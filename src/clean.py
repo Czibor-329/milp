@@ -1,10 +1,10 @@
 """清洁条件解析 + DummyClean 合成。
 
 清洁条件解析（接口 CleanCondition 条件树）：
-  挂载点：Wac=Visit.AfterOutPM(CounterCondition)，PreClean/DummyClean=Route.PrePJob，
+  挂载点：Wac=Visit.AfterOutPM(CounterCondition)，PreClean/DummyClean=Route.PrePJob,
           PostClean=Route.PostPJob。DummyClean 与不带片清洁的区别仅在 MaterialCount>0。
   resolve_route_clean 把 PrePJob/PostPJob 解析成 route 顶层 per-PM 表
-  （pre/post/dummy_clean_by_pm）；Wac 由 task_ir 的 RouteStep 时长注入消费 _wac_from_afterout。
+  （pre/post/dummy_clean_by_pm）；Wac 由 parse 的 RouteStep 时长注入消费 _wac_from_afterout。
 
 DummyClean 合成：产品 route 的 PrePJob[PM] 中 MaterialCount>0 的任务表示该 PM 加工前需要
 调度 dummy 晶圆（DummyPort 库存）进腔执行清洁配方。dummy route 直接复用对应产品 PJob 的
@@ -16,7 +16,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from CT.tool.log_setup import get_logger
+from src.log_setup import get_logger
 
 log = get_logger(__name__)
 

@@ -10,9 +10,6 @@
     pick/place 时长按 单片×2 + 成员间转位 合成；LoadPort 的时长本身就是成对值
   - 真空手双槽臂同取同放：时长直接用单值
   - Materials 按 PJob MatList 顺序两两配对；奇数片留一个单片"对"（占位空腔）
-
-trace 层按 `_DualView`（pair_members / merged_ll）把成对 move 还原成接口要求的
-拆解形态（2 pick/place + pre_trans、双门各开、抽充气只记主 LL 等）。
 """
 
 from __future__ import annotations
@@ -20,7 +17,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Dict, List, Mapping, Optional
 
-from CT.tool.log_setup import get_logger
+from src.log_setup import get_logger
 
 log = get_logger(__name__)
 
@@ -91,9 +88,6 @@ def apply_dual_view(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         primary = stations[members[0]]
         entry = deepcopy(primary)
         entry["Name"] = merged
-        # 保留真实物理容量（LA/LB 各 2 槽）：建模容量由 task_ir 的 loadlock 分支钳为 1
-        # （单一压力态/抽充气计时），但 physical_capacity 须 >1 才能让 swap 判定生效——
-        # 否则成对 LL 满仓时大气手无法 place-then-pick 换片，持片楔死（hold-and-wait 死锁）。
         stations[merged] = entry
     for m in member_to_merged:
         stations.pop(m, None)

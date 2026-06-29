@@ -16,7 +16,7 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 
-from CT.solutions.learn.features import step_features
+from src.features import step_features
 
 _BIG = 1e18
 
@@ -34,7 +34,7 @@ def _replay_record(ir, tm, wafers, rtime, *, banker: bool
                    ) -> Tuple[List[Tuple[np.ndarray, int]], bool]:
     """复现 MILP 序并记录每步 (候选特征, 提交候选在 cands 中的 idx)。返回 (records, completed)。
     候选/Banker/提交口径与 timing._decode_orders 完全一致（仅选择规则=MILP r-time）。"""
-    from CT.solutions.timing import (_Cand, _DecodeState, _resource, _blocked,
+    from src.timing import (_Cand, _DecodeState, _resource, _blocked,
                                      _reserve_for, _drain_completes, _pdur, _L)
 
     wmap = {w.wid: w for w in wafers}

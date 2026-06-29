@@ -12,9 +12,9 @@ from __future__ import annotations
 import copy
 from typing import Any, Dict, List, Sequence, Tuple
 
-from CT.infer.marathon_gen import _proc_recipe, _recipe_entry, _route_steps
-from CT.config.input_loader import load_alg_entries
-from CT.config.paths import input_data_path
+from src.marathon_gen import _proc_recipe, _recipe_entry, _route_steps
+from src.parse import load_alg_entries
+from src.paths import input_data_path
 
 _BASE_TOPO = "s1-1c1p-preclean"
 

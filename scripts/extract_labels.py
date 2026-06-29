@@ -23,13 +23,13 @@ import numpy as np
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from CT.config.input_loader import load_alg_entries
-from CT.config.paths import input_data_path
-from CT.infer.marathon_gen import expand_topo_pms, PM_POOL_6
-from CT.solutions.preprocess import preprocess
-from CT.solutions.milp import _expand, _Timing
-from CT.solutions.learn.features import FEATURE_DIM
-from CT.solutions.learn.labels import extract_instance
+from src.parse import load_alg_entries
+from src.paths import input_data_path
+from src.marathon_gen import expand_topo_pms, PM_POOL_6
+from src.parse import parse_task
+from src.model import Durations
+from src.features import FEATURE_DIM
+from src.labels import extract_instance
 
 BASE_TOPO = "s1-1c1p-preclean"
 _ROOT = Path(__file__).resolve().parents[1]
@@ -77,9 +77,9 @@ def main() -> None:
         fam_tot[fam] += 1
         n_tot += 1
         try:
-            ir, _ = preprocess(ai0, d["update_params"])
-            tm = _Timing(ir)
-            wf = _expand(ir, tm)
+            ir = parse_task(ai0, d["update_params"])
+            tm = Durations(ir)
+            wf = ir.wafers
             records, completed = extract_instance(ir, tm, wf, res["schedule"])
         except Exception as e:  # noqa: BLE001
             print(f"  [warn] {os.path.basename(f)}: {e}")

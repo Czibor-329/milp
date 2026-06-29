@@ -1,7 +1,7 @@
 """Benchmark：启发式 timing 定序 vs MILP 最优标签，在 dataset/test 测试集上批量对比。
 
-与 scripts/bench_timing.py 不同：本脚本直接吃 dataset 实例（含 spec/update_params/result），
-用 result.makespan 作 MILP 基准（不重跑 Gurobi），逐实例跑 timing 单次 + 寻优并对比 gap% 与计算时间。
+本脚本直接吃 dataset 实例（含 spec/update_params/result），用 result.makespan 作 MILP 基准
+（不重跑 Gurobi），逐实例跑 timing 单次 + 寻优（+ 可选 BC 策略）并对比 gap% 与计算时间。
 
 实例重建 ir 的路径（见 manifest base_topo=s1-1c1p-preclean）：
   load_alg_entries(s1-1c1p-preclean) → expand_topo_pms(PM_POOL_6) → preprocess(topo, update_params)
@@ -32,11 +32,12 @@ from pathlib import Path
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from CT.config.input_loader import load_alg_entries
-from CT.config.paths import input_data_path
-from CT.infer.marathon_gen import expand_topo_pms, PM_POOL_6
-from CT.solutions.preprocess import preprocess
-from CT.solutions.timing import time_from_ir, optimize_from_ir
+from src.parse import load_alg_entries
+from src.paths import input_data_path,MODELS_DIR
+from src.marathon_gen import expand_topo_pms, PM_POOL_6
+from src.parse import parse_task
+from src.timing import time_from_ir, optimize_from_ir, time_from_policy
+from src.policy import load_policy
 
 BASE_TOPO = "s1-1c1p-preclean"
 SUBSETS = ["1stage", "2stage", "3stage"]
@@ -58,21 +59,14 @@ def _instances(sub: str, limit: int = 0):
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--subsets", nargs="*", default=SUBSETS, help="测试子集（缺省=全部）")
-    ap.add_argument("--opt-budget", type=float, default=2.0,
-                    help="寻优墙钟预算(秒/实例)，0=跳过寻优只跑单次")
+    ap.add_argument("--opt-budget", type=float, default=2.0,help="寻优墙钟预算(秒/实例)，0=跳过寻优只跑单次")
     ap.add_argument("--seed", type=int, default=0, help="寻优随机种子")
     ap.add_argument("--limit", type=int, default=0, help="每子集只跑前 N 个（冒烟用，0=全部）")
     ap.add_argument("--out", type=str, default=None, help="把逐实例+汇总写成 JSON")
-    ap.add_argument("--bc-policy", type=str, default=None,
-                    help="BC 策略 checkpoint（给则加一列 bc；需 torch 的 venv 跑）")
     args = ap.parse_args()
     do_opt = args.opt_budget > 0
 
-    policy = None
-    if args.bc_policy:
-        from CT.solutions.learn.policy import load_policy
-        from CT.solutions.timing import time_from_policy
-        policy = load_policy(args.bc_policy)
+    policy = load_policy(MODELS_DIR / "bc_policy.pt")
 
     # 基础物理拓扑只加载/expand 一次，循环复用
     ai, _ = load_alg_entries(input_data_path(BASE_TOPO))
@@ -103,7 +97,7 @@ def main() -> None:
             m_mk = float(d["result"]["makespan"]) if has_label else float("nan")
 
             try:
-                ir, _ = preprocess(ai, d["update_params"])
+                ir = parse_task(ai, d["update_params"])
                 t0 = time.perf_counter()
                 tres = time_from_ir(ir, verbose=False, cross_check=True)
                 t_ms = (time.perf_counter() - t0) * 1000.0

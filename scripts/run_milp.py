@@ -1,9 +1,9 @@
-"""跑 MILP oracle（CT/solutions/milp.py）并自检 / 导出 movelist。
+"""跑 MILP oracle（src/milp.py）并自检 / 导出 movelist。
 
 用法：
   # 合成 case
   python scripts/run_milp.py --case 1 --n1 2 --n2 2
-  # 真实配置文件（CT/config/input_data/*.json）
+  # 真实配置文件（src/input_data/*.json）
   python scripts/run_milp.py --input s1-1c1p-preclean --export
 """
 
@@ -17,17 +17,16 @@ from pathlib import Path
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from CT.solutions.cases import case1, case2, case3
-from CT.solutions.preprocess import preprocess
-from CT.solutions.milp import solve_milp, check_solution, export_movelist
-from CT.config.input_loader import load_alg_entries
-from CT.config.paths import input_data_path, output_path
+from src.cases import case1, case2, case3
+from src.parse import parse_task, load_alg_entries
+from src.milp import solve_milp, check_solution, export_movelist
+from src.paths import input_data_path, output_path
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", type=str, default=None,
-                    help="CT/config/input_data 下的场景名（与 --case 二选一）")
+                    help="src/input_data 下的场景名（与 --case 二选一）")
     ap.add_argument("--case", type=int, choices=[1, 2, 3], default=1)
     ap.add_argument("--n1", type=int, default=2)
     ap.add_argument("--n2", type=int, default=2)
@@ -40,12 +39,12 @@ def main() -> None:
     if args.input:
         name = args.input[:-5] if args.input.endswith(".json") else args.input
         ai, asch = load_alg_entries(input_data_path(name))
-        ir, _ = preprocess(ai, asch)
+        ir = parse_task(ai, asch)
     else:
         name = f"milp_case{args.case}"
         fn = {1: case1, 2: case2, 3: case3}[args.case]
         ai, asch = fn(n_wafer=[args.n1, args.n2])
-        ir, _ = preprocess(ai, asch)
+        ir = parse_task(ai, asch)
 
     # 核心仓库不含贪心上界（torch/Petri 栈），统一用 loose-M baseline。
     ub = None

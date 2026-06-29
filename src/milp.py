@@ -1,4 +1,4 @@
-"""Case 级 MILP oracle（Gurobi）：吃 PreprocessedTask IR，求 makespan 最优排程。
+"""Case 级 MILP oracle（Gurobi）：吃 Problem IR，求 makespan 最优排程。
 
 见 milp_design.md。iter-1 实现：路径先后(P) / 驻留(D) / 腔互斥(C) / 机器手互斥(R) /
 LoadLock 状态 setup(LL) / 同 route id FIFO，round-robin 定腔，单片原子搬运（swap 暂关）。
@@ -16,101 +16,16 @@ from typing import Dict, List, Optional, Tuple
 import gurobipy as gp
 from gurobipy import GRB
 
-from CT.solutions.preprocess.internal_data import (
-    PreprocessedTask, Route, StageStep, TransportStep,
-)
+from src.model import Chamber, Durations, Problem, Stage, Wafer
 
 
 # --------------------------------------------------------------------------- #
-# 路径展开：IR → 每片晶圆的 stage 序列（含 round-robin 定腔、时长）
+# 工作数据类（Stage / Wafer / Durations）已迁到 src.model；晶圆展开见 src.parse。
+# 本模块只消费 Problem（task.wafers / task.pre_clean / task.post_clean）。
 # --------------------------------------------------------------------------- #
-@dataclass
-class _Stage:
-    j: int
-    chamber: str
-    stage_type: str          # source/loadlock/process/sink/...
-    proc: float              # 停留时长（process 加工 / loadlock pump 或 vent / 其余 0）
-    in_robot: str            # 进站搬运手（""=源）
-    out_robot: str           # 出站搬运手（""=汇）
-    residency: float         # 驻留上限，<0 无
-    ll_type: str = ""        # loadlock: "entry"(进站抽气) / "exit"(出站充气)
-    slot: int = 0            # 多容量腔(heater/cooler)按 round-robin 分配的槽位(0-based)
-    clean_time: float = 0.0  # wac 无片清洗时长（0=无）
-    clean_trigger: int = 0   # wac 触发片数（每 N 片）
-    clean_recipe: str = ""
-    cands: List[str] = field(default_factory=list)  # 候选腔（loadlock 放开 round-robin 时由 MILP 选）
-
-
-@dataclass
-class _Wafer:
-    wid: int                 # 全局唯一序号（= 加工/发片优先序）
-    mat_id: int
-    route_name: str
-    route_rank: int          # 同 route 内第几片（0-based），供 round-robin / FIFO
-    stages: List[_Stage]
-    transports: List[str]    # hop -> robot，长度 = len(stages)-1
-    pjob_name: str = ""
-
-
-class _Timing:
-    """从 IR 取动作时长（含开关门）。"""
-    def __init__(self, ir: PreprocessedTask):
-        self.ir = ir
-        # 大气手 = scope 里含 loadport 类站点的手
-        self.atm_robots = set()
-        lp_types = {"loadport"}
-        ch = ir.chambers
-        for rn, rb in ir.robots.items():
-            if any(str(ch[s].type).lower() in lp_types for s in rb.scope if s in ch):
-                self.atm_robots.add(rn)
-
-    # 机器手动作（仅占机器手，validator: MoveType 0/1/5）
-    def pick_t(self, robot: str, c: str) -> float:
-        rb = self.ir.robots.get(robot)
-        return float(rb.pick_time.get(c, 0.0)) if rb else 0.0
-
-    def place_t(self, robot: str, c: str) -> float:
-        rb = self.ir.robots.get(robot)
-        return float(rb.place_time.get(c, 0.0)) if rb else 0.0
-
-    # 门动作（仅占站点，validator: MoveType 6/7；与机器手行程/加工可并行）
-    def pick_pre(self, robot: str, c: str) -> float:    # pick 前开门
-        ch = self.ir.chambers.get(c)
-        return float(ch.pick_prepare_time.get(robot, 0.0)) if ch else 0.0
-
-    def pick_post(self, robot: str, c: str) -> float:   # pick 后关门
-        ch = self.ir.chambers.get(c)
-        return float(ch.pick_complete_time.get(robot, 0.0)) if ch else 0.0
-
-    def place_pre(self, robot: str, c: str) -> float:   # place 前开门
-        ch = self.ir.chambers.get(c)
-        return float(ch.place_prepare_time.get(robot, 0.0)) if ch else 0.0
-
-    def place_post(self, robot: str, c: str) -> float:  # place 后关门
-        ch = self.ir.chambers.get(c)
-        return float(ch.place_complete_time.get(robot, 0.0)) if ch else 0.0
-
-    # 占用窗口口径（含门）：pick=开门+pick+关门，place=开门+place+关门
-    def pick(self, robot: str, c: str) -> float:
-        return self.pick_pre(robot, c) + self.pick_t(robot, c) + self.pick_post(robot, c)
-
-    def place(self, robot: str, c: str) -> float:
-        return self.place_pre(robot, c) + self.place_t(robot, c) + self.place_post(robot, c)
-
-    def move(self, robot: str) -> float:
-        rb = self.ir.robots.get(robot)
-        if rb and rb.prep_trans_time:
-            return float(rb.prep_trans_time[0].get("Time", 0.0))
-        return 0.0
-
-
-def _round_robin(candidates: List[str], rank: int) -> str:
-    return candidates[rank % len(candidates)] if candidates else ""
-
-
-def _ll_proc(ir: PreprocessedTask, chamber: str, ll_type: str) -> float:
+def _ll_proc(task: Problem, chamber: str, ll_type: str) -> float:
     """loadlock 在某具体腔的停留时长：entry→pump，exit→vent（放开分配后按选中腔取）。"""
-    ch = ir.chambers.get(chamber)
+    ch = task.chambers.get(chamber)
     if ch is None or ll_type not in ("entry", "exit"):
         return 0.0
     return float((ch.pump_time if ll_type == "entry" else ch.vent_time) or 0.0)
@@ -123,21 +38,21 @@ class _SwapPair:
     j_out: int              # w_out 在该腔的 stage（出腔 hop = j_out）
     j_in: int               # w_in 在该腔的 stage（进腔 hop = j_in-1）
     robot: str              # 执行 swap 的手（出腔 pick 与进腔 place 同一手）
-    w_out: _Wafer = None    # type: ignore
-    w_in: _Wafer = None     # type: ignore
+    w_out: Wafer = None    # type: ignore
+    w_in: Wafer = None     # type: ignore
 
 
-def _swap_candidates(ir: PreprocessedTask, wafers: List[_Wafer]) -> List[_SwapPair]:
+def _swap_candidates(task: Problem, wafers: List[Wafer]) -> List[_SwapPair]:
     """单容量腔上相邻两片，若「出腔 pick 手 == 进腔 place 手」且该手双臂 → 一个 swap 候选。
 
     VTR 一趟在腔 c 把 w_out 取出、w_in 放入（swap=pick(c)+place(c)），省掉两次往返。
     只取单容量加工腔（grid 瓶颈 = PM；多容量腔的门簇/槽位另算，暂不建 swap）。"""
     # 只在「加工腔」上建 swap（每片在加工腔仅一次访问 → 占用序即不同片的发片序）。
     # LL/LP 的多物理槽单臂 combine 是另一套模型（共享压力态 + physical_cap，暂不建）。
-    occ: Dict[Tuple[str, int], List[Tuple[int, _Wafer, int]]] = {}
+    occ: Dict[Tuple[str, int], List[Tuple[int, Wafer, int]]] = {}
     for w in wafers:
         for j, s in enumerate(w.stages):
-            ch = ir.chambers.get(s.chamber)
+            ch = task.chambers.get(s.chamber)
             if ch is None or s.stage_type != "process" or int(ch.capacity) != 1:
                 continue
             occ.setdefault((s.chamber, s.slot), []).append((w.wid, w, j))
@@ -150,57 +65,16 @@ def _swap_candidates(ir: PreprocessedTask, wafers: List[_Wafer]) -> List[_SwapPa
             R = w_out.stages[j_out].out_robot
             if not R or R != w_in.stages[j_in].in_robot:
                 continue  # 取出/放入须同一手才能合成一趟
-            rb = ir.robots.get(R)
+            rb = task.robots.get(R)
             if rb is None or not rb.can_swap:
                 continue
             pairs.append(_SwapPair(c, j_out, j_in, R, w_out, w_in))
     return pairs
 
 
-def _expand(ir: PreprocessedTask, tm: _Timing) -> List[_Wafer]:
-    """每个 pjob 的每片 material → _Wafer，按 (pjob 顺序, material 顺序) 定全局 wid。"""
-    wafers: List[_Wafer] = []
-    wid = 0
-    slot_counter: Dict[str, int] = {}   # 腔 -> 已分配占用数，供多容量腔 round-robin 槽位
-    for pj in ir.pjobs:
-        route = ir.routes[pj.route_name]
-        stage_steps = [s for s in route.steps if isinstance(s, StageStep)]
-        trans_steps = [s for s in route.steps if isinstance(s, TransportStep)]
-        for rank, mat in enumerate(pj.material_ids):
-            stages: List[_Stage] = []
-            transports = [t.robot for t in trans_steps]
-            for j, st in enumerate(stage_steps):
-                in_r = transports[j - 1] if j >= 1 else ""
-                out_r = transports[j] if j < len(transports) else ""
-                chamber = _round_robin(list(st.visits), rank)
-                proc = float(st.time)
-                ll_type = ""
-                if st.stage_type == "loadlock":
-                    entry = in_r in tm.atm_robots  # 进站手是大气手 → 进真空，抽气
-                    ll_type = "entry" if entry else "exit"
-                    ch = ir.chambers.get(chamber)
-                    proc = float((ch.pump_time if entry else ch.vent_time) or 0.0) if ch else 0.0
-                ch = ir.chambers.get(chamber)
-                cap = int(ch.capacity) if ch else 1
-                slot = slot_counter.get(chamber, 0) % max(cap, 1)
-                slot_counter[chamber] = slot_counter.get(chamber, 0) + 1
-                stages.append(_Stage(
-                    j=j, chamber=chamber, stage_type=st.stage_type, proc=proc,
-                    in_robot=in_r, out_robot=out_r,
-                    residency=float(st.residual_time_limit), ll_type=ll_type, slot=slot,
-                    clean_time=float(st.clean_time), clean_trigger=int(st.clean_trigger),
-                    clean_recipe=st.clean_recipe, cands=list(st.visits),
-                ))
-            wafers.append(_Wafer(wid=wid, mat_id=mat, route_name=pj.route_name,
-                                 route_rank=rank, stages=stages, transports=transports,
-                                 pjob_name=pj.name))
-            wid += 1
-    return wafers
-
-
 # --------------------------------------------------------------------------- #
 # 清洁展开（决策4）：pre/post/wac 折成固定占腔事件（无片、无搬运），不进 0/1。
-#   dummy 清洁已由 synthesize_dummy_routes 合成为 dummy 晶圆，随 ir.pjobs 正常流转。
+#   dummy 清洁已由 synthesize_dummy_routes 合成为 dummy 晶圆，随 task.pjobs 正常流转。
 # --------------------------------------------------------------------------- #
 @dataclass
 class _Clean:
@@ -214,7 +88,7 @@ class _Clean:
     after: Optional[Tuple[int, int]] = None    # 须晚于此 (wid, j) 的占腔
 
 
-def _clean_specs(ir: PreprocessedTask, wafers: List[_Wafer]) -> List[_Clean]:
+def _clean_specs(task: Problem, wafers: List[Wafer]) -> List[_Clean]:
     """从 IR 的 route.clean 与 wac stage 字段，按 round-robin 的腔分配展开清洁事件。"""
     wmap = {w.wid: w for w in wafers}
     # 每个 process 腔按 wid 升序的占用 (wid, j)
@@ -226,16 +100,15 @@ def _clean_specs(ir: PreprocessedTask, wafers: List[_Wafer]) -> List[_Clean]:
     for occ in by_ch.values():
         occ.sort()
 
-    # route 顶层 pre/post 清洁按 PM 聚合
+    # 顶层 pre/post 清洁按 PM 聚合（来源 Problem.pre_clean / post_clean，按 route 序拼接）
     pre_by_ch: Dict[str, Tuple[float, str, str]] = {}
     post_by_ch: Dict[str, Tuple[float, str, str]] = {}
-    for rt in ir.routes.values():
-        for spec in rt.clean.pre_clean:
-            for c in spec.visits:
-                pre_by_ch.setdefault(c, (float(spec.time), spec.recipe, spec.task))
-        for spec in rt.clean.post_clean:
-            for c in spec.visits:
-                post_by_ch.setdefault(c, (float(spec.time), spec.recipe, spec.task))
+    for spec in task.pre_clean:
+        for c in spec.visits:
+            pre_by_ch.setdefault(c, (float(spec.time), spec.recipe, spec.task))
+    for spec in task.post_clean:
+        for c in spec.visits:
+            post_by_ch.setdefault(c, (float(spec.time), spec.recipe, spec.task))
 
     cleans: List[_Clean] = []
     for c, occ in by_ch.items():
@@ -277,13 +150,13 @@ class SolveResult:
 # --------------------------------------------------------------------------- #
 # 建模 + 求解
 # --------------------------------------------------------------------------- #
-def solve_milp(ir: PreprocessedTask, *, time_limit: float = 300.0,
+def solve_milp(task: Problem, *, time_limit: float = 300.0,
                verbose: bool = False, ub: Optional[float] = None) -> SolveResult:
     """ub: 一条可行排程的 makespan 上界（如 run_greedy 的 finished makespan）。给定则用
     tight Big-M=2·ub+1 收紧 LP 松弛（方案 §6.2）；None 时退回 loose-M（所有动作时长之和）。"""
-    tm = _Timing(ir)
-    wafers = _expand(ir, tm)
-    cap = {n: int(c.capacity) for n, c in ir.chambers.items()}
+    tm = Durations(task)
+    wafers = task.wafers
+    cap = {n: int(c.capacity) for n, c in task.chambers.items()}
 
     # Big-M（既作变量上界又作大-M 系数）。
     # loose：所有片所有动作时长之和——够大但极松，LP 松弛差、分支树爆。
@@ -313,14 +186,14 @@ def solve_milp(ir: PreprocessedTask, *, time_limit: float = 300.0,
         for j in range(len(w.stages) - 1):
             r[w.wid, j] = m.addVar(lb=0.0, ub=M, name=f"r_{w.wid}_{j}")
 
-    def L(w: _Wafer, j: int) -> float:
+    def L(w: Wafer, j: int) -> float:
         """stage j→j+1 机器手占用时长 = pick + move + place（门动作不占机器手，见 §6-1）。"""
         rob = w.transports[j]
         return (tm.pick_t(rob, w.stages[j].chamber) + tm.move(rob)
                 + tm.place_t(rob, w.stages[j + 1].chamber))
 
     # swap 候选（决策 B）：每对 → 一个 0/1；其涉及的两个 hop 的链式 a=r+L 改为条件约束。
-    swap_pairs = _swap_candidates(ir, wafers)
+    swap_pairs = _swap_candidates(task, wafers)
     sw: Dict[int, gp.Var] = {k: m.addVar(vtype=GRB.BINARY, name=f"sw_{p.chamber}_{p.w_out.wid}_{p.w_in.wid}")
                              for k, p in enumerate(swap_pairs)}
     # hop (wid, j) → 由哪个 swap 决定：进腔 hop = j_in-1（受 sw 控 a 链），出腔 hop = j_out（受 sw 控 r 与 a 链）
@@ -350,18 +223,18 @@ def solve_milp(ir: PreprocessedTask, *, time_limit: float = 300.0,
                 m.addConstr(gp.quicksum(zc.values()) == 1, name=f"zsum_{w.wid}_{j}")
                 ll_z[w.wid, j] = zc
 
-    def cdep(w: _Wafer, j: int, fn):
+    def cdep(w: Wafer, j: int, fn):
         """选腔相关标量 → float（写死腔）或 LinExpr（放开的 loadlock，按 z 加权）。"""
         zc = ll_z.get((w.wid, j))
         if zc is None:
             return fn(w.stages[j].chamber)
         return gp.quicksum(v * fn(c) for c, v in zc.items())
 
-    def proc_val(w: _Wafer, j: int):
+    def proc_val(w: Wafer, j: int):
         """停留时长：loadlock 按选中腔的 pump/vent；其余用静态 proc。"""
         s = w.stages[j]
         if s.stage_type == "loadlock":
-            return cdep(w, j, lambda c: _ll_proc(ir, c, s.ll_type))
+            return cdep(w, j, lambda c: _ll_proc(task, c, s.ll_type))
         return s.proc
 
     # (S) swap 约束块（milp_design §4-S）。sw=1：VTR 一趟 pick(c,w_out)+place(c,w_in)；
@@ -400,7 +273,7 @@ def solve_milp(ir: PreprocessedTask, *, time_limit: float = 300.0,
     # (P) 站内停留：place 后关门 → 加工/抽充气 → pick 前开门 → 才能 pick
     #     r[w,j] ≥ a[w,j] + place_post(进站,c) + proc + pick_pre(出站,c)
     #     门动作（关/开）与机器手行程并行，但与本片加工串行（提前开门不能早于加工完成）
-    def proc_done(w: _Wafer, j: int) -> gp.LinExpr:
+    def proc_done(w: Wafer, j: int) -> gp.LinExpr:
         s = w.stages[j]
         pp = cdep(w, j, lambda c: tm.place_post(s.in_robot, c)) if s.in_robot else 0.0
         return a[w.wid, j] + pp + proc_val(w, j)
@@ -416,25 +289,25 @@ def solve_milp(ir: PreprocessedTask, *, time_limit: float = 300.0,
     # 占用区间（cap=1 腔互斥用）：含门动作（站点整段串行）。
     #   start = 进站 place 开门起点 = a − place − place_pre
     #   end   = 出站 pick  关门终点 = r + pick + pick_post
-    def occ_start(w: _Wafer, j: int) -> gp.LinExpr:
+    def occ_start(w: Wafer, j: int) -> gp.LinExpr:
         s = w.stages[j]
         if not s.in_robot:
             return a[w.wid, j]
         return a[w.wid, j] - cdep(w, j, lambda c: tm.place_t(s.in_robot, c)
                                    + tm.place_pre(s.in_robot, c))
 
-    def occ_end(w: _Wafer, j: int) -> gp.LinExpr:
+    def occ_end(w: Wafer, j: int) -> gp.LinExpr:
         s = w.stages[j]
         if not s.out_robot:
             return r[w.wid, j]
         return r[w.wid, j] + cdep(w, j, lambda c: tm.pick_t(s.out_robot, c)
                                   + tm.pick_post(s.out_robot, c))
 
-    def ll_setup(prev: _Stage, nxt: _Stage) -> float:
+    def ll_setup(prev: Stage, nxt: Stage) -> float:
         """同一 LL 连续两次使用的状态相关 setup（空抽/空充）。"""
         if not prev.ll_type or not nxt.ll_type:
             return 0.0
-        ch = ir.chambers.get(nxt.chamber)
+        ch = task.chambers.get(nxt.chamber)
         if prev.ll_type == "entry" and nxt.ll_type == "entry":   # 真空→需大气：空充
             return float((ch.vent_time if ch else 0.0) or 0.0)
         if prev.ll_type == "exit" and nxt.ll_type == "exit":     # 大气→需真空：空抽
@@ -445,10 +318,10 @@ def solve_milp(ir: PreprocessedTask, *, time_limit: float = 300.0,
     # 跳过 loadport/buffer/dummyport（容量≥片数，非瓶颈）与 source/sink
     # loadlock 腔分配为决策 → 不能按静态腔分组，移到下方 (C-LL) 按候选腔条件化。
     skip_types = {"loadport", "buffer", "dummyport"}
-    slot_occ: Dict[Tuple[str, int], List[Tuple[_Wafer, int]]] = {}
+    slot_occ: Dict[Tuple[str, int], List[Tuple[Wafer, int]]] = {}
     for w in wafers:
         for j, s in enumerate(w.stages):
-            ch = ir.chambers.get(s.chamber)
+            ch = task.chambers.get(s.chamber)
             if ch is None or str(ch.type).lower() in skip_types:
                 continue
             if s.stage_type in ("source", "sink", "loadlock"):
@@ -481,14 +354,14 @@ def solve_milp(ir: PreprocessedTask, *, time_limit: float = 300.0,
     # (C-LL) loadlock 互斥（腔分配为决策 → 按候选腔条件化）。一对占用仅当「都选中腔 c」时互斥：
     #   都选中 c ⟺ e1c+e2c==2，relax=M*(2-e1c-e2c)（任一未选 c 即放松）。同 route 同 visit
     #   用条件 FIFO（省 0/1），entry/exit 等不同 visit 用 0/1 析取。空抽/空充 setup 按选中腔取。
-    def ecoef(w: _Wafer, j: int, c: str):
+    def ecoef(w: Wafer, j: int, c: str):
         zc = ll_z.get((w.wid, j))
         if zc is None:
             return 1.0 if w.stages[j].chamber == c else 0.0
         return zc.get(c, 0.0)
 
     def ll_setup_c(prev_lt: str, nxt_lt: str, c: str) -> float:
-        ch = ir.chambers.get(c)
+        ch = task.chambers.get(c)
         if prev_lt == "entry" and nxt_lt == "entry":     # 真空→需大气：空充
             return float((ch.vent_time if ch else 0.0) or 0.0)
         if prev_lt == "exit" and nxt_lt == "exit":       # 大气→需真空：空抽
@@ -534,7 +407,7 @@ def solve_milp(ir: PreprocessedTask, *, time_limit: float = 300.0,
     door_clusters: Dict[str, List[Tuple[gp.LinExpr, gp.LinExpr]]] = {}
     for w in wafers:
         for j, s in enumerate(w.stages):
-            ch = ir.chambers.get(s.chamber)
+            ch = task.chambers.get(s.chamber)
             if ch is None or int(ch.capacity) <= 1 or str(ch.type).lower() in skip_types:
                 continue
             if s.stage_type in ("source", "sink"):
@@ -552,7 +425,7 @@ def solve_milp(ir: PreprocessedTask, *, time_limit: float = 300.0,
                 m.addConstr(cls[p][0] >= cls[q][1] - M * z)
 
     # (R) 机器手互斥 + 空手 move
-    robot_ops: Dict[str, List[Tuple[_Wafer, int]]] = {}
+    robot_ops: Dict[str, List[Tuple[Wafer, int]]] = {}
     for w in wafers:
         for j in range(len(w.stages) - 1):
             robot_ops.setdefault(w.transports[j], []).append((w, j))
@@ -560,12 +433,12 @@ def solve_milp(ir: PreprocessedTask, *, time_limit: float = 300.0,
     for rob, ops in robot_ops.items():
         mv = tm.move(rob)
 
-        def gap(wa: _Wafer, ja: int, wb: _Wafer, jb: int) -> float:
+        def gap(wa: Wafer, ja: int, wb: Wafer, jb: int) -> float:
             """wa 的 hop 紧接 wb 的 hop 时机器手所需间隙。wa 放进的腔 == wb 取出的腔 且为
             多槽 skip 站(loadport/buffer/dummyport，单门)时 → 须先关门再开门(place_post+pick_pre)
             而非转位 move（同站不转位、但门共用须串行）。否则 = move（转位）。"""
             dst, src = wa.stages[ja + 1].chamber, wb.stages[jb].chamber
-            ch = ir.chambers.get(dst)
+            ch = task.chambers.get(dst)
             if dst == src and ch and int(ch.capacity) > 1 and str(ch.type).lower() in skip_types:
                 return tm.place_post(rob, dst) + tm.pick_pre(rob, src)
             return mv
@@ -584,7 +457,7 @@ def solve_milp(ir: PreprocessedTask, *, time_limit: float = 300.0,
                 m.addConstr(r[w1.wid, j1] >= a[w2.wid, j2 + 1] + gap(w2, j2, w1, j1) - M * y - relax)
 
     # FIFO 发片（更正①）：同 route id 升序
-    by_route: Dict[str, List[_Wafer]] = {}
+    by_route: Dict[str, List[Wafer]] = {}
     for w in wafers:
         by_route.setdefault(w.route_name, []).append(w)
     for ws in by_route.values():
@@ -599,7 +472,7 @@ def solve_milp(ir: PreprocessedTask, *, time_limit: float = 300.0,
 
     # 清洁占腔（决策4，无 0/1）：pre 早于首片、post 晚于末片(撑 Cmax)、wac 夹在两片间
     wmap = {w.wid: w for w in wafers}
-    for cl in _clean_specs(ir, wafers):
+    for cl in _clean_specs(task, wafers):
         if cl.kind == "pre":
             wb, jb = cl.before
             m.addConstr(occ_start(wmap[wb], jb) >= cl.dur, name=f"preclean_{cl.chamber}")
@@ -618,7 +491,7 @@ def solve_milp(ir: PreprocessedTask, *, time_limit: float = 300.0,
     # tight-M 兜底：若 tight 上界过小割掉了可行域（不可行/无界），退回 loose-M 重解一次。
     if (used_tight and m.SolCount == 0
             and m.Status in (GRB.INFEASIBLE, GRB.INF_OR_UNBD, GRB.UNBOUNDED)):
-        return solve_milp(ir, time_limit=max(1.0, float(time_limit) - float(m.Runtime)),
+        return solve_milp(task, time_limit=max(1.0, float(time_limit) - float(m.Runtime)),
                           verbose=verbose, ub=None)
 
     res = SolveResult(status=m.Status, makespan=float("nan"))
@@ -642,7 +515,7 @@ def solve_milp(ir: PreprocessedTask, *, time_limit: float = 300.0,
     return res
 
 
-def export_movelist(ir: PreprocessedTask, res: SolveResult) -> List[dict]:
+def export_movelist(task: Problem, res: SolveResult) -> List[dict]:
     """把 MILP 排程展开成 MoveList（过 validate_movelist）。
 
     每段搬运在 [r, a_next] 窗口内按子动作顺序铺：
@@ -650,8 +523,8 @@ def export_movelist(ir: PreprocessedTask, res: SolveResult) -> List[dict]:
     每个 stage 另铺 加工(9) / loadlock 抽充气(10)。窗口与 solve_milp 的时长口径一致，
     腔/机器手不重叠由 MILP 保证，故子动作天然串行、门成对。
     """
-    tm = _Timing(ir)
-    wafers = {w.wid: w for w in _expand(ir, tm)}
+    tm = Durations(task)
+    wafers = {w.wid: w for w in task.wafers}
     moves: List[dict] = []
     mid = 0
     # bug1：机器手 pick 前的空载转位（PreTransMove）；bug2：LL 连续两用间的空抽/空充
@@ -662,14 +535,14 @@ def export_movelist(ir: PreprocessedTask, res: SolveResult) -> List[dict]:
     # gov_in：w_in 进腔 hop(=j_in-1)；gov_out：w_out 出腔 hop(=j_out)。两 hop 不再各铺一遍。
     swap_set = set(res.swaps)
     swaps = {(p.chamber, p.w_out.wid, p.w_in.wid): p
-             for p in _swap_candidates(ir, [wafers[k] for k in sorted(wafers)])
+             for p in _swap_candidates(task, [wafers[k] for k in sorted(wafers)])
              if (p.chamber, p.w_out.wid, p.w_in.wid) in swap_set}
     gov_in = {(p.w_in.wid, p.j_in - 1): p for p in swaps.values()}
     gov_out = {(p.w_out.wid, p.j_out): p for p in swaps.values()}
 
     def emit(mtype: int, start: float, end: float, *, station: str = "",
              robot: str = "", src: str = "", dst: str = "", cslot: int = 1,
-             w: Optional[_Wafer] = None, **extra) -> None:
+             w: Optional[Wafer] = None, **extra) -> None:
         nonlocal mid
         mid += 1
         mv = {
@@ -690,7 +563,7 @@ def export_movelist(ir: PreprocessedTask, res: SolveResult) -> List[dict]:
         mv.update(extra)
         moves.append(mv)
 
-    def emit_hop(w: _Wafer, j: int) -> None:
+    def emit_hop(w: Wafer, j: int) -> None:
         """普通单片原子搬运 c→下一腔：源 开门(6)→pick(0)→关门(7) → 走位(5) → 目标 开门(6)→place(1)→关门(7)。"""
         rows = res.schedule[w.wid]
         c, rv = rows[j][1], rows[j][3]
@@ -750,7 +623,7 @@ def export_movelist(ir: PreprocessedTask, res: SolveResult) -> List[dict]:
             cs = s.slot + 1
             # stage 装饰：加工 / 抽充气，发生在 place 关门之后
             d0 = av + (tm.place_post(s.in_robot, c) if s.in_robot else 0.0)
-            llp = _ll_proc(ir, c, s.ll_type) if stype == "loadlock" else 0.0
+            llp = _ll_proc(task, c, s.ll_type) if stype == "loadlock" else 0.0
             if stype == "process" and s.proc > 0:
                 emit(9, d0, d0 + s.proc, station=c, cslot=cs, w=w)
             elif stype == "loadlock" and llp > 0:
@@ -786,7 +659,7 @@ def export_movelist(ir: PreprocessedTask, res: SolveResult) -> List[dict]:
     # exit→exit 须空抽(pump 回真空才能再接收真空片)。铺在下一次占用前 [occ_s-setup, occ_s]。
     for c, occs in ll_occs.items():
         occs.sort()
-        ch = ir.chambers.get(c)
+        ch = task.chambers.get(c)
         vent = float((ch.vent_time if ch else 0.0) or 0.0)
         pump = float((ch.pump_time if ch else 0.0) or 0.0)
         for (s0, e0, t0), (s1, e1, t1) in zip(occs, occs[1:]):
@@ -804,7 +677,7 @@ def export_movelist(ir: PreprocessedTask, res: SolveResult) -> List[dict]:
         s = wafers[wid].stages[j]; _, c, _, rv = res.schedule[wid][j]
         return rv + (tm.pick_t(s.out_robot, c) + tm.pick_post(s.out_robot, c) if s.out_robot else 0.0)
 
-    for cl in _clean_specs(ir, list(wafers.values())):
+    for cl in _clean_specs(task, list(wafers.values())):
         if cl.kind == "pre":
             end = _occ_s(*cl.before); start = end - cl.dur
         else:  # post / wac 都跟在某片占用之后
@@ -816,10 +689,10 @@ def export_movelist(ir: PreprocessedTask, res: SolveResult) -> List[dict]:
     return moves
 
 
-def check_solution(ir: PreprocessedTask, res: SolveResult) -> List[str]:
+def check_solution(task: Problem, res: SolveResult) -> List[str]:
     """独立复核：把解代回各约束，返回违例列表（空=通过）。验证 MILP 自身正确。"""
-    tm = _Timing(ir)
-    wafers = {w.wid: w for w in _expand(ir, tm)}
+    tm = Durations(task)
+    wafers = {w.wid: w for w in task.wafers}
     sched = res.schedule
     issues: List[str] = []
     eps = 1e-4
@@ -828,7 +701,7 @@ def check_solution(ir: PreprocessedTask, res: SolveResult) -> List[str]:
     swap_pair_set = {frozenset((o, i)) for _, o, i in res.swaps}
     swap_cham_set = {(frozenset((o, i)), c) for c, o, i in res.swaps}  # 合法重叠仅限被换腔
     swap_meta = {(p.chamber, p.w_out.wid, p.w_in.wid): p
-                 for p in _swap_candidates(ir, [wafers[k] for k in sorted(wafers)])}
+                 for p in _swap_candidates(task, [wafers[k] for k in sorted(wafers)])}
     for c, o, i in res.swaps:
         p = swap_meta.get((c, o, i))
         if p is None:
@@ -848,7 +721,7 @@ def check_solution(ir: PreprocessedTask, res: SolveResult) -> List[str]:
         for j in range(len(rows) - 1):
             _, c, av, rv = rows[j]
             s = w.stages[j]
-            proc = _ll_proc(ir, c, s.ll_type) if s.stage_type == "loadlock" else s.proc
+            proc = _ll_proc(task, c, s.ll_type) if s.stage_type == "loadlock" else s.proc
             need = (av + (tm.place_post(s.in_robot, c) if s.in_robot else 0.0) + proc
                     + (tm.pick_pre(s.out_robot, c) if s.out_robot else 0.0))
             if rv + eps < need:
@@ -860,7 +733,7 @@ def check_solution(ir: PreprocessedTask, res: SolveResult) -> List[str]:
     for wid, rows in sched.items():
         w = wafers[wid]
         for j, (_, c, av, rv) in enumerate(rows):
-            ch = ir.chambers.get(c)
+            ch = task.chambers.get(c)
             s = w.stages[j]
             if ch is None or str(ch.type).lower() in skip_types or s.stage_type in ("source", "sink"):
                 continue

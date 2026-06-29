@@ -18,12 +18,9 @@ orders。
   · 多容量【加工】腔的门簇互斥 (Cd)。命中多容量非 skip 加工腔时 makespan 可能偏乐观。
 
 用法：
-    from timing import time_from_ir
-    res = time_from_ir(ir, verbose=True)        # res 是 SolveResult，且带 .feasible / .residency_violations
-    issues = check_solution(ir, res)            # 直接复用 milp 的独立复核
-
-导入路径按你的工程调整：下面从 `milp` 导入，若 milp.py 在包内请改成对应路径，
-例如 `from CT.solutions.xxx.milp import ...`。
+    from src.timing import time_from_ir
+    res = time_from_ir(task, verbose=True)       # res 是 SolveResult，且带 .feasible / .residency_violations
+    issues = check_solution(task, res)           # 直接复用 milp 的独立复核
 """
 
 from __future__ import annotations
@@ -37,8 +34,8 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
 # —— 按你的工程调整这一行 —— #
-from CT.solutions.milp import _expand, _Timing, SolveResult, check_solution, _ll_proc  # noqa: F401
-from CT.solutions.preprocess.internal_data import PreprocessedTask
+from src.milp import SolveResult, check_solution, _ll_proc  # noqa: F401
+from src.model import Durations, Problem
 
 
 EPS = 1e-9
@@ -106,7 +103,7 @@ class _Nodes:
 # --------------------------------------------------------------------------- #
 # 时长口径（与 milp.py 完全一致）
 # --------------------------------------------------------------------------- #
-def _pdur(tm: _Timing, w, j: int) -> float:
+def _pdur(tm: Durations, w, j: int) -> float:
     """站内停留：place 关门 + 加工/抽充气 + pick 开门（s.proc 在 _expand 已置为 LL 的 pump/vent）。"""
     s = w.stages[j]
     pp = tm.place_post(s.in_robot, s.chamber) if s.in_robot else 0.0
@@ -114,14 +111,14 @@ def _pdur(tm: _Timing, w, j: int) -> float:
     return pp + s.proc + pre
 
 
-def _L(tm: _Timing, w, j: int) -> float:
+def _L(tm: Durations, w, j: int) -> float:
     """hop j→j+1 占机器手时长 = pick + move + place（门不占手）。"""
     rob = w.transports[j]
     return (tm.pick_t(rob, w.stages[j].chamber) + tm.move(rob)
             + tm.place_t(rob, w.stages[j + 1].chamber))
 
 
-def _ll_setup(ir: PreprocessedTask, prev_stage, nxt_stage) -> float:
+def _ll_setup(ir: Problem, prev_stage, nxt_stage) -> float:
     """同一 LL 连续两用的状态相关 setup：entry→entry 须空充(vent)，exit→exit 须空抽(pump)。"""
     pt, nt = prev_stage.ll_type, nxt_stage.ll_type
     if not pt or not nt:
@@ -134,7 +131,7 @@ def _ll_setup(ir: PreprocessedTask, prev_stage, nxt_stage) -> float:
     return 0.0
 
 
-def _gap(ir: PreprocessedTask, tm: _Timing, rob: str, wa, ja: int, wb, jb: int) -> float:
+def _gap(ir: Problem, tm: Durations, rob: str, wa, ja: int, wb, jb: int) -> float:
     """wa 的 hop 紧接 wb 的 hop 时机器手所需间隙：同一多槽 skip 站须关门+开门，否则 = 转位 move。"""
     dst, src = wa.stages[ja + 1].chamber, wb.stages[jb].chamber
     ch = ir.chambers.get(dst)
@@ -161,7 +158,7 @@ def _gap(ir: PreprocessedTask, tm: _Timing, rob: str, wa, ja: int, wb, jb: int) 
 # 资源粒度：每个 (腔,槽) 视作容量 1 的占用单元（与 _expand 的 round-robin 定槽、与
 # milp.py 的腔互斥口径一致）；source/sink 与 loadport/buffer/dummyport 不占资源。
 # --------------------------------------------------------------------------- #
-def _resource(ir: PreprocessedTask, w, j: int) -> Optional[Tuple[str, int]]:
+def _resource(ir: Problem, w, j: int) -> Optional[Tuple[str, int]]:
     """晶圆 w 在 stage j 占用的 (腔,槽)；不计资源（源/汇/跳过类站点）返回 None。"""
     s = w.stages[j]
     ch = ir.chambers.get(s.chamber)
@@ -187,8 +184,8 @@ _Cand = namedtuple("_Cand", "wid j dest rob start")
 @dataclass
 class _DecodeState:
     """解码到某一步时的全局状态快照（只读，供 chooser/特征提取用）。"""
-    ir: PreprocessedTask
-    tm: _Timing
+    ir: Problem
+    tm: Durations
     wmap: Dict[int, object]
     K: Dict[int, int]
     pos: Dict[int, int]
@@ -214,7 +211,7 @@ def _is_resid(w, k: int) -> bool:
             and w.stages[k].residency > 0)
 
 
-def _reserve_for(ir: PreprocessedTask, w, nj: int) -> set:
+def _reserve_for(ir: Problem, w, nj: int) -> set:
     """片放入 stage nj 后应预留的资源：紧邻下一跳 + 驻留 run（连续驻留腔）末端的落脚资源。"""
     if not _is_resid(w, nj):
         return set()
@@ -241,7 +238,7 @@ def _blocked(dest, occ: dict, resv: dict, wid: int) -> bool:
     return dest in occ or (dest in resv and resv[dest] != wid)
 
 
-def _drain_completes(ir: PreprocessedTask, wmap: Dict[int, object], K: Dict[int, int],
+def _drain_completes(ir: Problem, wmap: Dict[int, object], K: Dict[int, int],
                      pos: Dict[int, int], occ: Dict[Tuple[str, int], int],
                      resv: Dict[Tuple[str, int], int], reserve: bool = False) -> bool:
     """安全谕示：从 (pos, occ, resv) 起，用纯下游清空（每步挑剩余最下游、去向未被占/预留的 hop）
@@ -295,7 +292,7 @@ def _make_default_chooser(prio: Optional[Dict[Tuple[int, int], float]]
     return chooser
 
 
-def _decode_orders(ir: PreprocessedTask, tm: _Timing, wafers, *, chooser: _Chooser,
+def _decode_orders(ir: Problem, tm: Durations, wafers, *, chooser: _Chooser,
                    reserve: bool = False, banker: bool = True) -> _Orders:
     """全局事件式构造：产出各 (腔,槽) 占用序与各机器手 hop 序（彼此自洽、无死锁）。每步生成
     合法候选(去向资源未占/未预留、j==0 满足发片 FIFO)，交 chooser 排偏好序，循环再套 Banker
@@ -410,7 +407,7 @@ def _decode_orders(ir: PreprocessedTask, tm: _Timing, wafers, *, chooser: _Choos
     return _Orders(chambers=chambers, robots=robots)
 
 
-def _sequence(ir: PreprocessedTask, tm: _Timing, wafers, reserve: bool = False,
+def _sequence(ir: Problem, tm: Durations, wafers, reserve: bool = False,
               prio: Optional[Dict[Tuple[int, int], float]] = None,
               banker: bool = True) -> _Orders:
     """定死 backward 定序（默认 chooser）。prio={(wid,j):bias} 注入派工偏置；bias 缺省 0 ⇒ 零回归。
@@ -419,7 +416,7 @@ def _sequence(ir: PreprocessedTask, tm: _Timing, wafers, reserve: bool = False,
                           reserve=reserve, banker=banker)
 
 
-def default_orders(ir: PreprocessedTask, tm: _Timing, wafers, nodes: _Nodes = None) -> _Orders:
+def default_orders(ir: Problem, tm: Durations, wafers, nodes: _Nodes = None) -> _Orders:
     """无死锁 backward 定序（替代旧的松弛最早时刻占位）。nodes 参数保留以兼容旧调用，未使用。"""
     return _sequence(ir, tm, wafers)
 
@@ -438,7 +435,7 @@ class _Genome:
     ll_assign: Dict[Tuple[int, int], str] = field(default_factory=dict)   # (wid,j) → loadlock 选腔
 
 
-def _ll_genes(ir: PreprocessedTask, wafers) -> List[Tuple[int, int, List[str]]]:
+def _ll_genes(ir: Problem, wafers) -> List[Tuple[int, int, List[str]]]:
     """可选腔的 loadlock stage（候选腔 >1，口径同 MILP 的 (Z)）：[(wid, j, 候选腔列表)]。"""
     out: List[Tuple[int, int, List[str]]] = []
     for w in wafers:
@@ -448,7 +445,7 @@ def _ll_genes(ir: PreprocessedTask, wafers) -> List[Tuple[int, int, List[str]]]:
     return out
 
 
-def _recompute_slots(ir: PreprocessedTask, wafers) -> None:
+def _recompute_slots(ir: Problem, wafers) -> None:
     """按 _expand 的全局 round-robin 重算各 stage 槽位（换 loadlock 腔后须重算 (腔,槽) 资源键）。
     腔/顺序不变时复现 _expand 的槽位 ⇒ 默认无回归。就地改 s.slot。"""
     counter: Dict[str, int] = {}
@@ -460,7 +457,7 @@ def _recompute_slots(ir: PreprocessedTask, wafers) -> None:
             counter[s.chamber] = counter.get(s.chamber, 0) + 1
 
 
-def _apply_ll_assign(ir: PreprocessedTask, wafers,
+def _apply_ll_assign(ir: Problem, wafers,
                      ll_assign: Dict[Tuple[int, int], str]) -> List:
     """克隆 wafers 并套用 loadlock 选腔：改 chamber、按选中腔重算 proc(pump/vent)、全局重算 slot。
     口径照抄 _expand（entry→pump_time，exit→vent_time）。返回新 wafers 列表。"""
@@ -480,7 +477,7 @@ def _apply_ll_assign(ir: PreprocessedTask, wafers,
     return wf
 
 
-def _decode(ir: PreprocessedTask, tm: _Timing, wafers, genome: _Genome,
+def _decode(ir: Problem, tm: Durations, wafers, genome: _Genome,
             reserve: bool = False, banker: bool = True) -> Tuple[List, _Orders]:
     """genome → (有效 wafers, 占用序)。空 genome+banker=True ⇒ 默认定序（零回归）。
     返回的 wafers 必须原样喂给 solve_timing，使占用序与腔分配口径一致。
@@ -493,7 +490,7 @@ def _decode(ir: PreprocessedTask, tm: _Timing, wafers, genome: _Genome,
 # --------------------------------------------------------------------------- #
 # 主入口：给定顺序 → 建全图 → Bellman-Ford → SolveResult
 # --------------------------------------------------------------------------- #
-def solve_timing(ir: PreprocessedTask, wafers=None, *, orders: Optional[_Orders] = None,
+def solve_timing(ir: Problem, wafers=None, *, orders: Optional[_Orders] = None,
                  release_interval: float = 0.0, verbose: bool = False) -> SolveResult:
     """对固定顺序求最早时刻。返回 SolveResult，并附加：
          res.feasible（bool）、res.residency_violations（[(wid,j,腔,实际驻留,上限)]）。
@@ -502,9 +499,9 @@ def solve_timing(ir: PreprocessedTask, wafers=None, *, orders: Optional[_Orders]
     （降低在制品 WIP），让驻留腔有时间被腾空——驻留(qtime)不可行时由 solve_timing_paced
     二分搜索最小可行间隔。"""
     t_start = time.perf_counter()
-    tm = _Timing(ir)
+    tm = Durations(ir)
     if wafers is None:
-        wafers = _expand(ir, tm)
+        wafers = ir.wafers
     wmap = {w.wid: w for w in wafers}
     nodes = _Nodes(wafers)
     if orders is None:
@@ -650,7 +647,7 @@ def _infeasible() -> SolveResult:
     return r
 
 
-def _eval_genome(ir: PreprocessedTask, tm: _Timing, wafers, genome: _Genome,
+def _eval_genome(ir: Problem, tm: Durations, wafers, genome: _Genome,
                  banker: Optional[bool] = None) -> Tuple[SolveResult, List]:
     """解码 genome → 求时刻。residency 不可行时按需 reserve=True 重解一次。返回 (res, 有效 wafers)。
     banker=False（搜索快路径）解码死锁直接判负（infeasible），不再调 solve_timing。
@@ -721,16 +718,16 @@ def _neighbor(cur: _Genome, cur_res: SolveResult, wafers,
     return g
 
 
-def optimize_orders(ir: PreprocessedTask, wafers=None, *, budget: float = 2.0,
+def optimize_orders(ir: Problem, wafers=None, *, budget: float = 2.0,
                     iters: Optional[int] = None, seed: int = 0,
                     verbose: bool = False) -> SolveResult:
     """局部搜索（SA）寻优占用序 + loadlock 选腔，用 solve_timing 评估。返回 best 可行 SolveResult
     （schedule 已反映所选 loadlock 腔）。budget=墙钟秒数；iters 设定则按迭代数停。incumbent 初始
     = 默认定序 ⇒ 最坏不退化。"""
     t0 = time.perf_counter()
-    tm = _Timing(ir)
+    tm = Durations(ir)
     if wafers is None:
-        wafers = _expand(ir, tm)
+        wafers = ir.wafers
     rng = random.Random(seed)
     ll_genes = _ll_genes(ir, wafers)
     ll_cand = {(w, j): cs for w, j, cs in ll_genes}                 # (wid,j) → 候选腔
@@ -788,14 +785,14 @@ def optimize_orders(ir: PreprocessedTask, wafers=None, *, budget: float = 2.0,
 # --------------------------------------------------------------------------- #
 # 便捷封装
 # --------------------------------------------------------------------------- #
-def time_from_ir(ir: PreprocessedTask, *, verbose: bool = True,
+def time_from_ir(ir: Problem, *, verbose: bool = True,
                  cross_check: bool = True) -> SolveResult:
     """_expand → 默认定序 → solve_timing；可选用 milp.check_solution 独立复核。
 
     若快序（吞吐优先）因驻留(qtime)排不出，自动回退到驻留预留定序（reserve=True，牺牲吞吐
     换驻留可行）再求一次。死锁所致的不可行不回退（预留无济于事）。"""
-    tm = _Timing(ir)
-    wafers = _expand(ir, tm)
+    tm = Durations(ir)
+    wafers = ir.wafers
     res = solve_timing(ir, wafers, verbose=verbose)
     if not getattr(res, "feasible", False) and getattr(res, "residency_violations", []):
         if verbose:
@@ -815,12 +812,12 @@ def time_from_ir(ir: PreprocessedTask, *, verbose: bool = True,
     return res
 
 
-def optimize_from_ir(ir: PreprocessedTask, *, budget: float = 2.0, seed: int = 0,
+def optimize_from_ir(ir: Problem, *, budget: float = 2.0, seed: int = 0,
                      verbose: bool = True, cross_check: bool = True) -> SolveResult:
     """time_from_ir 的寻优版：局部搜索（占用序 + loadlock 选腔）逼近 MILP，再可选独立复核。
     单次定序仍由 time_from_ir 提供（快速基线）。"""
-    tm = _Timing(ir)
-    wafers = _expand(ir, tm)
+    tm = Durations(ir)
+    wafers = ir.wafers
     res = optimize_orders(ir, wafers, budget=budget, seed=seed, verbose=verbose)
     if cross_check and getattr(res, "feasible", False):
         issues = check_solution(ir, res)
@@ -838,11 +835,11 @@ def optimize_from_ir(ir: PreprocessedTask, *, budget: float = 2.0, seed: int = 0
 # --------------------------------------------------------------------------- #
 # BC 策略派工：用学到的候选打分器替换默认 chooser，经 Banker 安全解码 + solve_timing 求时刻。
 # 策略不可行（驻留/无安全候选）时回退默认定序；最终取 min(策略, 默认) ⇒ 最坏不退化。
-# 策略对象由 CT.solutions.learn.policy.load_policy 加载（需 torch）。
+# 策略对象由 src.policy.load_policy 加载（需 torch）。
 # --------------------------------------------------------------------------- #
 def _greedy_chooser(policy) -> _Chooser:
     """策略 chooser：对每候选打分，返回分数降序的偏好序（Banker 在解码循环里再保证无死锁）。"""
-    from CT.solutions.learn.features import step_features
+    from src.features import step_features
 
     def chooser(state: _DecodeState, cands: List[_Cand]) -> List[int]:
         scores = policy.score_step(step_features(state, cands))
@@ -855,7 +852,7 @@ def _sampling_chooser(policy, rng, temp: float) -> _Chooser:
     """随机 rollout 的 chooser：分数/temp 加 Gumbel 噪声后排序（= 按 softmax(分数/temp) 抽偏好序）。
     多次 rollout 用 timing 精确评估取最优，逼近策略下的最好序——仍是纯 BC（推理期解码，不训练）。"""
     import numpy as np
-    from CT.solutions.learn.features import step_features
+    from src.features import step_features
 
     def chooser(state: _DecodeState, cands: List[_Cand]) -> List[int]:
         s = policy.score_step(step_features(state, cands)) / temp
@@ -865,15 +862,15 @@ def _sampling_chooser(policy, rng, temp: float) -> _Chooser:
     return chooser
 
 
-def time_from_policy(ir: PreprocessedTask, policy, *, n_samples: int = 32, temp: float = 0.7,
+def time_from_policy(ir: Problem, policy, *, n_samples: int = 32, temp: float = 0.7,
                      seed: int = 0, verbose: bool = False,
                      cross_check: bool = False) -> SolveResult:
     """BC 策略定序 → solve_timing（毫秒级精确评估器）。先贪心解码 1 次，再做 n_samples 次策略
     随机 rollout，全部用 solve_timing 评估取可行最优。策略全不可行/更差时回退默认定序——返回
     min(策略最优, 默认)，**最坏不退化**。n_samples=0 ⇒ 只贪心。"""
     import numpy as np
-    tm = _Timing(ir)
-    wafers = _expand(ir, tm)
+    tm = Durations(ir)
+    wafers = ir.wafers
     rng = np.random.default_rng(seed)
 
     choosers = [_greedy_chooser(policy)]
@@ -903,9 +900,9 @@ def time_from_policy(ir: PreprocessedTask, policy, *, n_samples: int = 32, temp:
 
 
 if __name__ == "__main__":
-    # 示例（按你的工程改）：
-    #   from CT.solutions.preprocess import preprocess_task
-    #   ir = preprocess_task(...)
-    #   res = time_from_ir(ir, verbose=True)
+    # 示例：
+    #   from src.parse import parse_task
+    #   task = parse_task(tool_topo, update_params)
+    #   res = time_from_ir(task, verbose=True)
     #   print("makespan =", res.makespan, "feasible =", res.feasible)
     pass

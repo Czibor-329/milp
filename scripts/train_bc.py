@@ -20,7 +20,8 @@ import torch.nn as nn
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from CT.solutions.learn.policy import CandidateScorer
+from src.policy import CandidateScorer
+from src.paths import model_output_path
 
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -30,7 +31,7 @@ def main() -> None:
     ap.add_argument("--labels", type=str,
                     default=str(_ROOT / "dataset" / "train_artifacts" / "bc_labels.npz"))
     ap.add_argument("--out", type=str,
-                    default=str(_ROOT / "dataset" / "train_artifacts" / "bc_policy.pt"))
+                    default=str(model_output_path("bc_policy.pt")))
     ap.add_argument("--epochs", type=int, default=80)
     ap.add_argument("--hidden", type=int, default=64)
     ap.add_argument("--lr", type=float, default=1e-3)

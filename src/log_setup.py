@@ -1,16 +1,15 @@
 """集中式 logger 配置。
 
-scheduler 链路被 C# 宿主通过 pythonnet 调用时不在终端运行，print(...) 看不到，
-异常的 Python 端 traceback 也会丢失。本模块把日志同时落地到 **文件 + 控制台**：
+把日志同时落地到 **文件 + 控制台**：
 
-    from CT.infer.log_setup import get_logger
+    from src.log_setup import get_logger
     log = get_logger(__name__)
 
 - 文件：results/logs/scheduler.log（RotatingFileHandler，utf-8，含中文不乱码）。
-- 控制台：StreamHandler，run_once 在终端跑时仍可见。
+- 控制台：StreamHandler，终端跑时仍可见。
 
-配置是惰性且幂等的：pythonnet 可能多次 import 本包，handler 只会挂一次，
-不会出现重复日志行。日志级别默认 INFO，可用环境变量 SCHED_LOG_LEVEL 调高到 DEBUG。
+配置是惰性且幂等的：handler 只会挂一次，不会出现重复日志行。
+日志级别默认 INFO，可用环境变量 SCHED_LOG_LEVEL 调高到 DEBUG。
 """
 
 from __future__ import annotations
@@ -19,10 +18,9 @@ import logging
 import logging.handlers
 import os
 
-from CT.config.paths import log_path
+from src.paths import log_path
 
-# 整个 infer 包共享的父 logger 名；各子模块用 get_logger(__name__) 取到其子 logger。
-_ROOT_LOGGER_NAME = "infer"
+_ROOT_LOGGER_NAME = "milp"
 _CONFIGURED = False
 
 _FILE_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
@@ -63,7 +61,7 @@ def _resolve_level() -> int:
 
 
 def _configure_root() -> logging.Logger:
-    """惰性、幂等地配置 infer 包级 logger。"""
+    """惰性、幂等地配置包级 logger。"""
     global _CONFIGURED
     root = logging.getLogger(_ROOT_LOGGER_NAME)
     if _CONFIGURED or root.handlers:
@@ -100,11 +98,7 @@ def _configure_root() -> logging.Logger:
 
 
 def get_logger(name: str) -> logging.Logger:
-    """返回已配置好的 logger（infer 包级父 logger 的子 logger）。
-
-    若 name 不在 infer 命名空间下（如 C# 部署把模块 import 为 src.hc_alg.scheduler），
-    则挂到 infer.* 之下，保证继承到已配置的 handler。
-    """
+    """返回已配置好的 logger（包级父 logger 的子 logger）。"""
     _configure_root()
     if name == _ROOT_LOGGER_NAME or name.startswith(_ROOT_LOGGER_NAME + "."):
         return logging.getLogger(name)
