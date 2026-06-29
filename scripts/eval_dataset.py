@@ -1,8 +1,19 @@
-"""Benchmark：固定顺序 timing 定序 + BC 策略 vs MILP 最优标签，在 dataset/test 上批量对比。
+"""Benchmark：timing 基线（腔分配寻优 + 默认定序）+ BC 策略 vs MILP 最优标签，在 dataset/test 批量对比。
 
 本脚本直接吃 dataset 实例（含 spec/update_params/result），用 result.makespan 作 MILP 基准
-（不重跑 Gurobi），逐实例跑 timing 固定顺序（time_from_ir）+ BC 策略（time_from_policy）并对比
+（不重跑 Gurobi），逐实例跑 timing 基线（time_from_ir）+ BC 策略（time_from_policy）并对比
 gap% 与计算时间。BC 生成的排程会导出 MoveList 到 results/output/bc/<子集>/inst_XXXX.json。
+
+注：time_from_ir/time_from_policy 现在都先做【腔分配寻优】(loadlock + 并行加工腔，毫秒级 BF
+评估)，再分别走默认/策略定序。腔分配是逼近 MILP 的最大杠杆——round-robin 默认让每片 entry/exit
+同腔、并行腔串行化（旧 gap +15~70%）；寻优后多数例命中 MILP。残留正 gap（2stage 2腔例、
+3PM-长proc 例）是 backward 定序器流水表达力限制。
+  · 个别小负 gap（≤1.3%，仅多 PM 例）非 bug、非乐观：MILP 只优化 loadlock 分配、**PM 写死
+    round-robin**（见 milp.py「PM 仍写死」），而本层把 PM 分配也寻优了，故能找到比 MILP 标签更优
+    的可行解。已证实：把本层选的 PM 分配回灌 MILP，MILP 复得同一更优值（status=2 gap=0）；且独立
+    校验器（不复用 solve_timing/check_solution）对全部 timing+BC 排程 0 违例。
+  · 警示：本表 gap 大幅收窄主要来自【腔分配寻优(搜索)】，非 BC 网络本身；bc% 多数 == b%（同基底），
+    学到的策略仅在少数例(1stage/10·11、2stage/5)较默认定序再压 ≤2.4%。
 
 实例重建 ir 的路径（见 manifest base_topo=s1-1c1p-preclean）：
   load_alg_entries(s1-1c1p-preclean) → expand_topo_pms(PM_POOL_6) → parse_task(topo, update_params)
@@ -41,7 +52,7 @@ from src.milp import export_movelist
 from src.policy import load_policy
 
 BASE_TOPO = "s1-1c1p-preclean"
-SUBSETS = ["1stage", "2stage", "3stage"]
+SUBSETS = ["1stage", "1stage_e", "2stage", "3stage"]
 _DATASET_TEST = Path(__file__).resolve().parents[1] / "dataset" / "test"
 _BC_OUT = OUTPUT_DIR / "bc"
 

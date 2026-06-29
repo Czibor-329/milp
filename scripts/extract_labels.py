@@ -31,6 +31,7 @@ from src.parse import parse_task
 from src.model import Durations
 from src.features import FEATURE_DIM
 from src.labels import extract_instance
+from src.timing import optimize_chambers
 
 BASE_TOPO = "s1-1c1p-preclean"
 _ROOT = Path(__file__).resolve().parents[1]
@@ -82,7 +83,11 @@ def main() -> None:
         try:
             ir = parse_task(ai0, d["update_params"])
             tm = Durations(ir)
-            wf = ir.wafers
+            # 腔分配寻优后的基底（与 time_from_policy 推理同基底）：teacher-force MILP 序须在
+            # 与推理一致的腔资源上抽，否则标签困在 round-robin 坏默认 → 学不到有用排序（BC==固定）。
+            _, wf, _ = optimize_chambers(ir, tm, ir.wafers, budget=1.0, seed=0)
+            if wf is None:
+                wf = ir.wafers
             records, completed = extract_instance(ir, tm, wf, res["schedule"])
         except Exception as e:  # noqa: BLE001
             print(f"  [warn] {os.path.basename(f)}: {e}")

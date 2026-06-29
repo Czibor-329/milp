@@ -490,6 +490,268 @@ def _decode(ir: Problem, tm: Durations, wafers, genome: _Genome,
 
 
 # --------------------------------------------------------------------------- #
+# loadlock 分配寻优（portfolio 种子 + 贪心下降，用快速 BF 评估）
+#
+# 这是逼近 MILP 的【最大杠杆】：_expand 的 round-robin 让每片 entry+exit 用同一 loadlock
+# （按 rank 奇偶），把并行加工腔劈成各自串行的奇/偶两条流水（并行腔零收益）。MILP 则解耦
+# entry/exit（如 entry→LA、exit→LB）让系统真正流水。该解耦是实例相关决策，无单一静态方案普适
+# （全局轮转易死锁、parity 在单腔例反劣），故按实例快速寻优。评估器是毫秒级 BF，portfolio
+# 几个种子 + 单事件贪心翻腔即可在多数例命中 MILP；解码内含 Banker ⇒ 候选恒无死锁。
+# --------------------------------------------------------------------------- #
+def _ll_assign_events(wafers) -> List[Tuple[int, int, List[str]]]:
+    """可选腔 loadlock stage（候选 >1），按 (wid, j) 顺序：[(wid, j, 候选腔列表)]。"""
+    out: List[Tuple[int, int, List[str]]] = []
+    for w in wafers:
+        for j, s in enumerate(w.stages):
+            if s.stage_type == "loadlock" and len(s.cands) > 1:
+                out.append((w.wid, j, list(s.cands)))
+    return out
+
+
+def _ll_seed_assignments(wafers) -> List[Dict[Tuple[int, int], str]]:
+    """若干 loadlock 全分配种子（解耦 entry/exit 的不同模式）。空 dict = _expand 的 round-robin
+    默认（entry/exit 同腔）。其余按 loadlock 占用事件序做不同步幅/相位轮转 + parity，覆盖
+    「同片 entry/exit 拆到不同腔」「相邻片错腔」等利于流水的模式。"""
+    ev = _ll_assign_events(wafers)
+    seeds: List[Dict[Tuple[int, int], str]] = [{}]
+    if not ev:
+        return seeds
+    for stride in (1, 2):
+        for off in (0, 1):
+            seeds.append({(wid, j): cands[(k * stride + off) % len(cands)]
+                          for k, (wid, j, cands) in enumerate(ev)})
+    parity: Dict[Tuple[int, int], str] = {}
+    for w in wafers:
+        js = [j for j, s in enumerate(w.stages)
+              if s.stage_type == "loadlock" and len(s.cands) > 1]
+        for k, j in enumerate(js):
+            cands = w.stages[j].cands
+            parity[(w.wid, j)] = cands[(w.wid + k) % len(cands)]
+    seeds.append(parity)
+    return seeds
+
+
+def _eval_ll_assign(ir: Problem, tm: Durations, wafers,
+                    assign: Dict[Tuple[int, int], str]) -> Tuple[List, Optional[SolveResult]]:
+    """给定 loadlock 全分配 → Banker 解码 + solve_timing（驻留不可行回退 reserve）。
+    口径与 _eval_genome 一致。返回 (有效 wafers, res 或 None若不可行)。"""
+    g = _Genome(ll_assign=assign)
+    try:
+        wf, orders = _decode(ir, tm, wafers, g, reserve=False, banker=True)
+    except (RuntimeError, _DecodeDeadlock):
+        return wafers, None
+    res = solve_timing(ir, wf, orders=orders)
+    if not getattr(res, "feasible", False) and getattr(res, "residency_violations", []):
+        try:
+            wf, orders = _decode(ir, tm, wafers, g, reserve=True, banker=True)
+        except (RuntimeError, _DecodeDeadlock):
+            return wafers, None
+        res = solve_timing(ir, wf, orders=orders)
+    return (wf, res) if getattr(res, "feasible", False) else (wf, None)
+
+
+def optimize_loadlock(ir: Problem, tm: Optional[Durations] = None, wafers=None, *,
+                      budget: float = 0.4, seed: int = 0
+                      ) -> Tuple[Optional[Dict[Tuple[int, int], str]], List, Optional[SolveResult]]:
+    """寻优 loadlock 分配：portfolio 种子取最优可行作 incumbent，再单事件贪心下降。
+    返回 (best_assign, best_wafers, best_res)；全不可行返回 (None, wafers, None)。
+    best_res 走默认（backward）定序——顺序由调用方（默认/policy/SA）另行决定。"""
+    if tm is None:
+        tm = Durations(ir)
+    if wafers is None:
+        wafers = ir.wafers
+    ev = _ll_assign_events(wafers)
+    t0 = time.perf_counter()
+    best_a: Optional[Dict[Tuple[int, int], str]] = None
+    best_wf, best_res, best_mk = wafers, None, float("inf")
+    for a in _ll_seed_assignments(wafers):
+        wf, res = _eval_ll_assign(ir, tm, wafers, a)
+        if res is not None and res.makespan < best_mk - EPS:
+            best_a, best_wf, best_res, best_mk = dict(a), wf, res, res.makespan
+    if best_res is None or not ev:
+        return best_a, best_wf, best_res
+    rng = random.Random(seed)
+    improved = True
+    while improved and time.perf_counter() - t0 < budget:
+        improved = False
+        order = list(range(len(ev)))
+        rng.shuffle(order)
+        for idx in order:
+            wid, j, cands = ev[idx]
+            cur = best_a.get((wid, j)) if best_a else None
+            for c in cands:
+                if c == cur:
+                    continue
+                trial = dict(best_a or {})
+                trial[(wid, j)] = c
+                wf, res = _eval_ll_assign(ir, tm, wafers, trial)
+                if res is not None and res.makespan < best_mk - EPS:
+                    best_a, best_wf, best_res, best_mk = trial, wf, res, res.makespan
+                    improved = True
+            if time.perf_counter() - t0 >= budget:
+                break
+    return best_a, best_wf, best_res
+
+
+# —— 全腔分配寻优（process + loadlock）：loadlock 只是腔分配的一类；并行【加工】腔的分配同样是
+# MILP 决策(Z)。loadlock-bound 多 PM 例（#loadlock < #PM）里 MILP 实际只用 ≤2 个加工腔（其余空转），
+# round-robin 却摊到全部 PM，使 wafer→PM 与 wafer→loadlock 周期错位、backward 定序无法细粒度流水。
+# 故在 loadlock 寻优之上，再加「限制 process 腔用量」的种子 + 全事件贪心。贪心从 loadlock-opt incumbent
+# 起、只接受改进 ⇒ **永不劣于 optimize_loadlock**（单调）。
+def _chamber_assign_events(wafers) -> List[Tuple[int, int, List[str]]]:
+    """全部多候选腔 stage（process + loadlock），按 (wid, j) 顺序：[(wid, j, 候选腔列表)]。"""
+    out: List[Tuple[int, int, List[str]]] = []
+    for w in wafers:
+        for j, s in enumerate(w.stages):
+            if len(s.cands) > 1 and s.stage_type in ("process", "loadlock"):
+                out.append((w.wid, j, list(s.cands)))
+    return out
+
+
+def _apply_chamber_assign(ir: Problem, wafers, assign: Dict[Tuple[int, int], str]) -> List:
+    """克隆 wafers 并套用任意 stage 的选腔（process + loadlock）。loadlock 选腔后按腔重算 proc
+    (pump/vent)，process 选腔不改 proc；最后全局重算 slot。是 _apply_ll_assign 的超集。"""
+    wf = [copy.copy(w) for w in wafers]
+    for w in wf:
+        w.stages = [copy.copy(s) for s in w.stages]
+    for w in wf:
+        for j, s in enumerate(w.stages):
+            c = assign.get((w.wid, j))
+            if c is not None and c in s.cands:
+                s.chamber = c
+        for s in w.stages:
+            if s.stage_type == "loadlock":
+                s.proc = _ll_proc(ir, s.chamber, s.ll_type)
+    _recompute_slots(ir, wf)
+    return wf
+
+
+def _eval_chamber_assign(ir: Problem, tm: Durations, wafers,
+                         assign: Dict[Tuple[int, int], str]) -> Tuple[List, Optional[SolveResult]]:
+    """给定全腔分配 → 默认 backward 定序 + solve_timing（驻留不可行回退 reserve）。同 _eval_ll_assign
+    口径，但允许 process 选腔。返回 (有效 wafers, res 或 None)。"""
+    wf = _apply_chamber_assign(ir, wafers, assign) if assign else wafers
+    try:
+        orders = _sequence(ir, tm, wf, reserve=False, banker=True)
+    except (RuntimeError, _DecodeDeadlock):
+        return wf, None
+    res = solve_timing(ir, wf, orders=orders)
+    if not getattr(res, "feasible", False) and getattr(res, "residency_violations", []):
+        try:
+            orders = _sequence(ir, tm, wf, reserve=True, banker=True)
+        except (RuntimeError, _DecodeDeadlock):
+            return wf, None
+        res = solve_timing(ir, wf, orders=orders)
+    return (wf, res) if getattr(res, "feasible", False) else (wf, None)
+
+
+def _joint_chamber_seeds(wafers) -> List[Dict[Tuple[int, int], str]]:
+    """全腔（process + loadlock）联合分配种子，两族并集（各覆盖单一模式拼不出的结构）：
+      族 A：对【所有】腔池统一按 (width, stride, offset) 轮转——entry/exit/相邻片细粒度错腔交错
+            （深 flowline loadlock-bound 例如 3stage[2,2,1] 需要这种全局交错）。
+      族 B：加工腔限 width × loadlock 模式(_ll_seed_assignments，含 parity)的【叉积】——
+            「只用 2 加工腔 + parity loadlock」（如 1stage 3PM 例 MILP 实际只用 2 腔 + parity）。
+    与 loadlock-opt incumbent 取并集 ⇒ 最坏不劣（见 optimize_chambers）。"""
+    all_pools: Dict[Tuple[str, ...], List[Tuple[int, int]]] = {}
+    proc_pools: Dict[Tuple[str, ...], List[Tuple[int, int]]] = {}
+    for w in wafers:
+        for j, s in enumerate(w.stages):
+            if len(s.cands) > 1 and s.stage_type in ("process", "loadlock"):
+                all_pools.setdefault(tuple(s.cands), []).append((w.wid, j))
+                if s.stage_type == "process":
+                    proc_pools.setdefault(tuple(s.cands), []).append((w.wid, j))
+    seeds: List[Dict[Tuple[int, int], str]] = []
+    # 族 A：全池统一轮转
+    if all_pools:
+        maxw = max(len(p) for p in all_pools)
+        for width in sorted({2, 3, maxw}):
+            for stride in (1, 2):
+                for off in (0, 1):
+                    a: Dict[Tuple[int, int], str] = {}
+                    for pool, evs in all_pools.items():
+                        w_eff = max(min(width, len(pool)), 1)
+                        for k, (wid, j) in enumerate(evs):
+                            a[(wid, j)] = pool[(k * stride + off) % w_eff]
+                    seeds.append(a)
+    # 族 B：加工腔限宽 × loadlock 模式 叉积
+    ll_pats = _ll_seed_assignments(wafers)
+    if proc_pools:
+        maxw = max(len(p) for p in proc_pools)
+        for width in sorted({2, maxw}):
+            for stride in (1, 2):
+                pa: Dict[Tuple[int, int], str] = {}
+                for pool, evs in proc_pools.items():
+                    w_eff = max(min(width, len(pool)), 1)
+                    for k, (wid, j) in enumerate(evs):
+                        pa[(wid, j)] = pool[(k * stride) % w_eff]
+                for ll in ll_pats:
+                    m = dict(pa)
+                    m.update(ll)
+                    seeds.append(m)
+    else:
+        seeds += ll_pats
+    # 去重（不同 (width,stride) 常生成同一分配）
+    out: List[Dict[Tuple[int, int], str]] = []
+    seen: set = set()
+    for m in seeds:
+        key = tuple(sorted(m.items()))
+        if key not in seen:
+            seen.add(key)
+            out.append(m)
+    return out
+
+
+def optimize_chambers(ir: Problem, tm: Optional[Durations] = None, wafers=None, *,
+                      budget: float = 0.6, seed: int = 0
+                      ) -> Tuple[Optional[Dict[Tuple[int, int], str]], List, Optional[SolveResult]]:
+    """寻优【全部多候选腔】(process + loadlock) 分配——对齐 MILP 腔分配决策(Z)。返回
+    (best_assign, best_wafers, best_res)；全不可行返回 (None, wafers, None)。
+
+    两段式（保证不劣于 optimize_loadlock）：① loadlock 专项寻优定 incumbent（已验证命中多数 MILP）；
+    ② 叠加「限 process 腔用量」种子 + 全事件贪心下降（只接受改进）。best_res 走默认 backward 定序。"""
+    if tm is None:
+        tm = Durations(ir)
+    if wafers is None:
+        wafers = ir.wafers
+    t0 = time.perf_counter()
+    # ① loadlock 专项 → incumbent（≥ LL-opt 质量，保证单调不劣）
+    ll_assign, ll_wf, ll_res = optimize_loadlock(ir, tm, wafers, budget=budget * 0.35, seed=seed)
+    best_a: Dict[Tuple[int, int], str] = dict(ll_assign) if ll_assign else {}
+    best_wf, best_res = ll_wf, ll_res
+    best_mk = ll_res.makespan if ll_res is not None else float("inf")
+    # ② 全腔联合种子（process+loadlock 限宽/错腔；含 incumbent 搞不定的结构）
+    for s in _joint_chamber_seeds(wafers):
+        wf, res = _eval_chamber_assign(ir, tm, wafers, s)
+        if res is not None and res.makespan < best_mk - EPS:
+            best_a, best_wf, best_res, best_mk = s, wf, res, res.makespan
+    if best_res is None:
+        return None, wafers, None
+    # ③ 全事件贪心下降（process + loadlock），从 incumbent 起、只接受改进 ⇒ ≤ LL-opt
+    ev = _chamber_assign_events(wafers)
+    rng = random.Random(seed + 1)
+    improved = True
+    while ev and improved and time.perf_counter() - t0 < budget:
+        improved = False
+        order = list(range(len(ev)))
+        rng.shuffle(order)
+        for idx in order:
+            wid, j, cands = ev[idx]
+            cur = best_a.get((wid, j))
+            for c in cands:
+                if c == cur:
+                    continue
+                trial = dict(best_a)
+                trial[(wid, j)] = c
+                wf, res = _eval_chamber_assign(ir, tm, wafers, trial)
+                if res is not None and res.makespan < best_mk - EPS:
+                    best_a, best_wf, best_res, best_mk = trial, wf, res, res.makespan
+                    improved = True
+            if time.perf_counter() - t0 >= budget:
+                break
+    return best_a, best_wf, best_res
+
+
+# --------------------------------------------------------------------------- #
 # 主入口：给定顺序 → 建全图 → Bellman-Ford → SolveResult
 # --------------------------------------------------------------------------- #
 def solve_timing(ir: Problem, wafers=None, *, orders: Optional[_Orders] = None,
@@ -724,27 +986,37 @@ def optimize_orders(ir: Problem, wafers=None, *, budget: float = 2.0,
                     iters: Optional[int] = None, seed: int = 0,
                     verbose: bool = False) -> SolveResult:
     """局部搜索（SA）寻优占用序 + loadlock 选腔，用 solve_timing 评估。返回 best 可行 SolveResult
-    （schedule 已反映所选 loadlock 腔）。budget=墙钟秒数；iters 设定则按迭代数停。incumbent 初始
-    = 默认定序 ⇒ 最坏不退化。"""
+    （schedule 已反映所选 loadlock 腔）。budget=墙钟秒数；iters 设定则按迭代数停。
+
+    先用 portfolio+贪心把 loadlock 分配定下（最大杠杆——单基因 SA 跳不出 round-robin 坏默认的
+    LL 局部最优），再在该 LL-opt 基底上做顺序 SA。incumbent 初始 = LL-opt 基底默认定序 ⇒ 最坏
+    不退化。"""
     t0 = time.perf_counter()
     tm = Durations(ir)
     if wafers is None:
         wafers = ir.wafers
     rng = random.Random(seed)
+
+    # 腔分配寻优（loadlock + 并行加工腔）→ 基底；顺序 SA 在该基底上跑（仍可经 _neighbor 微调 LL）。
+    ll_budget = min(budget * 0.5, 1.2) if iters is None else 0.8
+    _, wf, ll_res = optimize_chambers(ir, tm, wafers, budget=ll_budget, seed=seed)
+    if ll_res is not None:
+        wafers = wf
+
     ll_genes = _ll_genes(ir, wafers)
     ll_cand = {(w, j): cs for w, j, cs in ll_genes}                 # (wid,j) → 候选腔
     ll_default = {(w.wid, j): w.stages[j].chamber for w in wafers
                   for j, s in enumerate(w.stages)
-                  if (w.wid, j) in ll_cand}                         # (wid,j) → round-robin 默认腔
+                  if (w.wid, j) in ll_cand}                         # (wid,j) → 当前基底腔
 
     cur = _Genome()
-    cur_res, _ = _eval_genome(ir, tm, wafers, cur, banker=True)   # 基线=安全默认定序
+    cur_res = ll_res if ll_res is not None else _eval_genome(ir, tm, wafers, cur, banker=True)[0]
     if not getattr(cur_res, "feasible", False):
         if verbose:
             print("[timing] 默认定序即不可行，放弃搜索。")
         return cur_res
     best, best_res, best_mk = cur, cur_res, cur_res.makespan
-    base_mk = best_mk                               # 默认定序基线（仅供日志）
+    base_mk = best_mk                               # LL-opt 基底基线（仅供日志）
     cur_mk = best_mk
     # 贪心为主的低温 SA：Banker 评估贵、迭代少，故偏向爬山；停滞则回到 best 重启以跳出局部。
     T0 = max(best_mk * 0.02, 1.0)
@@ -787,20 +1059,40 @@ def optimize_orders(ir: Problem, wafers=None, *, budget: float = 2.0,
 # --------------------------------------------------------------------------- #
 # 便捷封装
 # --------------------------------------------------------------------------- #
-def time_from_ir(ir: Problem, *, verbose: bool = True,
-                 cross_check: bool = True) -> SolveResult:
-    """_expand → 默认定序 → solve_timing；可选用 milp.check_solution 独立复核。
-
-    若快序（吞吐优先）因驻留(qtime)排不出，自动回退到驻留预留定序（reserve=True，牺牲吞吐
-    换驻留可行）再求一次。死锁所致的不可行不回退（预留无济于事）。"""
-    tm = Durations(ir)
-    wafers = ir.wafers
+def _fixed_default(ir: Problem, tm: Durations, wafers, verbose: bool) -> SolveResult:
+    """原始默认（backward）定序 + 驻留预留回退（不动 loadlock 分配）。"""
     res = solve_timing(ir, wafers, verbose=verbose)
     if not getattr(res, "feasible", False) and getattr(res, "residency_violations", []):
         if verbose:
             print("[timing] 快序超驻留 → 回退驻留预留定序(reserve=True)重排。")
         orders = _sequence(ir, tm, wafers, reserve=True)
         res = solve_timing(ir, wafers, orders=orders, verbose=verbose)
+    return res
+
+
+def time_from_ir(ir: Problem, *, verbose: bool = True, cross_check: bool = True,
+                 optimize_ll: bool = True, ll_budget: float = 1.0,
+                 seed: int = 0) -> SolveResult:
+    """_expand → 腔分配寻优 → 默认定序 → solve_timing；可选 milp.check_solution 复核。
+
+    optimize_ll=True（默认）：先 portfolio+贪心定【腔分配】（loadlock + 并行加工腔，最大杠杆，
+    逼近 MILP 的 Z 决策），再在该基底上走默认 backward 定序。无可行分配时退回原始默认。
+    optimize_ll=False ⇒ 原行为（纯 round-robin 默认腔，作快速/对照基线）。
+
+    快序（吞吐优先）因驻留(qtime)排不出时回退驻留预留定序（reserve=True）。"""
+    tm = Durations(ir)
+    wafers = ir.wafers
+    if optimize_ll:
+        _, wf, res = optimize_chambers(ir, tm, wafers, budget=ll_budget, seed=seed)
+        if res is None:                          # 无可行腔分配 → 原始默认（含 reserve 回退）
+            res = _fixed_default(ir, tm, wafers, verbose)
+        else:
+            wafers = wf
+        if verbose:
+            print(f"[timing] 腔分配寻优 → makespan={res.makespan:.2f}"
+                  if getattr(res, "feasible", False) else "[timing] 腔分配寻优：无可行")
+    else:
+        res = _fixed_default(ir, tm, wafers, verbose)
     if cross_check and getattr(res, "feasible", False):
         issues = check_solution(ir, res)
         if verbose:
@@ -865,15 +1157,24 @@ def _sampling_chooser(policy, rng, temp: float) -> _Chooser:
 
 
 def time_from_policy(ir: Problem, policy, *, n_samples: int = 32, temp: float = 0.7,
-                     seed: int = 0, verbose: bool = False,
-                     cross_check: bool = False) -> SolveResult:
-    """BC 策略定序 → solve_timing（毫秒级精确评估器）。先贪心解码 1 次，再做 n_samples 次策略
-    随机 rollout，全部用 solve_timing 评估取可行最优。策略全不可行/更差时回退默认定序——返回
-    min(策略最优, 默认)，**最坏不退化**。n_samples=0 ⇒ 只贪心。"""
+                     seed: int = 0, verbose: bool = False, cross_check: bool = False,
+                     ll_budget: float = 1.0) -> SolveResult:
+    """BC 策略定序 → solve_timing（毫秒级精确评估器）。先把【腔分配】寻优定下（最大杠杆，与
+    time_from_ir 同基底），再在该基底上：贪心解码 1 次 + n_samples 次策略随机 rollout，全部
+    solve_timing 评估取可行最优。策略全不可行/更差时回退该基底默认定序——返回 min(策略, 默认)，
+    **最坏不退化**。n_samples=0 ⇒ 只贪心。
+
+    注：腔分配（loadlock + 并行加工腔）是结构性决策（MILP 的 Z），由毫秒级 portfolio 寻优负责；
+    策略只决定该基底上的占用/派工【顺序】。否则策略困在 round-robin 坏默认上，必然 == 固定顺序。"""
     import numpy as np
     tm = Durations(ir)
-    wafers = ir.wafers
     rng = np.random.default_rng(seed)
+
+    # 腔分配基底寻优（与 time_from_ir 一致）；无可行则退原始 round-robin 默认。
+    _, wafers, base = optimize_chambers(ir, tm, ir.wafers, budget=ll_budget, seed=seed)
+    if base is None:
+        base = _fixed_default(ir, tm, ir.wafers, verbose=False)
+        wafers = ir.wafers
 
     choosers = [_greedy_chooser(policy)]
     choosers += [_sampling_chooser(policy, rng, temp) for _ in range(max(n_samples, 0))]
@@ -887,14 +1188,13 @@ def time_from_policy(ir: Problem, policy, *, n_samples: int = 32, temp: float = 
         if getattr(r, "feasible", False) and (best is None or r.makespan < best.makespan):
             best = r
 
-    base = time_from_ir(ir, verbose=False, cross_check=False)   # 默认基线（含其自身 reserve 回退）
     if best is not None and best.makespan <= getattr(base, "makespan", float("inf")):
         res = best
     else:
         res = base
     if verbose:
         pm = best.makespan if best is not None else float("nan")
-        print(f"[timing][policy] 策略最优={pm:.2f}  默认={getattr(base,'makespan',float('nan')):.2f}"
+        print(f"[timing][policy] 策略最优={pm:.2f}  基底默认={getattr(base,'makespan',float('nan')):.2f}"
               f"  采用={res.makespan:.2f}")
     if cross_check and getattr(res, "feasible", False):
         res.check_issues = check_solution(ir, res)             # type: ignore[attr-defined]
