@@ -1,20 +1,21 @@
-"""Benchmark：启发式 timing 定序 vs MILP 最优标签，在 dataset/test 测试集上批量对比。
+"""Benchmark：固定顺序 timing 定序 + BC 策略 vs MILP 最优标签，在 dataset/test 上批量对比。
 
 本脚本直接吃 dataset 实例（含 spec/update_params/result），用 result.makespan 作 MILP 基准
-（不重跑 Gurobi），逐实例跑 timing 单次 + 寻优（+ 可选 BC 策略）并对比 gap% 与计算时间。
+（不重跑 Gurobi），逐实例跑 timing 固定顺序（time_from_ir）+ BC 策略（time_from_policy）并对比
+gap% 与计算时间。BC 生成的排程会导出 MoveList 到 results/output/bc/<子集>/inst_XXXX.json。
 
 实例重建 ir 的路径（见 manifest base_topo=s1-1c1p-preclean）：
-  load_alg_entries(s1-1c1p-preclean) → expand_topo_pms(PM_POOL_6) → preprocess(topo, update_params)
+  load_alg_entries(s1-1c1p-preclean) → expand_topo_pms(PM_POOL_6) → parse_task(topo, update_params)
 
 用法：
-  python scripts/eval_dataset.py                                  # 全 3 子集，寻优预算 2s
-  python scripts/eval_dataset.py --subsets single_stage --limit 3 --opt-budget 0   # 冒烟
-  python scripts/eval_dataset.py --opt-budget 3 --out eval.json   # 写逐实例+汇总 JSON
+  python scripts/eval_dataset.py                                  # 全 3 子集
+  python scripts/eval_dataset.py --subsets 1stage --limit 3       # 冒烟
+  python scripts/eval_dataset.py --out eval.json                  # 写逐实例+汇总 JSON
 
 解读：
   · gap% = (timing.makespan − milp.makespan) / milp.makespan，正=timing 偏大(劣)。
-  · b%=单次定序 gap，o%=寻优后 gap；寻优 incumbent=单次解 ⇒ o% ≤ b%（最坏不退化）。
-  · feas=False=该启发式顺序在驻留下排不出；viol>0=timing 自身建图有 bug（应为 0）。
+  · b%=固定顺序 gap，bc%=BC 策略 gap。
+  · feas=False=该顺序在驻留下排不出；viol>0=timing 自身建图有 bug（应为 0）。
   · MILP status≠2 或标签为 nan（超时/不可行）的实例：仍跑 timing，但不计入 gap 统计。
   · 多容量加工腔 Cd 门簇互斥未建模，个别 case 可能负 gap（漏约束偏乐观，非更优）。
 """
@@ -32,16 +33,17 @@ from pathlib import Path
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.parse import load_alg_entries
-from src.paths import input_data_path,MODELS_DIR
+from src.parse import load_alg_entries, parse_task
+from src.paths import input_data_path, MODELS_DIR, OUTPUT_DIR
 from src.marathon_gen import expand_topo_pms, PM_POOL_6
-from src.parse import parse_task
-from src.timing import time_from_ir, optimize_from_ir, time_from_policy
+from src.timing import time_from_ir, time_from_policy
+from src.milp import export_movelist
 from src.policy import load_policy
 
 BASE_TOPO = "s1-1c1p-preclean"
 SUBSETS = ["1stage", "2stage", "3stage"]
 _DATASET_TEST = Path(__file__).resolve().parents[1] / "dataset" / "test"
+_BC_OUT = OUTPUT_DIR / "bc"
 
 
 def _valid_label(result: dict) -> bool:
@@ -59,12 +61,9 @@ def _instances(sub: str, limit: int = 0):
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--subsets", nargs="*", default=SUBSETS, help="测试子集（缺省=全部）")
-    ap.add_argument("--opt-budget", type=float, default=2.0,help="寻优墙钟预算(秒/实例)，0=跳过寻优只跑单次")
-    ap.add_argument("--seed", type=int, default=0, help="寻优随机种子")
     ap.add_argument("--limit", type=int, default=0, help="每子集只跑前 N 个（冒烟用，0=全部）")
     ap.add_argument("--out", type=str, default=None, help="把逐实例+汇总写成 JSON")
     args = ap.parse_args()
-    do_opt = args.opt_budget > 0
 
     policy = load_policy(MODELS_DIR / "bc_policy.pt")
 
@@ -72,11 +71,11 @@ def main() -> None:
     ai, _ = load_alg_entries(input_data_path(BASE_TOPO))
     ai = expand_topo_pms(ai, PM_POOL_6)
 
-    hdr = (f"{'case':<26} {'MILP mk':>9} | {'tmg mk':>9} {'opt mk':>9} {'bc mk':>9} "
-           f"{'tmg ms':>8} {'bc ms':>8} {'feas':>5} {'viol':>5} | {'b%':>7} {'o%':>7} {'bc%':>7}")
+    hdr = (f"{'case':<26} {'MILP mk':>9} | {'tmg mk':>9} {'bc mk':>9} "
+           f"{'tmg ms':>8} {'bc ms':>8} {'feas':>5} {'viol':>5} | {'b%':>7} {'bc%':>7}")
 
     records = []
-    all_gaps, all_ogaps, all_bgaps = [], [], []
+    all_gaps, all_bgaps = [], []
     grand_feas = grand_n = 0
     for sub in args.subsets:
         files = _instances(sub, args.limit)
@@ -88,7 +87,7 @@ def main() -> None:
         print(hdr)
         print("-" * len(hdr))
 
-        gaps, ogaps, bgaps, tms_list, oms_list, bms_list = [], [], [], [], [], []
+        gaps, bgaps, tms_list, bms_list = [], [], [], []
         feas_cnt = 0
         for f in files:
             name = f"{sub}/{os.path.basename(f)[:-5]}"
@@ -108,19 +107,6 @@ def main() -> None:
                 print(f"{name:<26} timing 失败: {e}")
                 continue
 
-            o_mk = float("nan")
-            o_ms = float("nan")
-            if do_opt:
-                try:
-                    t0 = time.perf_counter()
-                    ores = optimize_from_ir(ir, budget=args.opt_budget, seed=args.seed,
-                                            verbose=False, cross_check=False)
-                    o_ms = (time.perf_counter() - t0) * 1000.0
-                    if bool(getattr(ores, "feasible", False)):
-                        o_mk = ores.makespan
-                except Exception as e:  # noqa: BLE001
-                    print(f"  [warn] {name} 寻优失败: {e}")
-
             b_mk = float("nan")
             b_ms = float("nan")
             if policy is not None:
@@ -130,58 +116,47 @@ def main() -> None:
                     b_ms = (time.perf_counter() - t0) * 1000.0
                     if bool(getattr(bres, "feasible", False)):
                         b_mk = bres.makespan
+                        _export_bc_movelist(ir, bres, sub, os.path.basename(f)[:-5])
                 except Exception as e:  # noqa: BLE001
                     print(f"  [warn] {name} bc 失败: {e}")
 
             gap = ((t_mk - m_mk) / m_mk * 100.0) if (feas and has_label and m_mk > 0) else float("nan")
-            ogap = ((o_mk - m_mk) / m_mk * 100.0) if (o_mk == o_mk and has_label and m_mk > 0) else float("nan")
             bgap = ((b_mk - m_mk) / m_mk * 100.0) if (b_mk == b_mk and has_label and m_mk > 0) else float("nan")
             if feas:
                 feas_cnt += 1
                 tms_list.append(t_ms)
-                if o_ms == o_ms:
-                    oms_list.append(o_ms)
                 if b_ms == b_ms:
                     bms_list.append(b_ms)
                 if gap == gap:
                     gaps.append(gap)
-                if ogap == ogap:
-                    ogaps.append(ogap)
                 if bgap == bgap:
                     bgaps.append(bgap)
 
             mmk_str = f"{m_mk:>9.1f}" if has_label else f"{'n/a':>9}"
-            omk_str = f"{o_mk:>9.1f}" if o_mk == o_mk else f"{'-':>9}"
             bmk_str = f"{b_mk:>9.1f}" if b_mk == b_mk else f"{'-':>9}"
             bms_str = f"{b_ms:>8.1f}" if b_ms == b_ms else f"{'-':>8}"
             gap_str = f"{gap:>7.2f}" if gap == gap else f"{'n/a':>7}"
-            ogap_str = f"{ogap:>7.2f}" if ogap == ogap else f"{'-':>7}"
             bgap_str = f"{bgap:>7.2f}" if bgap == bgap else f"{'-':>7}"
-            print(f"{name:<26} {mmk_str} | {t_mk:>9.1f} {omk_str} {bmk_str} "
-                  f"{t_ms:>8.1f} {bms_str} {str(feas):>5} {viol:>5} | {gap_str} {ogap_str} {bgap_str}")
+            print(f"{name:<26} {mmk_str} | {t_mk:>9.1f} {bmk_str} "
+                  f"{t_ms:>8.1f} {bms_str} {str(feas):>5} {viol:>5} | {gap_str} {bgap_str}")
 
             records.append({
                 "case": name, "milp": m_mk if has_label else None, "has_label": has_label,
-                "tmg_mk": t_mk, "opt_mk": o_mk if o_mk == o_mk else None,
-                "bc_mk": b_mk if b_mk == b_mk else None,
-                "tmg_ms": t_ms, "opt_ms": o_ms if o_ms == o_ms else None,
-                "bc_ms": b_ms if b_ms == b_ms else None,
+                "tmg_mk": t_mk, "bc_mk": b_mk if b_mk == b_mk else None,
+                "tmg_ms": t_ms, "bc_ms": b_ms if b_ms == b_ms else None,
                 "feasible": feas, "viol": viol,
-                "gap": gap if gap == gap else None, "ogap": ogap if ogap == ogap else None,
+                "gap": gap if gap == gap else None,
                 "bgap": bgap if bgap == bgap else None,
             })
 
         print("-" * len(hdr))
         print(f"  可行 {feas_cnt}/{len(files)}"
-              + (f"  单次 gap%：平均 {sum(gaps)/len(gaps):+.2f} 最大 {max(gaps):+.2f} 最小 {min(gaps):+.2f}" if gaps else "")
-              + (f"  寻优 gap%：平均 {sum(ogaps)/len(ogaps):+.2f} 最大 {max(ogaps):+.2f} 最小 {min(ogaps):+.2f}" if ogaps else "")
+              + (f"  固定顺序 gap%：平均 {sum(gaps)/len(gaps):+.2f} 最大 {max(gaps):+.2f} 最小 {min(gaps):+.2f}" if gaps else "")
               + (f"  bc gap%：平均 {sum(bgaps)/len(bgaps):+.2f} 最大 {max(bgaps):+.2f} 最小 {min(bgaps):+.2f}" if bgaps else ""))
-        print(f"  平均计算时间：单次 {sum(tms_list)/len(tms_list):.1f} ms" if tms_list else "  平均计算时间：单次 n/a",
+        print(f"  平均计算时间：固定顺序 {sum(tms_list)/len(tms_list):.1f} ms" if tms_list else "  平均计算时间：固定顺序 n/a",
               end="")
-        print((f"  寻优 {sum(oms_list)/len(oms_list):.1f} ms" if oms_list else "")
-              + (f"  bc {sum(bms_list)/len(bms_list):.1f} ms" if bms_list else ""))
+        print((f"  bc {sum(bms_list)/len(bms_list):.1f} ms" if bms_list else ""))
         all_gaps += gaps
-        all_ogaps += ogaps
         all_bgaps += bgaps
         grand_feas += feas_cnt
         grand_n += len(files)
@@ -189,24 +164,30 @@ def main() -> None:
     print("=" * len(hdr))
     print(f"总体：可行 {grand_feas}/{grand_n}")
     if all_gaps:
-        print(f"  单次 gap%：平均 {sum(all_gaps)/len(all_gaps):+.2f}  最大 {max(all_gaps):+.2f}  最小 {min(all_gaps):+.2f}  (n={len(all_gaps)})")
-    if all_ogaps:
-        print(f"  寻优 gap%：平均 {sum(all_ogaps)/len(all_ogaps):+.2f}  最大 {max(all_ogaps):+.2f}  最小 {min(all_ogaps):+.2f}  (n={len(all_ogaps)})")
+        print(f"  固定顺序 gap%：平均 {sum(all_gaps)/len(all_gaps):+.2f}  最大 {max(all_gaps):+.2f}  最小 {min(all_gaps):+.2f}  (n={len(all_gaps)})")
     if all_bgaps:
-        print(f"  bc   gap%：平均 {sum(all_bgaps)/len(all_bgaps):+.2f}  最大 {max(all_bgaps):+.2f}  最小 {min(all_bgaps):+.2f}  (n={len(all_bgaps)})")
+        print(f"  bc       gap%：平均 {sum(all_bgaps)/len(all_bgaps):+.2f}  最大 {max(all_bgaps):+.2f}  最小 {min(all_bgaps):+.2f}  (n={len(all_bgaps)})")
+    print(f"  BC MoveList 导出 → {_BC_OUT}")
     print("=" * len(hdr))
 
     if args.out:
         summary = {
             "feasible": grand_feas, "total": grand_n,
             "gap_mean": (sum(all_gaps)/len(all_gaps)) if all_gaps else None,
-            "ogap_mean": (sum(all_ogaps)/len(all_ogaps)) if all_ogaps else None,
             "bgap_mean": (sum(all_bgaps)/len(all_bgaps)) if all_bgaps else None,
-            "opt_budget": args.opt_budget, "seed": args.seed,
         }
         with open(args.out, "w", encoding="utf-8") as fp:
             json.dump({"summary": summary, "records": records}, fp, ensure_ascii=False, indent=2)
         print(f"已写 {len(records)} 条记录 + 汇总 → {args.out}")
+
+
+def _export_bc_movelist(ir, bres, sub: str, basename: str) -> None:
+    """把 BC 策略排程导出成 MoveList，落 results/output/bc/<子集>/<inst>.json。"""
+    ml = export_movelist(ir, bres)
+    out = _BC_OUT / sub / f"{basename}.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "w", encoding="utf-8") as fp:
+        json.dump({"MoveList": ml}, fp, ensure_ascii=False)
 
 
 if __name__ == "__main__":

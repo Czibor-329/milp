@@ -1,7 +1,9 @@
 """Case 级 MILP oracle（Gurobi）：吃 Problem IR，求 makespan 最优排程。
 
 见 milp_design.md。iter-1 实现：路径先后(P) / 驻留(D) / 腔互斥(C) / 机器手互斥(R) /
-LoadLock 状态 setup(LL) / 同 route id FIFO，round-robin 定腔，单片原子搬运（swap 暂关）。
+LoadLock 状态 setup(LL) / 同 route id FIFO，round-robin 定腔，双臂换料(swap，决策 B)。
+swap 由 solve_milp(enable_swap=) 控制：默认开；生成 timing 训练集时置 False（timing 解码层无
+swap 原语，关掉可保 MILP 解落在 timing 可表示空间内、teacher 序可被复现）。
 
 用法见 scripts/run_milp.py。求解结果 SolveResult.makespan / schedule（每片每 stage 的
 进站 a、取走 r）便于核对与后续 movelist 导出。
@@ -151,9 +153,13 @@ class SolveResult:
 # 建模 + 求解
 # --------------------------------------------------------------------------- #
 def solve_milp(task: Problem, *, time_limit: float = 300.0,
-               verbose: bool = False, ub: Optional[float] = None) -> SolveResult:
+               verbose: bool = False, ub: Optional[float] = None,
+               enable_swap: bool = True) -> SolveResult:
     """ub: 一条可行排程的 makespan 上界（如 run_greedy 的 finished makespan）。给定则用
-    tight Big-M=2·ub+1 收紧 LP 松弛（方案 §6.2）；None 时退回 loose-M（所有动作时长之和）。"""
+    tight Big-M=2·ub+1 收紧 LP 松弛（方案 §6.2）；None 时退回 loose-M（所有动作时长之和）。
+
+    enable_swap: 是否建模双臂换料（决策 B）。False ⇒ 不建 swap 候选，所有 hop 原子搬运、
+    res.swaps 恒空（供 timing 训练集生成：timing 解码层无 swap 原语）。"""
     tm = Durations(task)
     wafers = task.wafers
     cap = {n: int(c.capacity) for n, c in task.chambers.items()}
@@ -193,7 +199,7 @@ def solve_milp(task: Problem, *, time_limit: float = 300.0,
                 + tm.place_t(rob, w.stages[j + 1].chamber))
 
     # swap 候选（决策 B）：每对 → 一个 0/1；其涉及的两个 hop 的链式 a=r+L 改为条件约束。
-    swap_pairs = _swap_candidates(task, wafers)
+    swap_pairs = _swap_candidates(task, wafers) if enable_swap else []
     sw: Dict[int, gp.Var] = {k: m.addVar(vtype=GRB.BINARY, name=f"sw_{p.chamber}_{p.w_out.wid}_{p.w_in.wid}")
                              for k, p in enumerate(swap_pairs)}
     # hop (wid, j) → 由哪个 swap 决定：进腔 hop = j_in-1（受 sw 控 a 链），出腔 hop = j_out（受 sw 控 r 与 a 链）

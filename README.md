@@ -19,9 +19,6 @@ pip install -r requirements.txt
 ## 用法
 
 ```bash
-# 合成验证用例（cases.py 里的 case1/2/3）
-python scripts/run_milp.py --case 1 --n1 2 --n2 2
-
 # 真实配置场景（src/input_data/*.json），并导出 MoveList
 python scripts/run_milp.py --input s1-1c1p-preclean --export
 
@@ -43,15 +40,16 @@ src/
   milp.py             # 核心：建模 + 求解 + 自检 + MoveList 导出（消费 Problem）
   timing.py           # 定时层：差分约束图 + Bellman-Ford + 局部搜索寻优
   features.py / labels.py / policy.py   # 模仿学习（BC）：特征 / 标签 / 候选打分网络
-  cases.py            # 合成验证用例 case1/2/3
   marathon_gen.py     # 合成 job / route 生成（纯 stdlib）
   paths.py            # 路径常量
   log_setup.py        # 日志
   input_data/*.json   # 样例场景
 scripts/
   run_milp.py         # MILP 入口
-  eval_dataset.py     # 数据集批量评测（timing/寻优/BC vs MILP 标签）
+  gen_test.py         # 数据集生成（YAML 案例清单 → MILP 标注，swap 关）
+  eval_dataset.py     # 数据集批量评测（固定顺序 / BC vs MILP 标签，导出 BC MoveList）
   extract_labels.py / train_bc.py       # BC 标签抽取 / 训练
+  dataset/cases/*.yaml  # 生成用案例清单（逐工序腔数 × proc）
 milp_design.md        # 建模设计文档
 milp_handoff.md       # 交接说明
 ```

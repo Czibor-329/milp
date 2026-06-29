@@ -14,7 +14,9 @@
 orders。
 
 未建模（v1 已知缺口，命中时会打印告警）：
-  · swap（换料，与 milp.py 现状一致：swap 暂关）。
+  · swap（双臂换料）：本解码层无 swap 原语，每跳都是单次原子 pick+move+place。MILP 默认建模
+    swap（solve_milp(enable_swap=True)），故训练/评测数据须用 enable_swap=False 生成（见
+    scripts/gen_test.py），使 MILP 解落在本层可表示空间内、teacher 序可被复现。
   · 多容量【加工】腔的门簇互斥 (Cd)。命中多容量非 skip 加工腔时 makespan 可能偏乐观。
 
 用法：

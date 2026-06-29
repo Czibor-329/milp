@@ -1,12 +1,13 @@
-"""抽取 BC 标签：遍历 train 实例，teacher-forced 复现 MILP 服务序 → 每步 (候选特征, 专家 idx)。
+"""抽取 BC 标签：遍历数据集实例，teacher-forced 复现 MILP 服务序 → 每步 (候选特征, 专家 idx)。
 
-只收「完整复现」的实例（标签自洽 + 近 MILP，~75% 覆盖）。变长候选用 padding+mask 存成 .npz。
-末尾按 family（stage 数 × 腔数）报覆盖率，确认硬例（宽并行腔）有足量监督。
+数据集即 dataset/test/**（swap-free，由 gen_test.py 生成）——本仓库「测试集即训练集」：同一套
+干净实例既抽标签训练、又供 eval_dataset 评测。只收「完整复现」的实例（标签自洽 + 近 MILP）。
+变长候选用 padding+mask 存成 .npz。末尾按 family（stage 数 × 腔数）报覆盖率。
 
 用法：
-  python scripts/extract_labels.py                       # 全 train → dataset/train_artifacts/bc_labels.npz
+  python scripts/extract_labels.py                       # 全 dataset/test/** → train_artifacts/bc_labels.npz
   python scripts/extract_labels.py --limit 100           # 冒烟
-  python scripts/extract_labels.py --splits train test   # 也收 test（默认只 train）
+  python scripts/extract_labels.py --glob "dataset/train/inst_*.json" --splits train   # 旧 train 集（如仍在）
 """
 
 import argparse
@@ -46,13 +47,15 @@ def _family(spec: dict) -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--splits", nargs="*", default=["train"], help="收哪些 split（默认 train）")
+    ap.add_argument("--splits", nargs="*", default=["test"], help="收哪些 split（默认 test=训练集）")
+    ap.add_argument("--glob", type=str, default="dataset/test/**/inst_*.json",
+                    help="实例 glob（相对仓库根，默认递归收 dataset/test/**）")
     ap.add_argument("--limit", type=int, default=0, help="只跑前 N 个实例（冒烟，0=全部）")
     ap.add_argument("--out", type=str,
                     default=str(_ROOT / "dataset" / "train_artifacts" / "bc_labels.npz"))
     args = ap.parse_args()
 
-    files = sorted(glob.glob(str(_ROOT / "dataset" / "train" / "inst_*.json")))
+    files = sorted(glob.glob(str(_ROOT / args.glob), recursive=True))
     if args.limit > 0:
         files = files[:args.limit]
 
