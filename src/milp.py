@@ -154,7 +154,7 @@ class SolveResult:
 # --------------------------------------------------------------------------- #
 def solve_milp(task: Problem, *, time_limit: float = 300.0,
                verbose: bool = False, ub: Optional[float] = None,
-               enable_swap: bool = True) -> SolveResult:
+               enable_swap: bool = True, warm: Optional[SolveResult] = None) -> SolveResult:
     """ub: 一条可行排程的 makespan 上界（如 run_greedy 的 finished makespan）。给定则用
     tight Big-M=2·ub+1 收紧 LP 松弛（方案 §6.2）；None 时退回 loose-M（所有动作时长之和）。
 
@@ -218,20 +218,22 @@ def solve_milp(task: Problem, *, time_limit: float = 300.0,
                 continue  # 条件链由 swap 约束块给出
             m.addConstr(a[w.wid, j + 1] == r[w.wid, j] + L(w, j), name=f"chain_{w.wid}_{j}")
 
-    # (Z) loadlock 腔分配决策（bug2：放开 round-robin，仅 loadlock；PM 仍写死）。
-    #   z[w,j,c]∈{0,1}, Σ_c z=1。loadlock 的 pick/place 行程时长在各候选腔相等 → L 与 a=r+L
-    #   链、(R) 机器手互斥全不依赖选腔；仅 proc(pump/vent)、门微动作、(C) 互斥分组依赖 → 下方条件化。
-    ll_z: Dict[Tuple[int, int], Dict[str, gp.Var]] = {}
+    # (Z) 腔分配决策（放开 round-robin）：loadlock + 加工腔(process) 均建选腔变量。
+    #   z[w,j,c]∈{0,1}, Σ_c z=1。候选腔 pick/place 行程时长相等（marathon_gen 克隆 PM 同 PickTime/
+    #   PlaceTime、move 按手取与腔无关）→ L、a=r+L 链、(R) 机器手互斥全不依赖选腔；仅 proc(pump/vent)、
+    #   门微动作、(C) 互斥分组依赖 → 下方条件化。process 的 proc 各候选腔同值（路由模板每 stage 一个
+    #   process_time），故 proc 也不依赖选腔；只需把 (C) 的静态分组改为 (C-PM) 条件互斥。
+    sel_z: Dict[Tuple[int, int], Dict[str, gp.Var]] = {}
     for w in wafers:
         for j, s in enumerate(w.stages):
-            if s.stage_type == "loadlock" and len(s.cands) > 1:
+            if s.stage_type in ("loadlock", "process") and len(s.cands) > 1:
                 zc = {c: m.addVar(vtype=GRB.BINARY, name=f"z_{w.wid}_{j}_{c}") for c in s.cands}
                 m.addConstr(gp.quicksum(zc.values()) == 1, name=f"zsum_{w.wid}_{j}")
-                ll_z[w.wid, j] = zc
+                sel_z[w.wid, j] = zc
 
     def cdep(w: Wafer, j: int, fn):
-        """选腔相关标量 → float（写死腔）或 LinExpr（放开的 loadlock，按 z 加权）。"""
-        zc = ll_z.get((w.wid, j))
+        """选腔相关标量 → float（写死腔）或 LinExpr（放开选腔的腔，按 z 加权）。"""
+        zc = sel_z.get((w.wid, j))
         if zc is None:
             return fn(w.stages[j].chamber)
         return gp.quicksum(v * fn(c) for c, v in zc.items())
@@ -332,6 +334,8 @@ def solve_milp(task: Problem, *, time_limit: float = 300.0,
                 continue
             if s.stage_type in ("source", "sink", "loadlock"):
                 continue
+            if s.stage_type == "process" and len(s.cands) > 1:
+                continue  # 放开选腔的 process → 不能按静态腔分组，移到下方 (C-PM) 条件化
             slot_occ.setdefault((s.chamber, s.slot), []).append((w, j))
 
     for (c, _slot), occs in slot_occ.items():
@@ -361,7 +365,7 @@ def solve_milp(task: Problem, *, time_limit: float = 300.0,
     #   都选中 c ⟺ e1c+e2c==2，relax=M*(2-e1c-e2c)（任一未选 c 即放松）。同 route 同 visit
     #   用条件 FIFO（省 0/1），entry/exit 等不同 visit 用 0/1 析取。空抽/空充 setup 按选中腔取。
     def ecoef(w: Wafer, j: int, c: str):
-        zc = ll_z.get((w.wid, j))
+        zc = sel_z.get((w.wid, j))
         if zc is None:
             return 1.0 if w.stages[j].chamber == c else 0.0
         return zc.get(c, 0.0)
@@ -405,6 +409,36 @@ def solve_milp(task: Problem, *, time_limit: float = 300.0,
                                 + ll_setup_c(s1.ll_type, s2.ll_type, c) - M * (1 - x) - relax)
                     m.addConstr(occ_start(w1, j1) >= occ_end(w2, j2)
                                 + ll_setup_c(s2.ll_type, s1.ll_type, c) - M * x - relax)
+
+    # (C-PM) process 腔互斥（腔分配为决策 → 按候选腔条件化，与 (C-LL) 同构但无抽充气 setup）。
+    #   一对占用仅当「都选中腔 c」时互斥：relax=M*(2−e1c−e2c)（任一未选 c 即放松）。同 route 同 stage
+    #   用条件 FIFO（id 升序，省 0/1）；跨 route 不同 visit 用 0/1 析取（一个 x 管所有同选候选腔）。
+    pm_visits = [(w, j) for w in wafers
+                 for j, s in enumerate(w.stages)
+                 if s.stage_type == "process" and len(s.cands) > 1]
+    for p in range(len(pm_visits)):
+        for q in range(p + 1, len(pm_visits)):
+            w1, j1 = pm_visits[p]; w2, j2 = pm_visits[q]
+            if w1.wid == w2.wid:
+                continue  # 同片重访：precedence 已序
+            s1, s2 = w1.stages[j1], w2.stages[j2]
+            shared = [c for c in s1.cands if c in s2.cands]
+            if not shared:
+                continue
+            if w1.route_name == w2.route_name and j1 == j2:
+                lo, jlo, hi, jhi = ((w1, j1, w2, j2) if w1.wid < w2.wid
+                                    else (w2, j2, w1, j1))
+                for c in shared:    # 条件 FIFO：lo 先（仅当两者都选 c 时生效）
+                    relax = M * (2 - ecoef(lo, jlo, c) - ecoef(hi, jhi, c))
+                    m.addConstr(occ_start(hi, jhi) >= occ_end(lo, jlo) - relax,
+                                name=f"CPM_{c}_{lo.wid}_{hi.wid}")
+            else:
+                x = m.addVar(vtype=GRB.BINARY,
+                             name=f"xpm_{w1.wid}_{j1}_{w2.wid}_{j2}")
+                for c in shared:
+                    relax = M * (2 - ecoef(w1, j1, c) - ecoef(w2, j2, c))
+                    m.addConstr(occ_start(w2, j2) >= occ_end(w1, j1) - M * (1 - x) - relax)
+                    m.addConstr(occ_start(w1, j1) >= occ_end(w2, j2) - M * x - relax)
 
     # (Cd) 多容量腔的「门」整站串行：加工可跨槽并行，但开关门(MoveType 6/7)共用一套门机构，
     # 必须站级互斥（validator 规则）。把每次访问的 进站门簇/出站门簇 两两不重叠。
@@ -490,6 +524,26 @@ def solve_milp(task: Problem, *, time_limit: float = 300.0,
             m.addConstr(occ_start(wmap[wb], jb) >= occ_end(wmap[wa], ja) + cl.dur,
                         name=f"wac_{cl.chamber}_{wa}")
 
+    # 暖启动（MIPStart）：给定一条可行排程（如 timing 解）→ 设 a/r/选腔/swap 起始值，Gurobi 自带一个
+    # ≤该排程 makespan 的初始 incumbent。两重保证：(1) 一定有可行解（放开 PM 选腔后难例也不 nan/丢标）；
+    # (2) 最终 incumbent ≤ warm makespan（喂 timing ⇒ gap 不为负）。并从好点出发加速收敛。
+    if warm is not None and warm.schedule:
+        for w in wafers:
+            rows = warm.schedule.get(w.wid)
+            if not rows or len(rows) != len(w.stages):
+                continue
+            for j, (_st, cham, av, rv) in enumerate(rows):
+                if (w.wid, j) in a:
+                    a[w.wid, j].Start = float(av)
+                if (w.wid, j) in r:
+                    r[w.wid, j].Start = float(rv)
+                zc = sel_z.get((w.wid, j))
+                if zc is not None:
+                    for c, v in zc.items():
+                        v.Start = 1.0 if c == cham else 0.0
+        for v in sw.values():
+            v.Start = 0.0
+
     m.setObjective(Cmax, GRB.MINIMIZE)
 
     m.optimize()
@@ -498,7 +552,7 @@ def solve_milp(task: Problem, *, time_limit: float = 300.0,
     if (used_tight and m.SolCount == 0
             and m.Status in (GRB.INFEASIBLE, GRB.INF_OR_UNBD, GRB.UNBOUNDED)):
         return solve_milp(task, time_limit=max(1.0, float(time_limit) - float(m.Runtime)),
-                          verbose=verbose, ub=None)
+                          verbose=verbose, ub=None, warm=warm)
 
     res = SolveResult(status=m.Status, makespan=float("nan"))
     res.runtime = float(m.Runtime)
@@ -506,7 +560,7 @@ def solve_milp(task: Problem, *, time_limit: float = 300.0,
         res.makespan = float(Cmax.X)
         res.gap = float(m.MIPGap) if m.Status != GRB.OPTIMAL else 0.0
         # loadlock 选中腔（放开分配）：取 z=1 的腔，回写进 schedule 供 export/check 用真实腔时长。
-        chosen = {(wid, j): max(zc, key=lambda c: zc[c].X) for (wid, j), zc in ll_z.items()}
+        chosen = {(wid, j): max(zc, key=lambda c: zc[c].X) for (wid, j), zc in sel_z.items()}
         for w in wafers:
             row = []
             for j, s in enumerate(w.stages):
@@ -633,8 +687,11 @@ def export_movelist(task: Problem, res: SolveResult) -> List[dict]:
             if stype == "process" and s.proc > 0:
                 emit(9, d0, d0 + s.proc, station=c, cslot=cs, w=w)
             elif stype == "loadlock" and llp > 0:
+                # type-10 抽充气：按 ll_type 记压力态转移（entry 抽气 ATM→VAC、exit 充气 VAC→ATM），
+                # 与下方空抽/空充口径统一，使同一 LL 的 type-10 序列成 ATM/VAC 干净交替（可校验）。
+                last, cur = ("ATM", "VAC") if s.ll_type == "entry" else ("VAC", "ATM")
                 emit(10, d0, d0 + llp, station=c, cslot=cs, w=w,
-                     LastState=s.in_robot, CurState=s.out_robot)
+                     LastState=last, CurState=cur)
                 # 收集 LL 占用窗口（含门），供 bug2 的空抽/空充补铺
                 occ_s = av - (tm.place_t(s.in_robot, c) + tm.place_pre(s.in_robot, c) if s.in_robot else 0.0)
                 occ_e = rv + (tm.pick_t(s.out_robot, c) + tm.pick_post(s.out_robot, c) if s.out_robot else 0.0)
@@ -669,10 +726,13 @@ def export_movelist(task: Problem, res: SolveResult) -> List[dict]:
         vent = float((ch.vent_time if ch else 0.0) or 0.0)
         pump = float((ch.pump_time if ch else 0.0) or 0.0)
         for (s0, e0, t0), (s1, e1, t1) in zip(occs, occs[1:]):
-            setup, cur = (vent, "ATM") if (t0 == "entry" and t1 == "entry") else \
-                         (pump, "VAC") if (t0 == "exit" and t1 == "exit") else (0.0, "")
+            # entry→entry 须空充(VAC→ATM 回大气才能再接收大气片)，exit→exit 须空抽(ATM→VAC)。
+            # LastState=前态、CurState=目标态：与每片 type-10 串成 ATM/VAC 交替链；无片用空 MatIDList 标记。
+            setup, last, cur = (vent, "VAC", "ATM") if (t0 == "entry" and t1 == "entry") else \
+                               (pump, "ATM", "VAC") if (t0 == "exit" and t1 == "exit") else (0.0, "", "")
             if setup > 0:
-                emit(10, s1 - setup, s1, station=c, LastState="empty", CurState=cur)
+                emit(10, s1 - setup, s1, station=c, MatIDList=[],
+                     LastState=last, CurState=cur)
 
     # 清洁占腔（决策4）：type-9 无片，按解出的相邻片占用窗口定位
     def _occ_s(wid: int, j: int) -> float:
@@ -769,5 +829,34 @@ def check_solution(task: Problem, res: SolveResult) -> List[str]:
                 continue  # swap：进腔 hop 与出腔 hop 合成一趟，VTR 占用重叠合法
             if ivs[i][1] > ivs[i + 1][0] + eps:
                 issues.append(f"R 重叠 手{rob}: w{ivs[i][2]}[..{ivs[i][1]:.1f}] 与 w{ivs[i+1][2]}[{ivs[i+1][0]:.1f}..]")
+
+    # (LL) loadlock 抽充气状态机：按腔重建时序占用，校验连续用例间是否预留了空抽/空充(preprepare)
+    # 间隙——补 MILP/movelist 未独立复核的 LL 状态。初始态按首用所需（preprepare：开机把 LL 预置到
+    # 首用压力态，与 MILP 只建「连续同型」setup、不建初始 setup 的口径一致），故首段不计 setup。
+    ll_occ: Dict[str, List[Tuple[float, float, str]]] = {}
+    for wid, rows in sched.items():
+        w = wafers[wid]
+        for j, (stype, c, av, rv) in enumerate(rows):
+            if stype != "loadlock":
+                continue
+            s = w.stages[j]
+            st = av - (tm.place_t(s.in_robot, c) + tm.place_pre(s.in_robot, c) if s.in_robot else 0.0)
+            en = rv + (tm.pick_t(s.out_robot, c) + tm.pick_post(s.out_robot, c) if s.out_robot else 0.0)
+            ll_occ.setdefault(c, []).append((st, en, s.ll_type))
+    for c, occs in ll_occ.items():
+        occs.sort()
+        ch = task.chambers.get(c)
+        pump = float((ch.pump_time if ch else 0.0) or 0.0)
+        vent = float((ch.vent_time if ch else 0.0) or 0.0)
+        state, prev_en = None, None        # 初始态按首用所需（preprepare 免费），首段不计 setup
+        for st, en, lt in occs:
+            need = "ATM" if lt == "entry" else "VAC"   # entry 收大气片须 ATM；exit 收真空片须 VAC
+            if state is not None and state != need:    # 须空 setup 翻态：ATM→VAC 空抽 / VAC→ATM 空充
+                setup = pump if need == "VAC" else vent
+                if (st - prev_en) + eps < setup:
+                    issues.append(f"LL preprepare 间隙不足 腔{c}: {st:.1f} 前需空"
+                                  f"{'抽' if need == 'VAC' else '充'} {setup:.1f}，仅 {st - prev_en:.1f}")
+            state = "VAC" if lt == "entry" else "ATM"  # entry 抽到真空、exit 充到大气
+            prev_en = en
 
     return issues

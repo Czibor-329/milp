@@ -52,15 +52,17 @@ from src.milp import export_movelist
 from src.policy import load_policy
 
 BASE_TOPO = "s1-1c1p-preclean"
-SUBSETS = ["1stage", "1stage_e", "2stage", "3stage"]
+SUBSETS = ["1stage", "1stage_e", "2stage", "3stage", "2job"]
 _DATASET_TEST = Path(__file__).resolve().parents[1] / "dataset" / "test"
 _BC_OUT = OUTPUT_DIR / "bc"
 
 
 def _valid_label(result: dict) -> bool:
-    """实例是否带可用的 MILP 最优标签（status==2 且 makespan 非 nan）。"""
+    """实例是否带可用的 MILP 标签：有可行解（makespan 非 nan 且 schedule 非空）即可。
+    放开 PM 选腔后多 PM 例可能时限内未证明最优(status≠2)，但 incumbent ≤ timing UB，仍是更紧的有效参考。"""
     mk = result.get("makespan")
-    return result.get("status") == 2 and isinstance(mk, (int, float)) and not math.isnan(mk)
+    return (isinstance(mk, (int, float)) and not math.isnan(mk)
+            and bool(result.get("schedule")))
 
 
 def _instances(sub: str, limit: int = 0):

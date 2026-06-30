@@ -75,7 +75,9 @@ def main() -> None:
             continue
         res = d.get("result", {})
         mk = res.get("makespan")
-        if res.get("status") != 2 or mk is None or (isinstance(mk, float) and mk != mk):
+        # 接受可行 incumbent（makespan 有限 + schedule 非空），不再仅限证明最优（status==2）：放开 PM
+        # 选腔后多 PM 例时限内未必证明最优，但 incumbent 是更紧的有效 teacher 序（schedule 存在即可复现）。
+        if not (isinstance(mk, (int, float)) and mk == mk) or not res.get("schedule"):
             continue
         fam = _family(d.get("spec", {}))
         fam_tot[fam] += 1

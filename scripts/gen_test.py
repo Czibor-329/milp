@@ -24,10 +24,12 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.marathon_gen import (
-    JobSpec, build_update_params, job_process_recipes, expand_topo_pms, PM_POOL_6,
+    JobSpec, build_update_params, build_concurrent_update, job_process_recipes,
+    expand_topo_pms, PM_POOL_6, LP_POOL,
 )
 from src.parse import parse_task, load_alg_entries
 from src.milp import solve_milp, check_solution, export_movelist
+from src.timing import time_from_ir
 from src.paths import input_data_path, TEST_ROOT
 
 BASE_TOPO = "s1-1c1p-preclean"
@@ -44,14 +46,21 @@ def load_cases(path):
     if not cases:
         raise ValueError(f"案例清单为空: {path}")
     for idx, case in enumerate(cases):
-        chambers, proc_times = case.get("chambers"), case.get("proc_times")
-        if not chambers or not proc_times:
-            raise ValueError(f"case {idx}: 必须同时含 chambers 与 proc_times")
-        if len(chambers) != len(proc_times):
-            raise ValueError(f"case {idx}: len(chambers)={len(chambers)} != "
-                             f"len(proc_times)={len(proc_times)}")
-        if sum(chambers) > len(PM_POOL_6):
-            raise ValueError(f"case {idx}: sum(chambers)={sum(chambers)} > {len(PM_POOL_6)}")
+        # 多 job 案例：jobs=[{chambers, proc_times, [n_wafer]}…]，加工腔跨 job 不相交 → sum 全部 ≤6。
+        sub = case["jobs"] if "jobs" in case else [case]
+        if "jobs" in case and len(case["jobs"]) < 2:
+            raise ValueError(f"case {idx}: jobs 至少 2 个")
+        total_ch = 0
+        for jdx, jc in enumerate(sub):
+            chambers, proc_times = jc.get("chambers"), jc.get("proc_times")
+            if not chambers or not proc_times:
+                raise ValueError(f"case {idx}.job{jdx}: 必须同时含 chambers 与 proc_times")
+            if len(chambers) != len(proc_times):
+                raise ValueError(f"case {idx}.job{jdx}: len(chambers)={len(chambers)} != "
+                                 f"len(proc_times)={len(proc_times)}")
+            total_ch += sum(chambers)
+        if total_ch > len(PM_POOL_6):
+            raise ValueError(f"case {idx}: 各 job 加工腔总数 {total_ch} > {len(PM_POOL_6)}（须不相交）")
     return defaults, cases
 
 
@@ -69,6 +78,26 @@ def build_instance(chambers, proc_times, n_wafer, residency, lp, seed):
     up, _ = build_update_params(job, 1, 1, lp, 0, 0.0,
                                 process_recipes=job_process_recipes(job, 1))
     return job, up
+
+
+def build_multi_instance(jobs_cfg, n_wafer_default, residency, seed):
+    """多 job（不同 recipe、加工腔不相交）：PM_POOL_6 跨 job 连续切片不重用，仅共享 VTR + loadlock。
+    复用 build_concurrent_update（合并 routes/pjobs/cjobs/recipes、各 job 轮分 LP、同优并发）。确定性。"""
+    rng = random.Random(seed)
+    jobs, off = [], 0
+    for k, jc in enumerate(jobs_cfg):
+        chambers = list(jc["chambers"])
+        stages = []
+        for c in chambers:
+            stages.append(list(PM_POOL_6[off:off + c])); off += c   # 跨 job 累进 off ⇒ 加工腔不相交
+        job = JobSpec(k, rng, pm_pool=PM_POOL_6, stage_range=(len(chambers), len(chambers)),
+                      clean=False, residency=int(jc.get("residency", residency)))
+        job.stages = stages
+        job.proc_times = [int(p) for p in jc["proc_times"]]
+        job.n_wafer = int(jc.get("n_wafer", n_wafer_default))
+        jobs.append(job)
+    up = build_concurrent_update(jobs, rng, lps=LP_POOL)
+    return jobs, up
 
 
 def main():
@@ -91,51 +120,75 @@ def main():
     n_nonopt = 0
     t_start = time.time()
     for i, case in enumerate(cases):
-        chambers = list(case["chambers"])
-        proc_times = [int(p) for p in case["proc_times"]]
-        n_wafer = int(case.get("n_wafer", defaults["n_wafer"]))
         residency = int(case.get("residency", defaults["residency"]))
-        lp = case.get("lp", defaults["lp"])
-        job, up = build_instance(chambers, proc_times, n_wafer, residency, lp, seed=i)
+        if "jobs" in case:                            # 多 job：不同 recipe、加工腔不相交，仅共享 VTR+loadlock
+            jobs, up = build_multi_instance(case["jobs"], defaults["n_wafer"], residency, seed=i)
+            spec = {"n_jobs": len(jobs), "residency": residency,
+                    "jobs": [{"n_chamber": list(jc["chambers"]),
+                              "proc_times": [int(p) for p in jc["proc_times"]],
+                              "n_wafer": jb.n_wafer, "stages": jb.stages}
+                             for jc, jb in zip(case["jobs"], jobs)]}
+            man_base = {"id": i, "split": "test", "file": f"inst_{i:04d}.json", "n_jobs": len(jobs),
+                        "configs": [list(jc["chambers"]) for jc in case["jobs"]]}
+            head = (f"[{i+1:2d}/{total}] jobs×{len(jobs)} "
+                    f"{' | '.join('·'.join(map(str, jc['chambers'])) for jc in case['jobs']):16s} 求解中…")
+        else:                                         # 单 job（原结构网格）
+            chambers = list(case["chambers"]); proc_times = [int(p) for p in case["proc_times"]]
+            n_wafer = int(case.get("n_wafer", defaults["n_wafer"]))
+            lp = case.get("lp", defaults["lp"])
+            job, up = build_instance(chambers, proc_times, n_wafer, residency, lp, seed=i)
+            spec = {"lp": lp, "n_wafer": n_wafer, "n_stage": len(chambers),
+                    "n_chamber": chambers, "stages": job.stages, "proc_times": job.proc_times,
+                    "residency": residency}
+            man_base = {"id": i, "split": "test", "file": f"inst_{i:04d}.json", "n_wafer": n_wafer,
+                        "n_stage": len(chambers),
+                        "n_chamber": chambers[0] if len(chambers) == 1 else chambers,
+                        "config": chambers, "proc": proc_times[0], "proc_times": proc_times}
+            head = (f"[{i+1:2d}/{total}] cfg={'·'.join(map(str,chambers)):7s} "
+                    f"proc={'·'.join(map(str,proc_times)):11s} nw={n_wafer:2d} 求解中…")
         ir = parse_task(alg_init, up)                 # parse_task 内部深拷贝 up、只读 topo，可复用 alg_init
         # 先打 case 头（求解可能耗到 --tl 秒）：立刻 flush ⇒ 控制台实时显示「当前在解哪例」
-        print(f"[{i+1:2d}/{total}] cfg={'·'.join(map(str,chambers)):7s} "
-              f"proc={'·'.join(map(str,proc_times)):11s} nw={n_wafer:2d} 求解中…",
-              end="\n" if args.verbose else "", flush=True)
+        print(head, end="\n" if args.verbose else "", flush=True)
+        # 先用 timing 层(ms 级)求一条可行排程：既作 UB（收紧 big-M），又作 MIPStart 暖启动——保证多 PM
+        # 难例一定有可行 incumbent（不 nan/丢标）且 incumbent ≤ timing（gap 不为负），并加速收敛。
+        try:
+            tub = time_from_ir(ir, verbose=False, cross_check=False)
+            warm = tub if getattr(tub, "feasible", False) and tub.makespan == tub.makespan else None
+            ub = tub.makespan if warm is not None else None
+        except Exception:  # noqa: BLE001 - timing 失败仅退回 loose-M/无暖启动，不阻断
+            warm, ub = None, None
         t0 = time.time()
-        res = solve_milp(ir, time_limit=args.tl, ub=None, enable_swap=False,   # 无 swap：解落在 timing 可表示空间
-                         verbose=args.verbose)
+        res = solve_milp(ir, time_limit=args.tl, ub=ub, enable_swap=False,   # 无 swap：解落在 timing 可表示空间
+                         warm=warm, verbose=args.verbose)
         wall = time.time() - t0
-        optimal = (res.makespan == res.makespan) and res.gap <= 1e-6
-        issues = check_solution(ir, res) if optimal else ["not optimal"]
-        ml = export_movelist(ir, res) if optimal else []
+        # 放开 PM 选腔后多 PM 例可能时限内未证明最优；只要有可行 incumbent（schedule 非空）即作标签
+        # （incumbent 已 ≤ timing UB，比 round-robin 旧标更紧），optimal 仅作证明状态标记。
+        feasible = (res.makespan == res.makespan) and bool(res.schedule)
+        optimal = feasible and res.gap <= 1e-6
+        issues = check_solution(ir, res) if feasible else ["no feasible solution"]
+        ml = export_movelist(ir, res) if feasible else []
         replay_ok = None                              # 核心仓库无执行器/Petri 回放栈，不做 replay 校验
         n_nonopt += int(not optimal)
 
         rec = {
             "id": i, "split": "test",
-            "spec": {"lp": lp, "n_wafer": n_wafer, "n_stage": len(chambers),
-                     "n_chamber": chambers, "stages": job.stages, "proc_times": job.proc_times,
-                     "residency": residency},
+            "spec": spec,
             "update_params": up,
             "result": {"status": res.status, "makespan": res.makespan, "gap": res.gap,
                        "optimal": optimal, "self_check_ok": not issues, "issues": issues[:5],
                        "replay_ok": replay_ok, "wall": round(wall, 2),
-                       "releases": res.releases if optimal else [],
-                       "schedule": {str(k): v for k, v in res.schedule.items()} if optimal else {}},
+                       "releases": res.releases if feasible else [],
+                       "schedule": {str(k): v for k, v in res.schedule.items()} if feasible else {}},
             "MoveList": ml,
         }
         fn = out / f"inst_{i:04d}.json"
         with open(fn, "w", encoding="utf-8") as f:
             json.dump(rec, f, ensure_ascii=False)
-        # n_chamber: 单工序存 int（eval_grid 按 (chamber,proc) 铺热力图）；多工序存 list
-        # proc: 单工序便捷标量(eval_grid 沿用)；proc_times: 逐工序列表(下游真相源)
-        manifest.append({"id": i, "split": "test", "file": fn.name, "n_wafer": n_wafer,
-                         "n_stage": len(chambers),
-                         "n_chamber": chambers[0] if len(chambers) == 1 else chambers,
-                         "config": chambers, "proc": proc_times[0], "proc_times": proc_times,
-                         "makespan": res.makespan, "gap": res.gap,
+        # 单 job 的 n_chamber/proc 便捷字段在 man_base 里（eval_grid 按 (chamber,proc) 铺热力图）；
+        # 多 job 用 n_jobs/configs。此处统一补求解结果字段。
+        man_base.update({"makespan": res.makespan, "gap": res.gap,
                          "optimal": optimal, "replay_ok": replay_ok})
+        manifest.append(man_base)
         flag = "✓" if optimal else ("⚠非最优" if res.status != 2 else "⚠有 gap")
         # verbose 下 case 头已换行（Gurobi 日志占据其后），故再补完整一行；否则把结果接到「求解中…」同一行
         tail = f"MILP={res.makespan:8.1f} gap={res.gap*100:4.1f}% {flag} {wall:.1f}s"
