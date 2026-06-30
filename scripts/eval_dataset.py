@@ -52,7 +52,7 @@ from src.milp import export_movelist
 from src.policy import load_policy
 
 BASE_TOPO = "s1-1c1p-preclean"
-SUBSETS = ["1stage", "1stage_e", "2stage", "3stage", "2job"]
+SUBSETS = ["1stage", "1stage_e", "2stage", "3stage", "2job", "2job1s"]
 _DATASET_TEST = Path(__file__).resolve().parents[1] / "dataset" / "test"
 _BC_OUT = OUTPUT_DIR / "bc"
 

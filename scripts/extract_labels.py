@@ -87,7 +87,9 @@ def main() -> None:
             tm = Durations(ir)
             # 腔分配寻优后的基底（与 time_from_policy 推理同基底）：teacher-force MILP 序须在
             # 与推理一致的腔资源上抽，否则标签困在 round-robin 坏默认 → 学不到有用排序（BC==固定）。
-            _, wf, _ = optimize_chambers(ir, tm, ir.wafers, budget=1.0, seed=0)
+            # 多 route(双 job) 自动开 SA-ILS 精修腔分配，与推理基底一致（见 timing._auto_refine_budget）。
+            rb = 6.0 if len({w.route_name for w in ir.wafers}) > 1 else 0.0
+            _, wf, _ = optimize_chambers(ir, tm, ir.wafers, budget=1.0, seed=0, refine_budget=rb)
             if wf is None:
                 wf = ir.wafers
             records, completed = extract_instance(ir, tm, wf, res["schedule"])

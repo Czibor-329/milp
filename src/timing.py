@@ -702,13 +702,20 @@ def _joint_chamber_seeds(wafers) -> List[Dict[Tuple[int, int], str]]:
 
 
 def optimize_chambers(ir: Problem, tm: Optional[Durations] = None, wafers=None, *,
-                      budget: float = 0.6, seed: int = 0
+                      budget: float = 0.6, seed: int = 0, refine_budget: float = 0.0
                       ) -> Tuple[Optional[Dict[Tuple[int, int], str]], List, Optional[SolveResult]]:
     """寻优【全部多候选腔】(process + loadlock) 分配——对齐 MILP 腔分配决策(Z)。返回
     (best_assign, best_wafers, best_res)；全不可行返回 (None, wafers, None)。
 
-    两段式（保证不劣于 optimize_loadlock）：① loadlock 专项寻优定 incumbent（已验证命中多数 MILP）；
-    ② 叠加「限 process 腔用量」种子 + 全事件贪心下降（只接受改进）。best_res 走默认 backward 定序。"""
+    三段式（保证不劣于 optimize_loadlock）：① loadlock 专项寻优定 incumbent（已验证命中多数 MILP）；
+    ② 叠加「限 process 腔用量」种子 + 全事件贪心下降（只接受改进）；③ refine_budget>0 时再做
+    SA+重启 ILS 逃离贪心局部最优。best_res 走默认 backward 定序。
+
+    refine_budget（秒）：贪心后的 SA-ILS 预算。**多 route 共享 loadlock（双 job）例的关键杠杆**——
+    贪心常困在「entry/exit 同腔 round-robin」局部最优，使某 loadlock 过载成饱和瓶颈（此时定序无力，
+    见 _decode_orders 注），ILS 用单/双事件翻腔 + 回 best/随机重启逃出，找到均衡两 route 负载的不规则
+    分配（逼近 MILP）。单调（best 只接受改进 ⇒ ≤ 贪心结果，零回归）。缺省 0 = 不做（单 job 用，已近最优）。
+    每次评估 = 默认序一次 BF（makespan 对固定腔分配近似 order-invariant，故评估便宜、可上千次）。"""
     if tm is None:
         tm = Durations(ir)
     if wafers is None:
@@ -748,7 +755,69 @@ def optimize_chambers(ir: Problem, tm: Optional[Durations] = None, wafers=None, 
                     improved = True
             if time.perf_counter() - t0 >= budget:
                 break
+    # ④ SA + 重启 ILS（逃离贪心局部最优；多 route 共享 loadlock 例的关键）。monotone：best 只接受改进。
+    if ev and refine_budget > 0 and best_res is not None:
+        best_a, best_wf, best_res, best_mk = _chamber_ils(
+            ir, tm, wafers, ev, best_a, best_wf, best_res, best_mk,
+            budget=refine_budget, seed=seed + 7)
     return best_a, best_wf, best_res
+
+
+def _auto_refine_budget(wafers, override: Optional[float]) -> float:
+    """多 route（双 job 共享 loadlock）时默认给腔分配 ILS 6s 预算；单 route 给 0（已近最优、不浪费）。
+    override 非 None 则照用（调用方显式控制）。"""
+    if override is not None:
+        return override
+    return 6.0 if len({w.route_name for w in wafers}) > 1 else 0.0
+
+
+def _chamber_ils(ir: Problem, tm: Durations, wafers, ev, best_a, best_wf, best_res,
+                 best_mk: float, *, budget: float, seed: int):
+    """从贪心 incumbent 起，对腔分配做 SA + 重启 ILS。每个分配用默认序 BF 快评（带 makespan 缓存）。
+    单调：best 只接受改进 ⇒ 返回 ≤ 入参 best_mk。返回 (best_a, best_wf, best_res, best_mk)。"""
+    keys = [(wid, j) for wid, j, _ in ev]
+    cmap = {(wid, j): cs for wid, j, cs in ev}
+    cache: Dict[tuple, float] = {tuple(sorted(best_a.items())): best_mk}
+
+    def mk_of(assign) -> float:
+        key = tuple(sorted(assign.items()))
+        if key in cache:
+            return cache[key]
+        _, r = _eval_chamber_assign(ir, tm, wafers, assign)
+        v = r.makespan if r is not None else float("inf")
+        cache[key] = v
+        return v
+
+    rng = random.Random(seed)
+    cur, cur_mk = dict(best_a), best_mk
+    T0 = max(best_mk * 0.04, 1.0)
+    t0 = time.perf_counter()
+    n = 0
+    while time.perf_counter() - t0 < budget:
+        n += 1
+        frac = (time.perf_counter() - t0) / budget
+        T = max(T0 * (1.0 - frac), 1e-6)
+        trial = dict(cur)
+        for _ in range(rng.choice([1, 1, 2])):          # 翻 1~2 个事件
+            k = rng.choice(keys)
+            trial[k] = rng.choice(cmap[k])
+        mk = mk_of(trial)
+        if mk < cur_mk - EPS or (mk < float("inf")
+                                 and rng.random() < math.exp(-(mk - cur_mk) / T)):
+            cur, cur_mk = trial, mk
+            if mk < best_mk - EPS:
+                best_a, best_mk = dict(trial), mk
+        if n % 150 == 0:                                 # 重启：半数回 best 深挖、半数随机跳基
+            if rng.random() < 0.5:
+                cur, cur_mk = dict(best_a), best_mk
+            else:
+                cur = {(wid, j): rng.choice(cmap[(wid, j)]) for wid, j in keys}
+                cur_mk = mk_of(cur)
+    # 用最终 best_a 完整评估一次拿 wf/res（带 schedule）
+    wf, res = _eval_chamber_assign(ir, tm, wafers, best_a)
+    if res is not None and res.makespan <= best_mk + EPS:
+        best_wf, best_res, best_mk = wf, res, res.makespan
+    return best_a, best_wf, best_res, best_mk
 
 
 # --------------------------------------------------------------------------- #
@@ -999,7 +1068,8 @@ def optimize_orders(ir: Problem, wafers=None, *, budget: float = 2.0,
 
     # 腔分配寻优（loadlock + 并行加工腔）→ 基底；顺序 SA 在该基底上跑（仍可经 _neighbor 微调 LL）。
     ll_budget = min(budget * 0.5, 1.2) if iters is None else 0.8
-    _, wf, ll_res = optimize_chambers(ir, tm, wafers, budget=ll_budget, seed=seed)
+    _, wf, ll_res = optimize_chambers(ir, tm, wafers, budget=ll_budget, seed=seed,
+                                      refine_budget=_auto_refine_budget(wafers, None))
     if ll_res is not None:
         wafers = wf
 
@@ -1072,18 +1142,23 @@ def _fixed_default(ir: Problem, tm: Durations, wafers, verbose: bool) -> SolveRe
 
 def time_from_ir(ir: Problem, *, verbose: bool = True, cross_check: bool = True,
                  optimize_ll: bool = True, ll_budget: float = 1.0,
-                 seed: int = 0) -> SolveResult:
+                 seed: int = 0, refine_budget: Optional[float] = None) -> SolveResult:
     """_expand → 腔分配寻优 → 默认定序 → solve_timing；可选 milp.check_solution 复核。
 
     optimize_ll=True（默认）：先 portfolio+贪心定【腔分配】（loadlock + 并行加工腔，最大杠杆，
     逼近 MILP 的 Z 决策），再在该基底上走默认 backward 定序。无可行分配时退回原始默认。
     optimize_ll=False ⇒ 原行为（纯 round-robin 默认腔，作快速/对照基线）。
 
+    refine_budget：腔分配 SA-ILS 预算（秒）。缺省 None ⇒ 多 route(双 job)自动给 6s、单 route 给 0
+    （见 _auto_refine_budget / optimize_chambers ④）。单调，零回归。
+
     快序（吞吐优先）因驻留(qtime)排不出时回退驻留预留定序（reserve=True）。"""
     tm = Durations(ir)
     wafers = ir.wafers
     if optimize_ll:
-        _, wf, res = optimize_chambers(ir, tm, wafers, budget=ll_budget, seed=seed)
+        rb = _auto_refine_budget(wafers, refine_budget)
+        _, wf, res = optimize_chambers(ir, tm, wafers, budget=ll_budget, seed=seed,
+                                       refine_budget=rb)
         if res is None:                          # 无可行腔分配 → 原始默认（含 reserve 回退）
             res = _fixed_default(ir, tm, wafers, verbose)
         else:
@@ -1170,8 +1245,9 @@ def time_from_policy(ir: Problem, policy, *, n_samples: int = 32, temp: float = 
     tm = Durations(ir)
     rng = np.random.default_rng(seed)
 
-    # 腔分配基底寻优（与 time_from_ir 一致）；无可行则退原始 round-robin 默认。
-    _, wafers, base = optimize_chambers(ir, tm, ir.wafers, budget=ll_budget, seed=seed)
+    # 腔分配基底寻优（与 time_from_ir 一致，多 route 自动开 ILS）；无可行则退原始 round-robin 默认。
+    _, wafers, base = optimize_chambers(ir, tm, ir.wafers, budget=ll_budget, seed=seed,
+                                        refine_budget=_auto_refine_budget(ir.wafers, None))
     if base is None:
         base = _fixed_default(ir, tm, ir.wafers, verbose=False)
         wafers = ir.wafers
