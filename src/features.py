@@ -7,6 +7,10 @@
 
 口径与 timing.py 解码完全一致：候选 = 去向资源未占/未预留且 j==0 满足 FIFO（由解码器保证）；
 本模块只读状态，不改任何东西。
+
+c12~c15 为 recipe/route 量纲特征（皆 ÷ 实例尺度，跨实例规模无关）：多 job 时同一步的两条
+recipe 路径候选在原 18 维下特征撞车（实测 16.6% 步，全 cross-route）⇒ BC 必给同分、复现不了
+MILP 的跨 job 服务序。加这 4 维把撞车降到 2.5%（残留=对称同构 route，本应同分）。
 """
 
 from __future__ import annotations
@@ -17,7 +21,7 @@ import numpy as np
 
 EPS = 1e-9
 GLOBAL_DIM = 6
-CAND_DIM = 12
+CAND_DIM = 16
 FEATURE_DIM = GLOBAL_DIM + CAND_DIM     # 每候选最终特征维度（全局拼到候选上）
 
 
@@ -37,6 +41,13 @@ def step_features(state, cands) -> np.ndarray:
     rfs = [robot_free.get(c.rob, 0.0) for c in cands]
     min_rf, max_rf = min(rfs), max(rfs)
     span_rf = (max_rf - min_rf) or 1.0
+
+    # 实例级尺度（recipe 特征用，尺度无关）：最大单步 proc、各 route 总工作量
+    max_proc = max((s.proc for w in wmap.values() for s in w.stages if s.proc > 0), default=1.0) or 1.0
+    route_work: dict = {}
+    for w in wmap.values():
+        route_work.setdefault(w.route_name, sum(s.proc for s in w.stages))
+    max_work = max(route_work.values(), default=1.0) or 1.0
 
     n_place_proc = 0
     n_pick_proc = 0
@@ -81,6 +92,10 @@ def step_features(state, cands) -> np.ndarray:
             has_resid,                                         # c9 当前在驻留腔
             free_sib,                                          # c10 并行腔空闲比例
             (robot_free.get(c.rob, 0.0) - min_rf) / span_rf,   # c11 该手相对空闲
+            sj.proc / max_proc,                                # c12 当前 stage proc（recipe 量纲）
+            sj1.proc / max_proc,                               # c13 下一 stage proc（去向负荷）
+            sum(s.proc for s in w.stages[c.j:]) / max_work,    # c14 剩余工作量占比（critical ratio）
+            route_work[w.route_name] / max_work,               # c15 该 route 总工作量（路径身份）
         ]
         rows[i, GLOBAL_DIM:] = f
 

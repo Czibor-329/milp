@@ -36,7 +36,8 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
 # —— 按你的工程调整这一行 —— #
-from src.milp import SolveResult, check_solution, _ll_proc  # noqa: F401
+from src.milp import SolveResult, _ll_proc
+from src.export import check_solution
 from src.model import Durations, Problem
 
 
@@ -160,15 +161,27 @@ def _gap(ir: Problem, tm: Durations, rob: str, wa, ja: int, wb, jb: int) -> floa
 # 资源粒度：每个 (腔,槽) 视作容量 1 的占用单元（与 _expand 的 round-robin 定槽、与
 # milp.py 的腔互斥口径一致）；source/sink 与 loadport/buffer/dummyport 不占资源。
 # --------------------------------------------------------------------------- #
+def _skip_chambers(ir: Problem) -> set:
+    """跳过类（loadport/buffer/dummyport）或不存在的腔名集合，按 ir 缓存一次（热点 _resource 每解码
+    被调数百万次，原先每次 ir.chambers.get + str(type).lower() 是大头）。口径同 SKIP_TYPES 判定。"""
+    s = getattr(ir, "_skip_chambers_cache", None)
+    if s is None:
+        s = {name for name, ch in ir.chambers.items()
+             if str(ch.type).lower() in SKIP_TYPES}
+        ir._skip_chambers_cache = s                # type: ignore[attr-defined]
+    return s
+
+
 def _resource(ir: Problem, w, j: int) -> Optional[Tuple[str, int]]:
-    """晶圆 w 在 stage j 占用的 (腔,槽)；不计资源（源/汇/跳过类站点）返回 None。"""
+    """晶圆 w 在 stage j 占用的 (腔,槽)；不计资源（源/汇/跳过类站点）返回 None。
+    用预算好的跳过腔集合快速判定（行为与原 ir.chambers.get + type.lower() 完全一致）。"""
     s = w.stages[j]
-    ch = ir.chambers.get(s.chamber)
-    if ch is None or str(ch.type).lower() in SKIP_TYPES:
-        return None
     if s.stage_type in ("source", "sink"):
         return None
-    return (s.chamber, s.slot)
+    c = s.chamber
+    if c not in ir.chambers or c in _skip_chambers(ir):
+        return None
+    return (c, s.slot)
 
 
 @dataclass
@@ -240,12 +253,23 @@ def _blocked(dest, occ: dict, resv: dict, wid: int) -> bool:
     return dest in occ or (dest in resv and resv[dest] != wid)
 
 
+def _build_resmap(ir: Problem, wmap: Dict[int, object]) -> Dict[Tuple[int, int], Optional[Tuple[str, int]]]:
+    """预算每片每 stage 的 (腔,槽) 资源键一次。解码内热点 _drain_completes 被调数万次、每次 O(剩余)
+    遍历，原先每格重算 _resource（数百万次）；预算后改 dict 查表，是解码提速的大头。"""
+    return {(w.wid, j): _resource(ir, w, j)
+            for w in wmap.values() for j in range(len(w.stages))}
+
+
 def _drain_completes(ir: Problem, wmap: Dict[int, object], K: Dict[int, int],
                      pos: Dict[int, int], occ: Dict[Tuple[str, int], int],
-                     resv: Dict[Tuple[str, int], int], reserve: bool = False) -> bool:
+                     resv: Dict[Tuple[str, int], int], reserve: bool = False,
+                     resmap: Optional[Dict[Tuple[int, int], Optional[Tuple[str, int]]]] = None) -> bool:
     """安全谕示：从 (pos, occ, resv) 起，用纯下游清空（每步挑剩余最下游、去向未被占/预留的 hop）
     能否把所有片送完？能 ⇒ 当前状态安全（无死锁）。纯下游清空对单臂流水可证无死锁，故
-    「存在完工序」当且仅当它能跑完。预留只挡新进、不挡在制片出腔，故不致死锁。"""
+    「存在完工序」当且仅当它能跑完。预留只挡新进、不挡在制片出腔，故不致死锁。
+    resmap：预算好的 (wid,j)→资源键表（_decode_orders 传入共享、避免重算）；None 时本地建一次。"""
+    if resmap is None:
+        resmap = _build_resmap(ir, wmap)
     pos = dict(pos)
     occ = dict(occ)
     resv = dict(resv)
@@ -255,7 +279,7 @@ def _drain_completes(ir: Problem, wmap: Dict[int, object], K: Dict[int, int],
         for wid, j in pos.items():
             if j >= K[wid]:
                 continue
-            dest = _resource(ir, wmap[wid], j + 1)
+            dest = resmap[(wid, j + 1)]
             if _blocked(dest, occ, resv, wid):
                 continue
             cand = (-j, wid)
@@ -265,10 +289,10 @@ def _drain_completes(ir: Problem, wmap: Dict[int, object], K: Dict[int, int],
             return False                  # 无可动 hop 却未完工 = 死锁
         wid = pick[1]
         j = pos[wid]
-        src = _resource(ir, wmap[wid], j)
+        src = resmap[(wid, j)]
         if src is not None and occ.get(src) == wid:
             del occ[src]
-        dest = _resource(ir, wmap[wid], j + 1)
+        dest = resmap[(wid, j + 1)]
         if dest is not None and resv.get(dest) == wid:
             del resv[dest]
         if dest is not None:
@@ -305,6 +329,7 @@ def _decode_orders(ir: Problem, tm: Durations, wafers, *, chooser: _Chooser,
     (快~50×，搜索批量评估)，中途卡死抛 _DecodeDeadlock 由调用方判负。"""
     wmap = {w.wid: w for w in wafers}
     K = {w.wid: len(w.stages) - 1 for w in wafers}
+    resmap = _build_resmap(ir, wmap)            # (wid,j)→资源键，预算一次供候选/Banker 复用（热点提速）
     pos = {w.wid: 0 for w in wafers}            # 各片当前所在 stage
     place_t = {w.wid: 0.0 for w in wafers}      # 各片落位到当前 stage 的（近似）时刻
     occ: Dict[Tuple[str, int], int] = {}        # (腔,槽) → 当前占用片
@@ -340,7 +365,7 @@ def _decode_orders(ir: Problem, tm: Durations, wafers, *, chooser: _Chooser,
             j = pos[wid]
             if j >= K[wid]:
                 continue
-            dest = _resource(ir, w, j + 1)
+            dest = resmap[(wid, j + 1)]
             if _blocked(dest, occ, resv if reserve else {}, wid):
                 continue
             if j == 0 and route_wids[w.route_name][next_rel[w.route_name]] != wid:
@@ -368,7 +393,7 @@ def _decode_orders(ir: Problem, tm: Durations, wafers, *, chooser: _Chooser,
                 tpos = dict(pos)
                 tocc = dict(occ)
                 tresv = dict(resv) if reserve else {}
-                src = _resource(ir, wmap[c.wid], c.j)
+                src = resmap[(c.wid, c.j)]
                 if src is not None and tocc.get(src) == c.wid:
                     del tocc[src]
                 if c.dest is not None and tresv.get(c.dest) == c.wid:
@@ -379,7 +404,7 @@ def _decode_orders(ir: Problem, tm: Durations, wafers, *, chooser: _Chooser,
                     for er in _reserve_for(ir, wmap[c.wid], c.j + 1):
                         tresv[er] = c.wid
                 tpos[c.wid] = c.j + 1
-                if _drain_completes(ir, wmap, K, tpos, tocc, tresv, reserve):
+                if _drain_completes(ir, wmap, K, tpos, tocc, tresv, reserve, resmap):
                     chosen = c
                     break
             if chosen is None:             # 理论不达：纯下游候选恒安全
@@ -387,7 +412,7 @@ def _decode_orders(ir: Problem, tm: Durations, wafers, *, chooser: _Chooser,
 
         wid, j, dest, rob, start = chosen
         w = wmap[wid]
-        src = _resource(ir, w, j)
+        src = resmap[(wid, j)]
         if src is not None and occ.get(src) == wid:
             del occ[src]
         if dest is not None and resv.get(dest) == wid:
@@ -593,24 +618,23 @@ def optimize_loadlock(ir: Problem, tm: Optional[Durations] = None, wafers=None, 
     return best_a, best_wf, best_res
 
 
-# —— 全腔分配寻优（process + loadlock）：loadlock 只是腔分配的一类；并行【加工】腔的分配同样是
-# MILP 决策(Z)。loadlock-bound 多 PM 例（#loadlock < #PM）里 MILP 实际只用 ≤2 个加工腔（其余空转），
-# round-robin 却摊到全部 PM，使 wafer→PM 与 wafer→loadlock 周期错位、backward 定序无法细粒度流水。
-# 故在 loadlock 寻优之上，再加「限制 process 腔用量」的种子 + 全事件贪心。贪心从 loadlock-opt incumbent
-# 起、只接受改进 ⇒ **永不劣于 optimize_loadlock**（单调）。
+# —— loadlock 腔分配寻优：loadlock 选腔是 MILP 决策(Z)，加工腔(process) 按 round-robin 固定腔不寻优。
+# 在 loadlock 专项寻优之上叠加联合种子 + 全 loadlock 事件贪心/ILS（均衡 loadlock 负载，双 job 关键杠杆）。
+# 贪心从 loadlock-opt incumbent 起、只接受改进 ⇒ **永不劣于 optimize_loadlock**（单调）。
 def _chamber_assign_events(wafers) -> List[Tuple[int, int, List[str]]]:
-    """全部多候选腔 stage（process + loadlock），按 (wid, j) 顺序：[(wid, j, 候选腔列表)]。"""
+    """多候选 loadlock stage，按 (wid, j) 顺序：[(wid, j, 候选腔列表)]。
+    加工腔(process) 按 round-robin 固定腔，不参与寻优。"""
     out: List[Tuple[int, int, List[str]]] = []
     for w in wafers:
         for j, s in enumerate(w.stages):
-            if len(s.cands) > 1 and s.stage_type in ("process", "loadlock"):
+            if len(s.cands) > 1 and s.stage_type == "loadlock":
                 out.append((w.wid, j, list(s.cands)))
     return out
 
 
 def _apply_chamber_assign(ir: Problem, wafers, assign: Dict[Tuple[int, int], str]) -> List:
-    """克隆 wafers 并套用任意 stage 的选腔（process + loadlock）。loadlock 选腔后按腔重算 proc
-    (pump/vent)，process 选腔不改 proc；最后全局重算 slot。是 _apply_ll_assign 的超集。"""
+    """克隆 wafers 并套用 loadlock 选腔（process 按 round-robin 固定腔，assign 不含其键 ⇒ 不动）。
+    loadlock 选腔后按腔重算 proc (pump/vent)；最后全局重算 slot。"""
     wf = [copy.copy(w) for w in wafers]
     for w in wf:
         w.stages = [copy.copy(s) for s in w.stages]
@@ -629,7 +653,7 @@ def _apply_chamber_assign(ir: Problem, wafers, assign: Dict[Tuple[int, int], str
 def _eval_chamber_assign(ir: Problem, tm: Durations, wafers,
                          assign: Dict[Tuple[int, int], str]) -> Tuple[List, Optional[SolveResult]]:
     """给定全腔分配 → 默认 backward 定序 + solve_timing（驻留不可行回退 reserve）。同 _eval_ll_assign
-    口径，但允许 process 选腔。返回 (有效 wafers, res 或 None)。"""
+    口径（loadlock 选腔；加工腔固定 round-robin）。返回 (有效 wafers, res 或 None)。"""
     wf = _apply_chamber_assign(ir, wafers, assign) if assign else wafers
     try:
         orders = _sequence(ir, tm, wf, reserve=False, banker=True)
@@ -646,22 +670,18 @@ def _eval_chamber_assign(ir: Problem, tm: Durations, wafers,
 
 
 def _joint_chamber_seeds(wafers) -> List[Dict[Tuple[int, int], str]]:
-    """全腔（process + loadlock）联合分配种子，两族并集（各覆盖单一模式拼不出的结构）：
-      族 A：对【所有】腔池统一按 (width, stride, offset) 轮转——entry/exit/相邻片细粒度错腔交错
-            （深 flowline loadlock-bound 例如 3stage[2,2,1] 需要这种全局交错）。
-      族 B：加工腔限 width × loadlock 模式(_ll_seed_assignments，含 parity)的【叉积】——
-            「只用 2 加工腔 + parity loadlock」（如 1stage 3PM 例 MILP 实际只用 2 腔 + parity）。
+    """loadlock 分配种子（加工腔按 round-robin 固定腔，不入种子），两族并集：
+      族 A：对【所有】loadlock 腔池统一按 (width, stride, offset) 轮转——entry/exit/相邻片细粒度
+            错腔交错（深 flowline loadlock-bound 例如 3stage[2,2,1] 需要这种全局交错）。
+      族 B：_ll_seed_assignments（含 parity）的 loadlock 专项模式。
     与 loadlock-opt incumbent 取并集 ⇒ 最坏不劣（见 optimize_chambers）。"""
     all_pools: Dict[Tuple[str, ...], List[Tuple[int, int]]] = {}
-    proc_pools: Dict[Tuple[str, ...], List[Tuple[int, int]]] = {}
     for w in wafers:
         for j, s in enumerate(w.stages):
-            if len(s.cands) > 1 and s.stage_type in ("process", "loadlock"):
+            if len(s.cands) > 1 and s.stage_type == "loadlock":
                 all_pools.setdefault(tuple(s.cands), []).append((w.wid, j))
-                if s.stage_type == "process":
-                    proc_pools.setdefault(tuple(s.cands), []).append((w.wid, j))
     seeds: List[Dict[Tuple[int, int], str]] = []
-    # 族 A：全池统一轮转
+    # 族 A：全 loadlock 池统一轮转
     if all_pools:
         maxw = max(len(p) for p in all_pools)
         for width in sorted({2, 3, maxw}):
@@ -673,23 +693,8 @@ def _joint_chamber_seeds(wafers) -> List[Dict[Tuple[int, int], str]]:
                         for k, (wid, j) in enumerate(evs):
                             a[(wid, j)] = pool[(k * stride + off) % w_eff]
                     seeds.append(a)
-    # 族 B：加工腔限宽 × loadlock 模式 叉积
-    ll_pats = _ll_seed_assignments(wafers)
-    if proc_pools:
-        maxw = max(len(p) for p in proc_pools)
-        for width in sorted({2, maxw}):
-            for stride in (1, 2):
-                pa: Dict[Tuple[int, int], str] = {}
-                for pool, evs in proc_pools.items():
-                    w_eff = max(min(width, len(pool)), 1)
-                    for k, (wid, j) in enumerate(evs):
-                        pa[(wid, j)] = pool[(k * stride) % w_eff]
-                for ll in ll_pats:
-                    m = dict(pa)
-                    m.update(ll)
-                    seeds.append(m)
-    else:
-        seeds += ll_pats
+    # 族 B：loadlock 专项模式（parity 等）
+    seeds += _ll_seed_assignments(wafers)
     # 去重（不同 (width,stride) 常生成同一分配）
     out: List[Dict[Tuple[int, int], str]] = []
     seen: set = set()
@@ -702,20 +707,24 @@ def _joint_chamber_seeds(wafers) -> List[Dict[Tuple[int, int], str]]:
 
 
 def optimize_chambers(ir: Problem, tm: Optional[Durations] = None, wafers=None, *,
-                      budget: float = 0.6, seed: int = 0, refine_budget: float = 0.0
+                      budget: float = 0.6, seed: int = 0, refine_budget: float = 0.0,
+                      time_cap: Optional[float] = None
                       ) -> Tuple[Optional[Dict[Tuple[int, int], str]], List, Optional[SolveResult]]:
-    """寻优【全部多候选腔】(process + loadlock) 分配——对齐 MILP 腔分配决策(Z)。返回
-    (best_assign, best_wafers, best_res)；全不可行返回 (None, wafers, None)。
+    """寻优【loadlock 多候选腔】分配——对齐 MILP 腔分配决策(Z)；加工腔按 round-robin 固定腔不寻优。
+    返回 (best_assign, best_wafers, best_res)；全不可行返回 (None, wafers, None)。
 
     三段式（保证不劣于 optimize_loadlock）：① loadlock 专项寻优定 incumbent（已验证命中多数 MILP）；
-    ② 叠加「限 process 腔用量」种子 + 全事件贪心下降（只接受改进）；③ refine_budget>0 时再做
+    ② 叠加 loadlock 联合种子 + 全 loadlock 事件贪心下降（只接受改进）；③ refine_budget>0 时再做
     SA+重启 ILS 逃离贪心局部最优。best_res 走默认 backward 定序。
 
     refine_budget（秒）：贪心后的 SA-ILS 预算。**多 route 共享 loadlock（双 job）例的关键杠杆**——
     贪心常困在「entry/exit 同腔 round-robin」局部最优，使某 loadlock 过载成饱和瓶颈（此时定序无力，
     见 _decode_orders 注），ILS 用单/双事件翻腔 + 回 best/随机重启逃出，找到均衡两 route 负载的不规则
     分配（逼近 MILP）。单调（best 只接受改进 ⇒ ≤ 贪心结果，零回归）。缺省 0 = 不做（单 job 用，已近最优）。
-    每次评估 = 默认序一次 BF（makespan 对固定腔分配近似 order-invariant，故评估便宜、可上千次）。"""
+    每次评估 = 默认序一次 BF（makespan 对固定腔分配近似 order-invariant，故评估便宜、可上千次）。
+
+    time_cap（秒）：整函数（含最终评估）墙钟硬上限。设了它，ILS 截止在 t0+time_cap−margin、留余量给
+    收尾评估 ⇒ 保证总耗时 ≤ time_cap（满足「不超过 1s」类实时约束）。None=不限（离线高预算模式）。"""
     if tm is None:
         tm = Durations(ir)
     if wafers is None:
@@ -726,14 +735,14 @@ def optimize_chambers(ir: Problem, tm: Optional[Durations] = None, wafers=None, 
     best_a: Dict[Tuple[int, int], str] = dict(ll_assign) if ll_assign else {}
     best_wf, best_res = ll_wf, ll_res
     best_mk = ll_res.makespan if ll_res is not None else float("inf")
-    # ② 全腔联合种子（process+loadlock 限宽/错腔；含 incumbent 搞不定的结构）
+    # ② loadlock 联合种子（限宽/错腔；含 incumbent 搞不定的结构）
     for s in _joint_chamber_seeds(wafers):
         wf, res = _eval_chamber_assign(ir, tm, wafers, s)
         if res is not None and res.makespan < best_mk - EPS:
             best_a, best_wf, best_res, best_mk = s, wf, res, res.makespan
     if best_res is None:
         return None, wafers, None
-    # ③ 全事件贪心下降（process + loadlock），从 incumbent 起、只接受改进 ⇒ ≤ LL-opt
+    # ③ 全 loadlock 事件贪心下降，从 incumbent 起、只接受改进 ⇒ ≤ LL-opt
     ev = _chamber_assign_events(wafers)
     rng = random.Random(seed + 1)
     improved = True
@@ -757,24 +766,32 @@ def optimize_chambers(ir: Problem, tm: Optional[Durations] = None, wafers=None, 
                 break
     # ④ SA + 重启 ILS（逃离贪心局部最优；多 route 共享 loadlock 例的关键）。monotone：best 只接受改进。
     if ev and refine_budget > 0 and best_res is not None:
+        deadline = t0 + budget + refine_budget
+        if time_cap is not None:                 # 留 0.2s 余量给收尾完整评估，保证总 ≤ time_cap
+            deadline = min(deadline, t0 + time_cap - 0.2)
         best_a, best_wf, best_res, best_mk = _chamber_ils(
             ir, tm, wafers, ev, best_a, best_wf, best_res, best_mk,
-            budget=refine_budget, seed=seed + 7)
+            deadline=deadline, seed=seed + 7)
     return best_a, best_wf, best_res
 
 
-def _auto_refine_budget(wafers, override: Optional[float]) -> float:
-    """多 route（双 job 共享 loadlock）时默认给腔分配 ILS 6s 预算；单 route 给 0（已近最优、不浪费）。
-    override 非 None 则照用（调用方显式控制）。"""
-    if override is not None:
-        return override
-    return 6.0 if len({w.route_name for w in wafers}) > 1 else 0.0
+def _chamber_opt_budgets(wafers, ll_budget: float, refine_override: Optional[float]
+                         ) -> Tuple[float, float, Optional[float]]:
+    """给 optimize_chambers 选 (budget, refine_budget, time_cap)。单 route：现状（贪心 ll_budget、无 ILS、
+    无 cap，已近最优）。多 route(双 job 共享 loadlock)：默认 1s 实时档——贪心 0.3s + ILS、总墙钟硬上限 1.0s；
+    refine_override 非 None 时按它作 ILS 预算且**不设 cap**（离线高预算档，gap 可压更低但更慢）。"""
+    multi = len({w.route_name for w in wafers}) > 1
+    if not multi:
+        return ll_budget, 0.0, None
+    if refine_override is not None:
+        return 0.3, refine_override, None
+    return 0.3, 0.55, 1.0
 
 
 def _chamber_ils(ir: Problem, tm: Durations, wafers, ev, best_a, best_wf, best_res,
-                 best_mk: float, *, budget: float, seed: int):
-    """从贪心 incumbent 起，对腔分配做 SA + 重启 ILS。每个分配用默认序 BF 快评（带 makespan 缓存）。
-    单调：best 只接受改进 ⇒ 返回 ≤ 入参 best_mk。返回 (best_a, best_wf, best_res, best_mk)。"""
+                 best_mk: float, *, deadline: float, seed: int):
+    """从贪心 incumbent 起，对腔分配做 SA + 重启 ILS，跑到墙钟 deadline。每个分配用默认序 BF 快评
+    （带 makespan 缓存）。单调：best 只接受改进 ⇒ 返回 ≤ 入参 best_mk。返回 (best_a, best_wf, best_res, best_mk)。"""
     keys = [(wid, j) for wid, j, _ in ev]
     cmap = {(wid, j): cs for wid, j, cs in ev}
     cache: Dict[tuple, float] = {tuple(sorted(best_a.items())): best_mk}
@@ -792,10 +809,11 @@ def _chamber_ils(ir: Problem, tm: Durations, wafers, ev, best_a, best_wf, best_r
     cur, cur_mk = dict(best_a), best_mk
     T0 = max(best_mk * 0.04, 1.0)
     t0 = time.perf_counter()
+    span = max(deadline - t0, 1e-6)
     n = 0
-    while time.perf_counter() - t0 < budget:
+    while time.perf_counter() < deadline:
         n += 1
-        frac = (time.perf_counter() - t0) / budget
+        frac = (time.perf_counter() - t0) / span
         T = max(T0 * (1.0 - frac), 1e-6)
         trial = dict(cur)
         for _ in range(rng.choice([1, 1, 2])):          # 翻 1~2 个事件
@@ -1068,8 +1086,9 @@ def optimize_orders(ir: Problem, wafers=None, *, budget: float = 2.0,
 
     # 腔分配寻优（loadlock + 并行加工腔）→ 基底；顺序 SA 在该基底上跑（仍可经 _neighbor 微调 LL）。
     ll_budget = min(budget * 0.5, 1.2) if iters is None else 0.8
-    _, wf, ll_res = optimize_chambers(ir, tm, wafers, budget=ll_budget, seed=seed,
-                                      refine_budget=_auto_refine_budget(wafers, None))
+    b, rb, cap = _chamber_opt_budgets(wafers, ll_budget, None)
+    _, wf, ll_res = optimize_chambers(ir, tm, wafers, budget=b, seed=seed,
+                                      refine_budget=rb, time_cap=cap)
     if ll_res is not None:
         wafers = wf
 
@@ -1156,9 +1175,9 @@ def time_from_ir(ir: Problem, *, verbose: bool = True, cross_check: bool = True,
     tm = Durations(ir)
     wafers = ir.wafers
     if optimize_ll:
-        rb = _auto_refine_budget(wafers, refine_budget)
-        _, wf, res = optimize_chambers(ir, tm, wafers, budget=ll_budget, seed=seed,
-                                       refine_budget=rb)
+        b, rb, cap = _chamber_opt_budgets(wafers, ll_budget, refine_budget)
+        _, wf, res = optimize_chambers(ir, tm, wafers, budget=b, seed=seed,
+                                       refine_budget=rb, time_cap=cap)
         if res is None:                          # 无可行腔分配 → 原始默认（含 reserve 回退）
             res = _fixed_default(ir, tm, wafers, verbose)
         else:
@@ -1245,9 +1264,10 @@ def time_from_policy(ir: Problem, policy, *, n_samples: int = 32, temp: float = 
     tm = Durations(ir)
     rng = np.random.default_rng(seed)
 
-    # 腔分配基底寻优（与 time_from_ir 一致，多 route 自动开 ILS）；无可行则退原始 round-robin 默认。
-    _, wafers, base = optimize_chambers(ir, tm, ir.wafers, budget=ll_budget, seed=seed,
-                                        refine_budget=_auto_refine_budget(ir.wafers, None))
+    # 腔分配基底寻优（与 time_from_ir 一致，多 route 自动开 ILS、总墙钟 ≤1s）；无可行则退 round-robin。
+    b, rb, cap = _chamber_opt_budgets(ir.wafers, ll_budget, None)
+    _, wafers, base = optimize_chambers(ir, tm, ir.wafers, budget=b, seed=seed,
+                                        refine_budget=rb, time_cap=cap)
     if base is None:
         base = _fixed_default(ir, tm, ir.wafers, verbose=False)
         wafers = ir.wafers

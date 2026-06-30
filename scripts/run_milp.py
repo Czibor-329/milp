@@ -16,18 +16,15 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.parse import parse_task, load_alg_entries
-from src.milp import solve_milp, check_solution, export_movelist
+from src.milp import solve_milp
+from src.export import check_solution, export_movelist
 from src.paths import input_data_path, output_path
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--input", type=str, required=True,
-                    help="src/input_data 下的场景名")
+    ap.add_argument("--input", type=str, required=True,help="src/input_data 下的场景名")
     ap.add_argument("--tl", type=float, default=300.0, help="求解时限(秒)")
-    ap.add_argument("--show", type=int, default=4, help="打印前 N 片排程")
-    ap.add_argument("--export", action="store_true", help="导出 MoveList 到 results/output")
-    ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
     name = args.input[:-5] if args.input.endswith(".json") else args.input
@@ -38,7 +35,7 @@ def main() -> None:
     ub = None
 
     t0 = time.time()
-    res = solve_milp(ir, time_limit=args.tl, verbose=args.verbose, ub=ub)
+    res = solve_milp(ir, time_limit=args.tl, verbose=False, ub=ub)
     wall = time.time() - t0
 
     print("=" * 68)
@@ -54,20 +51,12 @@ def main() -> None:
     else:
         print("  ✓ 自检通过（P/C/R 约束均满足）")
 
-    print(f"  发片顺序(时刻,route,wid): {res.releases[:args.show]}"
-          f"{' ...' if len(res.releases) > args.show else ''}")
-    for wid in list(res.schedule)[:args.show]:
-        print(f"  w{wid}: " + " | ".join(
-            f"{stype[:4]}@{c}[a={av:.1f},r={rv:.1f}]"
-            for stype, c, av, rv in res.schedule[wid]))
-
-    if args.export:
-        ml = export_movelist(ir, res)
-        out = output_path(f"{name}.json")
-        out.parent.mkdir(parents=True, exist_ok=True)
-        with open(out, "w", encoding="utf-8") as f:
-            json.dump({"MoveList": ml}, f, ensure_ascii=False)
-        print(f"  导出 {len(ml)} 条 move → {out}")
+    ml = export_movelist(ir, res)
+    out = output_path(f"{name}.json")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "w", encoding="utf-8") as f:
+        json.dump({"MoveList": ml}, f, ensure_ascii=False)
+    print(f"  导出 {len(ml)} 条 move → {out}")
     print("=" * 68)
 
 

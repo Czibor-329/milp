@@ -48,7 +48,7 @@ from src.parse import load_alg_entries, parse_task
 from src.paths import input_data_path, MODELS_DIR, OUTPUT_DIR
 from src.marathon_gen import expand_topo_pms, PM_POOL_6
 from src.timing import time_from_ir, time_from_policy
-from src.milp import export_movelist
+from src.export import export_movelist
 from src.policy import load_policy
 
 BASE_TOPO = "s1-1c1p-preclean"
