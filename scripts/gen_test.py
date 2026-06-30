@@ -105,25 +105,9 @@ def _feasible(r) -> bool:
     return bool(getattr(r, "schedule", None)) and r.makespan == r.makespan
 
 
-def solve_label(ir, tl, ub, warm, verbose, probe):
-    """探针门控求标签：fix_loadlock 消 loadlock 爆炸——**loadlock 饱和**(短 proc 单 route)时即全局最优、
-    瞬解；但 loadlock 有空闲时强制交替会高估 makespan（+13~61%，前装填被掐死、见 milp_design）。
-    无可靠先验 gate（loadlock 利用率不分离、warm+紧 ub 也救不了饱和 free 的爆炸），故用**短 free 探针**
-    经验判定：探针(≤probe 秒)能压过 fix ⇒ 非饱和 ⇒ 给满预算续解 free 取优；压不过 ⇒ 信 fix（已最优）。
-    饱和例 gen_test 从 ~60s 降到 ~probe 秒且仍精确；非饱和例正确（不回归）。"""
-    fix = solve_milp(ir, time_limit=tl, ub=ub, enable_swap=False, warm=warm,
-                     verbose=verbose, fix_loadlock=True)
-    if not _feasible(fix):                     # fix 无解（warm 缺失等）→ 直接 free 兜底
-        return solve_milp(ir, time_limit=tl, ub=ub, enable_swap=False, warm=warm,
-                          verbose=verbose, fix_loadlock=False)
-    pr = solve_milp(ir, time_limit=min(tl, probe), ub=fix.makespan, enable_swap=False,
-                    warm=fix, verbose=verbose, fix_loadlock=False)
-    if _feasible(pr) and pr.makespan < fix.makespan - 1e-6:   # 非饱和：free 更优 → 满预算续解
-        full = solve_milp(ir, time_limit=tl, ub=pr.makespan, enable_swap=False,
-                          warm=pr, verbose=verbose, fix_loadlock=False)
-        return min((r for r in (fix, pr, full) if _feasible(r)),
-                   key=lambda r: r.makespan, default=fix)
-    return fix                                 # 饱和：fix 即最优、瞬解
+def solve_label(ir, tl, warm, verbose, probe):
+    fix = solve_milp(ir, time_limit=tl, verbose=verbose)
+    return fix
 
 
 def main():
@@ -177,16 +161,9 @@ def main():
         ir = parse_task(alg_init, up)                 # parse_task 内部深拷贝 up、只读 topo，可复用 alg_init
         # 先打 case 头（求解可能耗到 --tl 秒）：立刻 flush ⇒ 控制台实时显示「当前在解哪例」
         print(head, end="\n" if args.verbose else "", flush=True)
-        # 先用 timing 层(ms 级)求一条可行排程：既作 UB（收紧 big-M），又作 MIPStart 暖启动——保证多 PM
-        # 难例一定有可行 incumbent（不 nan/丢标）且 incumbent ≤ timing（gap 不为负），并加速收敛。
-        try:
-            tub = time_from_ir(ir, verbose=False, cross_check=False)
-            warm = tub if getattr(tub, "feasible", False) and tub.makespan == tub.makespan else None
-            ub = tub.makespan if warm is not None else None
-        except Exception:  # noqa: BLE001 - timing 失败仅退回 loose-M/无暖启动，不阻断
-            warm, ub = None, None
+        warm = None
         t0 = time.time()
-        res = solve_label(ir, args.tl, ub, warm, args.verbose, args.probe)
+        res = solve_label(ir, args.tl, warm, args.verbose, args.probe)
         wall = time.time() - t0
         # 放开 PM 选腔后多 PM 例可能时限内未证明最优；只要有可行 incumbent（schedule 非空）即作标签
         # （incumbent 已 ≤ timing UB，比 round-robin 旧标更紧），optimal 仅作证明状态标记。

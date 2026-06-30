@@ -1,5 +1,6 @@
 from src.model import Chamber, Durations, Problem, Stage, Wafer
-from src.milp import SolveResult, _ll_proc, _swap_candidates,_clean_specs
+from src.milp import SolveResult, _ll_proc
+from src.milp_clean import _clean_specs
 from typing import List, Tuple, Dict, Optional
 
 def export_movelist(task: Problem, res: SolveResult) -> List[dict]:
@@ -17,15 +18,6 @@ def export_movelist(task: Problem, res: SolveResult) -> List[dict]:
     # bug1：机器手 pick 前的空载转位（PreTransMove）；bug2：LL 连续两用间的空抽/空充
     robot_hops: Dict[str, List[Tuple[float, str, str]]] = {}   # robot -> [(r, src, prev_dst 由排序得)]
     ll_occs: Dict[str, List[Tuple[float, float, str]]] = {}    # LL -> [(occ_start, occ_end, ll_type)]
-
-    # 解里取 1 的 swap：恢复 _SwapPair 以便把「出腔 pick + 进腔 place」合成一趟换料。
-    # gov_in：w_in 进腔 hop(=j_in-1)；gov_out：w_out 出腔 hop(=j_out)。两 hop 不再各铺一遍。
-    swap_set = set(res.swaps)
-    swaps = {(p.chamber, p.w_out.wid, p.w_in.wid): p
-             for p in _swap_candidates(task, [wafers[k] for k in sorted(wafers)])
-             if (p.chamber, p.w_out.wid, p.w_in.wid) in swap_set}
-    gov_in = {(p.w_in.wid, p.j_in - 1): p for p in swaps.values()}
-    gov_out = {(p.w_out.wid, p.j_out): p for p in swaps.values()}
 
     def emit(mtype: int, start: float, end: float, *, station: str = "",
              robot: str = "", src: str = "", dst: str = "", cslot: int = 1,
@@ -69,39 +61,6 @@ def export_movelist(task: Problem, res: SolveResult) -> List[dict]:
         emit(1, arrive, a_next, robot=R, dst=nxt_c, cslot=ns, w=w)          # place
         emit(7, a_next, a_next + post_n, station=nxt_c, cslot=ns, w=w)      # 目标关门(与下一动作并行)
 
-    def emit_swap(p: "_SwapPair") -> None:
-        """双臂换料一趟：c_prev 取 w_in → 走位到 c → 腔门开一次：pick w_out、place w_in → 关门 →
-        走位到 c_next 放 w_out。出腔 pick 与进腔 place 串行（先取后放），腔门只成对一次。"""
-        R, c = p.robot, p.chamber
-        w_in, w_out, pin = p.w_in, p.w_out, p.j_in - 1
-        rin, rout = res.schedule[w_in.wid], res.schedule[w_out.wid]
-        c_prev, cs_prev = rin[pin][1], w_in.stages[pin].slot + 1       # w_in 来源腔(如 LL)
-        c_next, cs_next = rout[p.j_out + 1][1], w_out.stages[p.j_out + 1].slot + 1  # w_out 去向腔
-        cs_in, cs_out = w_in.stages[p.j_in].slot + 1, w_out.stages[p.j_out].slot + 1
-        r_in = rin[pin][3]                          # VTR 在 c_prev pick w_in
-        a_in = rin[p.j_in][2]                       # w_in place 入 c 完成 = pick+place 末
-        a_out_next = rout[p.j_out + 1][2]           # w_out place 入 c_next 完成
-        pre_p, pt_p, post_p = tm.pick_pre(R, c_prev), tm.pick_t(R, c_prev), tm.pick_post(R, c_prev)
-        pre_c, post_c = tm.pick_pre(R, c), tm.place_post(R, c)
-        pt_out, plt_in = tm.pick_t(R, c), tm.place_t(R, c)
-        pre_n, post_n = tm.place_pre(R, c_next), tm.place_post(R, c_next)
-        mv = tm.move(R)
-        arrive = r_in + pt_p + mv                   # 持 w_in 抵 c（= swap 起点）
-        arrive2 = a_in + mv                          # 持 w_out 抵 c_next
-        emit(6, r_in - pre_p, r_in, station=c_prev, cslot=cs_prev, w=w_in)             # 源开门
-        emit(0, r_in, r_in + pt_p, robot=R, src=c_prev, cslot=cs_prev, w=w_in)         # pick w_in
-        emit(7, r_in + pt_p, r_in + pt_p + post_p, station=c_prev, cslot=cs_prev, w=w_in)  # 源关门
-        emit(5, r_in + pt_p, arrive, robot=R, src=c_prev, dst=c, cslot=cs_prev, w=w_in)    # 走位→c
-        emit(6, arrive - pre_c, arrive, station=c, cslot=cs_out, w=w_out)              # 腔开门(一次)
-        emit(0, arrive, arrive + pt_out, robot=R, src=c, cslot=cs_out, w=w_out)        # 先 pick w_out
-        emit(1, arrive + pt_out, a_in, robot=R, dst=c, cslot=cs_in, w=w_in)            # 后 place w_in
-        emit(7, a_in, a_in + post_c, station=c, cslot=cs_in, w=w_in)                   # 腔关门(一次)
-        emit(5, a_in, arrive2, robot=R, src=c, dst=c_next, cslot=cs_out, w=w_out)      # 走位→c_next
-        emit(6, arrive2 - pre_n, arrive2, station=c_next, cslot=cs_next, w=w_out)      # 目标开门
-        emit(1, arrive2, a_out_next, robot=R, dst=c_next, cslot=cs_next, w=w_out)      # place w_out
-        emit(7, a_out_next, a_out_next + post_n, station=c_next, cslot=cs_next, w=w_out)   # 目标关门
-        robot_hops.setdefault(R, []).append((r_in, c_prev, c_next))   # 一趟净起于 c_prev、终于 c_next
-
     for wid, rows in res.schedule.items():
         w = wafers[wid]
         K = len(rows) - 1
@@ -126,13 +85,7 @@ def export_movelist(task: Problem, res: SolveResult) -> List[dict]:
             if j >= K:
                 continue
             # 出站搬运 c -> 下一腔。门动作与机器手行程并行（见 §6-1）。
-            # swap 治理的两 hop（w_in 进腔 / w_out 出腔）合成一趟，由 emit_swap 在 w_in 进腔 hop 触发一次。
-            if (wid, j) in gov_in:
-                emit_swap(gov_in[(wid, j)])
-            elif (wid, j) in gov_out:
-                pass  # 已并入对应 swap，跳过避免重复铺设
-            else:
-                emit_hop(w, j)
+            emit_hop(w, j)
 
     # bug1：空载转位（PreTransMove）。机器手 pick 前若指向上一目标≠本源，须先转过来。
     # 时长 = move，铺在 pick 前 [r-move, r]（与 MILP 的 (R) 空手 move 间隙一致，必落在空档内）。
@@ -189,24 +142,6 @@ def check_solution(task: Problem, res: SolveResult) -> List[str]:
     sched = res.schedule
     issues: List[str] = []
     eps = 1e-4
-    # swap 对：腔内占用与 VTR 两手活按设计重叠，(C)/(R) 不计为违例；但重叠须恰是合法换料形态，
-    # 故在此正向校验：同一趟 VTR 先 pick(w_out) 后 place(w_in)，进腔 place 紧接 swap=pick+place。
-    swap_pair_set = {frozenset((o, i)) for _, o, i in res.swaps}
-    swap_cham_set = {(frozenset((o, i)), c) for c, o, i in res.swaps}  # 合法重叠仅限被换腔
-    swap_meta = {(p.chamber, p.w_out.wid, p.w_in.wid): p
-                 for p in _swap_candidates(task, [wafers[k] for k in sorted(wafers)])}
-    for c, o, i in res.swaps:
-        p = swap_meta.get((c, o, i))
-        if p is None:
-            issues.append(f"swap 违例 腔{c}: ({o},{i}) 不是合法 swap 候选")
-            continue
-        r_out = sched[o][p.j_out][3]                 # VTR pick w_out 时刻
-        a_in = sched[i][p.j_in][2]                   # w_in place 入腔完成
-        swap_dur = tm.pick_t(p.robot, c) + tm.place_t(p.robot, c)
-        if a_in + eps < r_out:                       # 须先取后放
-            issues.append(f"swap 违例 腔{c}: w{i} place({a_in:.1f}) 早于 w{o} pick({r_out:.1f})")
-        if abs((a_in - r_out) - swap_dur) > 1e-3:    # 一趟换料 = pick+place，时序须吻合
-            issues.append(f"swap 违例 腔{c}: w{o}->w{i} 换料时长 {a_in - r_out:.2f} ≠ pick+place {swap_dur:.2f}")
 
     # (P) place 关门 + 加工 + pick 开门 完成才能取
     for wid, rows in sched.items():
@@ -236,8 +171,6 @@ def check_solution(task: Problem, res: SolveResult) -> List[str]:
     for (c, slot), ivs in intervals.items():
         ivs.sort()
         for i in range(len(ivs) - 1):
-            if (frozenset((ivs[i][2], ivs[i + 1][2])), c) in swap_cham_set:
-                continue  # swap：仅被换腔上 w_in 随 w_out 同窗换入，占用重叠合法
             if ivs[i][1] > ivs[i + 1][0] + eps:
                 issues.append(f"C 重叠 腔{c}#{slot}: w{ivs[i][2]}[..{ivs[i][1]:.1f}] 与 w{ivs[i+1][2]}[{ivs[i+1][0]:.1f}..]")
 
@@ -252,8 +185,6 @@ def check_solution(task: Problem, res: SolveResult) -> List[str]:
     for rob, ivs in rob_iv.items():
         ivs.sort()
         for i in range(len(ivs) - 1):
-            if frozenset((ivs[i][2], ivs[i + 1][2])) in swap_pair_set:
-                continue  # swap：进腔 hop 与出腔 hop 合成一趟，VTR 占用重叠合法
             if ivs[i][1] > ivs[i + 1][0] + eps:
                 issues.append(f"R 重叠 手{rob}: w{ivs[i][2]}[..{ivs[i][1]:.1f}] 与 w{ivs[i+1][2]}[{ivs[i+1][0]:.1f}..]")
 

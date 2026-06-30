@@ -35,7 +35,7 @@ def main() -> None:
     ub = None
 
     t0 = time.time()
-    res = solve_milp(ir, time_limit=args.tl, verbose=False, ub=ub)
+    res = solve_milp(ir, time_limit=args.tl, verbose=False)
     wall = time.time() - t0
 
     print("=" * 68)
