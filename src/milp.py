@@ -39,7 +39,7 @@ def solve_milp(task: Problem, *, time_limit: float = 10.0, verbose: bool = False
 
     tm = Durations(task)
     wafers = task.wafers
-    M = 4000 # Big-M（既作变量上界又作大-M 系数）。
+    M = 5600 # Big-M（既作变量上界又作大-M 系数）。
 
     m = gp.Model("ct_case_milp")
     if not verbose:
