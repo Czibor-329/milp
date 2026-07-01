@@ -6,7 +6,7 @@ entry/exit（如 entry→LA、exit→LB）让系统真正流水。该解耦是�
 （全局轮转易死锁、parity 在单腔例反劣），故按实例快速寻优。评估器是毫秒级 BF，portfolio
 几个种子 + 单事件贪心翻腔即可在多数例命中 MILP；解码内含 Banker ⇒ 候选恒无死锁。
 
-genome：一个搜索候选 = 派工偏置 prio + loadlock 选腔 ll_assign。解码器仍走 sequencing._sequence
+genome：一个搜索候选 = 派工偏置 prio + loadlock 选腔 ll_assign。解码器仍走 sequencing.decode_orders
 （内含 Banker 安全检查）⇒ 任意候选都解出无死锁占用序；空 genome ⇒ 与默认定序逐字节一致（零回归）。
 loadlock 选腔对齐 MILP 的 (Z) 决策：可把某片从 round-robin 默认的 LA 改到 LB 以均衡瓶颈 loadlock 负载。
 """
@@ -24,7 +24,7 @@ from src.milp import SolveResult, _ll_proc
 from src.model import Durations, Problem
 
 from ._common import EPS
-from .sequencing import _DecodeDeadlock, _Orders, _sequence
+from .sequencing import _DecodeDeadlock, _Orders, decode_orders
 from .solve import solve_timing
 
 
@@ -72,7 +72,7 @@ def _decode(ir: Problem, tm: Durations, wafers, genome: _Genome,
     返回的 wafers 必须原样喂给 solve_timing，使占用序与腔分配口径一致。
     banker=False 走快速贪心解码（搜索用），中途死锁抛 _DecodeDeadlock。"""
     wf = _apply_ll_assign(ir, wafers, genome.ll_assign) if genome.ll_assign else wafers
-    orders = _sequence(ir, tm, wf, reserve=reserve, prio=genome.prio, banker=banker)
+    orders = decode_orders(ir, tm, wf, reserve=reserve, prio=genome.prio, banker=banker)
     return wf, orders
 
 
@@ -199,13 +199,13 @@ def _eval_chamber_assign(ir: Problem, tm: Durations, wafers,
     口径（loadlock 选腔；加工腔固定 round-robin）。返回 (有效 wafers, res 或 None)。"""
     wf = _apply_chamber_assign(ir, wafers, assign) if assign else wafers
     try:
-        orders = _sequence(ir, tm, wf, reserve=False, banker=True)
+        orders = decode_orders(ir, tm, wf, reserve=False, banker=True)
     except (RuntimeError, _DecodeDeadlock):
         return wf, None
     res = solve_timing(ir, wf, orders=orders)
     if not getattr(res, "feasible", False) and getattr(res, "residency_violations", []):
         try:
-            orders = _sequence(ir, tm, wf, reserve=True, banker=True)
+            orders = decode_orders(ir, tm, wf, reserve=True, banker=True)
         except (RuntimeError, _DecodeDeadlock):
             return wf, None
         res = solve_timing(ir, wf, orders=orders)
@@ -262,7 +262,7 @@ def optimize_chambers(ir: Problem, tm: Optional[Durations] = None, wafers=None, 
 
     refine_budget（秒）：贪心后的 SA-ILS 预算。**多 route 共享 loadlock（双 job）例的关键杠杆**——
     贪心常困在「entry/exit 同腔 round-robin」局部最优，使某 loadlock 过载成饱和瓶颈（此时定序无力，
-    见 _decode_orders 注），ILS 用单/双事件翻腔 + 回 best/随机重启逃出，找到均衡两 route 负载的不规则
+    见 decode_orders 注），ILS 用单/双事件翻腔 + 回 best/随机重启逃出，找到均衡两 route 负载的不规则
     分配（逼近 MILP）。单调（best 只接受改进 ⇒ ≤ 贪心结果，零回归）。缺省 0 = 不做（单 job 用，已近最优）。
     每次评估 = 默认序一次 BF（makespan 对固定腔分配近似 order-invariant，故评估便宜、可上千次）。
 

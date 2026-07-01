@@ -1,10 +1,10 @@
 """Benchmark：timing 基线（腔分配寻优 + 默认定序）+ BC 策略 vs MILP 最优标签，在 dataset/test 批量对比。
 
 本脚本直接吃 dataset 实例（含 spec/update_params/result），用 result.makespan 作 MILP 基准
-（不重跑 Gurobi），逐实例跑 timing 基线（time_from_ir）+ BC 策略（time_from_policy）并对比
+（不重跑 Gurobi），逐实例跑 timing 基线（start_schedule）+ BC 策略（time_from_policy）并对比
 gap% 与计算时间。BC 生成的排程会导出 MoveList 到 results/output/bc/<子集>/inst_XXXX.json。
 
-注：time_from_ir/time_from_policy 现在都先做【腔分配寻优】(loadlock + 并行加工腔，毫秒级 BF
+注：start_schedule/time_from_policy 现在都先做【腔分配寻优】(loadlock + 并行加工腔，毫秒级 BF
 评估)，再分别走默认/策略定序。腔分配是逼近 MILP 的最大杠杆——round-robin 默认让每片 entry/exit
 同腔、并行腔串行化（旧 gap +15~70%）；寻优后多数例命中 MILP。残留正 gap（2stage 2腔例、
 3PM-长proc 例）是 backward 定序器流水表达力限制。
@@ -47,7 +47,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.parse import load_alg_entries, parse_task
 from src.paths import input_data_path, MODELS_DIR, OUTPUT_DIR
 from src.marathon_gen import expand_topo_pms, PM_POOL_6
-from src.timing import time_from_ir, time_from_policy
+from src.timing import start_schedule, start_schedule_by_policy
 from src.export import export_movelist
 from src.policy import load_policy
 
@@ -111,7 +111,7 @@ def main() -> None:
             try:
                 ir = parse_task(ai, d["update_params"])
                 t0 = time.perf_counter()
-                tres = time_from_ir(ir, verbose=False, cross_check=True)
+                tres = start_schedule(ir, verbose=False, cross_check=True)
                 t_ms = (time.perf_counter() - t0) * 1000.0
                 t_mk = tres.makespan
                 feas = bool(getattr(tres, "feasible", False))
@@ -125,7 +125,7 @@ def main() -> None:
             if policy is not None:
                 try:
                     t0 = time.perf_counter()
-                    bres = time_from_policy(ir, policy, verbose=False, cross_check=False)
+                    bres = start_schedule_by_policy(ir, policy)
                     b_ms = (time.perf_counter() - t0) * 1000.0
                     if bool(getattr(bres, "feasible", False)):
                         b_mk = bres.makespan

@@ -7,7 +7,7 @@ from src.milp import SolveResult
 from src.model import Durations, Problem
 
 from .graph import _Nodes, _bellman_ford_longest
-from .sequencing import _Orders, default_orders
+from .sequencing import _Orders, decode_orders
 from .spans import _hop_span, _ll_reuse_setup, _robot_switch_gap, _stage_dwell
 
 
@@ -25,7 +25,7 @@ def solve_timing(ir: Problem, wafers=None, *, orders: Optional[_Orders] = None,
     wmap = {w.wid: w for w in wafers}
     nodes = _Nodes(wafers)
     if orders is None:
-        orders = default_orders(ir, tm, wafers)
+        orders = decode_orders(ir, tm, wafers)
 
     edges: List[Tuple[int, int, float]] = []
     res_edges: List[Tuple[int, int, float]] = []   # 驻留后向边，单列以便诊断

@@ -33,7 +33,7 @@ def rtime_from_schedule(msched: dict) -> Dict[Tuple[int, int], float]:
 def _replay_record(ir, tm, wafers, rtime, *, banker: bool
                    ) -> Tuple[List[Tuple[np.ndarray, int]], bool]:
     """复现 MILP 序并记录每步 (候选特征, 提交候选在 cands 中的 idx)。返回 (records, completed)。
-    候选/Banker/提交口径与 timing._decode_orders 完全一致（仅选择规则=MILP r-time）。"""
+    候选/Banker/提交口径与 timing.decode_orders 完全一致（仅选择规则=MILP r-time）。"""
     from src.timing import (_Cand, _DecodeState, _resource, _blocked,
                                      _reserve_for, _drain_completes, _stage_dwell, _hop_span)
 

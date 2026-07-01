@@ -15,9 +15,12 @@ LA 把片搬进 PM1」——下游 hop 先于上游 hop 的 backward 节拍。
 资源粒度：每个 (腔,槽) 视作容量 1 的占用单元（与 _expand 的 round-robin 定槽、与
 milp.py 的腔互斥口径一致）；source/sink 与 loadport/buffer/dummyport 不占资源。
 
-把定死的 backward 规则改成「可搜索」：解码器 _decode_orders 每步把「合法候选 hop」交给
+把定死的 backward 规则改成「可搜索」：解码器 decode_orders 每步把「合法候选 hop」交给
 chooser 排序，循环再套 Banker 安全掩码提交。同一候选合法性供三方共用：默认(start+bias
 排序，_make_default_chooser)、teacher(MILP 序，标签提取)、policy(网络打分，推理)。
+
+对外只有一个函数：decode_orders(ir, tm, wafers, *, chooser=None, prio=None, reserve=False,
+banker=True)。默认/派工偏置/驻留预留/自定义 chooser 全部走它，无薄封装层。
 """
 
 from __future__ import annotations
@@ -94,7 +97,7 @@ _Chooser = Callable[[_DecodeState, List[_Cand]], List[int]]
 # —— 驻留(qtime)预留：单臂下，共享 loadlock 既进又出，新片的「进」易抢在在制片的「出」
 # 之前，把片闷在加工腔里超驻留。对策：片一进入驻留腔（run），就把它出口去向资源（紧邻下一
 # 跳 + 驻留 run 末端的落脚资源）预留下来，挡住别的片占用，保证其能按时离腔。仅 reserve=True
-# 时启用（在快序驻留不可行时回退采用，见 time_from_ir）。
+# 时启用（在快序驻留不可行时回退采用，见 start_schedule）。
 def _is_resid(w, k: int) -> bool:
     return (0 <= k < len(w.stages) and w.stages[k].stage_type == "process"
             and w.stages[k].residency > 0)
@@ -141,7 +144,7 @@ def _drain_completes(ir: Problem, wmap: Dict[int, object], K: Dict[int, int],
     """安全谕示：从 (pos, occ, resv) 起，用纯下游清空（每步挑剩余最下游、去向未被占/预留的 hop）
     能否把所有片送完？能 ⇒ 当前状态安全（无死锁）。纯下游清空对单臂流水可证无死锁，故
     「存在完工序」当且仅当它能跑完。预留只挡新进、不挡在制片出腔，故不致死锁。
-    res_map：预算好的 (wid,j)→资源键表（_decode_orders 传入共享、避免重算）；None 时本地建一次。"""
+    res_map：预算好的 (wid,j)→资源键表（decode_orders 传入共享、避免重算）；None 时本地建一次。"""
     if res_map is None:
         res_map = _build_resource_map(ir, wmap)
     pos = dict(pos)
@@ -182,7 +185,7 @@ def _drain_completes(ir: Problem, wmap: Dict[int, object], K: Dict[int, int],
 def _make_default_chooser(prio: Optional[Dict[Tuple[int, int], float]]
                           ) -> _Chooser:
     """定死 backward 规则的 chooser：按 (最早可起+bias, 下游优先, wid) 排序。
-    bias 缺省 0 ⇒ 与旧 _sequence 逐字节同序（wid 唯一 ⇒ 决出全序，不触及 dest/rob 比较）。"""
+    bias 缺省 0 ⇒ 与旧定序逐字节同序（wid 唯一 ⇒ 决出全序，不触及 dest/rob 比较）。"""
     def chooser(state: _DecodeState, cands: List[_Cand]) -> List[int]:
         def key(i: int):
             c = cands[i]
@@ -192,15 +195,25 @@ def _make_default_chooser(prio: Optional[Dict[Tuple[int, int], float]]
     return chooser
 
 
-def _decode_orders(ir: Problem, tm: Durations, wafers, *, chooser: _Chooser,
-                   reserve: bool = False, banker: bool = True) -> _Orders:
+def decode_orders(ir: Problem, tm: Durations, wafers, *,
+                  chooser: Optional[_Chooser] = None,
+                  prio: Optional[Dict[Tuple[int, int], float]] = None,
+                  reserve: bool = False, banker: bool = True) -> _Orders:
     """全局事件式构造：产出各 (腔,槽) 占用序与各机器手 hop 序（彼此自洽、无死锁）。每步生成
     合法候选(去向资源未占/未预留、j==0 满足发片 FIFO)，交 chooser 排偏好序，循环再套 Banker
     安全掩码提交。候选合法性 + Banker 安全 + 提交逻辑三方共用——换 chooser 不改这些（零回归）。
 
+    本模块唯一的对外入口，覆盖三种用法：
+      · decode_orders(ir, tm, wafers)                         —— 默认 backward 定序
+      · decode_orders(ir, tm, wafers, prio=..., reserve=...)   —— 默认 chooser + 派工偏置/驻留预留
+      · decode_orders(ir, tm, wafers, chooser=自定义, banker=...) —— teacher/policy 等自定义候选打分
+    chooser 缺省 None ⇒ 用 prio 构造默认 chooser（_make_default_chooser）；显式传 chooser 时 prio 不生效。
+
     reserve=True 时额外做驻留(qtime)预留（牺牲吞吐换驻留可行），仅在快序驻留不可行时回退采用。
     banker：True=每步 Banker 安全检查(保证无死锁，默认/基线/换腔)；False=直接取偏好序首位
     (快~50×，搜索批量评估)，中途卡死抛 _DecodeDeadlock 由调用方判负。"""
+    if chooser is None:
+        chooser = _make_default_chooser(prio)
     wmap = {w.wid: w for w in wafers}
     K = {w.wid: len(w.stages) - 1 for w in wafers}
     res_map = _build_resource_map(ir, wmap)      # (wid,j)→资源键，预算一次供候选/Banker 复用（热点提速）
@@ -306,17 +319,3 @@ def _decode_orders(ir: Problem, tm: Durations, wafers, *, chooser: _Chooser,
         placed += 1
 
     return _Orders(chambers=chambers, robots=robots)
-
-
-def _sequence(ir: Problem, tm: Durations, wafers, reserve: bool = False,
-              prio: Optional[Dict[Tuple[int, int], float]] = None,
-              banker: bool = True) -> _Orders:
-    """定死 backward 定序（默认 chooser）。prio={(wid,j):bias} 注入派工偏置；bias 缺省 0 ⇒ 零回归。
-    薄封装 _decode_orders——候选/Banker/提交口径在那里统一，仅决策规则不同。"""
-    return _decode_orders(ir, tm, wafers, chooser=_make_default_chooser(prio),
-                          reserve=reserve, banker=banker)
-
-
-def default_orders(ir: Problem, tm: Durations, wafers) -> _Orders:
-    """无死锁 backward 定序（替代旧的松弛最早时刻占位）。"""
-    return _sequence(ir, tm, wafers)
