@@ -1,14 +1,4 @@
-"""主入口：给定顺序 → 建全图 → Bellman-Ford → SolveResult。
-
-顺序来自哪里：默认走 sequencing.py 的「无死锁 backward 定序」(_sequence)——全局事件式构造，
-一次产出彼此自洽的各资源占用序。面向单臂机器手：下游 hop 先于上游 hop（清空腔再装入），
-并用 Banker 安全检查保证无死锁。solve_timing 与定序解耦——你也可以传入自己的 orders。
-
-未建模（v1 已知缺口，命中时会打印告警）：
-  · 多容量【加工】腔的门簇互斥 (Cd)。命中多容量非 skip 加工腔时 makespan 可能偏乐观。
-"""
-
-from __future__ import annotations
+"""主入口：给定顺序 → 建全图 → Bellman-Ford → SolveResult"""
 
 import time
 from typing import Dict, List, Optional, Tuple
@@ -66,30 +56,41 @@ def solve_timing(ir: Problem, wafers=None, *, orders: Optional[_Orders] = None,
     # tagged：带「资源键 + 两端 op」标注的 cross-wafer 互斥边，供 _critical_resources 提瓶颈。
     tagged: List[Tuple[int, int, float, str, str, Tuple[int, int], Tuple[int, int]]] = []
 
-    # (C) 腔互斥：固定次序里 lo 先 hi 后 → a[hi] ≥ r[lo] + (pick口径 + place口径 + ll_setup)
-    for (c, _slot), occ in orders.chambers.items():
-        for (wlo, jlo), (whi, jhi) in zip(occ, occ[1:]):
-            if wlo == whi:
+    # 腔互斥：顺序确定后，先离腔的片(leave)让出腔位后，后进腔的片(enter)才能到站
+    # a[wafer1, enter stage] ≥ r[wafer2, leave stage] + gap
+    # 对于腔室来说 gap = 2door + pick + place
+    # 对于LoadLock gap = 2door + pick + place + vent/pump
+    for (chamber, _slot), occupants in orders.chambers.items():
+        # 按照顺序依次构造约束关系
+        for (wid_leave, j_leave), (wid_enter, j_enter) in zip(occupants, occupants[1:]):
+            if wid_leave == wid_enter:
                 continue                            # 同片重访：precedence 已序
-            slo = wmap[wlo].stages[jlo]
-            shi = wmap[whi].stages[jhi]
-            wgt = (tm.pick_t(slo.out_robot, c) + tm.pick_post(slo.out_robot, c)
-                   + tm.place_t(shi.in_robot, c) + tm.place_pre(shi.in_robot, c)
-                   + _ll_reuse_setup(ir, slo, shi))
-            a, b = nodes.r(wlo, jlo), nodes.a(whi, jhi)
-            edges.append((a, b, wgt))
-            tagged.append((a, b, wgt, "C", c, (wlo, jlo), (whi, jhi)))
+            stage_leave = wmap[wid_leave].stages[j_leave]
+            stage_enter = wmap[wid_enter].stages[j_enter]
+            # gap = pick + post_prepare + place + post_prepare + ll time
+            gap = (tm.pick_t(stage_leave.out_robot, chamber) + tm.pick_post(stage_leave.out_robot, chamber)
+                   + tm.place_t(stage_enter.in_robot, chamber) + tm.place_pre(stage_enter.in_robot, chamber)
+                   + _ll_reuse_setup(ir, stage_leave, stage_enter))
+            tail, head = nodes.r(wid_leave, j_leave), nodes.a(wid_enter, j_enter)
+            # tail + gap <= head
+            edges.append((tail, head, gap))
+            tagged.append((tail, head, gap, "C", chamber, (wid_leave, j_leave), (wid_enter, j_enter)))
 
-    # (R) 机器手互斥：固定次序里 op1 先 op2 后 → r[op2] ≥ a_next[op1] + gap
-    for rob, ops in orders.robots.items():
-        for (w1, j1), (w2, j2) in zip(ops, ops[1:]):
-            if w1 == w2:
-                continue
-            wa, wb = wmap[w1], wmap[w2]
-            g = _robot_switch_gap(ir, tm, rob, wa, j1, wb, j2)
-            a, b = nodes.a(w1, j1 + 1), nodes.r(w2, j2)
-            edges.append((a, b, g))
-            tagged.append((a, b, g, "R", rob, (w1, j1), (w2, j2)))
+    # 机器手互斥：顺序确定后，前一跳(prev)把片落位后，机器手隔 gap 才能开始下一跳(next)的取片
+    # r[next] ≥ a[prev] + gap
+    # 两跳去向不同腔 / 同腔但非多槽 skip 站：gap = 两个不同腔室之间机器手旋转的时长
+    # 两跳连续去向同一个多槽 skip 站(如 heater/cooler，capacity>1)：gap = 关门(place_post) + 开门(pick_pre)
+    for rob, hops in orders.robots.items():
+        # 按照顺序依次构造约束关系
+        for (wid_prev, j_prev), (wid_next, j_next) in zip(hops, hops[1:]):
+            if wid_prev == wid_next:
+                continue                            # 同片重访：precedence 已序
+            wafer_prev, wafer_next = wmap[wid_prev], wmap[wid_next]
+            gap = _robot_switch_gap(ir, tm, rob, wafer_prev, j_prev, wafer_next, j_next)
+            tail, head = nodes.a(wid_prev, j_prev + 1), nodes.r(wid_next, j_next)
+            # tail + gap <= head
+            edges.append((tail, head, gap))
+            tagged.append((tail, head, gap, "R", rob, (wid_prev, j_prev), (wid_next, j_next)))
 
     # 求解：含驻留后向边的全图
     dist, ok = _bellman_ford_longest(len(nodes), edges + res_edges)
@@ -108,7 +109,7 @@ def solve_timing(ir: Problem, wafers=None, *, orders: Optional[_Orders] = None,
                   f"用时={res.runtime*1000:.1f} ms  节点={len(nodes)}  边={len(edges)+len(res_edges)}")
         return res
 
-    # 不可行：去掉驻留边再求一次（仍可能因资源次序自相矛盾而成环 = 死锁）
+    # 不可行：去掉驻留边再求一次，用来区分「真死锁」和「纯粹驻留超限」
     dist0, ok0 = _bellman_ford_longest(len(nodes), edges)
     if not ok0:
         if verbose:

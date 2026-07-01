@@ -31,7 +31,10 @@ def _hop_span(tm: Durations, w, j: int) -> float:
 
 
 def _ll_reuse_setup(ir: Problem, prev_stage, nxt_stage) -> float:
-    """同一 LL 连续两用的状态相关 setup：entry→entry 须空充(vent)，exit→exit 须空抽(pump)。"""
+    """同一LL再次可以使用时间间隔：
+    - 上一次使用是ATR，当前使用ATR，则必须充气后才能使用
+    - 上一次使用是VTR，当前使用VTR，则必须抽气后才能使用
+    - 上一次使用是VTR(ATR)，当前使用ATR(VTR)，则必须时间间隔为零"""
     pt, nt = prev_stage.ll_type, nxt_stage.ll_type
     if not pt or not nt:
         return 0.0
