@@ -11,6 +11,10 @@
 c12~c15 为 recipe/route 量纲特征（皆 ÷ 实例尺度，跨实例规模无关）：多 job 时同一步的两条
 recipe 路径候选在原 18 维下特征撞车（实测 16.6% 步，全 cross-route）⇒ BC 必给同分、复现不了
 MILP 的跨 job 服务序。加这 4 维把撞车降到 2.5%（残留=对称同构 route，本应同分）。
+
+c16 为选腔特征：同一 hop 在多候选腔（loadlock LA/LB、并行 PM）下分裂成多个候选，本维给出去向腔
+在其候选腔池里的相对累计负载，让这些候选可区分（否则特征全同 ⇒ BC 分不清选哪个腔，学不到
+MILP 的选腔决策）。仅选腔模式（labels/policy 走 state.ch_used）非零；默认/backward 定序恒 0。
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ import numpy as np
 
 EPS = 1e-9
 GLOBAL_DIM = 6
-CAND_DIM = 16
+CAND_DIM = 17
 FEATURE_DIM = GLOBAL_DIM + CAND_DIM     # 每候选最终特征维度（全局拼到候选上）
 
 
@@ -32,6 +36,7 @@ def step_features(state, cands) -> np.ndarray:
     wmap, K, pos, occ = state.wmap, state.K, state.pos, state.occ
     place_t, robot_free = state.place_t, state.robot_free
     tm = state.tm
+    ch_used = getattr(state, "ch_used", None)              # 选腔模式下各腔累计派入片数（否则 None）
     n_waf = max(len(wmap), 1)
     n_c = len(cands)
 
@@ -79,6 +84,15 @@ def step_features(state, cands) -> np.ndarray:
                 free = sum(1 for cc in sibs if (cc, 0) not in occ)
                 free_sib = free / len(sibs)
 
+        # 选腔均衡：本候选去向腔在其候选腔池里的相对累计负载（0=池内最闲、1=最忙）。
+        # MILP 均衡 loadlock/PM 负载 ⇒ 偏好低负载腔；这维让同一 hop 的不同选腔候选可区分（否则特征撞车）。
+        chamber_load = 0.0
+        if c.dest is not None and ch_used is not None:
+            pool = list(getattr(sj1, "cands", []) or [c.dest[0]])
+            loads = [ch_used.get(cc, 0) for cc in pool]
+            lo, hi = min(loads), max(loads)
+            chamber_load = (ch_used.get(c.dest[0], 0) - lo) / ((hi - lo) or 1.0)
+
         f = [
             place_into_proc,                                   # c0 放入加工腔
             pick_from_proc,                                    # c1 从加工腔取片
@@ -96,6 +110,7 @@ def step_features(state, cands) -> np.ndarray:
             sj1.proc / max_proc,                               # c13 下一 stage proc（去向负荷）
             sum(s.proc for s in w.stages[c.j:]) / max_work,    # c14 剩余工作量占比（critical ratio）
             route_work[w.route_name] / max_work,               # c15 该 route 总工作量（路径身份）
+            chamber_load,                                      # c16 去向腔相对累计负载（选腔均衡）
         ]
         rows[i, GLOBAL_DIM:] = f
 

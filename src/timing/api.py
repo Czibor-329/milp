@@ -8,9 +8,10 @@ from src.export import check_solution
 from src.milp import SolveResult
 from src.model import Durations, Problem
 
+from ._common import _DecodeDeadlock
 from .chambers import _chamber_opt_budgets, optimize_chambers
 from .solve import solve_timing
-from .sequencing import _Cand, _DecodeState, _Chooser, decode_orders
+from .sequencing import _Cand, _DecodeState, _Chooser, decode_orders, decode_orders_choosing
 
 def _fixed_default(ir: Problem, durations: Durations, wafers, verbose: bool) -> SolveResult:
     """原始默认（backward）定序 + 驻留预留回退（不动 loadlock 分配）。"""
@@ -89,7 +90,9 @@ def start_schedule(ir: Problem, *, verbose: bool = True, cross_check: bool = Tru
     return res
 
 def start_schedule_by_policy(ir: Problem, policy, *, n_samples: int = 32, temp: float = 0.7, seed: int = 0) -> SolveResult:
-    """BC 策略定序 → solve_timing"""
+    """BC 策略【联合选腔 + 定序】→ solve_timing。策略 chooser 在每步的多候选腔候选上打分，
+    decode_orders_choosing 联合决定 (hop, 腔)，把选中腔写回 wafers 后原样喂 solve_timing
+    （train/推理同口径：标签也跟随 MILP 选腔）。多 sample 取 makespan 最优可行。"""
     import numpy as np
     tm = Durations(ir)
     rng = np.random.default_rng(seed)
@@ -100,13 +103,16 @@ def start_schedule_by_policy(ir: Problem, policy, *, n_samples: int = 32, temp: 
     best = None
     for ch in choosers:
         try:
-            orders = decode_orders(ir, tm, wafers, chooser=ch, reserve=False, banker=True)
-        except RuntimeError:
+            wf, orders = decode_orders_choosing(ir, tm, wafers, chooser=ch, reserve=False, banker=True)
+        except (RuntimeError, _DecodeDeadlock):
             continue
-        r = solve_timing(ir, wafers, orders=orders)
+        r = solve_timing(ir, wf, orders=orders)
         if getattr(r, "feasible", False) and (best is None or r.makespan < best.makespan):
             best = r
 
     res = best
-    res.check_issues = check_solution(ir, res)             # type: ignore[attr-defined]
-    return res
+    if res is not None:
+        res.check_issues = check_solution(ir, res)             # type: ignore[attr-defined]
+        return res
+    else:
+        return res

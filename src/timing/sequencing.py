@@ -25,6 +25,7 @@ banker=True)。默认/派工偏置/驻留预留/自定义 chooser 全部走它�
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from collections import namedtuple
 from typing import Callable, Dict, List, Optional, Tuple
@@ -88,6 +89,9 @@ class _DecodeState:
     placed: int
     total: int
     reserve: bool
+    # 选腔模式下（labels/policy）各腔累计被派入的片数，供 step_features 的选腔均衡特征用；
+    # 默认/backward 定序不选腔 ⇒ None（特征退化为 0，对这些路径零影响）。
+    ch_used: Optional[Dict[str, int]] = None
 
 
 # chooser(state, cands) → 候选索引的偏好序（最优在前）。banker 时循环取序里第一个安全候选。
@@ -319,3 +323,170 @@ def decode_orders(ir: Problem, tm: Durations, wafers, *,
         placed += 1
 
     return _Orders(chambers=chambers, robots=robots)
+
+
+# --------------------------------------------------------------------------- #
+# 选腔解码：把「去向腔」也做成每步决策（loadlock LA/LB、并行 PM）。候选按去向 stage 的候选腔
+# 分裂，chooser 联合选 (hop, 腔)；提交把选中腔写回 stage（chamber/slot/loadlock proc）。与固定腔
+# 的 decode_orders 分开实现——后者是热点、口径严格零回归，不掺动态腔分支。labels 的 teacher 复现
+# 走同一候选口径（跟随 MILP 腔），policy 推理走本函数（网络打分选腔）。
+# --------------------------------------------------------------------------- #
+def _free_slot(ir: Problem, occ: dict, cc: str) -> Optional[int]:
+    """腔 cc 里最小的空槽（0-based），无空槽返回 None。"""
+    ch = ir.chambers.get(cc)
+    cap = int(ch.capacity) if ch else 1
+    return next((s for s in range(max(cap, 1)) if (cc, s) not in occ), None)
+
+
+def _drain_completes_cc(ir: Problem, wmap, K, pos, occ, dsel) -> bool:
+    """选腔版安全谕示：纯下游清空，未定腔的下游 hop 允许落【任一空候选腔】。dsel 给出已（暂定）
+    落腔的 (wid,j)→(腔,槽)（含本步暂定 move），其余按 wafer 当前 stage 已定腔 live 读。能送完
+    ⇒ 状态安全。放宽到「任一空腔」比真实更宽松，仍是有效存在性谕示 ⇒ banker 恒有安全候选。"""
+    pos = dict(pos); occ = dict(occ); dsel = dict(dsel)
+
+    def cur_res(wid: int):
+        p = pos[wid]
+        return dsel[(wid, p)] if (wid, p) in dsel else _resource(ir, wmap[wid], p)
+
+    remaining = sum(K[wid] - pos[wid] for wid in pos)
+    while remaining > 0:
+        pick = None                                    # (key=(-p,wid), wid, chosen)
+        for wid, p in pos.items():
+            if p >= K[wid]:
+                continue
+            w = wmap[wid]
+            base = _resource(ir, w, p + 1)
+            chosen = None
+            if base is not None:                       # 去向是资源腔：需一个空候选腔
+                nxt = w.stages[p + 1]
+                pool = list(nxt.cands) if len(nxt.cands) > 1 else [nxt.chamber]
+                for cc in pool:
+                    s = _free_slot(ir, occ, cc)
+                    if s is not None:
+                        chosen = (cc, s); break
+                if chosen is None:
+                    continue                           # 无空腔 ⇒ 该片当前不可动
+            key = (-p, wid)
+            if pick is None or key < pick[0]:
+                pick = (key, wid, chosen)
+        if pick is None:
+            return False                               # 未完工却无可动 hop = 死锁
+        _, wid, chosen = pick
+        p = pos[wid]
+        src = cur_res(wid)
+        if src is not None and occ.get(src) == wid:
+            del occ[src]
+        if chosen is not None:
+            occ[chosen] = wid
+            dsel[(wid, p + 1)] = chosen
+        pos[wid] = p + 1
+        remaining -= 1
+    return True
+
+
+def decode_orders_choosing(ir: Problem, tm: Durations, wafers, *,
+                           chooser: _Chooser, reserve: bool = False,
+                           banker: bool = True) -> Tuple[List, _Orders]:
+    """选腔解码：返回 (有效 wafers, _Orders)。有效 wafers 已把选中腔写回各 stage，必须原样喂
+    solve_timing（腔分配口径一致）。候选/特征/提交口径与 labels 的 teacher 复现一致，仅 chooser 不同：
+    每步候选按去向 stage 的多候选腔（有空槽）分裂，chooser 联合决定 (hop, 腔)，banker 用选腔版
+    安全谕示 _drain_completes_cc 保证无死锁。"""
+    from src.milp import _ll_proc                        # 懒导入避免包初始化期环
+
+    wafers = [copy.copy(w) for w in wafers]              # 克隆：提交要改 stage.chamber，不污染 ir.wafers
+    for w in wafers:
+        w.stages = [copy.copy(s) for s in w.stages]
+    wmap = {w.wid: w for w in wafers}
+    K = {w.wid: len(w.stages) - 1 for w in wafers}
+    pos = {w.wid: 0 for w in wafers}
+    place_t = {w.wid: 0.0 for w in wafers}
+    occ: Dict[Tuple[str, int], int] = {}
+    resv: Dict[Tuple[str, int], int] = {}
+    robot_free: Dict[str, float] = {}
+    ch_used: Dict[str, int] = {}                         # 各腔累计派入片数（选腔均衡特征）
+
+    route_wids: Dict[str, List[int]] = {}
+    for w in wafers:
+        route_wids.setdefault(w.route_name, []).append(w.wid)
+    for v in route_wids.values():
+        v.sort()
+    next_rel = {r: 0 for r in route_wids}
+
+    chambers: Dict[Tuple[str, int], List[Tuple[int, int]]] = {}
+    robots: Dict[str, List[Tuple[int, int]]] = {}
+    total = sum(K.values())
+    placed = 0
+    while placed < total:
+        cands: List[_Cand] = []
+        for w in wafers:
+            wid = w.wid
+            j = pos[wid]
+            if j >= K[wid]:
+                continue
+            if j == 0 and route_wids[w.route_name][next_rel[w.route_name]] != wid:
+                continue
+            rob = w.transports[j]
+            start = max(place_t[wid] + _stage_dwell(tm, w, j), robot_free.get(rob, 0.0))
+            base = _resource(ir, w, j + 1)              # None=去向为 source/sink/skip（无资源、不选腔）
+            if base is None:
+                cands.append(_Cand(wid, j, None, rob, start))
+                continue
+            nxt = w.stages[j + 1]
+            pool = list(nxt.cands) if len(nxt.cands) > 1 else [nxt.chamber]
+            for cc in pool:
+                s = _free_slot(ir, occ, cc)
+                if s is not None:
+                    cands.append(_Cand(wid, j, (cc, s), rob, start))
+        if not cands:
+            if banker:
+                raise RuntimeError("[timing] 选腔解码无安全候选（疑似拓扑无可行解）")
+            raise _DecodeDeadlock()
+
+        state = _DecodeState(ir, tm, wmap, K, pos, occ, resv, place_t, robot_free,
+                             placed, total, reserve, ch_used)
+        order = chooser(state, cands)
+
+        if not banker:
+            chosen = cands[order[0]]
+        else:
+            chosen = None
+            for idx in order:
+                c = cands[idx]
+                tpos = dict(pos); tocc = dict(occ)
+                src = _resource(ir, wmap[c.wid], c.j)
+                if src is not None and tocc.get(src) == c.wid:
+                    del tocc[src]
+                dsel: Dict[Tuple[int, int], Tuple[str, int]] = {}
+                if c.dest is not None:
+                    tocc[c.dest] = c.wid
+                    dsel = {(c.wid, c.j + 1): c.dest}
+                tpos[c.wid] = c.j + 1
+                if _drain_completes_cc(ir, wmap, K, tpos, tocc, dsel):
+                    chosen = c
+                    break
+            if chosen is None:
+                raise RuntimeError("[timing] 选腔解码无安全候选（疑似拓扑无可行解）")
+
+        wid, j, dest, rob, start = chosen
+        w = wmap[wid]
+        src = _resource(ir, w, j)
+        if src is not None and occ.get(src) == wid:
+            del occ[src]
+        if dest is not None:                            # 把选中的腔写回 stage（资源键/后续 dwell 一致）
+            cc, slot = dest
+            nxt = w.stages[j + 1]
+            nxt.chamber, nxt.slot = cc, slot
+            if nxt.stage_type == "loadlock":
+                nxt.proc = _ll_proc(ir, cc, nxt.ll_type)
+            occ[dest] = wid
+            ch_used[cc] = ch_used.get(cc, 0) + 1
+            chambers.setdefault(dest, []).append((wid, j + 1))
+        robots.setdefault(rob, []).append((wid, j))
+        robot_free[rob] = start + _hop_span(tm, w, j)
+        place_t[wid] = robot_free[rob]
+        if j == 0:
+            next_rel[w.route_name] += 1
+        pos[wid] = j + 1
+        placed += 1
+
+    return wafers, _Orders(chambers=chambers, robots=robots)

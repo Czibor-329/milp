@@ -52,7 +52,9 @@ from .sequencing import (
     _reserve_for,
     _resource,
     _skip_chambers,
+    _drain_completes_cc,
     decode_orders,
+    decode_orders_choosing,
 )
 from .chambers import (
     _Genome,
@@ -86,7 +88,7 @@ __all__ = [
     "_stage_dwell", "_hop_span", "_ll_reuse_setup", "_robot_switch_gap",
     "_skip_chambers", "_resource", "_Orders", "_Cand", "_DecodeState", "_Chooser",
     "_is_resid", "_reserve_for", "_blocked", "_build_resource_map", "_drain_completes",
-    "decode_orders",
+    "_drain_completes_cc", "decode_orders", "decode_orders_choosing",
     "_Genome", "_recompute_slots", "_apply_ll_assign", "_decode",
     "_ll_seed_assignments", "_eval_ll_assign", "optimize_loadlock",
     "_chamber_assign_events", "_apply_chamber_assign", "_eval_chamber_assign",

@@ -38,6 +38,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 
 
 def _family(spec: dict) -> str:
+    """返回stage中最多的腔室数"""
     ns = spec.get("n_stage")
     if ns is None:
         ns = len(spec.get("stages", [[]]))
@@ -74,30 +75,14 @@ def main() -> None:
         if d.get("split") not in args.splits:
             continue
         res = d.get("result", {})
-        mk = res.get("makespan")
-        # 接受可行 incumbent（makespan 有限 + schedule 非空），不再仅限证明最优（status==2）：放开 PM
-        # 选腔后多 PM 例时限内未必证明最优，但 incumbent 是更紧的有效 teacher 序（schedule 存在即可复现）。
-        if not (isinstance(mk, (int, float)) and mk == mk) or not res.get("schedule"):
-            continue
         fam = _family(d.get("spec", {}))
         fam_tot[fam] += 1
         n_tot += 1
-        try:
-            ir = parse_task(ai0, d["update_params"])
-            tm = Durations(ir)
-            # 腔分配寻优后的基底（与 time_from_policy 推理同基底）：teacher-force MILP 序须在
-            # 与推理一致的腔资源上抽，否则标签困在 round-robin 坏默认 → 学不到有用排序（BC==固定）。
-            # 多 route(双 job) 开 SA-ILS 精修腔分配（离线标签用更高预算 6s，高于 timing._chamber_opt_budgets
-            # 运行时默认的 0.55s，但同属「多 route 才开 ILS」的口径）。
-            rb = 6.0 if len({w.route_name for w in ir.wafers}) > 1 else 0.0
-            _, wf, _ = optimize_chambers(ir, tm, ir.wafers, budget=1.0, seed=0, refine_budget=rb)
-            if wf is None:
-                wf = ir.wafers
-            records, completed = extract_instance(ir, tm, wf, res["schedule"])
-        except Exception as e:  # noqa: BLE001
-            print(f"  [warn] {os.path.basename(f)}: {e}")
-            continue
+        ir = parse_task(ai0, d["update_params"])
+        tm = Durations(ir)
+        records, completed = extract_instance(ir, tm, ir.wafers, res["schedule"])
         if not completed:
+            print(f"inst {n_tot} failed")
             continue
         n_done += 1
         fam_done[fam] += 1

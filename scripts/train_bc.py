@@ -32,7 +32,7 @@ def main() -> None:
                     default=str(_ROOT / "dataset" / "train_artifacts" / "bc_labels.npz"))
     ap.add_argument("--out", type=str,
                     default=str(model_output_path("bc_policy.pt")))
-    ap.add_argument("--epochs", type=int, default=80)
+    ap.add_argument("--epochs", type=int, default=1000)
     ap.add_argument("--hidden", type=int, default=64)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--batch", type=int, default=256)

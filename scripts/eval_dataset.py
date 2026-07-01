@@ -19,7 +19,7 @@ gap% 与计算时间。BC 生成的排程会导出 MoveList 到 results/output/b
   load_alg_entries(s1-1c1p-preclean) → expand_topo_pms(PM_POOL_6) → parse_task(topo, update_params)
 
 用法：
-  python scripts/eval_dataset.py                                  # 全 3 子集
+  python scripts/eval_dataset.py                                  # 全部子集
   python scripts/eval_dataset.py --subsets 1stage --limit 3       # 冒烟
   python scripts/eval_dataset.py --out eval.json                  # 写逐实例+汇总 JSON
 
@@ -52,7 +52,7 @@ from src.export import export_movelist
 from src.policy import load_policy
 
 BASE_TOPO = "s1-1c1p-preclean"
-SUBSETS = ["1stage", "1stage_e", "2stage", "3stage", "2job", "2job1s"]
+SUBSETS = ["1stage", "2stage", "3stage", "2job"]
 _DATASET_TEST = Path(__file__).resolve().parents[1] / "dataset" / "test"
 _BC_OUT = OUTPUT_DIR / "bc"
 
@@ -78,7 +78,11 @@ def main() -> None:
     ap.add_argument("--out", type=str, default=None, help="把逐实例+汇总写成 JSON")
     args = ap.parse_args()
 
-    policy = load_policy(MODELS_DIR / "bc_policy.pt")
+    try:
+        policy = load_policy(MODELS_DIR / "bc_policy.pt")
+    except Exception as e:  # noqa: BLE001
+        print(f"[warn] load_policy 失败（{e}），跳过 BC 对比，只跑 timing 基线。")
+        policy = None
 
     # 基础物理拓扑只加载/expand 一次，循环复用
     ai, _ = load_alg_entries(input_data_path(BASE_TOPO))
@@ -90,6 +94,8 @@ def main() -> None:
     records = []
     all_gaps, all_bgaps = [], []
     grand_feas = grand_n = 0
+    if args.subsets[0] == 'all':
+        args.subsets = SUBSETS
     for sub in args.subsets:
         files = _instances(sub, args.limit)
         if not files:
