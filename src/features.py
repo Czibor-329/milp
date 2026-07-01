@@ -27,7 +27,7 @@ FEATURE_DIM = GLOBAL_DIM + CAND_DIM     # 每候选最终特征维度（全局�
 
 def step_features(state, cands) -> np.ndarray:
     """返回 [n_cand, FEATURE_DIM] 特征矩阵（全局特征已拼到每行）。state: _DecodeState。"""
-    from src.timing import _pdur                      # 懒导入避免环
+    from src.timing import _stage_dwell                # 懒导入避免环
 
     wmap, K, pos, occ = state.wmap, state.K, state.pos, state.occ
     place_t, robot_free = state.place_t, state.robot_free
@@ -67,7 +67,7 @@ def step_features(state, cands) -> np.ndarray:
         resid_urg = 0.0
         has_resid = 0.0
         if pick_from_proc and getattr(sj, "residency", 0) and sj.residency > 0:
-            cap = _pdur(tm, w, c.j) + sj.residency
+            cap = _stage_dwell(tm, w, c.j) + sj.residency
             resid_urg = float(np.clip((c.start - place_t[c.wid]) / (cap or 1.0), 0.0, 2.0))
             has_resid = 1.0
 

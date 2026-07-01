@@ -18,7 +18,7 @@ from src.marathon_gen import expand_topo_pms, PM_POOL_6
 from src.model import Durations
 from src.features import step_features
 from src.timing import (optimize_chambers, _Cand, _DecodeState, _resource,
-                        _blocked, _drain_completes, _pdur, _L)
+                        _blocked, _drain_completes, _stage_dwell, _hop_span)
 from src.labels import rtime_from_schedule
 
 BASE_TOPO = "s1-1c1p-preclean"
@@ -62,7 +62,7 @@ def _run(ir, tm, wafers, rtime, tol, banker):
             if j == 0 and route_wids[w.route_name][next_rel[w.route_name]] != wid:
                 continue
             rob = w.transports[j]
-            start = max(place_t[wid] + _pdur(tm, w, j), robot_free.get(rob, 0.0))
+            start = max(place_t[wid] + _stage_dwell(tm, w, j), robot_free.get(rob, 0.0))
             cands.append(_Cand(wid, j, dest, rob, start))
         if not cands:
             return None
@@ -109,7 +109,7 @@ def _run(ir, tm, wafers, rtime, tol, banker):
             del occ[src]
         if dest is not None:
             occ[dest] = wid
-        robot_free[rob] = start + _L(tm, w, j)
+        robot_free[rob] = start + _hop_span(tm, w, j)
         place_t[wid] = robot_free[rob]
         if j == 0:
             next_rel[w.route_name] += 1

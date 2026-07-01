@@ -35,7 +35,7 @@ def _replay_record(ir, tm, wafers, rtime, *, banker: bool
     """复现 MILP 序并记录每步 (候选特征, 提交候选在 cands 中的 idx)。返回 (records, completed)。
     候选/Banker/提交口径与 timing._decode_orders 完全一致（仅选择规则=MILP r-time）。"""
     from src.timing import (_Cand, _DecodeState, _resource, _blocked,
-                                     _reserve_for, _drain_completes, _pdur, _L)
+                                     _reserve_for, _drain_completes, _stage_dwell, _hop_span)
 
     wmap = {w.wid: w for w in wafers}
     K = {w.wid: len(w.stages) - 1 for w in wafers}
@@ -68,7 +68,7 @@ def _replay_record(ir, tm, wafers, rtime, *, banker: bool
             if j == 0 and route_wids[w.route_name][next_rel[w.route_name]] != wid:
                 continue
             rob = w.transports[j]
-            start = max(place_t[wid] + _pdur(tm, w, j), robot_free.get(rob, 0.0))
+            start = max(place_t[wid] + _stage_dwell(tm, w, j), robot_free.get(rob, 0.0))
             cands.append(_Cand(wid, j, dest, rob, start))
         if not cands:
             return records, False              # 死锁（纯贪心命中单臂循环等待）
@@ -106,7 +106,7 @@ def _replay_record(ir, tm, wafers, rtime, *, banker: bool
             del occ[src]
         if dest is not None:
             occ[dest] = wid
-        robot_free[rob] = start + _L(tm, w, j)
+        robot_free[rob] = start + _hop_span(tm, w, j)
         place_t[wid] = robot_free[rob]
         if j == 0:
             next_rel[w.route_name] += 1
