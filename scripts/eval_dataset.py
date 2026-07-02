@@ -18,9 +18,10 @@ gap% 与计算时间。BC 生成的排程会导出 MoveList 到 results/output/b
 实例重建 ir 的路径（见 manifest base_topo=s1-1c1p-preclean）：
   load_alg_entries(s1-1c1p-preclean) → expand_topo_pms(PM_POOL_6) → parse_task(topo, update_params)
 
-用法：
+用法（子集名用「目录/名」限定：train/* 有标签配置网格、test/* 大规模外推）：
   python scripts/eval_dataset.py                                  # 全部子集
-  python scripts/eval_dataset.py --subsets 1stage --limit 3       # 冒烟
+  python scripts/eval_dataset.py --subsets train/2job --limit 3   # 冒烟（有标签网格）
+  python scripts/eval_dataset.py --subsets test/1stage            # 外推测试集（无标签）
   python scripts/eval_dataset.py --out eval.json                  # 写逐实例+汇总 JSON
 
 解读：
@@ -52,8 +53,10 @@ from src.export import export_movelist
 from src.policy import load_policy
 
 BASE_TOPO = "s1-1c1p-preclean"
-SUBSETS = ["1stage", "2stage", "3stage", "2job"]
-_DATASET_TEST = Path(__file__).resolve().parents[1] / "dataset" / "test"
+# 数据集重组后子集用「目录/名」限定：train/* 为有 MILP 标签的配置网格（报 gap），
+# test/* 为更大规模外推实例（MILP 超时/无标签，只跑 timing/BC、不计入 gap 统计）。
+SUBSETS = ["train/1stage", "train/2stage", "train/3stage", "train/2job", "test/1stage"]
+_DATASET = Path(__file__).resolve().parents[1] / "dataset"
 _BC_OUT = OUTPUT_DIR / "bc"
 
 
@@ -65,9 +68,21 @@ def _valid_label(result: dict) -> bool:
             and bool(result.get("schedule")))
 
 
+def _resolve(sub: str) -> Path:
+    """子集名 → 目录。支持限定名 train/2job、test/1stage；未限定名（如 1stage）
+    优先取 train/<sub>，其次 test/<sub>（兼容旧写法）。"""
+    if "/" in sub:
+        return _DATASET / sub
+    for root in ("train", "test"):
+        p = _DATASET / root / sub
+        if p.is_dir():
+            return p
+    return _DATASET / "train" / sub  # 兜底（下游 glob 得空、警告跳过）
+
+
 def _instances(sub: str, limit: int = 0):
     """子集下的 inst_*.json（忽略 grid_eval.json / grid_heatmap.html 等非实例文件）。"""
-    files = sorted(glob.glob(str(_DATASET_TEST / sub / "inst_*.json")))
+    files = sorted(glob.glob(str(_resolve(sub) / "inst_*.json")))
     return files[:limit] if limit > 0 else files
 
 

@@ -37,6 +37,8 @@ def main() -> None:
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--batch", type=int, default=256)
     ap.add_argument("--val-frac", type=float, default=0.15)
+    ap.add_argument("--waf-aug", action="store_true",
+                    help="晶圆数域随机化：把 12 片样本按多个虚拟片数重标 g1/g2，逼网络学片数不变策略（外推大批量）")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
@@ -49,6 +51,28 @@ def main() -> None:
     expert = z["expert"].astype(np.int64)        # [N]
     N, C, F = feats.shape
     print(f"labels: N={N} cmax={C} feat_dim={F}")
+
+    # 晶圆数域随机化（--waf-aug）：标签全在训练片数(=12)下抽出，g1/g2=occ/12、n_c/12 的【绝对档位】
+    # 只在 12 片时成立，测试 25 片时会滑向 0 掉出分布 ⇒ 网络若依赖它就在大批量塌成串行。这里把每个
+    # 12 片样本复制若干份、按不同虚拟片数 nw' 重标 g1/g2（乘 12/nw'），专家选中候选不变 ⇒ 无需新
+    # 标签。网络因此见到「同一决策下 g1/g2 档位随机变化」，被迫改用与片数无关的 g6/g7(÷资源容量)，
+    # 学成片数不变的策略、外推到任意批量。g1=col1、g2=col2（全局块前 8 列内），只缩放真实候选行。
+    if args.waf_aug:
+        nwps = [8, 12, 18, 25, 36]               # 覆盖部署片数范围的虚拟批量（12=原样）
+        base_nw = 12.0
+        fs, ms, es = [], [], []
+        for nwp in nwps:
+            fc = feats.copy()
+            sc = base_nw / nwp
+            fc[:, :, 1] *= sc                     # g1 = occ / nw'
+            fc[:, :, 2] *= sc                     # g2 = n_c / nw'
+            fc *= mask[:, :, None]                # padding 行保持 0
+            fs.append(fc); ms.append(mask.copy()); es.append(expert.copy())
+        feats = np.concatenate(fs, 0)
+        mask = np.concatenate(ms, 0)
+        expert = np.concatenate(es, 0)
+        N = feats.shape[0]
+        print(f"waf-aug: ×{len(nwps)} 片数档 {nwps} ⇒ N={N}")
 
     # 标准化：仅用真实候选行算 mean/std
     flat = feats[mask > 0.5]                      # [M, F]

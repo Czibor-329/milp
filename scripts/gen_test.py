@@ -13,6 +13,8 @@ n_wafer / residency / lp 由 YAML defaults 提供，每案例可覆盖。
 
 用法:
   venv/Scripts/python.exe scripts/gen_test.py --cases dataset/cases/3stage.yaml --out 3stage
+  # 晶圆数多、MILP 跑不完时，只生成测试案例（不求解、无 movelist）：
+  venv/Scripts/python.exe scripts/gen_test.py --cases dataset/cases/3stage.yaml --out 3stage --no-milp
 """
 
 import argparse, io, json, random, sys, time
@@ -118,6 +120,9 @@ def main():
     ap.add_argument("--probe", type=float, default=12.0,
                     help="free 探针时限(秒)：判 loadlock 饱和 vs 空闲（饱和例信 fix、瞬解）")
     ap.add_argument("--verbose", action="store_true", help="流式打印 Gurobi 求解日志（看慢例的实时进度）")
+    ap.add_argument("--no-milp", action="store_true",
+                    help="只生成测试案例（instance + spec + update_params），不跑 MILP 求解/标注/movelist。"
+                         "晶圆数变多时 MILP 跑不完，用此选项产出纯测试集。")
     args = ap.parse_args()
 
     defaults, cases = load_cases(args.cases)
@@ -159,6 +164,26 @@ def main():
             head = (f"[{i+1:2d}/{total}] cfg={'·'.join(map(str,chambers)):7s} "
                     f"proc={'·'.join(map(str,proc_times)):11s} nw={n_wafer:2d} 求解中…")
         ir = parse_task(alg_init, up)                 # parse_task 内部深拷贝 up、只读 topo，可复用 alg_init
+
+        if args.no_milp:                              # 纯测试集：不跑 MILP（晶圆多时跑不完），instance 无标注/movelist
+            rec = {
+                "id": i, "split": "test",
+                "spec": spec,
+                "update_params": up,
+                "result": {"status": None, "makespan": float("nan"), "gap": float("nan"),
+                           "optimal": False, "self_check_ok": None, "issues": [],
+                           "replay_ok": None, "wall": 0.0, "releases": [], "schedule": {}},
+                "MoveList": [],
+            }
+            fn = out / f"inst_{i:04d}.json"
+            with open(fn, "w", encoding="utf-8") as f:
+                json.dump(rec, f, ensure_ascii=False)
+            man_base.update({"makespan": float("nan"), "gap": float("nan"),
+                             "optimal": False, "replay_ok": None})
+            manifest.append(man_base)
+            print(head.replace("求解中…", "已生成（--no-milp 跳过求解）"), flush=True)
+            continue
+
         # 先打 case 头（求解可能耗到 --tl 秒）：立刻 flush ⇒ 控制台实时显示「当前在解哪例」
         print(head, end="\n" if args.verbose else "", flush=True)
         warm = None

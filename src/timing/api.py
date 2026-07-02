@@ -89,7 +89,7 @@ def start_schedule(ir: Problem, *, verbose: bool = True, cross_check: bool = Tru
         res.check_issues = issues                  # type: ignore[attr-defined]
     return res
 
-def start_schedule_by_policy(ir: Problem, policy, *, n_samples: int = 32, temp: float = 0.7, seed: int = 0) -> SolveResult:
+def start_schedule_by_policy(ir: Problem, policy, *, n_samples: int = 1, temp: float = 0.7, seed: int = 0) -> SolveResult:
     """BC 策略【联合选腔 + 定序】→ solve_timing。策略 chooser 在每步的多候选腔候选上打分，
     decode_orders_choosing 联合决定 (hop, 腔)，把选中腔写回 wafers 后原样喂 solve_timing
     （train/推理同口径：标签也跟随 MILP 选腔）。多 sample 取 makespan 最优可行。"""
