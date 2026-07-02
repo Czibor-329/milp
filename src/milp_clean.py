@@ -61,14 +61,36 @@ def _clean_specs(task: Problem, wafers: List[Wafer]) -> List[_Clean]:
         if not occ:
             continue
         slot = wmap[occ[0][0]].stages[occ[0][1]].slot
+        # 按 pjob 把该腔占用切成连续段（发片序=wid 序 ⇒ 同 job 占用相邻）。pre/post 清洁挂在
+        # **每个 job 边界**（PrePJob/PostPJob 语义）：pre 落每 job 首片前、post 落每 job 末片后。
+        #   首 job 的 pre = 绝对 pre（腔空→首片）；后续 job 的 pre = 前一 job 末片与本 job 首片间隙。
+        #   末 job 的 post = 收尾 post（进 makespan）；靠前 job 的 post = 本 job 末片与下 job 首片间隙。
+        # 单 job 时段数=1 ⇒ 只出 pre / 只出 post，退化为原「腔全局首/末」口径（零回归）。
+        runs: List[List[Tuple[int, int]]] = []
+        for o in occ:
+            pj = wmap[o[0]].pjob_name
+            if runs and wmap[runs[-1][0][0]].pjob_name == pj:
+                runs[-1].append(o)
+            else:
+                runs.append([o])
         if c in pre_by_ch:
             t, rec, task_name = pre_by_ch[c]
             if t > 0:
-                cleans.append(_Clean(c, slot, t, rec, task_name, "pre", before=occ[0]))
+                for i, run in enumerate(runs):
+                    if i == 0:                       # 腔上首 job：绝对 pre（腔空后清洁再放首片）
+                        cleans.append(_Clean(c, slot, t, rec, task_name, "pre", before=run[0]))
+                    else:                            # 后续 job：前 job 末片与本 job 首片之间清洁
+                        cleans.append(_Clean(c, slot, t, rec, task_name, "wac",
+                                             after=runs[i - 1][-1], before=run[0]))
         if c in post_by_ch:
             t, rec, task_name = post_by_ch[c]
             if t > 0:
-                cleans.append(_Clean(c, slot, t, rec, task_name, "post", after=occ[-1]))
+                for i, run in enumerate(runs):
+                    if i == len(runs) - 1:           # 腔上末 job：收尾 post（计入 makespan）
+                        cleans.append(_Clean(c, slot, t, rec, task_name, "post", after=run[-1]))
+                    else:                            # 靠前 job：本 job 末片与下 job 首片之间清洁
+                        cleans.append(_Clean(c, slot, t, rec, task_name, "wac",
+                                             after=run[-1], before=runs[i + 1][0]))
         # wac：每 trigger 片后插一次无片清洗（按 wid 序 = 发片序）
         st0 = wmap[occ[0][0]].stages[occ[0][1]]
         if st0.clean_trigger > 0 and st0.clean_time > 0:
