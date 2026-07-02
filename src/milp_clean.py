@@ -140,15 +140,25 @@ def _clean_specs(task: Problem, wafers: List[Wafer]) -> List[_Clean]:
                     else:                            # 靠前 job：本 job 末片与下 job 首片之间清洁
                         cleans.append(_Clean(c, slot, t, rec, task_name, "wac",
                                              after=run[-1], before=runs[i + 1][0]))
-        # wac：每 trigger 片后插一次无片清洗（按 wid 序 = 发片序）。
+        # wac：每 trigger 片**加工后**插一次无片清洗（按 wid 序 = 发片序）。触发点含段末片：
+        # 计数正好整除时末片后也要清（trigger=1、2 片 ⇒ w1-wac-w2-wac，而非 w1-wac-w2）。
         # 计数按 job（pjob 段）重置：跨 job 不累计，各 job 段内独立触发。
         st0 = wmap[occ[0][0]].stages[occ[0][1]]
         if st0.clean_trigger > 0 and st0.clean_time > 0:
-            for run in runs:
-                for k in range(st0.clean_trigger - 1, len(run) - 1, st0.clean_trigger):
-                    cleans.append(_Clean(c, slot, st0.clean_time, st0.clean_recipe, "",
-                                         "wac", after=run[k], before=run[k + 1]))
-        # dummy-wac：每个 job 的 dummy 段跑完后、该 job 首个真实片前，插一次无片 wac。
+            trig = st0.clean_trigger
+            for ri, run in enumerate(runs):
+                for k in range(trig - 1, len(run), trig):
+                    if k + 1 < len(run):                 # 段内两片间清洗
+                        cleans.append(_Clean(c, slot, st0.clean_time, st0.clean_recipe, "",
+                                             "wac", after=run[k], before=run[k + 1]))
+                    elif ri + 1 < len(runs):             # 段末触发：落到下一 job 首片前
+                        cleans.append(_Clean(c, slot, st0.clean_time, st0.clean_recipe, "",
+                                             "wac", after=run[k], before=runs[ri + 1][0]))
+                    else:                                # 腔上最末片触发：收尾 wac（计入 makespan）
+                        cleans.append(_Clean(c, slot, st0.clean_time, st0.clean_recipe, "",
+                                             "post", after=run[k]))
+        # dummy-wac：EmptyCleanRecipeAfterMaterial 语义——每片 dummy 加工后都插一次无片 wac，
+        # 即 d1 → wac → d2 → wac → …→ 本 job 首个真实片（非仅末 dummy 后一次）。
         # dummy 段所属 job 由 dummy_owner 解析；解析不到时退化为「末 dummy → 腔上首真实片」。
         docc = dummy_by_ch.get(c)
         if c in dwac_by_ch and docc:
@@ -158,7 +168,9 @@ def _clean_specs(task: Problem, wafers: List[Wafer]) -> List[_Clean]:
                 run_idx = {wmap[run[0][0]].pjob_name: i for i, run in enumerate(runs)}
                 for drun in _pjob_runs(wmap, docc):
                     i = run_idx.get(owner.get(wmap[drun[0][0]].pjob_name, ""))
-                    before = runs[i][0] if i is not None else occ[0]
-                    cleans.append(_Clean(c, slot, t, rec, task_name, "wac",
-                                         after=drun[-1], before=before))
+                    prod_first = runs[i][0] if i is not None else occ[0]
+                    for di, d in enumerate(drun):        # 每片 dummy 后一次 wac
+                        before = drun[di + 1] if di + 1 < len(drun) else prod_first
+                        cleans.append(_Clean(c, slot, t, rec, task_name, "wac",
+                                             after=d, before=before))
     return cleans

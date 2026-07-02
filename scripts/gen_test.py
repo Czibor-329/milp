@@ -69,10 +69,21 @@ def load_cases(path):
     return defaults, cases
 
 
+def _apply_clean_knobs(job, case):
+    """把 case 里的清洁参数覆盖到 JobSpec（None=保留 JobSpec 随机/默认值）：
+       trigger=wac 触发片数 · clean_time=清洗时长 · n_dummy=每 PM dummy 片数 · empty_time=dummy 片间 wac 时长。"""
+    for src_key, attr in (("trigger", "trigger"), ("clean_time", "clean_time"),
+                          ("n_dummy", "n_dummy"), ("empty_time", "empty_time")):
+        v = case.get(src_key)
+        if v is not None:
+            setattr(job, attr, int(v))
+
+
 def build_instance(chambers, proc_times, n_wafer, residency, lp, seed,
-                   clean=False, clean_type=None):
+                   clean=False, clean_type=None, case=None):
     """逐工序腔室数 = chambers，互斥切片 PM_POOL_6，proc_times 逐工序取值。确定性构造。
-    clean=True 时挂清洁（clean_type 指定则固定该类型，否则 JobSpec 随机抽）。"""
+    clean=True 时挂清洁（clean_type 指定则固定该类型，否则 JobSpec 随机抽）。
+    case 提供则用其清洁参数（trigger/clean_time/n_dummy/empty_time）覆盖 JobSpec 随机默认。"""
     rng = random.Random(seed)
     stages, off = [], 0
     for c in chambers:
@@ -84,6 +95,8 @@ def build_instance(chambers, proc_times, n_wafer, residency, lp, seed,
     job.n_wafer = int(n_wafer)
     if clean and clean_type:
         job.clean_type = clean_type
+    if case:
+        _apply_clean_knobs(job, case)
     up, _ = build_update_params(job, 1, 1, lp, 0, 0.0,
                                 process_recipes=job_process_recipes(job, 1))
     return job, up
@@ -110,6 +123,7 @@ def build_multi_instance(jobs_cfg, n_wafer_default, residency, seed,
         jct = jc.get("clean_type", clean_type)
         if jclean and jct:
             job.clean_type = jct
+        _apply_clean_knobs(job, jc)
         jobs.append(job)
     up = build_concurrent_update(jobs, rng, lps=LP_POOL)
     return jobs, up
@@ -178,10 +192,12 @@ def main():
             c_clean = bool(case.get("clean", args.clean)) or bool(case.get("clean_type"))
             c_type = case.get("clean_type", args.clean_type)
             job, up = build_instance(chambers, proc_times, n_wafer, residency, lp, seed=i,
-                                     clean=c_clean, clean_type=c_type)
+                                     clean=c_clean, clean_type=c_type, case=case)
             spec = {"lp": lp, "n_wafer": n_wafer, "n_stage": len(chambers),
                     "n_chamber": chambers, "stages": job.stages, "proc_times": job.proc_times,
-                    "residency": residency, "clean_type": job.clean_type}
+                    "residency": residency, "clean_type": job.clean_type,
+                    "clean_time": job.clean_time, "trigger": job.trigger,
+                    "n_dummy": job.n_dummy, "empty_time": job.empty_time}
             man_base = {"id": i, "split": split, "file": f"inst_{i:04d}.json", "n_wafer": n_wafer,
                         "n_stage": len(chambers),
                         "n_chamber": chambers[0] if len(chambers) == 1 else chambers,

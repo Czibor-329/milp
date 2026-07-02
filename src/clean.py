@@ -408,8 +408,4 @@ def synthesize_dummy_routes(payload: Dict[str, Any]) -> Dict[str, Any]:
             "PJobNameList": orphan_names,
             "MaterialCount": total_assigned,
         })
-    log.info(
-        "synthesize_dummy_routes: jobs=%s assigned=%d",
-        pjob_names, total_assigned,
-    )
     return dummy_return_info

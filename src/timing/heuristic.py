@@ -3,7 +3,7 @@
 对外入口 start_schedule / start_schedule_by_policy 在 api.py，本模块只放其复用的内部件：
   · 评估：_decode_eval（解码→solve_timing 精确评估）、_pick_best、_eval_chooser。
   · chooser：_feed_chooser（喂片优先启发式）、_random_chooser、_greedy_chooser / _sampling_chooser（BC）。
-  · 调度：_has_clean、_heuristic_schedule（单 job 喂片 / 2+ job 配比搜 / 清洁排空 + backward 兜底）、
+  · 调度：_needs_drain、_heuristic_schedule（单 job 喂片 / 2+ job 配比搜 / 清洁排空 + backward 兜底）、
           _random_rollouts。
 """
 
@@ -55,13 +55,15 @@ def _eval_chooser(ir: Problem, durations: Durations, wafers, chooser: _Chooser,
 # --------------------------------------------------------------------------- #
 # 快速启发式定序
 # --------------------------------------------------------------------------- #
-def _has_clean(ir: Problem, wafers) -> bool:
-    """问题是否含清洁（pre/post/dummy-wac 或 stage 上的 periodic wac）。含清洁时不追求 LL 常满：
-    换出加工腔的片需落脚处，若 LL 被未加工片占满则无处可去 → 死锁；故清洁例改保守排空优先。"""
-    if ir.pre_clean or ir.post_clean or ir.dummy_wac:
-        return True
-    return any(getattr(s, "clean_time", 0.0) > 0 and getattr(s, "clean_trigger", 0) > 0
-               for w in wafers for s in w.stages)
+def _needs_drain(ir: Problem, wafers) -> bool:
+    """是否必须走「保守排空优先(backward)」而非喂片。仅 dummy-wac 清洁需要：它注入 dummy 清洁片，
+    喂片把 LL 塞满未加工片后 dummy 片/换出片无处落脚 → 死锁，故对其禁喂片、排空优先。
+
+    pre/post/periodic-wac 清洁不注入 dummy 片，喂片安全（实测正好打到 MILP 最优、腔室利用率更高），
+    故不锁排空——照单 job/多 job 的「backward 兜底 + 喂片」正常路径走。dummy 清洁(dummyclean)走多
+    route 配比路径（drain 反而更差），也不在此门内。喂片若真死锁，_eval_chooser 会自拒并保留
+    backward 地板 ⇒ 放行喂片单调不劣。"""
+    return bool(ir.dummy_wac)
 
 
 def _feed_chooser(quota: dict) -> _Chooser:
@@ -109,9 +111,9 @@ def _heuristic_schedule(ir: Problem, durations: Durations, wafers,
     routes = sorted({w.route_name for w in wafers})
     backward = _make_default_chooser(None)          # 旧固定序：排空/驻留安全，作兜底候选
 
-    if _has_clean(ir, wafers):
+    if _needs_drain(ir, wafers):
         if verbose:
-            print("[timing] 启发式：检测到清洁 → 排空优先(drain/backward)")
+            print("[timing] 启发式：dummy-wac 清洁 → 排空优先(drain/backward)")
         return _eval_chooser(ir, durations, wafers, backward, None)
 
     best = _eval_chooser(ir, durations, wafers, backward, None)   # 兜底基线

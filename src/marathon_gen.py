@@ -48,7 +48,7 @@ class JobSpec:
     清洁挂在 stage 0 的腔室上。priority 由组装方（run_marathon / build_concurrent_update）赋值。
     """
     __slots__ = ("idx", "clean_type", "stages", "proc_times", "clean_time",
-                 "empty_time", "trigger", "n_wafer", "priority", "residency")
+                 "empty_time", "trigger", "n_dummy", "n_wafer", "priority", "residency")
 
     def __init__(self, idx: int, rng: random.Random, *,
                  pm_pool: Sequence[str] = PM_CANDIDATES, stage_range: Tuple[int, int] = (1, 1),
@@ -65,6 +65,7 @@ class JobSpec:
         self.clean_time = rng.randint(CLEAN_MIN, CLEAN_MAX)
         self.empty_time = rng.randint(CLEAN_MIN, CLEAN_MAX)  # dummywac 片间 wac 时长
         self.trigger = rng.randint(1, 3)                     # wac 触发片数
+        self.n_dummy = DUMMY_PER_PM                           # 每 PM dummy 片数（带片清洁）
         self.n_wafer = WAFER_PER_JOB
         self.priority: int = idx + 1
 
@@ -218,10 +219,10 @@ def _apply_clean(route: Dict[str, Any], steps: List[Dict[str, Any]],
         route["PostPJob"] = _post_pjob(job, key)
     elif job.clean_type == "dummyclean":
         route["PrePJob"] = _pre_pjob(job, key, task="PreDummyClean",
-                                     material_count=DUMMY_PER_PM)
+                                     material_count=job.n_dummy)
     elif job.clean_type == "dummywacclean":
         route["PrePJob"] = _pre_pjob(job, key, task="PreWacClean",
-                                     material_count=DUMMY_PER_PM,
+                                     material_count=job.n_dummy,
                                      empty_recipe=_empty_recipe(job, key))
     elif job.clean_type == "wacclean":
         after = _wac_after(job, key)
@@ -268,10 +269,10 @@ def build_update_params(
         mat_ids.append(mat_id)
         mat_id += 1
 
-    # 带片清洁：注入 DummyPort 库存片（数量 = 每 PM DUMMY_PER_PM × 清洁腔室数）。
+    # 带片清洁：注入 DummyPort 库存片（数量 = 每 PM job.n_dummy × 清洁腔室数）。
     if _is_dummy_type(job):
         dummy_task = f"dummy_{key}"
-        for _ in range(DUMMY_PER_PM * len(job.clean_pms)):
+        for _ in range(job.n_dummy * len(job.clean_pms)):
             materials.append({
                 "Name": str(mat_id), "ID": mat_id, "TaskID": dummy_task,
                 "LotID": dummy_task, "FoupID": "DummyFoup", "Priority": -1,
