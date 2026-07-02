@@ -1,7 +1,7 @@
 """抽取 BC 标签：遍历数据集实例，teacher-forced 复现 MILP 服务序 → 每步 (候选特征, 专家 idx)。
 
 数据集即 dataset/test/**（swap-free，由 gen_test.py 生成）——本仓库「测试集即训练集」：同一套
-干净实例既抽标签训练、又供 eval_dataset 评测。只收「完整复现」的实例（标签自洽 + 近 MILP）。
+干净实例既抽标签训练、又供 run.py 评测。只收「完整复现」的实例（标签自洽 + 近 MILP）。
 变长候选用 padding+mask 存成 .npz。末尾按 family（stage 数 × 腔数）报覆盖率。
 
 用法：

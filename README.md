@@ -19,15 +19,20 @@ pip install -r requirements.txt
 ## 用法
 
 ```bash
-# 真实配置场景（src/input_data/*.json），并导出 MoveList
-python scripts/run_milp.py --input s1-1c1p-preclean --export
+# 数据集批量评测（默认全子集，仅 heuristic），三策略对比：random / bc / heuristic
+python scripts/run.py --strategy heuristic bc random --subsets train/2job --limit 3
 
-# 时限、打印片数
-python scripts/run_milp.py --input s2-1c1p --tl 120 --show 8
+# 真实配置场景（src/input_data/*.json）跑 MILP oracle 并导出 MoveList（旧 run_milp）
+python scripts/run.py --strategy milp --input s1-1c1p-preclean --export --tl 120
+
+# 导出各策略 MoveList + 写汇总 JSON
+python scripts/run.py --strategy heuristic --export --out eval.json
 ```
 
-求解结果含每片每 stage 的进站时刻 `a` / 取走时刻 `r`、发片顺序、swap 决策；
-`--export` 把排程铺成 MoveList 写到 `results/output/<场景>.json`。
+统一入口 `scripts/run.py` 支持四种策略（`--strategy`，可多选，`all`=random/bc/heuristic）：
+`heuristic`（快速启发式定序）、`random`（启发式基底叠随机 rollout）、`bc`（模仿学习策略）、
+`milp`（Gurobi oracle）。数据集模式与 `result.makespan`（MILP 标签）比 gap%；`--input` 单场景模式
+自检 + 导出。`--export` 把排程铺成 MoveList 写到 `results/output/<strategy>/<子集>/inst_XXXX.json`。
 
 ## 目录结构
 
@@ -45,9 +50,8 @@ src/
   log_setup.py        # 日志
   input_data/*.json   # 样例场景
 scripts/
-  run_milp.py         # MILP 入口
+  run.py              # 统一入口：策略(heuristic/random/bc/milp) × 模式(数据集批量 / 单场景) → 评测/自检/导出
   gen_test.py         # 数据集生成（YAML 案例清单 → MILP 标注，swap 关）
-  eval_dataset.py     # 数据集批量评测（固定顺序 / BC vs MILP 标签，导出 BC MoveList）
   extract_labels.py / train_bc.py       # BC 标签抽取 / 训练
   dataset/cases/*.yaml  # 生成用案例清单（逐工序腔数 × proc）
 milp_design.md        # 建模设计文档

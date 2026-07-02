@@ -58,8 +58,11 @@ from .sequencing import (
     decode_orders_choosing,
 )
 from .solve import _fill_schedule, solve_timing
-from .api import (_decode_eval, _fixed_default, _pick_best, _random_chooser,
-                  _random_rollouts, start_schedule, start_schedule_by_policy)
+from .heuristic import (_decode_eval, _eval_chooser, _feed_chooser,
+                        _greedy_chooser, _has_clean, _heuristic_schedule,
+                        _pick_best, _random_chooser, _random_rollouts,
+                        _sampling_chooser)
+from .api import start_schedule, start_schedule_by_policy
 
 __all__ = [
     "EPS", "SKIP_TYPES", "_DecodeDeadlock",
@@ -69,6 +72,8 @@ __all__ = [
     "_is_resid", "_reserve_for", "_blocked", "_build_resource_map", "_drain_completes",
     "_drain_completes_cc", "decode_orders", "decode_orders_choosing",
     "solve_timing", "_fill_schedule",
-    "_fixed_default", "_decode_eval", "_pick_best", "_random_chooser", "_random_rollouts",
+    "_heuristic_schedule", "_feed_chooser", "_has_clean", "_eval_chooser",
+    "_greedy_chooser", "_sampling_chooser",
+    "_decode_eval", "_pick_best", "_random_chooser", "_random_rollouts",
     "start_schedule", "start_schedule_by_policy",
 ]

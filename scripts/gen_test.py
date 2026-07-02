@@ -6,7 +6,7 @@
   - `chambers: [1, 3]`：逐工序腔室数；
   - `proc_times: [120, 45]`：逐工序加工时长（各工序可不同）。
 n_wafer / residency / lp 由 YAML defaults 提供，每案例可覆盖。
-落扁平 inst_XXXX.json + manifest.json（split 由 --root 决定），供 extract_labels / eval_dataset 读取。
+落扁平 inst_XXXX.json + manifest.json（split 由 --root 决定），供 extract_labels / run.py 读取。
 
 本仓库（src 核心）用法：swap 在 MILP 侧关闭（enable_swap=False），使 MILP 解落在 timing 解码
 层可表示空间内 —— 这套数据既做 BC 训练集又做评测集（测试集即训练集）。
