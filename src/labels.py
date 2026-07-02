@@ -1,8 +1,9 @@
 """BC 标签：teacher-forced 复现 MILP **选腔 + 服务序** → 每步 (候选特征, 专家选中 idx)。
 
-逐步走解码器：每步在合法候选里跟随 MILP——同一 hop 在多候选腔（loadlock LA/LB、并行 PM）下
-分裂成多个候选，专家 = 「MILP 最早发生的 hop」且「MILP 实际用的那个腔」。提交即把选中的腔写回
-该 stage（改 chamber/slot、loadlock 重算 pump/vent），使后续资源键与 MILP 一致。
+逐步走解码器：每步在合法候选里跟随 MILP——同一 hop 仅在 loadlock 多候选腔（LA/LB）下分裂成多个
+候选（加工腔 round-robin 固定单候选、不选腔，见 _chamber_pool），专家 = 「MILP 最早发生的 hop」
+且「MILP 实际用的那个腔」。提交即把选中的腔写回该 stage（改 chamber/slot、loadlock 重算 pump/vent），
+使后续资源键与 MILP 一致。
 
 **为何不再需要 Banker**：过去标签把 MILP 选腔决策丢掉、用 parse round-robin 腔重放 MILP 序 ⇒
 缝合怪死锁、被迫用 Banker 擦屁股、标签偏离 MILP、BC 天花板卡在选腔。现在 teacher 连腔一起复现，
@@ -58,7 +59,7 @@ def _replay_record(ir, tm, wafers, rtime, milp_ch
 
     候选：每片当前 hop 按其去向 stage 的候选腔（有空槽者）分裂成多个 _Cand（dest=(腔,槽)）；
     专家：MILP 最早发生的 hop 且用 MILP 那个腔。banker=False 纯跟随（MILP 序+腔可行无死锁）。"""
-    from src.timing import _Cand, _DecodeState, _resource, _stage_dwell, _hop_span
+    from src.timing import _Cand, _DecodeState, _resource, _stage_dwell, _hop_span, _chamber_pool
 
     wafers = _clone_wafers(wafers)
     wmap = {w.wid: w for w in wafers}
@@ -101,7 +102,7 @@ def _replay_record(ir, tm, wafers, rtime, milp_ch
                 cands.append(_Cand(wid, j, None, rob, start))
                 continue
             nxt = w.stages[j + 1]
-            pool = list(nxt.cands) if len(nxt.cands) > 1 else [nxt.chamber]
+            pool = _chamber_pool(nxt)                     # 仅 loadlock 多候选选腔；加工腔 round-robin 固定
             for cc in pool:                              # 每个有空槽的候选腔 → 一个候选
                 slot = _free_slot(cc)
                 if slot is not None:

@@ -628,6 +628,7 @@ class _RouteTmpl:
     transports: List[str]           # hop -> robot
     pre_clean: List[CleanSpec] = field(default_factory=list)
     post_clean: List[CleanSpec] = field(default_factory=list)
+    dummy_wac: List[CleanSpec] = field(default_factory=list)
 
 
 def _clean_specs(table: Mapping[str, Any]) -> List[CleanSpec]:
@@ -637,6 +638,19 @@ def _clean_specs(table: Mapping[str, Any]) -> List[CleanSpec]:
         key = (float(spec.get("duration") or 0), str(spec.get("recipe") or ""), str(spec.get("task") or ""))
         grouped.setdefault(key, []).append(str(pm))
     return [CleanSpec(visits=pms, time=k[0], recipe=k[1], task=k[2]) for k, pms in grouped.items()]
+
+
+def _dummy_wac_specs(table: Mapping[str, Any]) -> List[CleanSpec]:
+    """dummy_clean_by_pm 表 → dummy-wac CleanSpec（time=empty_duration）。
+    只取有 empty_duration 的 PM（dummywacclean 才带）；dummy 清洁本身是合成 dummy 晶圆、不在此。"""
+    grouped: Dict[Tuple[float, str], List[str]] = {}
+    for pm, spec in (table or {}).items():
+        edur = spec.get("empty_duration")
+        if not edur:
+            continue
+        key = (float(edur), str(spec.get("empty_recipe") or ""))
+        grouped.setdefault(key, []).append(str(pm))
+    return [CleanSpec(visits=pms, time=k[0], recipe=k[1], task="") for k, pms in grouped.items()]
 
 
 def _build_route_tmpl(
@@ -684,6 +698,7 @@ def _build_route_tmpl(
         transports=[str(t) for t in transports],
         pre_clean=_clean_specs(entry.get("pre_clean_by_pm") or {}),
         post_clean=_clean_specs(entry.get("post_clean_by_pm") or {}),
+        dummy_wac=_dummy_wac_specs(entry.get("dummy_clean_by_pm") or {}),
     )
 
 
@@ -768,6 +783,7 @@ def _problem_from_payload(payload: Mapping[str, Any]) -> Problem:
     problem.wafers = _expand_wafers(chambers, dur, routes, pjob_assignments)
     problem.pre_clean = [s for name in route_order for s in routes[name].pre_clean]
     problem.post_clean = [s for name in route_order for s in routes[name].post_clean]
+    problem.dummy_wac = [s for name in route_order for s in routes[name].dummy_wac]
     return problem
 
 

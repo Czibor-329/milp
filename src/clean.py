@@ -135,6 +135,7 @@ def resolve_route_clean(
                     edur = recipe_idx.get((spec["empty_recipe"], pm))
                     if edur is not None:
                         entry["empty_duration"] = int(round(edur))
+                        entry["empty_recipe"] = str(spec["empty_recipe"])
                 dummy_table[pm] = entry
             if dummy_table:
                 r["dummy_clean_by_pm"] = dummy_table

@@ -6,15 +6,17 @@
   - `chambers: [1, 3]`：逐工序腔室数；
   - `proc_times: [120, 45]`：逐工序加工时长（各工序可不同）。
 n_wafer / residency / lp 由 YAML defaults 提供，每案例可覆盖。
-落扁平 inst_XXXX.json + manifest.json（全 split=test），供 extract_labels / eval_dataset 读取。
+落扁平 inst_XXXX.json + manifest.json（split 由 --root 决定），供 extract_labels / eval_dataset 读取。
 
 本仓库（src 核心）用法：swap 在 MILP 侧关闭（enable_swap=False），使 MILP 解落在 timing 解码
 层可表示空间内 —— 这套数据既做 BC 训练集又做评测集（测试集即训练集）。
 
 用法:
-  venv/Scripts/python.exe scripts/gen_test.py --cases dataset/cases/3stage.yaml --out 3stage
+  python scripts/gen_test.py --cases dataset/cases/3stage.yaml --out 3stage
   # 晶圆数多、MILP 跑不完时，只生成测试案例（不求解、无 movelist）：
-  venv/Scripts/python.exe scripts/gen_test.py --cases dataset/cases/3stage.yaml --out 3stage --no-milp
+  python scripts/gen_test.py --cases dataset/cases/3stage.yaml --out 3stage --no-milp
+  # 含清洁的有标签网格（写到 dataset/train/clean，eval 报 gap）：
+  python scripts/gen_test.py --cases dataset/cases/clean.yaml --out clean --root train --clean
 """
 
 import argparse, io, json, random, sys, time
@@ -27,13 +29,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.marathon_gen import (
     JobSpec, build_update_params, build_concurrent_update, job_process_recipes,
-    expand_topo_pms, PM_POOL_6, LP_POOL,
+    expand_topo_pms, PM_POOL_6, LP_POOL, CLEAN_TYPES,
 )
 from src.parse import parse_task, load_alg_entries
 from src.milp import solve_milp
 from src.export import check_solution, export_movelist
 from src.timing import start_schedule
-from src.paths import input_data_path, TEST_ROOT
+from src.paths import input_data_path, TEST_ROOT, TRAIN_DIR
 
 BASE_TOPO = "s1-1c1p-preclean"
 
@@ -67,25 +69,31 @@ def load_cases(path):
     return defaults, cases
 
 
-def build_instance(chambers, proc_times, n_wafer, residency, lp, seed):
-    """逐工序腔室数 = chambers，互斥切片 PM_POOL_6，proc_times 逐工序取值。确定性构造。"""
+def build_instance(chambers, proc_times, n_wafer, residency, lp, seed,
+                   clean=False, clean_type=None):
+    """逐工序腔室数 = chambers，互斥切片 PM_POOL_6，proc_times 逐工序取值。确定性构造。
+    clean=True 时挂清洁（clean_type 指定则固定该类型，否则 JobSpec 随机抽）。"""
     rng = random.Random(seed)
     stages, off = [], 0
     for c in chambers:
         stages.append(list(PM_POOL_6[off:off + c])); off += c
     job = JobSpec(0, rng, pm_pool=PM_POOL_6, stage_range=(len(chambers), len(chambers)),
-                  clean=False, residency=residency)
+                  clean=clean, residency=residency)
     job.stages = stages
     job.proc_times = [int(p) for p in proc_times]
     job.n_wafer = int(n_wafer)
+    if clean and clean_type:
+        job.clean_type = clean_type
     up, _ = build_update_params(job, 1, 1, lp, 0, 0.0,
                                 process_recipes=job_process_recipes(job, 1))
     return job, up
 
 
-def build_multi_instance(jobs_cfg, n_wafer_default, residency, seed):
+def build_multi_instance(jobs_cfg, n_wafer_default, residency, seed,
+                         clean=False, clean_type=None):
     """多 job（不同 recipe、加工腔不相交）：PM_POOL_6 跨 job 连续切片不重用，仅共享 VTR + loadlock。
-    复用 build_concurrent_update（合并 routes/pjobs/cjobs/recipes、各 job 轮分 LP、同优并发）。确定性。"""
+    复用 build_concurrent_update（合并 routes/pjobs/cjobs/recipes、各 job 轮分 LP、同优并发）。确定性。
+    清洁按 job：case.jobs[k].clean / clean_type 优先，否则用全局 clean/clean_type。"""
     rng = random.Random(seed)
     jobs, off = [], 0
     for k, jc in enumerate(jobs_cfg):
@@ -93,11 +101,15 @@ def build_multi_instance(jobs_cfg, n_wafer_default, residency, seed):
         stages = []
         for c in chambers:
             stages.append(list(PM_POOL_6[off:off + c])); off += c   # 跨 job 累进 off ⇒ 加工腔不相交
+        jclean = bool(jc.get("clean", clean))
         job = JobSpec(k, rng, pm_pool=PM_POOL_6, stage_range=(len(chambers), len(chambers)),
-                      clean=False, residency=int(jc.get("residency", residency)))
+                      clean=jclean, residency=int(jc.get("residency", residency)))
         job.stages = stages
         job.proc_times = [int(p) for p in jc["proc_times"]]
         job.n_wafer = int(jc.get("n_wafer", n_wafer_default))
+        jct = jc.get("clean_type", clean_type)
+        if jclean and jct:
+            job.clean_type = jct
         jobs.append(job)
     up = build_concurrent_update(jobs, rng, lps=LP_POOL)
     return jobs, up
@@ -115,7 +127,9 @@ def solve_label(ir, tl, warm, verbose, probe):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cases", type=str, required=True, help="YAML 案例清单路径")
-    ap.add_argument("--out", type=str, default=None, help="保存路径(相对 TEST_ROOT)")
+    ap.add_argument("--out", type=str, default=None, help="保存子集名(相对 --root 指定的根)")
+    ap.add_argument("--root", choices=["test", "train"], default="test",
+                    help="输出根：test=dataset/test（外推/无标签默认），train=dataset/train（有标签网格，eval 报 gap）")
     ap.add_argument("--tl", type=float, default=100.0, help="单实例 MILP 时限(秒)")
     ap.add_argument("--probe", type=float, default=12.0,
                     help="free 探针时限(秒)：判 loadlock 饱和 vs 空闲（饱和例信 fix、瞬解）")
@@ -123,10 +137,16 @@ def main():
     ap.add_argument("--no-milp", action="store_true",
                     help="只生成测试案例（instance + spec + update_params），不跑 MILP 求解/标注/movelist。"
                          "晶圆数变多时 MILP 跑不完，用此选项产出纯测试集。")
+    ap.add_argument("--clean", action="store_true",
+                    help="启用清洁生成（默认关）；每 case 随机清洁类型，或用 --clean-type / case.clean_type 指定")
+    ap.add_argument("--clean-type", type=str, default=None, choices=CLEAN_TYPES,
+                    help="强制所有 case 用同一清洁类型（"
+                         "preclean/postclean/dummyclean/dummywacclean/wacclean），便于逐类型冒烟")
     args = ap.parse_args()
 
     defaults, cases = load_cases(args.cases)
-    out = Path(TEST_ROOT / args.out)
+    split = args.root
+    out = Path((TRAIN_DIR if args.root == "train" else TEST_ROOT) / args.out)
     out.mkdir(parents=True, exist_ok=True)
 
     alg_init, _ = load_alg_entries(input_data_path(BASE_TOPO))
@@ -139,13 +159,15 @@ def main():
     for i, case in enumerate(cases):
         residency = int(case.get("residency", defaults["residency"]))
         if "jobs" in case:                            # 多 job：不同 recipe、加工腔不相交，仅共享 VTR+loadlock
-            jobs, up = build_multi_instance(case["jobs"], defaults["n_wafer"], residency, seed=i)
+            jobs, up = build_multi_instance(case["jobs"], defaults["n_wafer"], residency, seed=i,
+                                            clean=args.clean, clean_type=args.clean_type)
             spec = {"n_jobs": len(jobs), "residency": residency,
                     "jobs": [{"n_chamber": list(jc["chambers"]),
                               "proc_times": [int(p) for p in jc["proc_times"]],
-                              "n_wafer": jb.n_wafer, "stages": jb.stages}
+                              "n_wafer": jb.n_wafer, "stages": jb.stages,
+                              "clean_type": jb.clean_type}
                              for jc, jb in zip(case["jobs"], jobs)]}
-            man_base = {"id": i, "split": "test", "file": f"inst_{i:04d}.json", "n_jobs": len(jobs),
+            man_base = {"id": i, "split": split, "file": f"inst_{i:04d}.json", "n_jobs": len(jobs),
                         "configs": [list(jc["chambers"]) for jc in case["jobs"]]}
             head = (f"[{i+1:2d}/{total}] jobs×{len(jobs)} "
                     f"{' | '.join('·'.join(map(str, jc['chambers'])) for jc in case['jobs']):16s} 求解中…")
@@ -153,11 +175,14 @@ def main():
             chambers = list(case["chambers"]); proc_times = [int(p) for p in case["proc_times"]]
             n_wafer = int(case.get("n_wafer", defaults["n_wafer"]))
             lp = case.get("lp", defaults["lp"])
-            job, up = build_instance(chambers, proc_times, n_wafer, residency, lp, seed=i)
+            c_clean = bool(case.get("clean", args.clean)) or bool(case.get("clean_type"))
+            c_type = case.get("clean_type", args.clean_type)
+            job, up = build_instance(chambers, proc_times, n_wafer, residency, lp, seed=i,
+                                     clean=c_clean, clean_type=c_type)
             spec = {"lp": lp, "n_wafer": n_wafer, "n_stage": len(chambers),
                     "n_chamber": chambers, "stages": job.stages, "proc_times": job.proc_times,
-                    "residency": residency}
-            man_base = {"id": i, "split": "test", "file": f"inst_{i:04d}.json", "n_wafer": n_wafer,
+                    "residency": residency, "clean_type": job.clean_type}
+            man_base = {"id": i, "split": split, "file": f"inst_{i:04d}.json", "n_wafer": n_wafer,
                         "n_stage": len(chambers),
                         "n_chamber": chambers[0] if len(chambers) == 1 else chambers,
                         "config": chambers, "proc": proc_times[0], "proc_times": proc_times}
@@ -167,7 +192,7 @@ def main():
 
         if args.no_milp:                              # 纯测试集：不跑 MILP（晶圆多时跑不完），instance 无标注/movelist
             rec = {
-                "id": i, "split": "test",
+                "id": i, "split": split,
                 "spec": spec,
                 "update_params": up,
                 "result": {"status": None, "makespan": float("nan"), "gap": float("nan"),
@@ -200,7 +225,7 @@ def main():
         n_nonopt += int(not optimal)
 
         rec = {
-            "id": i, "split": "test",
+            "id": i, "split": split,
             "spec": spec,
             "update_params": up,
             "result": {"status": res.status, "makespan": res.makespan, "gap": res.gap,

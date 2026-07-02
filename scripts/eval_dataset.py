@@ -55,7 +55,7 @@ from src.policy import load_policy
 BASE_TOPO = "s1-1c1p-preclean"
 # 数据集重组后子集用「目录/名」限定：train/* 为有 MILP 标签的配置网格（报 gap），
 # test/* 为更大规模外推实例（MILP 超时/无标签，只跑 timing/BC、不计入 gap 统计）。
-SUBSETS = ["train/1stage", "train/2stage", "train/3stage", "train/2job", "test/1stage"]
+SUBSETS = ["train/1stage", "train/2stage", "train/3stage", "train/2job", "train/clean", "test/1stage"]
 _DATASET = Path(__file__).resolve().parents[1] / "dataset"
 _BC_OUT = OUTPUT_DIR / "bc"
 

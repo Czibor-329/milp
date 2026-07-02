@@ -217,4 +217,28 @@ def check_solution(task: Problem, res: SolveResult) -> List[str]:
             state = "VAC" if lt == "entry" else "ATM"  # entry 抽到真空、exit 充到大气
             prev_en = en
 
+    # (Clean) 清洁时间预留：pre 落首片前、post 落末片后、wac/dummy-wac 落锚点两片之间，
+    # 校验预留间隙足够（Part A/C 的独立复核）。占腔窗口口径同 (C)/export。
+    def _cocc_s(wid: int, j: int) -> float:
+        s = wafers[wid].stages[j]; _, c, av, _ = sched[wid][j]
+        return av - (tm.place_t(s.in_robot, c) + tm.place_pre(s.in_robot, c) if s.in_robot else 0.0)
+
+    def _cocc_e(wid: int, j: int) -> float:
+        s = wafers[wid].stages[j]; _, c, _, rv = sched[wid][j]
+        return rv + (tm.pick_t(s.out_robot, c) + tm.pick_post(s.out_robot, c) if s.out_robot else 0.0)
+
+    for cl in _clean_specs(task, list(wafers.values())):
+        if cl.kind == "pre":
+            s0 = _cocc_s(*cl.before)
+            if s0 + eps < cl.dur:
+                issues.append(f"Clean pre 腔{cl.chamber}: 首片占腔起点 {s0:.1f} < 前清洁 {cl.dur:.1f}")
+        elif cl.kind == "post":
+            end = _cocc_e(*cl.after) + cl.dur
+            if res.makespan + eps < end:
+                issues.append(f"Clean post 腔{cl.chamber}: makespan {res.makespan:.1f} < 末片占腔终点+后清洁 {end:.1f}")
+        else:  # wac / dummy-wac
+            e_prev, s_next = _cocc_e(*cl.after), _cocc_s(*cl.before)
+            if s_next + eps < e_prev + cl.dur:
+                issues.append(f"Clean wac 腔{cl.chamber}: 片间隙 {s_next - e_prev:.1f} < 清洁 {cl.dur:.1f}")
+
     return issues

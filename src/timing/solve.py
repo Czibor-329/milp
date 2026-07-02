@@ -4,6 +4,7 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 from src.milp import SolveResult
+from src.milp_clean import _clean_specs
 from src.model import Durations, Problem
 
 from .graph import _Nodes, _bellman_ford_longest
@@ -92,6 +93,28 @@ def solve_timing(ir: Problem, wafers=None, *, orders: Optional[_Orders] = None,
             edges.append((tail, head, gap))
             tagged.append((tail, head, gap, "R", rob, (wid_prev, j_prev), (wid_next, j_next)))
 
+    # 清洁时间预留（与 MILP Part A 一一对应，只加时间边、不改占腔顺序/不加资源）：
+    #   pre  → 源点绝对下界：a(首片) ≥ pre_dur + place（占腔起点不早于 pre_dur）
+    #   wac / dummy-wac → 前后片占腔间隙：a(后片) ≥ r(前片) + (pick+place 门) + dur
+    #   post → makespan 后调（占腔终点 + post_dur），在 _fill_schedule 之后统一取 max
+    post_events = []
+    for cl in _clean_specs(ir, wafers):
+        c = cl.chamber
+        if cl.kind == "pre":
+            wb, jb = cl.before
+            sb = wmap[wb].stages[jb]
+            floor = cl.dur + (tm.place_t(sb.in_robot, c) + tm.place_pre(sb.in_robot, c) if sb.in_robot else 0.0)
+            edges.append((nodes.source, nodes.a(wb, jb), floor))
+        elif cl.kind == "post":
+            post_events.append(cl)
+        else:  # wac / dummy-wac：占腔终点(前片) + 门间隙 + dur ≤ 占腔起点(后片)
+            wa, ja = cl.after
+            wb, jb = cl.before
+            sa, sb = wmap[wa].stages[ja], wmap[wb].stages[jb]
+            gap = (tm.pick_t(sa.out_robot, c) + tm.pick_post(sa.out_robot, c)
+                   + tm.place_t(sb.in_robot, c) + tm.place_pre(sb.in_robot, c) + cl.dur)
+            edges.append((nodes.r(wa, ja), nodes.a(wb, jb), gap))
+
     # 求解：含驻留后向边的全图
     dist, ok = _bellman_ford_longest(len(nodes), edges + res_edges)
 
@@ -102,6 +125,12 @@ def solve_timing(ir: Problem, wafers=None, *, orders: Optional[_Orders] = None,
 
     if ok:
         _fill_schedule(res, wafers, nodes, dist)
+        for cl in post_events:                     # 后清洁计入 makespan（末片占腔终点 + post_dur）
+            wa, ja = cl.after
+            sa = wmap[wa].stages[ja]
+            end = (dist[nodes.r(wa, ja)] + tm.pick_t(sa.out_robot, cl.chamber)
+                   + tm.pick_post(sa.out_robot, cl.chamber) + cl.dur)
+            res.makespan = max(res.makespan, end)
         res._dist = dist                           # type: ignore[attr-defined]
         res._tagged = tagged                       # type: ignore[attr-defined]
         if verbose:

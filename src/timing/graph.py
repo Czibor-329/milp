@@ -35,6 +35,9 @@ class _Nodes:
                 self._add(w.wid, "a", j)                    # a 节点：0..K，比 r 多一个（终点只到不走）
             for j in range(K):
                 self._add(w.wid, "r", j)                    # r 节点：0..K-1
+        # 源点哨兵：固定为 0（无入边，Bellman-Ford 恒不被抬高），供清洁 pre 的绝对下界建边用
+        self.source = len(self.label)
+        self.label.append((-1, "src", 0))
 
     def _add(self, wid: int, kind: str, j: int) -> None:
         key = (wid, kind, j)

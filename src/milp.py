@@ -4,6 +4,7 @@ from typing import Dict, List, Optional, Tuple
 import gurobipy as gp
 from gurobipy import GRB
 
+from src.milp_clean import _clean_specs
 from src.model import Durations, Problem, Stage, Wafer
 
 # --------------------------------------------------------------------------- #
@@ -289,6 +290,25 @@ def solve_milp(task: Problem, *, time_limit: float = 10.0, verbose: bool = False
     Cmax = m.addVar(lb=0.0, ub=M, name="Cmax")
     for w in wafers:
         m.addConstr(Cmax >= a[w.wid, len(w.stages) - 1], name=f"cmax_{w.wid}")
+
+    # 清洁时间预留：pre/post/wac 折成占腔时间约束（腔固定、锚点固定 → 无 0/1，不改搜索结构）。
+    #   pre  : 首片占腔起点 ≥ pre_dur（腔在前清洁完成前不可放片，清洁从 t=0 起）
+    #   wac  : 后片占腔起点 ≥ 前片占腔终点 + wac_dur（两片间预留无片清洗；dummy-wac 同走此支）
+    #   post : makespan ≥ 末片占腔终点 + post_dur（后清洁计入 makespan）
+    #   dummy 清洁本身是合成 dummy 晶圆、随 wafers 正常排；占腔窗口用已定义的 occ_start/occ_end。
+    wmap = {w.wid: w for w in wafers}
+    for cl in _clean_specs(task, wafers):
+        if cl.kind == "pre":
+            wb, jb = cl.before
+            m.addConstr(occ_start(wmap[wb], jb) >= cl.dur, name=f"CLNpre_{cl.chamber}_{wb}")
+        elif cl.kind == "post":
+            wa, ja = cl.after
+            m.addConstr(Cmax >= occ_end(wmap[wa], ja) + cl.dur, name=f"CLNpost_{cl.chamber}_{wa}")
+        else:  # wac / dummy-wac
+            wa, ja = cl.after
+            wb, jb = cl.before
+            m.addConstr(occ_start(wmap[wb], jb) >= occ_end(wmap[wa], ja) + cl.dur,
+                        name=f"CLNwac_{cl.chamber}_{wa}_{wb}")
 
     m.setObjective(Cmax, GRB.MINIMIZE)
     m.optimize()

@@ -331,6 +331,15 @@ def decode_orders(ir: Problem, tm: Durations, wafers, *,
 # 的 decode_orders 分开实现——后者是热点、口径严格零回归，不掺动态腔分支。labels 的 teacher 复现
 # 走同一候选口径（跟随 MILP 腔），policy 推理走本函数（网络打分选腔）。
 # --------------------------------------------------------------------------- #
+def _chamber_pool(nxt) -> List[str]:
+    """去向 stage 的候选腔池（供 BC 选腔解码/标签 teacher/banker 谕示统一口径）：
+    仅 loadlock 放开多候选让策略选腔；加工腔按 round-robin 固定单候选（加工腔不选腔）。
+    source/sink/skip 去向由 _resource 返回 None 提前拦掉，不进本函数。"""
+    if nxt.stage_type == "loadlock" and len(nxt.cands) > 1:
+        return list(nxt.cands)
+    return [nxt.chamber]
+
+
 def _free_slot(ir: Problem, occ: dict, cc: str) -> Optional[int]:
     """腔 cc 里最小的空槽（0-based），无空槽返回 None。"""
     ch = ir.chambers.get(cc)
@@ -359,7 +368,7 @@ def _drain_completes_cc(ir: Problem, wmap, K, pos, occ, dsel) -> bool:
             chosen = None
             if base is not None:                       # 去向是资源腔：需一个空候选腔
                 nxt = w.stages[p + 1]
-                pool = list(nxt.cands) if len(nxt.cands) > 1 else [nxt.chamber]
+                pool = _chamber_pool(nxt)
                 for cc in pool:
                     s = _free_slot(ir, occ, cc)
                     if s is not None:
@@ -432,7 +441,7 @@ def decode_orders_choosing(ir: Problem, tm: Durations, wafers, *,
                 cands.append(_Cand(wid, j, None, rob, start))
                 continue
             nxt = w.stages[j + 1]
-            pool = list(nxt.cands) if len(nxt.cands) > 1 else [nxt.chamber]
+            pool = _chamber_pool(nxt)
             for cc in pool:
                 s = _free_slot(ir, occ, cc)
                 if s is not None:
