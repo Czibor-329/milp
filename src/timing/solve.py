@@ -4,7 +4,7 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 from src.milp import SolveResult
-from src.milp_clean import _clean_specs
+from src.milp_clean import _clean_specs, _dummy_order_pairs
 from src.model import Durations, Problem
 
 from .graph import _Nodes, _bellman_ford_longest
@@ -12,17 +12,9 @@ from .sequencing import _Orders, decode_orders
 from .spans import _hop_span, _ll_reuse_setup, _robot_switch_gap, _stage_dwell
 
 
-def solve_timing(ir: Problem, wafers=None, *, orders: Optional[_Orders] = None,
-                 release_interval: float = 0.0, verbose: bool = False) -> SolveResult:
-    """对固定顺序求最早时刻。返回 SolveResult，并附加：
-         res.feasible（bool）、res.residency_violations（[(wid,j,腔,实际驻留,上限)]）。
-
-    release_interval：同 route 相邻两片发片(r0)的最小间隔。0=尽快发片；>0 用于节流发片
-    （降低在制品 WIP），让驻留腔有时间被腾空。"""
+def solve_timing(ir: Problem, wafers, orders: Optional[_Orders]=None) -> SolveResult:
     t_start = time.perf_counter()
     tm = Durations(ir)
-    if wafers is None:
-        wafers = ir.wafers
     wmap = {w.wid: w for w in wafers}
     nodes = _Nodes(wafers)
     if orders is None:
@@ -52,7 +44,7 @@ def solve_timing(ir: Problem, wafers=None, *, orders: Optional[_Orders] = None,
     for ws in by_route.values():
         ws.sort(key=lambda x: x.wid)
         for lo, hi in zip(ws, ws[1:]):
-            edges.append((nodes.r(lo.wid, 0), nodes.r(hi.wid, 0), release_interval))
+            edges.append((nodes.r(lo.wid, 0), nodes.r(hi.wid, 0), 0.0))
 
     # tagged：带「资源键 + 两端 op」标注的 cross-wafer 互斥边，供 _critical_resources 提瓶颈。
     tagged: List[Tuple[int, int, float, str, str, Tuple[int, int], Tuple[int, int]]] = []
@@ -76,6 +68,28 @@ def solve_timing(ir: Problem, wafers=None, *, orders: Optional[_Orders] = None,
             # tail + gap <= head
             edges.append((tail, head, gap))
             tagged.append((tail, head, gap, "C", chamber, (wid_leave, j_leave), (wid_enter, j_enter)))
+
+    # loadlock swap 跨槽压力态：LL 双槽按方向分槽（上=entry 未加工 / 下=exit 已加工），异型占用
+    # 可共存——如真空手先把已加工片放进下槽、再取走上槽的未加工片。上方腔互斥退化为同槽内
+    # （同型复用，_ll_reuse_setup 兼作空抽/空充与异型夹层的转换时长，口径不变）；异型相邻占用
+    # 按解码提交序补两条压力边（LL 整腔单一压力态）：
+    #   ① 后片进腔开门前，前片的抽/充须已完成（异型 ⇒ 前片转换后的压力态恰是后片所需）：
+    #      a(v) ≥ a(u) + place_post(u) + proc(u) + place(v) + place_pre(v)
+    #   ② 后片的抽/充须等前片离腔关门（不能带着前片翻压力态）：
+    #      r(v) ≥ r(u) + pick(u) + pick_post(u) + proc(v) + pick_pre(v)
+    # 非共存（v 在 u 离腔后才进）时两边弱于常规 P/C 边，自动不 binding。
+    for c, seq in orders.ll_seq.items():
+        for (wu, ju), (wv, jv) in zip(seq, seq[1:]):
+            su, sv = wmap[wu].stages[ju], wmap[wv].stages[jv]
+            if wu == wv or su.ll_type == sv.ll_type:
+                continue                       # 同片 precedence 已序；同型=同槽，上方 C 边已管
+            w1 = ((tm.place_post(su.in_robot, c) if su.in_robot else 0.0) + su.proc
+                  + (tm.place_t(sv.in_robot, c) + tm.place_pre(sv.in_robot, c) if sv.in_robot else 0.0))
+            edges.append((nodes.a(wu, ju), nodes.a(wv, jv), w1))
+            w2 = ((tm.pick_t(su.out_robot, c) + tm.pick_post(su.out_robot, c) if su.out_robot else 0.0)
+                  + sv.proc + (tm.pick_pre(sv.out_robot, c) if sv.out_robot else 0.0))
+            edges.append((nodes.r(wu, ju), nodes.r(wv, jv), w2))
+            tagged.append((nodes.r(wu, ju), nodes.r(wv, jv), w2, "C", c, (wu, ju), (wv, jv)))
 
     # 机器手互斥：顺序确定后，前一跳(prev)把片落位后，机器手隔 gap 才能开始下一跳(next)的取片
     # r[next] ≥ a[prev] + gap
@@ -115,6 +129,15 @@ def solve_timing(ir: Problem, wafers=None, *, orders: Optional[_Orders] = None,
                    + tm.place_t(sb.in_robot, c) + tm.place_pre(sb.in_robot, c) + cl.dur)
             edges.append((nodes.r(wa, ja), nodes.a(wb, jb), gap))
 
+    # dummy 清洁段定序（与 MILP CLNdord 一一对应）：同腔 前一 job → dummy 段 → 本 job，
+    # 纯定序时间边（仅门间隙，无清洁时长；dummy-wac 时长已在上方 wac 支路）。
+    for (wa, ja), (wb, jb) in _dummy_order_pairs(ir, wafers):
+        sa, sb = wmap[wa].stages[ja], wmap[wb].stages[jb]
+        c = sa.chamber
+        gap = (tm.pick_t(sa.out_robot, c) + tm.pick_post(sa.out_robot, c)
+               + tm.place_t(sb.in_robot, c) + tm.place_pre(sb.in_robot, c))
+        edges.append((nodes.r(wa, ja), nodes.a(wb, jb), gap))
+
     # 求解：含驻留后向边的全图
     dist, ok = _bellman_ford_longest(len(nodes), edges + res_edges)
 
@@ -133,16 +156,11 @@ def solve_timing(ir: Problem, wafers=None, *, orders: Optional[_Orders] = None,
             res.makespan = max(res.makespan, end)
         res._dist = dist                           # type: ignore[attr-defined]
         res._tagged = tagged                       # type: ignore[attr-defined]
-        if verbose:
-            print(f"[timing] 可行  makespan={res.makespan:.2f}  "
-                  f"用时={res.runtime*1000:.1f} ms  节点={len(nodes)}  边={len(edges)+len(res_edges)}")
         return res
 
     # 不可行：去掉驻留边再求一次，用来区分「真死锁」和「纯粹驻留超限」
     dist0, ok0 = _bellman_ford_longest(len(nodes), edges)
     if not ok0:
-        if verbose:
-            print(f"[timing] 不可行：资源次序自相矛盾(疑似死锁)，非驻留所致。用时={res.runtime*1000:.1f} ms")
         return res
     viols = []
     for w in wafers:
@@ -154,10 +172,6 @@ def solve_timing(ir: Problem, wafers=None, *, orders: Optional[_Orders] = None,
                 if hold > limit + 1e-4:
                     viols.append((w.wid, j, s.chamber, round(hold, 2), round(limit, 2)))
     res.residency_violations = viols               # type: ignore[attr-defined]
-    if verbose:
-        print(f"[timing] 不可行：{len(viols)} 处超驻留。用时={res.runtime*1000:.1f} ms")
-        for wid, j, c, hold, lim in viols[:10]:
-            print(f"         w{wid} stage{j} 腔{c}: 实际占用 {hold} > 上限 {lim}")
     return res
 
 

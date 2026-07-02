@@ -4,24 +4,45 @@ from __future__ import annotations
 
 from typing import Optional, List
 
+import random
+
 from src.export import check_solution
 from src.milp import SolveResult
 from src.model import Durations, Problem
 
-from ._common import _DecodeDeadlock
-from .chambers import _chamber_opt_budgets, optimize_chambers
+from ._common import EPS, _DecodeDeadlock
 from .solve import solve_timing
 from .sequencing import _Cand, _DecodeState, _Chooser, decode_orders, decode_orders_choosing
 
 def _fixed_default(ir: Problem, durations: Durations, wafers, verbose: bool) -> SolveResult:
     """原始默认（backward）定序 + 驻留预留回退（不动 loadlock 分配）。"""
-    res = solve_timing(ir, wafers, verbose=verbose)
+    res = solve_timing(ir, wafers)
     if not getattr(res, "feasible", False) and getattr(res, "residency_violations", []):
         if verbose:
             print("[timing] 快序超驻留 → 回退驻留预留定序(reserve=True)重排。")
         orders = decode_orders(ir, durations, wafers, reserve=True)
-        res = solve_timing(ir, wafers, orders=orders, verbose=verbose)
+        res = solve_timing(ir, wafers, orders=orders)
     return res
+
+
+def _pick_best(a: Optional[SolveResult], b: Optional[SolveResult]) -> Optional[SolveResult]:
+    """两个候选结果取 makespan 更优的可行者；都不可行/None 时保 a。"""
+    if b is None or not getattr(b, "feasible", False):
+        return a
+    if a is None or not getattr(a, "feasible", False):
+        return b
+    return b if b.makespan < a.makespan - EPS else a
+
+
+def _decode_eval(ir: Problem, durations: Durations, wafers, *, swap: bool = False,
+                 chooser: Optional[_Chooser] = None) -> Optional[SolveResult]:
+    """一次「解码 → solve_timing 精确评估」：可行返回结果，解码死锁/排不出返回 None。"""
+    try:
+        orders = decode_orders(ir, durations, wafers, chooser=chooser, swap=swap)
+    except (RuntimeError, _DecodeDeadlock):
+        return None
+    r = solve_timing(ir, wafers, orders=orders)
+    return r if getattr(r, "feasible", False) else None
 
 def _greedy_chooser(policy) -> _Chooser:
     """策略 chooser：对每候选打分，返回分数降序的偏好序（Banker 在解码循环里再保证无死锁）。"""
@@ -32,6 +53,35 @@ def _greedy_chooser(policy) -> _Chooser:
         return sorted(range(len(cands)), key=lambda i: -float(scores[i]))
 
     return chooser
+
+
+def _random_chooser(rng: random.Random) -> _Chooser:
+    """随机定序 chooser：每步给合法候选一个均匀随机偏好序。解码循环的 Banker 安全掩码会沿
+    该序回退——随机首选会导致死锁时自动跳到下一个安全候选，故任意随机序都解出可行占用序。"""
+    def chooser(state: _DecodeState, cands: List[_Cand]) -> List[int]:
+        order = list(range(len(cands)))
+        rng.shuffle(order)
+        return order
+    return chooser
+
+
+def _random_rollouts(ir: Problem, durations: Durations, wafers, base: Optional[SolveResult],
+                     *, n: int, seed: int, verbose: bool) -> Optional[SolveResult]:
+    """在给定腔分配基底上做 n 次随机定序 rollout（Banker 保证无死锁；放开 LL swap 空间——
+    它严格包含 no-swap 的可行序），solve_timing 精确评估，与 base 取 makespan 最优可行
+    （不满足要求——死锁/驻留超限/更差——即回退到已有最优）。"""
+    rng = random.Random(seed)
+    best = base
+    picked = 0
+    for _ in range(max(n, 0)):
+        r = _decode_eval(ir, durations, wafers, swap=True, chooser=_random_chooser(rng))
+        if r is not None and (best is None or not getattr(best, "feasible", False)
+                              or r.makespan < best.makespan - EPS):
+            best, picked = r, picked + 1
+    if verbose and n > 0:
+        mk = best.makespan if best is not None and getattr(best, "feasible", False) else float("nan")
+        print(f"[timing] 随机定序 rollout ×{n}：采纳 {picked} 次改进 → makespan={mk:.2f}")
+    return best
 
 
 def _sampling_chooser(policy, rng, temp: float) -> _Chooser:
@@ -47,46 +97,33 @@ def _sampling_chooser(policy, rng, temp: float) -> _Chooser:
 
     return chooser
 
-def start_schedule(ir: Problem, *, verbose: bool = True, cross_check: bool = True,
-                   optimize_ll: bool = True, ll_budget: float = 1.0,
-                   seed: int = 0, refine_budget: Optional[float] = None) -> SolveResult:
+def start_schedule(ir: Problem, *, verbose: bool = True, seed: int = 0, random_orders: int = 0) -> SolveResult:
     """_expand → 腔分配寻优 → 默认定序 → solve_timing；可选 milp.check_solution 复核。
 
-    optimize_ll=True（默认）：先 portfolio+贪心定【腔分配】（loadlock + 并行加工腔，最大杠杆，
-    逼近 MILP 的 Z 决策），再在该基底上走默认 backward 定序。无可行分配时退回原始默认。
-    optimize_ll=False ⇒ 原行为（纯 round-robin 默认腔，作快速/对照基线）。
+    random_orders：随机定序策略的 rollout 次数。每次在同一腔分配基底上按随机顺序派工——每步
+    从合法候选里均匀随机选，不满足要求（会死锁）则由 Banker 回退到下一个安全候选；解出的整序
+    经 solve_timing 精确评估，仅当可行且 makespan 更优才替换默认序结果（单调不劣）。0=关（默认）。
 
-    refine_budget：腔分配 SA-ILS 预算（秒）。缺省 None ⇒ 多 route(双 job)自动给 0.55s（墙钟总
-    上限 1s）、单 route 给 0（见 _chamber_opt_budgets / optimize_chambers ④）。单调，零回归。
+    LL swap：定完腔分配后额外解一条放开 loadlock 双槽共存（上槽 entry 未加工/下槽 exit 已加工，
+    真空手可先放已加工片再取未加工片）的 backward 序，与 no-swap 基线取 makespan 更优（单调不劣）。
 
     快序（吞吐优先）因驻留(qtime)排不出时回退驻留预留定序（reserve=True）。"""
     durations = Durations(ir)
     wafers = ir.wafers
-    if optimize_ll:
-        chamber_budget, chamber_refine_budget, chamber_time_cap = _chamber_opt_budgets(
-            wafers, ll_budget, refine_budget)
-        _, assigned_wafers, res = optimize_chambers(
-            ir, durations, wafers, budget=chamber_budget, seed=seed,
-            refine_budget=chamber_refine_budget, time_cap=chamber_time_cap)
-        if res is None:                          # 无可行腔分配 → 原始默认（含 reserve 回退）
-            res = _fixed_default(ir, durations, wafers, verbose)
-        else:
-            wafers = assigned_wafers
-        if verbose:
-            print(f"[timing] 腔分配寻优 → makespan={res.makespan:.2f}"
-                  if getattr(res, "feasible", False) else "[timing] 腔分配寻优：无可行")
-    else:
-        res = _fixed_default(ir, durations, wafers, verbose)
-    if cross_check and getattr(res, "feasible", False):
+    res = _fixed_default(ir, durations, wafers, verbose)
+
+    # swap 定序变体：同一腔分配基底上放开 LL 双槽共存（真空手先放已加工片再取未加工片）重解一序，
+    # 与 no-swap 基线取优。基线口径未动 ⇒ 单调不劣；swap 空间在 LL 瓶颈例上常省往返跳。
+    swap_res = _decode_eval(ir, durations, wafers, swap=True)
+    res = _pick_best(res, swap_res)
+    if random_orders > 0:
+        res = _random_rollouts(ir, durations, wafers, res,
+                               n=random_orders, seed=seed, verbose=verbose)
+    if getattr(res, "feasible", False):
         issues = check_solution(ir, res)
-        if verbose:
-            if issues:
-                print(f"[timing][复核] check_solution 报 {len(issues)} 处违例（前 10）：")
-                for s in issues[:10]:
-                    print("   ", s)
-            else:
-                print("[timing][复核] check_solution 通过，无违例。")
-        res.check_issues = issues                  # type: ignore[attr-defined]
+        if issues:
+            print("MoveList Conflict")
+            res.check_issues = issues  # type: ignore[attr-defined]
     return res
 
 def start_schedule_by_policy(ir: Problem, policy, *, n_samples: int = 1, temp: float = 0.7, seed: int = 0) -> SolveResult:

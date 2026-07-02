@@ -4,7 +4,7 @@ from typing import Dict, List, Optional, Tuple
 import gurobipy as gp
 from gurobipy import GRB
 
-from src.milp_clean import _clean_specs
+from src.milp_clean import _clean_specs, _dummy_order_pairs
 from src.model import Durations, Problem, Stage, Wafer
 
 # --------------------------------------------------------------------------- #
@@ -56,8 +56,7 @@ def solve_milp(task: Problem, *, time_limit: float = 10.0, verbose: bool = False
     def L(w: Wafer, j: int) -> float:
         """stage j→j+1 机器手占用时长 = pick + move + place（门动作不占机器手，见 §6-1）。"""
         rob = w.transports[j]
-        return (tm.pick_t(rob, w.stages[j].chamber) + tm.move(rob)
-                + tm.place_t(rob, w.stages[j + 1].chamber))
+        return tm.pick_t(rob, w.stages[j].chamber) + tm.move(rob) + tm.place_t(rob, w.stages[j + 1].chamber)
 
     # a[w,j] 全部建成变量；每个 hop 直接 a[j+1]==r[j]+L（原子搬运）。
     a: Dict[Tuple[int, int], gp.Var] = {}
@@ -69,11 +68,8 @@ def solve_milp(task: Problem, *, time_limit: float = 10.0, verbose: bool = False
         for j in range(len(w.stages) - 1):
             m.addConstr(a[w.wid, j + 1] == r[w.wid, j] + L(w, j), name=f"chain_{w.wid}_{j}")
 
-    # (Z) loadlock 腔分配决策（放开 round-robin）：只 loadlock 建选腔变量；加工腔(process) 按 parse 期
-    #   round-robin 固定腔（用静态 s.chamber，不建 z）。
-    #   z[w,j,c]∈{0,1}, Σ_c z=1。候选腔 pick/place 行程时长相等（marathon_gen 克隆 PM 同 PickTime/
-    #   PlaceTime、move 按手取与腔无关）→ L、a=r+L 链、(R) 机器手互斥全不依赖选腔；仅 proc(pump/vent)、
-    #   门微动作、(C) 互斥分组依赖 → 下方条件化。
+    # loadlock 腔分配决策（放开 round-robin）：只 loadlock 建选腔变量；
+    #   z[w,j,c]∈{0,1}, Σ_c z=1。
     sel_z: Dict[Tuple[int, int], Dict[str, gp.Var]] = {}
     for w in wafers:
         for j, s in enumerate(w.stages):
@@ -98,7 +94,6 @@ def solve_milp(task: Problem, *, time_limit: float = 10.0, verbose: bool = False
 
     # (P) 站内停留：place 后关门 → 加工/抽充气 → pick 前开门 → 才能 pick
     #     r[w,j] ≥ a[w,j] + place_post(进站,c) + proc + pick_pre(出站,c)
-    #     门动作（关/开）与机器手行程并行，但与本片加工串行（提前开门不能早于加工完成）
     def proc_done(w: Wafer, j: int) -> gp.LinExpr:
         s = w.stages[j]
         pp = cdep(w, j, lambda c: tm.place_post(s.in_robot, c)) if s.in_robot else 0.0
@@ -309,6 +304,12 @@ def solve_milp(task: Problem, *, time_limit: float = 10.0, verbose: bool = False
             wb, jb = cl.before
             m.addConstr(occ_start(wmap[wb], jb) >= occ_end(wmap[wa], ja) + cl.dur,
                         name=f"CLNwac_{cl.chamber}_{wa}_{wb}")
+
+    # dummy 清洁段定序：每腔 前一 job 占用 → dummy 段 → 本 job 占用（d(P1)→P1→d(P2)→P2）。
+    # 纯定序（无额外时长）；dummy-wac 的时长间隙已由上方 CLNwac 约束承担。
+    for (wa, ja), (wb, jb) in _dummy_order_pairs(task, wafers):
+        m.addConstr(occ_start(wmap[wb], jb) >= occ_end(wmap[wa], ja),
+                    name=f"CLNdord_{wa}_{ja}_{wb}_{jb}")
 
     m.setObjective(Cmax, GRB.MINIMIZE)
     m.optimize()

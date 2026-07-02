@@ -95,9 +95,11 @@ class Problem:
     wafers: List[Wafer]              # 已展开（取代 _expand）
     pre_clean: List[CleanSpec] = field(default_factory=list)   # 每 PM 前清洗
     post_clean: List[CleanSpec] = field(default_factory=list)  # 每 PM 后清洗
-    # dummy-wac：dummy 清洁片跑完后、首片真实晶圆前，在该 PM 追加一次无片 wac（time=empty_duration）。
+    # dummy-wac：dummy 清洁片跑完后、所属 job 首片真实晶圆前，在该 PM 追加一次无片 wac（time=empty_duration）。
     # dummy 清洁本身已作为合成 dummy 晶圆编码在 wafers 里；periodic wac 编码在 wafer.stages 的 clean_* 字段。
     dummy_wac: List[CleanSpec] = field(default_factory=list)
+    # dummy 清洁 pjob 名 → 所属产品 pjob 名（milp_clean 用于把 dummy 段夹在 job 边界之间定序）
+    dummy_owner: Dict[str, str] = field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------- #

@@ -299,6 +299,15 @@ def synthesize_dummy_routes(payload: Dict[str, Any]) -> Dict[str, Any]:
     # 合成 route 必须显式注册到顶层 Routes：dummy 片复用时 Material 内联 Route
     # 会被后一次使用覆盖，normalize 从内联收集不到前面产品的 dummy route。
     routes_top = payload.setdefault("Routes", {})
+    # dummy pjob 挂进其产品所在 CJob：pjob 排序按 CJob 内 (Priority, 声明序) ⇒ 2k/2k+1
+    # 优先级链在同一 CJob 内才能给出 d(P1) → P1 → d(P2) → P2 的 wid（发片）序。
+    # （旧实现放独立 Priority=-1 CJob，dummy 全部排在所有产品片之前。）
+    cjob_by_pjob: Dict[str, Dict[str, Any]] = {}
+    for cj in payload.get("ControlJobs") or []:
+        if isinstance(cj, dict):
+            for n in (cj.get("PJobNameList") or []):
+                cjob_by_pjob[str(n)] = cj
+    orphan_names: List[str] = []
     pjob_names: List[str] = []
     dummy_return_info: Dict[str, List[Dict[str, Any]]] = {}
     use_count_by_mat: Dict[int, int] = {}
@@ -339,6 +348,7 @@ def synthesize_dummy_routes(payload: Dict[str, Any]) -> Dict[str, Any]:
 
         product_route = product.get("OriginRoute") or {}
         task_id = str(product.get("TaskID") or task_id)
+        product_name = str(product.get("JobName") or "")
         for pm in pm_order:
             spec = specs[pm]
             route_name = f"{product_route.get('Name') or 'route'}_dummy_{pm}"
@@ -360,8 +370,16 @@ def synthesize_dummy_routes(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "State": 0,
                 "OriginRoute": route,
                 "MatList": mat_ids,
+                # 内部标记：所属产品 pjob（parse → Problem.dummy_owner → dummy 段按 job 边界定序）
+                "_ProductPJob": product_name,
             })
             pjob_names.append(job_name)
+            cj = cjob_by_pjob.get(product_name)
+            if cj is not None:
+                cj.setdefault("PJobNameList", []).append(job_name)
+                cj["MaterialCount"] = int(cj.get("MaterialCount") or 0) + len(mats)
+            else:
+                orphan_names.append(job_name)
             if routes_top is not None:
                 routes_top[route_name] = route
             for m in mats:
@@ -382,13 +400,14 @@ def synthesize_dummy_routes(payload: Dict[str, Any]) -> Dict[str, Any]:
                     "AlgorithmCount": use_count_by_mat[mid],
                 })
 
-    payload.setdefault("ControlJobs", []).append({
-        "TaskID": task_id,
-        "JobType": 0,
-        "Priority": -1,
-        "PJobNameList": pjob_names,
-        "MaterialCount": total_assigned,
-    })
+    if orphan_names:  # 产品不在任何 CJob（异常形态）：兜底放独立 CJob，保证仍可解析
+        payload.setdefault("ControlJobs", []).append({
+            "TaskID": task_id,
+            "JobType": 0,
+            "Priority": -1,
+            "PJobNameList": orphan_names,
+            "MaterialCount": total_assigned,
+        })
     log.info(
         "synthesize_dummy_routes: jobs=%s assigned=%d",
         pjob_names, total_assigned,

@@ -715,6 +715,10 @@ def _expand_wafers(
     wafers: List[Wafer] = []
     wid = 0
     slot_counter: Dict[str, int] = {}
+    # process 腔 round-robin 按 (stage, 候选池) 全局连续计数：多 pjob 共享同一腔池时接着轮
+    # （job2 从 job1 停下的位置继续，负载均衡）而非每 pjob 归零。单 pjob / 池不相交时 == rank。
+    # loadlock 仍按 rank（其腔分配是 MILP/timing 决策，robin 只是初始默认，维持既有基线）。
+    robin_counter: Dict[Tuple[int, Tuple[str, ...]], int] = {}
     for pj in pjob_assignments:
         rt = routes[pj.route_name]
         stage_steps = rt.stages
@@ -724,7 +728,13 @@ def _expand_wafers(
             for j, st in enumerate(stage_steps):
                 in_r = transports[j - 1] if j >= 1 else ""
                 out_r = transports[j] if j < len(transports) else ""
-                chamber = _round_robin(st["visits"], rank)
+                if st["stage_type"] == "process":
+                    rkey = (j, tuple(st["visits"]))
+                    k = robin_counter.get(rkey, 0)
+                    robin_counter[rkey] = k + 1
+                    chamber = _round_robin(st["visits"], k)
+                else:
+                    chamber = _round_robin(st["visits"], rank)
                 proc = float(st["time"])
                 ll_type = ""
                 if st["stage_type"] == "loadlock":
@@ -733,9 +743,15 @@ def _expand_wafers(
                     ch = chambers.get(chamber)
                     proc = float((ch.pump_time if entry else ch.vent_time) or 0.0) if ch else 0.0
                 ch = chambers.get(chamber)
-                cap = int(ch.capacity) if ch else 1
-                slot = slot_counter.get(chamber, 0) % max(cap, 1)
-                slot_counter[chamber] = slot_counter.get(chamber, 0) + 1
+                if st["stage_type"] == "loadlock":
+                    # LL 双槽按方向定死：上槽(0)=entry 未加工片、下槽(1)=exit 已加工片。
+                    # 互斥退到同槽内 ⇒ entry/exit 可共存（swap：真空手先放已加工片再取
+                    # 未加工片）；跨槽压力态时序由 timing 层补边（见 timing/solve.py）。
+                    slot = 0 if ll_type == "entry" else 1
+                else:
+                    cap = int(ch.capacity) if ch else 1
+                    slot = slot_counter.get(chamber, 0) % max(cap, 1)
+                    slot_counter[chamber] = slot_counter.get(chamber, 0) + 1
                 stages.append(Stage(
                     j=j, chamber=chamber, stage_type=st["stage_type"], proc=proc,
                     in_robot=in_r, out_robot=out_r,
@@ -784,6 +800,13 @@ def _problem_from_payload(payload: Mapping[str, Any]) -> Problem:
     problem.pre_clean = [s for name in route_order for s in routes[name].pre_clean]
     problem.post_clean = [s for name in route_order for s in routes[name].post_clean]
     problem.dummy_wac = [s for name in route_order for s in routes[name].dummy_wac]
+    # dummy 清洁 pjob → 所属产品 pjob（synthesize_dummy_routes 注入 _ProductPJob），
+    # 供 milp_clean 把 dummy 段定序在「前一 job 末片 → 本 job 首片」之间。
+    problem.dummy_owner = {
+        str(pj.get("JobName") or ""): str(pj["_ProductPJob"])
+        for pj in (payload.get("ProcessJobs") or [])
+        if isinstance(pj, Mapping) and pj.get("_ProductPJob")
+    }
     return problem
 
 

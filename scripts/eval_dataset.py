@@ -132,7 +132,7 @@ def main() -> None:
             try:
                 ir = parse_task(ai, d["update_params"])
                 t0 = time.perf_counter()
-                tres = start_schedule(ir, verbose=False, cross_check=True)
+                tres = start_schedule(ir, verbose=False)
                 t_ms = (time.perf_counter() - t0) * 1000.0
                 t_mk = tres.makespan
                 feas = bool(getattr(tres, "feasible", False))

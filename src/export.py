@@ -1,6 +1,6 @@
 from src.model import Chamber, Durations, Problem, Stage, Wafer
 from src.milp import SolveResult, _ll_proc
-from src.milp_clean import _clean_specs
+from src.milp_clean import _clean_specs, _dummy_order_pairs
 from typing import List, Tuple, Dict, Optional
 
 def export_movelist(task: Problem, res: SolveResult) -> List[dict]:
@@ -18,6 +18,36 @@ def export_movelist(task: Problem, res: SolveResult) -> List[dict]:
     # bug1：机器手 pick 前的空载转位（PreTransMove）；bug2：LL 连续两用间的空抽/空充
     robot_hops: Dict[str, List[Tuple[float, str, str]]] = {}   # robot -> [(r, src, prev_dst 由排序得)]
     ll_occs: Dict[str, List[Tuple[float, float, str]]] = {}    # LL -> [(occ_start, occ_end, ll_type)]
+
+    # LoadLock swap 识别：同一 LL 腔里，某机器手在【一次开门】内先把片 v 放进一槽、再从兄弟槽取走
+    # 异型片 u（v.in_robot == u.out_robot、且 pick 起点恰接 place 终点 + 一次转位 move ⇒ 中间无门）。
+    # 对这对动作：① 抹掉夹在中间的 v.place_post 关门 + u.pick_pre 开门（门只在最外层开/关一次）；
+    # ② v 的抽/充气（留腔片压力态转换）改到 swap 关门之后才起（不能开着门翻压力态）。
+    #   suppress_place_post/pick_pre：(wid,j)→该 stage 的对应门被 swap 合并、不单独 emit；
+    #   proc_after_swap：(wid,j)→v 的 type-10 起始时刻（= u 取片完成 + pick_post 关门）。
+    def _detect_swaps():
+        by_c: Dict[str, list] = {}
+        for wid, rows in res.schedule.items():
+            for j, (stype, c, av, rv) in enumerate(rows):
+                if stype == "loadlock":
+                    by_c.setdefault(c, []).append((wid, j, wafers[wid].stages[j], av, rv))
+        supp_pp, supp_pre, proc_after = set(), set(), {}
+        for c, visits in by_c.items():
+            for (vw, vj, vs, va, vr) in visits:            # v = 被放入的片
+                if not vs.in_robot:
+                    continue
+                R, mv = vs.in_robot, tm.move(vs.in_robot)
+                for (uw, uj, us, ua, ur) in visits:        # u = 同腔被取走的异型片
+                    if (uw, uj) == (vw, vj) or us.ll_type == vs.ll_type or us.out_robot != R:
+                        continue
+                    if abs(ur - (va + mv)) > 1e-4:          # pick 起点≠place 终点+一次转位 ⇒ 非同门 swap
+                        continue
+                    supp_pp.add((vw, vj))                   # 抹 v 的 place 关门
+                    supp_pre.add((uw, uj))                  # 抹 u 的 pick 开门
+                    proc_after[(vw, vj)] = ur + tm.pick_t(R, c) + tm.pick_post(R, c)   # 关门后再翻压力态
+        return supp_pp, supp_pre, proc_after
+
+    supp_place_post, supp_pick_pre, proc_after_swap = _detect_swaps()
 
     def emit(mtype: int, start: float, end: float, *, station: str = "",
              robot: str = "", src: str = "", dst: str = "", cslot: int = 1,
@@ -53,13 +83,15 @@ def export_movelist(task: Problem, res: SolveResult) -> List[dict]:
         pre_c, pt, post_c = tm.pick_pre(R, c), tm.pick_t(R, c), tm.pick_post(R, c)
         pre_n, post_n = tm.place_pre(R, nxt_c), tm.place_post(R, nxt_c)
         arrive = rv + pt + tm.move(R)
-        emit(6, rv - pre_c, rv, station=c, cslot=cs, w=w)                   # 源开门(pick 前，与到位并行)
+        if (w.wid, j) not in supp_pick_pre:                                 # swap：源开门并入 place 那次门
+            emit(6, rv - pre_c, rv, station=c, cslot=cs, w=w)               # 源开门(pick 前，与到位并行)
         emit(0, rv, rv + pt, robot=R, src=c, cslot=cs, w=w)                 # pick
         emit(7, rv + pt, rv + pt + post_c, station=c, cslot=cs, w=w)        # 源关门(与走位并行)
         emit(5, rv + pt, arrive, robot=R, src=c, dst=nxt_c, cslot=cs, w=w)  # 走位
         emit(6, arrive - pre_n, arrive, station=nxt_c, cslot=ns, w=w)       # 目标开门(与走位并行)
         emit(1, arrive, a_next, robot=R, dst=nxt_c, cslot=ns, w=w)          # place
-        emit(7, a_next, a_next + post_n, station=nxt_c, cslot=ns, w=w)      # 目标关门(与下一动作并行)
+        if (w.wid, j + 1) not in supp_place_post:                          # swap：place 关门并入后续 pick 那次门
+            emit(7, a_next, a_next + post_n, station=nxt_c, cslot=ns, w=w)  # 目标关门(与下一动作并行)
 
     for wid, rows in res.schedule.items():
         w = wafers[wid]
@@ -75,8 +107,10 @@ def export_movelist(task: Problem, res: SolveResult) -> List[dict]:
             elif stype == "loadlock" and llp > 0:
                 # type-10 抽充气：按 ll_type 记压力态转移（entry 抽气 ATM→VAC、exit 充气 VAC→ATM），
                 # 与下方空抽/空充口径统一，使同一 LL 的 type-10 序列成 ATM/VAC 干净交替（可校验）。
+                # swap 留腔片：门要等取走兄弟片才关，压力态只能在关门后翻 ⇒ 起点顺延到 swap 关门。
+                p0 = proc_after_swap.get((wid, j), d0)
                 last, cur = ("ATM", "VAC") if s.ll_type == "entry" else ("VAC", "ATM")
-                emit(10, d0, d0 + llp, station=c, cslot=cs, w=w,
+                emit(10, p0, p0 + llp, station=c, cslot=cs, w=w,
                      LastState=last, CurState=cur)
                 # 收集 LL 占用窗口（含门），供 bug2 的空抽/空充补铺
                 occ_s = av - (tm.place_t(s.in_robot, c) + tm.place_pre(s.in_robot, c) if s.in_robot else 0.0)
@@ -240,5 +274,12 @@ def check_solution(task: Problem, res: SolveResult) -> List[str]:
             e_prev, s_next = _cocc_e(*cl.after), _cocc_s(*cl.before)
             if s_next + eps < e_prev + cl.dur:
                 issues.append(f"Clean wac 腔{cl.chamber}: 片间隙 {s_next - e_prev:.1f} < 清洁 {cl.dur:.1f}")
+
+    # (Clean-order) dummy 清洁段定序：同腔 前一 job → dummy 段 → 本 job（d(P1)→P1→d(P2)→P2）
+    for (wa, ja), (wb, jb) in _dummy_order_pairs(task, list(wafers.values())):
+        e_prev, s_next = _cocc_e(wa, ja), _cocc_s(wb, jb)
+        if s_next + eps < e_prev:
+            c = wafers[wa].stages[ja].chamber
+            issues.append(f"Clean dummy 定序违例 腔{c}: w{wb} 占腔起点 {s_next:.1f} < w{wa} 占腔终点 {e_prev:.1f}")
 
     return issues

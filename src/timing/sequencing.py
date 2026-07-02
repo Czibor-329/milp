@@ -26,7 +26,7 @@ banker=True)。默认/派工偏置/驻留预留/自定义 chooser 全部走它�
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from collections import namedtuple
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -66,6 +66,9 @@ def _resource(ir: Problem, w, j: int) -> Optional[Tuple[str, int]]:
 class _Orders:
     chambers: Dict[Tuple[str, int], List[Tuple[int, int]]]
     robots: Dict[str, List[Tuple[int, int]]]
+    # loadlock 每腔跨槽合并的占用提交序 腔→[(wid, stage)]：entry/exit 分槽共存（swap）后，
+    # 同槽序管不到异型相邻占用，solve_timing 靠它补跨槽压力态边。
+    ll_seq: Dict[str, List[Tuple[int, int]]] = field(default_factory=dict)
 
 
 # —— 可注入决策的解码：每步把「合法候选 hop」交给 chooser 排序，循环再套 Banker 安全掩码提交。
@@ -107,21 +110,26 @@ def _is_resid(w, k: int) -> bool:
             and w.stages[k].residency > 0)
 
 
-def _reserve_for(ir: Problem, w, nj: int) -> set:
-    """片放入 stage nj 后应预留的资源：紧邻下一跳 + 驻留 run（连续驻留腔）末端的落脚资源。"""
+def _reserve_for(ir: Problem, w, nj: int, res_map=None) -> set:
+    """片放入 stage nj 后应预留的资源：紧邻下一跳 + 驻留 run（连续驻留腔）末端的落脚资源。
+    res_map：解码用的 (wid,j)→资源键表（含 swap 并槽口径），传入保证预留键与占用键一致。"""
     if not _is_resid(w, nj):
         return set()
+
+    def _res(j: int):
+        return res_map[(w.wid, j)] if res_map is not None else _resource(ir, w, j)
+
     out = set()
     K = len(w.stages) - 1
     if nj + 1 <= K:                              # 紧邻下一跳去向
-        r = _resource(ir, w, nj + 1)
+        r = _res(nj + 1)
         if r is not None:
             out.add(r)
     k = nj
     while _is_resid(w, k):                       # 跨过连续驻留腔，预留 run 出口
         k += 1
     if k <= K:
-        r = _resource(ir, w, k)
+        r = _res(k)
         if r is not None:
             out.add(r)
     return out
@@ -134,26 +142,50 @@ def _blocked(dest, occ: dict, resv: dict, wid: int) -> bool:
     return dest in occ or (dest in resv and resv[dest] != wid)
 
 
-def _build_resource_map(ir: Problem, wmap: Dict[int, object]) -> Dict[Tuple[int, int], Optional[Tuple[str, int]]]:
+def _build_resource_map(ir: Problem, wmap: Dict[int, object], swap: bool = False
+                        ) -> Dict[Tuple[int, int], Optional[Tuple[str, int]]]:
     """预算每片每 stage 的 (腔,槽) 资源键一次。解码内热点 _drain_completes 被调数万次、每次 O(剩余)
-    遍历，原先每格重算 _resource（数百万次）；预算后改 dict 查表，是解码提速的大头。"""
-    return {(w.wid, j): _resource(ir, w, j)
-            for w in wmap.values() for j in range(len(w.stages))}
+    遍历，原先每格重算 _resource（数百万次）；预算后改 dict 查表，是解码提速的大头。
+    swap=False（默认）：loadlock 并槽为 (腔,0)——entry/exit 整腔互斥（旧口径，逐字节复现）；
+    swap=True：按 s.slot 分槽（entry=0/exit=1），异型占用可共存（swap 定序）。"""
+    out: Dict[Tuple[int, int], Optional[Tuple[str, int]]] = {}
+    for w in wmap.values():
+        for j in range(len(w.stages)):
+            r = _resource(ir, w, j)
+            if r is not None and not swap and w.stages[j].stage_type == "loadlock":
+                r = (r[0], 0)
+            out[(w.wid, j)] = r
+    return out
+
+
+def _ll_elder_blocked(src: Optional[Tuple[str, int]], occ: dict,
+                      ll_age: Optional[Dict[Tuple[str, int], int]]) -> bool:
+    """LL swap 的「先进先出」规则：片在 LL 某槽、兄弟槽被【更早进腔】的片占着 ⇒ 本片不可离腔。
+    压力态按占用顺序服务（elder 的抽/充先完成、先被取走），Edge②(solve_timing) 也按此建边；
+    解码提交序遵守同一规则才不会与压力边成环。ll_age 只在 swap 模式登记 LL 槽 ⇒ 其余恒 False。"""
+    if ll_age is None or src is None or src not in ll_age:
+        return False
+    sib = (src[0], 1 - src[1])
+    return sib in occ and ll_age.get(sib, 1 << 60) < ll_age[src]
 
 
 def _drain_completes(ir: Problem, wmap: Dict[int, object], K: Dict[int, int],
                      pos: Dict[int, int], occ: Dict[Tuple[str, int], int],
                      resv: Dict[Tuple[str, int], int], reserve: bool = False,
-                     res_map: Optional[Dict[Tuple[int, int], Optional[Tuple[str, int]]]] = None) -> bool:
+                     res_map: Optional[Dict[Tuple[int, int], Optional[Tuple[str, int]]]] = None,
+                     ll_age: Optional[Dict[Tuple[str, int], int]] = None) -> bool:
     """安全谕示：从 (pos, occ, resv) 起，用纯下游清空（每步挑剩余最下游、去向未被占/预留的 hop）
     能否把所有片送完？能 ⇒ 当前状态安全（无死锁）。纯下游清空对单臂流水可证无死锁，故
     「存在完工序」当且仅当它能跑完。预留只挡新进、不挡在制片出腔，故不致死锁。
-    res_map：预算好的 (wid,j)→资源键表（decode_orders 传入共享、避免重算）；None 时本地建一次。"""
+    res_map：预算好的 (wid,j)→资源键表（decode_orders 传入共享、避免重算）；None 时本地建一次。
+    ll_age：swap 模式下 LL 槽→进腔序号（谕示同样遵守 LL 先进先出，见 _ll_elder_blocked）；None=不启用。"""
     if res_map is None:
         res_map = _build_resource_map(ir, wmap)
     pos = dict(pos)
     occ = dict(occ)
     resv = dict(resv)
+    ll_age = dict(ll_age) if ll_age is not None else None
+    age_next = (max(ll_age.values()) + 1 if ll_age else 0) if ll_age is not None else 0
     remaining = sum(K[wid] - pos[wid] for wid in pos)
     while remaining > 0:
         pick = None                       # (-j, wid)：最下游优先
@@ -162,6 +194,8 @@ def _drain_completes(ir: Problem, wmap: Dict[int, object], K: Dict[int, int],
                 continue
             dest = res_map[(wid, j + 1)]
             if _blocked(dest, occ, resv, wid):
+                continue
+            if _ll_elder_blocked(res_map[(wid, j)], occ, ll_age):
                 continue
             cand = (-j, wid)
             if pick is None or cand < pick:
@@ -173,13 +207,18 @@ def _drain_completes(ir: Problem, wmap: Dict[int, object], K: Dict[int, int],
         src = res_map[(wid, j)]
         if src is not None and occ.get(src) == wid:
             del occ[src]
+            if ll_age is not None:
+                ll_age.pop(src, None)
         dest = res_map[(wid, j + 1)]
         if dest is not None and resv.get(dest) == wid:
             del resv[dest]
         if dest is not None:
             occ[dest] = wid
+            if ll_age is not None and wmap[wid].stages[j + 1].stage_type == "loadlock":
+                ll_age[dest] = age_next
+                age_next += 1
         if reserve:
-            for er in _reserve_for(ir, wmap[wid], j + 1):
+            for er in _reserve_for(ir, wmap[wid], j + 1, res_map):
                 resv[er] = wid
         pos[wid] = j + 1
         remaining -= 1
@@ -202,7 +241,8 @@ def _make_default_chooser(prio: Optional[Dict[Tuple[int, int], float]]
 def decode_orders(ir: Problem, tm: Durations, wafers, *,
                   chooser: Optional[_Chooser] = None,
                   prio: Optional[Dict[Tuple[int, int], float]] = None,
-                  reserve: bool = False, banker: bool = True) -> _Orders:
+                  reserve: bool = False, banker: bool = True,
+                  swap: bool = False) -> _Orders:
     """全局事件式构造：产出各 (腔,槽) 占用序与各机器手 hop 序（彼此自洽、无死锁）。每步生成
     合法候选(去向资源未占/未预留、j==0 满足发片 FIFO)，交 chooser 排偏好序，循环再套 Banker
     安全掩码提交。候选合法性 + Banker 安全 + 提交逻辑三方共用——换 chooser 不改这些（零回归）。
@@ -215,17 +255,22 @@ def decode_orders(ir: Problem, tm: Durations, wafers, *,
 
     reserve=True 时额外做驻留(qtime)预留（牺牲吞吐换驻留可行），仅在快序驻留不可行时回退采用。
     banker：True=每步 Banker 安全检查(保证无死锁，默认/基线/换腔)；False=直接取偏好序首位
-    (快~50×，搜索批量评估)，中途卡死抛 _DecodeDeadlock 由调用方判负。"""
+    (快~50×，搜索批量评估)，中途卡死抛 _DecodeDeadlock 由调用方判负。
+    swap：True=loadlock 双槽按方向分槽（entry=0/exit=1），异型占用可共存——真空手可先放已加工片
+    再取未加工片（压力态时序由 solve_timing 按 ll_seq 补边）；False（默认）=LL 整腔互斥（旧口径）。"""
     if chooser is None:
         chooser = _make_default_chooser(prio)
     wmap = {w.wid: w for w in wafers}
     K = {w.wid: len(w.stages) - 1 for w in wafers}
-    res_map = _build_resource_map(ir, wmap)      # (wid,j)→资源键，预算一次供候选/Banker 复用（热点提速）
+    res_map = _build_resource_map(ir, wmap, swap)  # (wid,j)→资源键，预算一次供候选/Banker 复用（热点提速）
     pos = {w.wid: 0 for w in wafers}            # 各片当前所在 stage
     place_t = {w.wid: 0.0 for w in wafers}      # 各片落位到当前 stage 的（近似）时刻
     occ: Dict[Tuple[str, int], int] = {}        # (腔,槽) → 当前占用片
     resv: Dict[Tuple[str, int], int] = {}       # (腔,槽) → 为其出口预留该资源的片
     robot_free: Dict[str, float] = {}           # 机器手下次空闲（近似）时刻
+    # swap 模式：LL 槽 → 进腔序号（提交计数）。离腔须遵守先进先出（_ll_elder_blocked），
+    # 保证提交序与 solve_timing 的跨槽压力边同向、结构上无正环。非 swap 恒空。
+    ll_age: Optional[Dict[Tuple[str, int], int]] = {} if swap else None
 
     # 同 route 按 wid 先来先发（与 solve_timing 的发片 FIFO 一致）
     route_wids: Dict[str, List[int]] = {}
@@ -246,6 +291,7 @@ def decode_orders(ir: Problem, tm: Durations, wafers, *,
 
     chambers: Dict[Tuple[str, int], List[Tuple[int, int]]] = {}
     robots: Dict[str, List[Tuple[int, int]]] = {}
+    ll_seq: Dict[str, List[Tuple[int, int]]] = {}
     total = sum(K.values())
     placed = 0
     while placed < total:
@@ -258,6 +304,8 @@ def decode_orders(ir: Problem, tm: Durations, wafers, *,
                 continue
             dest = res_map[(wid, j + 1)]
             if _blocked(dest, occ, resv if reserve else {}, wid):
+                continue
+            if _ll_elder_blocked(res_map[(wid, j)], occ, ll_age):
                 continue
             if j == 0 and route_wids[w.route_name][next_rel[w.route_name]] != wid:
                 continue
@@ -284,18 +332,23 @@ def decode_orders(ir: Problem, tm: Durations, wafers, *,
                 tpos = dict(pos)
                 tocc = dict(occ)
                 tresv = dict(resv) if reserve else {}
+                tage = dict(ll_age) if ll_age is not None else None
                 src = res_map[(c.wid, c.j)]
                 if src is not None and tocc.get(src) == c.wid:
                     del tocc[src]
+                    if tage is not None:
+                        tage.pop(src, None)
                 if c.dest is not None and tresv.get(c.dest) == c.wid:
                     del tresv[c.dest]
                 if c.dest is not None:
                     tocc[c.dest] = c.wid
+                    if tage is not None and wmap[c.wid].stages[c.j + 1].stage_type == "loadlock":
+                        tage[c.dest] = placed
                 if reserve:
-                    for er in _reserve_for(ir, wmap[c.wid], c.j + 1):
+                    for er in _reserve_for(ir, wmap[c.wid], c.j + 1, res_map):
                         tresv[er] = c.wid
                 tpos[c.wid] = c.j + 1
-                if _drain_completes(ir, wmap, K, tpos, tocc, tresv, reserve, res_map):
+                if _drain_completes(ir, wmap, K, tpos, tocc, tresv, reserve, res_map, tage):
                     chosen = c
                     break
             if chosen is None:             # 理论不达：纯下游候选恒安全
@@ -306,13 +359,19 @@ def decode_orders(ir: Problem, tm: Durations, wafers, *,
         src = res_map[(wid, j)]
         if src is not None and occ.get(src) == wid:
             del occ[src]
+            if ll_age is not None:
+                ll_age.pop(src, None)
         if dest is not None and resv.get(dest) == wid:
             del resv[dest]
         if dest is not None:
             occ[dest] = wid
             chambers.setdefault(dest, []).append((wid, j + 1))   # 到站 stage = j+1
+            if w.stages[j + 1].stage_type == "loadlock":
+                ll_seq.setdefault(dest[0], []).append((wid, j + 1))
+                if ll_age is not None:
+                    ll_age[dest] = placed
         if reserve:
-            for er in _reserve_for(ir, w, j + 1):
+            for er in _reserve_for(ir, w, j + 1, res_map):
                 resv[er] = wid
         robots.setdefault(rob, []).append((wid, j))
         place_t[wid] = start + _hop_span(tm, w, j)
@@ -322,7 +381,7 @@ def decode_orders(ir: Problem, tm: Durations, wafers, *,
         pos[wid] = j + 1
         placed += 1
 
-    return _Orders(chambers=chambers, robots=robots)
+    return _Orders(chambers=chambers, robots=robots, ll_seq=ll_seq)
 
 
 # --------------------------------------------------------------------------- #
@@ -340,18 +399,27 @@ def _chamber_pool(nxt) -> List[str]:
     return [nxt.chamber]
 
 
-def _free_slot(ir: Problem, occ: dict, cc: str) -> Optional[int]:
-    """腔 cc 里最小的空槽（0-based），无空槽返回 None。"""
+def _free_slot(ir: Problem, occ: dict, cc: str, nxt, swap: bool = False) -> Optional[int]:
+    """去向 stage nxt 落腔 cc 的可用槽位，无空槽返回 None。loadlock：swap=True 双槽按方向定死
+    （entry=0 / exit=1，同 _expand）⇒ 异型占用可共存（swap）；swap=False 并槽 (cc,0) 整腔互斥
+    （旧口径）。其余腔取最小空槽。"""
+    if nxt.stage_type == "loadlock":
+        s = (0 if nxt.ll_type == "entry" else 1) if swap else 0
+        return None if (cc, s) in occ else s
     ch = ir.chambers.get(cc)
     cap = int(ch.capacity) if ch else 1
     return next((s for s in range(max(cap, 1)) if (cc, s) not in occ), None)
 
 
-def _drain_completes_cc(ir: Problem, wmap, K, pos, occ, dsel) -> bool:
+def _drain_completes_cc(ir: Problem, wmap, K, pos, occ, dsel, swap: bool = False,
+                        ll_age: Optional[Dict[Tuple[str, int], int]] = None) -> bool:
     """选腔版安全谕示：纯下游清空，未定腔的下游 hop 允许落【任一空候选腔】。dsel 给出已（暂定）
     落腔的 (wid,j)→(腔,槽)（含本步暂定 move），其余按 wafer 当前 stage 已定腔 live 读。能送完
-    ⇒ 状态安全。放宽到「任一空腔」比真实更宽松，仍是有效存在性谕示 ⇒ banker 恒有安全候选。"""
+    ⇒ 状态安全。放宽到「任一空腔」比真实更宽松，仍是有效存在性谕示 ⇒ banker 恒有安全候选。
+    ll_age：swap 模式下 LL 槽→进腔序号（谕示同样遵守 LL 先进先出，见 _ll_elder_blocked）。"""
     pos = dict(pos); occ = dict(occ); dsel = dict(dsel)
+    ll_age = dict(ll_age) if ll_age is not None else None
+    age_next = (max(ll_age.values()) + 1 if ll_age else 0) if ll_age is not None else 0
 
     def cur_res(wid: int):
         p = pos[wid]
@@ -364,13 +432,15 @@ def _drain_completes_cc(ir: Problem, wmap, K, pos, occ, dsel) -> bool:
             if p >= K[wid]:
                 continue
             w = wmap[wid]
+            if _ll_elder_blocked(cur_res(wid), occ, ll_age):
+                continue
             base = _resource(ir, w, p + 1)
             chosen = None
             if base is not None:                       # 去向是资源腔：需一个空候选腔
                 nxt = w.stages[p + 1]
                 pool = _chamber_pool(nxt)
                 for cc in pool:
-                    s = _free_slot(ir, occ, cc)
+                    s = _free_slot(ir, occ, cc, nxt, swap)
                     if s is not None:
                         chosen = (cc, s); break
                 if chosen is None:
@@ -385,9 +455,14 @@ def _drain_completes_cc(ir: Problem, wmap, K, pos, occ, dsel) -> bool:
         src = cur_res(wid)
         if src is not None and occ.get(src) == wid:
             del occ[src]
+            if ll_age is not None:
+                ll_age.pop(src, None)
         if chosen is not None:
             occ[chosen] = wid
             dsel[(wid, p + 1)] = chosen
+            if ll_age is not None and wmap[wid].stages[p + 1].stage_type == "loadlock":
+                ll_age[chosen] = age_next
+                age_next += 1
         pos[wid] = p + 1
         remaining -= 1
     return True
@@ -395,11 +470,12 @@ def _drain_completes_cc(ir: Problem, wmap, K, pos, occ, dsel) -> bool:
 
 def decode_orders_choosing(ir: Problem, tm: Durations, wafers, *,
                            chooser: _Chooser, reserve: bool = False,
-                           banker: bool = True) -> Tuple[List, _Orders]:
+                           banker: bool = True, swap: bool = False) -> Tuple[List, _Orders]:
     """选腔解码：返回 (有效 wafers, _Orders)。有效 wafers 已把选中腔写回各 stage，必须原样喂
     solve_timing（腔分配口径一致）。候选/特征/提交口径与 labels 的 teacher 复现一致，仅 chooser 不同：
     每步候选按去向 stage 的多候选腔（有空槽）分裂，chooser 联合决定 (hop, 腔)，banker 用选腔版
-    安全谕示 _drain_completes_cc 保证无死锁。"""
+    安全谕示 _drain_completes_cc 保证无死锁。
+    swap：口径同 decode_orders——默认 False 保持 LL 整腔互斥（策略网按此分布训练）。"""
     from src.milp import _ll_proc                        # 懒导入避免包初始化期环
 
     wafers = [copy.copy(w) for w in wafers]              # 克隆：提交要改 stage.chamber，不污染 ir.wafers
@@ -413,6 +489,7 @@ def decode_orders_choosing(ir: Problem, tm: Durations, wafers, *,
     resv: Dict[Tuple[str, int], int] = {}
     robot_free: Dict[str, float] = {}
     ch_used: Dict[str, int] = {}                         # 各腔累计派入片数（选腔均衡特征）
+    ll_age: Optional[Dict[Tuple[str, int], int]] = {} if swap else None   # LL 先进先出（swap）
 
     route_wids: Dict[str, List[int]] = {}
     for w in wafers:
@@ -423,6 +500,7 @@ def decode_orders_choosing(ir: Problem, tm: Durations, wafers, *,
 
     chambers: Dict[Tuple[str, int], List[Tuple[int, int]]] = {}
     robots: Dict[str, List[Tuple[int, int]]] = {}
+    ll_seq: Dict[str, List[Tuple[int, int]]] = {}
     total = sum(K.values())
     placed = 0
     while placed < total:
@@ -434,6 +512,8 @@ def decode_orders_choosing(ir: Problem, tm: Durations, wafers, *,
                 continue
             if j == 0 and route_wids[w.route_name][next_rel[w.route_name]] != wid:
                 continue
+            if _ll_elder_blocked(_resource(ir, w, j), occ, ll_age):
+                continue
             rob = w.transports[j]
             start = max(place_t[wid] + _stage_dwell(tm, w, j), robot_free.get(rob, 0.0))
             base = _resource(ir, w, j + 1)              # None=去向为 source/sink/skip（无资源、不选腔）
@@ -443,7 +523,7 @@ def decode_orders_choosing(ir: Problem, tm: Durations, wafers, *,
             nxt = w.stages[j + 1]
             pool = _chamber_pool(nxt)
             for cc in pool:
-                s = _free_slot(ir, occ, cc)
+                s = _free_slot(ir, occ, cc, nxt, swap)
                 if s is not None:
                     cands.append(_Cand(wid, j, (cc, s), rob, start))
         if not cands:
@@ -462,15 +542,20 @@ def decode_orders_choosing(ir: Problem, tm: Durations, wafers, *,
             for idx in order:
                 c = cands[idx]
                 tpos = dict(pos); tocc = dict(occ)
+                tage = dict(ll_age) if ll_age is not None else None
                 src = _resource(ir, wmap[c.wid], c.j)
                 if src is not None and tocc.get(src) == c.wid:
                     del tocc[src]
+                    if tage is not None:
+                        tage.pop(src, None)
                 dsel: Dict[Tuple[int, int], Tuple[str, int]] = {}
                 if c.dest is not None:
                     tocc[c.dest] = c.wid
                     dsel = {(c.wid, c.j + 1): c.dest}
+                    if tage is not None and wmap[c.wid].stages[c.j + 1].stage_type == "loadlock":
+                        tage[c.dest] = placed
                 tpos[c.wid] = c.j + 1
-                if _drain_completes_cc(ir, wmap, K, tpos, tocc, dsel):
+                if _drain_completes_cc(ir, wmap, K, tpos, tocc, dsel, swap, tage):
                     chosen = c
                     break
             if chosen is None:
@@ -481,12 +566,17 @@ def decode_orders_choosing(ir: Problem, tm: Durations, wafers, *,
         src = _resource(ir, w, j)
         if src is not None and occ.get(src) == wid:
             del occ[src]
+            if ll_age is not None:
+                ll_age.pop(src, None)
         if dest is not None:                            # 把选中的腔写回 stage（资源键/后续 dwell 一致）
             cc, slot = dest
             nxt = w.stages[j + 1]
             nxt.chamber, nxt.slot = cc, slot
             if nxt.stage_type == "loadlock":
                 nxt.proc = _ll_proc(ir, cc, nxt.ll_type)
+                ll_seq.setdefault(cc, []).append((wid, j + 1))
+                if ll_age is not None:
+                    ll_age[dest] = placed
             occ[dest] = wid
             ch_used[cc] = ch_used.get(cc, 0) + 1
             chambers.setdefault(dest, []).append((wid, j + 1))
@@ -498,4 +588,4 @@ def decode_orders_choosing(ir: Problem, tm: Durations, wafers, *,
         pos[wid] = j + 1
         placed += 1
 
-    return wafers, _Orders(chambers=chambers, robots=robots)
+    return wafers, _Orders(chambers=chambers, robots=robots, ll_seq=ll_seq)
