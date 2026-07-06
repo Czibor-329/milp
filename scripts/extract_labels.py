@@ -31,7 +31,6 @@ from src.parse import parse_task
 from src.model import Durations
 from src.features import FEATURE_DIM
 from src.labels import extract_instance
-from src.timing import optimize_chambers
 
 BASE_TOPO = "s1-1c1p-preclean"
 _ROOT = Path(__file__).resolve().parents[1]

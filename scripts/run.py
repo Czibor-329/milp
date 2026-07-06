@@ -11,6 +11,9 @@
     打印表 + 汇总；--export 导出各策略 MoveList 到 results/output/<strategy>/<子集>/inst_XXXX.json。
   · 单场景（--input NAME）：跑 src/input_data/NAME.json 一个场景（无标签），自检 + 可选导出。
 
+每个可行解都做双层自检（v 列 = 违例数，非 0 时逐条打印）：schedule 层 check_solution（P/C/R/LL/Clean）
++ MoveList 层 validate_movelist（LL 压力态：type-10 与门/取放不重叠、大气手须 ATM/真空手须 VAC、链衔接）。
+
 用法：
   python scripts/run.py                                         # 全子集，仅 heuristic
   python scripts/run.py --strategy heuristic bc random          # 三策略对比
@@ -37,7 +40,7 @@ from src.paths import input_data_path, MODELS_DIR, OUTPUT_DIR
 from src.marathon_gen import expand_topo_pms, PM_POOL_6
 from src.timing import start_schedule, start_schedule_by_policy
 from src.milp import solve_milp
-from src.export import check_solution, export_movelist
+from src.export import check_solution, export_movelist, validate_move_list
 
 BASE_TOPO = "s1-1c1p-preclean"
 # 子集用「目录/名」限定：train/* 有 MILP 标签的配置网格（报 gap）；test/* 大规模外推（无标签，不计 gap）。
@@ -76,9 +79,16 @@ def run_strategy(name: str, ir, *, policy=None, random_orders: int = 64,
     return res, (time.perf_counter() - t0) * 1000.0
 
 
-def _export(ir, res, strategy: str, sub: str, basename: str) -> None:
-    """导出 MoveList 到 results/output/<strategy>/<子集>/<inst>.json。"""
+def _check_all(ir, res, init_data=None) -> tuple:
+    """可行解统一双层校验：schedule 层(check_solution) + MoveList 层(validate_movelist)。
+    每次排程都构建 MoveList 并校验（不管是否 --export），返回 (违例列表, MoveList)。"""
+    issues = check_solution(ir, res)
     ml = export_movelist(ir, res)
+    return issues + validate_move_list(ir, ml, init_data), ml
+
+
+def _export(ml, strategy: str, sub: str, basename: str) -> None:
+    """导出 MoveList 到 results/output/<strategy>/<子集>/<inst>.json。"""
     out = OUTPUT_DIR / strategy / sub / f"{basename}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w", encoding="utf-8") as fp:
@@ -171,7 +181,10 @@ def run_dataset(args, strategies, policy) -> None:
                     res, ms = None, float("nan")
                 feas = _ok(res)
                 mk = res.makespan if feas else float("nan")
-                viol = len(check_solution(ir, res)) if feas else 0
+                issues, ml = _check_all(ir, res, ai) if feas else ([], None)
+                viol = len(issues)
+                for x in issues[:4]:
+                    print(f"  [viol] {name} {s}: {x}")
                 gap = ((mk - m_mk) / m_mk * 100.0) if (feas and has_label and m_mk > 0) else float("nan")
                 if feas:
                     sub_stat[s]["feas"] += 1
@@ -180,7 +193,7 @@ def run_dataset(args, strategies, policy) -> None:
                     if gap == gap:
                         sub_stat[s]["gaps"].append(gap)
                     if args.export:
-                        _export(ir, res, s, sub, basename)
+                        _export(ml, s, sub, basename)
                 row += (f" {(f'{mk:.1f}' if feas else '-'):>10} {(f'{ms:.1f}' if ms == ms else '-'):>7}"
                         f" {(f'{gap:+.2f}' if gap == gap else '-'):>7} {str(feas)[0]:>2} {viol:>2} |")
                 rec[s] = {"mk": mk if feas else None, "ms": ms if ms == ms else None,
@@ -242,15 +255,15 @@ def run_single(args, strategies, policy) -> None:
         print(f"{name}  [{s}] status={getattr(res,'status','-')} makespan={res.makespan:.1f}"
               f"  gap={gap*100:.2f}%  solve={getattr(res,'runtime',0.0):.2f}s wall={ms/1000:.2f}s"
               f"  wafers={len(res.schedule)}")
-        issues = check_solution(ir, res)
+        issues, ml = _check_all(ir, res, ai)
         if issues:
             print(f"  ✗ 自检 {len(issues)} 处违例：")
             for x in issues[:10]:
                 print("    -", x)
         else:
-            print("  ✓ 自检通过（P/C/R 约束均满足）")
+            print("  ✓ 自检通过（schedule P/C/R/LL/Clean + MoveList 压力态）")
         if args.export:
-            _export(ir, res, s, "input", name)
+            _export(ml, s, "input", name)
             print(f"  导出 MoveList → {OUTPUT_DIR/s/'input'/(name+'.json')}")
     print("=" * 68)
 

@@ -1,7 +1,9 @@
 from src.model import Chamber, Durations, Problem, Stage, Wafer
 from src.milp import SolveResult, _ll_proc
 from src.milp_clean import _clean_specs, _dummy_order_pairs
+from src.validation import populate_premove_ids, validate_move_list
 from typing import List, Tuple, Dict, Optional
+
 
 def export_movelist(task: Problem, res: SolveResult) -> List[dict]:
     """把 MILP 排程展开成 MoveList（过 validate_movelist）。
@@ -19,21 +21,33 @@ def export_movelist(task: Problem, res: SolveResult) -> List[dict]:
     robot_hops: Dict[str, List[Tuple[float, str, str]]] = {}   # robot -> [(r, src, prev_dst 由排序得)]
     ll_occs: Dict[str, List[Tuple[float, float, str]]] = {}    # LL -> [(occ_start, occ_end, ll_type)]
 
-    # LoadLock swap 识别：同一 LL 腔里，某机器手在【一次开门】内先把片 v 放进一槽、再从兄弟槽取走
-    # 异型片 u（v.in_robot == u.out_robot、且 pick 起点恰接 place 终点 + 一次转位 move ⇒ 中间无门）。
-    # 对这对动作：① 抹掉夹在中间的 v.place_post 关门 + u.pick_pre 开门（门只在最外层开/关一次）；
-    # ② v 的抽/充气（留腔片压力态转换）改到 swap 关门之后才起（不能开着门翻压力态）。
-    #   suppress_place_post/pick_pre：(wid,j)→该 stage 的对应门被 swap 合并、不单独 emit；
-    #   proc_after_swap：(wid,j)→v 的 type-10 起始时刻（= u 取片完成 + pick_post 关门）。
+    # LoadLock swap（双槽异型共存）的两件事：
+    # ① 门合并：某机器手在【一次开门】内先把片 v 放进一槽、再从兄弟槽取走异型片 u
+    #   （v.in_robot == u.out_robot、且 pick 起点恰接 place 终点 + 一次转位 move ⇒ 中间无门）
+    #   ⇒ 抹掉夹在中间的 v.place_post 关门 + u.pick_pre 开门（门只在最外层开/关一次）。
+    #   suppress_place_post/pick_pre：(wid,j)→该 stage 的对应门被 swap 合并、不单独 emit。
+    # ② 压力态起点：LL 整腔单一压力态，v 的抽/充气须等所有【更早进腔】的异型共存片 u 离腔
+    #   关门之后才能起（不能带着 u 翻压力态）——不限于同门紧凑 swap：松散共存（两次独立
+    #   开关门，如大气手先放新片、稍后才取走留腔片）同样适用。镜像 solve_timing 的跨槽压力
+    #   边②（r(v) ≥ r(u)+pick+pick_post+proc(v)+pick_pre）⇒ 推迟后的窗口必在 v 取片开门前结束。
+    #   press_after：(wid,j)→v 的 type-10 最早起始时刻（= 各 u 取片完成 + pick_post 关门的最晚者）。
     def _detect_swaps():
         by_c: Dict[str, list] = {}
         for wid, rows in res.schedule.items():
             for j, (stype, c, av, rv) in enumerate(rows):
                 if stype == "loadlock":
                     by_c.setdefault(c, []).append((wid, j, wafers[wid].stages[j], av, rv))
-        supp_pp, supp_pre, proc_after = set(), set(), {}
+        supp_pp, supp_pre, press_after = set(), set(), {}
         for c, visits in by_c.items():
             for (vw, vj, vs, va, vr) in visits:            # v = 被放入的片
+                # ② 更早进腔的异型片离腔关门时刻的最晚者（已离腔者时刻早、被 emit 处 max(d0,·) 吸收）
+                blk = [ur + (tm.pick_t(us.out_robot, c) + tm.pick_post(us.out_robot, c)
+                             if us.out_robot else 0.0)
+                       for (uw, uj, us, ua, ur) in visits
+                       if us.ll_type != vs.ll_type and ua < va]
+                if blk:
+                    press_after[(vw, vj)] = max(blk)
+                # ① 同手同门紧凑 swap 的门合并
                 if not vs.in_robot:
                     continue
                 R, mv = vs.in_robot, tm.move(vs.in_robot)
@@ -44,13 +58,13 @@ def export_movelist(task: Problem, res: SolveResult) -> List[dict]:
                         continue
                     supp_pp.add((vw, vj))                   # 抹 v 的 place 关门
                     supp_pre.add((uw, uj))                  # 抹 u 的 pick 开门
-                    proc_after[(vw, vj)] = ur + tm.pick_t(R, c) + tm.pick_post(R, c)   # 关门后再翻压力态
-        return supp_pp, supp_pre, proc_after
+        return supp_pp, supp_pre, press_after
 
-    supp_place_post, supp_pick_pre, proc_after_swap = _detect_swaps()
+    supp_place_post, supp_pick_pre, press_after_swap = _detect_swaps()
 
     def emit(mtype: int, start: float, end: float, *, station: str = "",
              robot: str = "", src: str = "", dst: str = "", cslot: int = 1,
+             srcslot: Optional[int] = None, dstslot: Optional[int] = None,
              w: Optional[Wafer] = None, **extra) -> None:
         nonlocal mid
         mid += 1
@@ -64,9 +78,9 @@ def export_movelist(task: Problem, res: SolveResult) -> List[dict]:
             mv["Robot"] = robot
             mv["RobotSlotList"] = [1]
         if src:
-            mv["SrcStationList"] = [src]; mv["SrcSlotList"] = [cslot]
+            mv["SrcStationList"] = [src]; mv["SrcSlotList"] = [srcslot or cslot]
         if dst:
-            mv["DestStationList"] = [dst]; mv["DestSlotList"] = [cslot]
+            mv["DestStationList"] = [dst]; mv["DestSlotList"] = [dstslot or cslot]
         if w is not None:
             mv["MatIDList"] = [w.mat_id]; mv["PJobName"] = [w.pjob_name]
         mv.update(extra)
@@ -87,7 +101,8 @@ def export_movelist(task: Problem, res: SolveResult) -> List[dict]:
             emit(6, rv - pre_c, rv, station=c, cslot=cs, w=w)               # 源开门(pick 前，与到位并行)
         emit(0, rv, rv + pt, robot=R, src=c, cslot=cs, w=w)                 # pick
         emit(7, rv + pt, rv + pt + post_c, station=c, cslot=cs, w=w)        # 源关门(与走位并行)
-        emit(5, rv + pt, arrive, robot=R, src=c, dst=nxt_c, cslot=cs, w=w)  # 走位
+        emit(5, rv + pt, arrive, robot=R, src=c, dst=nxt_c, cslot=cs,
+             srcslot=cs, dstslot=ns, w=w)                                  # 走位
         emit(6, arrive - pre_n, arrive, station=nxt_c, cslot=ns, w=w)       # 目标开门(与走位并行)
         emit(1, arrive, a_next, robot=R, dst=nxt_c, cslot=ns, w=w)          # place
         if (w.wid, j + 1) not in supp_place_post:                          # swap：place 关门并入后续 pick 那次门
@@ -107,8 +122,8 @@ def export_movelist(task: Problem, res: SolveResult) -> List[dict]:
             elif stype == "loadlock" and llp > 0:
                 # type-10 抽充气：按 ll_type 记压力态转移（entry 抽气 ATM→VAC、exit 充气 VAC→ATM），
                 # 与下方空抽/空充口径统一，使同一 LL 的 type-10 序列成 ATM/VAC 干净交替（可校验）。
-                # swap 留腔片：门要等取走兄弟片才关，压力态只能在关门后翻 ⇒ 起点顺延到 swap 关门。
-                p0 = proc_after_swap.get((wid, j), d0)
+                # swap 共存：压力态只能在异型兄弟片离腔关门后翻 ⇒ 起点顺延（见 _detect_swaps ②）。
+                p0 = max(d0, press_after_swap.get((wid, j), d0))
                 last, cur = ("ATM", "VAC") if s.ll_type == "entry" else ("VAC", "ATM")
                 emit(10, p0, p0 + llp, station=c, cslot=cs, w=w,
                      LastState=last, CurState=cur)
@@ -166,6 +181,7 @@ def export_movelist(task: Problem, res: SolveResult) -> List[dict]:
              MatIDList=[], CleanRecipe=cl.recipe, CleanTaskName=cl.task)
 
     moves.sort(key=lambda m: (m["StartTime"], m["MoveID"]))
+    populate_premove_ids(moves)
     return moves
 
 

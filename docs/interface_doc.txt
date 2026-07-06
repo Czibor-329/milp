@@ -1,0 +1,262 @@
+===== SHEET: 模块类 (76x5) =====
+模块类 | 属性 | 属性类型 | 描述 | 备注说明
+IStation : IUpdateStation / （模块基类初始化接口） / 【interface】 | Name | string | 模块名称
+ | Capacity | int | 模块容量
+ | Slots | IList<int> | 模块可用槽位 | slot禁用可以在此处实现
+ | PickPrepareTime | IDictionary<string, double> | Pick前模块的准备时间，key：机械手的名称
+ | PlacePrepareTime | IDictionary<string, double> | Place前模块的准备时间，key：机械手的名称
+ | PickCompleteTime | IDictionary<string, double> | Pick后模块的完成时间，key：机械手的名称
+ | PlaceCompleteTime | IDictionary<string, double> | Place后模块的完成时间，key：机械手的名称
+ | PostCompleteTime | IDictionary<string, double> | PostComplete的时间，key：机械手的名称
+IUpdateStation / （模块基类重算更新接口） / 【interface】 | TimeToAvailableOfSlot | IDictionary<int，double> | 模块及slot最早的可调度时间，key：slotID，0表示模块 | 给值规则：PM/LL/Buffer/Cooler/AL模块必须维护value值为最早可用时间，其余可默认给0
+ | State | ModuleState | 模块状态，Normal = 0,Alarm = 1,Maintain = 2,Init = 3
+ILoadPort: IStation / （LoadPort初始化接口） / 【interface】
+IAligner：IStation / （Aligner初始化接口） / 【interface】 | IsAlignWithRobot | bool | 表示align时是否占用机械手
+ | AlignmentTime | IDictionary<int, double> | 校准时间（key: 片数，value: 时间）
+ILoadLock : IStation, IUpdateLoadLock / （LoadLock初始化接口） / 【interface】 | PrePrepareTime | IList<IStationPrepare> | 传输动作准备之前腔室环境准备的时间
+IUpdateLoadLock : IUpdateStation / （LoadLock重算更新接口） / 【interface】 | LastItem | string | 上一次访问的机械手名称
+IStationPrepare - 聚合到ILoadLock / （腔室环境准备时间接口） / 【interface】 | LastItem | string | 上一次的操作模块/位置/状态
+ | CurrentItem | string | 当前的操作模块/位置/状态
+ | Time | double | 转换时间
+ | PrePrepareType | IDictionary<string, double> | PrePrepare类型 | 调度侧提供具体类型，比如pump/vent，在PrePrepareMove输出时携带对应信息，简化调度侧逻辑
+ICooler : IStation, IUpdateCooler / （Cooler初始化接口） / 【interface】
+IUpdateCooler : IUpdateStation / （Cooler重算更新接口） / 【interface】 | MaterialCount | IDictionary<int, int> | 模块slot内的冷却工艺次数，key：slotID | 用于均衡使用次数需求
+IProcessChamber : IStation, IUpdateProcessChamber / （单槽PM初始化接口） / 【interface】 | PrePrepareTime | IList<IStationPrepare> | 传输动作准备之前腔室环境准备的时间 | 用于腔室控温 / StationPrepare传值：LastItem: Vacancy, CurItem: Occupied, Value: >=0, 表示腔室在有物料占用前需要做一次PrePrepare； / 如果byRoute，Value = 0，通过visit.MoveTimeOffset实现动态调整时间；如果byChamber，Value设置固定数值；如果无需规划，设为空list
+IUpdateProcessChamber : IUpdateStation / （单槽PM重算更新接口） / 【interface】 | PJobName | string | 当前占用腔室的pjob名字
+ | StateVariables | IDictionary<string, IStateVariable> | 腔室各项状态变量，key:变量名，value：重算时变量的当前值
+ | LastItem | string | 上一次的操作模块/位置/状态
+ | ByChamberClean | IList<CleanCondition> | 系统级的clean需求（不区分时机，与job无关）
+IMultiProcessChamber : IStation, IUpdateMultiProcessChamber / （多槽PM初始化接口） / 【interface】 | PrePrepareTime | IList<IStationPrepare> | 传输动作准备之前腔室环境准备的时间 | 用于腔室控温 / StationPrepare传值：LastItem: Vacancy, CurItem: Occupied, Value:>= 0, 表示腔室在有物料占用前需要做一次PrePrepare； / 如果byRoute，Value = 0，通过visit.MoveTimeOffset实现动态调整时间；如果byChamber，Value设置固定数值；如果无需规划，设为空list
+IUpdateMultiProcessChamber : IUpdateStation / （多槽PM重算更新接口） / 【interface】 | SlotPriority | int | 腔室内slot优先级，单片时优先使用的slot
+ | MaterialCount | IDictionary<int, int> | 腔室内slot产品片的工艺次数，key：slotID | 用于均衡使用次数需求
+ | PJobName | string | 当前占用腔室的pjob名字
+ | StateVariables | IDictionary<string, IStateVariable> | 腔室各项状态变量，key:变量名，value：重算时变量的当前值
+ | LastItem | string | 上一次的操作模块/位置/状态
+ | ByChamberClean |  IList<CleanCondition> | 系统级的clean需求（不区分时机，与job无关） | 考虑到Clean类型仍然存在片前片后的判断时机，需要算法在实现时根据实际需求在片前片后均进行Clean检查。
+IBuffer : IStation / （Buffer初始化接口） / 【interface】
+IDummyPort : IStation / （DummyPort初始化接口） / 【interface】
+IHeater : IStation / （Heater初始化接口） / 【interface】
+ISMIF : Istation / （SMIF初始化接口） / 【interface】
+IRobot : IUpdateRobot / （非独立机械手初始化接口） / 【interface】 | Name | string | 机械手名称
+ | Capacity | int | 机械手容量
+ | PlaceTime | IDictionary<string, double> | 机械手放片所需要的时间，key：机械手放片模块
+ | PickTime | IDictionary<string, double> | 机械手取片所需要的时间，key：机械手取片模块
+ | PrepTransTime | IList<ITransferInfo> | 机械手传输动作前的准备时间（包含控压、旋转、移动）
+ | ArmPointerPair | IList<IList<string>> | 机械手手臂指向位置关系对
+ | CanMultiTrans | bool | 机械手是否可以执行多臂组合动作（MultiPickMove、MultiPlaceMove等）
+IUpdateRobot / （非独立机械手重算更新接口） / 【interface】 | ArmInfo | IDictionary<string, IArm> | 手臂信息
+ | TimeToAvailable | double | 机械手最早的可调度时间
+ | State | ModuleState | 模块状态，Normal = 0,Alarm = 1,Maintain = 2,Init = 3
+IArm - 聚合到IRobot / （机械手手臂接口） / 【interface】 | Name | string | 机械手臂对应的名字
+ | IsEnable | bool | 机械手臂是否可用
+ | SlotIDs | IList<int> | 机械手臂对应的slot列表
+ | AccessibleStations | IList<string> | 机械手臂可以访问的模块列表
+ | SlotAtStation | string | 机械手臂当前指向的模块位置
+ | UseCount | int | 机械手臂的使用次数，传输一次物料累计一次
+ | SlotsStationMap | IDictionary<string, IDictionary<int, IList<KeyValuePair<string, int>>>> | 机械手臂slot与可操作station的slot对应关系， / key：组合模块名称，value：（key：机械手slot ID，value：<可操作模块，模块的slotID>）
+ITransferInfo - 聚合到IRobot / （机械手传输前准备时间存储结构） / 【interface】 | SrcStation | string | 源位置
+ | DestStation | string | 目的位置
+ | TransType | TransType(Enum) | 传输前准备动作类型（无载 NoLoad = 0,   有载 OnLoad = 1）
+ | Time | double | 传输前准备时间
+IATMRobot : IRobot / （ATMRobot初始化接口） / 【interface】
+IVTMRobot : IRobot / （VTMRobot初始化接口） / 【interface】
+IHighVTMRobot : IRobot / （级联设备的HighVTMRobot初始化接口） / 【interface】
+IStateVariable | Name | string | 状态变量名称
+ | Value | VariableDataType | 变量值
+ | ComputeRule | string | 状态变量计算规则
+ | Type | StateVariableType (Enum) | 状态变量类型： / IdleTimer = 0, / Counter = 1, / Compute = 2, / RouteOverwrite = 3, / FoupOverwrite = 4, / RecipeOverwrite = 5, / ProcessTypeOverwrite = 6, / LotOverwrite = 7, | 状态变量类型用来区分算法对各类型变量进行维护推演的内置逻辑： / 1）IdleTimer类型表示算法在维护推演该变量时以腔室的空闲时间的计算逻辑来进行维护推演； / 2）Counter类型表示算法根据实际工艺recipe中的weight属性携带的对应变量的权重增量来对变量进行累计的计算逻辑来维护推演； / 3）Compute类型表示算法根据变量中ComputeRule属性的计算方式来对变量进行维护推演； / 4）XXXOverwrite类型表示算法需要根据工艺后的Wafer或Recipe携带的对应属性对变量进行覆写的计算逻辑来维护推演；
+VariableDataType / 变量数据类型基类 / 【abstract class】
+VariableIntType : VariableDataType / int变量数据类型 / 【class】 | Value | int | int类型传递参数的值
+VariableDoubleType : VariableDataType / double变量数据类型 / 【class】 | Value | double | double类型传递参数的值
+VariableStringType : VariableDataType / string变量数据类型 / 【class】 | Value | string | string类型传递参数的值
+===== SHEET: 物料类 (20x6) =====
+物料类 | 属性 | 属性类型 | 描述 | 备注说明
+IMaterial - 聚合到IUpdateParams / （物料基类接口） / 【interface】 | Name | string | 当前物料名字
+ | ID | int | 物料ID（唯一标志）
+ | TaskID | string | 物料的Task id
+ | LotID | string | 物料的LotID
+ | FoupID | string | 物料的FoupID
+ | Priority | int | 物料在当前pjob的优先级
+ | Route | IRoute | 物料当前传输路径
+ | StepID | int | 物料当前处于Route中的第几个step
+ | CurrentModuleName | string | 物料当前所在Station的名字
+ | SlotID | int | 物料当前所在的Slot
+ | NeedSchedule | bool | 物料是否参与计算
+ | PJobName | string | 物料当前所在的pjob对象
+ | SrcPortName | string | wafer未工艺时从属的LP名字
+ | ProcessingState | MaterialProcessingState(Enum) | Unprocessed = 0, / InProcess = 1, / Processed = 2, / Skipped = 3, / Aborted = 4, / Stopped = 5, / Rejected = 6
+IDummyMaterial：IMaterial / （Dummy片接口） / 【interface】 | AccessiblePM | IList<string> | Dummy片可以进的PM列表
+ | LimitLevel1 | int | Dummy片使用次数上限1
+ | LimitLevel2 | int | Dummy片使用次数上限2
+ | Count | int | Dummy片累计使用次数
+ | Usage | DummyMatUsage(Enum) | Dummy片使用类型 / Cleaning = 0, / Dummy = 1, / MIX = 2
+===== SHEET: 路径类 (26x5) =====
+路径类 | 属性 | 属性类型 | 描述 | 备注说明
+IRoute / 【interface】 | Name | string | 路径名称
+ | RouteSteps | IList<IRouteStep> | 路径的Step列表
+ | BufferOption | BufferOption(Enum) | buffer的使用模式 / 0：no buffer , 1: 强制buffer out，2：强制buffer in，3. 非强制buffer out，4. 非强制buffer in
+ | BoundedStepIDs |         IList<IList<int>> | 重入路径需要绑定相同visit的step列表 / 例如：[[3,5],[2,4]]，表示step3和step5/step2和step4在选择visit时必须相同
+ | Group | string | waferflow group需求
+ | PrePJob | IDictionary<string, IList<CleanCondition>> | Pjob前clean需求
+ | PostPJob | IDictionary<string, IList<CleanCondition>> | Pjob后clean需求
+ | PostCJob | IDictionary<string, IList<CleanCondition>> | Cjob后clean需求
+IRouteStep - 聚合到IRoute / 【interface】 | Visits | IList<IVisit>  | 可访问清单
+ | StepID | int | 索引
+ | PostStepID | IList<int> | 下一步关联StepID列表
+ | NeedProcess | bool | 该步是否需要规划processmove/alignmove | NeedAlign(二刻、三刻)/UseAligner（一刻）：是否需要做Align操作，可以在此实现
+IVisit - 聚合到IRouteStep / 【interface】 | StationName | string | 访问模块名称
+ | MoveTimeOffset | IDictionary<MoveTpye(Enum), double> | 对该模块指定Move的耗时补偿， | PurgeN2需求/PM控温需求：CTC由此传入指定move类型（PrePrepareMove）和对应时间增量，算法依据增加后的时长规划对应Move
+ | SlotID | IList<int> | 指定访问模块的slot id（机械手臂可能有多个slot）。 | 需求1：针对多层机械手，区分操作未工艺片/已工艺片手臂，或区分取片/送片手臂，通过visit指定slot方式实现。 / 需求2：针对双腔机台/多层机械手，均衡使用在算法内部实现，若需要优先使用/禁用某Slot，通过visit指定slot方式实现。
+ | ProcessRecipe | string | 工艺配方recipe名称
+ | AfterOutPM | IList<CleanCondition> | 片后clean需求
+ | BeforeInPM | IList<CleanCondition> | 片前clean需求
+ | QTimeLimit | double | Qtime约束阈值
+ | ResidencyConstraint | double | 驻留时间约束阈值
+IProcessRecipe - 聚合到IUpdateParams / （工艺配方接口） / 【interface】 | Name | string | 配方名称
+ | ModuleName | string | 模块名字
+ | Time | double | 配方时间
+ | Weight | IDictionary<string, double> | 表示工艺执行后对腔室的各状态变量的权重/增量，其中Key表示腔室状态变量的名字，Value是对该状态变量的增量 | 例如，腔室维护了名为"ProcessCount", "ILCCount", "OLCCount"的三个Counter类型的StateVariable，该工艺配方在执行后需要对上述三个变量累计加1，则该属性应该存储 / { /     "ProcessCount": 1.0, /     "ILCCount": 1.0, /     "OLCCount": 1.0 / }
+ | ProcessType | string | 工艺类型，默认为string.empty | 二刻clean by switch recipe Group需求可通过此接口实现
+===== SHEET: Clean类 (33x6) =====
+clean类 | 属性 | 属性类型 | 描述
+ICleanCondition / （组合需求接口） / 【interface】 | CheckConditions | IDictionary<string, IList<CleanTask>> | 组合条件别名 + 执行任务列表，任务按列表存储顺序执行(优先级)
+ | ExecuteOrder | IList<ICondition> | CheckConditions中多对clean的执行顺序(优先级)，按CombineCondition排序
+ICondition / （条件基类接口） / 【interface】 | Alias | string | 条件别名
+ICombineCondition：ICondition / （组合条件接口） / 【interface】 | Conditions | IList<ICondition> | 条件列表(无条件执行置空)
+ | Rule | string | 条件间AND/OR的关系表达式，只允许出现数字、AND、OR、小括号等关键字
+ISimpleCondition：ICondition / （无条件基类接口） / 【interface】
+ICounterCondition：ICondition / （累计型条件） / 【interface】 | ThresholdValueList | IList<double> | 阈值范围 / 条件为大于等于某个阈值：[  x，inf ) / 条件为小于某个阈值：[  -inf，x ) / 条件为大于等于某个阈值x，小于某个阈值：[ x, y )
+ | StateVariableName | string | 条件关联的状态变量
+ | PreJuge | bool | 是否预估增加下一片后情况
+ISwitchCondition：ICondition / （切换型条件） / 【interface】 | PreValue | string | 切换前取值，不指定设空
+ | StateVariableName | string | 条件关联的状态变量
+ | PostValue | string | 切换后取值，不指定设空
+ICleanTask / （执行任务） / 【interface】 | TaskName | string | 执行任务的名称，唯一标识
+ | CleanRecipe | string | 任务执行的clean recipe名
+ | UpdateStateVariables | IList<string> | 执行任务后需要更新的过程变量名列表
+ | MaterialCount | int | 任务需要的Dummy片数量，不带片为0
+ | EmptyCleanRecipeAfterMaterial | string | 片间wac的recipe名 / 不需要做设string.empty / 不带片情况下，若设置，在执行clean recipe对应process后执行 / 带片情况下，若设置，在Dummy片间执行，默认一片一wac
+根据插入位置分类 | PreJob | IDictionary<string，IList<CleanCondition>> | key：PM名，job前clean需求， / by chamber：可挂在PM上，存储类型为 List<CleanCondition> / by sequence：可挂在Route、Pjob、Cjob上
+ | PostJob | IDictionary<string，IList<CleanCondition>> | key：PM名，job后clean需求， / by chamber：可挂在PM上，存储类型为 List<CleanCondition> / by sequence：可挂在Route、Pjob、Cjob上
+ | AfterOutPM | IDictionary<string，IList<CleanCondition>> | key：PM名，片后clean需求， / by chamber：可挂在PM上，存储类型为 List<CleanCondition> / by sequence：可挂在Route、Pjob、Cjob上
+ | BeforeInPM | IDictionary<string，IList<CleanCondition>> | key：PM名，片前clean需求， / by chamber：可挂在PM上，存储类型为 List<CleanCondition> / by sequence：可挂在Route、Pjob、Cjob上
+===== SHEET: Job类 (16x5) =====
+Job类 | 属性 | 属性类型 | 描述
+IProcessJob - 聚合到IUpdateParams / （Pjob接口） / 【interface】 | JobName | string | pjob name from EAP
+ | MatList | IList<int> | 物料ID列表
+ | State | JobState(Enum) | pjob状态， / Running  = 0，Abort  = 1 ，End = 2 ，Resume   = 3 
+ | OriginRoute | IRoute | 原始传输路径（waferflow中定义的route,不可修改）
+ | TaskID | string | Task ID
+ | Priority | int | 同一Cjob下的Pjob优先级
+IControlJob - 聚合到IUpdateParams / （Cjob接口） / 【interface】 | TaskID | string | wafer所属TaskID
+ | JobType | CJobType(Enum) | CJob类型 / NormalLot = 0，ManualJob = 1，HighestLot = 2，HigherLot = 3，TransferJob = 4，DummySeason = 5
+ | Priority | int | Normal lot类型的CJob优先级，其他类型的Cjob，此值为-1
+ | TaskMode | TaskMode(Enum) | 任务模式，Smart = 0，Pipeline = 1，Sequential = 2，Concurrent =3
+ | PJobNameList | IList<String> | CJob下带的Pjob对应的ID列表
+IDummySeason：IProcessJob / 【interface】 | Count | int | 需要的dummy片数
+ | Usage | DummyMatUsage(Enum) | 指定dummy片的使用类型
+===== SHEET: Move类 (55x6) =====
+计算输出 | 描述 | 属性名 | 属性类型 | 描述 | 备注说明
+IMove / （基类） / 【interface】 | move基类，用于描述机台内的动作 | ModuleName | string | 动作执行模块
+ |  | MoveType | MoveType(Enum) | Move类型： / PickMove = 0， / PlaceMove = 1， / MultiPickMove = 2， / MultiPlaceMove = 3， / SwapMove = 4， / PreTransMove = 5， / PrepareMove = 6， / CompleteMove = 7， / PostCompleteMove = 8 / ProcessMove = 9, / PrePrepareMove = 10, / AlignMove = 11
+ |  | MatIDList | IList<int> | 物料ID(list)
+ |  | StepIDList | IList<int> | 物料step id(list)
+ |  | MoveID | int | move id
+ |  | RequestID | int | 重算ID
+ |  | PJobName | IList<string> | pjob name
+ |  | TaskID | IList<string> | TaskID
+ |  | StartTime | double | 开始时间
+ |  | EndTime | double | 规划结束时间
+ |  | PreMoveID | IList<int> | 前置moveID(list)
+IPickMove：IMove / （单Arm单/多片) / 【interface】 | 用于描述机械手小颗粒度的pick动作 | RobotSlotList | IList<int> | 关联机械手slot(list)
+ |  | SrcStationList | IList<string> | 源模块(list)
+ |  | SrcSlotList | IList<int> | 源slot(list)
+IPlaceMove：IMove / （单Arm单/多片) / 【interface】 | 用于描述机械手小颗粒度的place动作 | RobotSlotList | IList<int> | 关联机械手slot(list)
+ |  | DestStationList | IList<string> | 目的模块(list)
+ |  | DestSlotList | IList<int> | 目的slot(list)
+IMultiPickMove：IMove / （多Arm) / 【interface】 | 用于描述机械手小颗粒度的pick动作 | RobotSlotList | IList<int> | 关联机械手slot(list)
+ |  | SrcStationList | IList<string> | 源模块(list)
+ |  | SrcSlotList | IList<int> | 源slot(list)
+IMultiPlaceMove：IMove / （多Arm) / 【interface】 | 用于描述机械手小颗粒度的place动作 | RobotSlotList | IList<int> | 关联机械手slot(list)
+ |  | DestStationList | IList<string> | 目的模块(list)
+ |  | DestSlotList | IList<int> | 目的slot(list)
+IPreTransMove：IMove / （单/多片） / 【interface】 | 用于描述机械手小颗粒度的传输前的准备动作（包括旋转、TM腔控压等） | RobotSlotList | IList<int> | 关联机械手slot(list)
+ |  | SrcStationList | IList<string> | 源模块(list)
+ |  | SrcSlotList | IList<int> | 源slot(list)
+ |  | DestStationList | IList<string> | 目的模块(list)
+ |  | DestSlotList | IList<int> | 目的slot(list)
+ |  | RalatedActionType | ActionType(Enum) | Prepare关联动作类型，place/doubleplace:0;pick/doublepick:1;swap:2
+ISwapMove：IMove / （单/双手） / 【interface】 | 用于描述机械手小颗粒度的交换片动作 / （包括pick+旋转+place） | StnRecvSlotList | IList<int> | 目的slot(list)
+ |  | StnSendSlotList | IList<int> | 源slot(list)
+ |  | StationList | IList<string> | swap模块
+ |  | RecvSlotList | IList<int> | 关联机械手PickSlot(list)
+ |  | SendSlotList | IList<int> | 关联机械手PlaceSlot(list)
+ |  | RecvMatList | IList<int> | pick物料(list)
+ |  | SendMatList | IList<int> | place物料(list)
+ |  | SwapMode | SwapMode(Enum) | 0:pickfirst;1:place first（二刻：RobotMode、三刻）
+ |  | RecvMatStepIDList | IList<int> | pick物料stepID(list)
+ |  | SendMatStepIDList | IList<int> | place物料stepID(list)
+IProcessMove：IMove / （产品片+clean，单/多片） / 【interface】 | 用于描述加工工艺动作 / （包括产品片工艺、冷却工艺、purgeN2、带片/无片clean工艺等） | ProcessRecipe | string | 关联process recipe
+ |  | CleanTaskName | string | 执行的cleantask name，产品片工艺/cooling等设空
+ |  | SlotList | IList<int> | 关联slot，双腔机台有多个Slot
+ |  | IsLastCleanTaskMove | bool | 表示是否是该CleanTask的最后一个Process Move
+ |  | IsLastMove | bool | 判断PM是否是Cjob内最后一次被使用，CTC通过此参数判断腔室是否能释放
+IPrePrepareMove：IMove / 【interface】 | 用于描述机械手传输准备之前的动作 / （包括Pump、Vent、多腔室旋转、控温等） | LastState | string | 模块上一次状态 | 控温PrePrepareMove 是 placemove前腔室preparemove的前置动作
+ |  | CurState | string | 模块当前状态
+ |  | PrePrepareType | string | PrePrepare类型
+IAlignMove：IMove / （单/多片） / 【interface】 | 用于描述aligner的校准动作
+IPrepareMove：IMove / 【interface】 | 用于描述模块小颗粒度的传输前的准备动作（包括模块控压、升降针、开关门等） | SlotList | IList<int> | Prepare相关联的模块slot列表
+ |  | RelatedActionType | ActionType(Enum) | Prepare关联动作类型，place/doubleplace:0;pick/doublepick:1;swap:2
+ |  | RelatedRobotType | RobotType(Enum) | Prepare关联动作使用的机械手，1：真空手 2：大气手
+ICompleteMove：IMove / 【interface】 | 用于描述模块、机械手小颗粒度的传输后的完成动作（包括模块升降针、开关门等） | RelatedActionType | ActionType(Enum) | Prepare关联动作类型，place/doubleplace:0;pick/doublepick:1;swap:2
+ |  | RelatedRobotType | RobotType(Enum) | Complete关联动作使用的机械手，1：真空手 2：大气手
+IPostCompleteMove：IMove / 【interface】 | 用于描述模块小颗粒度的关门后的处理动作（包括模块控压等） | RelatedRobotType | RobotType(Enum) | Complete关联动作使用的机械手，1：真空手 2：大气手
+===== SHEET: Scheduler (57x5) =====
+调度 | 方法 |  | 描述 | 备注说明
+IScheduler | OutputHandler: event |  | 算法输出规划信息事件
+ | DeadLockHandler: event |  | 算法死锁事件
+ | SchedulerStateChangedHandler: event |  | 算法状态变更事件
+ | InitToolTopo(IToolTopo toolTopo) |  | 初始化ToolTopo
+ | StartSchedule(int requestID, IUpdateParams updateParams) | StartSchedule(IUpdateParams updateParams，int RequestID) | 开始/重新计算
+ | UpdateMoveState(IMoveStateInfo moveStateInfo) |  | 非重算时更新Move状态信息
+ | UpdateJobState(string cJobID, string pJobID, JobState jobState) |  | 非重算时更新job执行状态
+ | StopSchedule() | StopSchedule() | 停止计算
+ | QuitSchedule() |  | 退出调度，释放计算线程、非托管代码资源等 | 在该方法被调用后需要关闭算法的计算线程等
+委托 | 定义 |  | 描述 | 备注说明
+OnOutput | OnOutput(object sender, OutputEventArgs e) |  | 算法输出规划信息事件委托
+OnDeadLock | OnDeadLock(object sender, DeadLockEventArgs e) |  | 算法死锁事件委托
+OnSchedulerStateChanged | OnDeadLock(object sender, SchedulerStateChangedEventArgs e) |  | 算法计算状态变更事件委托
+参数类 | 属性 | 属性类型 | 描述 | 备注说明
+IToolTopo / （设备初始化接口） / 【interface】 | Robots | IDictionary<string, IRobot> | 设备机台的Robot列表
+ | Stations | IDictionary<string, IStation> | 设备中的模块列表
+IUpdateParams / （重算参数接口） / 【interface】 | Robots | IDictionary<string, IUpdateRobot> | 设备中需要更新的Robot列表，key：机械手名称
+ | Stations | IDictionary<string, IUpdateStation> | 设备中需要更新的模块列表，key：模块名称
+ | Materials | IList<IMaterial> | 重算时物料信息
+ | ProcessJobs | IList<IProcessJob> | 重算时PJob信息
+ | ControlJobs | IList<IControlJob> | 重算时CJob信息
+ | RemoveList | IList<int> | 重算时，通知算法需要移除的MoveID列表
+ | ProcessRecipes | IList<IProcessRecipe> | 重算时更新配方信息
+ | MoveStates | IList<IMoveStateInfo> | 重算时更新Move状态信息
+ | CurrentTime | double | 重算时当前时间戳（单位与其他时间参数保持一致）
+IMoveStateInfo - 聚合到IUpdateParams / （Move状态存储结构） / 【interface】 | MoveID | int | Move的ID
+ | StartTime | double | Move的开始时间
+ | EndTime | double | Move的结束时间，未结束给-1
+ | MoveState | MoveState (Enum) | Move执行状态： / Running = 0， / Done = 1， / Aborted = 2
+IOutputParams / （输出参数接口） / 【interface】 | MoveList | IList<IMove> | 算法规划的move列表
+ | Feedback | IList<string> | 算法通知信息 | dummy片不足可通过此处通知
+ | JobList | IList<IPlannedJob> | 算法规划的Cjob信息
+ | DummyReturnInfo | IDictionary<int，IList<IRouteList>> | 算法规划的Dummy片信息，key：Dummy片的MatID
+ | MatIntoPM | IDictionary<int，IList<string>> | 算法规划的产品片进入的PM名称列表，key：产品片的MatID
+IPlannedJob - 聚合到IOutputParams / (算法规划Cjob信息) | TaskID | string | CJobID
+ | JobEndTime | double | CJob中最后一片Wafer回到LoadPort的时间
+ | OccupiedBuffer | string | 算法规划的CJob占用的Buffer名称
+IRouteList - 聚合到IOutputParams / （Dummy片的规划信息） | TaskID | string | Dummy片关联产品片的CJobID
+ | PJobName | string | Dummy片关联产品片的PJob名称
+ | RouteRecipe | IRoute | 算法规划Dummy片的Route路径
+ | CleanTaskName | string | 算法规划Dummy片关联的CJob下PJob的CleanTask
+ | AlgorithmCount | int | 算法规划Dummy片是关联CleanTask需要的第几片
+OutputEventArgs: System.EventArgs / （算法输出事件参数） | OutputParams | IOutputParams | 算法输出参数信息
+DeadLockEventArgs: System.EventArgs / （算法死锁事件参数） | DeadLockInfo | IList<string> | 死锁详细信息
+SchedulerStateChangedArgs: System.EventArgs / （算法计算状态事件参数） | SchedulerState | SchedulerState | 算法计算状态： / Idle = 0， / Running = 1
+===== SHEET: 接口类图 (128x57) =====
+===== SHEET: 补充说明 (1x1) =====

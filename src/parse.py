@@ -718,18 +718,22 @@ def _expand_wafers(
     # process 腔 round-robin 按 (stage, 候选池) 全局连续计数：多 pjob 共享同一腔池时接着轮
     # （job2 从 job1 停下的位置继续，负载均衡）而非每 pjob 归零。单 pjob / 池不相交时 == rank。
     # loadlock 仍按 rank（其腔分配是 MILP/timing 决策，robin 只是初始默认，维持既有基线）。
-    robin_counter: Dict[Tuple[int, Tuple[str, ...]], int] = {}
+    # 例外：dummy 清洁 pjob 的 loadlock 也走全局连续计数——每个 dummy pjob 通常只有 1~2 片、
+    # rank 从 0 重数，按 rank 轮转会让所有 dummy pjob 的首片挤同一 loadlock（进+出都是它，
+    # 另一 LL 闲置 ⇒ dummy 段串行）；跨 pjob 接着轮后各 PM 的 dummy 片 LA/LB 交替。
+    robin_counter: Dict[tuple, int] = {}
     for pj in pjob_assignments:
         rt = routes[pj.route_name]
         stage_steps = rt.stages
         transports = rt.transports
+        dummy_pj = pj.name.startswith("dummy_") or "_dummy_" in pj.route_name
         for rank, mat in enumerate(pj.material_ids):
             stages: List[Stage] = []
             for j, st in enumerate(stage_steps):
                 in_r = transports[j - 1] if j >= 1 else ""
                 out_r = transports[j] if j < len(transports) else ""
-                if st["stage_type"] == "process":
-                    rkey = (j, tuple(st["visits"]))
+                if st["stage_type"] == "process" or (dummy_pj and st["stage_type"] == "loadlock"):
+                    rkey = (st["stage_type"], j, tuple(st["visits"]))
                     k = robin_counter.get(rkey, 0)
                     robin_counter[rkey] = k + 1
                     chamber = _round_robin(st["visits"], k)

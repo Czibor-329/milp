@@ -1,0 +1,863 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MoveList 校验算法流程</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #17202a;
+      --muted: #5c6672;
+      --line: #d7dee8;
+      --panel: #ffffff;
+      --soft: #f4f7fa;
+      --accent: #0e766f;
+      --accent-2: #b24915;
+      --accent-3: #335c98;
+      --bad: #b42318;
+      --warn: #a15c07;
+      --ok: #067647;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: #eef3f7;
+      font-family: "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
+      line-height: 1.55;
+    }
+
+    header {
+      background: linear-gradient(135deg, #173b57 0%, #0e766f 100%);
+      color: #fff;
+      padding: 34px 32px 30px;
+    }
+
+    header h1 {
+      margin: 0 0 10px;
+      font-size: 32px;
+      font-weight: 720;
+      letter-spacing: 0;
+    }
+
+    header p {
+      max-width: 980px;
+      margin: 0;
+      color: rgba(255, 255, 255, 0.86);
+      font-size: 15px;
+    }
+
+    main {
+      max-width: 1240px;
+      margin: 0 auto;
+      padding: 24px 24px 48px;
+    }
+
+    nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 0 0 22px;
+    }
+
+    nav a {
+      display: inline-flex;
+      align-items: center;
+      min-height: 34px;
+      padding: 6px 12px;
+      color: #123247;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      text-decoration: none;
+      font-size: 13px;
+      font-weight: 650;
+    }
+
+    section {
+      margin: 0 0 24px;
+    }
+
+    h2 {
+      margin: 0 0 12px;
+      font-size: 22px;
+      letter-spacing: 0;
+    }
+
+    h3 {
+      margin: 0 0 10px;
+      font-size: 17px;
+      letter-spacing: 0;
+    }
+
+    p {
+      margin: 0 0 10px;
+    }
+
+    code {
+      padding: 1px 4px;
+      background: #e8edf2;
+      border-radius: 4px;
+      font-family: Consolas, "Cascadia Mono", monospace;
+      font-size: 0.94em;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 18px;
+      box-shadow: 0 8px 22px rgba(20, 39, 56, 0.06);
+    }
+
+    .two-col {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 16px;
+    }
+
+    .note {
+      border-left: 4px solid var(--accent);
+      background: #eef8f6;
+      padding: 12px 14px;
+      color: #194a46;
+      border-radius: 0 8px 8px 0;
+    }
+
+    .warning {
+      border-left-color: var(--warn);
+      background: #fff6e7;
+      color: #694100;
+    }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(155px, 1fr));
+      gap: 12px;
+      align-items: stretch;
+    }
+
+    .flow-step {
+      position: relative;
+      min-height: 138px;
+      padding: 14px;
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+
+    .flow-step:not(:last-child)::after {
+      content: "";
+      position: absolute;
+      right: -12px;
+      top: 50%;
+      width: 12px;
+      height: 2px;
+      background: var(--accent);
+    }
+
+    .flow-step strong {
+      display: block;
+      margin: 0 0 8px;
+      color: var(--accent);
+      font-size: 14px;
+    }
+
+    .flow-step span {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 10px 0 0;
+    }
+
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: #eef4fb;
+      color: #1b4e7a;
+      border: 1px solid #d6e4f4;
+      font-size: 12px;
+      font-weight: 650;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    th,
+    td {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+      text-align: left;
+      font-size: 13px;
+    }
+
+    th {
+      background: #e8eef5;
+      color: #263849;
+      font-weight: 750;
+      white-space: nowrap;
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .move-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+    }
+
+    .move-card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 8px 22px rgba(20, 39, 56, 0.05);
+    }
+
+    .move-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 14px 16px;
+      background: #f7fafc;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .move-title {
+      margin: 0;
+      color: #17202a;
+      font-size: 17px;
+    }
+
+    .move-type {
+      min-width: 36px;
+      height: 36px;
+      display: inline-grid;
+      place-items: center;
+      border-radius: 8px;
+      background: var(--accent);
+      color: #fff;
+      font-weight: 800;
+    }
+
+    .move-body {
+      padding: 14px 16px 16px;
+    }
+
+    .check-list {
+      margin: 0;
+      padding-left: 18px;
+    }
+
+    .check-list li {
+      margin: 0 0 7px;
+      font-size: 13px;
+    }
+
+    .label {
+      display: inline-flex;
+      align-items: center;
+      min-height: 22px;
+      padding: 2px 7px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 760;
+      color: #fff;
+      white-space: nowrap;
+    }
+
+    .label.field {
+      background: var(--accent-3);
+    }
+
+    .label.init {
+      background: var(--accent);
+    }
+
+    .label.pre {
+      background: var(--accent-2);
+    }
+
+    .label.state {
+      background: #6f4eb4;
+    }
+
+    .status-ok {
+      color: var(--ok);
+      font-weight: 700;
+    }
+
+    .status-bad {
+      color: var(--bad);
+      font-weight: 700;
+    }
+
+    .small {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    footer {
+      color: var(--muted);
+      font-size: 12px;
+      padding: 12px 0 0;
+    }
+
+    @media (max-width: 980px) {
+      .flow,
+      .move-grid,
+      .two-col {
+        grid-template-columns: 1fr;
+      }
+
+      .flow-step:not(:last-child)::after {
+        display: none;
+      }
+
+      header {
+        padding: 28px 20px 24px;
+      }
+
+      main {
+        padding: 18px 14px 34px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>MoveList 校验算法流程</h1>
+    <p>
+      本页描述当前校验器使用的时间轴扫描算法，以及 Pick、Place、PreTrans、Prepare、
+      Complete、Process、PrePrepare 这七类 move 的完整检查项。字段名称与
+      <code>docs/interface_doc.txt</code> 和 <code>src/validation</code> 当前实现保持一致。
+    </p>
+  </header>
+
+  <main>
+    <nav aria-label="目录">
+      <a href="#flow">总体流程</a>
+      <a href="#common">公共规则</a>
+      <a href="#types">MoveType</a>
+      <a href="#moves">逐 Move 检查</a>
+      <a href="#premove">PreMoveID</a>
+      <a href="#pressure">压力态</a>
+      <a href="#errors">错误分类</a>
+    </nav>
+
+    <section id="flow" class="panel">
+      <h2>1. 总体流程</h2>
+      <div class="flow" aria-label="校验流程">
+        <div class="flow-step">
+          <strong>1. 建立索引</strong>
+          <span>
+            建立 <code>MoveID -> move</code>、机器人、模块、槽位、可达性、时长和
+            PreMoveID 反向消费索引。
+          </span>
+        </div>
+        <div class="flow-step">
+          <strong>2. 时间轴排序</strong>
+          <span>
+            按 <code>StartTime, EndTime, MoveID</code> 从前往后扫描，并维护已见 move
+            与已完成 move。
+          </span>
+        </div>
+        <div class="flow-step">
+          <strong>3. 校验当前 move</strong>
+          <span>
+            先查字段，再查 init data 合法性，最后查必须的前置 move 是否在
+            <code>PreMoveID</code> 里。
+          </span>
+        </div>
+        <div class="flow-step">
+          <strong>4. 更新时间轴状态</strong>
+          <span>
+            Pick/Place 更新材料位置；Process 更新加工状态；PrePrepare 更新压力或环境状态。
+          </span>
+        </div>
+        <div class="flow-step">
+          <strong>5. 图与压力态复查</strong>
+          <span>
+            全局检查 PreMoveID 引用、重复、自环、环路和 LoadLock Pump/Vent 访问冲突。
+          </span>
+        </div>
+      </div>
+      <div class="note" style="margin-top: 14px;">
+        判定前置完成的核心条件是：
+        <code>previous.EndTime &lt;= current.StartTime + tolerance</code>。如果当前 move
+        依赖的前置 move 尚未结束，即使它出现在 <code>PreMoveID</code> 里，也应判为非法。
+      </div>
+    </section>
+
+    <section id="common">
+      <h2>2. 公共规则</h2>
+      <div class="two-col">
+        <div class="panel">
+          <h3>公共字段检查</h3>
+          <ul class="check-list">
+            <li><code>MoveID</code> 必须为正整数，且全局唯一。</li>
+            <li><code>MoveType</code> 必须属于当前支持范围。</li>
+            <li><code>StartTime</code> 和 <code>EndTime</code> 必须为有限数字。</li>
+            <li><code>EndTime &gt;= StartTime</code>。</li>
+            <li><code>ModuleName</code> 非空。</li>
+            <li><code>PreMoveID</code> 必须为整数列表；无前置使用空列表。</li>
+            <li>所有槽位字段必须是正整数列表。</li>
+            <li>多片字段按 index 对齐，例如 Mat、Step、PJob、RobotSlot、Station、Slot。</li>
+          </ul>
+        </div>
+        <div class="panel">
+          <h3>init data 检查</h3>
+          <ul class="check-list">
+            <li>引用的机器人必须存在于 <code>Robots</code>。</li>
+            <li>引用的模块必须存在于 <code>Stations</code>。</li>
+            <li>槽位必须落在 <code>Slots</code> 内；无 Slots 时使用 <code>1..Capacity</code>。</li>
+            <li>机器人 arm 必须启用，并且可达访问模块。</li>
+            <li><code>SlotsStationMap</code> 存在时，robot slot 与 station slot 映射必须合法。</li>
+            <li>模块和槽位的 <code>TimeToAvailable</code> 不得晚于实际使用时间。</li>
+            <li>实际动作时长必须匹配 init data 中的配置时长。</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section id="types" class="panel">
+      <h2>3. 当前使用的 MoveType</h2>
+      <p class="small">
+        接口枚举还包含 MultiPick(2)、MultiPlace(3)、Swap(4)、PostComplete(8)、Align(11)。
+        当前校验器尚未覆盖这些类型；输出中出现时应按不支持类型报错。
+      </p>
+      <div class="chips">
+        <span class="chip">0 PickMove</span>
+        <span class="chip">1 PlaceMove</span>
+        <span class="chip">5 PreTransMove</span>
+        <span class="chip">6 PrepareMove</span>
+        <span class="chip">7 CompleteMove</span>
+        <span class="chip">9 ProcessMove</span>
+        <span class="chip">10 PrePrepareMove</span>
+      </div>
+    </section>
+
+    <section id="moves">
+      <h2>4. 每种 Move 的所有校验情况</h2>
+      <div class="move-grid">
+        <article class="move-card" id="move-0">
+          <div class="move-head">
+            <h3 class="move-title">PickMove</h3>
+            <span class="move-type">0</span>
+          </div>
+          <div class="move-body">
+            <table>
+              <thead>
+                <tr><th>类别</th><th>校验项</th><th>不合法情况</th></tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><span class="label field">字段</span></td>
+                  <td>必须有 <code>Robot</code>、<code>RobotSlotList</code>、<code>SrcStationList</code>、<code>SrcSlotList</code>、<code>MatIDList</code>。</td>
+                  <td>缺字段、空列表、槽位不是正整数、材料为空。</td>
+                </tr>
+                <tr>
+                  <td><span class="label init">init</span></td>
+                  <td>Robot 存在；源模块存在；源槽位属于源模块；机器人可达源模块；robot slot 合法。</td>
+                  <td>机器人未知、模块未知、不可达、slot 不在 Slots/Capacity 内。</td>
+                </tr>
+                <tr>
+                  <td><span class="label init">时长</span></td>
+                  <td><code>EndTime - StartTime == Robot.PickTime[src_station]</code>。</td>
+                  <td>Pick 时长与 init data 配置不一致。</td>
+                </tr>
+                <tr>
+                  <td><span class="label state">状态</span></td>
+                  <td>开始时源 station slot 有对应 Mat；robot slot 为空；模块和机器人可用时间已到。</td>
+                  <td>源槽无片、Mat 不一致、robot slot 被占用、资源尚不可用。</td>
+                </tr>
+                <tr>
+                  <td><span class="label pre">前置</span></td>
+                  <td>需要同源站槽的最近 Prepare(6)、同机器人且目标等于源站槽的 PreTrans(5)、同源站的 PrePrepare(10)。</td>
+                  <td>缺少必要 PreMoveID；前置尚未完成；前置站点不是 Pick 源站。</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+
+        <article class="move-card" id="move-1">
+          <div class="move-head">
+            <h3 class="move-title">PlaceMove</h3>
+            <span class="move-type">1</span>
+          </div>
+          <div class="move-body">
+            <table>
+              <thead>
+                <tr><th>类别</th><th>校验项</th><th>不合法情况</th></tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><span class="label field">字段</span></td>
+                  <td>必须有 <code>Robot</code>、<code>RobotSlotList</code>、<code>DestStationList</code>、<code>DestSlotList</code>、<code>MatIDList</code>。</td>
+                  <td>缺字段、空列表、槽位不是正整数、材料为空。</td>
+                </tr>
+                <tr>
+                  <td><span class="label init">init</span></td>
+                  <td>Robot 存在；目标模块存在；目标槽位属于目标模块；机器人可达目标模块；robot slot 合法。</td>
+                  <td>机器人未知、模块未知、不可达、slot 不在 Slots/Capacity 内。</td>
+                </tr>
+                <tr>
+                  <td><span class="label init">时长</span></td>
+                  <td><code>EndTime - StartTime == Robot.PlaceTime[dest_station]</code>。</td>
+                  <td>Place 时长与 init data 配置不一致。</td>
+                </tr>
+                <tr>
+                  <td><span class="label state">状态</span></td>
+                  <td>开始时 robot slot 持有对应 Mat；目标 station slot 可放入；模块和机器人可用时间已到。</td>
+                  <td>robot slot 无片、Mat 不一致、目标槽被占用、资源尚不可用。</td>
+                </tr>
+                <tr>
+                  <td><span class="label pre">前置</span></td>
+                  <td>需要同目标站槽的最近 Prepare(6)、同机器人同材料且目标一致的 PreTrans(5)、同目标站的 PrePrepare(10)。</td>
+                  <td>缺少必要 PreMoveID；前置尚未完成；前置目标不是 Place 目标站。</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+
+        <article class="move-card" id="move-5">
+          <div class="move-head">
+            <h3 class="move-title">PreTransMove</h3>
+            <span class="move-type">5</span>
+          </div>
+          <div class="move-body">
+            <table>
+              <thead>
+                <tr><th>类别</th><th>校验项</th><th>不合法情况</th></tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><span class="label field">字段</span></td>
+                  <td>必须有 <code>Robot</code>、<code>RobotSlotList</code>、<code>SrcStationList</code>、<code>DestStationList</code>；带片时应有 Mat 和源/目标槽位。</td>
+                  <td>缺 Robot、缺源/目标站、robot slot 非法；带片信息无法和位置对应。</td>
+                </tr>
+                <tr>
+                  <td><span class="label init">init</span></td>
+                  <td>Robot 存在；源站和目标站存在；机器人可达源站与目标站；robot slot 合法。</td>
+                  <td>机器人未知、模块未知、源/目标不可达。</td>
+                </tr>
+                <tr>
+                  <td><span class="label init">时长</span></td>
+                  <td><code>EndTime - StartTime == Robot.PrepTransTime[src,dest]</code>；存在 TransType 时按 TransType 精确匹配。</td>
+                  <td>找不到配置时长，或实际时长与配置不一致。</td>
+                </tr>
+                <tr>
+                  <td><span class="label state">状态</span></td>
+                  <td>空载时机器人当前位置应可从源站移动；带片时 robot slot 中材料必须等于 MatIDList。</td>
+                  <td>机器人当前指向不一致、带片材料不一致、机器人尚不可用。</td>
+                </tr>
+                <tr>
+                  <td><span class="label pre">前置</span></td>
+                  <td>带 Mat 时需要同机器人、同源站、同材料的最近 Pick(0)；不带 Mat 时需要同机器人最近 Pick(0) 或 Place(1)。</td>
+                  <td>缺少必要 PreMoveID；前置尚未完成；Pick 源站不是 PreTrans 源站。</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+
+        <article class="move-card" id="move-6">
+          <div class="move-head">
+            <h3 class="move-title">PrepareMove</h3>
+            <span class="move-type">6</span>
+          </div>
+          <div class="move-body">
+            <table>
+              <thead>
+                <tr><th>类别</th><th>校验项</th><th>不合法情况</th></tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><span class="label field">字段</span></td>
+                  <td>必须有 <code>ModuleName</code>、<code>SlotList</code>、<code>RelatedActionType</code>、<code>RelatedRobotType</code>；不应包含 Robot。</td>
+                  <td>模块为空、slot 非法、station move 带 Robot。</td>
+                </tr>
+                <tr>
+                  <td><span class="label init">init</span></td>
+                  <td>模块存在；SlotList 属于模块合法槽位；模块状态允许准备动作。</td>
+                  <td>模块未知、槽位越界、模块处于不可操作状态。</td>
+                </tr>
+                <tr>
+                  <td><span class="label init">时长</span></td>
+                  <td>由后续消费它的 Pick/Place 决定：Pick 使用 <code>PickPrepareTime[robot]</code>，Place 使用 <code>PlacePrepareTime[robot]</code>。</td>
+                  <td>实际时长与对应 PrepareTime 不一致。</td>
+                </tr>
+                <tr>
+                  <td><span class="label state">状态</span></td>
+                  <td>Prepare 期间模块槽位不能和互斥动作非法重叠；LoadLock 转换中不可访问。</td>
+                  <td>同槽位并发准备/取放/关门冲突，或 Pump/Vent 期间访问。</td>
+                </tr>
+                <tr>
+                  <td><span class="label pre">前置</span></td>
+                  <td>需要同站槽最近的 Complete(7)、Process(9) 或 PrePrepare(10)。</td>
+                  <td>前一次关门、加工完成或环境准备未声明/未完成。</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+
+        <article class="move-card" id="move-7">
+          <div class="move-head">
+            <h3 class="move-title">CompleteMove</h3>
+            <span class="move-type">7</span>
+          </div>
+          <div class="move-body">
+            <table>
+              <thead>
+                <tr><th>类别</th><th>校验项</th><th>不合法情况</th></tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><span class="label field">字段</span></td>
+                  <td>必须有 <code>ModuleName</code>、<code>SlotList</code>、<code>RelatedActionType</code>、<code>RelatedRobotType</code>；不应包含 Robot。</td>
+                  <td>模块为空、slot 非法、station move 带 Robot。</td>
+                </tr>
+                <tr>
+                  <td><span class="label init">init</span></td>
+                  <td>模块存在；SlotList 属于模块合法槽位；模块状态允许完成动作。</td>
+                  <td>模块未知、槽位越界、模块处于不可操作状态。</td>
+                </tr>
+                <tr>
+                  <td><span class="label init">时长</span></td>
+                  <td>由前置 Pick/Place 决定：Pick 使用 <code>PickCompleteTime[robot]</code>，Place 使用 <code>PlaceCompleteTime[robot]</code>。</td>
+                  <td>实际时长与对应 CompleteTime 不一致。</td>
+                </tr>
+                <tr>
+                  <td><span class="label state">状态</span></td>
+                  <td>Complete 作用的槽位必须是刚发生 Pick/Place 的槽位；期间不能与互斥动作冲突。</td>
+                  <td>站槽不一致、并发冲突、LoadLock 转换中访问。</td>
+                </tr>
+                <tr>
+                  <td><span class="label pre">前置</span></td>
+                  <td>需要同站槽同材料最近 Pick(0) 或 Place(1)，并需要同站槽最近 Prepare(6) 如果存在。</td>
+                  <td>缺少必要 PreMoveID；前置尚未完成；前置站槽与 Complete 站槽不一致。</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+
+        <article class="move-card" id="move-9">
+          <div class="move-head">
+            <h3 class="move-title">ProcessMove</h3>
+            <span class="move-type">9</span>
+          </div>
+          <div class="move-body">
+            <table>
+              <thead>
+                <tr><th>类别</th><th>校验项</th><th>不合法情况</th></tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><span class="label field">字段</span></td>
+                  <td>必须有 <code>ModuleName</code>、<code>SlotList</code>、<code>ProcessRecipe</code>；产品片工艺需要 Mat、Step、PJob。</td>
+                  <td>模块为空、slot 非法、recipe 缺失、产品片身份不完整。</td>
+                </tr>
+                <tr>
+                  <td><span class="label init">init</span></td>
+                  <td>模块存在；slot 合法；ProcessRecipe 存在且适用于该模块。</td>
+                  <td>模块未知、槽位越界、recipe 不存在或模块不匹配。</td>
+                </tr>
+                <tr>
+                  <td><span class="label init">时长</span></td>
+                  <td><code>EndTime - StartTime == ProcessRecipe.Time + MoveTimeOffset[ProcessMove]</code>。</td>
+                  <td>实际加工时长与 recipe 或 offset 不一致。</td>
+                </tr>
+                <tr>
+                  <td><span class="label state">状态</span></td>
+                  <td>开始时站点槽位必须持有对应 Mat；晶圆 route step 必须匹配 recipe。</td>
+                  <td>槽位无片、Mat 不一致、Step/recipe 不匹配、模块尚不可用。</td>
+                </tr>
+                <tr>
+                  <td><span class="label pre">前置</span></td>
+                  <td>需要同站槽最近 Complete(7)；Process 带 Mat 时，Complete 也必须对应同一 Mat。</td>
+                  <td>缺少 Complete 前置；前置尚未完成；前置材料或站槽不一致。</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+
+        <article class="move-card" id="move-10">
+          <div class="move-head">
+            <h3 class="move-title">PrePrepareMove</h3>
+            <span class="move-type">10</span>
+          </div>
+          <div class="move-body">
+            <table>
+              <thead>
+                <tr><th>类别</th><th>校验项</th><th>不合法情况</th></tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><span class="label field">字段</span></td>
+                  <td>必须有 <code>ModuleName</code>、<code>SlotList</code>、<code>LastState</code>、<code>CurState</code>、<code>PrePrepareType</code>；不应包含 Robot。</td>
+                  <td>模块为空、slot 非法、状态缺失、station move 带 Robot。</td>
+                </tr>
+                <tr>
+                  <td><span class="label init">init</span></td>
+                  <td>模块存在；slot 合法；LoadLock 压力态目前只允许 <code>ATM</code> 与 <code>VAC</code>。</td>
+                  <td>模块未知、槽位越界、状态不是 ATM/VAC。</td>
+                </tr>
+                <tr>
+                  <td><span class="label init">时长</span></td>
+                  <td>LoadLock 使用 <code>PumpTime</code>、<code>VentTime</code> 或 <code>PrePrepareTime</code> 中匹配类型的 <code>Time</code>。</td>
+                  <td>找不到配置时长，或实际时长与配置不一致。</td>
+                </tr>
+                <tr>
+                  <td><span class="label state">状态</span></td>
+                  <td><code>LastState</code> 必须等于模块当前状态；转换期间同一 LoadLock 不允许 Pick/Place/Prepare/Complete 访问。</td>
+                  <td>压力链断裂、转换重叠、转换中访问。</td>
+                </tr>
+                <tr>
+                  <td><span class="label pre">前置</span></td>
+                  <td>需要同模块最近 PrePrepare(10)，以及同站槽最近可能占用槽位的 Complete(7)、Pick(0) 或 Place(1)。</td>
+                  <td>缺少压力链或占用链前置；前置尚未完成；<code>previous.CurState != current.LastState</code>。</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section id="premove" class="panel">
+      <h2>5. PreMoveID 边规则</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>当前 MoveType</th>
+            <th>允许的前置 MoveType</th>
+            <th>额外一致性</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Pick(0)</td>
+            <td>PreTrans(5), Prepare(6), PrePrepare(10)</td>
+            <td>Prepare 必须是 Pick 源站槽；PrePrepare 必须是 Pick 源站；PreTrans 目标必须等于 Pick 源站槽。</td>
+          </tr>
+          <tr>
+            <td>Place(1)</td>
+            <td>PreTrans(5), Prepare(6), PrePrepare(10)</td>
+            <td>Prepare 必须是 Place 目标站槽；PrePrepare 必须是 Place 目标站；PreTrans 目标必须等于 Place 目标站槽。</td>
+          </tr>
+          <tr>
+            <td>PreTrans(5)</td>
+            <td>Pick(0), Place(1)</td>
+            <td>带 Mat 时要求同机器人、同材料；由 Pick 触发时源站必须一致。</td>
+          </tr>
+          <tr>
+            <td>Prepare(6)</td>
+            <td>Pick(0), Place(1), Complete(7), Process(9), PrePrepare(10)</td>
+            <td>同站槽最近的关闭、加工完成或环境准备必须先完成。</td>
+          </tr>
+          <tr>
+            <td>Complete(7)</td>
+            <td>Pick(0), Place(1), Prepare(6), PrePrepare(10)</td>
+            <td>前置站槽必须和 Complete 站槽一致；带 Mat 时材料必须一致。</td>
+          </tr>
+          <tr>
+            <td>Process(9)</td>
+            <td>Complete(7)</td>
+            <td>同站槽最近 Complete 必须存在；带 Mat 时材料必须一致。</td>
+          </tr>
+          <tr>
+            <td>PrePrepare(10)</td>
+            <td>Pick(0), Place(1), Complete(7), PrePrepare(10)</td>
+            <td>PrePrepare 链必须满足 <code>previous.CurState == current.LastState</code>。</td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="note warning" style="margin-top: 14px;">
+        每条显式边还要统一检查：引用存在、无自环、前置结束时间不晚于当前开始时间、
+        两端至少通过机器人/站点/材料之一有关联、PJobName 在双方都存在时一致。整张图还要检查
+        PreMoveID 重复和环路。
+      </div>
+    </section>
+
+    <section id="pressure" class="panel">
+      <h2>6. LoadLock 压力态专项检查</h2>
+      <ul class="check-list">
+        <li>同一 LoadLock 的 PrePrepare(10) 按时间排序后，连续转换必须首尾相接。</li>
+        <li>Pump/Vent 期间，不允许同一 LoadLock 上发生 Pick、Place、Prepare、Complete。</li>
+        <li>entry LoadLock：<code>in_robot</code> 访问侧为 ATM，<code>out_robot</code> 访问侧为 VAC。</li>
+        <li>exit LoadLock：<code>in_robot</code> 访问侧为 VAC，<code>out_robot</code> 访问侧为 ATM。</li>
+        <li>Pick/Place 访问 LoadLock 时，实际压力态必须等于机器人要求的压力侧；处于转换中直接非法。</li>
+      </ul>
+    </section>
+
+    <section id="errors" class="panel">
+      <h2>7. 错误分类</h2>
+      <table>
+        <thead>
+          <tr><th>前缀</th><th>含义</th><th>典型问题</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>ML 字段违例</code></td>
+            <td>字段缺失、类型错误或枚举不支持。</td>
+            <td>MoveID 非正整数、PreMoveID 不是整数列表、SlotList 为空。</td>
+          </tr>
+          <tr>
+            <td><code>ML 拓扑违例</code></td>
+            <td>违反 init data 中的设备结构。</td>
+            <td>机器人不可达模块、槽位不在 Slots 内、模块不存在。</td>
+          </tr>
+          <tr>
+            <td><code>ML 时长违例</code></td>
+            <td>实际时长和 init data 配置不一致。</td>
+            <td>PickTime、PlaceTime、PrepTransTime、Pump/Vent 时间不匹配。</td>
+          </tr>
+          <tr>
+            <td><code>ML PreMoveID ...</code></td>
+            <td>依赖图或依赖边非法。</td>
+            <td>缺少必要前置、引用不存在、前置未完成、类型违例、资源不关联、有环。</td>
+          </tr>
+          <tr>
+            <td><code>ML 压力态违例</code></td>
+            <td>LoadLock 压力链或访问侧非法。</td>
+            <td>转换中访问、压力状态不匹配、PrePrepare 链断裂。</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <footer>
+      生成文件：docs/movelist_validation_flow.html。当前支持 MoveType：0、1、5、6、7、9、10。
+    </footer>
+  </main>
+</body>
+</html>
+

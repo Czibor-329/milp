@@ -15,6 +15,11 @@ from .sequencing import decode_orders, decode_orders_choosing
 from .heuristic import (_greedy_chooser, _heuristic_schedule, _pick_best,
                         _random_rollouts, _sampling_chooser)
 
+# BC 选腔解码可能因某步 loadlock 选腔提交后无安全候选而死锁（Banker 只能重排 hop、无法回退已提交
+# 的选腔）→ 整例判不可行。默认多采样 rollout（greedy + N 个温度采样）扩大找到可行且更优解码的机会，
+# 并以启发式(round-robin 腔，恒可行)为可行性地板：取「最优可行」⇒ 单调不劣于启发式、且保证可行。
+_BC_DEFAULT_SAMPLES = 64
+
 
 def start_schedule(ir: Problem, *, verbose: bool = True, seed: int = 0, random_orders: int = 0) -> SolveResult:
     """快速启发式定序 → solve_timing；可选 milp.check_solution 复核。
@@ -51,10 +56,17 @@ def start_schedule(ir: Problem, *, verbose: bool = True, seed: int = 0, random_o
     return res
 
 
-def start_schedule_by_policy(ir: Problem, policy, *, n_samples: int = 1, temp: float = 0.7, seed: int = 0) -> SolveResult:
+def start_schedule_by_policy(ir: Problem, policy, *, n_samples: int = _BC_DEFAULT_SAMPLES,
+                             temp: float = 0.7, seed: int = 0, fallback: bool = True,
+                             verbose: bool = False) -> SolveResult:
     """BC 策略【联合选腔 + 定序】→ solve_timing。策略 chooser 在每步的多候选腔候选上打分，
     decode_orders_choosing 联合决定 (hop, 腔)，把选中腔写回 wafers 后原样喂 solve_timing
-    （train/推理同口径：标签也跟随 MILP 选腔）。多 sample 取 makespan 最优可行。"""
+    （train/推理同口径：标签也跟随 MILP 选腔）。
+
+    n_samples：greedy 之外再叠 N 次温度采样 rollout（各按 policy 分布抽偏好序、精确评估），取最优
+    可行。多 job 时单条 greedy 选腔常在中途死锁（Banker 无法回退已提交的选腔）⇒ 多采样显著提升
+    可行率与 makespan。fallback=True：再以启发式(round-robin 腔，恒可行)为可行性地板，取「最优可行」
+    ⇒ 保证可行(与启发式同 64/64)且单调不劣于启发式；纯 BC 评测可传 fallback=False。"""
     import numpy as np
     tm = Durations(ir)
     rng = np.random.default_rng(seed)
@@ -72,9 +84,11 @@ def start_schedule_by_policy(ir: Problem, policy, *, n_samples: int = 1, temp: f
         if getattr(r, "feasible", False) and (best is None or r.makespan < best.makespan):
             best = r
 
+    if fallback:                                               # 启发式可行性地板（含 reserve 兜底，恒可行）
+        floor = start_schedule(ir, verbose=verbose)            # 单调不劣于启发式、保证可行
+        best = _pick_best(best, floor)
+
     res = best
     if res is not None:
         res.check_issues = check_solution(ir, res)             # type: ignore[attr-defined]
-        return res
-    else:
-        return res
+    return res
