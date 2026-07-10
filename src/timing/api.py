@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from src.export import check_solution
+from export.export import check_solution
 from src.milp import SolveResult
 from src.model import Durations, Problem
 

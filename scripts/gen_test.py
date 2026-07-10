@@ -33,8 +33,7 @@ from src.marathon_gen import (
 )
 from src.parse import parse_task, load_alg_entries
 from src.milp import solve_milp
-from src.export import check_solution, export_movelist
-from src.timing import start_schedule
+from export.export import check_solution, export_movelist
 from src.paths import input_data_path, TEST_ROOT, TRAIN_DIR
 
 BASE_TOPO = "s1-1c1p-preclean"

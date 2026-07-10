@@ -40,7 +40,7 @@ from src.paths import input_data_path, MODELS_DIR, OUTPUT_DIR
 from src.marathon_gen import expand_topo_pms, PM_POOL_6
 from src.timing import start_schedule, start_schedule_by_policy
 from src.milp import solve_milp
-from src.export import check_solution, export_movelist, validate_move_list
+from export.export import check_solution, export_movelist, validate_move_list
 
 BASE_TOPO = "s1-1c1p-preclean"
 # 子集用「目录/名」限定：train/* 有 MILP 标签的配置网格（报 gap）；test/* 大规模外推（无标签，不计 gap）。

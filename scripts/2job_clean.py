@@ -33,7 +33,7 @@ from src.marathon_gen import (
 from src.parse import parse_task, load_alg_entries
 from src.milp import solve_milp
 from src.model import Durations
-from src.export import check_solution, export_movelist
+from export.export import check_solution, export_movelist
 from src.milp_clean import _clean_specs, _is_dummy_wafer
 from src.paths import input_data_path, output_path
 
