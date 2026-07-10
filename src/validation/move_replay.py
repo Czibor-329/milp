@@ -149,11 +149,10 @@ def _start_prepare(
         return _issue(move, f"{station.name} 正在取放物料")
     if not _available(station.environment_busy_until, _start_time(move)):
         return _issue(move, f"{station.name} 正在切换环境", environment=True)
-    if _has_active_process(station, _start_time(move)):
-        return _issue(move, f"{station.name} 存在尚未完成的加工或清洁")
-
     action, related = _prepare_action(move, all_moves)
     slot_id = _prepare_slot(move, related)
+    if _has_active_process(station, _start_time(move), slot_id):
+        return _issue(move, f"{station.name} 存在尚未完成的加工或清洁")
     if action == ACTION_PICK:
         slot = _slot(station, slot_id, move)
         if isinstance(slot, str):
@@ -338,6 +337,8 @@ def _start_pretrans(
     if material is not None and material_id is not None and not _material_matches(material, material_id):
         return _issue(move, f"{robot.name}#{robot_slot} 持有物料与 Move 不匹配")
     for station_name in (source, destination):
+        if not station_name:
+            continue
         error = _robot_station_access_error(robot, station_name, move)
         if error:
             return error
@@ -402,15 +403,43 @@ def _start_preprepare(
         return _issue(move, f"{station.name} 正在开关门或取放物料", environment=True)
     if not _available(station.environment_busy_until, _start_time(move)):
         return _issue(move, f"{station.name} 正在切换环境", environment=True)
-    last_state = str(move.get("LastState") or "")
-    current_state = str(move.get("CurState") or "")
+    last_state = _environment_state(move.get("LastState"))
+    current_state = _environment_state(move.get("CurState"))
     if last_state not in {ATMOSPHERE, VACUUM} or current_state not in {ATMOSPHERE, VACUUM}:
-        return _issue(move, "LastState 和 CurState 必须为 ATM 或 VAC", environment=True)
+        return _issue(move, "LastState 和 CurState 必须为 ATM/VAC 或 ATR/VTR", environment=True)
     if station.environment != last_state:
         return _issue(move, f"{station.name} 当前环境为 {station.environment}，不是 {last_state}", environment=True)
 
+    material_id = _first_value(move, "MatIDList")
+    slot: Optional[SlotState] = None
+    material: Optional[MaterialState] = None
+    if material_id is not None:
+        slot_id = _first_slot(move, "SlotList")
+        if slot_id is None:
+            inferred = _slot_with_material(station, material_id)
+            if inferred is None:
+                return _issue(move, "缺少有效槽位", environment=True)
+            slot_id, slot = inferred
+        else:
+            slot_or_error = _slot(station, slot_id, move)
+            if isinstance(slot_or_error, str):
+                return slot_or_error
+            slot = slot_or_error
+        if not _available(slot.busy_until, _start_time(move)):
+            return _issue(move, f"{station.name}#{slot_id} 正在{slot.busy_action}", environment=True)
+        if slot.phase is not SlotPhase.UNPROCESSED or not _material_matches(slot.material, material_id):
+            return _issue(move, f"{station.name}#{slot_id} 没有待抽充气的匹配物料", environment=True)
+        material = slot.material
+        _reserve_slot(slot, end_time, "抽充气")
+
     station.environment_busy_until = end_time
-    _schedule(scheduled, move, end_time, lambda: setattr(station, "environment", current_state))
+
+    def complete() -> None:
+        station.environment = current_state
+        if slot is not None:
+            _set_slot(slot, SlotPhase.COMPLETED, material)
+
+    _schedule(scheduled, move, end_time, complete)
     return None
 
 
@@ -432,22 +461,22 @@ def _start_swap(
     station = _station(state, move, station_name)
     if isinstance(station, str):
         return station
-    receive_slot_id = _first_slot(move, "StnRecvSlotList")
-    send_slot_id = _first_slot(move, "StnSendSlotList")
-    receive_robot_slot = _first_slot(move, "RecvSlotList")
-    send_robot_slot = _first_slot(move, "SendSlotList")
-    receive_slot = _slot(station, receive_slot_id, move)
-    send_slot = _slot(station, send_slot_id, move)
-    if isinstance(receive_slot, str):
-        return receive_slot
-    if isinstance(send_slot, str):
-        return send_slot
-    if receive_robot_slot is None or send_robot_slot is None:
+    station_receive_slot_id = _first_slot(move, "StnRecvSlotList")
+    station_send_slot_id = _first_slot(move, "StnSendSlotList")
+    robot_receive_slot = _first_slot(move, "RecvSlotList")
+    robot_send_slot = _first_slot(move, "SendSlotList")
+    station_receive_slot = _slot(station, station_receive_slot_id, move)
+    station_send_slot = _slot(station, station_send_slot_id, move)
+    if isinstance(station_receive_slot, str):
+        return station_receive_slot
+    if isinstance(station_send_slot, str):
+        return station_send_slot
+    if robot_receive_slot is None or robot_send_slot is None:
         return _issue(move, "SwapMove 缺少机器人接收或发送槽位")
-    error = _robot_slot_error(robot, receive_robot_slot, move)
+    error = _robot_slot_error(robot, robot_receive_slot, move)
     if error:
         return error
-    error = _robot_slot_error(robot, send_robot_slot, move)
+    error = _robot_slot_error(robot, robot_send_slot, move)
     if error:
         return error
     error = _robot_station_access_error(robot, station_name, move)
@@ -459,31 +488,33 @@ def _start_swap(
         return _issue(move, f"{robot.name} 当前指向 {robot.position}，不是 {station_name}")
     if not _available(robot.busy_until, _start_time(move)) or not _available(station.transfer_busy_until, _start_time(move)):
         return _issue(move, f"{robot.name} 或 {station.name} 正在执行取放动作")
-    if not _available(receive_slot.busy_until, _start_time(move)) or not _available(send_slot.busy_until, _start_time(move)):
+    if not _available(station_receive_slot.busy_until, _start_time(move)) or not _available(station_send_slot.busy_until, _start_time(move)):
         return _issue(move, f"{station.name} 换片槽位正在执行其他动作")
-    received_material_id = _first_value(move, "RecvMatList")
-    sent_material_id = _first_value(move, "SendMatList")
-    sent_material = robot.hands.get(send_robot_slot)
-    if receive_slot.phase is not SlotPhase.COMPLETED or not _material_matches(receive_slot.material, received_material_id):
-        return _issue(move, f"{station.name}#{receive_slot_id} 没有可换出的已完成物料")
-    if robot.hands.get(receive_robot_slot) is not None:
-        return _issue(move, f"{robot.name}#{receive_robot_slot} 不是空手")
-    if sent_material is None or not _material_matches(sent_material, sent_material_id):
-        return _issue(move, f"{robot.name}#{send_robot_slot} 没有可换入的匹配物料")
-    if receive_slot is not send_slot and send_slot.phase not in {SlotPhase.EMPTY, SlotPhase.CLEANED}:
-        return _issue(move, f"{station.name}#{send_slot_id} 不是可换入空槽")
+    robot_receive_material_id = _first_value(move, "RecvMatList")
+    robot_send_material_id = _first_value(move, "SendMatList")
+    robot_send_material = robot.hands.get(robot_send_slot)
+    if station_send_slot.phase is not SlotPhase.COMPLETED or not _material_matches(station_send_slot.material, robot_receive_material_id):
+        return _issue(move, f"{station.name}#{station_send_slot_id} 没有可换出的已完成物料")
+    if robot.hands.get(robot_receive_slot) is not None:
+        return _issue(move, f"{robot.name}#{robot_receive_slot} 不是空手")
+    if robot_send_material is None or not _material_matches(robot_send_material, robot_send_material_id):
+        return _issue(move, f"{robot.name}#{robot_send_slot} 没有可换入的匹配物料")
+    if station_receive_slot is not station_send_slot and station_receive_slot.phase not in {SlotPhase.EMPTY, SlotPhase.CLEANED}:
+        return _issue(move, f"{station.name}#{station_receive_slot_id} 不是可换入空槽")
 
-    received_material = receive_slot.material
+    station_send_material = station_send_slot.material
     robot.busy_until = end_time
     station.transfer_busy_until = end_time
-    _reserve_slot(receive_slot, end_time, "换片")
-    if send_slot is not receive_slot:
-        _reserve_slot(send_slot, end_time, "换片")
+    _reserve_slot(station_receive_slot, end_time, "换片")
+    if station_send_slot is not station_receive_slot:
+        _reserve_slot(station_send_slot, end_time, "换片")
 
     def complete() -> None:
-        _set_slot(send_slot, SlotPhase.UNPROCESSED, _material_with_move_metadata(sent_material, move))
-        robot.hands[send_robot_slot] = None
-        robot.hands[receive_robot_slot] = received_material
+        _set_slot(station_receive_slot, SlotPhase.UNPROCESSED, _material_with_move_metadata(robot_send_material, move))
+        if station_send_slot is not station_receive_slot:
+            _set_slot(station_send_slot, SlotPhase.EMPTY, None)
+        robot.hands[robot_send_slot] = None
+        robot.hands[robot_receive_slot] = station_send_material
         robot.position = station_name
 
     _schedule(scheduled, move, end_time, complete)
@@ -553,6 +584,16 @@ def _required_environment(
     ) else VACUUM
 
 
+def _environment_state(value: Any) -> str:
+    """把接口中的压力态或机器人侧标签统一成 ATM/VAC。"""
+    raw = str(value or "").upper()
+    if raw in {ATMOSPHERE, "ATR"}:
+        return ATMOSPHERE
+    if raw in {VACUUM, "VTR"}:
+        return VACUUM
+    return raw
+
+
 def _station(state: MachineState, move: Mapping[str, Any], name: str) -> "StationState | str":
     """读取被引用站点，并把缺失站点转换为统一错误文案。"""
     station = state.stations.get(name)
@@ -572,6 +613,16 @@ def _slot(station: "StationState", slot_id: Optional[int], move: Mapping[str, An
         return _issue(move, "缺少有效槽位")
     slot = station.slots.get(slot_id)
     return slot if slot is not None else _issue(move, f"{station.name} 不存在槽位 {slot_id}")
+
+
+def _slot_with_material(station: "StationState", material_id: Any) -> Optional[Tuple[int, SlotState]]:
+    """在字段缺槽位时，从站内唯一匹配的未处理物料反推槽位。"""
+    matches = [
+        (slot_id, slot)
+        for slot_id, slot in station.slots.items()
+        if slot.phase is SlotPhase.UNPROCESSED and _material_matches(slot.material, material_id)
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 def _robot_slot(robot: "RobotState", move: Mapping[str, Any]) -> int:
@@ -606,12 +657,10 @@ def _prepare_slot(move: Mapping[str, Any], related: Optional[Mapping[str, Any]])
     return _first_slot(related, "StnSendSlotList")
 
 
-def _has_active_process(station: "StationState", timestamp: float) -> bool:
+def _has_active_process(station: "StationState", timestamp: float, slot_id: Optional[int] = None) -> bool:
     """判断是否仍有加工或清洁占用，开门前必须等待它们结束。"""
-    return any(
-        slot.busy_action in {"加工", "清洁"} and not _available(slot.busy_until, timestamp)
-        for slot in station.slots.values()
-    )
+    slots = [station.slots[slot_id]] if slot_id in station.slots else station.slots.values()
+    return any(slot.busy_action in {"加工", "清洁"} and not _available(slot.busy_until, timestamp) for slot in slots)
 
 
 def _available(busy_until: float, timestamp: float) -> bool:

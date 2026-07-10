@@ -118,15 +118,15 @@ def same_mat(left_move: dict, right_move: dict) -> bool:
     return bool(left_material and right_material and left_material == right_material)
 
 
-def sort_key(move: dict) -> Tuple[float, float, int]:
+def sort_key(move: dict) -> Tuple[float, int, float]:
     """返回 MoveList 回放使用的稳定时间线排序键。"""
     start_time = num(move.get("StartTime"))
     end_time = num(move.get("EndTime"))
     move_id = move.get("MoveID")
     return (
         start_time if start_time is not None else SORT_FALLBACK_TIME,
-        end_time if end_time is not None else SORT_FALLBACK_TIME,
         move_id if isinstance(move_id, int) else SORT_FALLBACK_MOVE_ID,
+        end_time if end_time is not None else SORT_FALLBACK_TIME,
     )
 
 

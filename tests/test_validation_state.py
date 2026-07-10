@@ -90,6 +90,18 @@ class ValidationStateTests(unittest.TestCase):
         self.assertIn("尚未完成的加工或清洁", validate_move_list(_problem(), blocked)[0])
         self.assertEqual(validate_move_list(_problem(), [_move(1, 9, 0, 1, ModuleName="PM1", SlotList=[1], MatIDList=[])]), [])
 
+        other_slot = [
+            _move(1, 9, 0, 5, ModuleName="PM1", SlotList=[1], MatIDList=[]),
+            _move(2, 6, 1, 2, ModuleName="PM1", SlotList=[2], RelatedActionType=0, MatIDList=[1]),
+        ]
+        self.assertEqual(validate_move_list(_problem(pm_capacity=2), other_slot), [])
+
+        same_start = [
+            _move(1, 9, 2, 5, ModuleName="PM1", SlotList=[2], MatIDList=[]),
+            _move(2, 6, 2, 3, ModuleName="PM1", SlotList=[1], RelatedActionType=0, MatIDList=[1]),
+        ]
+        self.assertEqual(validate_move_list(_problem(pm_capacity=2), same_start), [])
+
     def test_initial_materials_from_init_data_override_task_slots(self) -> None:
         """init data 的 Materials 应覆盖任务首工序中给出的初始落位。"""
         init_data = {
@@ -120,6 +132,27 @@ class ValidationStateTests(unittest.TestCase):
         ]
         self.assertIn("当前环境为 VAC，不是 ATM", validate_move_list(_problem(), moves)[0])
 
+        self.assertEqual(
+            validate_move_list(_problem(), [_move(1, 10, 0, 1, ModuleName="LL", LastState="ATR", CurState="VTR")]),
+            [],
+        )
+
+    def test_load_lock_preprepare_completes_material(self) -> None:
+        """LoadLock 抽充气完成后，槽内物料应可被真空侧取出。"""
+        moves = [
+            _move(1, 6, 0, 1, ModuleName="LP", SlotList=[1], RelatedActionType=1, MatIDList=[1]),
+            _move(2, 0, 1, 2, Robot="R", RobotSlotList=[1], SrcStationList=["LP"], SrcSlotList=[1], MatIDList=[1]),
+            _move(3, 7, 2, 3, ModuleName="LP"),
+            _move(4, 5, 2, 4, Robot="R", RobotSlotList=[1], SrcStationList=["LP"], DestStationList=["LL"], MatIDList=[1]),
+            _move(5, 6, 3, 4, ModuleName="LL", SlotList=[1], RelatedActionType=0, RelatedRobotType=0, MatIDList=[1]),
+            _move(6, 1, 4, 5, Robot="R", RobotSlotList=[1], DestStationList=["LL"], DestSlotList=[1], MatIDList=[1]),
+            _move(7, 7, 5, 6, ModuleName="LL"),
+            _move(8, 10, 6, 8, ModuleName="LL", MatIDList=[1], LastState="ATM", CurState="VAC"),
+            _move(9, 6, 8, 9, ModuleName="LL", SlotList=[1], RelatedActionType=1, RelatedRobotType=1, MatIDList=[1]),
+            _move(10, 0, 9, 10, Robot="R", RobotSlotList=[1], SrcStationList=["LL"], SrcSlotList=[1], MatIDList=[1]),
+        ]
+        self.assertEqual(validate_move_list(_problem(), moves), [])
+
     def test_robot_initial_position_and_pretrans_are_checked(self) -> None:
         """init data 的 SlotAtStation 应限制首个转位动作的来源。"""
         init_data = {
@@ -128,6 +161,9 @@ class ValidationStateTests(unittest.TestCase):
         }
         moves = [_move(1, 5, 0, 1, Robot="R", RobotSlotList=[1], SrcStationList=["PM1"], DestStationList=["LP"])]
         self.assertIn("当前指向 LP，不是 PM1", validate_move_list(_problem(), moves, init_data)[0])
+
+        blank_source = [_move(1, 5, 0, 1, Robot="R", RobotSlotList=[1], SrcStationList=[""], DestStationList=["LP"])]
+        self.assertEqual(validate_move_list(_problem(), blank_source, init_data), [])
 
     def test_robot_and_station_transfer_overlaps_are_rejected(self) -> None:
         """同一机器人和同一站点的取放动作不能在执行窗口重叠。"""
