@@ -40,7 +40,8 @@ from src.paths import input_data_path, MODELS_DIR, OUTPUT_DIR
 from src.marathon_gen import expand_topo_pms, PM_POOL_6
 from src.timing import start_schedule, start_schedule_by_policy
 from src.milp import solve_milp
-from export.export import check_solution, export_movelist, validate_move_list
+from src.export import check_solution, export_movelist
+from src.validation import validate_move_list
 
 BASE_TOPO = "s1-1c1p-preclean"
 # 子集用「目录/名」限定：train/* 有 MILP 标签的配置网格（报 gap）；test/* 大规模外推（无标签，不计 gap）。
@@ -83,7 +84,7 @@ def _check_all(ir, res, init_data=None) -> tuple:
     """可行解统一双层校验：schedule 层(check_solution) + MoveList 层(validate_movelist)。
     每次排程都构建 MoveList 并校验（不管是否 --export），返回 (违例列表, MoveList)。"""
     issues = check_solution(ir, res)
-    ml = export_movelist(ir, res)
+    ml = export_movelist(ir, res, init_data)
     return issues + validate_move_list(ir, ml, init_data), ml
 
 

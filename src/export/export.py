@@ -2,10 +2,16 @@ from src.model import Chamber, Durations, Problem, Stage, Wafer
 from src.milp import SolveResult, _ll_proc
 from src.milp_clean import _clean_specs, _dummy_order_pairs
 from src.validation import populate_premove_ids, validate_move_list
-from typing import List, Tuple, Dict, Optional
+from typing import Any, Dict, List, Mapping, Optional, Tuple
+
+from src.validation.state import MachineState, is_doorless_station
 
 
-def export_movelist(task: Problem, res: SolveResult) -> List[dict]:
+def export_movelist(
+    task: Problem,
+    res: SolveResult,
+    init_data: Optional[Mapping[str, Any]] = None,
+) -> List[dict]:
     """把 MILP 排程展开成 MoveList（过 validate_movelist）。
 
     每段搬运在 [r, a_next] 窗口内按子动作顺序铺：
@@ -14,6 +20,7 @@ def export_movelist(task: Problem, res: SolveResult) -> List[dict]:
     腔/机器手不重叠由 MILP 保证，故子动作天然串行、门成对。
     """
     tm = Durations(task)
+    initial_state = MachineState.from_sources(task, init_data)
     wafers = {w.wid: w for w in task.wafers}
     moves: List[dict] = []
     mid = 0
@@ -97,15 +104,17 @@ def export_movelist(task: Problem, res: SolveResult) -> List[dict]:
         pre_c, pt, post_c = tm.pick_pre(R, c), tm.pick_t(R, c), tm.pick_post(R, c)
         pre_n, post_n = tm.place_pre(R, nxt_c), tm.place_post(R, nxt_c)
         arrive = rv + pt + tm.move(R)
-        if (w.wid, j) not in supp_pick_pre:                                 # swap：源开门并入 place 那次门
+        if not is_doorless_station(c) and (w.wid, j) not in supp_pick_pre:  # swap：源开门并入 place 那次门
             emit(6, rv - pre_c, rv, station=c, cslot=cs, w=w)               # 源开门(pick 前，与到位并行)
         emit(0, rv, rv + pt, robot=R, src=c, cslot=cs, w=w)                 # pick
-        emit(7, rv + pt, rv + pt + post_c, station=c, cslot=cs, w=w)        # 源关门(与走位并行)
+        if not is_doorless_station(c):
+            emit(7, rv + pt, rv + pt + post_c, station=c, cslot=cs, w=w)    # 源关门(与走位并行)
         emit(5, rv + pt, arrive, robot=R, src=c, dst=nxt_c, cslot=cs,
              srcslot=cs, dstslot=ns, w=w)                                  # 走位
-        emit(6, arrive - pre_n, arrive, station=nxt_c, cslot=ns, w=w)       # 目标开门(与走位并行)
+        if not is_doorless_station(nxt_c):
+            emit(6, arrive - pre_n, arrive, station=nxt_c, cslot=ns, w=w)   # 目标开门(与走位并行)
         emit(1, arrive, a_next, robot=R, dst=nxt_c, cslot=ns, w=w)          # place
-        if (w.wid, j + 1) not in supp_place_post:                          # swap：place 关门并入后续 pick 那次门
+        if not is_doorless_station(nxt_c) and (w.wid, j + 1) not in supp_place_post:  # swap：place 关门并入后续 pick 那次门
             emit(7, a_next, a_next + post_n, station=nxt_c, cslot=ns, w=w)  # 目标关门(与下一动作并行)
 
     for wid, rows in res.schedule.items():
@@ -136,12 +145,13 @@ def export_movelist(task: Problem, res: SolveResult) -> List[dict]:
             # 出站搬运 c -> 下一腔。门动作与机器手行程并行（见 §6-1）。
             emit_hop(w, j)
 
-    # bug1：空载转位（PreTransMove）。机器手 pick 前若指向上一目标≠本源，须先转过来。
+    # bug1：空载转位（PreTransMove）。机器手 pick 前若指向上一目标或初始位置≠本源，须先转过来。
     # 时长 = move，铺在 pick 前 [r-move, r]（与 MILP 的 (R) 空手 move 间隙一致，必落在空档内）。
     for R, hops in robot_hops.items():
         hops.sort()                       # 按 pick 时刻 = 机器手执行序
         mv = tm.move(R)
-        prev_dst = None
+        robot_state = initial_state.resolve_robot(R)
+        prev_dst = robot_state.position if robot_state is not None else None
         for rv, src, dst in hops:
             if prev_dst is not None and prev_dst != src:
                 emit(5, rv - mv, rv, robot=R, src=prev_dst, dst=src)  # 空载转位，无晶圆

@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from export.export import check_solution
+from src.export import check_solution
 from src.milp import SolveResult
 from src.model import Durations, Problem
 
@@ -22,9 +22,9 @@ _BC_DEFAULT_SAMPLES = 64
 
 
 def start_schedule(ir: Problem, *, verbose: bool = True, seed: int = 0, random_orders: int = 0) -> SolveResult:
-    """快速启发式定序 → solve_timing；可选 milp.check_solution 复核。
+    """快速启发式定序 to solve_timing；可选 milp.check_solution 复核。
 
-    启发式(_heuristic_schedule)：单 job 喂片优先(让 LL 常装未加工片、填满并行 PM)；2+ job 在几种
+    heuristic：单 job 喂片优先(让 LL 常装未加工片、填满并行 PM)；2+ job 在几种
     交替发片配比里小规模搜索；含清洁例改排空优先(避免 LL 满死锁)。加工腔沿用 round-robin 固定分配，
     启发式只决定顺序，且每候选另试 LL swap 变体取优（单调不劣）。不做全局组合寻优 ⇒ 快。
 

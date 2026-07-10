@@ -32,6 +32,7 @@ from src.validation.state import (
     MaterialState,
     SlotPhase,
     SlotState,
+    is_doorless_station,
 )
 
 
@@ -189,7 +190,7 @@ def _start_complete(
     station = _station(state, move, _station_name(move))
     if isinstance(station, str):
         return station
-    if station.door is not DoorState.OPEN:
+    if not is_doorless_station(station.name) and station.door is not DoorState.OPEN:
         return _issue(move, f"{station.name} 当前不是开门状态")
     if not _available(station.door_busy_until, _start_time(move)):
         return _issue(move, f"{station.name} 门机构正在执行其他动作")
@@ -226,9 +227,11 @@ def _start_pick(
     error = _robot_station_access_error(robot, station_name, move)
     if error:
         return error
-    if station.door is not DoorState.OPEN:
+    if not is_doorless_station(station.name) and station.door is not DoorState.OPEN:
         return _issue(move, f"{station.name} 门当前为关门")
-    if not _available(robot.busy_until, _start_time(move)) or not _available(station.transfer_busy_until, _start_time(move)):
+    if not _available(robot.busy_until, _start_time(move)) or (
+        not is_doorless_station(station.name) and not _available(station.transfer_busy_until, _start_time(move))
+    ):
         return _issue(move, f"{robot.name} 或 {station.name} 正在执行取放动作")
     if not _available(slot.busy_until, _start_time(move)):
         return _issue(move, f"{station.name}#{slot_id} 正在{slot.busy_action}")
@@ -242,7 +245,8 @@ def _start_pick(
 
     material = slot.material
     robot.busy_until = end_time
-    station.transfer_busy_until = end_time
+    if not is_doorless_station(station.name):
+        station.transfer_busy_until = end_time
     _reserve_slot(slot, end_time, "取片")
 
     def complete() -> None:
@@ -281,9 +285,11 @@ def _start_place(
     error = _robot_station_access_error(robot, station_name, move)
     if error:
         return error
-    if station.door is not DoorState.OPEN:
+    if not is_doorless_station(station.name) and station.door is not DoorState.OPEN:
         return _issue(move, f"{station.name} 门当前为关门")
-    if not _available(robot.busy_until, _start_time(move)) or not _available(station.transfer_busy_until, _start_time(move)):
+    if not _available(robot.busy_until, _start_time(move)) or (
+        not is_doorless_station(station.name) and not _available(station.transfer_busy_until, _start_time(move))
+    ):
         return _issue(move, f"{robot.name} 或 {station.name} 正在执行取放动作")
     if not _available(slot.busy_until, _start_time(move)):
         return _issue(move, f"{station.name}#{slot_id} 正在{slot.busy_action}")
@@ -296,7 +302,8 @@ def _start_place(
         return _issue(move, f"{robot.name} 当前指向 {robot.position}，不是 {station_name}")
 
     robot.busy_until = end_time
-    station.transfer_busy_until = end_time
+    if not is_doorless_station(station.name):
+        station.transfer_busy_until = end_time
     _reserve_slot(slot, end_time, "放片")
 
     def complete() -> None:
@@ -365,7 +372,10 @@ def _start_process(
         return slot
     if station.door is not DoorState.CLOSED:
         return _issue(move, f"{station.name} 加工或清洁时必须关门")
-    if not _available(station.door_busy_until, _start_time(move)) or not _available(station.transfer_busy_until, _start_time(move)):
+    if not is_doorless_station(station.name) and (
+        not _available(station.door_busy_until, _start_time(move))
+        or not _available(station.transfer_busy_until, _start_time(move))
+    ):
         return _issue(move, f"{station.name} 正在执行开关门或取放动作")
     if not _available(slot.busy_until, _start_time(move)):
         return _issue(move, f"{station.name}#{slot_id} 正在{slot.busy_action}")
@@ -482,11 +492,13 @@ def _start_swap(
     error = _robot_station_access_error(robot, station_name, move)
     if error:
         return error
-    if station.door is not DoorState.OPEN:
+    if not is_doorless_station(station.name) and station.door is not DoorState.OPEN:
         return _issue(move, f"{station.name} 门当前为关门")
     if robot.position is not None and robot.position != station_name:
         return _issue(move, f"{robot.name} 当前指向 {robot.position}，不是 {station_name}")
-    if not _available(robot.busy_until, _start_time(move)) or not _available(station.transfer_busy_until, _start_time(move)):
+    if not _available(robot.busy_until, _start_time(move)) or (
+        not is_doorless_station(station.name) and not _available(station.transfer_busy_until, _start_time(move))
+    ):
         return _issue(move, f"{robot.name} 或 {station.name} 正在执行取放动作")
     if not _available(station_receive_slot.busy_until, _start_time(move)) or not _available(station_send_slot.busy_until, _start_time(move)):
         return _issue(move, f"{station.name} 换片槽位正在执行其他动作")
@@ -504,7 +516,8 @@ def _start_swap(
 
     station_send_material = station_send_slot.material
     robot.busy_until = end_time
-    station.transfer_busy_until = end_time
+    if not is_doorless_station(station.name):
+        station.transfer_busy_until = end_time
     _reserve_slot(station_receive_slot, end_time, "换片")
     if station_send_slot is not station_receive_slot:
         _reserve_slot(station_send_slot, end_time, "换片")

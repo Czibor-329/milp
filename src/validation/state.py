@@ -20,6 +20,12 @@ ATMOSPHERE = "ATM"
 VACUUM = "VAC"
 LOAD_LOCK_TYPE = "loadlock"
 LOAD_PORT_TYPE = "loadport"
+DOORLESS_STATION_NAMES = frozenset({"Cooler"})
+
+
+def is_doorless_station(name: str) -> bool:
+    """返回硬件模型中不产生开关门动作的站点。"""
+    return name in DOORLESS_STATION_NAMES
 
 
 class DoorState(str, Enum):

@@ -5,6 +5,6 @@
 """
 
 from src.validation.move_dependencies import populate_premove_ids
-from src.validation.move_replay import validate_move_list
+from src.validation.replay import validate_move_list
 
 __all__ = ["populate_premove_ids", "validate_move_list"]

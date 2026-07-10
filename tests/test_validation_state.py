@@ -3,6 +3,8 @@
 import unittest
 
 from src.model import Chamber, Problem, Robot, Stage, Wafer
+from src.milp import SolveResult
+from src.export.export import export_movelist
 from src.validation import validate_move_list
 
 
@@ -164,6 +166,54 @@ class ValidationStateTests(unittest.TestCase):
 
         blank_source = [_move(1, 5, 0, 1, Robot="R", RobotSlotList=[1], SrcStationList=[""], DestStationList=["LP"])]
         self.assertEqual(validate_move_list(_problem(), blank_source, init_data), [])
+
+    def test_export_includes_pretrans_from_initial_robot_position(self) -> None:
+        """导出首段搬运时应从 AlgInit 的机器人初始位置补空载转位。"""
+        wafer = Wafer(0, 1, "route", 0, [_stage(0, "LP"), _stage(1, "PM1")], ["R"], "P")
+        task = _problem(wafers=[wafer])
+        task.robots["R"].pick_time = {"LP": 1.0}
+        task.robots["R"].place_time = {"PM1": 1.0}
+        task.robots["R"].prep_trans_time = [{"Time": 2.0}]
+        result = SolveResult(
+            status=2,
+            makespan=9.0,
+            schedule={0: [("source", "LP", 0.0, 5.0), ("process", "PM1", 9.0, 9.0)]},
+        )
+        init_data = {
+            "Robots": {"R": {"ArmInfo": {"ArmA": {"SlotIDs": [1], "SlotAtStation": "PM1",
+                                                     "AccessibleStations": ["LP", "PM1"]}}}},
+            "Stations": {"LP": {"Slots": [1]}, "PM1": {"Slots": [1]}},
+        }
+
+        moves = export_movelist(task, result, init_data)
+        initial_pretrans = next(move for move in moves if move["MoveType"] == 5 and not move.get("MatIDList"))
+        self.assertEqual(initial_pretrans["SrcStationList"], ["PM1"])
+        self.assertEqual(initial_pretrans["DestStationList"], ["LP"])
+        self.assertEqual(validate_move_list(task, moves, init_data), [])
+
+    def test_export_and_replay_treat_cooler_as_doorless(self) -> None:
+        """Cooler 的取放不应生成或依赖开关门动作。"""
+        wafer = Wafer(0, 1, "route", 0, [_stage(0, "LP"), _stage(1, "Cooler")], ["R"], "P")
+        task = _problem(wafers=[wafer])
+        task.chambers["Cooler"] = Chamber("Cooler", "Cooler", 1)
+        task.robots["R"].scope.append("Cooler")
+        task.robots["R"].pick_time = {"LP": 1.0}
+        task.robots["R"].place_time = {"Cooler": 1.0}
+        task.robots["R"].prep_trans_time = [{"Time": 2.0}]
+        result = SolveResult(
+            status=2,
+            makespan=9.0,
+            schedule={0: [("source", "LP", 0.0, 5.0), ("process", "Cooler", 9.0, 9.0)]},
+        )
+        init_data = {
+            "Robots": {"R": {"ArmInfo": {"ArmA": {"SlotIDs": [1], "SlotAtStation": "PM1",
+                                                     "AccessibleStations": ["LP", "PM1", "Cooler"]}}}},
+            "Stations": {"LP": {"Slots": [1]}, "PM1": {"Slots": [1]}, "Cooler": {"Slots": [1]}},
+        }
+
+        moves = export_movelist(task, result, init_data)
+        self.assertFalse(any(move["MoveType"] in {6, 7} and move["ModuleName"] == "Cooler" for move in moves))
+        self.assertEqual(validate_move_list(task, moves, init_data), [])
 
     def test_robot_and_station_transfer_overlaps_are_rejected(self) -> None:
         """同一机器人和同一站点的取放动作不能在执行窗口重叠。"""
