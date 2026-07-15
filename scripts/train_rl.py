@@ -1,4 +1,4 @@
-"""RL 微调 BC 策略：self-critical REINFORCE，无死锁拐杖(banker-free)、遇死锁/超驻留即截断。
+"""RL 微调 BC 策略：小规模 self-critical 策略梯度，部署时限时搜索并由 timing 精确定时。
 
 动机：纯 BC 逐候选打分只学「专家被选中率」，对 2job 的全局交错决策力有未逮（表达力上限
 0.723），且部署靠 banker + 64 采样 + 启发式地板兜底才可行。RL 直接优化真正指标——rollout 的
@@ -9,7 +9,7 @@ makespan gap——并让策略【自己】学会不死锁（不再依赖 banker 
 solve_timing 精确评估，超驻留(qtime 不可行)同样按截断罚。
 
 奖励（越小 gap 越高奖）：
-  · 可行完成： r = -clip(gap, -0.5, 1.0)                  gap=(mk-mk_milp)/mk_milp，∈[-1.0, +0.5]
+  · 可行完成： r = -clip(gap, -0.5, 1.0)                  gap=(mk-reference)/reference，∈[-1.0, +0.5]
   · 死锁/不可行： r = -1.5 - (1 - progress)               progress=已放片/总片，∈[-2.5, -1.5]
   失败奖上界(-1.5) < 完成奖下界(-1.0) ⇒ 任何完成都严格优于任何截断；progress 给「多放几片」的梯度。
 
@@ -17,10 +17,14 @@ self-critical 基线：同实例 greedy(argmax, banker-free) 的奖励 b 作基�
 好处：greedy 已近最优的实例（多为 1job）优势≤0 ⇒ 只压低比 greedy 差的采样、把概率拉回 greedy
 动作 ⇒ 保持不回归；greedy 会死锁的硬 2job 则被 progress/完成奖拉着学出可行且更短的序。
 
+规模泛化：默认先把每个训练任务缩放为 5 片；候选共享 MLP、比例特征和资源容量特征均与固定片数
+解耦。训练结束后自动把少量样例缩放为 25 片，用与部署一致的 Banker+采样解码做外推验证。
+
 用法（须带 torch 的 venv）：
   C:/Users/khand/Desktop/CT/venv/Scripts/python.exe scripts/train_rl.py \
       --init results/models/bc_policy.pt --out results/models/bc_policy_rl.pt \
       --subsets train/2job train/1stage train/2stage train/3stage \
+      --train-wafers 5 --eval-wafers 25 \
       --epochs 40 --samples 6 --batch 8 --lr 1e-4 --temp 1.0
 """
 
@@ -39,13 +43,13 @@ import torch
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.parse import load_alg_entries, parse_task
+from src.parse import load_alg_entries, parse_task, resize_task_materials
 from src.paths import input_data_path, MODELS_DIR
 from src.marathon_gen import expand_topo_pms, PM_POOL_6
 from src.model import Durations
 from src.features import step_features
 from src.policy import CandidateScorer, Policy
-from src.timing import start_schedule_by_policy
+from src.timing import start_schedule, start_schedule_by_policy
 from src.timing._common import _DecodeDeadlock
 from src.timing.sequencing import decode_orders_choosing
 from src.timing.solve import solve_timing
@@ -87,7 +91,7 @@ class _RLChooser:
         return order
 
 
-def _rollout(model, mean, std, ir, tm, mk_milp, *, rng, temp, sample):
+def _rollout(model, mean, std, ir, tm, reference_makespan, *, rng, temp, sample):
     """一次 banker-free rollout → (traj, reward, feasible, makespan)。
     死锁 → 截断，reward 按 progress 罚；完成再 solve_timing，不可行(超驻留)同样按截断罚。"""
     ch = _RLChooser(model, mean, std, rng, temp, sample)
@@ -102,7 +106,7 @@ def _rollout(model, mean, std, ir, tm, mk_milp, *, rng, temp, sample):
     if not getattr(r, "feasible", False):
         progress = len(ch.traj) / max(total, 1)          # 放满但超驻留 ⇒ progress≈1、罚≈FAIL_BASE
         return ch.traj, FAIL_BASE - (1.0 - progress), False, float("nan")
-    gap = (r.makespan - mk_milp) / mk_milp
+    gap = (r.makespan - reference_makespan) / reference_makespan
     reward = -float(np.clip(gap, GAP_CLIP_LO, GAP_CLIP_HI))
     return ch.traj, reward, True, r.makespan
 
@@ -110,7 +114,8 @@ def _rollout(model, mean, std, ir, tm, mk_milp, *, rng, temp, sample):
 # --------------------------------------------------------------------------- #
 # 数据集加载
 # --------------------------------------------------------------------------- #
-def _load_instances(ai, subsets, limit):
+def _load_instances(ai, subsets, limit, wafer_count):
+    """加载训练实例；缩放片数后以同规模 heuristic makespan 作为奖励归一化参考。"""
     insts = []
     for sub in subsets:
         files = sorted(glob.glob(str(_DATASET / sub / "inst_*.json")))
@@ -120,13 +125,22 @@ def _load_instances(ai, subsets, limit):
             d = json.load(open(f, encoding="utf-8"))
             res = d.get("result", {})
             mk = res.get("makespan")
-            if not (isinstance(mk, (int, float)) and mk == mk and res.get("schedule")):
+            has_label = isinstance(mk, (int, float)) and mk == mk and res.get("schedule")
+            if wafer_count <= 0 and not has_label:
                 continue
             try:
-                ir = parse_task(ai, d["update_params"])
+                update_params = (resize_task_materials(d["update_params"], wafer_count)
+                                 if wafer_count > 0 else d["update_params"])
+                ir = parse_task(ai, update_params)
             except Exception:                            # noqa: BLE001
                 continue
-            insts.append((os.path.basename(f)[:-5], ir, Durations(ir), float(mk)))
+            if wafer_count > 0:
+                reference = start_schedule(ir, verbose=False)
+                if reference is None or not getattr(reference, "feasible", False):
+                    continue
+                mk = reference.makespan
+            suffix = f"@{wafer_count}" if wafer_count > 0 else ""
+            insts.append((os.path.basename(f)[:-5] + suffix, ir, Durations(ir), float(mk)))
     return insts
 
 
@@ -150,6 +164,12 @@ def main() -> None:
     ap.add_argument("--subsets", nargs="+",
                     default=["train/2job", "train/1stage", "train/2stage", "train/3stage"])
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--train-wafers", type=int, default=5,
+                    help="每个训练任务的产品晶圆总数；默认 5 片")
+    ap.add_argument("--eval-wafers", type=int, default=25,
+                    help="训练结束后的规模外推验证片数；0=关闭")
+    ap.add_argument("--eval-scale-limit", type=int, default=1,
+                    help="25 片外推验证每个子集最多取多少实例")
     ap.add_argument("--epochs", type=int, default=40)
     ap.add_argument("--samples", type=int, default=6, help="每实例采样轨迹数(self-critical 的探索序)")
     ap.add_argument("--batch", type=int, default=8, help="每次更新的实例数")
@@ -164,14 +184,24 @@ def main() -> None:
     ap.add_argument("--bc-batch", type=int, default=512, help="每次更新的 BC 锚定 step 数")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
+    if args.train_wafers <= 0:
+        ap.error("--train-wafers 必须为正数")
+    if args.eval_wafers < 0:
+        ap.error("--eval-wafers 不能为负数")
 
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
 
     ai, _ = load_alg_entries(input_data_path(BASE_TOPO))
     ai = expand_topo_pms(ai, PM_POOL_6)
-    insts = _load_instances(ai, args.subsets, args.limit)
-    print(f"实例 {len(insts)} 个（{args.subsets}）")
+    insts = _load_instances(ai, args.subsets, args.limit, args.train_wafers)
+    if not insts:
+        raise RuntimeError("没有可用训练实例")
+    print(f"训练实例 {len(insts)} 个（每例 {args.train_wafers} 片，{args.subsets}）")
+    scale_insts = (_load_instances(ai, args.subsets, args.eval_scale_limit, args.eval_wafers)
+                   if args.eval_wafers > 0 else [])
+    if scale_insts:
+        print(f"外推验证实例 {len(scale_insts)} 个（每例 {args.eval_wafers} 片）")
 
     ckpt = torch.load(args.init, map_location="cpu", weights_only=False)
     F = int(ckpt["feat_dim"]); H = int(ckpt["hidden"])
@@ -206,19 +236,21 @@ def main() -> None:
         g = (sum(gaps) / len(gaps)) if gaps else float("nan")
         return feas, len(insts), g
 
-    def eval_deploy():
-        """部署口径(纯 BC，无启发式地板)：start_schedule_by_policy(fallback=False) 的可行率 + gap均。
+    def eval_deploy(eval_instances=None, eval_model=None):
+        """部署口径(纯策略，无启发式地板)：start_schedule_by_policy(fallback=False) 的可行率 + gap均。
         用它选 checkpoint——直接对齐真正部署的 banker+采样解码，而非训练用的 banker-free 代理。"""
-        model.eval()
-        pol = Policy(model, mean, std)
+        eval_instances = insts if eval_instances is None else eval_instances
+        eval_model = model if eval_model is None else eval_model
+        eval_model.eval()
+        pol = Policy(eval_model, mean, std)
         feas = 0; gaps = []
-        for _, ir, _tm, mk in insts:
+        for _, ir, _tm, mk in eval_instances:
             r = start_schedule_by_policy(ir, pol, n_samples=args.eval_samples,
                                          fallback=False, seed=args.seed)
             if r is not None and getattr(r, "feasible", False) and r.makespan == r.makespan:
                 feas += 1; gaps.append((r.makespan - mk) / mk * 100.0)
         g = (sum(gaps) / len(gaps)) if gaps else float("nan")
-        return feas, len(insts), g
+        return feas, len(eval_instances), g
 
     gf, gn, gg = eval_greedy()
     df, dn, dg = eval_deploy()
@@ -280,9 +312,18 @@ def main() -> None:
                   f"bf-greedy {gf}/{gn} {gg:+.2f}%")
 
     print(f"best 部署: 可行 {best_metric[0]}/{len(insts)}  gap均 {-best_metric[1]:+.2f}%  → {args.out}")
+    if scale_insts:
+        best_checkpoint = torch.load(args.out, map_location="cpu", weights_only=False)
+        scale_model = CandidateScorer(int(best_checkpoint["feat_dim"]),
+                                      int(best_checkpoint["hidden"]))
+        scale_model.load_state_dict(best_checkpoint["state"])
+        sf, sn, sg = eval_deploy(scale_insts, scale_model)
+        print(f"[scale {args.train_wafers}→{args.eval_wafers}] 部署可行 {sf}/{sn} "
+              f"相对同规模 heuristic gap均 {sg:+.2f}%")
 
 
 def _save(model, ckpt, out):
+    """保存策略参数与训练时使用的特征标准化统计。"""
     torch.save({"state": {k: v.clone() for k, v in model.state_dict().items()},
                 "feat_dim": ckpt["feat_dim"], "hidden": ckpt["hidden"],
                 "mean": ckpt["mean"], "std": ckpt["std"]}, out)

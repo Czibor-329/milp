@@ -7,7 +7,10 @@
           _random_rollouts。
 """
 
+import itertools
+import math
 import random
+import time
 from typing import List, Optional
 
 from src.milp import SolveResult
@@ -163,6 +166,155 @@ def _random_rollouts(ir: Problem, durations: Durations, wafers, base: Optional[S
     if verbose and n > 0:
         mk = best.makespan if best is not None and getattr(best, "feasible", False) else float("nan")
         print(f"[timing] 随机定序 rollout ×{n}：采纳 {picked} 次改进 → makespan={mk:.2f}")
+    return best
+
+
+# --------------------------------------------------------------------------- #
+# 2-job 限时结构化搜索
+# --------------------------------------------------------------------------- #
+_RELEASE_SPACINGS = (5.0, 2.0, 10.0, 20.0, 40.0)
+_REPAIR_FACTOR_RANGE = (0.7, 1.3)
+_MAX_ENUMERATED_INTERLEAVINGS = 10_000
+_MAX_PORTFOLIO_SECONDS = 1.0
+_PORTFOLIO_BUDGET_FRACTION = 0.25
+
+
+def _priority_eval(ir: Problem, durations: Durations, wafers, priorities: dict,
+                   *, swap: bool) -> Optional[SolveResult]:
+    """评估一组 hop 时间偏置；与 ``_decode_eval`` 不同，会保留驻留不可行结果供搜索修复。"""
+    try:
+        orders = decode_orders(ir, durations, wafers, prio=priorities, swap=swap)
+    except (RuntimeError, _DecodeDeadlock):
+        return None
+    return solve_timing(ir, wafers, orders=orders)
+
+
+def _release_priorities(sequence: List[int], spacing: float) -> dict:
+    """把两条 route 的发片交织序编码成 source hop 偏置；route 内 FIFO 仍由解码器保证。"""
+    return {(wid, 0): rank * spacing for rank, wid in enumerate(sequence)}
+
+
+def _repair_residency(priorities: dict, result: SolveResult,
+                      rng: random.Random) -> bool:
+    """依据精确定时返回的驻留超限，提前对应 PM 出片 hop；有可修复违例时返回 True。"""
+    violations = getattr(result, "residency_violations", [])
+    if not violations:
+        return False
+    low, high = _REPAIR_FACTOR_RANGE
+    for wid, stage, _chamber, hold, limit in violations:
+        excess = max(hold - limit, 1.0)
+        hop = (wid, stage)
+        priorities[hop] = priorities.get(hop, 0.0) - excess * rng.uniform(low, high)
+    return True
+
+
+def _two_job_timed_search(ir: Problem, durations: Durations, wafers,
+                          base: Optional[SolveResult], *, seconds: float,
+                          seed: int, verbose: bool) -> Optional[SolveResult]:
+    """在严格时间预算内搜索两条 route 的发片交织，并用驻留违例定向修复。
+
+    2-job 的 route 内发片顺序受 FIFO 固定，真正需要搜索的是两条有序序列的交织；例如 6+6 片
+    仅有 924 种。每个候选仍交给 Banker 解码并由 ``solve_timing`` 精确计时，所以任意时刻返回的
+    ``best`` 都是已验证可行解。搜索优先使用 LL swap，并周期性覆盖整腔互斥口径。
+
+    参数：
+      · seconds：墙钟时间预算，非正数时原样返回 base。
+      · seed：候选交织、spacing 与驻留修复的可复现随机种子。
+    """
+    routes = sorted({w.route_name for w in wafers})
+    if seconds <= 0 or len(routes) != 2:
+        return base
+
+    by_route = {route: sorted(w.wid for w in wafers if w.route_name == route)
+                for route in routes}
+    first_count = len(by_route[routes[0]])
+    total_count = sum(len(wids) for wids in by_route.values())
+    interleaving_count = math.comb(total_count, first_count)
+    rng = random.Random(seed)
+    search_start = time.perf_counter()
+    deadline = search_start + seconds
+    portfolio_seconds = (seconds if seconds <= _MAX_PORTFOLIO_SECONDS
+                         else min(_MAX_PORTFOLIO_SECONDS,
+                                  seconds * _PORTFOLIO_BUDGET_FRACTION))
+    portfolio_deadline = search_start + portfolio_seconds
+    best = base
+    trials = 0
+    improvements = 0
+
+    # 常见 6+6 片只有 924 种：先用短 portfolio 覆盖不同 spacing，再完整扫 spacing=5 + LL swap。
+    # 大批量组合数爆炸时回退随机采样，但仍以 set 去重，避免浪费昂贵的精确定时评估。
+    enumerated = interleaving_count <= _MAX_ENUMERATED_INTERLEAVINGS
+    positions = (list(itertools.combinations(range(total_count), first_count))
+                 if enumerated else [])
+    if positions:
+        rng.shuffle(positions)
+    phases = [(spacing, True) for spacing in _RELEASE_SPACINGS]
+    phases.append((_RELEASE_SPACINGS[0], False))
+    phase_index = 0
+    position_index = 0
+    seen = set()
+    portfolio_finished = False
+
+    while time.perf_counter() < deadline:
+        in_portfolio = time.perf_counter() < portfolio_deadline
+        if not in_portfolio and not portfolio_finished:
+            # portfolio 后从 spacing=5 的完整覆盖重新开始，保证长预算能系统扫完最强邻域。
+            position_index = 0
+            phase_index = 0
+            portfolio_finished = True
+        if in_portfolio:
+            spacing = rng.choice(_RELEASE_SPACINGS)
+            swap = (trials % 8) != 0
+        else:
+            spacing, swap = phases[phase_index % len(phases)]
+        if enumerated:
+            first_positions = set(positions[position_index])
+            position_index += 1
+            if position_index >= len(positions):
+                position_index = 0
+                if not in_portfolio:
+                    phase_index += 1
+        else:
+            tokens = [0] * first_count + [1] * (total_count - first_count)
+            for _ in range(16):
+                rng.shuffle(tokens)
+                signature = (tuple(tokens), spacing, swap)
+                if signature not in seen:
+                    seen.add(signature)
+                    break
+            first_positions = {index for index, token in enumerate(tokens) if token == 0}
+
+        offsets = [0, 0]
+        sequence: List[int] = []
+        for index in range(total_count):
+            token = 0 if index in first_positions else 1
+            route = routes[token]
+            sequence.append(by_route[route][offsets[token]])
+            offsets[token] += 1
+        priorities = _release_priorities(sequence, spacing)
+        result = _priority_eval(ir, durations, wafers, priorities, swap=swap)
+        trials += 1
+
+        if result is not None and getattr(result, "feasible", False):
+            previous = best
+            best = _pick_best(best, result)
+            improvements += int(best is result and best is not previous)
+        elif result is not None and _repair_residency(priorities, result, rng):
+            # 一次定向修复通常足以跨过 qtime 可行边界；限制为一次以维持候选多样性。
+            if time.perf_counter() >= deadline:
+                break
+            repaired = _priority_eval(ir, durations, wafers, priorities, swap=swap)
+            trials += 1
+            if repaired is not None and getattr(repaired, "feasible", False):
+                previous = best
+                best = _pick_best(best, repaired)
+                improvements += int(best is repaired and best is not previous)
+
+    if verbose:
+        makespan = (best.makespan if best is not None and getattr(best, "feasible", False)
+                    else float("nan"))
+        print(f"[timing] 2-job 限时搜索 {seconds:.2f}s：评估 {trials} 个候选，"
+              f"改进 {improvements} 次 → makespan={makespan:.2f}")
     return best
 
 

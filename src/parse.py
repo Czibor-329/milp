@@ -48,6 +48,109 @@ def load_alg_entries(path: Path) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     return alg_init, alg_schedule
 
 
+def resize_task_materials(update_params: Mapping[str, Any], total_wafers: int) -> Dict[str, Any]:
+    """把原始调度任务按 PJob 比例缩放到指定产品片数。
+
+    该函数在 ``parse_task`` 之前工作，同步重建 ``Materials``、各 ``ProcessJob.MatList`` 和
+    ``ControlJob.MaterialCount``。每个仍有晶圆的 PJob 至少保留一片，剩余片数按原始 PJob
+    规模做最大余数分配；物料模板、route、recipe 和来源 LoadPort 均沿用原任务，槽位则在各
+    LoadPort 内重新连续编号。这样可用同一配置构造 5 片训练实例和 25 片外推实例。
+
+    参数：
+      · update_params：接口格式的 IUpdateParams。
+      · total_wafers：缩放后的产品晶圆总数，必须为正数。
+
+    返回深拷贝后的新任务，不修改调用方传入数据。
+    """
+    if total_wafers <= 0:
+        raise ValueError("total_wafers 必须为正数")
+
+    payload: Dict[str, Any] = deepcopy(dict(update_params))
+    process_jobs = list(payload.get("ProcessJobs") or [])
+    materials = list(payload.get("Materials") or [])
+    if not process_jobs or not materials:
+        raise ValueError("任务缺少 ProcessJobs 或 Materials，无法缩放晶圆数")
+
+    materials_by_id = {
+        int(material["ID"]): material
+        for material in materials
+        if isinstance(material, Mapping) and material.get("ID") is not None
+    }
+    templates_by_job: Dict[str, List[Mapping[str, Any]]] = {}
+    original_counts: List[int] = []
+    for process_job in process_jobs:
+        job_name = str(process_job.get("JobName") or "")
+        material_ids = [int(value) for value in (process_job.get("MatList") or [])]
+        templates = [materials_by_id[value] for value in material_ids if value in materials_by_id]
+        if not templates:
+            templates = [
+                material for material in materials
+                if str((material or {}).get("PJobName") or "") == job_name
+            ]
+        templates_by_job[job_name] = templates
+        original_counts.append(len(templates))
+
+    active_indices = [index for index, count in enumerate(original_counts) if count > 0]
+    if not active_indices:
+        raise ValueError("所有 ProcessJob 都没有可复用的物料模板")
+
+    # 先尽量为每个原有 PJob 保留一片，再按原规模比例分配剩余片数。
+    target_counts = [0] * len(process_jobs)
+    if total_wafers < len(active_indices):
+        for index in active_indices[:total_wafers]:
+            target_counts[index] = 1
+    else:
+        for index in active_indices:
+            target_counts[index] = 1
+        remaining = total_wafers - len(active_indices)
+        weight_sum = sum(original_counts[index] for index in active_indices)
+        raw_extras = {
+            index: remaining * original_counts[index] / weight_sum
+            for index in active_indices
+        }
+        for index, raw_extra in raw_extras.items():
+            target_counts[index] += int(raw_extra)
+        assigned = sum(target_counts)
+        remainder_order = sorted(
+            active_indices,
+            key=lambda index: (-(raw_extras[index] - int(raw_extras[index])), index),
+        )
+        for index in remainder_order[:total_wafers - assigned]:
+            target_counts[index] += 1
+
+    next_material_id = 0
+    next_slot_by_port: Dict[str, int] = {}
+    resized_materials: List[Dict[str, Any]] = []
+    count_by_job: Dict[str, int] = {}
+    for process_job, target_count in zip(process_jobs, target_counts):
+        job_name = str(process_job.get("JobName") or "")
+        templates = templates_by_job[job_name]
+        new_material_ids: List[int] = []
+        for rank in range(target_count):
+            material = deepcopy(dict(templates[rank % len(templates)]))
+            port = str(material.get("CurrentModuleName") or material.get("SrcPortName") or "")
+            next_slot_by_port[port] = next_slot_by_port.get(port, 0) + 1
+            material["ID"] = next_material_id
+            material["Name"] = str(next_material_id)
+            material["PJobName"] = job_name
+            material["SlotID"] = next_slot_by_port[port]
+            resized_materials.append(material)
+            new_material_ids.append(next_material_id)
+            next_material_id += 1
+        process_job["MatList"] = new_material_ids
+        count_by_job[job_name] = len(new_material_ids)
+
+    for control_job in (payload.get("ControlJobs") or []):
+        job_names = [str(name) for name in (control_job.get("PJobNameList") or [])]
+        control_job["MaterialCount"] = sum(count_by_job.get(name, 0) for name in job_names)
+
+    payload["ProcessJobs"] = process_jobs
+    payload["Materials"] = resized_materials
+    if "MaterialCount" in payload:
+        payload["MaterialCount"] = total_wafers
+    return payload
+
+
 # --------------------------------------------------------------------------- #
 # ControlJob / ProcessJob 解析（原 task_loader 实际用到的链）
 # --------------------------------------------------------------------------- #
@@ -729,6 +832,9 @@ def _expand_wafers(
         dummy_pj = pj.name.startswith("dummy_") or "_dummy_" in pj.route_name
         for rank, mat in enumerate(pj.material_ids):
             stages: List[Stage] = []
+            # 同一片晶圆回到 source LoadPort 时必须复用它的初始物理槽位；若 source/sink 分别
+            # 消耗全局 slot_counter，25 槽 LoadPort 在第 13 片就会绕回并产生初始占位冲突。
+            home_slots: Dict[str, int] = {}
             for j, st in enumerate(stage_steps):
                 in_r = transports[j - 1] if j >= 1 else ""
                 out_r = transports[j] if j < len(transports) else ""
@@ -754,8 +860,13 @@ def _expand_wafers(
                     slot = 0 if ll_type == "entry" else 1
                 else:
                     cap = int(ch.capacity) if ch else 1
-                    slot = slot_counter.get(chamber, 0) % max(cap, 1)
-                    slot_counter[chamber] = slot_counter.get(chamber, 0) + 1
+                    if st["stage_type"] == "sink" and chamber in home_slots:
+                        slot = home_slots[chamber]
+                    else:
+                        slot = slot_counter.get(chamber, 0) % max(cap, 1)
+                        slot_counter[chamber] = slot_counter.get(chamber, 0) + 1
+                        if st["stage_type"] == "source":
+                            home_slots[chamber] = slot
                 stages.append(Stage(
                     j=j, chamber=chamber, stage_type=st["stage_type"], proc=proc,
                     in_robot=in_r, out_robot=out_r,

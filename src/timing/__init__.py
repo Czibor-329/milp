@@ -29,7 +29,7 @@ orders。
     chambers.py        loadlock/加工腔分配寻优（portfolio + 贪心 + SA-ILS）
     solve.py           主入口 solve_timing：建图 + 求解
     search.py          关键路径瓶颈提取 + 占用序/选腔的 SA 寻优
-    api.py             顶层封装 start_schedule / start_schedule_by_policy
+    api.py             顶层封装 start_schedule / start_schedule_by_policy / start_schedule_by_rl
 
 本模块把以上子模块的公开与内部名全部原样重导出，`from src.timing import <name>` 的行为与拆分前
 完全一致（含 labels.py / features.py / scripts/probe_*.py 等直接引用的私有名）。
@@ -61,8 +61,10 @@ from .solve import _fill_schedule, solve_timing
 from .heuristic import (_decode_eval, _eval_chooser, _feed_chooser,
                         _greedy_chooser, _needs_drain, _heuristic_schedule,
                         _pick_best, _random_chooser, _random_rollouts,
-                        _sampling_chooser)
-from .api import start_schedule, start_schedule_by_policy
+                        _sampling_chooser, _two_job_timed_search)
+from .paper import paper_task_pool_search
+from .api import (start_schedule, start_schedule_by_policy,
+                  start_schedule_by_rl, start_schedule_paper)
 
 __all__ = [
     "EPS", "SKIP_TYPES", "_DecodeDeadlock",
@@ -75,5 +77,8 @@ __all__ = [
     "_heuristic_schedule", "_feed_chooser", "_needs_drain", "_eval_chooser",
     "_greedy_chooser", "_sampling_chooser",
     "_decode_eval", "_pick_best", "_random_chooser", "_random_rollouts",
-    "start_schedule", "start_schedule_by_policy",
+    "_two_job_timed_search",
+    "paper_task_pool_search",
+    "start_schedule", "start_schedule_by_policy", "start_schedule_by_rl",
+    "start_schedule_paper",
 ]

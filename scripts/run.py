@@ -3,7 +3,10 @@
 取代旧 run_.py / run_milp.py / eval_dataset.py 三脚本。策略（--strategy，可多选）：
   · heuristic  快速启发式定序（单 job 喂片 / 2+ job 配比搜 / 清洁排空 + backward 兜底）。start_schedule。
   · random     启发式基底上叠 N 次随机定序 rollout 取优。start_schedule(random_orders=N)。
+  · search     面向 2-job 的限时结构化搜索（默认 7 秒）：发片交织 + 驻留违例定向修复。
+  · paper      论文式加工仓任务池搜索：直接优化 LoadLock→PM 加工端顺序。
   · bc         BC 策略【联合选腔 + 定序】。start_schedule_by_policy（需 results/models/bc_policy.pt）。
+  · rl         RL 策略做顶层顺序限时搜索，底层由 timing 精确定时（需 bc_policy_rl.pt，硬限 <5 秒）。
   · milp       Gurobi oracle（重跑，非读标签）。solve_milp。作参考/oracle，覆盖旧 run_milp。
 
 两种运行模式：
@@ -17,8 +20,9 @@
 用法：
   python scripts/run.py                                         # 全子集，仅 heuristic
   python scripts/run.py --strategy heuristic bc random          # 三策略对比
-  python scripts/run.py --strategy all --subsets train/2job --limit 3   # 冒烟
+  python scripts/run.py --strategy all --subsets train/2job --limit 3   # 全部非 MILP 策略冒烟
   python scripts/run.py --strategy bc --export --out eval.json  # 导出 MoveList + 汇总 JSON
+  python scripts/run.py --strategy rl --wafer-count 25 --rl-search-seconds 4.0  # 5片训练模型外推
   python scripts/run.py --strategy milp --input s1-1c1p-preclean --export   # 旧 run_milp
 """
 
@@ -35,10 +39,11 @@ from pathlib import Path
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.parse import load_alg_entries, parse_task
+from src.parse import load_alg_entries, parse_task, resize_task_materials
 from src.paths import input_data_path, MODELS_DIR, OUTPUT_DIR
 from src.marathon_gen import expand_topo_pms, PM_POOL_6
-from src.timing import start_schedule, start_schedule_by_policy
+from src.timing import (start_schedule, start_schedule_by_policy,
+                        start_schedule_by_rl, start_schedule_paper)
 from src.milp import solve_milp
 from src.export import check_solution, export_movelist
 from src.validation import validate_move_list
@@ -46,7 +51,7 @@ from src.validation import validate_move_list
 BASE_TOPO = "s1-1c1p-preclean"
 # 子集用「目录/名」限定：train/* 有 MILP 标签的配置网格（报 gap）；test/* 大规模外推（无标签，不计 gap）。
 SUBSETS = ["train/1stage", "train/2stage", "train/3stage", "train/2job", "train/clean", "test/1stage"]
-STRATEGIES = ["heuristic", "random", "bc", "milp"]
+STRATEGIES = ["heuristic", "search", "paper", "random", "bc", "rl", "milp"]
 _DATASET = Path(__file__).resolve().parents[1] / "dataset"
 
 
@@ -62,17 +67,33 @@ def _ok(res) -> bool:
 
 
 def run_strategy(name: str, ir, *, policy=None, random_orders: int = 64,
-                 tl: float = 300.0, seed: int = 0, verbose: bool = False):
-    """跑一种策略 → (SolveResult|None, wall_ms)。bc 无 policy 时返回 (None, nan)。"""
+                 search_seconds: float = 7.0, tl: float = 300.0,
+                 rl_search_seconds: float = 4.0,
+                 rl_rollouts: int = 256, rl_temperature: float = 0.7,
+                 seed: int = 0, verbose: bool = False):
+    """跑一种策略 → (SolveResult|None, wall_ms)。bc/rl 无 policy 时返回 (None, nan)。"""
     t0 = time.perf_counter()
     if name == "heuristic":
         res = start_schedule(ir, verbose=verbose)
+    elif name == "search":
+        res = start_schedule(ir, verbose=verbose, seed=seed,
+                             search_seconds=search_seconds)
+    elif name == "paper":
+        res = start_schedule_paper(ir, verbose=verbose, seed=seed,
+                                   search_seconds=search_seconds)
     elif name == "random":
         res = start_schedule(ir, verbose=verbose, seed=seed, random_orders=random_orders)
     elif name == "bc":
         if policy is None:
             return None, float("nan")
         res = start_schedule_by_policy(ir, policy, seed=seed)
+    elif name == "rl":
+        if policy is None:
+            return None, float("nan")
+        res = start_schedule_by_rl(
+            ir, policy, seed=seed, search_seconds=rl_search_seconds,
+            max_rollouts=rl_rollouts, temp=rl_temperature, verbose=verbose,
+        )
     elif name == "milp":
         res = solve_milp(ir, time_limit=tl, verbose=verbose)
     else:
@@ -122,19 +143,21 @@ def _instances(sub: str, limit: int = 0):
     return files[:limit] if limit > 0 else files
 
 
-def _load_policy():
+def _load_policy(path: Path, strategy: str):
+    """加载指定策略 checkpoint；失败时只跳过该神经网络策略。"""
     try:
         from src.policy import load_policy
-        return load_policy(MODELS_DIR / "bc_policy.pt")
+        return load_policy(path)
     except Exception as e:  # noqa: BLE001
-        print(f"[warn] load_policy 失败（{e}），bc 策略将跳过。")
+        print(f"[warn] {strategy} 模型加载失败（{path}: {e}），该策略将跳过。")
         return None
 
 
 # --------------------------------------------------------------------------- #
 # 模式一：数据集批量对比
 # --------------------------------------------------------------------------- #
-def run_dataset(args, strategies, policy) -> None:
+def run_dataset(args, strategies, policies) -> None:
+    """批量评测所选策略；可按总片数构造无标签的规模外推实例。"""
     ai, _ = load_alg_entries(input_data_path(BASE_TOPO))
     ai = expand_topo_pms(ai, PM_POOL_6)
 
@@ -159,14 +182,18 @@ def run_dataset(args, strategies, policy) -> None:
 
         sub_stat = {s: {"gaps": [], "ms": [], "feas": 0} for s in strategies}
         for f in files:
-            name = f"{sub}/{os.path.basename(f)[:-5]}"
-            basename = os.path.basename(f)[:-5]
+            source_basename = os.path.basename(f)[:-5]
+            basename = (f"{source_basename}_w{args.wafer_count}"
+                        if args.wafer_count > 0 else source_basename)
+            name = f"{sub}/{basename}"
             d = json.load(open(f, encoding="utf-8"))
-            has_label = _valid_label(d["result"])
+            has_label = _valid_label(d["result"]) and args.wafer_count <= 0
             m_mk = float(d["result"]["makespan"]) if has_label else float("nan")
 
             try:
-                ir = parse_task(ai, d["update_params"])
+                update_params = (resize_task_materials(d["update_params"], args.wafer_count)
+                                 if args.wafer_count > 0 else d["update_params"])
+                ir = parse_task(ai, update_params)
             except Exception as e:  # noqa: BLE001
                 print(f"{name:<26} parse 失败: {e}")
                 continue
@@ -175,7 +202,12 @@ def run_dataset(args, strategies, policy) -> None:
             rec = {"case": name, "milp": m_mk if has_label else None, "has_label": has_label}
             for s in strategies:
                 try:
-                    res, ms = run_strategy(s, ir, policy=policy, random_orders=args.random_orders,
+                    res, ms = run_strategy(s, ir, policy=policies.get(s),
+                                           random_orders=args.random_orders,
+                                           search_seconds=args.search_seconds,
+                                           rl_search_seconds=args.rl_search_seconds,
+                                           rl_rollouts=args.rl_rollouts,
+                                           rl_temperature=args.rl_temperature,
                                            tl=args.tl, seed=args.seed)
                 except Exception as e:  # noqa: BLE001
                     print(f"  [warn] {name} {s} 失败: {e}")
@@ -240,13 +272,21 @@ def run_dataset(args, strategies, policy) -> None:
 # --------------------------------------------------------------------------- #
 # 模式二：单场景（src/input_data/NAME.json）
 # --------------------------------------------------------------------------- #
-def run_single(args, strategies, policy) -> None:
+def run_single(args, strategies, policies) -> None:
+    """运行一个录制场景，并可在解析前调整产品晶圆总数。"""
     name = args.input[:-5] if args.input.endswith(".json") else args.input
     ai, asch = load_alg_entries(input_data_path(name))
+    if args.wafer_count > 0:
+        asch = resize_task_materials(asch, args.wafer_count)
     ir = parse_task(ai, asch)
 
     for s in strategies:
-        res, ms = run_strategy(s, ir, policy=policy, random_orders=args.random_orders,
+        res, ms = run_strategy(s, ir, policy=policies.get(s),
+                               random_orders=args.random_orders,
+                               search_seconds=args.search_seconds,
+                               rl_search_seconds=args.rl_search_seconds,
+                               rl_rollouts=args.rl_rollouts,
+                               rl_temperature=args.rl_temperature,
                                tl=args.tl, seed=args.seed, verbose=False)
         print("=" * 68)
         if not _ok(res):
@@ -272,32 +312,61 @@ def run_single(args, strategies, policy) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--strategy", nargs="+", default=["heuristic"],
-                    help=f"调度策略，可多选：{STRATEGIES} 或 all（=heuristic random bc）")
+                    help=f"调度策略，可多选：{STRATEGIES} 或 all（全部非 MILP 策略）")
     ap.add_argument("--subsets", nargs="*", default=SUBSETS, help="数据集子集（缺省=全部；all 同义）")
     ap.add_argument("--input", type=str, default=None, help="单场景模式：src/input_data 下的场景名")
     ap.add_argument("--limit", type=int, default=0, help="每子集只跑前 N 个（0=全部）")
+    ap.add_argument("--wafer-count", type=int, default=0,
+                    help="解析前把产品晶圆总数缩放到 N；0=保持原任务。用于 5→25 规模外推验证")
     ap.add_argument("--random-orders", type=int, default=64, help="random 策略的随机 rollout 次数")
+    ap.add_argument("--search-seconds", type=float, default=7.0,
+                    help="search 策略在每个 2-job 实例上的墙钟预算(秒)")
+    ap.add_argument("--bc-model", type=Path, default=MODELS_DIR / "bc_policy.pt",
+                    help="BC checkpoint 路径")
+    ap.add_argument("--rl-model", type=Path, default=MODELS_DIR / "bc_policy_rl.pt",
+                    help="RL checkpoint 路径")
+    ap.add_argument("--rl-search-seconds", type=float, default=4.0,
+                    help="RL 顶层搜索墙钟预算(秒)，内部硬限制为 4.5，保证低于 5 秒")
+    ap.add_argument("--rl-rollouts", type=int, default=256,
+                    help="RL 搜索最多采样候选序数量；时间预算会更早停止")
+    ap.add_argument("--rl-temperature", type=float, default=0.7,
+                    help="RL rollout 的 softmax/Gumbel 采样温度")
     ap.add_argument("--tl", type=float, default=300.0, help="milp 策略求解时限(秒)")
-    ap.add_argument("--seed", type=int, default=0, help="random/bc 随机种子")
+    ap.add_argument("--seed", type=int, default=0, help="search/random/bc/rl 随机种子")
     ap.add_argument("--export", action="store_true", help="导出各策略 MoveList")
     ap.add_argument("--out", type=str, default=None, help="把逐实例+汇总写成 JSON（仅数据集模式）")
     args = ap.parse_args()
 
-    strategies = STRATEGIES[:3] if args.strategy == ["all"] else args.strategy
+    strategies = ["heuristic", "search", "paper", "random", "bc", "rl"] if args.strategy == ["all"] else args.strategy
     bad = [s for s in strategies if s not in STRATEGIES]
     if bad:
         ap.error(f"未知策略 {bad}，可选 {STRATEGIES} 或 all")
+    if args.wafer_count < 0:
+        ap.error("--wafer-count 不能为负数")
+    if args.rl_search_seconds < 0:
+        ap.error("--rl-search-seconds 不能为负数")
+    if args.rl_rollouts < 0:
+        ap.error("--rl-rollouts 不能为负数")
+    if args.rl_temperature <= 0:
+        ap.error("--rl-temperature 必须为正数")
 
-    policy = _load_policy() if "bc" in strategies else None
-    if "bc" in strategies and policy is None:
-        strategies = [s for s in strategies if s != "bc"]
-        if not strategies:
-            return
+    model_paths = {"bc": args.bc_model, "rl": args.rl_model}
+    policies = {
+        strategy: _load_policy(model_paths[strategy], strategy)
+        for strategy in ("bc", "rl")
+        if strategy in strategies
+    }
+    strategies = [
+        strategy for strategy in strategies
+        if strategy not in model_paths or policies.get(strategy) is not None
+    ]
+    if not strategies:
+        return
 
     if args.input:
-        run_single(args, strategies, policy)
+        run_single(args, strategies, policies)
     else:
-        run_dataset(args, strategies, policy)
+        run_dataset(args, strategies, policies)
 
 
 if __name__ == "__main__":
