@@ -7,6 +7,7 @@ MoveList，也不承载动作编排逻辑。
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Set
@@ -115,7 +116,7 @@ class MachineState:
     def from_sources(
         cls,
         task: Problem,
-        init_data: Optional[Mapping[str, Any]],
+        init_data: "Optional[Mapping[str, Any] | MachineState]",
     ) -> "MachineState":
         """从 ``init_data`` 与 ``Problem`` 构建验证用初始状态。
 
@@ -126,6 +127,9 @@ class MachineState:
         返回:
             已填充站点、机器人、初始物料和机器人初始指向的整机状态。
         """
+        if isinstance(init_data, cls):
+            return deepcopy(init_data)
+
         payload = _initial_payload(init_data)
         state = cls()
         station_configs = _mapping(payload.get("Stations"))
@@ -166,6 +170,17 @@ class MachineState:
             if raw_name:
                 state.robot_aliases.setdefault(raw_name, robot_name)
 
+        # 路线可能把 LoadLock 的进/出方向映射到不同逻辑槽；即使接口 Capacity 仍为 1，
+        # 状态机也必须补出 MoveList 实际会引用的槽位。
+        for wafer in getattr(task, "wafers", []):
+            for stage in getattr(wafer, "stages", []):
+                station_name = str(getattr(stage, "chamber", "") or "")
+                if station_name:
+                    state.ensure_station(
+                        station_name,
+                        int(getattr(stage, "slot", 0) or 0) + ZERO_BASED_SLOT_OFFSET,
+                    )
+
         for station_name, slot_id, material in _initial_materials(task, payload):
             station = state.ensure_station(station_name, slot_id)
             station.slots[slot_id] = SlotState(SlotPhase.COMPLETED, material)
@@ -183,6 +198,10 @@ class MachineState:
     def resolve_robot(self, raw_name: str) -> Optional[RobotState]:
         """通过 init data 名称别名查找机器人状态。"""
         return self.robots.get(self.robot_aliases.get(raw_name, raw_name))
+
+    def clone(self) -> "MachineState":
+        """复制当前快照，供重算生成新计划时隔离后续通知写入。"""
+        return deepcopy(self)
 
 
 def _initial_payload(init_data: Optional[Mapping[str, Any]]) -> Mapping[str, Any]:

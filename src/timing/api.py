@@ -67,7 +67,8 @@ def start_schedule(ir: Problem, *, verbose: bool = True, seed: int = 0,
     if getattr(res, "feasible", False):
         issues = check_solution(ir, res)
         if issues:
-            print("MoveList Conflict")
+            if verbose:
+                print("MoveList Conflict")
             res.check_issues = issues  # type: ignore[attr-defined]
     return res
 

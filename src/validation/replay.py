@@ -54,6 +54,143 @@ class _ScheduledCompletion:
     complete: Callable[[], None]
 
 
+class MoveStateReplay:
+    """接收外部 Move 开始/结束通知并维护实时设备状态。
+
+    ``MoveState`` 兼容接口枚举值 ``0=Running``、``1=Done``、``2=Aborted``，也接受
+    对应英文字符串。开始通知执行使能检查并占用资源，结束通知才真正落地物料、门和环境状态。
+    重算方可以读取 ``state`` 快照，并通过 ``running_move_ids`` 判断是否处于安全切点。
+    """
+
+    RUNNING = 0
+    DONE = 1
+    ABORTED = 2
+
+    def __init__(
+        self,
+        task: Problem,
+        moves: Sequence[Mapping[str, Any]],
+        init_data: "Optional[Mapping[str, Any] | MachineState]" = None,
+    ) -> None:
+        """用当前计划和初始整机状态创建实时回放器。"""
+        self.task = task
+        self.moves = [dict(move) for move in sorted(moves, key=sort_key)]
+        self.state = MachineState.from_sources(task, init_data)
+        self.current_time = 0.0
+        self._moves_by_id = {
+            int(move["MoveID"]): move
+            for move in self.moves
+            if isinstance(move.get("MoveID"), int)
+        }
+        self._scheduled: List[_ScheduledCompletion] = []
+        self._running: Dict[int, Dict[str, Any]] = {}
+        self._reservations: Dict[int, List[Tuple[Any, str]]] = {}
+        self._executed: Dict[int, Dict[str, Any]] = {}
+
+    @property
+    def running_move_ids(self) -> frozenset[int]:
+        """返回已经开始、尚未收到结束通知的 MoveID。"""
+        return frozenset(self._running)
+
+    @property
+    def executed_moves(self) -> List[dict]:
+        """返回按实际开始时间排序的已完成 Move，不暴露内部可变对象。"""
+        return [
+            dict(move)
+            for move in sorted(self._executed.values(), key=sort_key)
+        ]
+
+    @property
+    def materialized_plan(self) -> List[dict]:
+        """以实际完成记录覆盖原计划，返回当前段可拼接的 MoveList。"""
+        return [
+            dict(self._executed.get(int(move.get("MoveID", -1)), move))
+            for move in self.moves
+        ]
+
+    def update_move_state(self, notification: Mapping[str, Any]) -> MachineState:
+        """应用一条 Move 开始或结束通知并返回当前状态快照。
+
+        通知至少包含 ``MoveID`` 和 ``MoveState``；开始通知可带 ``StartTime``，结束通知可带
+        ``EndTime``。未提供的时间沿用计划值。Abort 无法从稳定状态安全回滚，因此明确报错并要求
+        上层先执行设备恢复流程。
+        """
+        move_id = notification.get("MoveID")
+        if not isinstance(move_id, int) or move_id not in self._moves_by_id:
+            raise ValueError(f"未知 MoveID={move_id}")
+        move_state = self._notification_state(notification)
+        if move_state == self.RUNNING:
+            self._start_notified_move(move_id, notification)
+        elif move_state == self.DONE:
+            self._finish_notified_move(move_id, notification)
+        else:
+            raise ValueError(f"MoveID={move_id} 已中止；请先完成设备恢复，再从稳定状态重算")
+        return self.state.clone()
+
+    @classmethod
+    def _notification_state(cls, notification: Mapping[str, Any]) -> int:
+        """把数字或字符串 MoveState 归一成接口枚举值。"""
+        raw = notification.get("MoveState", notification.get("State"))
+        if isinstance(raw, int) and raw in {cls.RUNNING, cls.DONE, cls.ABORTED}:
+            return raw
+        name = str(raw or "").strip().lower()
+        states = {"running": cls.RUNNING, "start": cls.RUNNING, "done": cls.DONE,
+                  "finished": cls.DONE, "end": cls.DONE, "aborted": cls.ABORTED,
+                  "abort": cls.ABORTED}
+        if name not in states:
+            raise ValueError(f"不支持 MoveState={raw}")
+        return states[name]
+
+    def _start_notified_move(self, move_id: int, notification: Mapping[str, Any]) -> None:
+        """按开始通知执行使能检查并登记结束回调。"""
+        if move_id in self._running or move_id in self._executed:
+            raise ValueError(f"MoveID={move_id} 收到重复开始通知")
+        planned = self._moves_by_id[move_id]
+        move = dict(planned)
+        planned_start = float(num(planned.get("StartTime")) or 0.0)
+        planned_end = float(num(planned.get("EndTime")) or planned_start)
+        actual_start = float(num(notification.get("StartTime")) if num(notification.get("StartTime")) is not None else planned_start)
+        move["StartTime"] = actual_start
+        move["EndTime"] = actual_start + max(0.0, planned_end - planned_start)
+        before = {
+            (id(owner), field_name): float(getattr(owner, field_name))
+            for owner, field_name in _busy_resource_refs(self.state)
+        }
+        error = _start_move(self.state, move, float(move["EndTime"]), self.moves, self._scheduled)
+        if error:
+            raise ValueError(error)
+        self._reservations[move_id] = [
+            (owner, field_name)
+            for owner, field_name in _busy_resource_refs(self.state)
+            if abs(float(getattr(owner, field_name)) - before[(id(owner), field_name)]) > TIME_TOLERANCE
+        ]
+        self._running[move_id] = move
+        self.current_time = max(self.current_time, actual_start)
+
+    def _finish_notified_move(self, move_id: int, notification: Mapping[str, Any]) -> None:
+        """按结束通知只落地对应 Move 的状态更新。"""
+        move = self._running.get(move_id)
+        if move is None:
+            raise ValueError(f"MoveID={move_id} 尚未开始，不能结束")
+        actual_end_value = num(notification.get("EndTime"))
+        actual_end = float(actual_end_value if actual_end_value is not None else move["EndTime"])
+        if actual_end + TIME_TOLERANCE < float(move["StartTime"]):
+            raise ValueError(f"MoveID={move_id} 的 EndTime 早于 StartTime")
+        completion = next((item for item in self._scheduled if item.move_id == move_id), None)
+        if completion is None:
+            raise ValueError(f"MoveID={move_id} 缺少待落地状态")
+        planned_end = completion.end_time
+        for owner, field_name in self._reservations.pop(move_id, []):
+            if abs(float(getattr(owner, field_name)) - planned_end) <= TIME_TOLERANCE:
+                setattr(owner, field_name, actual_end)
+        completion.complete()
+        self._scheduled.remove(completion)
+        move["EndTime"] = actual_end
+        self._executed[move_id] = dict(move)
+        del self._running[move_id]
+        self.current_time = max(self.current_time, actual_end)
+
+
 def validate_move_list(
     task: Problem,
     moves: List[dict],
@@ -105,6 +242,19 @@ def _finish_until(scheduled: List[_ScheduledCompletion], timestamp: float) -> No
         completed += 1
     if completed:
         del scheduled[:completed]
+
+
+def _busy_resource_refs(state: MachineState) -> List[Tuple[Any, str]]:
+    """列出状态机中所有资源占用终点字段，供单条实时 Move 精确改时。"""
+    references: List[Tuple[Any, str]] = []
+    for station in state.stations.values():
+        for field_name in ("door_busy_until", "transfer_busy_until", "environment_busy_until"):
+            references.append((station, field_name))
+        for slot in station.slots.values():
+            references.append((slot, "busy_until"))
+    for robot in state.robots.values():
+        references.append((robot, "busy_until"))
+    return references
 
 
 def _start_move(

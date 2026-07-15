@@ -7,6 +7,12 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 from src.validation.state import MachineState, is_doorless_station
 
 
+RELATED_ACTION_PLACE = 0
+RELATED_ACTION_PICK = 1
+RELATED_ROBOT_ATMOSPHERE = 0
+RELATED_ROBOT_VACUUM = 1
+
+
 def export_movelist(
     task: Problem,
     res: SolveResult,
@@ -104,16 +110,20 @@ def export_movelist(
         pre_c, pt, post_c = tm.pick_pre(R, c), tm.pick_t(R, c), tm.pick_post(R, c)
         pre_n, post_n = tm.place_pre(R, nxt_c), tm.place_post(R, nxt_c)
         arrive = rv + pt + tm.move(R)
+        related_robot_type = RELATED_ROBOT_ATMOSPHERE if R in tm.atm_robots else RELATED_ROBOT_VACUUM
         if not is_doorless_station(c) and (w.wid, j) not in supp_pick_pre:  # swap：源开门并入 place 那次门
-            emit(6, rv - pre_c, rv, station=c, cslot=cs, w=w)               # 源开门(pick 前，与到位并行)
+            emit(6, rv - pre_c, rv, station=c, cslot=cs, w=w,
+                 RelatedActionType=RELATED_ACTION_PICK, RelatedRobotType=related_robot_type)  # 源开门
         emit(0, rv, rv + pt, robot=R, src=c, cslot=cs, w=w)                 # pick
         if not is_doorless_station(c):
             emit(7, rv + pt, rv + pt + post_c, station=c, cslot=cs, w=w)    # 源关门(与走位并行)
         emit(5, rv + pt, arrive, robot=R, src=c, dst=nxt_c, cslot=cs,
              srcslot=cs, dstslot=ns, w=w)                                  # 走位
         if not is_doorless_station(nxt_c):
-            emit(6, arrive - pre_n, arrive, station=nxt_c, cslot=ns, w=w)   # 目标开门(与走位并行)
-        emit(1, arrive, a_next, robot=R, dst=nxt_c, cslot=ns, w=w)          # place
+            emit(6, arrive - pre_n, arrive, station=nxt_c, cslot=ns, w=w,
+                 RelatedActionType=RELATED_ACTION_PLACE, RelatedRobotType=related_robot_type)  # 目标开门
+        emit(1, arrive, a_next, robot=R, dst=nxt_c, cslot=ns, w=w,
+             StepIDList=[w.stages[j + 1].j])                                # place；供实时状态恢复进度
         if not is_doorless_station(nxt_c) and (w.wid, j + 1) not in supp_place_post:  # swap：place 关门并入后续 pick 那次门
             emit(7, a_next, a_next + post_n, station=nxt_c, cslot=ns, w=w)  # 目标关门(与下一动作并行)
 
