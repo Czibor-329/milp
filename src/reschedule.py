@@ -11,11 +11,13 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from src.export import export_movelist
-from src.model import Problem, Stage, Wafer
+from src.model import Durations, Problem, Stage, Wafer
 from src.parse import parse_task
 from src.timing import start_schedule, start_schedule_by_rl
 from src.validation import MoveStateReplay, populate_premove_ids, validate_move_list
-from src.validation.move_fields import PREPARE_MOVE, PRE_PREPARE_MOVE, PROCESS_MOVE, sort_key
+from src.validation.move_fields import (
+    PICK_MOVE, PLACE_MOVE, PREPARE_MOVE, PRE_PREPARE_MOVE, PROCESS_MOVE, SWAP_MOVE, sort_key,
+)
 from src.validation.state import (
     ATMOSPHERE,
     VACUUM,
@@ -107,16 +109,23 @@ class RealtimeRescheduler:
 
     @property
     def can_recompute(self) -> bool:
-        """返回当前状态是否满足无运行 Move、门全关且 Robot 空手的安全切点条件。"""
+        """返回当前状态是否满足无运行 Move、门全关、Robot 空手且 LoadLock 无片。"""
         if self._tracker.running_move_ids:
             return False
         if any(station.door is not DoorState.CLOSED for station in self._tracker.state.stations.values()):
             return False
-        return all(
+        robots_empty = all(
             material is None
             for robot in self._tracker.state.robots.values()
             for material in robot.hands.values()
         )
+        loadlocks_empty = all(
+            slot.material is None
+            for station in self._tracker.state.stations.values()
+            if isinstance(station, LoadLockState)
+            for slot in station.slots.values()
+        )
+        return robots_empty and loadlocks_empty
 
     def update_move_state(self, notification: Mapping[str, Any]) -> MachineState:
         """接收外部 Move 开始/结束通知并更新 ``src.validation.state`` 状态。"""
@@ -229,12 +238,17 @@ def _build_recompute_problem(
     next_state = state.clone()
     locations = _material_locations(next_state)
     residual: List[Wafer] = []
+    started_cjobs = set()
+    old_locations = []
     for wafer in previous.wafers:
         location = locations.get(wafer.mat_id)
         if location is None:
             raise ValueError(f"状态中找不到旧任务物料 MatID={wafer.mat_id}")
         station_name, slot_id, slot = location
         stage_index = _current_stage_index(wafer, station_name, slot_id, slot.material)
+        old_locations.append((wafer, stage_index))
+        if stage_index > 0 or wafer.already_released:
+            started_cjobs.add(wafer.cjob_id)
         if stage_index == len(wafer.stages) - 1 and wafer.stages[stage_index].stage_type == "sink":
             continue
         residual.append(_trim_wafer(wafer, stage_index, station_name, slot.phase))
@@ -242,6 +256,23 @@ def _build_recompute_problem(
             slot.material.step_id = 0
 
     incoming_wafers = [deepcopy(wafer) for wafer in incoming.wafers]
+    highest_ids = {
+        wafer.cjob_id for wafer in incoming_wafers if wafer.cjob_job_type == 2
+    }
+    higher_ids = {
+        wafer.cjob_id for wafer in incoming_wafers if wafer.cjob_job_type == 3
+    }
+    for wafer in residual:
+        blockers = set(wafer.dispatch_after)
+        if wafer.cjob_id not in started_cjobs:
+            blockers.update(highest_ids)
+            blockers.update(higher_ids)
+        wafer.dispatch_after = tuple(sorted(blockers))
+    for wafer in incoming_wafers:
+        blockers = set(wafer.dispatch_after)
+        if wafer.cjob_job_type == 3:
+            blockers.update(cjob for cjob in started_cjobs if cjob)
+        wafer.dispatch_after = tuple(sorted(blockers))
     _assign_incoming_resources(incoming_wafers, next_state, previous.chambers)
     existing_material_ids = set(locations)
     new_material_ids = {wafer.mat_id for wafer in incoming_wafers}
@@ -357,6 +388,12 @@ def _trim_wafer(wafer: Wafer, stage_index: int, station_name: str, phase: SlotPh
         stages=stages,
         transports=transports,
         pjob_name=wafer.pjob_name,
+        cjob_id=wafer.cjob_id,
+        cjob_job_type=wafer.cjob_job_type,
+        cjob_priority=wafer.cjob_priority,
+        already_released=wafer.already_released or stage_index > 0,
+        resume_stage_index=wafer.resume_stage_index + stage_index,
+        dispatch_after=tuple(wafer.dispatch_after),
     )
 
 
@@ -484,20 +521,47 @@ def _prepend_environment_setups(
 ) -> List[dict]:
     """必要时在新段开头补 LoadLock 空抽/空充，并整体让出该准备窗口。"""
     setups: List[dict] = []
+    ordered_moves = sorted(moves, key=sort_key)
+    atmosphere_robots = Durations(problem).atm_robots
     for station_name, station in state.stations.items():
         if not isinstance(station, LoadLockState):
             continue
         first_pressure = next(
             (
-                move for move in sorted(moves, key=sort_key)
+                move for move in ordered_moves
                 if move.get("MoveType") == PRE_PREPARE_MOVE
                 and str(move.get("Station") or move.get("ModuleName") or "") == station_name
             ),
             None,
         )
-        if first_pressure is None:
+        first_prepare = next((
+            move for move in ordered_moves
+            if move.get("MoveType") == PREPARE_MOVE
+            and str(move.get("Station") or move.get("ModuleName") or "") == station_name
+        ), None)
+        requirements: List[Tuple[float, str]] = []
+        if first_pressure is not None:
+            requirements.append((float(first_pressure.get("StartTime") or 0.0),
+                                 str(first_pressure.get("LastState") or "").upper()))
+        if first_prepare is not None:
+            mats = set(first_prepare.get("MatIDList") or [])
+            related = next((
+                move for move in ordered_moves
+                if move.get("MoveType") in {PICK_MOVE, PLACE_MOVE, SWAP_MOVE}
+                and mats.intersection(move.get("MatIDList") or [])
+                and station_name in (
+                    list(move.get("SrcStationList") or [])
+                    + list(move.get("DestStationList") or [])
+                    + list(move.get("StationList") or [])
+                )
+            ), None)
+            if related is not None:
+                robot = str(related.get("Robot") or related.get("ModuleName") or "")
+                requirements.append((float(first_prepare.get("StartTime") or 0.0),
+                                     ATMOSPHERE if robot in atmosphere_robots else VACUUM))
+        if not requirements:
             continue
-        required = str(first_pressure.get("LastState") or "").upper()
+        required = min(requirements, key=lambda item: item[0])[1]
         if required not in {ATMOSPHERE, VACUUM} or required == station.environment:
             continue
         chamber = problem.chambers.get(station_name)

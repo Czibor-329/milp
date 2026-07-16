@@ -72,6 +72,12 @@ class Wafer:
     stages: List[Stage]
     transports: List[str]    # hop -> robot，长度 = len(stages)-1
     pjob_name: str = ""
+    cjob_id: str = ""
+    cjob_job_type: int = 0
+    cjob_priority: int = 1
+    already_released: bool = False
+    resume_stage_index: int = 0
+    dispatch_after: tuple[str, ...] = ()
 
 
 # --------------------------------------------------------------------------- #

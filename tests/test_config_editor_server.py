@@ -519,14 +519,27 @@ class ConfigEditorServerTests(unittest.TestCase):
                 patch.object(config_server, "LOG_EXPORT_DIR", export_root / "logs"),
             ):
                 result_id = config_server.save_result({"MoveList": [], "RecomputePoints": []})
-                log_id = config_server.save_reproduction_log([{"Describe": "Input", "Info": {}}])
+                log_entries = [
+                    {"Describe": "Input", "Info": {"value": 1}},
+                    {"Describe": "AlgInit", "Info": {"value": 2}},
+                    {"Describe": "AlgSchedule", "Info": {"value": 3}},
+                    {"Describe": "AlgOutput", "Info": {"value": 4}},
+                ]
+                log_id = config_server.save_reproduction_log(log_entries)
                 config_server._RESULTS.clear()
                 config_server._REPRODUCTION_LOGS.clear()
 
                 self.assertEqual([], config_server.read_result(result_id)["MoveList"])
                 self.assertEqual("Input", config_server.read_reproduction_log(log_id)[0]["Describe"])
                 self.assertTrue((export_root / "results" / f"{result_id}.json").is_file())
-                self.assertTrue((export_root / "logs" / f"{log_id}.json").is_file())
+                log_path = export_root / "logs" / f"{log_id}.json"
+                self.assertTrue(log_path.is_file())
+                log_lines = log_path.read_text(encoding="utf-8").splitlines()
+                self.assertEqual(len(log_entries) + 2, len(log_lines))
+                self.assertEqual("[", log_lines[0])
+                self.assertEqual("]", log_lines[-1])
+                for index, entry in enumerate(log_entries, start=1):
+                    self.assertEqual(entry, json.loads(log_lines[index].removesuffix(",")))
 
     def test_two_recomputes_merge_movelist_and_markers(self) -> None:
         """首次排程加两次重算应合并 MoveList，并保留两条重算线。"""

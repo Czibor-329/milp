@@ -80,12 +80,24 @@ def _feed_chooser(quota: dict) -> _Chooser:
         fed: dict = {}
         for wid, p in state.pos.items():
             if p > 0:
-                r = state.wmap[wid].route_name
-                fed[r] = fed.get(r, 0) + 1
+                w = state.wmap[wid]
+                group = w.cjob_id or w.route_name
+                fed[group] = fed.get(group, 0) + 1
 
         def load_ratio(route: str) -> float:
             q = quota.get(route, 1) or 1
             return fed.get(route, 0) / q
+
+        def business_rank(w):
+            # HighestLot 可抢占后续派片/加工候选；HigherLot 的不可抢占边界由
+            # dispatch_after 约束，NormalLot 再按 Priority 排序。
+            if w.cjob_job_type == 2:
+                return (0, 0)
+            if w.cjob_job_type == 1:
+                return (1, 0)
+            if w.cjob_job_type == 3:
+                return (2, 0)
+            return (3, w.cjob_priority)
 
         def key(i: int):
             c = cands[i]
@@ -93,7 +105,12 @@ def _feed_chooser(quota: dict) -> _Chooser:
             dtype = w.stages[c.j + 1].stage_type
             into_proc = 0 if dtype == "process" else 1     # ①搬进加工腔最优
             feed = 0 if c.j == 0 else 1                     # ②发新片次之
-            return (into_proc, feed, load_ratio(w.route_name), c.start, -c.j, c.wid)
+            group = w.cjob_id or w.route_name
+            # 重算切点已经在设备内的晶圆先按原 Route 深度从下游向上游排空，
+            # 避免 timing 把新片放进状态中仍被占用的 LL/PM 槽位。
+            resume = (0, -w.resume_stage_index) if c.j == 0 and w.already_released else (1, 0)
+            return (resume, *business_rank(w), into_proc, feed,
+                    load_ratio(group), c.start, -c.j, c.wid)
 
         return sorted(range(len(cands)), key=key)
 
@@ -117,13 +134,17 @@ def _heuristic_schedule(ir: Problem, durations: Durations, wafers,
             print("[timing] 启发式：dummy-wac 清洁 → 排空优先(drain/backward)")
         return _eval_chooser(ir, durations, wafers, backward, None)
 
-    best = _eval_chooser(ir, durations, wafers, backward, None)   # 兜底基线
+    has_cjob_policy = any(w.cjob_id for w in wafers)
+    # 标准 CJob 任务不能让不识别 JobType/Priority 的 backward 候选以更短
+    # makespan 覆盖业务顺序；仅在业务 chooser 无可行解时才用它兜底。
+    best = None if has_cjob_policy else _eval_chooser(ir, durations, wafers, backward, None)
 
     if len(routes) <= 1:
         if verbose:
             print("[timing] 启发式：单 job 喂片优先(feed) + backward 兜底")
         feed = _feed_chooser({routes[0]: 1} if routes else {})
-        return _eval_chooser(ir, durations, wafers, feed, best)
+        result = _eval_chooser(ir, durations, wafers, feed, best)
+        return result or _eval_chooser(ir, durations, wafers, backward, None)
 
     # 2+ job：在若干交替发片配比里搜索（非全局）。前两条 route 取配比，其余按权重 1 均分。
     A, B = routes[0], routes[1]
@@ -131,6 +152,8 @@ def _heuristic_schedule(ir: Problem, durations: Durations, wafers,
     ratios = [(1, 1), (1, 2), (2, 1), (1, 3), (3, 1), (2, 3), (3, 2)]
     for a, b in ratios:
         best = _eval_chooser(ir, durations, wafers, _feed_chooser({A: a, B: b, **others}), best)
+    if best is None:
+        best = _eval_chooser(ir, durations, wafers, backward, None)
     if verbose:
         mk = best.makespan if best is not None and getattr(best, "feasible", False) else float("nan")
         print(f"[timing] 启发式：{len(routes)} job 交替配比搜索 ×{len(ratios)} + backward → makespan={mk:.2f}")

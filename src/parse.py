@@ -181,6 +181,9 @@ class PJobAssignment:
     load_port: str
     material_ids: List[int]
     material_count: int
+    cjob_id: str = ""
+    cjob_job_type: int = int(CJobType.NormalLot)
+    cjob_priority: int = 1
 
 
 @dataclass(slots=True)
@@ -346,6 +349,11 @@ def task_cjob_assignments(payload: Mapping[str, Any]) -> List[CJobAssignment]:
             job_type=job_type,
             priority=cjob_priority,
         ))
+        cjob_id = f"{str(cj.get('TaskID', ''))}:{cidx}"
+        for assignment in pjobs:
+            assignment.cjob_id = cjob_id
+            assignment.cjob_job_type = job_type
+            assignment.cjob_priority = cjob_priority
     out.sort(key=lambda c: (
         _JOBTYPE_RANK.get(int(c.job_type), 99),
         int(c.priority) if int(c.job_type) == int(CJobType.NormalLot) else 0,
@@ -876,7 +884,9 @@ def _expand_wafers(
                 ))
             wafers.append(Wafer(wid=wid, mat_id=mat, route_name=pj.route_name,
                                 route_rank=rank, stages=stages, transports=list(transports),
-                                pjob_name=pj.name))
+                                pjob_name=pj.name, cjob_id=pj.cjob_id,
+                                cjob_job_type=pj.cjob_job_type,
+                                cjob_priority=pj.cjob_priority))
             wid += 1
     return wafers
 

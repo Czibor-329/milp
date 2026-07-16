@@ -40,6 +40,11 @@ if str(ROOT) not in sys.path:
 from src.paths import MODELS_DIR
 from src.reschedule import RealtimeRescheduler, TIME_TOLERANCE
 from src.validation import MoveStateReplay
+from src.validation.move_fields import (
+    COMPLETE_MOVE, PICK_MOVE, PLACE_MOVE, PREPARE_MOVE, PRE_PREPARE_MOVE,
+    PRE_TRANS_MOVE, SWAP_MOVE,
+)
+from src.validation.state import DoorState, LoadLockState
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -696,6 +701,7 @@ def advance_to_recompute(
     """沿旧计划推进到请求时刻后的第一个全局安全切点，不限制最长等待。"""
     cutoff = max(float(cutoff), scheduler.state_time)
     groups = _planned_event_groups(scheduler.current_plan)
+    planned_by_id = {int(move["MoveID"]): move for move in scheduler.current_plan}
     started: set[int] = set()
     finished: set[int] = set()
 
@@ -728,7 +734,18 @@ def advance_to_recompute(
     if scheduler.can_recompute:
         return float(cutoff)
 
-    # 请求时刻不安全时继续执行旧计划；每个事件组先完成旧 Move，再判断是否可取消同刻新 Move。
+    # cutoff 时仍在 LoadPort 的晶圆尚未发片；冻结它们的全部旧动作。已经进入设备的
+    # 晶圆则按旧计划排空到 LoadPort，之后立即重算，避免连续启动整批剩余晶圆。
+    frozen_materials = {
+        slot.material.material_id
+        for name, station in scheduler.state.stations.items()
+        if str(getattr(scheduler.problem.chambers.get(name), "type", "")).lower() == "loadport"
+        for slot in station.slots.values()
+        if slot.material is not None
+    }
+
+    # 请求时刻不安全时只等待已经开始的 Move 完成。cutoff 之后的旧 Move 必须取消，
+    # 不能为了寻找安全点继续启动它们，否则连续流水会把重算拖到整批 Job 结束。
     last_time = float(cutoff)
     for group in groups:
         group_time = max(float(cutoff), float(group["time"]))
@@ -741,10 +758,19 @@ def advance_to_recompute(
         last_time = max(last_time, group_time)
         if scheduler.can_recompute:
             return last_time
+        # 允许把 cutoff 前已经打开的搬运事务收尾（取/放/关门），但禁止启动新的
+        # 开门、加工事务和新一片发片。这样能抵达最近稳定点而不会继续整条流水。
         for _, notification in group["starts"]:
             move_id = int(notification["MoveID"])
-            if move_id not in started:
-                apply_notification(notification)
+            move = planned_by_id.get(move_id, {})
+            move_type = move.get("MoveType")
+            move_materials = set(move.get("MatIDList") or [])
+            if move_id not in started and not (frozen_materials & move_materials):
+                try:
+                    apply_notification(notification)
+                except ValueError:
+                    # 与当前已打开事务无关的旧动作留给重算取消。
+                    continue
         for _, notification in group["sameFinishes"]:
             move_id = int(notification["MoveID"])
             if move_id in started and move_id not in finished:
@@ -754,7 +780,20 @@ def advance_to_recompute(
 
     if scheduler.can_recompute:
         return last_time
-    raise ValueError("旧计划执行结束后仍找不到全局安全重算时刻")
+    open_doors = [name for name, station in scheduler.state.stations.items()
+                  if station.door is not DoorState.CLOSED]
+    held = [f"{robot.name}#{slot_id}" for robot in scheduler.state.robots.values()
+            for slot_id, material in robot.hands.items() if material is not None]
+    loadlock_mats = {
+        name: [slot.material.material_id for slot in station.slots.values() if slot.material is not None]
+        for name, station in scheduler.state.stations.items()
+        if isinstance(station, LoadLockState)
+        and any(slot.material is not None for slot in station.slots.values())
+    }
+    raise ValueError(
+        f"旧计划找不到全局安全重算时刻：开门={open_doors}，"
+        f"机械手持片={held}，LoadLock={loadlock_mats}"
+    )
 
 
 def _load_rl_policy() -> Any:
@@ -988,15 +1027,29 @@ def _read_workspace_catalog_unlocked(path: Path) -> Dict[str, Any]:
     return catalog
 
 
-def _write_json_atomic(path: Path, payload: Any) -> None:
-    """把 JSON 原子写入指定文件，避免异常退出留下半份配置。"""
+def _write_text_atomic(path: Path, content: str) -> None:
+    """原子写入 UTF-8 文本，避免异常退出留下半份文件。"""
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = path.with_suffix(path.suffix + ".tmp")
-    temporary_path.write_text(
-        json.dumps(payload, ensure_ascii=False, allow_nan=False, indent=2),
-        encoding="utf-8",
-    )
+    temporary_path.write_text(content, encoding="utf-8")
     temporary_path.replace(path)
+
+
+def _write_json_atomic(path: Path, payload: Any) -> None:
+    """把 JSON 原子写入指定文件，避免异常退出留下半份配置。"""
+    content = json.dumps(payload, ensure_ascii=False, allow_nan=False, indent=2)
+    _write_text_atomic(path, content)
+
+
+def format_reproduction_log(entries: Sequence[Mapping[str, Any]]) -> str:
+    """生成顶层事件各占一行、同时保持可直接解析的 JSON 数组。"""
+    event_lines = [
+        json.dumps(entry, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        for entry in entries
+    ]
+    if not event_lines:
+        return "[]"
+    return "[\n" + ",\n".join(event_lines) + "\n]"
 
 
 def _write_workspace_catalog_unlocked(path: Path, catalog: Mapping[str, Any]) -> None:
@@ -1345,7 +1398,7 @@ def save_reproduction_log(entries: Sequence[Mapping[str, Any]]) -> str:
     """把 input_data 格式日志写入专用导出目录并放入有界内存缓存。"""
     log_id = uuid.uuid4().hex
     payload = deepcopy(list(entries))
-    _write_json_atomic(LOG_EXPORT_DIR / f"{log_id}.json", payload)
+    _write_text_atomic(LOG_EXPORT_DIR / f"{log_id}.json", format_reproduction_log(payload))
     with _REPRODUCTION_LOGS_LOCK:
         _REPRODUCTION_LOGS[log_id] = payload
         _REPRODUCTION_LOGS.move_to_end(log_id)
@@ -1426,6 +1479,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                 self._send_json(
                     reproduction_log,
                     download_name=f"ct-input-log-{log_id[:8]}.json",
+                    top_level_item_per_line=True,
                 )
             return
         self._send_json({"ok": False, "error": "Not found"}, HTTPStatus.NOT_FOUND)
@@ -1557,9 +1611,14 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
         payload: Any,
         status: HTTPStatus = HTTPStatus.OK,
         download_name: Optional[str] = None,
+        top_level_item_per_line: bool = False,
     ) -> None:
         """以 UTF-8 JSON 返回 API 结果。"""
-        content = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        if top_level_item_per_line:
+            content_text = format_reproduction_log(payload)
+        else:
+            content_text = json.dumps(payload, ensure_ascii=False, allow_nan=False)
+        content = content_text.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(content)))

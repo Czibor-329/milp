@@ -302,6 +302,11 @@ def decode_orders(ir: Problem, tm: Durations, wafers, *,
             j = pos[wid]
             if j >= K[wid]:
                 continue
+            if j == 0 and not w.already_released and any(
+                any(x.cjob_id == blocker and pos[x.wid] < K[x.wid] for x in wafers)
+                for blocker in w.dispatch_after
+            ):
+                continue
             dest = res_map[(wid, j + 1)]
             if _blocked(dest, occ, resv if reserve else {}, wid):
                 continue
@@ -509,6 +514,11 @@ def decode_orders_choosing(ir: Problem, tm: Durations, wafers, *,
             wid = w.wid
             j = pos[wid]
             if j >= K[wid]:
+                continue
+            if j == 0 and not w.already_released and any(
+                any(x.cjob_id == blocker and pos[x.wid] < K[x.wid] for x in wafers)
+                for blocker in w.dispatch_after
+            ):
                 continue
             if j == 0 and route_wids[w.route_name][next_rel[w.route_name]] != wid:
                 continue
