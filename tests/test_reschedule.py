@@ -55,6 +55,8 @@ class RealtimeRescheduleTests(unittest.TestCase):
         """查看器应解析 RecomputePoints 并渲染重算竖线。"""
         viewer = (ROOT / "movelist_gantt_viewer.html").read_text(encoding="utf-8")
         self.assertIn("payload.RecomputePoints", viewer)
+        self.assertIn("point.EffectiveTime", viewer)
+        self.assertIn("实际执行", viewer)
         self.assertIn('class="recompute-marker"', viewer)
         self.assertIn('stroke="#dc2626"', viewer)
 

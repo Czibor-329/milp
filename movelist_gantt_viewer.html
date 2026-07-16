@@ -1427,9 +1427,14 @@
     function normalizeRecomputePoint(point, index) {
       const rawTime = typeof point === "number" ? point : point && (point.Time ?? point.time);
       const time = Number(rawTime);
+      const rawEffectiveTime = typeof point === "number"
+        ? rawTime
+        : point && (point.EffectiveTime ?? point.effectiveTime ?? rawTime);
+      const effectiveTime = Number(rawEffectiveTime);
       const displayIndex = Number(point && (point.Index ?? point.index));
       return {
         time,
+        effectiveTime: Number.isFinite(effectiveTime) ? effectiveTime : time,
         index: Number.isFinite(displayIndex) ? displayIndex : index + 1,
         reason: String(point && (point.Reason ?? point.reason) || "重算")
       };
@@ -2354,6 +2359,9 @@
         .map((point) => {
           const x = labelW + (point.time - dataset.view.t0) * xScale;
           const label = `重算 #${point.index}`;
+          const executionNote = Math.abs(point.effectiveTime - point.time) > 1e-6
+            ? `请求 ${fmt(point.time)}s · 实际执行 ${fmt(point.effectiveTime)}s`
+            : `${fmt(point.time)}s`;
           return `
             <g class="recompute-marker" pointer-events="none">
               <line x1="${x}" y1="${topPad - 5}" x2="${x}" y2="${topPad + yTop}"
@@ -2361,7 +2369,7 @@
               <rect x="${x - 27}" y="${topPad - 25}" width="54" height="17" rx="4" fill="#dc2626"/>
               <text x="${x}" y="${topPad - 13}" text-anchor="middle" font-size="10" fill="#ffffff"
                 style="font-family:inherit">${escapeHtml(label)}</text>
-              <title>${escapeHtml(`${label} · ${fmt(point.time)}s · ${point.reason}`)}</title>
+              <title>${escapeHtml(`${label} · ${executionNote} · ${point.reason}`)}</title>
             </g>`;
         }).join("");
 

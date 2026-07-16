@@ -37,12 +37,18 @@ class RecomputePoint:
     """一次重算在统一时间轴上的显示信息。"""
 
     time: float
+    effective_time: float
     index: int
     reason: str
 
     def to_dict(self) -> Dict[str, Any]:
         """转换成 MoveList 文件中的 ``RecomputePoints`` 行。"""
-        return {"Time": self.time, "Index": self.index, "Reason": self.reason}
+        return {
+            "Time": self.time,
+            "EffectiveTime": self.effective_time,
+            "Index": self.index,
+            "Reason": self.reason,
+        }
 
 
 class RealtimeRescheduler:
@@ -82,6 +88,7 @@ class RealtimeRescheduler:
         self._current_plan = self._schedule_segment(self.problem, initial_state, start_time)
         self._next_move_id = max((int(move["MoveID"]) for move in self._current_plan), default=0) + 1
         self._tracker = MoveStateReplay(self.problem, self._current_plan, initial_state)
+        self._tracker.current_time = start_time
 
     @property
     def current_plan(self) -> List[dict]:
@@ -92,6 +99,24 @@ class RealtimeRescheduler:
     def state(self) -> MachineState:
         """返回当前整机状态的隔离快照。"""
         return self._tracker.state.clone()
+
+    @property
+    def state_time(self) -> float:
+        """返回当前状态已经推进到的绝对时间，不允许后续重算回退到该时刻之前。"""
+        return float(self._tracker.current_time)
+
+    @property
+    def can_recompute(self) -> bool:
+        """返回当前状态是否满足无运行 Move、门全关且 Robot 空手的安全切点条件。"""
+        if self._tracker.running_move_ids:
+            return False
+        if any(station.door is not DoorState.CLOSED for station in self._tracker.state.stations.values()):
+            return False
+        return all(
+            material is None
+            for robot in self._tracker.state.robots.values()
+            for material in robot.hands.values()
+        )
 
     def update_move_state(self, notification: Mapping[str, Any]) -> MachineState:
         """接收外部 Move 开始/结束通知并更新 ``src.validation.state`` 状态。"""
@@ -107,9 +132,9 @@ class RealtimeRescheduler:
     ) -> Dict[str, Any]:
         """在当前稳定状态加入新任务，取消旧计划未来 Move 并启发式续排。
 
-        ``cutoff_time``（缺省等于 ``current_time``）之前已经开始的 Move 必须都上报；跨越触发点
-        的运行中 Move 可以结束到 ``current_time``，其余旧 Move 不再执行。新计划从稳定后的
-        ``current_time`` 开始，甘特图重算线仍画在原始触发点。返回值是已经拼接的统一数据。
+        ``cutoff_time`` 是外部请求重算的时刻；调用方必须继续执行旧计划，直到
+        ``current_time`` 所指的首个全局安全时刻。旧计划在该安全时刻之前的 Move 会保留，
+        其余旧 Move 作废，新计划从 ``current_time`` 开始。甘特图重算线仍画在原始请求时刻。
         """
         timestamp = float(current_time)
         cutoff = timestamp if cutoff_time is None else float(cutoff_time)
@@ -122,13 +147,14 @@ class RealtimeRescheduler:
         combined_problem, next_state = _build_recompute_problem(self.problem, new_problem, snapshot)
 
         self._history.extend(self._tracker.executed_moves)
-        self._points.append(RecomputePoint(cutoff, len(self._points) + 1, reason))
+        self._points.append(RecomputePoint(cutoff, timestamp, len(self._points) + 1, reason))
         new_segment = self._schedule_segment(combined_problem, next_state, timestamp)
         new_segment, self._next_move_id = _renumber_segment(new_segment, self._next_move_id)
 
         self.problem = combined_problem
         self._current_plan = new_segment
         self._tracker = MoveStateReplay(combined_problem, new_segment, next_state)
+        self._tracker.current_time = timestamp
         return self.combined_output()
 
     def combined_output(self) -> Dict[str, Any]:

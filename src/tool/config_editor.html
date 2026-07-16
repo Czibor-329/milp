@@ -6,766 +6,761 @@
   <title>CT 实时调度终端</title>
   <style>
     :root {
-      --bg: #f5f7fb;
-      --surface: #ffffff;
-      --surface-soft: #f8fafc;
-      --ink: #14213d;
-      --muted: #64748b;
-      --line: #dbe2ea;
-      --brand: #2457d6;
-      --brand-dark: #173d9f;
-      --brand-soft: #eaf0ff;
-      --green: #087f5b;
-      --green-soft: #e7f8f0;
-      --orange: #b45309;
-      --orange-soft: #fff4df;
-      --red: #bd2837;
-      --red-soft: #fff0f1;
-      --shadow: 0 12px 32px rgba(32, 47, 81, .08);
-      --radius: 16px;
+      --bg: #f4f6fa; --surface: #fff; --soft: #f8fafc; --ink: #14213d; --muted: #64748b;
+      --line: #dbe2ea; --brand: #2457d6; --brand-dark: #173d9f; --brand-soft: #edf2ff;
+      --green: #087f5b; --green-soft: #e8f8f1; --red: #bd2837; --red-soft: #fff0f1;
+      --shadow: 0 12px 32px rgba(32, 47, 81, .08); --radius: 16px;
     }
-
     * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      color: var(--ink);
-      background:
-        radial-gradient(circle at 8% 0%, #e9efff 0, transparent 30rem),
-        var(--bg);
-      font: 14px/1.55 Inter, "Microsoft YaHei", system-ui, sans-serif;
-    }
+    body { margin: 0; color: var(--ink); background: radial-gradient(circle at 8% 0%, #e8efff 0, transparent 30rem), var(--bg); font: 14px/1.55 Inter, "Microsoft YaHei", system-ui, sans-serif; }
     button, input, select, textarea { font: inherit; }
     button { cursor: pointer; }
-    .shell { max-width: 1440px; margin: 0 auto; padding: 28px 30px 64px; }
-    .hero {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 24px;
-      margin-bottom: 24px;
-    }
-    .eyebrow {
-      margin-bottom: 7px;
-      color: var(--brand);
-      font-size: 12px;
-      font-weight: 800;
-      letter-spacing: .15em;
-      text-transform: uppercase;
-    }
-    h1 { margin: 0; font-size: clamp(26px, 3vw, 38px); line-height: 1.12; letter-spacing: -.03em; }
-    .hero p { max-width: 720px; margin: 10px 0 0; color: var(--muted); }
-    .service-pill {
-      flex: none;
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 9px 13px;
-      border: 1px solid #b9e8d4;
-      border-radius: 999px;
-      color: var(--green);
-      background: var(--green-soft);
-      font-weight: 700;
-    }
+    .shell { max-width: 1440px; margin: 0 auto; padding: 26px 30px 64px; }
+    .hero { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-bottom: 18px; }
+    .eyebrow { color: var(--brand); font-size: 11px; font-weight: 800; letter-spacing: .15em; text-transform: uppercase; }
+    h1 { margin: 4px 0 0; font-size: clamp(26px, 3vw, 36px); line-height: 1.12; letter-spacing: -.03em; }
+    .hero p { max-width: 680px; margin: 8px 0 0; color: var(--muted); }
+    .service-pill { display: flex; align-items: center; gap: 8px; padding: 9px 13px; border: 1px solid #b9e8d4; border-radius: 999px; color: var(--green); background: var(--green-soft); font-weight: 700; white-space: nowrap; }
     .service-pill::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+    .tabs { display: flex; gap: 6px; margin-bottom: 20px; padding: 5px; width: fit-content; border: 1px solid var(--line); border-radius: 12px; background: rgba(255,255,255,.75); }
+    .tab { min-width: 108px; padding: 9px 16px; border: 0; border-radius: 8px; color: #506079; background: transparent; font-weight: 800; }
+    .tab.active { color: #fff; background: var(--brand); box-shadow: 0 4px 12px rgba(36,87,214,.22); }
     .layout { display: grid; grid-template-columns: minmax(0, 1fr) 390px; gap: 22px; align-items: start; }
-    .main, .side { display: grid; gap: 18px; }
+    .layout.editor-mode { grid-template-columns: 1fr; }
+    .main, .side, .tab-view { display: grid; gap: 18px; }
     .side { position: sticky; top: 18px; }
-    .panel {
-      border: 1px solid rgba(213, 222, 235, .95);
-      border-radius: var(--radius);
-      background: rgba(255, 255, 255, .96);
-      box-shadow: var(--shadow);
-      overflow: hidden;
-    }
-    .panel-head {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 16px;
-      padding: 18px 20px;
-      border-bottom: 1px solid var(--line);
-    }
+    .tab-view:not(.active), .side.is-hidden { display: none; }
+    .panel { overflow: hidden; border: 1px solid rgba(213,222,235,.95); border-radius: var(--radius); background: rgba(255,255,255,.97); box-shadow: var(--shadow); }
+    .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 20px; border-bottom: 1px solid var(--line); }
     .panel-head h2 { margin: 0; font-size: 17px; }
     .panel-head p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
     .panel-body { padding: 20px; }
     .grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 14px; }
-    .span-12 { grid-column: span 12; }
-    .span-8 { grid-column: span 8; }
-    .span-6 { grid-column: span 6; }
-    .span-4 { grid-column: span 4; }
-    .span-3 { grid-column: span 3; }
+    .span-12 { grid-column: span 12; } .span-8 { grid-column: span 8; } .span-6 { grid-column: span 6; } .span-4 { grid-column: span 4; } .span-3 { grid-column: span 3; }
     .field { min-width: 0; }
     .field label { display: block; margin-bottom: 6px; color: #42526b; font-size: 12px; font-weight: 700; }
-    .field input, .field select, .field textarea {
-      width: 100%;
-      min-height: 39px;
-      padding: 8px 10px;
-      border: 1px solid #cdd6e2;
-      border-radius: 9px;
-      color: var(--ink);
-      background: #fff;
-      outline: none;
-      transition: .16s border-color, .16s box-shadow;
-    }
+    .field input, .field select, .field textarea { width: 100%; min-height: 39px; padding: 8px 10px; border: 1px solid #cdd6e2; border-radius: 9px; color: var(--ink); background: #fff; outline: none; }
     .field textarea { min-height: 72px; resize: vertical; }
-    .field select[multiple] { min-height: 76px; }
-    .field input:focus, .field select:focus, .field textarea:focus {
-      border-color: #7396ee;
-      box-shadow: 0 0 0 3px rgba(36, 87, 214, .11);
-    }
+    .field select[multiple] { min-height: 92px; }
+    .field input:focus, .field select:focus, .field textarea:focus { border-color: #7396ee; box-shadow: 0 0 0 3px rgba(36,87,214,.11); }
     .hint { margin-top: 5px; color: var(--muted); font-size: 11px; }
-    .btn {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      gap: 7px;
-      min-height: 36px;
-      padding: 7px 12px;
-      border: 1px solid #cdd6e2;
-      border-radius: 9px;
-      color: #334155;
-      background: #fff;
-      font-weight: 700;
-    }
+    .btn { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 36px; padding: 7px 12px; border: 1px solid #cdd6e2; border-radius: 9px; color: #334155; background: #fff; font-weight: 700; text-decoration: none; }
     .btn:hover { border-color: #9fadc0; background: #f8fafc; }
     .btn.primary { border-color: var(--brand); color: #fff; background: var(--brand); }
     .btn.primary:hover { background: var(--brand-dark); }
     .btn.danger { border-color: #f0bdc2; color: var(--red); background: var(--red-soft); }
     .btn.small { min-height: 30px; padding: 4px 9px; font-size: 12px; }
-    .btn:disabled { cursor: not-allowed; opacity: .48; }
-    .file-select {
-      position: relative;
-      display: grid;
-      place-items: center;
-      min-height: 92px;
-      padding: 16px;
-      border: 1px dashed #9db0cb;
-      border-radius: 12px;
-      color: #42526b;
-      background: var(--surface-soft);
-      text-align: center;
-    }
+    .btn.icon { min-width: 30px; padding: 4px 7px; }
+    .btn:disabled { cursor: not-allowed; opacity: .45; }
+    .file-select { position: relative; display: grid; place-items: center; min-height: 88px; padding: 15px; border: 1px dashed #9db0cb; border-radius: 12px; color: #42526b; background: var(--soft); text-align: center; }
     .file-select input { position: absolute; inset: 0; width: 100%; opacity: 0; cursor: pointer; }
     .file-select strong { display: block; color: var(--brand); }
-    .summary-chips { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 12px; }
-    .chip { padding: 4px 9px; border-radius: 999px; color: #42526b; background: #edf2f7; font-size: 12px; font-weight: 700; }
+    .workspace-actions { display: flex; flex-wrap: wrap; gap: 7px; align-items: end; }
+    .workspace-actions .btn { flex: 1 1 auto; }
+    .import-device { position: relative; overflow: hidden; }
+    .import-device input { position: absolute; inset: 0; width: 100%; opacity: 0; cursor: pointer; }
+    .workspace-status { display: flex; align-items: center; gap: 7px; min-height: 28px; color: var(--muted); font-size: 12px; }
+    .workspace-status.dirty { color: #b45309; }
+    .workspace-status.saved { color: var(--green); }
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+    .summary-chips { margin-top: 12px; }
+    .chip { padding: 4px 9px; border-radius: 999px; color: #42526b; background: #edf2f7; font-size: 11px; font-weight: 700; }
     .chip.good { color: var(--green); background: var(--green-soft); }
     .time-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 10px; margin-top: 15px; }
-    .time-box { padding: 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-soft); }
+    .time-box { padding: 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--soft); }
     .time-box strong { display: block; margin-bottom: 5px; font-size: 12px; }
     .time-box input { width: 100%; padding: 7px 8px; border: 1px solid #cdd6e2; border-radius: 7px; }
     .time-box:first-child { color: var(--green); background: var(--green-soft); }
     .card-list { display: grid; gap: 12px; }
-    .edit-card { border: 1px solid var(--line); border-radius: 12px; background: var(--surface-soft); }
+    .edit-card { border: 1px solid var(--line); border-radius: 12px; background: var(--soft); }
     .edit-card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
-    .edit-card-head strong { font-size: 14px; }
     .edit-card-body { padding: 14px; }
     .empty { padding: 28px 18px; border: 1px dashed #bdc8d8; border-radius: 12px; color: var(--muted); text-align: center; }
-    .stage-list { display: grid; gap: 9px; margin-top: 12px; }
-    .stage { padding: 12px; border-left: 3px solid #9ab3f2; border-radius: 8px; background: #fff; }
-    .stage-title { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
-    .stage-title span { color: var(--brand); font-size: 12px; font-weight: 800; }
-    .round { border-color: #ccd7ea; }
     .round > .edit-card-head { background: #f4f7ff; }
-    .round-time { color: var(--brand); font-size: 12px; font-weight: 800; }
+    .round-time { margin-left: 7px; color: var(--brand); font-size: 12px; font-weight: 800; }
+    .job-card { padding: 12px; border-left: 3px solid #9ab3f2; border-radius: 8px; background: #fff; }
+    .job-head { display: flex; justify-content: space-between; margin-bottom: 10px; color: var(--brand); font-size: 12px; font-weight: 800; }
+    .route-meta { padding: 14px; border-bottom: 1px solid var(--line); background: #fff; }
+    .route-clean-details { margin-top: 12px; }
+    .route-clean-details summary { cursor: pointer; color: var(--muted); font-size: 12px; font-weight: 700; }
+    .route-clean-details .grid { margin-top: 12px; }
+    .step-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; padding: 14px; }
+    .step-card { position: relative; min-height: 168px; padding: 13px 13px 34px; border: 1px solid #d8e0ec; border-radius: 11px; background: #fff; user-select: none; transition: .16s transform, .16s border-color, .16s box-shadow; }
+    .step-card:hover { transform: translateY(-1px); border-color: #8da9ef; box-shadow: 0 7px 18px rgba(36,87,214,.09); }
+    .step-card:focus { outline: 3px solid rgba(36,87,214,.15); }
+    .step-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+    .step-index { color: var(--brand); font-size: 12px; font-weight: 900; }
+    .step-kind { margin-top: 2px; color: var(--muted); font-size: 11px; }
+    .step-actions { display: flex; gap: 4px; }
+    .step-candidates { margin: 12px 0 10px; }
+    .step-fields { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 10px; }
+    .step-field { padding: 6px 7px; border-radius: 7px; background: var(--soft); }
+    .step-field span { display: block; color: var(--muted); font-size: 9px; text-transform: uppercase; }
+    .step-field strong { display: block; overflow: hidden; margin-top: 1px; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+    .step-open-hint { position: absolute; right: 12px; bottom: 9px; color: #8a99ad; font-size: 10px; }
     .run-box { padding: 20px; color: #fff; background: linear-gradient(145deg, #173d9f, #2457d6); }
     .run-box h2 { margin: 0; font-size: 19px; }
     .run-box p { margin: 7px 0 18px; color: #dce6ff; font-size: 12px; }
     .run-box .btn { width: 100%; min-height: 46px; border-color: #fff; color: var(--brand-dark); background: #fff; }
+    .export-option { display: flex; align-items: center; gap: 8px; margin: -7px 0 14px; color: #e5ecff; font-size: 12px; cursor: pointer; }
+    .export-option input { width: 16px; height: 16px; margin: 0; accent-color: #fff; }
     .run-box .btn.running::before { content: ""; width: 14px; height: 14px; border: 2px solid #b9c7eb; border-top-color: var(--brand); border-radius: 50%; animation: spin .8s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
+    .strategy-options { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .strategy-card { padding: 12px; border: 1px solid var(--line); border-radius: 10px; }
+    .strategy-card:has(input:checked) { border-color: var(--brand); background: var(--brand-soft); }
+    .strategy-card input { width: auto; margin-right: 6px; }
+    .strategy-card span { display: block; margin: 4px 0 0 22px; color: var(--muted); font-size: 11px; }
     .result-metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-bottom: 14px; }
-    .metric { padding: 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-soft); }
+    .metric { padding: 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--soft); }
     .metric span { display: block; color: var(--muted); font-size: 11px; }
     .metric strong { display: block; margin-top: 3px; font-size: 17px; }
-    .terminal {
-      min-height: 190px;
-      max-height: 360px;
-      margin: 0;
-      padding: 14px;
-      overflow: auto;
-      border-radius: 10px;
-      color: #cce9db;
-      background: #101927;
-      white-space: pre-wrap;
-      word-break: break-word;
-      font: 12px/1.7 Consolas, monospace;
-    }
-    .terminal .error { color: #ffb4bd; }
-    .result-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
-    .notice { padding: 10px 12px; border-radius: 9px; color: var(--orange); background: var(--orange-soft); font-size: 12px; }
-    .strategy-options { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-    .strategy-card { position: relative; padding: 12px; border: 1px solid var(--line); border-radius: 10px; }
-    .strategy-card:has(input:checked) { border-color: var(--brand); background: var(--brand-soft); }
-    .strategy-card input { width: auto; min-height: auto; margin-right: 6px; }
-    .strategy-card span { display: block; margin: 4px 0 0 22px; color: var(--muted); font-size: 11px; }
+    .terminal { min-height: 190px; max-height: 350px; margin: 0; padding: 14px; overflow: auto; border-radius: 10px; color: #cce9db; background: #101927; white-space: pre-wrap; word-break: break-word; font: 12px/1.7 Consolas, monospace; }
+    .terminal.error { color: #ffb4bd; }
+    .result-actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 12px; }
     .is-hidden { display: none !important; }
-    @media (max-width: 1040px) {
-      .layout { grid-template-columns: 1fr; }
-      .side { position: static; grid-row: 1; }
-    }
-    @media (max-width: 700px) {
-      .shell { padding: 20px 14px 48px; }
-      .hero { align-items: flex-start; flex-direction: column; }
-      .grid > * { grid-column: span 12 !important; }
-      .strategy-options, .result-actions { grid-template-columns: 1fr; }
-    }
+    .drawer-layer { position: fixed; inset: 0; z-index: 50; pointer-events: none; background: rgba(15,23,42,0); transition: .2s background; }
+    .drawer-layer.open { pointer-events: auto; background: rgba(15,23,42,.18); }
+    .drawer { position: absolute; top: 0; right: 0; width: min(500px, 94vw); height: 100%; overflow: auto; border-left: 1px solid var(--line); background: #fff; box-shadow: -18px 0 45px rgba(30,41,59,.16); transform: translateX(101%); transition: .22s transform; }
+    .drawer-layer.open .drawer { transform: translateX(0); }
+    .drawer-head { position: sticky; top: 0; z-index: 2; display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; padding: 20px; border-bottom: 1px solid var(--line); background: rgba(255,255,255,.96); backdrop-filter: blur(10px); }
+    .drawer-head h2 { margin: 0; font-size: 18px; }
+    .drawer-head p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+    .drawer-body { display: grid; gap: 18px; padding: 20px; }
+    .drawer-section { padding-bottom: 18px; border-bottom: 1px solid var(--line); }
+    .drawer-section:last-child { border-bottom: 0; }
+    .drawer-section h3 { margin: 0 0 11px; font-size: 13px; }
+    .visit-list { display: grid; gap: 12px; }
+    .visit-editor { overflow: hidden; border: 1px solid var(--line); border-radius: 11px; background: var(--soft); }
+    .visit-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--line); background: #fff; }
+    .visit-body { padding: 12px; }
+    .choice-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+    .choice { display: flex; align-items: center; gap: 7px; padding: 8px 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); }
+    .choice:has(input:checked) { border-color: #8da9ef; color: var(--brand); background: var(--brand-soft); }
+    .switch-line { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+    .switch-line input { width: 18px; height: 18px; }
+    @media (max-width: 1040px) { .layout { grid-template-columns: 1fr; } .side { position: static; grid-row: 1; } }
+    @media (max-width: 700px) { .shell { padding: 18px 14px 48px; } .hero { align-items: flex-start; flex-direction: column; } .tabs { width: 100%; } .tab { flex: 1; min-width: 0; } .grid > * { grid-column: span 12 !important; } .step-list { grid-template-columns: 1fr; } .result-actions { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
   <main class="shell">
     <header class="hero">
-      <div>
-        <div class="eyebrow">Realtime scheduling console</div>
-        <h1>CT 实时调度终端</h1>
-        <p>选择设备，预先定义所有重算时间，再设计公共 Recipe、Clean、Route 和每轮新增 Job。页面直接运行后端策略，不再编辑 init，也不导出配置 JSON。</p>
-      </div>
+      <div><div class="eyebrow">Realtime scheduling console</div><h1>CT 实时调度终端</h1><p>选择设备，在设备下维护多个可重复运行的 Route、Clean 与重算测试集。</p></div>
       <div class="service-pill" id="serviceState">本地服务</div>
     </header>
 
-    <div class="layout">
+    <nav class="tabs" aria-label="主要功能">
+      <button class="tab active" data-tab-target="schedule">运行计划</button>
+      <button class="tab" data-tab-target="route">Route</button>
+      <button class="tab" data-tab-target="clean">Clean</button>
+    </nav>
+
+    <div class="layout" id="pageLayout">
       <section class="main">
-        <article class="panel">
-          <div class="panel-head">
-            <div><h2>1. 设备与重算时间</h2><p>总轮数 N = 首次排程 + N-1 次重算。</p></div>
-          </div>
-          <div class="panel-body">
-            <div class="grid">
-              <div class="field span-8">
-                <label>设备 init 文件</label>
-                <label class="file-select">
-                  <input id="deviceFile" type="file" accept=".json,application/json">
-                  <span><strong id="deviceFileName">选择 init / input_data JSON</strong><small>只读取设备，不提供任何编辑入口</small></span>
-                </label>
-                <div class="summary-chips" id="deviceSummary"><span class="chip">尚未选择设备</span></div>
-              </div>
-              <div class="field span-4">
-                <label for="roundCount">总轮数</label>
-                <input id="roundCount" type="number" min="1" max="8" value="2">
-                <div class="hint">例如 2 表示首次排程后再重算 1 次。</div>
+        <div class="tab-view active" data-tab-view="schedule">
+          <article class="panel">
+            <div class="panel-head"><div><h2>设备与测试集</h2><p>设备 init 只保存一次，每个测试集独立保存完整计算配置。</p></div></div>
+            <div class="panel-body">
+              <div class="grid">
+                <div class="field span-4"><label for="deviceSelect">设备</label><select id="deviceSelect"><option value="">尚未导入设备</option></select></div>
+                <div class="field span-4"><label>导入新设备</label><label class="btn import-device">＋ 选择 init / input_data<input id="deviceFile" type="file" accept=".json,application/json"></label></div>
+                <div class="field span-4"><label>设备信息</label><div class="chips" id="deviceSummary"><span class="chip">尚未选择设备</span></div></div>
+                <div class="field span-4"><label for="testCaseSelect">测试集</label><select id="testCaseSelect"><option value="">请先选择设备</option></select></div>
+                <div class="field span-4"><label for="testCaseName">测试集名称</label><input id="testCaseName" value="" placeholder="测试集名称" disabled></div>
+                <div class="field span-4"><label>测试集操作</label><div class="workspace-actions"><button class="btn small" id="newTestButton" disabled>新建</button><button class="btn small" id="copyTestButton" disabled>复制</button><button class="btn primary small" id="saveTestButton" disabled>保存</button><button class="btn danger small" id="deleteTestButton" disabled>删除</button></div></div>
+                <div class="span-12 workspace-status" id="workspaceStatus">导入或选择一个设备后开始。</div>
               </div>
             </div>
-            <div class="time-strip" id="timeStrip"></div>
-          </div>
-        </article>
+          </article>
+          <article class="panel">
+            <div class="panel-head"><div><h2>重算时间</h2><p>总轮数 N = 首次排程 + N-1 次重算。</p></div><div class="field" style="width:160px"><label for="roundCount">总轮数</label><input id="roundCount" type="number" min="1" max="8" value="2"></div></div>
+            <div class="panel-body"><div class="time-strip" id="timeStrip"></div></div>
+          </article>
+          <article class="panel">
+            <div class="panel-head"><div><h2>分轮新增 Job</h2><p>每轮只填写该轮外部新增加的 Job，Job 引用 Route。</p></div></div>
+            <div class="panel-body"><div class="card-list" id="roundList"></div></div>
+          </article>
+        </div>
 
-        <article class="panel">
-          <div class="panel-head">
-            <div><h2>2. 公共 Recipe</h2><p>Recipe 在这里定义，Route 的 Step 只做引用。</p></div>
-            <button class="btn small" data-action="add-recipe">＋ Recipe</button>
-          </div>
-          <div class="panel-body"><div class="card-list" id="recipeList"></div></div>
-        </article>
+        <div class="tab-view" data-tab-view="route">
+          <article class="panel">
+            <div class="panel-head"><div><h2>Route</h2><p>Step 显示 IRouteStep 摘要；点击 Step，在右侧逐条编辑 Visits。</p></div><button class="btn small" data-action="add-route">＋ Route</button></div>
+            <div class="panel-body"><div class="card-list" id="routeList"></div></div>
+          </article>
+        </div>
 
-        <article class="panel">
-          <div class="panel-head">
-            <div><h2>3. 公共 Clean</h2><p>Clean 引用 Recipe；Route 可在 Step 前后或 Job 前后引用 Clean。</p></div>
-            <button class="btn small" data-action="add-clean">＋ Clean</button>
-          </div>
-          <div class="panel-body"><div class="card-list" id="cleanList"></div></div>
-        </article>
-
-        <article class="panel">
-          <div class="panel-head">
-            <div><h2>4. 完整 Route</h2><p>Route 定义完整工艺路径；首尾 Step 会在运行时绑定 Job 的 LoadPort。</p></div>
-            <button class="btn small" data-action="add-route">＋ Route</button>
-          </div>
-          <div class="panel-body"><div class="card-list" id="routeList"></div></div>
-        </article>
-
-        <article class="panel">
-          <div class="panel-head">
-            <div><h2>5. 分轮新增 Job</h2><p>每一轮只填写该轮外部新增加的 Job，Job 只引用上面的 Route。</p></div>
-          </div>
-          <div class="panel-body"><div class="card-list" id="roundList"></div></div>
-        </article>
+        <div class="tab-view" data-tab-view="clean">
+          <article class="panel">
+            <div class="panel-head"><div><h2>Clean</h2><p>清洁 Recipe 归属于 Clean，不再维护公共 Recipe。</p></div><button class="btn small" data-action="add-clean">＋ Clean</button></div>
+            <div class="panel-body"><div class="card-list" id="cleanList"></div></div>
+          </article>
+        </div>
       </section>
 
-      <aside class="side">
+      <aside class="side" id="scheduleSide">
         <article class="panel">
-          <div class="panel-head"><div><h2>运行策略</h2><p>启发式适合实时重算；RL 搜索限制为 5 秒内。</p></div></div>
+          <div class="panel-head"><div><h2>运行策略</h2><p>启发式默认；RL 搜索硬限制在 5 秒内。</p></div></div>
           <div class="panel-body">
             <div class="strategy-options">
-              <label class="strategy-card"><input type="radio" name="strategy" value="heuristic" checked><b>启发式</b><span>稳定、快速，默认推荐</span></label>
-              <label class="strategy-card"><input id="rlStrategyInput" type="radio" name="strategy" value="rl"><b>RL 搜索</b><span id="rlStrategyHint">调用已训练模型寻优</span></label>
+              <label class="strategy-card"><input type="radio" name="strategy" value="heuristic" checked><b>启发式</b><span>稳定、快速</span></label>
+              <label class="strategy-card"><input id="rlStrategyInput" type="radio" name="strategy" value="rl"><b>RL 搜索</b><span id="rlStrategyHint">调用已训练模型</span></label>
             </div>
             <div id="rlOptions" class="grid is-hidden" style="margin-top:14px">
               <div class="field span-6"><label>搜索秒数</label><input data-option="rlSearchSeconds" type="number" min="0.1" max="4.8" step="0.1" value="4"></div>
-              <div class="field span-6"><label>Rollouts</label><input data-option="rlRollouts" type="number" min="1" max="10000" value="256"></div>
+              <div class="field span-6"><label>Rollouts</label><input data-option="rlRollouts" type="number" min="1" value="256"></div>
               <div class="field span-6"><label>温度</label><input data-option="rlTemperature" type="number" min="0.01" step="0.05" value="0.7"></div>
               <div class="field span-6"><label>随机种子</label><input data-option="seed" type="number" value="0"></div>
             </div>
           </div>
-          <div class="run-box">
-            <h2>开始运行</h2>
-            <p>后端会依次排程、推进 Move 状态、截断未执行 Move 并触发重算。</p>
-            <button class="btn" id="runButton">▶ 运行后端策略</button>
-          </div>
+          <div class="run-box"><h2>开始运行</h2><p>后端将依次排程、推进 Move 状态并触发重算。</p><label class="export-option"><input id="autoExportLog" type="checkbox">运行结束后自动下载 input_data 复现日志（失败也会生成）</label><button class="btn" id="runButton">▶ 运行后端策略</button></div>
         </article>
-
         <article class="panel">
-          <div class="panel-head"><div><h2>运行结果</h2><p>每轮耗时、makespan、校验与调度日志。</p></div></div>
+          <div class="panel-head"><div><h2>运行结果</h2><p>耗时、makespan、校验与日志。</p></div></div>
           <div class="panel-body">
-            <div class="result-metrics">
-              <div class="metric"><span>总耗时</span><strong id="metricTime">—</strong></div>
-              <div class="metric"><span>Makespan</span><strong id="metricMakespan">—</strong></div>
-              <div class="metric"><span>Move 数</span><strong id="metricMoves">—</strong></div>
-              <div class="metric"><span>校验</span><strong id="metricValidation">—</strong></div>
-            </div>
+            <div class="result-metrics"><div class="metric"><span>总耗时</span><strong id="metricTime">—</strong></div><div class="metric"><span>Makespan</span><strong id="metricMakespan">—</strong></div><div class="metric"><span>Move 数</span><strong id="metricMoves">—</strong></div><div class="metric"><span>校验</span><strong id="metricValidation">—</strong></div></div>
             <pre class="terminal" id="terminal">$ 等待运行…</pre>
-            <div class="result-actions">
-              <button class="btn" id="clearButton">清空终端</button>
-              <a class="btn primary" id="ganttButton" href="#" target="_blank" aria-disabled="true">打开甘特图</a>
-            </div>
+            <div class="result-actions"><button class="btn" id="clearButton">清空终端</button><a class="btn" id="logButton" href="#" download aria-disabled="true">导出复现日志</a><a class="btn primary" id="ganttButton" href="#" target="_blank" aria-disabled="true">打开甘特图</a></div>
           </div>
         </article>
       </aside>
     </div>
   </main>
 
+  <div class="drawer-layer" id="drawerLayer">
+    <aside class="drawer" id="stepDrawer" aria-label="Route Step 详细设置">
+      <header class="drawer-head"><div><h2 id="drawerTitle">Step 详细设置</h2><p id="drawerSubtitle"></p></div><button class="btn icon" id="closeDrawer" aria-label="关闭">✕</button></header>
+      <div class="drawer-body" id="drawerBody"></div>
+    </aside>
+  </div>
+
   <script>
     "use strict";
 
     const state = {
-      deviceName: "",
-      device: null,
-      loadPorts: [],
-      processModules: [],
-      robotNames: [],
-      robotScopes: {},
-      strategy: "heuristic",
-      roundCount: 2,
-      times: [0, 70],
-      options: { rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, seed: 0 },
-      recipes: [{ name: "ProcessA", time: 20, modules: "PM1,PM2", processType: "", weight: "{}" }],
+      workspaceDevices: [], workspaceDevice: null, workspaceDeviceId: "", testCaseId: "", testCaseName: "", dirty: false,
+      deviceName: "", device: null, stationNames: [], loadPorts: [], processModules: [], robotNames: [], robotScopes: {},
+      strategy: "heuristic", roundCount: 2, times: [0, 70], options: { rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, seed: 0 },
       cleans: [],
-      routes: [{
-        name: "RouteA", group: "RouteA", bufferOption: 0,
-        prePJobCleanRefs: [], postPJobCleanRefs: [], postCJobCleanRefs: [],
-        stages: [makeStage("LP1"), makeStage("Robot"), makeStage("PM1,PM2", "ProcessA"), makeStage("Robot"), makeStage("LP1")]
-      }],
-      rounds: [
-        { jobs: [makeJob("InitialJob", "RouteA", "LP1", 5)] },
-        { jobs: [makeJob("AddedJob", "RouteA", "LP2", 5)] }
-      ]
+      routes: [{ name: "RouteA", group: "RouteA", bufferOption: 0, prePJobCleanRefs: [], postPJobCleanRefs: [], postCJobCleanRefs: [], stages: linkRouteSteps([makeStage("LP1"), makeStage("Robot"), makeStage("PM1,PM2", true, "RouteA_Step2"), makeStage("Robot"), makeStage("LP1")]) }],
+      rounds: [{ jobs: [makeJob("InitialJob", "RouteA", "LP1", 5)] }, { jobs: [makeJob("AddedJob", "RouteA", "LP2", 5)] }],
+      drawer: null
     };
 
-    /** 创建一个 Route Step 的默认数据。 */
-    function makeStage(stations = "", recipeRef = "", slots = "1") {
-      return { stations, recipeRef, slots, qTime: -1, residency: -1, beforeCleanRefs: [], afterCleanRefs: [] };
+    /** 创建一个 IVisit；Recipe 和约束都归属于 Visit。 */
+    function makeVisit(stationName = "", processRecipe = "") {
+      return { stationName, slotIds: "1", processRecipe, recipeTime: 20, processType: "", weight: "{}", moveTimeOffset: "{}", qTimeLimit: -1, residencyConstraint: -1, beforeCleanRefs: [], afterCleanRefs: [] };
     }
 
-    /** 创建一个只引用 Route 的默认 Job。 */
+    /** 创建一个 IRouteStep，并为候选设备分别创建 Visit。 */
+    function makeStage(stations = "", needProcess = false, recipeName = "") {
+      const names = stringList(stations), visits = (names.length ? names : [""]).map(name => makeVisit(name, needProcess ? recipeName : ""));
+      return { stepId: 0, postStepIds: [], needProcess, visits };
+    }
+
+    /** 按当前显示顺序建立 StepID 和线性 PostStepID。 */
+    function linkRouteSteps(stages) {
+      stages.forEach((stage, index) => { stage.stepId = index; stage.postStepIds = index + 1 < stages.length ? [index + 1] : []; });
+      return stages;
+    }
+
+    /** 创建只引用 Route 的 Job。 */
     function makeJob(name, routeRef = "", loadPort = "", waferCount = 5) {
       return { name, routeRef, loadPort, waferCount, priority: 1, weight: 1, jobType: 0, taskMode: 0, foupId: name };
     }
 
-    /** 防止动态文本进入 HTML 时形成标签。 */
-    function escapeHtml(value) {
-      return String(value ?? "").replace(/[&<>"]/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[char]));
+    /** 转义动态 HTML 文本。 */
+    function escapeHtml(value) { return String(value ?? "").replace(/[&<>"]/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[char])); }
+
+    /** 把数组或逗号文本转换成去重列表。 */
+    function stringList(value) {
+      const values = Array.isArray(value) ? value : String(value || "").replaceAll("，", ",").split(",");
+      return [...new Set(values.map(item => String(item).trim()).filter(Boolean))];
     }
 
-    /** 生成普通单选下拉框选项。 */
+    /** 调用本地工作区 API，并把后端错误转换为可显示异常。 */
+    async function requestJson(url, options = {}) {
+      const response = await fetch(url, options), result = await response.json();
+      if (!response.ok || result?.ok === false) throw new Error(result?.error || `服务返回 ${response.status}`);
+      return result;
+    }
+
+    /** 生成单选下拉选项。 */
     function optionsHtml(values, selected, emptyLabel = "请选择") {
-      return `<option value="">${escapeHtml(emptyLabel)}</option>` + values.map(value =>
-        `<option value="${escapeHtml(value)}" ${value === selected ? "selected" : ""}>${escapeHtml(value)}</option>`
-      ).join("");
+      return `<option value="">${escapeHtml(emptyLabel)}</option>` + values.map(value => `<option value="${escapeHtml(value)}" ${value === selected ? "selected" : ""}>${escapeHtml(value)}</option>`).join("");
     }
 
-    /** 生成 Clean 多选框选项。 */
+    /** 生成多选下拉选项。 */
     function multiOptionsHtml(values, selected) {
-      const selectedSet = new Set(selected || []);
-      return values.map(value =>
-        `<option value="${escapeHtml(value)}" ${selectedSet.has(value) ? "selected" : ""}>${escapeHtml(value)}</option>`
-      ).join("");
+      const chosen = new Set(stringList(selected));
+      return values.map(value => `<option value="${escapeHtml(value)}" ${chosen.has(value) ? "selected" : ""}>${escapeHtml(value)}</option>`).join("");
     }
 
-    /** 从 input_data 录制数组或普通对象中提取 AlgInit。 */
+    /** 从 input_data 录制数组或普通 init 对象提取设备。 */
     function unwrapDevice(raw) {
       let value = raw;
-      if (Array.isArray(value)) {
-        const initEntry = value.find(item => item && String(item.Describe || "").toLowerCase() === "alginit");
-        if (!initEntry) throw new Error("设备文件中找不到 Describe=AlgInit");
-        value = initEntry.Info;
-      }
-      if (value && value.InitData) value = value.InitData;
-      if (value && value.Info && value.Info.Stations) value = value.Info;
-      if (!value || typeof value !== "object" || !value.Stations || !value.Robots) {
-        throw new Error("设备文件必须包含 Stations 和 Robots");
-      }
+      if (Array.isArray(value)) { const entry = value.find(item => item && String(item.Describe || "").toLowerCase() === "alginit"); if (!entry) throw new Error("设备文件中找不到 Describe=AlgInit"); value = entry.Info; }
+      if (value?.InitData) value = value.InitData;
+      if (value?.Info?.Stations) value = value.Info;
+      if (!value || typeof value !== "object" || !value.Stations || !value.Robots) throw new Error("设备文件必须包含 Stations 和 Robots");
       return value;
     }
 
-    /** 读取设备类型并更新页面中可选的 LoadPort 和 PM。 */
+    /** 导入设备到本地工作区；相同拓扑会直接复用已有设备。 */
     async function loadDevice(file) {
       if (!file) return;
-      const raw = JSON.parse(await file.text());
-      const device = unwrapDevice(raw);
-      const stations = Object.entries(device.Stations);
-      state.device = device;
-      state.deviceName = file.name;
-      const naturalSort = (left, right) => left.localeCompare(right, undefined, { numeric: true });
-      state.loadPorts = stations.filter(([, item]) => String(item.Type || "").toLowerCase() === "loadport").map(([name]) => name).sort(naturalSort);
-      state.processModules = stations.filter(([, item]) => String(item.Type || "").toLowerCase() === "processchamber").map(([name]) => name).sort(naturalSort);
-      state.robotNames = Object.keys(device.Robots).sort(naturalSort);
-      state.robotScopes = Object.fromEntries(Object.entries(device.Robots).map(([name, robot]) => {
-        const arms = Object.values(robot.ArmInfo || {});
-        return [name, [...new Set(arms.flatMap(arm => arm.AccessibleStations || []))]];
-      }));
-      if (!state.loadPorts.length) throw new Error("设备中没有 Type=LoadPort 的 Station");
-      if (!state.processModules.length) throw new Error("设备中没有 Type=ProcessChamber 的 Station");
-      document.getElementById("deviceFileName").textContent = file.name;
-      document.getElementById("deviceSummary").innerHTML = [
-        `<span class="chip good">已载入</span>`,
-        `<span class="chip">${stations.length} Stations</span>`,
-        `<span class="chip">${Object.keys(device.Robots).length} Robots</span>`,
-        `<span class="chip">${state.loadPorts.join(", ")}</span>`,
-        `<span class="chip">${state.processModules.join(", ")}</span>`
-      ].join("");
-      applyDeviceDefaults();
-      renderAll();
-      writeTerminal(`$ 已选择设备 ${file.name}\n  LoadPort: ${state.loadPorts.join(", ")}\n  PM: ${state.processModules.join(", ")}`);
-    }
-
-    /** 首次选择设备后，把示例占位模块替换成设备实际名称。 */
-    function applyDeviceDefaults() {
-      const modules = state.processModules.slice(0, 2).join(",");
-      const port = state.loadPorts[0];
-      if (state.recipes.length === 1 && /^PM1,?PM2?$/.test(state.recipes[0].modules.replace(/\s/g, ""))) state.recipes[0].modules = modules;
-      state.routes.forEach(route => {
-        route.stages = defaultRouteStages(port, state.processModules.slice(0, 2), state.recipes[0]?.name || "");
+      if (state.dirty) await saveCurrentTest(true);
+      const device = unwrapDevice(JSON.parse(await file.text()));
+      const result = await requestJson("/api/workspaces/devices", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: file.name, device })
       });
-      state.rounds.forEach((round, roundIndex) => round.jobs.forEach(job => {
-        job.loadPort = state.loadPorts[Math.min(roundIndex, state.loadPorts.length - 1)];
-      }));
+      await loadWorkspaceCatalog(result.device.id);
+      writeTerminal(`$ ${result.created ? "已导入" : "已选择已有"}设备 ${result.device.name}\n  该设备下有 ${state.workspaceDevice?.tests?.length || 0} 个测试集`);
+      document.getElementById("deviceFile").value = "";
     }
 
-    /** 在 Station—Robot 可达图上寻找 LoadPort 到目标 PM 的最短交替路径。 */
+    /** 应用设备拓扑，并建立 Route/Visit 可选模块集合。 */
+    function applyDeviceTopology(device, deviceName) {
+      const stations = Object.entries(device.Stations);
+      const natural = (left, right) => left.localeCompare(right, undefined, { numeric: true });
+      state.device = structuredClone(device); state.deviceName = deviceName;
+      state.stationNames = stations.map(([name]) => name).sort(natural);
+      state.loadPorts = stations.filter(([, item]) => String(item.Type || "").toLowerCase() === "loadport").map(([name]) => name).sort(natural);
+      state.processModules = stations.filter(([, item]) => String(item.Type || "").toLowerCase() === "processchamber").map(([name]) => name).sort(natural);
+      state.robotNames = Object.keys(device.Robots).sort(natural);
+      state.robotScopes = Object.fromEntries(Object.entries(device.Robots).map(([name, robot]) => [name, [...new Set(Object.values(robot.ArmInfo || {}).flatMap(arm => arm.AccessibleStations || []))]]));
+      if (!state.loadPorts.length || !state.processModules.length) throw new Error("设备必须包含 LoadPort 和 ProcessChamber");
+    }
+
+    /** 在 Station—Robot 可达图中寻找 LoadPort 到 PM 的最短路径。 */
     function shortestDevicePath(source, destination) {
-      const queue = [[`S:${source}`]];
-      const visited = new Set(queue[0]);
+      const queue = [[`S:${source}`]], visited = new Set(queue[0]);
       while (queue.length) {
-        const path = queue.shift();
-        const node = path.at(-1);
+        const path = queue.shift(), node = path.at(-1);
         if (node === `S:${destination}`) return path.map(item => item.slice(2));
         const [kind, name] = node.split(":");
-        const neighbours = kind === "S"
-          ? state.robotNames.filter(robot => (state.robotScopes[robot] || []).includes(name)).map(robot => `R:${robot}`)
-          : (state.robotScopes[name] || []).map(station => `S:${station}`);
-        neighbours.forEach(next => {
-          if (!visited.has(next)) {
-            visited.add(next);
-            queue.push([...path, next]);
-          }
-        });
+        const neighbours = kind === "S" ? state.robotNames.filter(robot => (state.robotScopes[robot] || []).includes(name)).map(robot => `R:${robot}`) : (state.robotScopes[name] || []).map(station => `S:${station}`);
+        neighbours.forEach(next => { if (!visited.has(next)) { visited.add(next); queue.push([...path, next]); } });
       }
       return [];
     }
 
-    /** 由设备拓扑构造可运行的源—传输—加工—传输—汇完整 Route。 */
-    function defaultRouteStages(loadPort, processModules, recipeRef) {
-      const target = processModules[0];
-      const outward = shortestDevicePath(loadPort, target);
-      if (outward.length < 3) {
-        const robot = state.robotNames[0] || "Robot";
-        return [makeStage(loadPort), makeStage(robot), makeStage(processModules.join(","), recipeRef), makeStage(robot), makeStage(loadPort)];
-      }
-      outward[outward.length - 1] = processModules.join(",");
-      const fullPath = [...outward, ...outward.slice(0, -1).reverse()];
-      return fullPath.map((name, index) => makeStage(name, index === outward.length - 1 ? recipeRef : ""));
+    /** 用设备可达关系生成完整的往返 Route。 */
+    function defaultRouteStages(routeName) {
+      const port = state.loadPorts[0] || "", modules = state.processModules.slice(0, 2), outward = shortestDevicePath(port, modules[0]);
+      if (outward.length < 3) return linkRouteSteps([makeStage(port), makeStage(state.robotNames[0] || ""), makeStage(modules, true, `${routeName}_Step2`), makeStage(state.robotNames[0] || ""), makeStage(port)]);
+      outward[outward.length - 1] = modules;
+      const full = [...outward, ...outward.slice(0, -1).reverse()];
+      return linkRouteSteps(full.map((name, index) => makeStage(name, index === outward.length - 1, index === outward.length - 1 ? `${routeName}_Step${index}` : "")));
     }
 
-    /** 按总轮数同步重算时间和每轮 Job 容器。 */
-    function resizeRounds(count) {
-      const safeCount = Math.max(1, Math.min(8, Number(count) || 1));
-      state.roundCount = safeCount;
-      while (state.times.length < safeCount) state.times.push((state.times.at(-1) || 0) + 70);
-      while (state.rounds.length < safeCount) {
-        const index = state.rounds.length;
-        state.rounds.push({ jobs: [makeJob(`AddedJob${index}`, state.routes[0]?.name || "", state.loadPorts[index] || state.loadPorts[0] || "", 5)] });
-      }
-      state.times.length = safeCount;
-      state.rounds.length = safeCount;
-      state.times[0] = 0;
-      document.getElementById("roundCount").value = safeCount;
-      renderTimes();
-      renderRounds();
-    }
-
-    /** 绘制页面顶部所有重算时间输入。 */
-    function renderTimes() {
-      document.getElementById("timeStrip").innerHTML = state.times.map((time, index) => `
-        <div class="time-box">
-          <strong>${index === 0 ? "首次排程" : `第 ${index + 1} 轮重算`}</strong>
-          <input data-time-index="${index}" type="number" min="0" step="0.1" value="${Number(time)}" ${index === 0 ? "disabled" : ""}>
-          <div class="hint">${index === 0 ? "固定为 0 s" : "触发时间（秒）"}</div>
-        </div>`).join("");
-    }
-
-    /** 绘制公共 Recipe 编辑器。 */
-    function renderRecipes() {
-      const host = document.getElementById("recipeList");
-      host.innerHTML = state.recipes.length ? state.recipes.map((recipe, index) => `
-        <div class="edit-card">
-          <div class="edit-card-head"><strong>Recipe ${index + 1} · ${escapeHtml(recipe.name || "未命名")}</strong><button class="btn danger small" data-action="remove-recipe" data-index="${index}">删除</button></div>
-          <div class="edit-card-body grid">
-            <div class="field span-4"><label>名称</label><input data-scope="recipe" data-index="${index}" data-key="name" value="${escapeHtml(recipe.name)}"></div>
-            <div class="field span-4"><label>加工时间（秒）</label><input type="number" min="0" step="0.1" data-scope="recipe" data-index="${index}" data-key="time" value="${Number(recipe.time)}"></div>
-            <div class="field span-4"><label>ProcessType</label><input data-scope="recipe" data-index="${index}" data-key="processType" value="${escapeHtml(recipe.processType)}" placeholder="可留空"></div>
-            <div class="field span-6"><label>适用 PM（逗号分隔）</label><input data-scope="recipe" data-index="${index}" data-key="modules" value="${escapeHtml(recipe.modules)}" placeholder="PM1,PM2"></div>
-            <div class="field span-6"><label>Weight（JSON 对象）</label><input data-scope="recipe" data-index="${index}" data-key="weight" value="${escapeHtml(recipe.weight)}" placeholder="{}"></div>
-          </div>
-        </div>`).join("") : `<div class="empty">暂无 Recipe。完整 Route 的加工 Step 通常需要至少一个 Recipe。</div>`;
-    }
-
-    /** 绘制公共 Clean 编辑器。 */
-    function renderCleans() {
-      const recipes = state.recipes.map(item => item.name).filter(Boolean);
-      const host = document.getElementById("cleanList");
-      host.innerHTML = state.cleans.length ? state.cleans.map((clean, index) => `
-        <div class="edit-card">
-          <div class="edit-card-head"><strong>Clean ${index + 1} · ${escapeHtml(clean.name || "未命名")}</strong><button class="btn danger small" data-action="remove-clean" data-index="${index}">删除</button></div>
-          <div class="edit-card-body grid">
-            <div class="field span-4"><label>名称 / Alias</label><input data-scope="clean" data-index="${index}" data-key="name" value="${escapeHtml(clean.name)}"></div>
-            <div class="field span-4"><label>清洁 Recipe</label><select data-scope="clean" data-index="${index}" data-key="recipeRef">${optionsHtml(recipes, clean.recipeRef)}</select></div>
-            <div class="field span-4"><label>TaskName</label><input data-scope="clean" data-index="${index}" data-key="taskName" value="${escapeHtml(clean.taskName)}"></div>
-            <div class="field span-4"><label>StateVariable</label><input data-scope="clean" data-index="${index}" data-key="stateVariable" value="${escapeHtml(clean.stateVariable)}"></div>
-            <div class="field span-2"><label>下限</label><input type="number" data-scope="clean" data-index="${index}" data-key="lower" value="${Number(clean.lower)}"></div>
-            <div class="field span-2"><label>上限</label><input type="number" data-scope="clean" data-index="${index}" data-key="upper" value="${Number(clean.upper)}"></div>
-            <div class="field span-4"><label>更新状态量（逗号分隔）</label><input data-scope="clean" data-index="${index}" data-key="updateStateVariables" value="${escapeHtml(clean.updateStateVariables)}"></div>
-          </div>
-        </div>`).join("") : `<div class="empty">无需清洁时可以保持为空；Route 中也不会出现 Clean 配置。</div>`;
-    }
-
-    /** 绘制一个 Route 内的完整 Step 链。 */
-    function renderStages(route, routeIndex) {
-      const recipes = state.recipes.map(item => item.name).filter(Boolean);
-      const cleans = state.cleans.map(item => item.name).filter(Boolean);
-      return route.stages.map((stage, stageIndex) => {
-        const role = stageIndex === 0 ? "源端 Station" : stageIndex === route.stages.length - 1 ? "汇端 Station" : stageIndex % 2 ? "Robot 传输" : "Station";
-        return `<div class="stage">
-          <div class="stage-title"><span>Step ${stageIndex} · ${role}</span><button class="btn danger small" data-action="remove-stage" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" ${route.stages.length <= 2 ? "disabled" : ""}>删除</button></div>
-          <div class="grid">
-            <div class="field span-4"><label>候选 Station（逗号分隔）</label><input data-scope="stage" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-key="stations" value="${escapeHtml(stage.stations)}"></div>
-            <div class="field span-4"><label>Recipe 引用</label><select data-scope="stage" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-key="recipeRef">${optionsHtml(recipes, stage.recipeRef, "不加工")}</select></div>
-            <div class="field span-4"><label>可用槽位</label><input data-scope="stage" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-key="slots" value="${escapeHtml(stage.slots)}"></div>
-            <div class="field span-3"><label>QTime</label><input type="number" step="0.1" data-scope="stage" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-key="qTime" value="${Number(stage.qTime)}"></div>
-            <div class="field span-3"><label>Residency</label><input type="number" step="0.1" data-scope="stage" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-key="residency" value="${Number(stage.residency)}"></div>
-            <div class="field span-3"><label>进站前 Clean</label><select multiple data-scope="stage" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-key="beforeCleanRefs">${multiOptionsHtml(cleans, stage.beforeCleanRefs)}</select></div>
-            <div class="field span-3"><label>出站后 Clean</label><select multiple data-scope="stage" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-key="afterCleanRefs">${multiOptionsHtml(cleans, stage.afterCleanRefs)}</select></div>
-          </div>
-        </div>`;
-      }).join("");
-    }
-
-    /** 绘制 Route 及其 Job 级 Clean 引用。 */
-    function renderRoutes() {
-      const cleans = state.cleans.map(item => item.name).filter(Boolean);
-      const host = document.getElementById("routeList");
-      host.innerHTML = state.routes.length ? state.routes.map((route, index) => `
-        <div class="edit-card">
-          <div class="edit-card-head"><strong>Route ${index + 1} · ${escapeHtml(route.name || "未命名")}</strong><div><button class="btn small" data-action="add-stage" data-index="${index}">＋ Step</button> <button class="btn danger small" data-action="remove-route" data-index="${index}">删除</button></div></div>
-          <div class="edit-card-body">
-            <div class="grid">
-              <div class="field span-4"><label>Route 名称</label><input data-scope="route" data-index="${index}" data-key="name" value="${escapeHtml(route.name)}"></div>
-              <div class="field span-4"><label>Group</label><input data-scope="route" data-index="${index}" data-key="group" value="${escapeHtml(route.group)}"></div>
-              <div class="field span-4"><label>BufferOption</label><input type="number" data-scope="route" data-index="${index}" data-key="bufferOption" value="${Number(route.bufferOption)}"></div>
-              <div class="field span-4"><label>PJob 前 Clean</label><select multiple data-scope="route" data-index="${index}" data-key="prePJobCleanRefs">${multiOptionsHtml(cleans, route.prePJobCleanRefs)}</select></div>
-              <div class="field span-4"><label>PJob 后 Clean</label><select multiple data-scope="route" data-index="${index}" data-key="postPJobCleanRefs">${multiOptionsHtml(cleans, route.postPJobCleanRefs)}</select></div>
-              <div class="field span-4"><label>CJob 后 Clean</label><select multiple data-scope="route" data-index="${index}" data-key="postCJobCleanRefs">${multiOptionsHtml(cleans, route.postCJobCleanRefs)}</select></div>
-            </div>
-            <div class="stage-list">${renderStages(route, index)}</div>
-          </div>
-        </div>`).join("") : `<div class="empty">至少创建一条完整 Route，Job 才能引用。</div>`;
-    }
-
-    /** 绘制每轮仅新增的 Job。 */
-    function renderRounds() {
-      const routes = state.routes.map(item => item.name).filter(Boolean);
-      const ports = state.loadPorts;
-      document.getElementById("roundList").innerHTML = state.rounds.map((round, roundIndex) => `
-        <div class="edit-card round">
-          <div class="edit-card-head"><div><strong>${roundIndex === 0 ? "首次排程" : `第 ${roundIndex + 1} 轮重算`}</strong> <span class="round-time">@ ${Number(state.times[roundIndex] || 0)} s</span></div><button class="btn small" data-action="add-job" data-round-index="${roundIndex}">＋ Job</button></div>
-          <div class="edit-card-body card-list">
-            ${round.jobs.length ? round.jobs.map((job, jobIndex) => `
-              <div class="stage">
-                <div class="stage-title"><span>新增 Job ${jobIndex + 1}</span><button class="btn danger small" data-action="remove-job" data-round-index="${roundIndex}" data-job-index="${jobIndex}" ${round.jobs.length <= 1 ? "disabled" : ""}>删除</button></div>
-                <div class="grid">
-                  <div class="field span-4"><label>Job 名称</label><input data-scope="job" data-round-index="${roundIndex}" data-job-index="${jobIndex}" data-key="name" value="${escapeHtml(job.name)}"></div>
-                  <div class="field span-4"><label>Route 引用</label><select data-scope="job" data-round-index="${roundIndex}" data-job-index="${jobIndex}" data-key="routeRef">${optionsHtml(routes, job.routeRef)}</select></div>
-                  <div class="field span-4"><label>LoadPort</label><select data-scope="job" data-round-index="${roundIndex}" data-job-index="${jobIndex}" data-key="loadPort">${optionsHtml(ports, job.loadPort, ports.length ? "请选择" : "请先选择设备")}</select></div>
-                  <div class="field span-3"><label>晶圆数</label><input type="number" min="1" max="25" data-scope="job" data-round-index="${roundIndex}" data-job-index="${jobIndex}" data-key="waferCount" value="${Number(job.waferCount)}"></div>
-                  <div class="field span-3"><label>Priority</label><input type="number" min="1" data-scope="job" data-round-index="${roundIndex}" data-job-index="${jobIndex}" data-key="priority" value="${Number(job.priority)}"></div>
-                  <div class="field span-3"><label>Weight</label><input type="number" min="1" data-scope="job" data-round-index="${roundIndex}" data-job-index="${jobIndex}" data-key="weight" value="${Number(job.weight)}"></div>
-                  <div class="field span-3"><label>FoupID</label><input data-scope="job" data-round-index="${roundIndex}" data-job-index="${jobIndex}" data-key="foupId" value="${escapeHtml(job.foupId)}"></div>
-                </div>
-              </div>`).join("") : `<div class="empty">这一轮还没有新增 Job。</div>`}
-          </div>
-        </div>`).join("");
-    }
-
-    /** 绘制所有依赖引用的编辑区域。 */
-    function renderAll() {
-      renderTimes();
-      renderRecipes();
-      renderCleans();
-      renderRoutes();
-      renderRounds();
-    }
-
-    /** 根据控件定位并更新状态，不在输入过程中重建 DOM。 */
-    function updateStateFromControl(control) {
-      const numeric = control.type === "number";
-      const value = control.multiple ? Array.from(control.selectedOptions, item => item.value) : numeric ? Number(control.value) : control.value;
-      const key = control.dataset.key;
-      if (control.dataset.timeIndex !== undefined) {
-        state.times[Number(control.dataset.timeIndex)] = value;
-        return;
-      }
-      if (control.dataset.option) {
-        state.options[control.dataset.option] = value;
-        return;
-      }
-      const scope = control.dataset.scope;
-      if (scope === "recipe") state.recipes[Number(control.dataset.index)][key] = value;
-      if (scope === "clean") state.cleans[Number(control.dataset.index)][key] = value;
-      if (scope === "route") state.routes[Number(control.dataset.index)][key] = value;
-      if (scope === "stage") state.routes[Number(control.dataset.routeIndex)].stages[Number(control.dataset.stageIndex)][key] = value;
-      if (scope === "job") state.rounds[Number(control.dataset.roundIndex)].jobs[Number(control.dataset.jobIndex)][key] = value;
-    }
-
-    /** 处理新增和删除按钮。 */
-    function handleAction(button) {
-      const action = button.dataset.action;
-      const index = Number(button.dataset.index);
-      if (action === "add-recipe") state.recipes.push({ name: `Recipe${state.recipes.length + 1}`, time: 20, modules: state.processModules.join(","), processType: "", weight: "{}" });
-      if (action === "remove-recipe") state.recipes.splice(index, 1);
-      if (action === "add-clean") state.cleans.push({ name: `Clean${state.cleans.length + 1}`, recipeRef: state.recipes[0]?.name || "", taskName: `Clean${state.cleans.length + 1}`, stateVariable: "IdleTime", lower: 0, upper: 9999, updateStateVariables: "" });
-      if (action === "remove-clean") state.cleans.splice(index, 1);
-      if (action === "add-route") state.routes.push({ name: `Route${state.routes.length + 1}`, group: `Route${state.routes.length + 1}`, bufferOption: 0, prePJobCleanRefs: [], postPJobCleanRefs: [], postCJobCleanRefs: [], stages: defaultRouteStages(state.loadPorts[0] || "", state.processModules.slice(0, 2), state.recipes[0]?.name || "") });
-      if (action === "remove-route") state.routes.splice(index, 1);
-      if (action === "add-stage") state.routes[index].stages.splice(-1, 0, makeStage(state.processModules.join(","), state.recipes[0]?.name || ""));
-      if (action === "remove-stage") state.routes[Number(button.dataset.routeIndex)].stages.splice(Number(button.dataset.stageIndex), 1);
-      if (action === "add-job") {
-        const roundIndex = Number(button.dataset.roundIndex);
-        state.rounds[roundIndex].jobs.push(makeJob(`Round${roundIndex + 1}Job${state.rounds[roundIndex].jobs.length + 1}`, state.routes[0]?.name || "", state.loadPorts[roundIndex] || state.loadPorts[0] || ""));
-      }
-      if (action === "remove-job") state.rounds[Number(button.dataset.roundIndex)].jobs.splice(Number(button.dataset.jobIndex), 1);
-      renderAll();
-    }
-
-    /** 把 UI 状态转换为后端运行请求，并校验 Weight JSON。 */
-    function buildPayload() {
-      if (!state.device) throw new Error("请先选择设备 init 文件");
-      const recipes = state.recipes.map(recipe => {
-        let weight;
-        try { weight = JSON.parse(recipe.weight || "{}"); } catch { throw new Error(`Recipe ${recipe.name || "未命名"} 的 Weight 不是有效 JSON`); }
-        if (!weight || Array.isArray(weight) || typeof weight !== "object") throw new Error(`Recipe ${recipe.name || "未命名"} 的 Weight 必须是 JSON 对象`);
-        return { ...recipe, weight };
-      });
-      const times = state.times.map(Number);
-      if (times.some(value => !Number.isFinite(value))) throw new Error("重算时间必须是数字");
-      if (times.some((value, index) => index > 0 && value <= times[index - 1])) throw new Error("各轮重算时间必须严格递增");
+    /** 为当前设备创建一套可直接编辑的默认测试集。 */
+    function makeDefaultTestCase(name = "默认测试集") {
+      const routeName = "RouteA";
       return {
-        deviceName: state.deviceName,
-        device: state.device,
-        strategy: state.strategy,
-        roundCount: state.roundCount,
-        options: state.options,
-        recipes,
-        cleans: state.cleans,
-        routes: state.routes,
-        rounds: state.rounds.map((round, index) => ({ currentTime: times[index], jobs: round.jobs }))
+        name, strategy: "heuristic", roundCount: 2, times: [0, 70],
+        options: { rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, seed: 0 }, cleans: [],
+        routes: [{ name: routeName, group: routeName, bufferOption: 0, prePJobCleanRefs: [], postPJobCleanRefs: [], postCJobCleanRefs: [], stages: defaultRouteStages(routeName) }],
+        rounds: [
+          { jobs: [makeJob("InitialJob", routeName, state.loadPorts[0] || "", 5)] },
+          { jobs: [makeJob("AddedJob", routeName, state.loadPorts[1] || state.loadPorts[0] || "", 5)] }
+        ]
       };
     }
 
-    /** 向轻量本地服务提交方案，并显示策略运行结果。 */
+    /** 更新设备、测试集下拉框和保存状态相关按钮。 */
+    function renderWorkspaceControls() {
+      const deviceSelect = document.getElementById("deviceSelect"), tests = state.workspaceDevice?.tests || [];
+      deviceSelect.innerHTML = state.workspaceDevices.length ? state.workspaceDevices.map(device => `<option value="${escapeHtml(device.id)}" ${device.id === state.workspaceDeviceId ? "selected" : ""}>${escapeHtml(device.name)} · ${device.testCount} 个测试集</option>`).join("") : `<option value="">尚未导入设备</option>`;
+      const testSelect = document.getElementById("testCaseSelect");
+      testSelect.innerHTML = tests.length ? tests.map(test => `<option value="${escapeHtml(test.id)}" ${test.id === state.testCaseId ? "selected" : ""}>${escapeHtml(test.name)}</option>`).join("") : `<option value="">请先选择设备</option>`;
+      testSelect.disabled = !tests.length;
+      const hasTest = Boolean(state.testCaseId);
+      const nameInput = document.getElementById("testCaseName"); nameInput.disabled = !hasTest; nameInput.value = state.testCaseName || "";
+      document.getElementById("newTestButton").disabled = !state.workspaceDeviceId;
+      document.getElementById("copyTestButton").disabled = !hasTest;
+      document.getElementById("saveTestButton").disabled = !hasTest;
+      document.getElementById("deleteTestButton").disabled = tests.length <= 1;
+      document.getElementById("deviceSummary").innerHTML = state.device ? `<span class="chip good">${escapeHtml(state.deviceName)}</span><span class="chip">${state.stationNames.length} Stations</span><span class="chip">${state.robotNames.length} Robots</span>` : `<span class="chip">尚未选择设备</span>`;
+    }
+
+    /** 显示当前测试集是否已经持久化。 */
+    function setWorkspaceStatus(message, kind = "") {
+      const status = document.getElementById("workspaceStatus"); status.textContent = message; status.className = `span-12 workspace-status ${kind}`.trim();
+    }
+
+    /** 标记当前测试集有尚未保存的编辑。 */
+    function markTestDirty() {
+      if (!state.testCaseId) return;
+      state.dirty = true; setWorkspaceStatus(`“${state.testCaseName}”有未保存修改`, "dirty");
+    }
+
+    /** 清理上一测试集的运行指标和结果链接，避免把旧结果误认为当前结果。 */
+    function resetRunResult() {
+      ["metricTime", "metricMakespan", "metricMoves", "metricValidation"].forEach(id => { document.getElementById(id).textContent = "—"; });
+      for (const id of ["logButton", "ganttButton"]) {
+        const link = document.getElementById(id); link.href = "#"; link.setAttribute("aria-disabled", "true");
+      }
+      writeTerminal("$ 测试集已就绪，等待运行…");
+    }
+
+    /** 将持久化测试集载入页面编辑状态。 */
+    function applyTestCase(testCase) {
+      const value = structuredClone(testCase);
+      state.testCaseId = value.id; state.testCaseName = value.name; state.strategy = value.strategy || "heuristic";
+      state.roundCount = Math.max(1, Number(value.roundCount) || 1); state.times = Array.isArray(value.times) ? value.times : [0];
+      state.options = value.options || { rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, seed: 0 };
+      state.cleans = Array.isArray(value.cleans) ? value.cleans : []; state.routes = Array.isArray(value.routes) ? value.routes : [];
+      state.rounds = Array.isArray(value.rounds) ? value.rounds : [];
+      while (state.times.length < state.roundCount) state.times.push((Number(state.times.at(-1)) || 0) + 70);
+      while (state.rounds.length < state.roundCount) state.rounds.push({ jobs: [] });
+      state.times.length = state.roundCount; state.rounds.length = state.roundCount; state.times[0] = 0; state.drawer = null; state.dirty = false;
+      document.getElementById("roundCount").value = state.roundCount;
+      document.querySelectorAll('input[name="strategy"]').forEach(input => { input.checked = input.value === state.strategy; });
+      document.querySelectorAll("[data-option]").forEach(input => { input.value = state.options[input.dataset.option] ?? input.value; });
+      document.getElementById("rlOptions").classList.toggle("is-hidden", state.strategy !== "rl");
+      renderAll(); renderWorkspaceControls(); resetRunResult(); setWorkspaceStatus(`已载入“${state.testCaseName}”`, "saved");
+    }
+
+    /** 把当前页面编辑状态整理为不含设备 init 的测试集快照。 */
+    function currentTestSnapshot(name = state.testCaseName) {
+      return structuredClone({ name, strategy: state.strategy, roundCount: state.roundCount, times: state.times, options: state.options, cleans: state.cleans, routes: state.routes, rounds: state.rounds });
+    }
+
+    /** 保存当前测试集；运行和切换前可静默调用。 */
+    async function saveCurrentTest(silent = false) {
+      if (!state.workspaceDeviceId || !state.testCaseId) return false;
+      const inputName = document.getElementById("testCaseName").value.trim();
+      if (inputName) state.testCaseName = inputName;
+      const result = await requestJson(`/api/workspaces/${state.workspaceDeviceId}/tests/${state.testCaseId}`, {
+        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(currentTestSnapshot())
+      });
+      const index = state.workspaceDevice.tests.findIndex(test => test.id === state.testCaseId);
+      state.workspaceDevice.tests[index] = result.test; state.testCaseName = result.test.name; state.dirty = false;
+      renderWorkspaceControls(); setWorkspaceStatus(`${silent ? "已自动保存" : "已保存"}“${state.testCaseName}”`, "saved");
+      return true;
+    }
+
+    /** 新建空白测试集，或复制当前测试集形成独立副本。 */
+    async function createTestCase(copyCurrent = false) {
+      if (!state.workspaceDeviceId) throw new Error("请先选择设备");
+      if (state.dirty) await saveCurrentTest(true);
+      const source = copyCurrent ? currentTestSnapshot(`${state.testCaseName} 副本`) : makeDefaultTestCase(`测试集 ${(state.workspaceDevice?.tests?.length || 0) + 1}`);
+      const result = await requestJson(`/api/workspaces/${state.workspaceDeviceId}/tests`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(source)
+      });
+      state.workspaceDevice.tests.push(result.test);
+      const summary = state.workspaceDevices.find(device => device.id === state.workspaceDeviceId); if (summary) summary.testCount = state.workspaceDevice.tests.length;
+      applyTestCase(result.test);
+    }
+
+    /** 删除当前测试集并切换到该设备的第一套剩余测试。 */
+    async function deleteCurrentTest() {
+      if (!state.testCaseId || !window.confirm(`确定删除测试集“${state.testCaseName}”吗？`)) return;
+      const result = await requestJson(`/api/workspaces/${state.workspaceDeviceId}/tests/${state.testCaseId}`, { method: "DELETE" });
+      state.workspaceDevice.tests = result.tests;
+      const summary = state.workspaceDevices.find(device => device.id === state.workspaceDeviceId); if (summary) summary.testCount = result.tests.length;
+      applyTestCase(result.tests[0]);
+    }
+
+    /** 在当前设备中切换测试集，切换前自动保存当前编辑。 */
+    async function selectWorkspaceTest(testId) {
+      if (state.dirty) await saveCurrentTest(true);
+      const testCase = state.workspaceDevice?.tests?.find(test => test.id === testId);
+      if (!testCase) throw new Error(`测试集不存在：${testId}`);
+      applyTestCase(testCase);
+    }
+
+    /** 读取一个设备及其测试集；首次导入时自动建立默认测试集。 */
+    async function selectWorkspaceDevice(deviceId, preferredTestId = "") {
+      const result = await requestJson(`/api/workspaces/${deviceId}`);
+      state.workspaceDevice = result.device; state.workspaceDeviceId = result.device.id;
+      applyDeviceTopology(result.device.device, result.device.name);
+      if (!result.device.tests.length) {
+        const created = await requestJson(`/api/workspaces/${deviceId}/tests`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(makeDefaultTestCase())
+        });
+        state.workspaceDevice.tests.push(created.test);
+      }
+      const summary = state.workspaceDevices.find(device => device.id === deviceId); if (summary) summary.testCount = state.workspaceDevice.tests.length;
+      const selected = state.workspaceDevice.tests.find(test => test.id === preferredTestId) || state.workspaceDevice.tests[0];
+      applyTestCase(selected);
+    }
+
+    /** 加载设备目录，并选择指定设备或目录中的第一台设备。 */
+    async function loadWorkspaceCatalog(preferredDeviceId = "", preferredTestId = "") {
+      const result = await requestJson("/api/workspaces"); state.workspaceDevices = result.devices;
+      const deviceId = result.devices.some(device => device.id === preferredDeviceId) ? preferredDeviceId : result.devices[0]?.id;
+      if (deviceId) await selectWorkspaceDevice(deviceId, preferredTestId); else renderWorkspaceControls();
+    }
+
+    /** 切换主功能标签，并只在运行页显示策略侧栏。 */
+    function switchTab(name) {
+      document.querySelectorAll("[data-tab-target]").forEach(button => button.classList.toggle("active", button.dataset.tabTarget === name));
+      document.querySelectorAll("[data-tab-view]").forEach(view => view.classList.toggle("active", view.dataset.tabView === name));
+      document.getElementById("scheduleSide").classList.toggle("is-hidden", name !== "schedule");
+      document.getElementById("pageLayout").classList.toggle("editor-mode", name !== "schedule");
+      if (name !== "route") closeStepDrawer();
+    }
+
+    /** 同步轮数、时间和每轮 Job 容器。 */
+    function resizeRounds(count) {
+      const safe = Math.max(1, Math.min(8, Number(count) || 1)); state.roundCount = safe;
+      while (state.times.length < safe) state.times.push((state.times.at(-1) || 0) + 70);
+      while (state.rounds.length < safe) { const index = state.rounds.length; state.rounds.push({ jobs: [makeJob(`AddedJob${index}`, state.routes[0]?.name || "", state.loadPorts[index] || state.loadPorts[0] || "", 5)] }); }
+      state.times.length = safe; state.rounds.length = safe; state.times[0] = 0;
+      renderTimes(); renderRounds();
+    }
+
+    /** 绘制所有重算时间。 */
+    function renderTimes() {
+      document.getElementById("timeStrip").innerHTML = state.times.map((time, index) => `<div class="time-box"><strong>${index ? `第 ${index + 1} 轮重算` : "首次排程"}</strong><input data-time-index="${index}" type="number" min="0" step="0.1" value="${Number(time)}" ${index ? "" : "disabled"}><div class="hint">${index ? "触发时间（秒）" : "固定为 0 s"}</div></div>`).join("");
+    }
+
+    /** 绘制 Clean；清洁 Recipe 内嵌在 Clean 中。 */
+    function renderCleans() {
+      const host = document.getElementById("cleanList");
+      host.innerHTML = state.cleans.length ? state.cleans.map((clean, index) => `<div class="edit-card"><div class="edit-card-head"><strong>Clean ${index + 1} · ${escapeHtml(clean.name || "未命名")}</strong><button class="btn danger small" data-action="remove-clean" data-index="${index}">删除</button></div><div class="edit-card-body grid">
+        <div class="field span-4"><label>Clean 名称 / Alias</label><input data-scope="clean" data-index="${index}" data-key="name" value="${escapeHtml(clean.name)}"></div>
+        <div class="field span-4"><label>Recipe 名称</label><input data-scope="clean" data-index="${index}" data-key="recipeName" value="${escapeHtml(clean.recipeName)}"></div>
+        <div class="field span-4"><label>清洁时间（秒）</label><input type="number" min="0" step="0.1" data-scope="clean" data-index="${index}" data-key="recipeTime" value="${Number(clean.recipeTime)}"></div>
+        <div class="field span-6"><label>适用腔室</label><select multiple data-scope="clean" data-index="${index}" data-key="modules">${multiOptionsHtml(state.processModules, clean.modules)}</select><div class="hint">只能选择设备内的 ProcessChamber。</div></div>
+        <div class="field span-3"><label>StateVariable</label><input data-scope="clean" data-index="${index}" data-key="stateVariable" value="${escapeHtml(clean.stateVariable)}"></div>
+        <div class="field span-3"><label>TaskName</label><input data-scope="clean" data-index="${index}" data-key="taskName" value="${escapeHtml(clean.taskName)}"></div>
+        <div class="field span-3"><label>触发下限</label><input type="number" data-scope="clean" data-index="${index}" data-key="lower" value="${Number(clean.lower)}"></div>
+        <div class="field span-3"><label>触发上限</label><input type="number" data-scope="clean" data-index="${index}" data-key="upper" value="${Number(clean.upper)}"></div>
+        <div class="field span-6"><label>更新状态量（逗号分隔）</label><input data-scope="clean" data-index="${index}" data-key="updateStateVariables" value="${escapeHtml(clean.updateStateVariables)}"></div>
+      </div></div>`).join("") : `<div class="empty">当前没有 Clean。无需清洁时可保持为空。</div>`;
+    }
+
+    /** 返回 Step 类型的简短名称。 */
+    function stepKind(route, index) { return index === 0 ? "源端 Station" : index === route.stages.length - 1 ? "汇端 Station" : index % 2 ? "Robot 传输" : "Station"; }
+
+    /** 绘制只包含关键信息的 Step 摘要卡片。 */
+    function renderSteps(route, routeIndex) {
+      return route.stages.map((stage, stageIndex) => {
+        const candidates = [...new Set((stage.visits || []).map(visit => visit.stationName).filter(Boolean))];
+        return `<article class="step-card" tabindex="0" data-step-card data-route-index="${routeIndex}" data-stage-index="${stageIndex}">
+          <div class="step-card-head"><div><div class="step-index">Step ${stageIndex}</div><div class="step-kind">${stepKind(route, stageIndex)} · ${stage.visits?.length || 0} Visits</div></div><div class="step-actions">
+            <button class="btn icon small" title="前移" data-action="move-step-up" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" ${stageIndex === 0 ? "disabled" : ""}>↑</button>
+            <button class="btn icon small" title="后移" data-action="move-step-down" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" ${stageIndex === route.stages.length - 1 ? "disabled" : ""}>↓</button>
+            <button class="btn danger icon small" title="删除" data-action="remove-stage" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" ${route.stages.length <= 3 ? "disabled" : ""}>×</button>
+          </div></div>
+          <div class="chips step-candidates">${candidates.length ? candidates.map(name => `<span class="chip">${escapeHtml(name)}</span>`).join("") : `<span class="chip">未选择设备</span>`}</div>
+          <div class="step-fields"><div class="step-field"><span>StepID</span><strong>${Number(stage.stepId)}</strong></div><div class="step-field"><span>PostStepID</span><strong>${stage.postStepIds?.length ? stage.postStepIds.join(", ") : "—"}</strong></div><div class="step-field"><span>NeedProcess</span><strong>${stage.needProcess ? "true" : "false"}</strong></div></div>
+          <span class="step-open-hint">点击编辑 Visits</span>
+        </article>`;
+      }).join("");
+    }
+
+    /** 绘制 Route 主视图。 */
+    function renderRoutes() {
+      const cleans = state.cleans.map(item => item.name).filter(Boolean), host = document.getElementById("routeList");
+      host.innerHTML = state.routes.length ? state.routes.map((route, index) => `<div class="edit-card"><div class="edit-card-head"><strong>Route ${index + 1} · ${escapeHtml(route.name || "未命名")}</strong><div><button class="btn small" data-action="add-stage" data-index="${index}">＋ Step 组</button> <button class="btn danger small" data-action="remove-route" data-index="${index}">删除</button></div></div>
+        <div class="route-meta"><div class="grid"><div class="field span-5"><label>Route 名称</label><input data-scope="route" data-index="${index}" data-key="name" value="${escapeHtml(route.name)}"></div><div class="field span-5"><label>Group</label><input data-scope="route" data-index="${index}" data-key="group" value="${escapeHtml(route.group)}"></div><div class="field span-2"><label>BufferOption</label><input type="number" data-scope="route" data-index="${index}" data-key="bufferOption" value="${Number(route.bufferOption)}"></div></div>
+        <details class="route-clean-details"><summary>Route 级 Clean 设置</summary><div class="grid"><div class="field span-4"><label>PJob 前</label><select multiple data-scope="route" data-index="${index}" data-key="prePJobCleanRefs">${multiOptionsHtml(cleans, route.prePJobCleanRefs)}</select></div><div class="field span-4"><label>PJob 后</label><select multiple data-scope="route" data-index="${index}" data-key="postPJobCleanRefs">${multiOptionsHtml(cleans, route.postPJobCleanRefs)}</select></div><div class="field span-4"><label>CJob 后</label><select multiple data-scope="route" data-index="${index}" data-key="postCJobCleanRefs">${multiOptionsHtml(cleans, route.postCJobCleanRefs)}</select></div></div></details></div>
+        <div class="step-list">${renderSteps(route, index)}</div></div>`).join("") : `<div class="empty">至少创建一条 Route，Job 才能引用。</div>`;
+    }
+
+    /** 绘制每轮新增 Job。 */
+    function renderRounds() {
+      const routes = state.routes.map(item => item.name).filter(Boolean);
+      document.getElementById("roundList").innerHTML = state.rounds.map((round, roundIndex) => `<div class="edit-card round"><div class="edit-card-head"><div><strong>${roundIndex ? `第 ${roundIndex + 1} 轮重算` : "首次排程"}</strong><span class="round-time">@ ${Number(state.times[roundIndex] || 0)} s</span></div><button class="btn small" data-action="add-job" data-round-index="${roundIndex}">＋ Job</button></div><div class="edit-card-body card-list">${round.jobs.map((job, jobIndex) => `<div class="job-card"><div class="job-head"><span>新增 Job ${jobIndex + 1}</span><button class="btn danger small" data-action="remove-job" data-round-index="${roundIndex}" data-job-index="${jobIndex}" ${round.jobs.length <= 1 ? "disabled" : ""}>删除</button></div><div class="grid">
+        <div class="field span-4"><label>Job 名称</label><input data-scope="job" data-round-index="${roundIndex}" data-job-index="${jobIndex}" data-key="name" value="${escapeHtml(job.name)}"></div>
+        <div class="field span-4"><label>Route</label><select data-scope="job" data-round-index="${roundIndex}" data-job-index="${jobIndex}" data-key="routeRef">${optionsHtml(routes, job.routeRef)}</select></div>
+        <div class="field span-4"><label>LoadPort</label><select data-scope="job" data-round-index="${roundIndex}" data-job-index="${jobIndex}" data-key="loadPort">${optionsHtml(state.loadPorts, job.loadPort, state.loadPorts.length ? "请选择" : "请先选择设备")}</select></div>
+        <div class="field span-3"><label>晶圆数</label><input type="number" min="1" max="25" data-scope="job" data-round-index="${roundIndex}" data-job-index="${jobIndex}" data-key="waferCount" value="${Number(job.waferCount)}"></div>
+        <div class="field span-3"><label>Priority</label><input type="number" min="1" data-scope="job" data-round-index="${roundIndex}" data-job-index="${jobIndex}" data-key="priority" value="${Number(job.priority)}"></div>
+        <div class="field span-3"><label>Weight</label><input type="number" min="1" data-scope="job" data-round-index="${roundIndex}" data-job-index="${jobIndex}" data-key="weight" value="${Number(job.weight)}"></div>
+        <div class="field span-3"><label>FoupID</label><input data-scope="job" data-round-index="${roundIndex}" data-job-index="${jobIndex}" data-key="foupId" value="${escapeHtml(job.foupId)}"></div>
+      </div></div>`).join("")}</div></div>`).join("");
+    }
+
+    /** 绘制一个 IVisit 的完整编辑表单。 */
+    function renderVisitEditor(routeIndex, stageIndex, visit, visitIndex, allowed, cleans, visitCount) {
+      return `<article class="visit-editor"><div class="visit-head"><strong>Visit ${visitIndex + 1}</strong><button class="btn danger small" data-action="remove-visit" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-visit-index="${visitIndex}" ${visitCount <= 1 ? "disabled" : ""}>删除 Visit</button></div><div class="visit-body grid">
+        <div class="field span-8"><label>StationName</label><select data-scope="visit" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-visit-index="${visitIndex}" data-key="stationName">${optionsHtml(allowed, visit.stationName, allowed.length ? "请选择设备" : "请先选择设备")}</select></div>
+        <div class="field span-4"><label>SlotID</label><input data-scope="visit" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-visit-index="${visitIndex}" data-key="slotIds" value="${escapeHtml(visit.slotIds)}" placeholder="1,2"></div>
+        <div class="field span-6"><label>ProcessRecipe</label><input data-scope="visit" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-visit-index="${visitIndex}" data-key="processRecipe" value="${escapeHtml(visit.processRecipe)}" placeholder="无需加工时留空"></div>
+        <div class="field span-6"><label>Recipe 时间（秒）</label><input type="number" min="0" step="0.1" data-scope="visit" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-visit-index="${visitIndex}" data-key="recipeTime" value="${Number(visit.recipeTime)}"></div>
+        <div class="field span-6"><label>ProcessType</label><input data-scope="visit" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-visit-index="${visitIndex}" data-key="processType" value="${escapeHtml(visit.processType)}"></div>
+        <div class="field span-6"><label>Weight（JSON）</label><input data-scope="visit" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-visit-index="${visitIndex}" data-key="weight" value="${escapeHtml(visit.weight)}"></div>
+        <div class="field span-12"><label>MoveTimeOffset（JSON）</label><input data-scope="visit" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-visit-index="${visitIndex}" data-key="moveTimeOffset" value="${escapeHtml(visit.moveTimeOffset)}" placeholder="{}"></div>
+        <div class="field span-6"><label>QTimeLimit</label><input type="number" step="0.1" data-scope="visit" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-visit-index="${visitIndex}" data-key="qTimeLimit" value="${Number(visit.qTimeLimit)}"></div>
+        <div class="field span-6"><label>ResidencyConstraint</label><input type="number" step="0.1" data-scope="visit" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-visit-index="${visitIndex}" data-key="residencyConstraint" value="${Number(visit.residencyConstraint)}"></div>
+        <div class="field span-6"><label>BeforeInPM</label><select multiple data-scope="visit" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-visit-index="${visitIndex}" data-key="beforeCleanRefs">${multiOptionsHtml(cleans, visit.beforeCleanRefs)}</select></div>
+        <div class="field span-6"><label>AfterOutPM</label><select multiple data-scope="visit" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-visit-index="${visitIndex}" data-key="afterCleanRefs">${multiOptionsHtml(cleans, visit.afterCleanRefs)}</select></div>
+      </div></article>`;
+    }
+
+    /** 绘制当前 IRouteStep 和其 Visits 的右侧编辑抽屉。 */
+    function renderStepDrawer() {
+      if (!state.drawer) return;
+      const { routeIndex, stageIndex } = state.drawer, route = state.routes[routeIndex], stage = route?.stages[stageIndex];
+      if (!stage) { closeStepDrawer(); return; }
+      const robotStep = stageIndex % 2 === 1, allowed = robotStep ? state.robotNames : state.stationNames, cleans = state.cleans.map(item => item.name).filter(Boolean);
+      document.getElementById("drawerTitle").textContent = `${route.name || "Route"} · StepID ${stage.stepId}`;
+      document.getElementById("drawerSubtitle").textContent = `${stepKind(route, stageIndex)} · 点击卡片编辑 IVisit`;
+      document.getElementById("drawerBody").innerHTML = `<section class="drawer-section"><h3>IRouteStep</h3><div class="grid">
+        <div class="field span-4"><label>StepID</label><input type="number" data-scope="stage" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-key="stepId" value="${Number(stage.stepId)}"></div>
+        <div class="field span-8"><label>PostStepID</label><input data-scope="stage" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-key="postStepIds" value="${escapeHtml((stage.postStepIds || []).join(","))}" placeholder="1,2"></div>
+        <div class="field span-12"><label>NeedProcess</label><label class="choice" style="width:fit-content;min-width:120px"><input type="checkbox" data-scope="stage" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-key="needProcess" ${stage.needProcess ? "checked" : ""}><span>${stage.needProcess ? "true" : "false"}</span></label></div>
+      </div></section>
+      <section class="drawer-section"><div class="switch-line"><div><h3 style="margin:0">Visits</h3><div class="hint">每个 Visit 只可选择当前设备已有的${robotStep ? " Robot" : "腔室"}。</div></div><button class="btn small" data-action="add-visit" data-route-index="${routeIndex}" data-stage-index="${stageIndex}">＋ Visit</button></div>
+        <div class="visit-list">${(stage.visits || []).map((visit, visitIndex) => renderVisitEditor(routeIndex, stageIndex, visit, visitIndex, allowed, cleans, stage.visits.length)).join("")}</div>
+      </section>`;
+    }
+
+    /** 打开指定 Step 的右侧抽屉。 */
+    function openStepDrawer(routeIndex, stageIndex) { state.drawer = { routeIndex, stageIndex }; renderStepDrawer(); document.getElementById("drawerLayer").classList.add("open"); }
+
+    /** 关闭 Step 抽屉。 */
+    function closeStepDrawer() { state.drawer = null; document.getElementById("drawerLayer").classList.remove("open"); }
+
+    /** 渲染所有依赖状态的区域。 */
+    function renderAll() { renderTimes(); renderCleans(); renderRoutes(); renderRounds(); if (state.drawer) renderStepDrawer(); }
+
+    /** 根据 data 属性把表单值写回状态。 */
+    function updateStateFromControl(control) {
+      let value = control.multiple ? Array.from(control.selectedOptions, item => item.value) : control.type === "checkbox" ? control.checked : control.type === "number" ? Number(control.value) : control.value;
+      const key = control.dataset.key;
+      markTestDirty();
+      if (key === "postStepIds") value = stringList(value).map(item => Number(item)).filter(Number.isInteger);
+      if (control.dataset.timeIndex !== undefined) { state.times[Number(control.dataset.timeIndex)] = value; return; }
+      if (control.dataset.option) { state.options[control.dataset.option] = value; return; }
+      const scope = control.dataset.scope;
+      if (scope === "clean") state.cleans[Number(control.dataset.index)][key] = value;
+      if (scope === "route") state.routes[Number(control.dataset.index)][key] = value;
+      if (scope === "stage") state.routes[Number(control.dataset.routeIndex)].stages[Number(control.dataset.stageIndex)][key] = value;
+      if (scope === "visit") state.routes[Number(control.dataset.routeIndex)].stages[Number(control.dataset.stageIndex)].visits[Number(control.dataset.visitIndex)][key] = value;
+      if (scope === "job") state.rounds[Number(control.dataset.roundIndex)].jobs[Number(control.dataset.jobIndex)][key] = value;
+    }
+
+    /** 处理新增、删除和 Step 排序动作。 */
+    function handleAction(button) {
+      const action = button.dataset.action, index = Number(button.dataset.index), routeIndex = Number(button.dataset.routeIndex), stageIndex = Number(button.dataset.stageIndex), visitIndex = Number(button.dataset.visitIndex);
+      if (action === "add-clean") state.cleans.push({ name: `Clean${state.cleans.length + 1}`, recipeName: `Clean${state.cleans.length + 1}Recipe`, recipeTime: 20, modules: state.processModules.slice(0, 2), taskName: `Clean${state.cleans.length + 1}`, stateVariable: "IdleTime", lower: 0, upper: 9999, updateStateVariables: "" });
+      if (action === "remove-clean") state.cleans.splice(index, 1);
+      if (action === "add-route") { const name = `Route${state.routes.length + 1}`; state.routes.push({ name, group: name, bufferOption: 0, prePJobCleanRefs: [], postPJobCleanRefs: [], postCJobCleanRefs: [], stages: state.device ? defaultRouteStages(name) : linkRouteSteps([makeStage(""), makeStage(""), makeStage("", true, `${name}_Step2`), makeStage(""), makeStage("")]) }); }
+      if (action === "remove-route") state.routes.splice(index, 1);
+      if (action === "add-stage") { state.routes[index].stages.splice(-1, 0, makeStage(""), makeStage("")); linkRouteSteps(state.routes[index].stages); }
+      if (action === "remove-stage") { state.routes[routeIndex].stages.splice(stageIndex, 1); linkRouteSteps(state.routes[routeIndex].stages); closeStepDrawer(); }
+      if (action === "move-step-up" && stageIndex > 0) { [state.routes[routeIndex].stages[stageIndex - 1], state.routes[routeIndex].stages[stageIndex]] = [state.routes[routeIndex].stages[stageIndex], state.routes[routeIndex].stages[stageIndex - 1]]; linkRouteSteps(state.routes[routeIndex].stages); }
+      if (action === "move-step-down" && stageIndex < state.routes[routeIndex].stages.length - 1) { [state.routes[routeIndex].stages[stageIndex + 1], state.routes[routeIndex].stages[stageIndex]] = [state.routes[routeIndex].stages[stageIndex], state.routes[routeIndex].stages[stageIndex + 1]]; linkRouteSteps(state.routes[routeIndex].stages); }
+      if (action === "add-visit") { const stage = state.routes[routeIndex].stages[stageIndex], allowed = stageIndex % 2 ? state.robotNames : state.stationNames; stage.visits.push(makeVisit(allowed[0] || "", stage.needProcess ? `${state.routes[routeIndex].name}_Step${stage.stepId}` : "")); }
+      if (action === "remove-visit") state.routes[routeIndex].stages[stageIndex].visits.splice(visitIndex, 1);
+      if (action === "add-job") { const round = Number(button.dataset.roundIndex); state.rounds[round].jobs.push(makeJob(`Round${round + 1}Job${state.rounds[round].jobs.length + 1}`, state.routes[0]?.name || "", state.loadPorts[round] || state.loadPorts[0] || "")); }
+      if (action === "remove-job") state.rounds[Number(button.dataset.roundIndex)].jobs.splice(Number(button.dataset.jobIndex), 1);
+      markTestDirty(); renderAll();
+    }
+
+    /** 收集 Step/Clean 内嵌 Recipe，并合并同名 Recipe 的设备范围。 */
+    function collectRecipes() {
+      const recipes = [];
+      function add(name, time, modules, processType = "", weightText = "{}") {
+        const weight = typeof weightText === "string" ? weightText : JSON.stringify(weightText ?? {}), moduleList = stringList(modules);
+        const existing = recipes.find(recipe => recipe.name === name && Number(recipe.time) === Number(time) && recipe.processType === processType && recipe.weight === weight);
+        if (existing) {
+          existing.modules = [...new Set([...existing.modules, ...moduleList])];
+        } else recipes.push({ name, time: Number(time), modules: moduleList, processType, weight });
+      }
+      state.routes.forEach(route => route.stages.forEach(stage => stage.visits.forEach(visit => { if (visit.processRecipe) add(visit.processRecipe, visit.recipeTime, [visit.stationName], visit.processType, visit.weight); })));
+      state.cleans.forEach(clean => add(clean.recipeName, clean.recipeTime, clean.modules));
+      return recipes;
+    }
+
+    /** 构造后端请求，Recipe 由 Route Step 和 Clean 自动生成。 */
+    function buildPayload() {
+      const times = state.times.map(Number);
+      const routes = state.routes.map(route => ({ ...route, stages: route.stages.map(stage => ({ ...stage, visits: stage.visits.map(visit => ({ ...visit })) })) }));
+      const cleans = state.cleans.map(clean => ({ ...clean, recipeRef: clean.recipeName }));
+      return { deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options: state.options, recipes: collectRecipes(), cleans, routes, rounds: state.rounds.map((round, index) => ({ currentTime: times[index], jobs: round.jobs })) };
+    }
+
+    /** 让本次运行生成的 input_data 日志可下载，并按选项自动导出。 */
+    function prepareLogDownload(result) {
+      if (!result?.logUrl) return false;
+      const link = document.getElementById("logButton");
+      link.href = result.logUrl; link.download = result.logFileName || "ct-input-log.json"; link.removeAttribute("aria-disabled");
+      if (document.getElementById("autoExportLog").checked) {
+        const automatic = document.createElement("a"); automatic.href = link.href; automatic.download = link.download; automatic.hidden = true; document.body.appendChild(automatic); automatic.click(); automatic.remove();
+      }
+      return true;
+    }
+
+    /** 调用本地服务运行排程。 */
     async function runPlan() {
       const button = document.getElementById("runButton");
+      let logReady = false;
       try {
-        const payload = buildPayload();
-        button.disabled = true;
-        button.classList.add("running");
-        button.textContent = "正在运行策略…";
+        if (state.testCaseId) await saveCurrentTest(true);
+        const payload = buildPayload(); button.disabled = true; button.classList.add("running"); button.textContent = "正在运行策略…";
         writeTerminal(`$ 开始运行 ${state.strategy}\n  总轮数: ${state.roundCount}\n  重算时间: ${state.times.join(", ")} s`);
-        const response = await fetch("/api/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-        const result = await response.json();
-        if (!response.ok || !result.ok) throw new Error(result.error || `服务返回 ${response.status}`);
-        showResult(result);
-      } catch (error) {
-        writeTerminal(`$ 运行失败\n  ${error.message}`, true);
-        document.getElementById("metricValidation").textContent = "失败";
-      } finally {
-        button.disabled = false;
-        button.classList.remove("running");
-        button.textContent = "▶ 运行后端策略";
-      }
+        const response = await fetch("/api/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }), result = await response.json();
+        logReady = prepareLogDownload(result);
+        if (!response.ok || !result.ok) throw new Error(result.error || `服务返回 ${response.status}`); showResult(result);
+      } catch (error) { writeTerminal(`$ 运行失败\n  ${error.message}${logReady ? "\n  复现日志已生成，可点击“导出复现日志”" : ""}`, true); document.getElementById("metricValidation").textContent = "失败"; }
+      finally { button.disabled = false; button.classList.remove("running"); button.textContent = "▶ 运行后端策略"; }
     }
 
-    /** 更新指标、逐轮摘要、日志和甘特图入口。 */
+    /** 显示运行指标和逐轮日志。 */
     function showResult(result) {
-      document.getElementById("metricTime").textContent = `${result.totalElapsedMs.toFixed(1)} ms`;
-      document.getElementById("metricMakespan").textContent = `${result.makespan.toFixed(2)} s`;
-      document.getElementById("metricMoves").textContent = result.moveCount;
-      document.getElementById("metricValidation").textContent = result.validation === "passed" ? "通过" : result.validation;
-      const roundLines = result.rounds.map(round => `  #${round.index} ${round.kind === "initial" ? "首次" : `@${round.requestedTime}s 重算`} | ${round.elapsedMs.toFixed(1)} ms | segment end ${round.segmentEnd.toFixed(2)}s`);
-      writeTerminal(["$ 调度完成", ...roundLines, "", ...result.logs].join("\n"));
-      const gantt = document.getElementById("ganttButton");
-      gantt.href = result.ganttUrl;
-      gantt.removeAttribute("aria-disabled");
+      document.getElementById("metricTime").textContent = `${result.totalElapsedMs.toFixed(1)} ms`; document.getElementById("metricMakespan").textContent = `${result.makespan.toFixed(2)} s`; document.getElementById("metricMoves").textContent = result.moveCount; document.getElementById("metricValidation").textContent = result.validation === "passed" ? "通过" : result.validation;
+      writeTerminal(["$ 调度完成", ...result.rounds.map(round => {
+        if (round.kind === "initial") return `  #${round.index} 首次 | ${round.elapsedMs.toFixed(1)} ms`;
+        const request = Number(round.requestedTime);
+        const effective = Number(round.effectiveTime);
+        const timing = Math.abs(effective - request) > 1e-6
+          ? `@${request}s 请求 → @${effective}s 执行`
+          : `@${request}s 重算`;
+        return `  #${round.index} ${timing} | ${round.elapsedMs.toFixed(1)} ms`;
+      }), "", ...result.logs].join("\n"));
+      const gantt = document.getElementById("ganttButton"); gantt.href = result.ganttUrl; gantt.removeAttribute("aria-disabled");
     }
 
-    /** 写入终端并对错误使用醒目标记。 */
-    function writeTerminal(message, isError = false) {
-      const terminal = document.getElementById("terminal");
-      terminal.textContent = message;
-      terminal.classList.toggle("error", isError);
-    }
+    /** 写入终端。 */
+    function writeTerminal(message, error = false) { const terminal = document.getElementById("terminal"); terminal.textContent = message; terminal.classList.toggle("error", error); }
 
-    /** 检查页面是否由配套本地服务提供。 */
+    /** 检查本地服务和 RL 模型可用性。 */
     async function checkService() {
       const pill = document.getElementById("serviceState");
-      try {
-        const response = await fetch("/api/health");
-        if (!response.ok) throw new Error();
-        const status = await response.json();
-        const rlAvailable = status.strategies?.rl !== false;
-        document.getElementById("rlStrategyInput").disabled = !rlAvailable;
-        document.getElementById("rlStrategyHint").textContent = rlAvailable ? "调用已训练模型寻优" : "缺少 results/models/bc_policy_rl.pt";
-        pill.textContent = "本地服务已连接";
-      } catch {
-        pill.textContent = "本地服务未连接";
-        pill.style.color = "var(--red)";
-        pill.style.background = "var(--red-soft)";
-        writeTerminal("$ 无法连接本地服务\n  请运行: python scripts/config_editor_server.py", true);
-      }
+      try { const response = await fetch("/api/health"); if (!response.ok) throw new Error(); const status = await response.json(), available = status.strategies?.rl !== false; document.getElementById("rlStrategyInput").disabled = !available; document.getElementById("rlStrategyHint").textContent = available ? "调用已训练模型" : "缺少 RL 模型"; pill.textContent = "本地服务已连接"; }
+      catch { pill.textContent = "本地服务未连接"; pill.style.color = "var(--red)"; pill.style.background = "var(--red-soft)"; writeTerminal("$ 无法连接本地服务\n  请运行: py scripts/config_editor_server.py", true); }
     }
 
-    document.getElementById("deviceFile").addEventListener("change", event => loadDevice(event.target.files[0]).catch(error => writeTerminal(`$ 设备读取失败\n  ${error.message}`, true)));
-    document.getElementById("roundCount").addEventListener("change", event => resizeRounds(event.target.value));
+    document.getElementById("deviceFile").addEventListener("change", event => loadDevice(event.target.files[0]).catch(error => { event.target.value = ""; writeTerminal(`$ 设备读取失败\n  ${error.message}`, true); }));
+    document.getElementById("deviceSelect").addEventListener("change", event => (async () => { if (state.dirty) await saveCurrentTest(true); await selectWorkspaceDevice(event.target.value); })().catch(error => writeTerminal(`$ 设备切换失败\n  ${error.message}`, true)));
+    document.getElementById("testCaseSelect").addEventListener("change", event => selectWorkspaceTest(event.target.value).catch(error => writeTerminal(`$ 测试集切换失败\n  ${error.message}`, true)));
+    document.getElementById("testCaseName").addEventListener("input", event => { state.testCaseName = event.target.value; markTestDirty(); });
+    document.getElementById("newTestButton").addEventListener("click", () => createTestCase(false).catch(error => writeTerminal(`$ 新建测试集失败\n  ${error.message}`, true)));
+    document.getElementById("copyTestButton").addEventListener("click", () => createTestCase(true).catch(error => writeTerminal(`$ 复制测试集失败\n  ${error.message}`, true)));
+    document.getElementById("saveTestButton").addEventListener("click", () => saveCurrentTest(false).catch(error => writeTerminal(`$ 保存测试集失败\n  ${error.message}`, true)));
+    document.getElementById("deleteTestButton").addEventListener("click", () => deleteCurrentTest().catch(error => writeTerminal(`$ 删除测试集失败\n  ${error.message}`, true)));
+    document.getElementById("roundCount").addEventListener("input", event => { resizeRounds(event.target.value); markTestDirty(); });
     document.getElementById("runButton").addEventListener("click", runPlan);
     document.getElementById("clearButton").addEventListener("click", () => writeTerminal("$ 等待运行…"));
+    document.getElementById("logButton").addEventListener("click", event => { if (event.currentTarget.getAttribute("aria-disabled") === "true") event.preventDefault(); });
     document.getElementById("ganttButton").addEventListener("click", event => { if (event.currentTarget.getAttribute("aria-disabled") === "true") event.preventDefault(); });
-    document.addEventListener("input", event => {
-      if (event.target.matches("[data-scope], [data-option], [data-time-index]")) updateStateFromControl(event.target);
-    });
+    document.getElementById("closeDrawer").addEventListener("click", closeStepDrawer);
+    document.getElementById("drawerLayer").addEventListener("click", event => { if (event.target.id === "drawerLayer") closeStepDrawer(); });
+    document.addEventListener("keydown", event => { if (event.key === "Escape") closeStepDrawer(); });
+    document.addEventListener("keydown", event => { const card = event.target.closest?.("[data-step-card]"); if (card && event.key === "Enter") openStepDrawer(Number(card.dataset.routeIndex), Number(card.dataset.stageIndex)); });
+    document.addEventListener("input", event => { if (event.target.matches("[data-scope], [data-option], [data-time-index]")) updateStateFromControl(event.target); });
     document.addEventListener("change", event => {
       if (event.target.matches("[data-scope], [data-option], [data-time-index]")) {
         updateStateFromControl(event.target);
-        if (event.target.dataset.timeIndex !== undefined || ["name", "recipeRef"].includes(event.target.dataset.key)) renderAll();
+        if (["name", "modules"].includes(event.target.dataset.key) || event.target.dataset.timeIndex !== undefined) renderAll();
+        else if (state.drawer) { renderRoutes(); if (["stepId", "postStepIds", "needProcess"].includes(event.target.dataset.key)) renderStepDrawer(); }
       }
-      if (event.target.name === "strategy") {
-        state.strategy = event.target.value;
-        document.getElementById("rlOptions").classList.toggle("is-hidden", state.strategy !== "rl");
-      }
+      if (event.target.name === "strategy") { state.strategy = event.target.value; markTestDirty(); document.getElementById("rlOptions").classList.toggle("is-hidden", state.strategy !== "rl"); }
     });
     document.addEventListener("click", event => {
-      const button = event.target.closest("[data-action]");
-      if (button && !button.disabled) handleAction(button);
+      const tab = event.target.closest("[data-tab-target]"); if (tab) switchTab(tab.dataset.tabTarget);
+      const button = event.target.closest("[data-action]"); if (button && !button.disabled) { handleAction(button); return; }
+      const card = event.target.closest("[data-step-card]"); if (card) openStepDrawer(Number(card.dataset.routeIndex), Number(card.dataset.stageIndex));
     });
 
-    renderAll();
-    checkService();
+    renderAll(); renderWorkspaceControls(); checkService(); loadWorkspaceCatalog().catch(error => setWorkspaceStatus(`测试集读取失败：${error.message}`, "dirty"));
   </script>
 </body>
 </html>
