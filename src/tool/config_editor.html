@@ -76,28 +76,67 @@
     .edit-card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
     .edit-card-body { padding: 14px; }
     .empty { padding: 28px 18px; border: 1px dashed #bdc8d8; border-radius: 12px; color: var(--muted); text-align: center; }
-    .round > .edit-card-head { background: #f4f7ff; }
-    .round-time { margin-left: 7px; color: var(--brand); font-size: 12px; font-weight: 800; }
-    .job-card { padding: 12px; border-left: 3px solid #9ab3f2; border-radius: 8px; background: #fff; }
-    .job-head { display: flex; justify-content: space-between; margin-bottom: 10px; color: var(--brand); font-size: 12px; font-weight: 800; }
-    .route-meta { padding: 14px; border-bottom: 1px solid var(--line); background: #fff; }
+    .round-card { overflow: hidden; border: 1px solid #ccd8ea; border-radius: 14px; background: #f7f9fc; }
+    .round-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 14px 16px; border-bottom: 1px solid #d8e1ed; background: linear-gradient(90deg, #edf3ff, #f8faff); }
+    .round-title { display: flex; align-items: center; gap: 10px; }
+    .round-number { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 9px; color: #fff; background: var(--brand); font-size: 12px; font-weight: 900; }
+    .round-title strong { display: block; font-size: 14px; }
+    .round-time-editor { display: flex; align-items: center; gap: 7px; color: var(--brand); font-weight: 800; }
+    .round-time-editor input { width: 92px; min-height: 34px; padding: 5px 8px; border: 1px solid #bfcde2; border-radius: 8px; color: var(--ink); background: #fff; }
+    .round-actions { display: flex; align-items: center; gap: 8px; }
+    .cjob-list { display: grid; gap: 12px; padding: 14px; }
+    .cjob-card { overflow: hidden; border: 1px solid #d8e0eb; border-radius: 12px; background: #fff; }
+    .cjob-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 13px; border-bottom: 1px solid var(--line); background: #fff; }
+    .cjob-title { display: flex; align-items: center; gap: 8px; }
+    .cjob-title strong { font-size: 13px; }
+    .readonly-pill { display: inline-flex; align-items: center; gap: 5px; padding: 4px 8px; border-radius: 7px; color: #475569; background: #eef2f7; font-size: 11px; font-weight: 700; }
+    .cjob-controls { display: grid; grid-template-columns: minmax(150px, 1fr) 120px minmax(150px, 1fr) minmax(180px, 1.2fr); gap: 10px; padding: 12px 13px; border-bottom: 1px solid var(--line); background: #fafbfd; }
+    .cjob-controls .field label { margin-bottom: 4px; font-size: 10px; }
+    .cjob-controls input, .cjob-controls select { min-height: 35px; }
+    .pjob-name-list { display: flex; flex-wrap: wrap; gap: 5px; min-height: 35px; align-items: center; }
+    .pjob-table-wrap { overflow-x: auto; }
+    .pjob-table { width: 100%; min-width: 850px; border-collapse: collapse; font-size: 11px; }
+    .pjob-table th, .pjob-table td { padding: 9px 10px; border-bottom: 1px solid #e3e8ef; text-align: left; vertical-align: middle; }
+    .pjob-table th { color: var(--muted); background: #f8fafc; font-size: 10px; white-space: nowrap; }
+    .pjob-table tr:last-child td { border-bottom: 0; }
+    .pjob-table input, .pjob-table select { min-height: 34px; padding: 5px 7px; border: 1px solid #cad5e3; border-radius: 7px; color: var(--ink); background: #fff; }
+    .pjob-table .wafer-input { width: 72px; }
+    .pjob-table .priority-input { width: 66px; }
+    .pjob-table .foup-input { width: 125px; }
+    .pjob-table .pjob-number { width: 72px; }
+    .pjob-table .pjob-text { width: 120px; }
+    .mat-list-preview { display: block; max-width: 125px; overflow: hidden; color: var(--muted); font-family: Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+    .disabled-field { color: #94a3b8 !important; background: #eef2f6 !important; cursor: not-allowed; }
+    .route-meta { padding: 16px 18px; border-bottom: 1px solid var(--line); background: linear-gradient(90deg, #fff, #f8faff); }
+    .route-meta-grid { display: grid; grid-template-columns: minmax(190px, 1fr) minmax(190px, 1fr) 130px; gap: 12px; align-items: end; }
+    .route-meta .field label { margin-bottom: 4px; font-size: 11px; }
+    .route-meta .field input { min-height: 36px; }
     .route-clean-details { margin-top: 12px; }
     .route-clean-details summary { cursor: pointer; color: var(--muted); font-size: 12px; font-weight: 700; }
     .route-clean-details .grid { margin-top: 12px; }
-    .step-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; padding: 14px; }
-    .step-card { position: relative; min-height: 168px; padding: 13px 13px 34px; border: 1px solid #d8e0ec; border-radius: 11px; background: #fff; user-select: none; transition: .16s transform, .16s border-color, .16s box-shadow; }
-    .step-card:hover { transform: translateY(-1px); border-color: #8da9ef; box-shadow: 0 7px 18px rgba(36,87,214,.09); }
-    .step-card:focus { outline: 3px solid rgba(36,87,214,.15); }
-    .step-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
-    .step-index { color: var(--brand); font-size: 12px; font-weight: 900; }
-    .step-kind { margin-top: 2px; color: var(--muted); font-size: 11px; }
-    .step-actions { display: flex; gap: 4px; }
-    .step-candidates { margin: 12px 0 10px; }
-    .step-fields { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 10px; }
-    .step-field { padding: 6px 7px; border-radius: 7px; background: var(--soft); }
-    .step-field span { display: block; color: var(--muted); font-size: 9px; text-transform: uppercase; }
-    .step-field strong { display: block; overflow: hidden; margin-top: 1px; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-    .step-open-hint { position: absolute; right: 12px; bottom: 9px; color: #8a99ad; font-size: 10px; }
+    .route-table-wrap, .drawer-table-wrap { overflow-x: auto; }
+    .route-table, .drawer-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 12px; }
+    .route-table th, .route-table td, .drawer-table th, .drawer-table td { padding: 10px 12px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: middle; }
+    .route-table th, .drawer-table th { color: var(--muted); background: #f7f9fc; font-size: 10px; font-weight: 800; letter-spacing: .02em; white-space: nowrap; }
+    .route-table tbody tr { cursor: pointer; transition: .15s background; }
+    .route-table tbody tr:hover td { background: #f5f8ff; }
+    .route-table tbody tr:last-child td { border-bottom: 0; }
+    .step-id-badge { display: inline-grid; place-items: center; width: 28px; height: 28px; border-radius: 8px; color: var(--brand); background: var(--brand-soft); font-size: 12px; font-weight: 900; }
+    .step-type { display: inline-flex; align-items: center; min-width: 62px; padding: 4px 8px; border-radius: 999px; color: #475569; background: #eef2f7; font-size: 11px; font-weight: 800; }
+    .step-type.process { color: #087f5b; background: var(--green-soft); }
+    .candidate-picker { position: relative; min-width: 250px; }
+    .candidate-picker summary { display: flex; align-items: center; min-height: 36px; gap: 6px; padding: 5px 8px; border: 1px solid #ccd7e5; border-radius: 9px; background: #fff; cursor: pointer; list-style: none; }
+    .candidate-picker summary::-webkit-details-marker { display: none; }
+    .candidate-picker summary::after { content: "⌄"; margin-left: auto; color: var(--muted); font-size: 14px; }
+    .candidate-picker[open] summary { border-color: #7697e7; box-shadow: 0 0 0 3px rgba(36,87,214,.1); }
+    .candidate-picker-empty { color: var(--muted); font-size: 11px; }
+    .candidate-picker-menu { position: absolute; z-index: 10; top: calc(100% + 5px); left: 0; display: grid; grid-template-columns: repeat(2, minmax(105px, 1fr)); gap: 3px; width: max-content; min-width: 270px; max-width: 390px; max-height: 230px; padding: 8px; overflow: auto; border: 1px solid #cbd6e5; border-radius: 10px; background: #fff; box-shadow: 0 12px 28px rgba(30,41,59,.15); }
+    .candidate-option { display: flex; align-items: center; gap: 7px; padding: 6px 7px; border-radius: 7px; color: #334155; white-space: nowrap; }
+    .candidate-option:hover { background: var(--brand-soft); }
+    .candidate-option input { width: 14px; height: 14px; margin: 0; accent-color: var(--brand); }
+    .route-step-actions { display: flex; gap: 4px; white-space: nowrap; }
+    .route-step-readonly { color: #334155; font-weight: 700; white-space: nowrap; }
+    .step-next { color: var(--muted); font-size: 11px; }
     .run-box { padding: 20px; color: #fff; background: linear-gradient(145deg, #173d9f, #2457d6); }
     .run-box h2 { margin: 0; font-size: 19px; }
     .run-box p { margin: 7px 0 18px; color: #dce6ff; font-size: 12px; }
@@ -126,21 +165,29 @@
     .drawer-head { position: sticky; top: 0; z-index: 2; display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; padding: 20px; border-bottom: 1px solid var(--line); background: rgba(255,255,255,.96); backdrop-filter: blur(10px); }
     .drawer-head h2 { margin: 0; font-size: 18px; }
     .drawer-head p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
-    .drawer-body { display: grid; gap: 18px; padding: 20px; }
+    .drawer-body { display: grid; gap: 14px; padding: 20px; }
     .drawer-section { padding-bottom: 18px; border-bottom: 1px solid var(--line); }
     .drawer-section:last-child { border-bottom: 0; }
     .drawer-section h3 { margin: 0 0 11px; font-size: 13px; }
-    .visit-list { display: grid; gap: 12px; }
-    .visit-editor { overflow: hidden; border: 1px solid var(--line); border-radius: 11px; background: var(--soft); }
-    .visit-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--line); background: #fff; }
-    .visit-body { padding: 12px; }
+    .step-summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+    .step-summary-item { min-width: 0; padding: 9px 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--soft); }
+    .step-summary-item span { display: block; color: var(--muted); font-size: 10px; font-weight: 700; }
+    .step-summary-item strong { display: block; margin-top: 3px; overflow: hidden; color: #1e293b; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+    .drawer-table { min-width: 0; }
+    .drawer-table td { color: #334155; }
+    .drawer-table input { width: 92px; min-height: 34px; padding: 5px 7px; border: 1px solid #cbd6e5; border-radius: 7px; color: var(--ink); background: #fff; }
+    .readonly-value { display: inline-block; max-width: 160px; overflow: hidden; color: #64748b; font-family: Consolas, monospace; font-size: 11px; text-overflow: ellipsis; vertical-align: bottom; white-space: nowrap; }
+    .visit-info { display: grid; gap: 3px; min-width: 135px; }
+    .visit-info b { color: #64748b; font-size: 10px; font-weight: 700; }
+    .visit-info span { color: #334155; font-family: Consolas, monospace; font-size: 11px; overflow-wrap: anywhere; }
     .choice-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
     .choice { display: flex; align-items: center; gap: 7px; padding: 8px 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); }
     .choice:has(input:checked) { border-color: #8da9ef; color: var(--brand); background: var(--brand-soft); }
     .switch-line { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
     .switch-line input { width: 18px; height: 18px; }
     @media (max-width: 1040px) { .layout { grid-template-columns: 1fr; } .side { position: static; grid-row: 1; } }
-    @media (max-width: 700px) { .shell { padding: 18px 14px 48px; } .hero { align-items: flex-start; flex-direction: column; } .tabs { width: 100%; } .tab { flex: 1; min-width: 0; } .grid > * { grid-column: span 12 !important; } .step-list { grid-template-columns: 1fr; } .result-actions { grid-template-columns: 1fr; } }
+    @media (max-width: 900px) { .cjob-controls { grid-template-columns: 1fr 1fr; } }
+    @media (max-width: 700px) { .shell { padding: 18px 14px 48px; } .hero { align-items: flex-start; flex-direction: column; } .tabs { width: 100%; } .tab { flex: 1; min-width: 0; } .grid > * { grid-column: span 12 !important; } .route-meta-grid, .cjob-controls { grid-template-columns: 1fr; } .round-head { align-items: flex-start; flex-direction: column; } .candidate-picker-menu { grid-template-columns: 1fr; } .step-summary { grid-template-columns: 1fr 1fr; } .result-actions { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
@@ -174,18 +221,14 @@
             </div>
           </article>
           <article class="panel">
-            <div class="panel-head"><div><h2>重算时间</h2><p>总轮数 N = 首次排程 + N-1 次重算。</p></div><div class="field" style="width:160px"><label for="roundCount">总轮数</label><input id="roundCount" type="number" min="1" max="8" value="2"></div></div>
-            <div class="panel-body"><div class="time-strip" id="timeStrip"></div></div>
-          </article>
-          <article class="panel">
-            <div class="panel-head"><div><h2>分轮新增 Job</h2><p>每轮只填写该轮外部新增加的 Job，Job 引用 Route。</p></div></div>
+            <div class="panel-head"><div><h2>重算任务</h2><p>重算轮次 → CJob → PJob</p></div><div class="field" style="width:140px"><label for="roundCount">总轮数</label><input id="roundCount" type="number" min="1" max="8" value="2"></div></div>
             <div class="panel-body"><div class="card-list" id="roundList"></div></div>
           </article>
         </div>
 
         <div class="tab-view" data-tab-view="route">
           <article class="panel">
-            <div class="panel-head"><div><h2>Route</h2><p>Step 显示 IRouteStep 摘要；点击 Step，在右侧逐条编辑 Visits。</p></div><button class="btn small" data-action="add-route">＋ Route</button></div>
+            <div class="panel-head"><div><h2>Route</h2><p>选择设备候选项，点击行设置 ProcessTime。</p></div><button class="btn small" data-action="add-route">＋ Route</button></div>
             <div class="panel-body"><div class="card-list" id="routeList"></div></div>
           </article>
         </div>
@@ -237,19 +280,22 @@
   <script>
     "use strict";
 
+    const CJOB_TYPES = ["NormalLot", "HighestLot", "HigherLot"];
+    const TASK_MODES = ["Smart", "Pipeline", "Sequential", "Concurrent"];
+
     const state = {
       workspaceDevices: [], workspaceDevice: null, workspaceDeviceId: "", testCaseId: "", testCaseName: "", dirty: false,
       deviceName: "", device: null, stationNames: [], loadPorts: [], processModules: [], robotNames: [], robotScopes: {},
       strategy: "heuristic", roundCount: 2, times: [0, 70], options: { rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, seed: 0 },
       cleans: [],
       routes: [{ name: "RouteA", group: "RouteA", bufferOption: 0, prePJobCleanRefs: [], postPJobCleanRefs: [], postCJobCleanRefs: [], stages: linkRouteSteps([makeStage("LP1"), makeStage("Robot"), makeStage("PM1,PM2", true, "RouteA_Step2"), makeStage("Robot"), makeStage("LP1")]) }],
-      rounds: [{ jobs: [makeJob("InitialJob", "RouteA", "LP1", 5)] }, { jobs: [makeJob("AddedJob", "RouteA", "LP2", 5)] }],
+      rounds: [makeRound(1, 0, "RouteA", "LP1"), makeRound(2, 70, "RouteA", "LP2")],
       drawer: null
     };
 
-    /** 创建一个 IVisit；Recipe 和约束都归属于 Visit。 */
+    /** 创建一个 IVisit；工艺名称为内部派生字段，不在页面上直接编辑。 */
     function makeVisit(stationName = "", processRecipe = "") {
-      return { stationName, slotIds: "1", processRecipe, recipeTime: 20, processType: "", weight: "{}", moveTimeOffset: "{}", qTimeLimit: -1, residencyConstraint: -1, beforeCleanRefs: [], afterCleanRefs: [] };
+      return { stationName, slotIds: "1", processRecipe, processTime: 20, recipeTime: 20, processType: "", weight: "{}", moveTimeOffset: "{}", qTimeLimit: -1, residencyConstraint: -1, beforeCleanRefs: [], afterCleanRefs: [] };
     }
 
     /** 创建一个 IRouteStep，并为候选设备分别创建 Visit。 */
@@ -264,9 +310,103 @@
       return stages;
     }
 
-    /** 创建只引用 Route 的 Job。 */
-    function makeJob(name, routeRef = "", loadPort = "", waferCount = 5) {
-      return { name, routeRef, loadPort, waferCount, priority: 1, weight: 1, jobType: 0, taskMode: 0, foupId: name };
+    /** 判断 Step 是否使用 Robot；旧数据没有类型时按已有候选项和原有交替规则兼容。 */
+    function stageUsesRobot(stage, index) {
+      const names = (stage.visits || []).map(visit => visit.stationName).filter(Boolean);
+      return stage.kind === "robot" || (names.length ? names.every(name => state.robotNames.includes(name)) : index % 2 === 1);
+    }
+
+    /** 统一补全 Step 的派生字段，避免 StepID、PostStepID、NeedProcess 被手工改坏。 */
+    function normalizeRoute(route) {
+      route.stages = Array.isArray(route.stages) ? route.stages : [];
+      linkRouteSteps(route.stages);
+      route.stages.forEach((stage, index) => {
+        stage.visits = Array.isArray(stage.visits) ? stage.visits : [];
+        stage.kind = stageUsesRobot(stage, index) ? "robot" : "station";
+        stage.needProcess = stage.kind === "station" && stage.visits.some(visit => state.processModules.includes(visit.stationName));
+        const recipeName = stage.needProcess ? `${route.name || "Route"}_Step${stage.stepId}` : "";
+        stage.visits.forEach(visit => {
+          visit.processTime = Number(visit.processTime ?? visit.recipeTime ?? 20);
+          visit.recipeTime = visit.processTime;
+          visit.processRecipe = recipeName;
+          visit.moveTimeOffset ??= "{}";
+          visit.slotIds ??= "1";
+        });
+      });
+      return route;
+    }
+
+    /** 将列表中选择的候选设备同步为一组 Visit，并保留相同设备的参数。 */
+    function setStageCandidates(routeIndex, stageIndex, names) {
+      const route = state.routes[routeIndex], stage = route.stages[stageIndex], prior = new Map((stage.visits || []).map(visit => [visit.stationName, visit]));
+      stage.visits = stringList(names).map(name => prior.get(name) || makeVisit(name));
+      normalizeRoute(route);
+    }
+
+    /** 创建一个 PJob；名称、TaskID 和 MatList 均由层级位置派生。 */
+    function makePJob(index = 1, routeRef = "", loadPort = "", waferCount = 5) {
+      return { jobName: `P${index}`, taskId: "", waferCount, matList: Array.from({ length: waferCount }, (_, item) => item + 1), routeRef, loadPort, priority: 1, weight: 1, foupId: `P${index}` };
+    }
+
+    /** 创建一个默认 CJob。 */
+    function makeCJob(roundIndex, pjobs = [], routeRef = "", loadPort = "") {
+      const rows = pjobs.length ? pjobs : [makePJob(1, routeRef, loadPort, 5)];
+      return { key: `C1`, taskId: String(roundIndex), jobType: "NormalLot", priority: 1, taskMode: "Smart", pJobNameList: rows.map(item => item.jobName), pjobs: rows };
+    }
+
+    /** 创建一轮排程。 */
+    function makeRound(roundIndex, currentTime, routeRef = "", loadPort = "") {
+      return { currentTime: roundIndex === 1 ? 0 : currentTime, cjobs: [makeCJob(roundIndex, [], routeRef, loadPort)] };
+    }
+
+    /** 把旧枚举数值转换成页面名称。 */
+    function enumName(value, names, fallback) {
+      if (names.includes(value)) return value;
+      const numeric = Number(value);
+      if (names === CJOB_TYPES) return ({ 0: "NormalLot", 2: "HighestLot", 3: "HigherLot" })[numeric] || fallback;
+      return ({ 0: "Smart", 1: "Pipeline", 2: "Sequential", 3: "Concurrent" })[numeric] || fallback;
+    }
+
+    /** 规范化一个 PJob，并重新计算只读字段。 */
+    function normalizePJob(raw, index, taskId) {
+      const waferCount = Math.max(1, Math.min(25, Number(raw.waferCount ?? raw.matList?.length ?? 1) || 1));
+      return {
+        jobName: `P${index}`, taskId: String(taskId), waferCount,
+        matList: Array.from({ length: waferCount }, (_, item) => item + 1),
+        routeRef: raw.routeRef || raw.originRoute || "", loadPort: raw.loadPort || "",
+        priority: Math.max(1, Number(raw.priority) || 1), weight: Math.max(1, Number(raw.weight) || 1),
+        foupId: raw.foupId || raw.name || `P${index}`,
+      };
+    }
+
+    /** 规范化一轮中的 CJob/PJob，并迁移旧版扁平 jobs。 */
+    function normalizeRound(raw, roundIndex, fallbackTime) {
+      const taskId = String(roundIndex), source = raw || {};
+      let cjobs = Array.isArray(source.cjobs) ? source.cjobs : null;
+      if (!cjobs) {
+        const legacyJobs = Array.isArray(source.jobs) ? source.jobs : [];
+        const first = legacyJobs[0] || {};
+        cjobs = [{ jobType: first.jobType, priority: first.priority, taskMode: first.taskMode, pjobs: legacyJobs.length ? legacyJobs : [{}] }];
+      }
+      if (!cjobs.length) cjobs = [{ pjobs: [{}] }];
+      const normalizedCJobs = cjobs.map((cjob, cjobIndex) => {
+        const rawPJobs = Array.isArray(cjob.pjobs) && cjob.pjobs.length ? cjob.pjobs : [{}];
+        const pjobs = rawPJobs.map((pjob, pjobIndex) => normalizePJob(pjob, pjobIndex + 1, taskId));
+        const jobType = enumName(cjob.jobType, CJOB_TYPES, "NormalLot");
+        return {
+          key: cjob.key || `C${cjobIndex + 1}`, taskId, jobType,
+          priority: jobType === "NormalLot" ? Math.max(1, Number(cjob.priority) || 1) : -1,
+          taskMode: enumName(cjob.taskMode, TASK_MODES, "Smart"),
+          pJobNameList: pjobs.map(pjob => pjob.jobName), pjobs,
+        };
+      });
+      return { currentTime: roundIndex === 1 ? 0 : Number(source.currentTime ?? fallbackTime ?? 0), cjobs: normalizedCJobs };
+    }
+
+    /** 对所有轮次重新计算派生字段，并同步兼容的 times 数组。 */
+    function normalizeRounds() {
+      state.rounds = state.rounds.map((round, index) => normalizeRound(round, index + 1, state.times[index]));
+      state.times = state.rounds.map(round => Number(round.currentTime));
     }
 
     /** 转义动态 HTML 文本。 */
@@ -276,6 +416,12 @@
     function stringList(value) {
       const values = Array.isArray(value) ? value : String(value || "").replaceAll("，", ",").split(",");
       return [...new Set(values.map(item => String(item).trim()).filter(Boolean))];
+    }
+
+    /** 格式化抽屉中的只读参数。 */
+    function readonlyText(value) {
+      if (value === undefined || value === null || value === "") return "—";
+      return typeof value === "string" ? value : JSON.stringify(value);
     }
 
     /** 调用本地工作区 API，并把后端错误转换为可显示异常。 */
@@ -362,8 +508,8 @@
         options: { rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, seed: 0 }, cleans: [],
         routes: [{ name: routeName, group: routeName, bufferOption: 0, prePJobCleanRefs: [], postPJobCleanRefs: [], postCJobCleanRefs: [], stages: defaultRouteStages(routeName) }],
         rounds: [
-          { jobs: [makeJob("InitialJob", routeName, state.loadPorts[0] || "", 5)] },
-          { jobs: [makeJob("AddedJob", routeName, state.loadPorts[1] || state.loadPorts[0] || "", 5)] }
+          makeRound(1, 0, routeName, state.loadPorts[0] || ""),
+          makeRound(2, 70, routeName, state.loadPorts[1] || state.loadPorts[0] || "")
         ]
       };
     }
@@ -389,10 +535,20 @@
       const status = document.getElementById("workspaceStatus"); status.textContent = message; status.className = `span-12 workspace-status ${kind}`.trim();
     }
 
+    /** 延迟自动保存，确保刷新页面后 Route 和其他编辑仍能恢复。 */
+    let autoSaveTimer = null;
+    function scheduleAutoSave() {
+      window.clearTimeout(autoSaveTimer);
+      autoSaveTimer = window.setTimeout(() => {
+        if (state.dirty) saveCurrentTest(true).catch(error => setWorkspaceStatus(`自动保存失败：${error.message}`, "dirty"));
+      }, 600);
+    }
+
     /** 标记当前测试集有尚未保存的编辑。 */
     function markTestDirty() {
       if (!state.testCaseId) return;
       state.dirty = true; setWorkspaceStatus(`“${state.testCaseName}”有未保存修改`, "dirty");
+      scheduleAutoSave();
     }
 
     /** 清理上一测试集的运行指标和结果链接，避免把旧结果误认为当前结果。 */
@@ -411,10 +567,15 @@
       state.roundCount = Math.max(1, Number(value.roundCount) || 1); state.times = Array.isArray(value.times) ? value.times : [0];
       state.options = value.options || { rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, seed: 0 };
       state.cleans = Array.isArray(value.cleans) ? value.cleans : []; state.routes = Array.isArray(value.routes) ? value.routes : [];
+      state.routes.forEach(normalizeRoute);
       state.rounds = Array.isArray(value.rounds) ? value.rounds : [];
       while (state.times.length < state.roundCount) state.times.push((Number(state.times.at(-1)) || 0) + 70);
-      while (state.rounds.length < state.roundCount) state.rounds.push({ jobs: [] });
-      state.times.length = state.roundCount; state.rounds.length = state.roundCount; state.times[0] = 0; state.drawer = null; state.dirty = false;
+      while (state.rounds.length < state.roundCount) {
+        const index = state.rounds.length;
+        state.rounds.push(makeRound(index + 1, state.times[index], state.routes[0]?.name || "", state.loadPorts[index] || state.loadPorts[0] || ""));
+      }
+      state.times.length = state.roundCount; state.rounds.length = state.roundCount; state.times[0] = 0;
+      normalizeRounds(); state.drawer = null; state.dirty = false;
       document.getElementById("roundCount").value = state.roundCount;
       document.querySelectorAll('input[name="strategy"]').forEach(input => { input.checked = input.value === state.strategy; });
       document.querySelectorAll("[data-option]").forEach(input => { input.value = state.options[input.dataset.option] ?? input.value; });
@@ -424,6 +585,7 @@
 
     /** 把当前页面编辑状态整理为不含设备 init 的测试集快照。 */
     function currentTestSnapshot(name = state.testCaseName) {
+      normalizeRounds();
       return structuredClone({ name, strategy: state.strategy, roundCount: state.roundCount, times: state.times, options: state.options, cleans: state.cleans, routes: state.routes, rounds: state.rounds });
     }
 
@@ -503,19 +665,19 @@
       if (name !== "route") closeStepDrawer();
     }
 
-    /** 同步轮数、时间和每轮 Job 容器。 */
+    /** 同步轮数、时间和每轮 CJob/PJob 容器；缩放只裁剪尾部，已有轮次保持原位。 */
     function resizeRounds(count) {
+      normalizeRounds();
       const safe = Math.max(1, Math.min(8, Number(count) || 1)); state.roundCount = safe;
-      while (state.times.length < safe) state.times.push((state.times.at(-1) || 0) + 70);
-      while (state.rounds.length < safe) { const index = state.rounds.length; state.rounds.push({ jobs: [makeJob(`AddedJob${index}`, state.routes[0]?.name || "", state.loadPorts[index] || state.loadPorts[0] || "", 5)] }); }
-      state.times.length = safe; state.rounds.length = safe; state.times[0] = 0;
-      renderTimes(); renderRounds();
+      while (state.rounds.length < safe) {
+        const index = state.rounds.length, priorTime = Number(state.rounds.at(-1)?.currentTime || 0);
+        state.rounds.push(makeRound(index + 1, priorTime + 70, state.routes[0]?.name || "", state.loadPorts[index] || state.loadPorts[0] || ""));
+      }
+      state.rounds.length = safe; normalizeRounds(); renderRounds();
     }
 
-    /** 绘制所有重算时间。 */
-    function renderTimes() {
-      document.getElementById("timeStrip").innerHTML = state.times.map((time, index) => `<div class="time-box"><strong>${index ? `第 ${index + 1} 轮重算` : "首次排程"}</strong><input data-time-index="${index}" type="number" min="0" step="0.1" value="${Number(time)}" ${index ? "" : "disabled"}><div class="hint">${index ? "触发时间（秒）" : "固定为 0 s"}</div></div>`).join("");
-    }
+    /** 重算时间已合并到轮次卡片，此函数仅维持旧调用点的状态同步。 */
+    function renderTimes() { normalizeRounds(); }
 
     /** 绘制 Clean；清洁 Recipe 内嵌在 Clean 中。 */
     function renderCleans() {
@@ -534,22 +696,30 @@
     }
 
     /** 返回 Step 类型的简短名称。 */
-    function stepKind(route, index) { return index === 0 ? "源端 Station" : index === route.stages.length - 1 ? "汇端 Station" : index % 2 ? "Robot 传输" : "Station"; }
+    function stepKind(route, index) { return stageUsesRobot(route.stages[index], index) ? "Robot" : "Station"; }
 
-    /** 绘制只包含关键信息的 Step 摘要卡片。 */
+    /** 绘制紧凑候选设备选择器，避免原生多选框占用整行高度。 */
+    function renderCandidatePicker(routeIndex, stageIndex, allowed, candidates) {
+      const selected = new Set(candidates);
+      const summary = candidates.length
+        ? candidates.map(name => `<span class="chip">${escapeHtml(name)}</span>`).join("")
+        : `<span class="candidate-picker-empty">选择设备</span>`;
+      return `<details class="candidate-picker" onclick="event.stopPropagation()"><summary>${summary}</summary><div class="candidate-picker-menu">${allowed.map(name => `<label class="candidate-option"><input type="checkbox" data-scope="stage-candidate-toggle" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-candidate="${escapeHtml(name)}" ${selected.has(name) ? "checked" : ""}><span>${escapeHtml(name)}</span></label>`).join("")}</div></details>`;
+    }
+
+    /** 绘制 Route Step 列表；列表区域仅允许选择设备候选项。 */
     function renderSteps(route, routeIndex) {
       return route.stages.map((stage, stageIndex) => {
         const candidates = [...new Set((stage.visits || []).map(visit => visit.stationName).filter(Boolean))];
-        return `<article class="step-card" tabindex="0" data-step-card data-route-index="${routeIndex}" data-stage-index="${stageIndex}">
-          <div class="step-card-head"><div><div class="step-index">Step ${stageIndex}</div><div class="step-kind">${stepKind(route, stageIndex)} · ${stage.visits?.length || 0} Visits</div></div><div class="step-actions">
-            <button class="btn icon small" title="前移" data-action="move-step-up" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" ${stageIndex === 0 ? "disabled" : ""}>↑</button>
-            <button class="btn icon small" title="后移" data-action="move-step-down" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" ${stageIndex === route.stages.length - 1 ? "disabled" : ""}>↓</button>
-            <button class="btn danger icon small" title="删除" data-action="remove-stage" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" ${route.stages.length <= 3 ? "disabled" : ""}>×</button>
-          </div></div>
-          <div class="chips step-candidates">${candidates.length ? candidates.map(name => `<span class="chip">${escapeHtml(name)}</span>`).join("") : `<span class="chip">未选择设备</span>`}</div>
-          <div class="step-fields"><div class="step-field"><span>StepID</span><strong>${Number(stage.stepId)}</strong></div><div class="step-field"><span>PostStepID</span><strong>${stage.postStepIds?.length ? stage.postStepIds.join(", ") : "—"}</strong></div><div class="step-field"><span>NeedProcess</span><strong>${stage.needProcess ? "true" : "false"}</strong></div></div>
-          <span class="step-open-hint">点击编辑 Visits</span>
-        </article>`;
+        const allowed = stageUsesRobot(stage, stageIndex) ? state.robotNames : state.stationNames;
+        return `<tr data-step-card data-route-index="${routeIndex}" data-stage-index="${stageIndex}">
+          <td><span class="step-id-badge">${Number(stage.stepId)}</span></td>
+          <td><span class="step-type ${stage.needProcess ? "process" : ""}">${stepKind(route, stageIndex)}</span></td>
+          <td>${renderCandidatePicker(routeIndex, stageIndex, allowed, candidates)}</td>
+          <td class="route-step-readonly"><span class="step-next">${stage.postStepIds?.length ? stage.postStepIds.join(", ") : "结束"}</span></td>
+          <td class="route-step-readonly">${stage.needProcess ? "true" : "false"}</td>
+          <td><div class="route-step-actions"><button class="btn icon small" title="前移" data-action="move-step-up" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" ${stageIndex === 0 ? "disabled" : ""}>↑</button><button class="btn icon small" title="后移" data-action="move-step-down" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" ${stageIndex === route.stages.length - 1 ? "disabled" : ""}>↓</button><button class="btn danger icon small" title="删除" data-action="remove-stage" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" ${route.stages.length <= 3 ? "disabled" : ""}>×</button></div></td>
+        </tr>`;
       }).join("");
     }
 
@@ -557,58 +727,54 @@
     function renderRoutes() {
       const cleans = state.cleans.map(item => item.name).filter(Boolean), host = document.getElementById("routeList");
       host.innerHTML = state.routes.length ? state.routes.map((route, index) => `<div class="edit-card"><div class="edit-card-head"><strong>Route ${index + 1} · ${escapeHtml(route.name || "未命名")}</strong><div><button class="btn small" data-action="add-stage" data-index="${index}">＋ Step 组</button> <button class="btn danger small" data-action="remove-route" data-index="${index}">删除</button></div></div>
-        <div class="route-meta"><div class="grid"><div class="field span-5"><label>Route 名称</label><input data-scope="route" data-index="${index}" data-key="name" value="${escapeHtml(route.name)}"></div><div class="field span-5"><label>Group</label><input data-scope="route" data-index="${index}" data-key="group" value="${escapeHtml(route.group)}"></div><div class="field span-2"><label>BufferOption</label><input type="number" data-scope="route" data-index="${index}" data-key="bufferOption" value="${Number(route.bufferOption)}"></div></div>
+        <div class="route-meta"><div class="route-meta-grid"><div class="field"><label>Route 名称</label><input data-scope="route" data-index="${index}" data-key="name" value="${escapeHtml(route.name)}"></div><div class="field"><label>Group</label><input data-scope="route" data-index="${index}" data-key="group" value="${escapeHtml(route.group)}"></div><div class="field"><label>BufferOption</label><input type="number" data-scope="route" data-index="${index}" data-key="bufferOption" value="${Number(route.bufferOption)}"></div></div>
         <details class="route-clean-details"><summary>Route 级 Clean 设置</summary><div class="grid"><div class="field span-4"><label>PJob 前</label><select multiple data-scope="route" data-index="${index}" data-key="prePJobCleanRefs">${multiOptionsHtml(cleans, route.prePJobCleanRefs)}</select></div><div class="field span-4"><label>PJob 后</label><select multiple data-scope="route" data-index="${index}" data-key="postPJobCleanRefs">${multiOptionsHtml(cleans, route.postPJobCleanRefs)}</select></div><div class="field span-4"><label>CJob 后</label><select multiple data-scope="route" data-index="${index}" data-key="postCJobCleanRefs">${multiOptionsHtml(cleans, route.postCJobCleanRefs)}</select></div></div></details></div>
-        <div class="step-list">${renderSteps(route, index)}</div></div>`).join("") : `<div class="empty">至少创建一条 Route，Job 才能引用。</div>`;
+        <div class="route-table-wrap"><table class="route-table"><thead><tr><th>StepID</th><th>类型</th><th>可选腔室 / 机器手</th><th>PostStepID</th><th>NeedProcess</th><th></th></tr></thead><tbody>${renderSteps(route, index)}</tbody></table></div></div>`).join("") : `<div class="empty">至少创建一条 Route，Job 才能引用。</div>`;
     }
 
-    /** 绘制每轮新增 Job。 */
+    /** 绘制重算轮次 → CJob → PJob 的三级结构。 */
     function renderRounds() {
-      const routes = state.routes.map(item => item.name).filter(Boolean);
-      document.getElementById("roundList").innerHTML = state.rounds.map((round, roundIndex) => `<div class="edit-card round"><div class="edit-card-head"><div><strong>${roundIndex ? `第 ${roundIndex + 1} 轮重算` : "首次排程"}</strong><span class="round-time">@ ${Number(state.times[roundIndex] || 0)} s</span></div><button class="btn small" data-action="add-job" data-round-index="${roundIndex}">＋ Job</button></div><div class="edit-card-body card-list">${round.jobs.map((job, jobIndex) => `<div class="job-card"><div class="job-head"><span>新增 Job ${jobIndex + 1}</span><button class="btn danger small" data-action="remove-job" data-round-index="${roundIndex}" data-job-index="${jobIndex}" ${round.jobs.length <= 1 ? "disabled" : ""}>删除</button></div><div class="grid">
-        <div class="field span-4"><label>Job 名称</label><input data-scope="job" data-round-index="${roundIndex}" data-job-index="${jobIndex}" data-key="name" value="${escapeHtml(job.name)}"></div>
-        <div class="field span-4"><label>Route</label><select data-scope="job" data-round-index="${roundIndex}" data-job-index="${jobIndex}" data-key="routeRef">${optionsHtml(routes, job.routeRef)}</select></div>
-        <div class="field span-4"><label>LoadPort</label><select data-scope="job" data-round-index="${roundIndex}" data-job-index="${jobIndex}" data-key="loadPort">${optionsHtml(state.loadPorts, job.loadPort, state.loadPorts.length ? "请选择" : "请先选择设备")}</select></div>
-        <div class="field span-3"><label>晶圆数</label><input type="number" min="1" max="25" data-scope="job" data-round-index="${roundIndex}" data-job-index="${jobIndex}" data-key="waferCount" value="${Number(job.waferCount)}"></div>
-        <div class="field span-3"><label>Priority</label><input type="number" min="1" data-scope="job" data-round-index="${roundIndex}" data-job-index="${jobIndex}" data-key="priority" value="${Number(job.priority)}"></div>
-        <div class="field span-3"><label>Weight</label><input type="number" min="1" data-scope="job" data-round-index="${roundIndex}" data-job-index="${jobIndex}" data-key="weight" value="${Number(job.weight)}"></div>
-        <div class="field span-3"><label>FoupID</label><input data-scope="job" data-round-index="${roundIndex}" data-job-index="${jobIndex}" data-key="foupId" value="${escapeHtml(job.foupId)}"></div>
-      </div></div>`).join("")}</div></div>`).join("");
+      normalizeRounds();
+      const routes = state.routes.map(item => item.name).filter(Boolean), host = document.getElementById("roundList");
+      host.innerHTML = state.rounds.map((round, roundIndex) => {
+        const roundTitle = roundIndex ? `第 ${roundIndex + 1} 轮重算` : "首次排程";
+        const cjobs = round.cjobs.map((cjob, cjobIndex) => {
+          const normalLot = cjob.jobType === "NormalLot";
+          const pjobRows = cjob.pjobs.map((pjob, pjobIndex) => `<tr>
+            <td><span class="readonly-pill">${escapeHtml(pjob.jobName)}</span></td>
+            <td><input class="pjob-number" type="number" min="1" max="25" data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="waferCount" value="${Number(pjob.waferCount)}"><small class="mat-list-preview">[${pjob.matList.join(", ")}]</small></td>
+            <td><select data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="routeRef">${optionsHtml(routes, pjob.routeRef, routes.length ? "选择 Route" : "请先配置 Route")}</select></td>
+            <td><span class="readonly-pill">${escapeHtml(pjob.taskId)}</span></td>
+            <td><input class="pjob-number" type="number" min="1" data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="priority" value="${Number(pjob.priority)}"></td>
+            <td><select data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="loadPort">${optionsHtml(state.loadPorts, pjob.loadPort, state.loadPorts.length ? "选择端口" : "无端口")}</select></td>
+            <td><input class="pjob-text" data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="foupId" value="${escapeHtml(pjob.foupId)}"></td>
+            <td><input class="pjob-number" type="number" min="1" data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="weight" value="${Number(pjob.weight)}"></td>
+            <td><button class="btn danger icon small" aria-label="删除 ${escapeHtml(pjob.jobName)}" data-action="remove-pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" ${cjob.pjobs.length <= 1 ? "disabled" : ""}>×</button></td>
+          </tr>`).join("");
+          return `<section class="cjob-card">
+            <header class="cjob-head"><div class="cjob-title"><strong>CJob ${cjobIndex + 1}</strong><span class="readonly-pill">TaskID ${escapeHtml(cjob.taskId)}</span></div><div class="round-actions"><button class="btn small" data-action="add-pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}">＋ PJob</button><button class="btn danger small" data-action="remove-cjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" ${round.cjobs.length <= 1 ? "disabled" : ""}>删除 CJob</button></div></header>
+            <div class="cjob-controls">
+              <div class="field"><label>JobType</label><select data-scope="cjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-key="jobType">${CJOB_TYPES.map(value => `<option ${value === cjob.jobType ? "selected" : ""}>${value}</option>`).join("")}</select></div>
+              <div class="field ${normalLot ? "" : "disabled-field"}"><label>Priority</label><input type="number" min="1" data-scope="cjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-key="priority" value="${Number(cjob.priority)}" ${normalLot ? "" : "disabled"}></div>
+              <div class="field"><label>TaskMode</label><select data-scope="cjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-key="taskMode">${TASK_MODES.map(value => `<option ${value === cjob.taskMode ? "selected" : ""}>${value}</option>`).join("")}</select></div>
+              <div class="field"><label>PJobNameList</label><div class="pjob-name-list">${cjob.pJobNameList.map(name => `<span>${escapeHtml(name)}</span>`).join("")}</div></div>
+            </div>
+            <div class="pjob-table-wrap"><table class="pjob-table"><thead><tr><th>JobName</th><th>晶圆数量 / MatList</th><th>OriginRoute</th><th>TaskID</th><th>Priority</th><th>LoadPort</th><th>FoupID</th><th>Weight</th><th></th></tr></thead><tbody>${pjobRows}</tbody></table></div>
+          </section>`;
+        }).join("");
+        return `<section class="round-card"><header class="round-head"><div class="round-title"><div class="round-number">${roundIndex + 1}</div><div><strong>${roundTitle}</strong><span class="readonly-pill">@ ${Number(round.currentTime)}s</span></div></div><div class="round-time-editor field"><label>${roundIndex ? "重算时间" : "排程时间"}</label><div><input type="number" min="0" step="0.1" data-round-time-index="${roundIndex}" value="${Number(round.currentTime)}" ${roundIndex ? "" : "disabled"}><span>s</span></div></div><button class="btn small" data-action="add-cjob" data-round-index="${roundIndex}">＋ CJob</button></header><div class="cjob-list">${cjobs}</div></section>`;
+      }).join("");
     }
 
-    /** 绘制一个 IVisit 的完整编辑表单。 */
-    function renderVisitEditor(routeIndex, stageIndex, visit, visitIndex, allowed, cleans, visitCount) {
-      return `<article class="visit-editor"><div class="visit-head"><strong>Visit ${visitIndex + 1}</strong><button class="btn danger small" data-action="remove-visit" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-visit-index="${visitIndex}" ${visitCount <= 1 ? "disabled" : ""}>删除 Visit</button></div><div class="visit-body grid">
-        <div class="field span-8"><label>StationName</label><select data-scope="visit" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-visit-index="${visitIndex}" data-key="stationName">${optionsHtml(allowed, visit.stationName, allowed.length ? "请选择设备" : "请先选择设备")}</select></div>
-        <div class="field span-4"><label>SlotID</label><input data-scope="visit" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-visit-index="${visitIndex}" data-key="slotIds" value="${escapeHtml(visit.slotIds)}" placeholder="1,2"></div>
-        <div class="field span-6"><label>ProcessRecipe</label><input data-scope="visit" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-visit-index="${visitIndex}" data-key="processRecipe" value="${escapeHtml(visit.processRecipe)}" placeholder="无需加工时留空"></div>
-        <div class="field span-6"><label>Recipe 时间（秒）</label><input type="number" min="0" step="0.1" data-scope="visit" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-visit-index="${visitIndex}" data-key="recipeTime" value="${Number(visit.recipeTime)}"></div>
-        <div class="field span-6"><label>ProcessType</label><input data-scope="visit" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-visit-index="${visitIndex}" data-key="processType" value="${escapeHtml(visit.processType)}"></div>
-        <div class="field span-6"><label>Weight（JSON）</label><input data-scope="visit" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-visit-index="${visitIndex}" data-key="weight" value="${escapeHtml(visit.weight)}"></div>
-        <div class="field span-12"><label>MoveTimeOffset（JSON）</label><input data-scope="visit" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-visit-index="${visitIndex}" data-key="moveTimeOffset" value="${escapeHtml(visit.moveTimeOffset)}" placeholder="{}"></div>
-        <div class="field span-6"><label>QTimeLimit</label><input type="number" step="0.1" data-scope="visit" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-visit-index="${visitIndex}" data-key="qTimeLimit" value="${Number(visit.qTimeLimit)}"></div>
-        <div class="field span-6"><label>ResidencyConstraint</label><input type="number" step="0.1" data-scope="visit" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-visit-index="${visitIndex}" data-key="residencyConstraint" value="${Number(visit.residencyConstraint)}"></div>
-        <div class="field span-6"><label>BeforeInPM</label><select multiple data-scope="visit" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-visit-index="${visitIndex}" data-key="beforeCleanRefs">${multiOptionsHtml(cleans, visit.beforeCleanRefs)}</select></div>
-        <div class="field span-6"><label>AfterOutPM</label><select multiple data-scope="visit" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-visit-index="${visitIndex}" data-key="afterCleanRefs">${multiOptionsHtml(cleans, visit.afterCleanRefs)}</select></div>
-      </div></article>`;
-    }
-
-    /** 绘制当前 IRouteStep 和其 Visits 的右侧编辑抽屉。 */
+    /** 绘制当前 Step 的参数表；设备候选项只在 Route 列表区域维护。 */
     function renderStepDrawer() {
       if (!state.drawer) return;
       const { routeIndex, stageIndex } = state.drawer, route = state.routes[routeIndex], stage = route?.stages[stageIndex];
       if (!stage) { closeStepDrawer(); return; }
-      const robotStep = stageIndex % 2 === 1, allowed = robotStep ? state.robotNames : state.stationNames, cleans = state.cleans.map(item => item.name).filter(Boolean);
       document.getElementById("drawerTitle").textContent = `${route.name || "Route"} · StepID ${stage.stepId}`;
-      document.getElementById("drawerSubtitle").textContent = `${stepKind(route, stageIndex)} · 点击卡片编辑 IVisit`;
-      document.getElementById("drawerBody").innerHTML = `<section class="drawer-section"><h3>IRouteStep</h3><div class="grid">
-        <div class="field span-4"><label>StepID</label><input type="number" data-scope="stage" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-key="stepId" value="${Number(stage.stepId)}"></div>
-        <div class="field span-8"><label>PostStepID</label><input data-scope="stage" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-key="postStepIds" value="${escapeHtml((stage.postStepIds || []).join(","))}" placeholder="1,2"></div>
-        <div class="field span-12"><label>NeedProcess</label><label class="choice" style="width:fit-content;min-width:120px"><input type="checkbox" data-scope="stage" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-key="needProcess" ${stage.needProcess ? "checked" : ""}><span>${stage.needProcess ? "true" : "false"}</span></label></div>
-      </div></section>
-      <section class="drawer-section"><div class="switch-line"><div><h3 style="margin:0">Visits</h3><div class="hint">每个 Visit 只可选择当前设备已有的${robotStep ? " Robot" : "腔室"}。</div></div><button class="btn small" data-action="add-visit" data-route-index="${routeIndex}" data-stage-index="${stageIndex}">＋ Visit</button></div>
-        <div class="visit-list">${(stage.visits || []).map((visit, visitIndex) => renderVisitEditor(routeIndex, stageIndex, visit, visitIndex, allowed, cleans, stage.visits.length)).join("")}</div>
-      </section>`;
+      document.getElementById("drawerSubtitle").textContent = `${stepKind(route, stageIndex)} 参数`;
+      document.getElementById("drawerBody").innerHTML = `<section class="drawer-section"><div class="step-summary"><div class="step-summary-item"><span>StepID</span><strong>${stage.stepId}</strong></div><div class="step-summary-item"><span>PostStepID</span><strong>${stage.postStepIds?.length ? stage.postStepIds.join(", ") : "结束"}</strong></div><div class="step-summary-item"><span>NeedProcess</span><strong>${stage.needProcess ? "true" : "false"}</strong></div><div class="step-summary-item"><span>候选数</span><strong>${stage.visits.length}</strong></div></div></section>
+        <section class="drawer-section"><div class="drawer-table-wrap"><table class="drawer-table"><thead><tr><th>腔室 / 机器手</th><th>ProcessTime</th><th>工艺信息</th><th>约束信息</th></tr></thead><tbody>${stage.visits.map((visit, visitIndex) => `<tr><td><span class="chip">${escapeHtml(visit.stationName)}</span></td><td>${stage.needProcess ? `<input type="number" min="0" step="0.1" aria-label="${escapeHtml(visit.stationName)} ProcessTime" data-scope="visit" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-visit-index="${visitIndex}" data-key="processTime" value="${Number(visit.processTime)}">` : "—"}</td><td><div class="visit-info"><b>Recipe</b><span>${escapeHtml(readonlyText(visit.processRecipe))}</span><b>Type</b><span>${escapeHtml(readonlyText(visit.processType))}</span></div></td><td><div class="visit-info"><b>Weight · Offset</b><span>${escapeHtml(readonlyText(visit.weight))} · ${escapeHtml(readonlyText(visit.moveTimeOffset))}</span><b>Slot · QTime · Residency</b><span>${escapeHtml(readonlyText(visit.slotIds))} · ${escapeHtml(readonlyText(visit.qTimeLimit))} · ${escapeHtml(readonlyText(visit.residencyConstraint))}</span></div></td></tr>`).join("")}</tbody></table></div></section>`;
     }
 
     /** 打开指定 Step 的右侧抽屉。 */
@@ -625,15 +791,40 @@
       let value = control.multiple ? Array.from(control.selectedOptions, item => item.value) : control.type === "checkbox" ? control.checked : control.type === "number" ? Number(control.value) : control.value;
       const key = control.dataset.key;
       markTestDirty();
-      if (key === "postStepIds") value = stringList(value).map(item => Number(item)).filter(Number.isInteger);
       if (control.dataset.timeIndex !== undefined) { state.times[Number(control.dataset.timeIndex)] = value; return; }
+      if (control.dataset.roundTimeIndex !== undefined) {
+        const roundIndex = Number(control.dataset.roundTimeIndex);
+        state.rounds[roundIndex].currentTime = roundIndex ? Math.max(0, value) : 0;
+        state.times[roundIndex] = state.rounds[roundIndex].currentTime;
+        return;
+      }
       if (control.dataset.option) { state.options[control.dataset.option] = value; return; }
       const scope = control.dataset.scope;
       if (scope === "clean") state.cleans[Number(control.dataset.index)][key] = value;
       if (scope === "route") state.routes[Number(control.dataset.index)][key] = value;
-      if (scope === "stage") state.routes[Number(control.dataset.routeIndex)].stages[Number(control.dataset.stageIndex)][key] = value;
-      if (scope === "visit") state.routes[Number(control.dataset.routeIndex)].stages[Number(control.dataset.stageIndex)].visits[Number(control.dataset.visitIndex)][key] = value;
-      if (scope === "job") state.rounds[Number(control.dataset.roundIndex)].jobs[Number(control.dataset.jobIndex)][key] = value;
+      if (scope === "stage-candidates") setStageCandidates(Number(control.dataset.routeIndex), Number(control.dataset.stageIndex), Array.from(control.selectedOptions, item => item.value));
+      if (scope === "stage-candidate-toggle") {
+        const routeIndex = Number(control.dataset.routeIndex), stageIndex = Number(control.dataset.stageIndex);
+        const current = new Set(state.routes[routeIndex].stages[stageIndex].visits.map(visit => visit.stationName));
+        if (control.checked) current.add(control.dataset.candidate); else current.delete(control.dataset.candidate);
+        setStageCandidates(routeIndex, stageIndex, [...current]);
+      }
+      if (scope === "visit") {
+        const stage = state.routes[Number(control.dataset.routeIndex)].stages[Number(control.dataset.stageIndex)];
+        stage.visits[Number(control.dataset.visitIndex)][key] = value;
+        if (key === "processTime") stage.visits[Number(control.dataset.visitIndex)].recipeTime = value;
+      }
+      if (scope === "cjob") {
+        const cjob = state.rounds[Number(control.dataset.roundIndex)].cjobs[Number(control.dataset.cjobIndex)];
+        cjob[key] = value;
+        if (key === "jobType") cjob.priority = value === "NormalLot" ? (cjob.priority > 0 ? cjob.priority : 1) : -1;
+        normalizeRounds();
+      }
+      if (scope === "pjob") {
+        const pjob = state.rounds[Number(control.dataset.roundIndex)].cjobs[Number(control.dataset.cjobIndex)].pjobs[Number(control.dataset.pjobIndex)];
+        pjob[key] = value;
+        normalizeRounds();
+      }
     }
 
     /** 处理新增、删除和 Step 排序动作。 */
@@ -647,10 +838,18 @@
       if (action === "remove-stage") { state.routes[routeIndex].stages.splice(stageIndex, 1); linkRouteSteps(state.routes[routeIndex].stages); closeStepDrawer(); }
       if (action === "move-step-up" && stageIndex > 0) { [state.routes[routeIndex].stages[stageIndex - 1], state.routes[routeIndex].stages[stageIndex]] = [state.routes[routeIndex].stages[stageIndex], state.routes[routeIndex].stages[stageIndex - 1]]; linkRouteSteps(state.routes[routeIndex].stages); }
       if (action === "move-step-down" && stageIndex < state.routes[routeIndex].stages.length - 1) { [state.routes[routeIndex].stages[stageIndex + 1], state.routes[routeIndex].stages[stageIndex]] = [state.routes[routeIndex].stages[stageIndex], state.routes[routeIndex].stages[stageIndex + 1]]; linkRouteSteps(state.routes[routeIndex].stages); }
-      if (action === "add-visit") { const stage = state.routes[routeIndex].stages[stageIndex], allowed = stageIndex % 2 ? state.robotNames : state.stationNames; stage.visits.push(makeVisit(allowed[0] || "", stage.needProcess ? `${state.routes[routeIndex].name}_Step${stage.stepId}` : "")); }
-      if (action === "remove-visit") state.routes[routeIndex].stages[stageIndex].visits.splice(visitIndex, 1);
-      if (action === "add-job") { const round = Number(button.dataset.roundIndex); state.rounds[round].jobs.push(makeJob(`Round${round + 1}Job${state.rounds[round].jobs.length + 1}`, state.routes[0]?.name || "", state.loadPorts[round] || state.loadPorts[0] || "")); }
-      if (action === "remove-job") state.rounds[Number(button.dataset.roundIndex)].jobs.splice(Number(button.dataset.jobIndex), 1);
+      if (action === "add-cjob") {
+        const roundIndex = Number(button.dataset.roundIndex), round = state.rounds[roundIndex];
+        const cjob = makeCJob(roundIndex + 1, [], state.routes[0]?.name || "", state.loadPorts[roundIndex] || state.loadPorts[0] || "");
+        cjob.key = `C${round.cjobs.length + 1}`; round.cjobs.push(cjob);
+      }
+      if (action === "remove-cjob") state.rounds[Number(button.dataset.roundIndex)].cjobs.splice(Number(button.dataset.cjobIndex), 1);
+      if (action === "add-pjob") {
+        const roundIndex = Number(button.dataset.roundIndex), cjob = state.rounds[roundIndex].cjobs[Number(button.dataset.cjobIndex)];
+        cjob.pjobs.push(makePJob(cjob.pjobs.length + 1, state.routes[0]?.name || "", state.loadPorts[roundIndex] || state.loadPorts[0] || "", 5));
+      }
+      if (action === "remove-pjob") state.rounds[Number(button.dataset.roundIndex)].cjobs[Number(button.dataset.cjobIndex)].pjobs.splice(Number(button.dataset.pjobIndex), 1);
+      normalizeRounds();
       markTestDirty(); renderAll();
     }
 
@@ -664,17 +863,17 @@
           existing.modules = [...new Set([...existing.modules, ...moduleList])];
         } else recipes.push({ name, time: Number(time), modules: moduleList, processType, weight });
       }
-      state.routes.forEach(route => route.stages.forEach(stage => stage.visits.forEach(visit => { if (visit.processRecipe) add(visit.processRecipe, visit.recipeTime, [visit.stationName], visit.processType, visit.weight); })));
+      state.routes.forEach(route => { normalizeRoute(route); route.stages.forEach(stage => stage.visits.forEach(visit => { if (visit.processRecipe) add(visit.processRecipe, visit.processTime, [visit.stationName], visit.processType, visit.weight); })); });
       state.cleans.forEach(clean => add(clean.recipeName, clean.recipeTime, clean.modules));
       return recipes;
     }
 
     /** 构造后端请求，Recipe 由 Route Step 和 Clean 自动生成。 */
     function buildPayload() {
-      const times = state.times.map(Number);
-      const routes = state.routes.map(route => ({ ...route, stages: route.stages.map(stage => ({ ...stage, visits: stage.visits.map(visit => ({ ...visit })) })) }));
+      normalizeRounds();
+      const routes = state.routes.map(route => ({ ...normalizeRoute(route), stages: route.stages.map(stage => ({ ...stage, visits: stage.visits.map(visit => ({ ...visit })) })) }));
       const cleans = state.cleans.map(clean => ({ ...clean, recipeRef: clean.recipeName }));
-      return { deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options: state.options, recipes: collectRecipes(), cleans, routes, rounds: state.rounds.map((round, index) => ({ currentTime: times[index], jobs: round.jobs })) };
+      return { deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options: state.options, recipes: collectRecipes(), cleans, routes, rounds: structuredClone(state.rounds) };
     }
 
     /** 让本次运行生成的 input_data 日志可下载，并按选项自动导出。 */
@@ -695,7 +894,7 @@
       try {
         if (state.testCaseId) await saveCurrentTest(true);
         const payload = buildPayload(); button.disabled = true; button.classList.add("running"); button.textContent = "正在运行策略…";
-        writeTerminal(`$ 开始运行 ${state.strategy}\n  总轮数: ${state.roundCount}\n  重算时间: ${state.times.join(", ")} s`);
+        writeTerminal(`$ 开始运行 ${state.strategy}\n  总轮数: ${state.roundCount}\n  重算时间: ${state.rounds.map(round => round.currentTime).join(", ")} s`);
         const response = await fetch("/api/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }), result = await response.json();
         logReady = prepareLogDownload(result);
         if (!response.ok || !result.ok) throw new Error(result.error || `服务返回 ${response.status}`); showResult(result);
@@ -745,12 +944,12 @@
     document.getElementById("drawerLayer").addEventListener("click", event => { if (event.target.id === "drawerLayer") closeStepDrawer(); });
     document.addEventListener("keydown", event => { if (event.key === "Escape") closeStepDrawer(); });
     document.addEventListener("keydown", event => { const card = event.target.closest?.("[data-step-card]"); if (card && event.key === "Enter") openStepDrawer(Number(card.dataset.routeIndex), Number(card.dataset.stageIndex)); });
-    document.addEventListener("input", event => { if (event.target.matches("[data-scope], [data-option], [data-time-index]")) updateStateFromControl(event.target); });
+    document.addEventListener("input", event => { if (event.target.matches("[data-scope], [data-option], [data-time-index], [data-round-time-index]")) updateStateFromControl(event.target); });
     document.addEventListener("change", event => {
-      if (event.target.matches("[data-scope], [data-option], [data-time-index]")) {
+      if (event.target.matches("[data-scope], [data-option], [data-time-index], [data-round-time-index]")) {
         updateStateFromControl(event.target);
-        if (["name", "modules"].includes(event.target.dataset.key) || event.target.dataset.timeIndex !== undefined) renderAll();
-        else if (state.drawer) { renderRoutes(); if (["stepId", "postStepIds", "needProcess"].includes(event.target.dataset.key)) renderStepDrawer(); }
+        if (["name", "modules", "jobType", "waferCount"].includes(event.target.dataset.key) || event.target.dataset.timeIndex !== undefined || event.target.dataset.roundTimeIndex !== undefined || ["stage-candidates", "stage-candidate-toggle", "cjob", "pjob"].includes(event.target.dataset.scope)) renderAll();
+        else if (state.drawer) { renderRoutes(); renderStepDrawer(); }
       }
       if (event.target.name === "strategy") { state.strategy = event.target.value; markTestDirty(); document.getElementById("rlOptions").classList.toggle("is-hidden", state.strategy !== "rl"); }
     });
@@ -758,6 +957,13 @@
       const tab = event.target.closest("[data-tab-target]"); if (tab) switchTab(tab.dataset.tabTarget);
       const button = event.target.closest("[data-action]"); if (button && !button.disabled) { handleAction(button); return; }
       const card = event.target.closest("[data-step-card]"); if (card) openStepDrawer(Number(card.dataset.routeIndex), Number(card.dataset.stageIndex));
+    });
+    window.addEventListener("pagehide", () => {
+      if (!state.dirty || !state.workspaceDeviceId || !state.testCaseId) return;
+      fetch(`/api/workspaces/${state.workspaceDeviceId}/tests/${state.testCaseId}`, {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(currentTestSnapshot()), keepalive: true,
+      }).catch(() => {});
     });
 
     renderAll(); renderWorkspaceControls(); checkService(); loadWorkspaceCatalog().catch(error => setWorkspaceStatus(`测试集读取失败：${error.message}`, "dirty"));

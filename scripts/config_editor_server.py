@@ -48,6 +48,10 @@ WORKSPACE_STORE_VERSION = 1
 FIRST_SLOT_ID = 1
 MAX_WAFERS_PER_JOB = 25
 DEFAULT_TRIGGER_UPPER = 9999.0
+CJOB_TYPE_VALUES = {"NormalLot": 0, "HighestLot": 2, "HigherLot": 3}
+TASK_MODE_VALUES = {"Smart": 0, "Pipeline": 1, "Sequential": 2, "Concurrent": 3}
+CJOB_TYPE_NAMES = {value: name for name, value in CJOB_TYPE_VALUES.items()}
+TASK_MODE_NAMES = {value: name for name, value in TASK_MODE_VALUES.items()}
 EDITOR_PATH = ROOT / "src" / "tool" / "config_editor.html"
 VIEWER_PATH = ROOT / "movelist_gantt_viewer.html"
 RL_MODEL_PATH = MODELS_DIR / "bc_policy_rl.pt"
@@ -480,13 +484,59 @@ def _load_port_capacity(tool_topo: Mapping[str, Any], name: str) -> int:
         return MAX_WAFERS_PER_JOB
 
 
+def _enum_value(raw: Any, values: Mapping[str, int], field_name: str, default: str) -> int:
+    """把页面枚举名称或兼容的整数值转换成后端枚举。"""
+    if raw is None or raw == "":
+        return values[default]
+    if isinstance(raw, str) and raw in values:
+        return values[raw]
+    try:
+        numeric = int(raw)
+    except (TypeError, ValueError):
+        numeric = -999
+    if numeric in values.values():
+        return numeric
+    raise ValueError(f"{field_name} 不支持：{raw}")
+
+
+def _round_cjob_rows(round_config: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    """读取新 CJob/PJob 层级，并把旧版扁平 Job 兼容为一 Job 一 CJob。"""
+    raw_cjobs = round_config.get("cjobs")
+    if isinstance(raw_cjobs, Sequence) and not isinstance(raw_cjobs, (str, bytes)):
+        return [deepcopy(dict(row)) for row in raw_cjobs if isinstance(row, Mapping)]
+    rows: List[Dict[str, Any]] = []
+    for index, job in enumerate(round_config.get("jobs") or [], start=1):
+        if not isinstance(job, Mapping):
+            continue
+        name = str(job.get("name") or f"Job{index}").strip()
+        pjob = deepcopy(dict(job))
+        pjob["jobName"] = "P1"
+        rows.append({
+            "taskId": name,
+            "jobType": job.get("jobType", 0),
+            "priority": job.get("priority", 1),
+            "taskMode": job.get("taskMode", 0),
+            "pjobs": [pjob],
+            "_legacyName": name,
+        })
+    return rows
+
+
+def _round_pjob_count(round_config: Mapping[str, Any]) -> int:
+    """返回一轮内的 PJob 数量，兼容旧版 jobs。"""
+    cjobs = round_config.get("cjobs")
+    if isinstance(cjobs, Sequence) and not isinstance(cjobs, (str, bytes)):
+        return sum(len(cjob.get("pjobs") or []) for cjob in cjobs if isinstance(cjob, Mapping))
+    return len([job for job in (round_config.get("jobs") or []) if isinstance(job, Mapping)])
+
+
 def build_round_update(
     plan: Mapping[str, Any],
     round_config: Mapping[str, Any],
     current_time: float,
     build_state: BuildState,
 ) -> Dict[str, Any]:
-    """把一轮新增 Job 展开成标准 IUpdateParams。"""
+    """把一轮 ``CJob → PJob`` 展开成标准 IUpdateParams。"""
     recipes = [row for row in (plan.get("recipes") or []) if isinstance(row, Mapping)]
     cleans = [row for row in (plan.get("cleans") or []) if isinstance(row, Mapping)]
     routes = [row for row in (plan.get("routes") or []) if isinstance(row, Mapping)]
@@ -499,94 +549,92 @@ def build_round_update(
         name: build_route(route, recipe_by_name, clean_by_name, robot_names)
         for name, route in route_by_name.items()
     }
-    jobs = [job for job in (round_config.get("jobs") or []) if isinstance(job, Mapping)]
-    if not jobs:
-        raise ValueError("每一轮至少需要一个新增 Job")
+    cjobs = _round_cjob_rows(round_config)
+    if not cjobs:
+        raise ValueError("每一轮至少需要一个 CJob")
 
     materials: List[Dict[str, Any]] = []
     process_jobs: List[Dict[str, Any]] = []
     control_jobs: List[Dict[str, Any]] = []
     referenced_routes: Dict[str, Dict[str, Any]] = {}
-    for job_index, job in enumerate(jobs, start=1):
-        job_name = str(job.get("name") or f"Job{job_index}").strip()
-        if job_name in build_state.job_names:
-            raise ValueError(f"Job 名称跨轮重复：{job_name}")
-        build_state.job_names.add(job_name)
-        route_name = str(job.get("routeRef") or "").strip()
-        route = built_routes.get(route_name)
-        if route is None:
-            raise ValueError(f"Job {job_name} 引用了不存在的 Route：{route_name}")
-        load_port = str(job.get("loadPort") or "").strip()
-        if load_port not in (tool_topo.get("Stations") or {}):
-            raise ValueError(f"Job {job_name} 的 LoadPort 不存在：{load_port}")
-        wafer_count = int(_finite_number(job.get("waferCount"), 1))
-        if wafer_count < 1 or wafer_count > MAX_WAFERS_PER_JOB:
-            raise ValueError(f"Job {job_name} 晶圆数必须为 1~{MAX_WAFERS_PER_JOB}")
-        priority = max(1, int(_finite_number(job.get("priority"), 1)))
-        pjob_name = f"{job_name}.P1"
-        runtime_route_name = f"{route_name}__{job_name}"
-        runtime_route = deepcopy(route)
-        runtime_route["Name"] = runtime_route_name
-        route_steps = runtime_route.get("RouteSteps") or []
-        for step_index in (0, len(route_steps) - 1):
-            if 0 <= step_index < len(route_steps):
-                for visit in route_steps[step_index].get("Visits") or []:
-                    visit["StationName"] = load_port
-        material_ids: List[int] = []
-        next_slot = build_state.next_slot_by_port.get(load_port, 0)
-        capacity = _load_port_capacity(tool_topo, load_port)
-        if next_slot + wafer_count > capacity:
-            raise ValueError(f"{load_port} 总片数超过容量 {capacity}")
-        for _ in range(wafer_count):
-            next_slot += 1
-            material_id = build_state.next_material_id
-            build_state.next_material_id += 1
-            material_ids.append(material_id)
-            material_route = deepcopy(runtime_route)
-            materials.append({
-                "Name": str(material_id),
-                "ID": material_id,
-                "TaskID": job_name,
-                "LotID": job_name,
-                "FoupID": str(job.get("foupId") or job_name),
-                "Priority": priority,
-                "StepID": 0,
-                "CurrentModuleName": load_port,
-                "SlotID": next_slot,
-                "NeedSchedule": True,
-                "PJobName": pjob_name,
-                "SrcPortName": load_port,
-                "Route": material_route,
+    for cjob_index, cjob in enumerate(cjobs, start=1):
+        task_id = str(cjob.get("taskId") or cjob.get("TaskID") or cjob_index).strip()
+        pjobs = [row for row in (cjob.get("pjobs") or []) if isinstance(row, Mapping)]
+        if not pjobs:
+            raise ValueError(f"CJob {cjob_index} 至少需要一个 PJob")
+        job_type = _enum_value(cjob.get("jobType", cjob.get("JobType")), CJOB_TYPE_VALUES, "JobType", "NormalLot")
+        task_mode = _enum_value(cjob.get("taskMode", cjob.get("TaskMode")), TASK_MODE_VALUES, "TaskMode", "Smart")
+        cjob_priority = max(1, int(_finite_number(cjob.get("priority"), 1))) if job_type == 0 else -1
+        runtime_pjob_names: List[str] = []
+        cjob_material_count = 0
+        legacy_name = str(cjob.get("_legacyName") or "").strip()
+
+        for pjob_index, pjob in enumerate(pjobs, start=1):
+            display_name = str(pjob.get("jobName") or pjob.get("name") or f"P{pjob_index}").strip()
+            pjob_name = f"{legacy_name}.P1" if legacy_name else f"{task_id}.C{cjob_index}.{display_name}"
+            if pjob_name in build_state.job_names:
+                raise ValueError(f"PJob 名称跨轮重复：{pjob_name}")
+            build_state.job_names.add(pjob_name)
+            runtime_pjob_names.append(pjob_name)
+            origin_route = pjob.get("originRoute")
+            if isinstance(origin_route, Mapping):
+                origin_route = origin_route.get("name") or origin_route.get("Name")
+            route_name = str(pjob.get("routeRef") or origin_route or "").strip()
+            route = built_routes.get(route_name)
+            if route is None:
+                raise ValueError(f"PJob {display_name} 引用了不存在的 Route：{route_name}")
+            load_port = str(pjob.get("loadPort") or "").strip()
+            if load_port not in (tool_topo.get("Stations") or {}):
+                raise ValueError(f"PJob {display_name} 的 LoadPort 不存在：{load_port}")
+            wafer_count = int(_finite_number(pjob.get("waferCount"), len(pjob.get("matList") or []) or 1))
+            if wafer_count < 1 or wafer_count > MAX_WAFERS_PER_JOB:
+                raise ValueError(f"PJob {display_name} 晶圆数必须为 1~{MAX_WAFERS_PER_JOB}")
+            priority = max(1, int(_finite_number(pjob.get("priority"), 1)))
+            runtime_route_name = f"{route_name}__{legacy_name or pjob_name}"
+            runtime_route = deepcopy(route)
+            runtime_route["Name"] = runtime_route_name
+            route_steps = runtime_route.get("RouteSteps") or []
+            for step_index in (0, len(route_steps) - 1):
+                if 0 <= step_index < len(route_steps):
+                    for visit in route_steps[step_index].get("Visits") or []:
+                        visit["StationName"] = load_port
+            material_ids: List[int] = []
+            next_slot = build_state.next_slot_by_port.get(load_port, 0)
+            capacity = _load_port_capacity(tool_topo, load_port)
+            if next_slot + wafer_count > capacity:
+                raise ValueError(f"{load_port} 总片数超过容量 {capacity}")
+            for _ in range(wafer_count):
+                next_slot += 1
+                material_id = build_state.next_material_id
+                build_state.next_material_id += 1
+                material_ids.append(material_id)
+                materials.append({
+                    "Name": str(material_id), "ID": material_id, "TaskID": task_id,
+                    "LotID": f"{task_id}.C{cjob_index}",
+                    "FoupID": str(pjob.get("foupId") or f"{task_id}-C{cjob_index}-{display_name}"),
+                    "Priority": priority, "StepID": 0, "CurrentModuleName": load_port,
+                    "SlotID": next_slot, "NeedSchedule": True, "PJobName": pjob_name,
+                    "SrcPortName": load_port, "Route": deepcopy(runtime_route),
+                })
+            build_state.next_slot_by_port[load_port] = next_slot
+            referenced_routes[runtime_route_name] = deepcopy(runtime_route)
+            process_jobs.append({
+                "JobName": pjob_name, "TaskID": task_id, "Priority": priority,
+                "Weight": max(1, int(_finite_number(pjob.get("weight"), 1))), "State": 0,
+                "OriginRoute": deepcopy(runtime_route), "MatList": material_ids,
             })
-        build_state.next_slot_by_port[load_port] = next_slot
-        referenced_routes[runtime_route_name] = deepcopy(runtime_route)
-        process_jobs.append({
-            "JobName": pjob_name,
-            "TaskID": job_name,
-            "Priority": priority,
-            "Weight": max(1, int(_finite_number(job.get("weight"), 1))),
-            "State": 0,
-            "OriginRoute": deepcopy(runtime_route),
-            "MatList": material_ids,
-        })
+            cjob_material_count += wafer_count
+
         control_jobs.append({
-            "TaskID": job_name,
-            "JobType": int(_finite_number(job.get("jobType"), 0)),
-            "Priority": priority,
-            "TaskMode": int(_finite_number(job.get("taskMode"), 0)),
-            "PJobNameList": [pjob_name],
-            "MaterialCount": wafer_count,
+            "TaskID": task_id, "JobType": job_type, "Priority": cjob_priority,
+            "TaskMode": task_mode, "PJobNameList": runtime_pjob_names,
+            "MaterialCount": cjob_material_count,
         })
     return {
-        "Scenario": 0,
-        "Routes": referenced_routes,
+        "Scenario": 0, "Routes": referenced_routes,
         "ProcessRecipes": build_process_recipes(recipes, routes),
-        "Materials": materials,
-        "ProcessJobs": process_jobs,
-        "ControlJobs": control_jobs,
-        "RemoveList": [],
-        "MoveStates": [],
-        "CurrentTime": float(current_time),
+        "Materials": materials, "ProcessJobs": process_jobs, "ControlJobs": control_jobs,
+        "RemoveList": [], "MoveStates": [], "CurrentTime": float(current_time),
     }
 
 
@@ -765,7 +813,7 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
         "kind": "initial",
         "requestedTime": 0.0,
         "effectiveTime": 0.0,
-        "jobCount": len(rounds[0].get("jobs") or []),
+        "jobCount": _round_pjob_count(rounds[0]),
         "elapsedMs": elapsed_ms,
         "segmentEnd": _segment_end(scheduler.current_plan),
     })
@@ -806,7 +854,7 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
             "kind": "recompute",
             "requestedTime": requested_time,
             "effectiveTime": effective_time,
-            "jobCount": len(round_config.get("jobs") or []),
+            "jobCount": _round_pjob_count(round_config),
             "elapsedMs": elapsed_ms,
             "segmentEnd": _segment_end(scheduler.current_plan),
         })
@@ -816,7 +864,7 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
         )
         logs.append(
             f"[{index}/{round_count}] @{requested_time:.2f}s 重算完成：{elapsed_ms:.1f} ms，"
-            f"新增 {len(round_config.get('jobs') or [])} Jobs{suffix}"
+            f"新增 {_round_pjob_count(round_config)} PJobs{suffix}"
         )
         reproduction.add("AlgOutput", _alg_output_info(scheduler.combined_output()), effective_time)
 
@@ -995,12 +1043,92 @@ def import_workspace_device(
         return deepcopy(device), True
 
 
+def _normalize_workspace_pjob(raw: Mapping[str, Any], index: int, task_id: str) -> Dict[str, Any]:
+    """规范化页面 PJob，并生成只读 JobName、TaskID 与 MatList。"""
+    wafer_count = max(1, min(MAX_WAFERS_PER_JOB, int(_finite_number(
+        raw.get("waferCount"), len(raw.get("matList") or []) or 1,
+    ))))
+    job_name = f"P{index}"
+    origin_route = raw.get("originRoute")
+    if isinstance(origin_route, Mapping):
+        origin_route = origin_route.get("name") or origin_route.get("Name")
+    return {
+        "jobName": job_name,
+        "taskId": task_id,
+        "waferCount": wafer_count,
+        "matList": list(range(1, wafer_count + 1)),
+        "routeRef": str(raw.get("routeRef") or origin_route or ""),
+        "loadPort": str(raw.get("loadPort") or ""),
+        "priority": max(1, int(_finite_number(raw.get("priority"), 1))),
+        "weight": max(1, int(_finite_number(raw.get("weight"), 1))),
+        "foupId": str(raw.get("foupId") or raw.get("name") or job_name),
+    }
+
+
+def _normalize_workspace_round(raw: Mapping[str, Any], index: int, current_time: float) -> Dict[str, Any]:
+    """规范化一轮 CJob/PJob；旧版 jobs 合并到该轮唯一默认 CJob。"""
+    task_id = str(index)
+    raw_cjobs = raw.get("cjobs")
+    if isinstance(raw_cjobs, Sequence) and not isinstance(raw_cjobs, (str, bytes)):
+        cjob_rows = [row for row in raw_cjobs if isinstance(row, Mapping)]
+    else:
+        legacy_jobs = [row for row in (raw.get("jobs") or []) if isinstance(row, Mapping)]
+        first = legacy_jobs[0] if legacy_jobs else {}
+        cjob_rows = [{
+            "jobType": first.get("jobType", "NormalLot"),
+            "priority": first.get("priority", 1),
+            "taskMode": first.get("taskMode", "Smart"),
+            "pjobs": legacy_jobs or [{}],
+        }]
+    if not cjob_rows:
+        cjob_rows = [{"pjobs": [{}]}]
+    cjobs: List[Dict[str, Any]] = []
+    for cjob_index, row in enumerate(cjob_rows, start=1):
+        raw_job_type = row.get("jobType", row.get("JobType", "NormalLot"))
+        try:
+            job_type_value = _enum_value(raw_job_type, CJOB_TYPE_VALUES, "JobType", "NormalLot")
+        except ValueError:
+            job_type_value = CJOB_TYPE_VALUES["NormalLot"]
+        raw_task_mode = row.get("taskMode", row.get("TaskMode", "Smart"))
+        try:
+            task_mode_value = _enum_value(raw_task_mode, TASK_MODE_VALUES, "TaskMode", "Smart")
+        except ValueError:
+            task_mode_value = TASK_MODE_VALUES["Smart"]
+        pjob_rows = [item for item in (row.get("pjobs") or []) if isinstance(item, Mapping)] or [{}]
+        pjobs = [
+            _normalize_workspace_pjob(item, pjob_index, task_id)
+            for pjob_index, item in enumerate(pjob_rows, start=1)
+        ]
+        cjobs.append({
+            "taskId": task_id,
+            "jobType": CJOB_TYPE_NAMES[job_type_value],
+            "priority": max(1, int(_finite_number(row.get("priority"), 1))) if job_type_value == 0 else -1,
+            "taskMode": TASK_MODE_NAMES[task_mode_value],
+            "pJobNameList": [pjob["jobName"] for pjob in pjobs],
+            "pjobs": pjobs,
+            "key": str(row.get("key") or f"C{cjob_index}"),
+        })
+    return {"currentTime": 0.0 if index == 1 else float(current_time), "cjobs": cjobs}
+
+
 def _normalize_test_case(raw_test: Mapping[str, Any], test_id: Optional[str] = None) -> Dict[str, Any]:
-    """只保留一次计算所需字段，避免在每个测试集中重复保存设备 init。"""
+    """保存统一测试集结构，并兼容迁移旧版扁平 Job。"""
     timestamp = _workspace_timestamp()
-    rounds = deepcopy(list(raw_test.get("rounds") or []))
-    round_count = max(1, int(_finite_number(raw_test.get("roundCount"), len(rounds) or 1)))
+    raw_rounds = [row for row in (raw_test.get("rounds") or []) if isinstance(row, Mapping)]
+    round_count = max(1, int(_finite_number(raw_test.get("roundCount"), len(raw_rounds) or 1)))
     times = deepcopy(list(raw_test.get("times") or [0.0]))
+    while len(raw_rounds) < round_count:
+        raw_rounds.append({})
+    while len(times) < round_count:
+        times.append((float(times[-1]) if times else 0.0) + 70.0)
+    rounds = [
+        _normalize_workspace_round(
+            raw_rounds[index], index + 1,
+            _finite_number(raw_rounds[index].get("currentTime"), _finite_number(times[index], 0.0)),
+        )
+        for index in range(round_count)
+    ]
+    times = [round_row["currentTime"] for round_row in rounds]
     return {
         "id": test_id or uuid.uuid4().hex,
         "name": str(raw_test.get("name") or "未命名测试集").strip() or "未命名测试集",

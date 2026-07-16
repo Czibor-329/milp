@@ -107,6 +107,42 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual("LP3", runtime_route["RouteSteps"][-1]["Visits"][0]["StationName"])
         self.assertEqual("Route12__Incoming", update["ProcessJobs"][0]["OriginRoute"]["Name"])
 
+    def test_round_supports_multiple_cjobs_and_pjobs(self) -> None:
+        """同一轮多个 CJob 应共享轮次 TaskID，并正确派生 PJobNameList 和枚举。"""
+        plan = {
+            "device": self.device,
+            "recipes": [{"name": "R12", "time": 8, "modules": "PM1,PM2", "weight": {}}],
+            "cleans": [],
+            "routes": [_route("Route12", "PM1,PM2", "R12")],
+        }
+        round_config = {
+            "currentTime": 70,
+            "cjobs": [
+                {
+                    "taskId": "2", "jobType": "NormalLot", "priority": 3, "taskMode": "Smart",
+                    "pjobs": [
+                        {"jobName": "P1", "routeRef": "Route12", "loadPort": "LP1", "waferCount": 2, "priority": 1},
+                        {"jobName": "P2", "routeRef": "Route12", "loadPort": "LP2", "waferCount": 1, "priority": 2},
+                    ],
+                },
+                {
+                    "taskId": "2", "jobType": "HighestLot", "priority": 99, "taskMode": "Concurrent",
+                    "pjobs": [{"jobName": "P1", "routeRef": "Route12", "loadPort": "LP3", "waferCount": 1}],
+                },
+            ],
+        }
+        update = build_round_update(plan, round_config, 70.0, BuildState())
+        self.assertEqual(2, len(update["ControlJobs"]))
+        self.assertEqual(3, len(update["ProcessJobs"]))
+        self.assertEqual(["2", "2"], [item["TaskID"] for item in update["ControlJobs"]])
+        self.assertEqual(["2.C1.P1", "2.C1.P2"], update["ControlJobs"][0]["PJobNameList"])
+        self.assertEqual(["2.C2.P1"], update["ControlJobs"][1]["PJobNameList"])
+        self.assertEqual(3, update["ControlJobs"][0]["Priority"])
+        self.assertEqual(-1, update["ControlJobs"][1]["Priority"])
+        self.assertEqual(2, update["ControlJobs"][1]["JobType"])
+        self.assertEqual(3, update["ControlJobs"][1]["TaskMode"])
+        self.assertEqual([1, 2], update["ProcessJobs"][0]["MatList"])
+
     def test_route_step_and_visit_fields_are_preserved(self) -> None:
         """显式 StepID/PostStepID/NeedProcess 和 IVisit 字段应进入标准 Route。"""
         route = {
@@ -140,14 +176,20 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual(12, process_visit["QTimeLimit"])
         self.assertEqual(34, process_visit["ResidencyConstraint"])
 
-    def test_editor_uses_main_tabs_and_step_drawer(self) -> None:
-        """页面应移除公共 Recipe 面板，并用独立标签和点击 Step 抽屉编辑 Visit。"""
+    def test_editor_uses_persistent_route_table_and_step_drawer(self) -> None:
+        """Route 应使用候选设备列表和自动保存，抽屉只编辑简化的工艺时间表。"""
         html = EDITOR_PATH.read_text(encoding="utf-8")
         self.assertIn('data-tab-target="schedule"', html)
         self.assertIn('data-tab-target="route"', html)
         self.assertIn('data-tab-target="clean"', html)
         self.assertIn('id="stepDrawer"', html)
-        self.assertIn("点击编辑 Visits", html)
+        self.assertIn('class="route-table"', html)
+        self.assertIn('data-scope="stage-candidate-toggle"', html)
+        self.assertIn("<th>ProcessTime</th>", html)
+        self.assertIn("<b>Recipe</b>", html)
+        self.assertIn("<b>Weight · Offset</b>", html)
+        self.assertIn("scheduleAutoSave", html)
+        self.assertIn('window.addEventListener("pagehide"', html)
         self.assertIn("StepID", html)
         self.assertIn("PostStepID", html)
         self.assertIn("NeedProcess", html)
@@ -160,6 +202,12 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn('id="copyTestButton"', html)
         self.assertIn('id="saveTestButton"', html)
         self.assertIn("saveCurrentTest(true)", html)
+        self.assertIn('data-action="add-cjob"', html)
+        self.assertIn('data-action="add-pjob"', html)
+        self.assertIn('data-scope="cjob"', html)
+        self.assertIn('data-scope="pjob"', html)
+        self.assertIn("PJobNameList", html)
+        self.assertIn("重算轮次 → CJob → PJob", html)
         self.assertIn("失败也会生成", html)
         self.assertNotIn('id="recipeList"', html)
 
@@ -200,6 +248,10 @@ class ConfigEditorServerTests(unittest.TestCase):
             self.assertEqual([{"name": "RouteA"}], loaded["tests"][0]["routes"])
             self.assertEqual([{"name": "RoutePM34"}], updated_second["routes"])
             self.assertEqual(2, updated_second["roundCount"])
+            migrated = updated_second["rounds"][1]["cjobs"][0]
+            self.assertEqual("2", migrated["taskId"])
+            self.assertEqual(["P1"], migrated["pJobNameList"])
+            self.assertEqual("Added", migrated["pjobs"][0]["foupId"])
             self.assertEqual(2, list_workspace_devices(store_path)[0]["testCount"])
 
             delete_workspace_test(device["id"], first["id"], store_path)
@@ -207,6 +259,40 @@ class ConfigEditorServerTests(unittest.TestCase):
             self.assertEqual([second["id"]], [item["id"] for item in remaining])
             with self.assertRaises(ValueError):
                 delete_workspace_test(device["id"], second["id"], store_path)
+
+    def test_nested_rounds_persist_without_reordering(self) -> None:
+        """多轮、多 CJob/PJob 保存后重新读取，应保留时间与归属并重算只读字段。"""
+        with tempfile.TemporaryDirectory() as directory:
+            store_path = Path(directory) / "workspaces.json"
+            device, _ = import_workspace_device("device.json", self.device, store_path)
+            nested = {
+                "name": "三级结构", "strategy": "heuristic", "roundCount": 3,
+                "times": [0, 70, 160], "options": {}, "cleans": [], "routes": [{"name": "Route12"}],
+                "rounds": [
+                    {"currentTime": 0, "cjobs": [{"pjobs": [{"routeRef": "Route12", "loadPort": "LP1", "waferCount": 2}]}]},
+                    {"currentTime": 70, "cjobs": [
+                        {"jobType": "NormalLot", "priority": 2, "pjobs": [
+                            {"routeRef": "Route12", "loadPort": "LP2", "waferCount": 3},
+                            {"routeRef": "Route12", "loadPort": "LP3", "waferCount": 1},
+                        ]},
+                        {"jobType": "HigherLot", "priority": 8, "taskMode": "Sequential", "pjobs": [
+                            {"routeRef": "Route12", "loadPort": "LP4", "waferCount": 4},
+                        ]},
+                    ]},
+                    {"currentTime": 160, "cjobs": [{"pjobs": [{"routeRef": "Route12", "loadPort": "LP1", "waferCount": 1}]}]},
+                ],
+            }
+            created = create_workspace_test(device["id"], nested, store_path)
+            loaded = get_workspace_device(device["id"], store_path)["tests"][0]
+            self.assertEqual([0.0, 70.0, 160.0], loaded["times"])
+            self.assertEqual(created["id"], loaded["id"])
+            second = loaded["rounds"][1]
+            self.assertEqual(2, len(second["cjobs"]))
+            self.assertEqual(["2", "2"], [item["taskId"] for item in second["cjobs"]])
+            self.assertEqual(["P1", "P2"], second["cjobs"][0]["pJobNameList"])
+            self.assertEqual([1, 2, 3], second["cjobs"][0]["pjobs"][0]["matList"])
+            self.assertEqual(-1, second["cjobs"][1]["priority"])
+            self.assertEqual("Sequential", second["cjobs"][1]["taskMode"])
 
     def test_pse300_arbitrary_recompute_waits_for_first_safe_time(self) -> None:
         """PSE300 任意时刻请求应保留旧 Move 到安全点，新 Move 从实际安全时间开始。"""
