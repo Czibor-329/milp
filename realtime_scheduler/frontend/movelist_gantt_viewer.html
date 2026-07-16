@@ -1431,10 +1431,20 @@
         ? rawTime
         : point && (point.EffectiveTime ?? point.effectiveTime ?? rawTime);
       const effectiveTime = Number(rawEffectiveTime);
+      const rawScheduleStart = typeof point === "number"
+        ? rawTime
+        : point && (point.ScheduleStartTime ?? point.scheduleStartTime ?? rawTime);
+      const rawRecoveryEnd = typeof point === "number"
+        ? rawEffectiveTime
+        : point && (point.RecoveryEndTime ?? point.recoveryEndTime ?? rawEffectiveTime);
+      const scheduleStartTime = Number(rawScheduleStart);
+      const recoveryEndTime = Number(rawRecoveryEnd);
       const displayIndex = Number(point && (point.Index ?? point.index));
       return {
         time,
         effectiveTime: Number.isFinite(effectiveTime) ? effectiveTime : time,
+        scheduleStartTime: Number.isFinite(scheduleStartTime) ? scheduleStartTime : time,
+        recoveryEndTime: Number.isFinite(recoveryEndTime) ? recoveryEndTime : effectiveTime,
         index: Number.isFinite(displayIndex) ? displayIndex : index + 1,
         reason: String(point && (point.Reason ?? point.reason) || "重算")
       };
@@ -2367,8 +2377,8 @@
           const x = labelW + (point.time - dataset.view.t0) * xScale;
           const label = `# ${point.index} (${fmt(point.time)} s)`;
           const labelWidth = Math.max(76, label.length * 6.4 + 16);
-          const executionNote = Math.abs(point.effectiveTime - point.time) > 1e-6
-            ? `请求 ${fmt(point.time)}s · 实际执行 ${fmt(point.effectiveTime)}s`
+          const executionNote = Math.abs(point.recoveryEndTime - point.scheduleStartTime) > 1e-6
+            ? `请求 ${fmt(point.time)}s · 新计划 ${fmt(point.scheduleStartTime)}s · 收尾结束 ${fmt(point.recoveryEndTime)}s`
             : `${fmt(point.time)}s`;
           return `
             <g class="recompute-marker-label" pointer-events="none">

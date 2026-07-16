@@ -11,7 +11,7 @@ Durations（原 milp._Timing）从 Problem 的 robots/chambers 取各动作时�
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 
 # --------------------------------------------------------------------------- #
@@ -91,6 +91,22 @@ class CleanSpec:
     task: str = ""
 
 
+@dataclass
+class RuntimeAvailability:
+    """实时重算相对排程起点的资源与物料最早可用时间。
+
+    时间均为相对秒数。站点字段描述共享门、取放和环境资源；槽位字段保留
+    多槽设备的独立占用；Robot 字段用于限制首个搬运；物料字段用于限制
+    投影状态在未来才生效的在机晶圆。
+    """
+
+    station_ready: Dict[str, float] = field(default_factory=dict)
+    slot_ready: Dict[Tuple[str, int], float] = field(default_factory=dict)
+    robot_ready: Dict[str, float] = field(default_factory=dict)
+    robot_positions: Dict[str, str] = field(default_factory=dict)
+    material_ready: Dict[int, float] = field(default_factory=dict)
+
+
 # --------------------------------------------------------------------------- #
 # 求解输入容器（取代 PreprocessedTask）
 # --------------------------------------------------------------------------- #
@@ -106,6 +122,8 @@ class Problem:
     dummy_wac: List[CleanSpec] = field(default_factory=list)
     # dummy 清洁 pjob 名 → 所属产品 pjob 名（milp_clean 用于把 dummy 段夹在 job 边界之间定序）
     dummy_owner: Dict[str, str] = field(default_factory=dict)
+    # 实时重算专用的相对资源释放下界；首排保持 None，不影响离线调度口径。
+    runtime_availability: Optional[RuntimeAvailability] = None
 
 
 # --------------------------------------------------------------------------- #

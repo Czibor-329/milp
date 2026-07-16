@@ -44,7 +44,7 @@ from src.validation.move_fields import (
     COMPLETE_MOVE, PICK_MOVE, PLACE_MOVE, PREPARE_MOVE, PRE_PREPARE_MOVE,
     PRE_TRANS_MOVE, SWAP_MOVE,
 )
-from src.validation.state import DoorState, LoadLockState
+from src.validation.state import DoorState
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -90,6 +90,14 @@ class BuildState:
     next_material_id: int = 1
     next_slot_by_port: Dict[str, int] = field(default_factory=dict)
     job_names: set[str] = field(default_factory=set)
+
+
+@dataclass
+class RecoveryProjection:
+    """一次重算请求需要保留的旧动作投影结果。"""
+
+    recovery_end: float
+    material_ready_times: Dict[int, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -693,30 +701,261 @@ def _planned_event_groups(moves: Sequence[Mapping[str, Any]]) -> List[Dict[str, 
     return ordered
 
 
+_RECOVERY_TRANSPORT_TYPES = frozenset({
+    PICK_MOVE,
+    PLACE_MOVE,
+    SWAP_MOVE,
+    PRE_TRANS_MOVE,
+    PREPARE_MOVE,
+    COMPLETE_MOVE,
+})
+
+
+def _move_material_ids(move: Mapping[str, Any]) -> set[int]:
+    """返回普通搬运或 Swap 字段中引用的全部物料编号。"""
+    material_ids: set[int] = set()
+    for key in ("MatIDList", "RecvMatList", "SendMatList"):
+        material_ids.update(
+            int(value)
+            for value in (move.get(key) or [])
+            if isinstance(value, int)
+        )
+    return material_ids
+
+
+def _move_accesses_station(move: Mapping[str, Any], station_name: str) -> bool:
+    """判断一条取、放或换片 Move 是否访问指定站点。"""
+    station_values = {
+        str(move.get("Station") or ""),
+        *(str(value) for value in (move.get("SrcStationList") or [])),
+        *(str(value) for value in (move.get("DestStationList") or [])),
+        *(str(value) for value in (move.get("StationList") or [])),
+    }
+    return station_name in station_values
+
+
+def _following_close_id(
+    moves: Sequence[Mapping[str, Any]],
+    station_name: str,
+    action_end: float,
+) -> Optional[int]:
+    """查找取放或换片结束后同站点的第一条关门 Move。"""
+    candidates = [
+        move for move in moves
+        if move.get("MoveType") == COMPLETE_MOVE
+        and str(move.get("Station") or move.get("ModuleName") or "") == station_name
+        and float(move.get("StartTime") or 0.0) >= action_end - TIME_TOLERANCE
+    ]
+    if not candidates:
+        return None
+    return int(min(candidates, key=lambda move: (
+        float(move.get("StartTime") or 0.0),
+        int(move["MoveID"]),
+    ))["MoveID"])
+
+
+def _transport_tail_ids(
+    moves: Sequence[Mapping[str, Any]],
+    material_id: int,
+    cutoff: float,
+) -> set[int]:
+    """返回指定在手机械手物料到下一次 Place 并关门为止的旧动作集合。"""
+    places = [
+        move for move in moves
+        if move.get("MoveType") == PLACE_MOVE
+        and material_id in _move_material_ids(move)
+        and float(move.get("EndTime") or 0.0) > cutoff + TIME_TOLERANCE
+    ]
+    if not places:
+        raise ValueError(f"旧计划找不到 MatID={material_id} 的后续 Place")
+    place = min(places, key=lambda move: (
+        float(move.get("StartTime") or 0.0),
+        int(move["MoveID"]),
+    ))
+    destination = str((place.get("DestStationList") or [""])[0])
+    place_end = float(place.get("EndTime") or place.get("StartTime") or cutoff)
+    close_id = _following_close_id(moves, destination, place_end)
+    closure_end = place_end
+    if close_id is not None:
+        close_move = next(move for move in moves if int(move["MoveID"]) == close_id)
+        closure_end = float(close_move.get("EndTime") or closure_end)
+
+    required = {
+        int(move["MoveID"])
+        for move in moves
+        if move.get("MoveType") in _RECOVERY_TRANSPORT_TYPES
+        and material_id in _move_material_ids(move)
+        and float(move.get("EndTime") or 0.0) > cutoff + TIME_TOLERANCE
+        and float(move.get("StartTime") or 0.0) <= closure_end + TIME_TOLERANCE
+    }
+    # LoadLock 目标侧可能需要在 Place 前先做空抽/空充。它没有 MatID，不能仅靠
+    # 晶圆字段命中，但属于该搬运链使目标门可访问的必要前置动作。
+    place_prepare_start = min(
+        (
+            float(move.get("StartTime") or 0.0)
+            for move in moves
+            if move.get("MoveType") == PREPARE_MOVE
+            and str(move.get("Station") or move.get("ModuleName") or "") == destination
+            and material_id in _move_material_ids(move)
+            and abs(
+                float(move.get("EndTime") or 0.0)
+                - float(place.get("StartTime") or 0.0)
+            ) <= TIME_TOLERANCE
+        ),
+        default=place_end,
+    )
+    required.update(
+        int(move["MoveID"])
+        for move in moves
+        if move.get("MoveType") == PRE_PREPARE_MOVE
+        and str(move.get("Station") or move.get("ModuleName") or "") == destination
+        and float(move.get("StartTime") or 0.0) >= cutoff - TIME_TOLERANCE
+        and float(move.get("EndTime") or 0.0) <= place_prepare_start + TIME_TOLERANCE
+    )
+    # 旧计划可能在 Pick 前安排一条无 MatID 的空载转位。恢复链若只按晶圆
+    # 筛选会漏掉它，导致 Robot 仍指向上一站点却直接 Pick。
+    selected_picks = [
+        move for move in moves
+        if int(move["MoveID"]) in required and move.get("MoveType") == PICK_MOVE
+    ]
+    for pick in selected_picks:
+        robot_name = str(pick.get("Robot") or pick.get("ModuleName") or "")
+        pick_start = float(pick.get("StartTime") or 0.0)
+        required.update(
+            int(move["MoveID"])
+            for move in moves
+            if move.get("MoveType") == PRE_TRANS_MOVE
+            and not _move_material_ids(move)
+            and str(move.get("Robot") or move.get("ModuleName") or "") == robot_name
+            and abs(float(move.get("EndTime") or 0.0) - pick_start) <= TIME_TOLERANCE
+            and float(move.get("EndTime") or 0.0) > cutoff + TIME_TOLERANCE
+        )
+    if close_id is not None:
+        required.add(close_id)
+    return required
+
+
+def _required_recovery_ids(
+    scheduler: RealtimeRescheduler,
+    moves: Sequence[Mapping[str, Any]],
+    cutoff: float,
+) -> set[int]:
+    """从请求时刻状态选择运行 Move 和必须完成的 Pick–Move–Place 收尾链。"""
+    planned_by_id = {int(move["MoveID"]): move for move in moves}
+    required = set(scheduler.running_move_ids)
+    tail_materials: set[int] = set()
+
+    # 运行中的加工、清洁和抽充气只保留自身；搬运类动作还要把晶圆落到
+    # 原计划下一目标。关门动作是否属于搬运中段由实时持片状态统一判断。
+    for move_id in required:
+        move = planned_by_id[move_id]
+        move_type = move.get("MoveType")
+        if move_type in {PREPARE_MOVE, PICK_MOVE, PLACE_MOVE, PRE_TRANS_MOVE}:
+            tail_materials.update(_move_material_ids(move))
+        elif move_type == SWAP_MOVE:
+            tail_materials.update(
+                int(value) for value in (move.get("RecvMatList") or []) if isinstance(value, int)
+            )
+
+    state = scheduler.state
+    for robot in state.robots.values():
+        tail_materials.update(
+            int(material.material_id)
+            for material in robot.hands.values()
+            if material is not None and isinstance(material.material_id, int)
+        )
+
+    # 开门已完成但对应取放恰好从 cutoff 开始时，该 Move 尚未收到 Running。
+    # 按用户口径继续原 Pick–Move–Place，而不是直接关回当前门。
+    for station_name, station in state.stations.items():
+        if station.door is DoorState.CLOSED:
+            continue
+        if any(
+            _move_accesses_station(planned_by_id[move_id], station_name)
+            for move_id in required
+            if move_id in planned_by_id
+        ):
+            continue
+        related = [
+            move for move in moves
+            if move.get("MoveType") in {PICK_MOVE, PLACE_MOVE, SWAP_MOVE}
+            and float(move.get("StartTime") or 0.0) >= cutoff - TIME_TOLERANCE
+            and _move_accesses_station(move, station_name)
+        ]
+        if not related:
+            continue
+        action = min(related, key=lambda move: (
+            float(move.get("StartTime") or 0.0),
+            int(move["MoveID"]),
+        ))
+        required.add(int(action["MoveID"]))
+        if action.get("MoveType") == SWAP_MOVE:
+            tail_materials.update(
+                int(value) for value in (action.get("RecvMatList") or []) if isinstance(value, int)
+            )
+            close_id = _following_close_id(
+                moves,
+                station_name,
+                float(action.get("EndTime") or action.get("StartTime") or cutoff),
+            )
+            if close_id is not None:
+                required.add(close_id)
+        else:
+            tail_materials.update(_move_material_ids(action))
+
+    for material_id in tail_materials:
+        required.update(_transport_tail_ids(moves, material_id, cutoff))
+    return required
+
+
 def advance_to_recompute(
     scheduler: RealtimeRescheduler,
     cutoff: float,
     recorded_events: Optional[List[Dict[str, Any]]] = None,
-) -> float:
-    """沿旧计划推进到请求时刻后的第一个全局安全切点，不限制最长等待。"""
+) -> RecoveryProjection:
+    """投影请求时刻状态，只执行运行 Move 和必要搬运收尾链。
+
+    返回的 ``recovery_end`` 只是固定旧动作的最晚结束时间；新排程仍从 cutoff
+    开始，并通过投影状态中的资源占用终点避免与这些旧动作冲突。
+    """
     cutoff = max(float(cutoff), scheduler.state_time)
-    groups = _planned_event_groups(scheduler.current_plan)
-    planned_by_id = {int(move["MoveID"]): move for move in scheduler.current_plan}
+    moves = scheduler.current_plan
+    groups = _planned_event_groups(moves)
+    planned_by_id = {int(move["MoveID"]): move for move in moves}
     started: set[int] = set()
     finished: set[int] = set()
+    material_ready_times: Dict[int, float] = {}
 
     def apply_notification(notification: Mapping[str, Any]) -> None:
-        """发送一条计划通知，并同步维护已开始、已完成集合与复现日志。"""
-        scheduler.update_move_state(notification)
-        move_id = int(notification["MoveID"])
-        if notification.get("MoveState") == MoveStateReplay.RUNNING:
+        """发送一条计划通知，并同步维护执行集合、物料释放时间与复现日志。"""
+        applied = dict(notification)
+        move_id = int(applied["MoveID"])
+        planned_move = planned_by_id[move_id]
+        if (
+            applied.get("MoveState") == MoveStateReplay.RUNNING
+            and planned_move.get("MoveType") == PRE_TRANS_MOVE
+            and not _move_material_ids(planned_move)
+        ):
+            robot_name = str(planned_move.get("Robot") or planned_move.get("ModuleName") or "")
+            robot = scheduler.state.resolve_robot(robot_name)
+            if robot is not None and robot.position:
+                applied["SrcStationList"] = [robot.position]
+        scheduler.update_move_state(applied)
+        if applied.get("MoveState") == MoveStateReplay.RUNNING:
             started.add(move_id)
         else:
             finished.add(move_id)
+            move = planned_by_id[move_id]
+            end_time = float(applied.get("EndTime") or move.get("EndTime") or cutoff)
+            for material_id in _move_material_ids(move):
+                material_ready_times[material_id] = max(
+                    material_ready_times.get(material_id, cutoff),
+                    end_time,
+                )
         if recorded_events is not None:
-            recorded_events.append(deepcopy(notification))
+            recorded_events.append(deepcopy(applied))
 
-    # 先还原请求时刻的真实状态：只开始严格早于请求时间的 Move，并落地截至请求时刻的完成。
+    # 还原 t1：只启动严格早于请求时刻的 Move，同刻开始的动作由新调度取消。
     for group in groups:
         for event_time, notification in group["priorFinishes"]:
             move_id = int(notification["MoveID"])
@@ -731,69 +970,47 @@ def advance_to_recompute(
             if event_time <= cutoff + TIME_TOLERANCE and move_id in started and move_id not in finished:
                 apply_notification(notification)
 
-    if scheduler.can_recompute:
-        return float(cutoff)
-
-    # cutoff 时仍在 LoadPort 的晶圆尚未发片；冻结它们的全部旧动作。已经进入设备的
-    # 晶圆则按旧计划排空到 LoadPort，之后立即重算，避免连续启动整批剩余晶圆。
-    frozen_materials = {
-        slot.material.material_id
-        for name, station in scheduler.state.stations.items()
-        if str(getattr(scheduler.problem.chambers.get(name), "type", "")).lower() == "loadport"
-        for slot in station.slots.values()
-        if slot.material is not None
-    }
-
-    # 请求时刻不安全时只等待已经开始的 Move 完成。cutoff 之后的旧 Move 必须取消，
-    # 不能为了寻找安全点继续启动它们，否则连续流水会把重算拖到整批 Job 结束。
-    last_time = float(cutoff)
+    required = _required_recovery_ids(scheduler, moves, cutoff)
+    recovery_end = float(cutoff)
     for group in groups:
-        group_time = max(float(cutoff), float(group["time"]))
-        if float(group["time"]) < cutoff - TIME_TOLERANCE:
+        group_time = float(group["time"])
+        if group_time < cutoff - TIME_TOLERANCE:
             continue
         for _, notification in group["priorFinishes"]:
             move_id = int(notification["MoveID"])
-            if move_id in started and move_id not in finished:
+            if move_id in required and move_id in started and move_id not in finished:
                 apply_notification(notification)
-        last_time = max(last_time, group_time)
-        if scheduler.can_recompute:
-            return last_time
-        # 允许把 cutoff 前已经打开的搬运事务收尾（取/放/关门），但禁止启动新的
-        # 开门、加工事务和新一片发片。这样能抵达最近稳定点而不会继续整条流水。
+                recovery_end = max(recovery_end, group_time)
         for _, notification in group["starts"]:
             move_id = int(notification["MoveID"])
-            move = planned_by_id.get(move_id, {})
-            move_type = move.get("MoveType")
-            move_materials = set(move.get("MatIDList") or [])
-            if move_id not in started and not (frozen_materials & move_materials):
-                try:
-                    apply_notification(notification)
-                except ValueError:
-                    # 与当前已打开事务无关的旧动作留给重算取消。
-                    continue
+            if move_id in required and move_id not in started:
+                apply_notification(notification)
         for _, notification in group["sameFinishes"]:
             move_id = int(notification["MoveID"])
-            if move_id in started and move_id not in finished:
+            if move_id in required and move_id in started and move_id not in finished:
                 apply_notification(notification)
-        if scheduler.can_recompute:
-            return last_time
+                recovery_end = max(recovery_end, group_time)
+        if required.issubset(finished):
+            break
 
-    if scheduler.can_recompute:
-        return last_time
-    open_doors = [name for name, station in scheduler.state.stations.items()
-                  if station.door is not DoorState.CLOSED]
-    held = [f"{robot.name}#{slot_id}" for robot in scheduler.state.robots.values()
-            for slot_id, material in robot.hands.items() if material is not None]
-    loadlock_mats = {
-        name: [slot.material.material_id for slot in station.slots.values() if slot.material is not None]
-        for name, station in scheduler.state.stations.items()
-        if isinstance(station, LoadLockState)
-        and any(slot.material is not None for slot in station.slots.values())
-    }
-    raise ValueError(
-        f"旧计划找不到全局安全重算时刻：开门={open_doors}，"
-        f"机械手持片={held}，LoadLock={loadlock_mats}"
-    )
+    if not required.issubset(finished) or not scheduler.can_recompute:
+        open_doors = [
+            name for name, station in scheduler.state.stations.items()
+            if station.door is not DoorState.CLOSED
+        ]
+        held = [
+            f"{robot.name}#{slot_id}"
+            for robot in scheduler.state.robots.values()
+            for slot_id, material in robot.hands.items()
+            if material is not None
+        ]
+        running = sorted(scheduler.running_move_ids)
+        missing = sorted(required - finished)
+        raise ValueError(
+            f"旧计划无法完成最小重算收尾：未完成={missing[:8]}，运行={running}，"
+            f"开门={open_doors}，机械手持片={held}"
+        )
+    return RecoveryProjection(recovery_end, material_ready_times)
 
 
 def _load_rl_policy() -> Any:
@@ -862,6 +1079,8 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
         "kind": "initial",
         "requestedTime": 0.0,
         "effectiveTime": 0.0,
+        "scheduleStartTime": 0.0,
+        "recoveryEndTime": 0.0,
         "jobCount": _round_pjob_count(rounds[0]),
         "elapsedMs": elapsed_ms,
         "segmentEnd": _segment_end(scheduler.current_plan),
@@ -872,7 +1091,8 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
     for index, round_config in enumerate(rounds[1:], start=2):
         requested_time = times[index - 1]
         notifications: List[Dict[str, Any]] = []
-        effective_time = advance_to_recompute(scheduler, requested_time, notifications)
+        recovery = advance_to_recompute(scheduler, requested_time, notifications)
+        effective_time = recovery.recovery_end
         for notification in notifications:
             event_time = (
                 notification.get("EndTime")
@@ -895,6 +1115,8 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
             update,
             effective_time,
             cutoff_time=requested_time,
+            schedule_start_time=requested_time,
+            material_ready_times=recovery.material_ready_times,
             reason=f"第 {index} 轮新增 Job",
         )
         elapsed_ms = (time.perf_counter() - round_started) * 1000.0
@@ -903,12 +1125,14 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
             "kind": "recompute",
             "requestedTime": requested_time,
             "effectiveTime": effective_time,
+            "scheduleStartTime": requested_time,
+            "recoveryEndTime": effective_time,
             "jobCount": _round_pjob_count(round_config),
             "elapsedMs": elapsed_ms,
             "segmentEnd": _segment_end(scheduler.current_plan),
         })
         suffix = (
-            f"，旧计划继续执行至 {effective_time:.2f}s 的首个安全时刻"
+            f"，固定旧动作最晚执行至 {effective_time:.2f}s；新计划从请求时刻并行开始"
             if effective_time > requested_time + TIME_TOLERANCE else ""
         )
         logs.append(

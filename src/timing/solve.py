@@ -23,6 +23,59 @@ def solve_timing(ir: Problem, wafers, orders: Optional[_Orders]=None) -> SolveRe
     edges: List[Tuple[int, int, float]] = []
     res_edges: List[Tuple[int, int, float]] = []   # 驻留后向边，单列以便诊断
 
+    # 实时重算：投影状态可能要到未来才成立。排程仍从 t1=0 开始，但任何首次
+    # 使用受影响站点、槽位、Robot 或物料的动作，都不能早于其相对释放时刻。
+    availability = ir.runtime_availability
+    if availability is not None:
+        for w in wafers:
+            material_floor = max(0.0, float(availability.material_ready.get(w.mat_id, 0.0)))
+            for j, stage in enumerate(w.stages):
+                station_floor = max(0.0, float(availability.station_ready.get(stage.chamber, 0.0)))
+                slot_floor = max(
+                    0.0,
+                    float(availability.slot_ready.get((stage.chamber, stage.slot + 1), 0.0)),
+                )
+                resource_floor = max(station_floor, slot_floor)
+
+                # 到站动作的最早实际资源占用从目标开门开始；续排首工序没有
+                # in_robot，此时 a 本身就是加工/抽充气或源状态的时间锚点。
+                arrival_floor = resource_floor
+                if stage.in_robot:
+                    arrival_floor += tm.place_t(stage.in_robot, stage.chamber)
+                    arrival_floor += tm.place_pre(stage.in_robot, stage.chamber)
+                if j == 0:
+                    arrival_floor = max(arrival_floor, material_floor)
+                if arrival_floor > 0.0:
+                    edges.append((nodes.source, nodes.a(w.wid, j), arrival_floor))
+
+                if j >= len(w.stages) - 1:
+                    continue
+                departure_floor = resource_floor + (
+                    tm.pick_pre(stage.out_robot, stage.chamber) if stage.out_robot else 0.0
+                )
+                if j == 0:
+                    departure_floor = max(
+                        departure_floor,
+                        material_floor + (
+                            tm.pick_pre(stage.out_robot, stage.chamber) if stage.out_robot else 0.0
+                        ),
+                    )
+                if departure_floor > 0.0:
+                    edges.append((nodes.source, nodes.r(w.wid, j), departure_floor))
+
+        # Robot 的互斥顺序保证后续 hop 晚于首个 hop，只需限制解码顺序中的
+        # 第一次使用。若 Robot 投影位置不在首个来源站，还要为导出的空载转位留时。
+        for robot_name, hops in orders.robots.items():
+            ready = max(0.0, float(availability.robot_ready.get(robot_name, 0.0)))
+            if ready <= 0.0 or not hops:
+                continue
+            first_wid, first_stage = hops[0]
+            source_station = wmap[first_wid].stages[first_stage].chamber
+            projected_position = availability.robot_positions.get(robot_name)
+            if projected_position and projected_position != source_station:
+                ready += tm.move(robot_name)
+            edges.append((nodes.source, nodes.r(first_wid, first_stage), ready))
+
     # 片内：P / 链式（正反向，等价于 a=r+L）/ 驻留上界
     for w in wafers:
         K = len(w.stages) - 1

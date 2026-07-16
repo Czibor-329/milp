@@ -953,9 +953,9 @@
       writeTerminal(["$ 调度完成", ...result.rounds.map(round => {
         if (round.kind === "initial") return `  #${round.index} 首次 | ${round.elapsedMs.toFixed(1)} ms`;
         const request = Number(round.requestedTime);
-        const effective = Number(round.effectiveTime);
-        const timing = Math.abs(effective - request) > 1e-6
-          ? `@${request}s 请求 → @${effective}s 执行`
+        const recoveryEnd = Number(round.recoveryEndTime ?? round.effectiveTime);
+        const timing = Math.abs(recoveryEnd - request) > 1e-6
+          ? `@${request}s 重算 · 固定旧动作收尾至 @${recoveryEnd}s`
           : `@${request}s 重算`;
         return `  #${round.index} ${timing} | ${round.elapsedMs.toFixed(1)} ms`;
       }), "", ...result.logs].join("\n"));

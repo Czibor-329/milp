@@ -1,7 +1,7 @@
-"""实时重算：Move 通知驱动状态、截断旧计划并用 heuristic + timing 生成续排。
+"""实时重算：投影在途动作状态，从请求时刻并行生成带资源释放下界的续排。
 
-重算只在稳定切点执行：没有仍在运行的 Move、所有门已关闭、机械手不持片。这样旧计划中
-尚未开始的 Move 可以立即作废，已完成 Move 与新计划可以无恢复动作地拼成统一 MoveList。
+重算保留已经运行的 Move 和必要搬运收尾链，投影到门关闭、Robot 空手的状态；新计划仍从
+原请求时刻开始，受旧动作影响的站点、槽位、Robot 和晶圆分别等待各自的释放时刻。
 """
 
 from __future__ import annotations
@@ -11,12 +11,13 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from src.export import export_movelist
-from src.model import Durations, Problem, Stage, Wafer
+from src.model import Durations, Problem, RuntimeAvailability, Stage, Wafer
 from src.parse import parse_task
 from src.timing import start_schedule, start_schedule_by_rl
 from src.validation import MoveStateReplay, populate_premove_ids, validate_move_list
 from src.validation.move_fields import (
-    PICK_MOVE, PLACE_MOVE, PREPARE_MOVE, PRE_PREPARE_MOVE, PROCESS_MOVE, SWAP_MOVE, sort_key,
+    COMPLETE_MOVE, PICK_MOVE, PLACE_MOVE, PREPARE_MOVE, PRE_PREPARE_MOVE,
+    PROCESS_MOVE, SWAP_MOVE, sort_key,
 )
 from src.validation.state import (
     ATMOSPHERE,
@@ -48,6 +49,8 @@ class RecomputePoint:
         return {
             "Time": self.time,
             "EffectiveTime": self.effective_time,
+            "ScheduleStartTime": self.time,
+            "RecoveryEndTime": self.effective_time,
             "Index": self.index,
             "Reason": self.reason,
         }
@@ -108,8 +111,13 @@ class RealtimeRescheduler:
         return float(self._tracker.current_time)
 
     @property
+    def running_move_ids(self) -> frozenset[int]:
+        """返回当前计划中已经开始但尚未完成的 MoveID。"""
+        return self._tracker.running_move_ids
+
+    @property
     def can_recompute(self) -> bool:
-        """返回当前状态是否满足无运行 Move、门全关、Robot 空手且 LoadLock 无片。"""
+        """返回当前状态是否满足无运行 Move、门全关且 Robot 空手。"""
         if self._tracker.running_move_ids:
             return False
         if any(station.door is not DoorState.CLOSED for station in self._tracker.state.stations.values()):
@@ -119,13 +127,7 @@ class RealtimeRescheduler:
             for robot in self._tracker.state.robots.values()
             for material in robot.hands.values()
         )
-        loadlocks_empty = all(
-            slot.material is None
-            for station in self._tracker.state.stations.values()
-            if isinstance(station, LoadLockState)
-            for slot in station.slots.values()
-        )
-        return robots_empty and loadlocks_empty
+        return robots_empty
 
     def update_move_state(self, notification: Mapping[str, Any]) -> MachineState:
         """接收外部 Move 开始/结束通知并更新 ``src.validation.state`` 状态。"""
@@ -138,32 +140,43 @@ class RealtimeRescheduler:
         *,
         reason: str = "new_job",
         cutoff_time: Optional[float] = None,
+        schedule_start_time: Optional[float] = None,
+        material_ready_times: Optional[Mapping[int, float]] = None,
     ) -> Dict[str, Any]:
-        """在当前稳定状态加入新任务，取消旧计划未来 Move 并启发式续排。
+        """在投影稳定状态加入新任务，并从请求时刻带资源释放下界续排。
 
         ``cutoff_time`` 是外部请求重算的时刻；调用方必须继续执行旧计划，直到
-        ``current_time`` 所指的首个全局安全时刻。旧计划在该安全时刻之前的 Move 会保留，
-        其余旧 Move 作废，新计划从 ``current_time`` 开始。甘特图重算线仍画在原始请求时刻。
+        ``current_time`` 所指的收尾完成时刻。``schedule_start_time`` 是新计划时间原点，
+        通常等于请求时刻；受收尾动作影响的资源和物料由运行时下界推迟，其余资源可在
+        请求时刻后立即工作。甘特图重算线仍画在原始请求时刻。
         """
         timestamp = float(current_time)
         cutoff = timestamp if cutoff_time is None else float(cutoff_time)
+        schedule_start = timestamp if schedule_start_time is None else float(schedule_start_time)
         if cutoff > timestamp + TIME_TOLERANCE:
             raise ValueError("重算触发时间不能晚于状态稳定时间")
+        if schedule_start < cutoff - TIME_TOLERANCE or schedule_start > timestamp + TIME_TOLERANCE:
+            raise ValueError("新计划起点必须位于重算触发时间与收尾完成时间之间")
         self._ensure_safe_cut(timestamp, cutoff)
         snapshot = self._tracker.state.clone()
         new_problem = parse_task(self.tool_topo, new_update_params)
         _apply_material_start_slots(new_problem, new_update_params)
         combined_problem, next_state = _build_recompute_problem(self.problem, new_problem, snapshot)
+        combined_problem.runtime_availability = _runtime_availability(
+            next_state,
+            schedule_start,
+            material_ready_times or {},
+        )
 
         self._history.extend(self._tracker.executed_moves)
         self._points.append(RecomputePoint(cutoff, timestamp, len(self._points) + 1, reason))
-        new_segment = self._schedule_segment(combined_problem, next_state, timestamp)
+        new_segment = self._schedule_segment(combined_problem, next_state, schedule_start)
         new_segment, self._next_move_id = _renumber_segment(new_segment, self._next_move_id)
 
         self.problem = combined_problem
         self._current_plan = new_segment
         self._tracker = MoveStateReplay(combined_problem, new_segment, next_state)
-        self._tracker.current_time = timestamp
+        self._tracker.current_time = schedule_start
         return self.combined_output()
 
     def combined_output(self) -> Dict[str, Any]:
@@ -220,8 +233,8 @@ class RealtimeRescheduler:
             raise RuntimeError(f"{self.strategy} 重算未找到可行计划")
         moves = export_movelist(problem, result, state)
         moves = _serialize_initial_processing(moves, state)
-        moves = _prepend_environment_setups(problem, moves, state)
         moves = _repair_loadlock_prepare_overlap(moves, state)
+        moves = _prepend_environment_setups(problem, moves, state)
         shifted = _shift_moves(moves, offset)
         issues = validate_move_list(problem, shifted, state)
         if issues:
@@ -503,6 +516,57 @@ def _assign_incoming_resources(
                 stage.cands = list(stage.cands or [chosen])
 
 
+def _runtime_availability(
+    state: MachineState,
+    schedule_start: float,
+    material_ready_times: Mapping[int, float],
+) -> RuntimeAvailability:
+    """把投影状态中的绝对占用终点转换成相对新计划起点的下界。
+
+    站点共享资源与槽位占用分别保留，避免一个槽位的在途加工无谓锁死同模块
+    的其他槽；Robot 位置同时传给 timing，用于判断首个空载转位是否需要留时。
+    """
+    origin = float(schedule_start)
+
+    def relative(timestamp: float) -> float:
+        """把绝对释放时刻转换为不小于零的相对秒数。"""
+        return max(0.0, float(timestamp) - origin)
+
+    station_ready = {
+        name: relative(max(
+            float(station.door_busy_until),
+            float(station.transfer_busy_until),
+            float(station.environment_busy_until),
+        ))
+        for name, station in state.stations.items()
+    }
+    slot_ready = {
+        (name, slot_id): relative(slot.busy_until)
+        for name, station in state.stations.items()
+        for slot_id, slot in station.slots.items()
+    }
+    robot_ready = {
+        name: relative(robot.busy_until)
+        for name, robot in state.robots.items()
+    }
+    robot_positions = {
+        name: str(robot.position)
+        for name, robot in state.robots.items()
+        if robot.position
+    }
+    material_ready = {
+        int(material_id): relative(timestamp)
+        for material_id, timestamp in material_ready_times.items()
+    }
+    return RuntimeAvailability(
+        station_ready={name: value for name, value in station_ready.items() if value > TIME_TOLERANCE},
+        slot_ready={key: value for key, value in slot_ready.items() if value > TIME_TOLERANCE},
+        robot_ready={name: value for name, value in robot_ready.items() if value > TIME_TOLERANCE},
+        robot_positions=robot_positions,
+        material_ready={key: value for key, value in material_ready.items() if value > TIME_TOLERANCE},
+    )
+
+
 def _shift_moves(moves: Sequence[Mapping[str, Any]], offset: float) -> List[dict]:
     """把 timing 的相对时间平移到实时调度绝对时间轴。"""
     shifted: List[dict] = []
@@ -519,72 +583,146 @@ def _prepend_environment_setups(
     moves: Sequence[Mapping[str, Any]],
     state: MachineState,
 ) -> List[dict]:
-    """必要时在新段开头补 LoadLock 空抽/空充，并整体让出该准备窗口。"""
-    setups: List[dict] = []
-    ordered_moves = sorted(moves, key=sort_key)
-    atmosphere_robots = Durations(problem).atm_robots
-    for station_name, station in state.stations.items():
-        if not isinstance(station, LoadLockState):
-            continue
-        first_pressure = next(
-            (
-                move for move in ordered_moves
-                if move.get("MoveType") == PRE_PREPARE_MOVE
-                and str(move.get("Station") or move.get("ModuleName") or "") == station_name
-            ),
-            None,
-        )
-        first_prepare = next((
-            move for move in ordered_moves
-            if move.get("MoveType") == PREPARE_MOVE
-            and str(move.get("Station") or move.get("ModuleName") or "") == station_name
-        ), None)
-        requirements: List[Tuple[float, str]] = []
-        if first_pressure is not None:
-            requirements.append((float(first_pressure.get("StartTime") or 0.0),
-                                 str(first_pressure.get("LastState") or "").upper()))
-        if first_prepare is not None:
-            mats = set(first_prepare.get("MatIDList") or [])
-            related = next((
-                move for move in ordered_moves
-                if move.get("MoveType") in {PICK_MOVE, PLACE_MOVE, SWAP_MOVE}
-                and mats.intersection(move.get("MatIDList") or [])
-                and station_name in (
-                    list(move.get("SrcStationList") or [])
-                    + list(move.get("DestStationList") or [])
-                    + list(move.get("StationList") or [])
+    """补齐 LoadLock 整段时间线中的环境转换，并为转换后的动作让出窗口。
+
+    续排首 stage 可能是已经留在 LoadLock 内的 source，timing 的常规相邻占用
+    看不到它此前形成的 ATM/VAC 状态。这里按时间回放每次开门和抽充气；发现
+    当前环境不满足下一动作时，在该动作原起点插入空抽/空充，并把此后的全局
+    动作顺延相应时长，从而保持既有资源先后关系。
+    """
+    repaired = [dict(move) for move in moves]
+    loadlocks = {
+        name: station
+        for name, station in state.stations.items()
+        if isinstance(station, LoadLockState)
+    }
+    if not loadlocks:
+        return repaired
+
+    while True:
+        environments = {name: station.environment for name, station in loadlocks.items()}
+        events: List[Tuple[float, int, str, str, Optional[str]]] = []
+        for move in repaired:
+            station_name = str(move.get("Station") or move.get("ModuleName") or "")
+            if station_name not in loadlocks:
+                continue
+            move_type = move.get("MoveType")
+            if move_type == PREPARE_MOVE:
+                related_robot_type = move.get("RelatedRobotType")
+                required = (
+                    ATMOSPHERE if related_robot_type == 0
+                    else VACUUM if related_robot_type == 1
+                    else ""
                 )
-            ), None)
-            if related is not None:
-                robot = str(related.get("Robot") or related.get("ModuleName") or "")
-                requirements.append((float(first_prepare.get("StartTime") or 0.0),
-                                     ATMOSPHERE if robot in atmosphere_robots else VACUUM))
-        if not requirements:
-            continue
-        required = min(requirements, key=lambda item: item[0])[1]
-        if required not in {ATMOSPHERE, VACUUM} or required == station.environment:
-            continue
+                if required:
+                    events.append((float(move.get("StartTime") or 0.0), 1,
+                                   station_name, required, None))
+            elif move_type == PRE_PREPARE_MOVE:
+                last_state = str(move.get("LastState") or "").upper()
+                current_state = str(move.get("CurState") or "").upper()
+                if last_state in {ATMOSPHERE, VACUUM} and current_state in {ATMOSPHERE, VACUUM}:
+                    events.append((float(move.get("StartTime") or 0.0), 1,
+                                   station_name, last_state, None))
+                    events.append((float(move.get("EndTime") or 0.0), 0,
+                                   station_name, last_state, current_state))
+
+        mismatch: Optional[Tuple[float, str, str, str]] = None
+        for event_time, priority, station_name, required, resulting in sorted(events):
+            current = environments[station_name]
+            if priority == 0:
+                environments[station_name] = resulting or required
+                continue
+            if current != required:
+                mismatch = (event_time, station_name, current, required)
+                break
+        if mismatch is None:
+            break
+
+        cut_time, station_name, last_state, required_state = mismatch
         chamber = problem.chambers.get(station_name)
-        duration = float(
-            (chamber.vent_time if station.environment == VACUUM else chamber.pump_time) or 0.0
-        ) if chamber is not None else 0.0
-        setups.append({
+        duration = 0.0
+        if chamber is not None:
+            duration = float(
+                (chamber.vent_time if last_state == VACUUM else chamber.pump_time) or 0.0
+            )
+        if duration <= TIME_TOLERANCE:
+            raise RuntimeError(
+                f"{station_name} 缺少 {last_state}->{required_state} 的环境转换时长"
+            )
+
+        def uses_station(move: Mapping[str, Any]) -> bool:
+            """判断 Move 是否占用当前待修复 LoadLock。"""
+            return station_name in {
+                str(move.get("Station") or move.get("ModuleName") or ""),
+                *(str(value) for value in (move.get("SrcStationList") or [])),
+                *(str(value) for value in (move.get("DestStationList") or [])),
+                *(str(value) for value in (move.get("StationList") or [])),
+            }
+
+        availability = problem.runtime_availability
+        previous_end = float(
+            availability.station_ready.get(station_name, 0.0)
+            if availability is not None else 0.0
+        )
+        previous_end = max(
+            previous_end,
+            max(
+                (
+                    float(move.get("EndTime") or 0.0)
+                    for move in repaired
+                    if uses_station(move)
+                    and float(move.get("StartTime") or 0.0) < cut_time - TIME_TOLERANCE
+                ),
+                default=previous_end,
+            ),
+        )
+        # 若当前环境下的门事务跨过 mismatch 时刻，必须先保留其关门动作，
+        # 再做空抽/空充；该关门不能随待修复的新动作一起后移。
+        blocking_close_ids: set[int] = set()
+        for prepare in repaired:
+            if prepare.get("MoveType") != PREPARE_MOVE or not uses_station(prepare):
+                continue
+            if float(prepare.get("StartTime") or 0.0) >= cut_time - TIME_TOLERANCE:
+                continue
+            close_candidates = [
+                move for move in repaired
+                if move.get("MoveType") == COMPLETE_MOVE
+                and uses_station(move)
+                and float(move.get("StartTime") or 0.0)
+                >= float(prepare.get("EndTime") or 0.0) - TIME_TOLERANCE
+            ]
+            if not close_candidates:
+                continue
+            close = min(close_candidates, key=sort_key)
+            close_end = float(close.get("EndTime") or 0.0)
+            if close_end > cut_time + TIME_TOLERANCE:
+                blocking_close_ids.add(int(close.get("MoveID") or 0))
+                previous_end = max(previous_end, close_end)
+        setup_start = max(previous_end, cut_time - duration)
+        delay = max(0.0, setup_start + duration - cut_time)
+        if delay > TIME_TOLERANCE:
+            for move in repaired:
+                if (
+                    float(move.get("StartTime") or 0.0) >= cut_time - TIME_TOLERANCE
+                    and int(move.get("MoveID") or 0) not in blocking_close_ids
+                ):
+                    move["StartTime"] = float(move.get("StartTime") or 0.0) + delay
+                    move["EndTime"] = float(move.get("EndTime") or 0.0) + delay
+        repaired.append({
             "MoveType": PRE_PREPARE_MOVE,
             "MoveID": 0,
-            "StartTime": 0.0,
-            "EndTime": duration,
+            "StartTime": setup_start,
+            "EndTime": setup_start + duration,
             "ModuleName": station_name,
             "Station": station_name,
             "SlotList": [FIRST_SLOT_ID],
             "MatIDList": [],
-            "LastState": station.environment,
-            "CurState": required,
+            "LastState": last_state,
+            "CurState": required_state,
             "PreMoveID": [],
         })
-    delay = max((float(move["EndTime"]) for move in setups), default=0.0)
-    delayed = _shift_moves(moves, delay)
-    delayed.extend(setups)
-    renumbered, _ = _renumber_segment(delayed, 1)
+
+    renumbered, _ = _renumber_segment(repaired, 1)
     return renumbered
 
 

@@ -150,6 +150,10 @@ class MoveStateReplay:
         planned_start = float(num(planned.get("StartTime")) or 0.0)
         planned_end = float(num(planned.get("EndTime")) or planned_start)
         actual_start = float(num(notification.get("StartTime")) if num(notification.get("StartTime")) is not None else planned_start)
+        # 重算取消了原计划中间动作后，恢复链的空载转位可能需要从 Robot
+        # 实际投影位置出发。通知可精确覆盖来源站点，执行历史也保留该实际字段。
+        if isinstance(notification.get("SrcStationList"), list):
+            move["SrcStationList"] = list(notification["SrcStationList"])
         move["StartTime"] = actual_start
         move["EndTime"] = actual_start + max(0.0, planned_end - planned_start)
         before = {

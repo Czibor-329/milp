@@ -54,7 +54,7 @@ def _resource(ir: Problem, w, j: int) -> Optional[Tuple[str, int]]:
     """晶圆 w 在 stage j 占用的 (腔,槽)；不计资源（源/汇/跳过类站点）返回 None。
     用预算好的跳过腔集合快速判定（行为与原 ir.chambers.get + type.lower() 完全一致）。"""
     s = w.stages[j]
-    if s.stage_type in ("source", "sink"):
+    if s.stage_type == "sink" or (s.stage_type == "source" and not w.already_released):
         return None
     c = s.chamber
     if c not in ir.chambers or c in _skip_chambers(ir):
@@ -152,7 +152,8 @@ def _build_resource_map(ir: Problem, wmap: Dict[int, object], swap: bool = False
     for w in wmap.values():
         for j in range(len(w.stages)):
             r = _resource(ir, w, j)
-            if r is not None and not swap and w.stages[j].stage_type == "loadlock":
+            chamber = ir.chambers.get(r[0]) if r is not None else None
+            if r is not None and not swap and chamber is not None and str(chamber.type).lower() == "loadlock":
                 r = (r[0], 0)
             out[(w.wid, j)] = r
     return out
@@ -292,6 +293,22 @@ def decode_orders(ir: Problem, tm: Durations, wafers, *,
     chambers: Dict[Tuple[str, int], List[Tuple[int, int]]] = {}
     robots: Dict[str, List[Tuple[int, int]]] = {}
     ll_seq: Dict[str, List[Tuple[int, int]]] = {}
+    initial_age = 0
+    for w in wafers:
+        if not w.already_released:
+            continue
+        source = res_map[(w.wid, 0)]
+        if source is None:
+            continue
+        if source in occ:
+            raise RuntimeError(f"[timing] 初始资源 {source} 同时被多片晶圆占用")
+        occ[source] = w.wid
+        chambers.setdefault(source, []).append((w.wid, 0))
+        if str(ir.chambers[source[0]].type).lower() == "loadlock":
+            ll_seq.setdefault(source[0], []).append((w.wid, 0))
+            if ll_age is not None:
+                ll_age[source] = initial_age
+                initial_age += 1
     total = sum(K.values())
     placed = 0
     while placed < total:
@@ -506,6 +523,23 @@ def decode_orders_choosing(ir: Problem, tm: Durations, wafers, *,
     chambers: Dict[Tuple[str, int], List[Tuple[int, int]]] = {}
     robots: Dict[str, List[Tuple[int, int]]] = {}
     ll_seq: Dict[str, List[Tuple[int, int]]] = {}
+    initial_resources = _build_resource_map(ir, wmap, swap)
+    initial_age = 0
+    for w in wafers:
+        if not w.already_released:
+            continue
+        source = initial_resources[(w.wid, 0)]
+        if source is None:
+            continue
+        if source in occ:
+            raise RuntimeError(f"[timing] 初始资源 {source} 同时被多片晶圆占用")
+        occ[source] = w.wid
+        chambers.setdefault(source, []).append((w.wid, 0))
+        if str(ir.chambers[source[0]].type).lower() == "loadlock":
+            ll_seq.setdefault(source[0], []).append((w.wid, 0))
+            if ll_age is not None:
+                ll_age[source] = initial_age
+                initial_age += 1
     total = sum(K.values())
     placed = 0
     while placed < total:

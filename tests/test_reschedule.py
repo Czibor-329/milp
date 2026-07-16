@@ -4,7 +4,9 @@ import unittest
 from pathlib import Path
 
 import scripts.reschedule as demo
+from src.model import Chamber, Problem, Robot, RuntimeAvailability, Stage, Wafer
 from src.reschedule import RealtimeRescheduler
+from src.timing import start_schedule
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -51,12 +53,53 @@ class RealtimeRescheduleTests(unittest.TestCase):
         self.assertTrue(cancelled_ids)
         self.assertTrue(cancelled_ids.isdisjoint(output_ids))
 
+    def test_runtime_availability_only_delays_affected_resources(self) -> None:
+        """一个模块仍被旧动作占用时，独立模块的 Move 应能在恢复结束前开始。"""
+        chambers = {
+            "LP1": Chamber("LP1", "LoadPort", 1),
+            "LP2": Chamber("LP2", "LoadPort", 1),
+            "PM1": Chamber("PM1", "ProcessChamber", 1),
+            "PM2": Chamber("PM2", "ProcessChamber", 1),
+        }
+        robots = {
+            "R1": Robot("R1", ["LP1", "PM1"], 1, False,
+                        {"LP1": 1.0, "PM1": 1.0}, {"LP1": 1.0, "PM1": 1.0}, [{"Time": 1.0}]),
+            "R2": Robot("R2", ["LP2", "PM2"], 1, False,
+                        {"LP2": 1.0, "PM2": 1.0}, {"LP2": 1.0, "PM2": 1.0}, [{"Time": 1.0}]),
+        }
+
+        def wafer(wid: int, material_id: int, load_port: str, process: str, robot: str) -> Wafer:
+            """构造使用独立 Robot 和 PM 的三段测试晶圆。"""
+            return Wafer(
+                wid,
+                material_id,
+                f"route-{wid}",
+                0,
+                [
+                    Stage(0, load_port, "source", 0.0, "", robot, -1.0),
+                    Stage(1, process, "process", 5.0, robot, robot, -1.0),
+                    Stage(2, load_port, "sink", 0.0, robot, "", -1.0),
+                ],
+                [robot, robot],
+            )
+
+        problem = Problem(
+            chambers,
+            robots,
+            [wafer(0, 1, "LP1", "PM1", "R1"), wafer(1, 2, "LP2", "PM2", "R2")],
+            runtime_availability=RuntimeAvailability(station_ready={"PM1": 50.0}),
+        )
+        result = start_schedule(problem, verbose=False)
+        self.assertTrue(result.feasible)
+        self.assertGreaterEqual(result.schedule[0][1][2], 51.0)
+        self.assertLess(result.schedule[1][1][2], 50.0)
+
     def test_viewer_reads_and_draws_recompute_points(self) -> None:
         """查看器应解析 RecomputePoints 并渲染重算竖线。"""
         viewer = (ROOT / "realtime_scheduler" / "frontend" / "movelist_gantt_viewer.html").read_text(encoding="utf-8")
         self.assertIn("payload.RecomputePoints", viewer)
         self.assertIn("point.EffectiveTime", viewer)
-        self.assertIn("实际执行", viewer)
+        self.assertIn("收尾结束", viewer)
         self.assertIn('class="recompute-marker"', viewer)
         self.assertIn('stroke="#2563eb" stroke-opacity="0.38"', viewer)
         self.assertIn('`# ${point.index} (${fmt(point.time)} s)`', viewer)

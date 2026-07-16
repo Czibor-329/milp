@@ -427,8 +427,8 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual("PM2", first_added["ModuleName"])
         self.assertEqual({"LA", "LB"}, added_loadlocks)
 
-    def test_pse300_arbitrary_recompute_waits_for_first_safe_time(self) -> None:
-        """PSE300 任意时刻请求应保留旧 Move 到安全点，新 Move 从实际安全时间开始。"""
+    def test_pse300_arbitrary_recompute_uses_bounded_recovery_window(self) -> None:
+        """任意时刻重算只保留在途收尾，新计划从请求时间带资源下界续排。"""
         pse300 = json.loads(PSE300_PATH.read_text(encoding="utf-8"))
         initial_job = _job("InitialJob", "Route12", "LP1")
         initial_job["waferCount"] = 5
@@ -456,14 +456,21 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual(3, len(result["rounds"]))
         effective_time = result["rounds"][1]["effectiveTime"]
         self.assertGreater(effective_time, 100.0)
-        self.assertAlmostEqual(result["rounds"][0]["segmentEnd"], effective_time)
-        self.assertEqual(effective_time, result["rounds"][2]["effectiveTime"])
+        self.assertLess(effective_time, result["rounds"][0]["segmentEnd"])
+        self.assertEqual(100.0, result["rounds"][1]["scheduleStartTime"])
+        self.assertEqual(effective_time, result["rounds"][1]["recoveryEndTime"])
+        second_effective_time = result["rounds"][2]["effectiveTime"]
+        self.assertGreater(second_effective_time, 200.0)
+        self.assertLess(second_effective_time, result["rounds"][1]["segmentEnd"])
+        self.assertEqual(200.0, result["rounds"][2]["scheduleStartTime"])
         points = result["output"]["RecomputePoints"]
         point = points[0]
         self.assertEqual(100.0, point["Time"])
         self.assertEqual(effective_time, point["EffectiveTime"])
+        self.assertEqual(100.0, point["ScheduleStartTime"])
+        self.assertEqual(effective_time, point["RecoveryEndTime"])
         self.assertEqual(200.0, points[1]["Time"])
-        self.assertEqual(effective_time, points[1]["EffectiveTime"])
+        self.assertEqual(second_effective_time, points[1]["EffectiveTime"])
 
         first_output = next(
             entry["Info"] for entry in result["reproductionLog"]
@@ -477,7 +484,7 @@ class ConfigEditorServerTests(unittest.TestCase):
             for move in final_moves
         ))
         self.assertTrue(all(
-            float(move["StartTime"]) >= effective_time - 1e-6
+            float(move["StartTime"]) >= 100.0 - 1e-6
             for move in final_moves
             if int(move["MoveID"]) not in initial_move_ids
         ))
