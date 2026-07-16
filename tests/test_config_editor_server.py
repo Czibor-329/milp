@@ -6,7 +6,9 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+import realtime_scheduler.server as config_server
 from scripts.config_editor_server import (
     BuildState,
     LoggedPlanError,
@@ -27,7 +29,7 @@ from scripts.replay_config_log import load_plan_from_log
 ROOT = Path(__file__).resolve().parents[1]
 DEVICE_PATH = ROOT / "src" / "input_data" / "s1-1c2p-reschedule.json"
 PSE300_PATH = ROOT / "src" / "input_data" / "PSE300.json"
-EDITOR_PATH = ROOT / "src" / "tool" / "config_editor.html"
+EDITOR_PATH = ROOT / "realtime_scheduler" / "frontend" / "config_editor.html"
 
 
 def _device_recording() -> list[dict]:
@@ -142,6 +144,23 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual(2, update["ControlJobs"][1]["JobType"])
         self.assertEqual(3, update["ControlJobs"][1]["TaskMode"])
         self.assertEqual([1, 2], update["ProcessJobs"][0]["MatList"])
+        self.assertTrue(all("Weight" not in pjob for pjob in update["ProcessJobs"]))
+
+    def test_same_cjob_pjobs_use_continuous_material_ids_and_load_port_slots(self) -> None:
+        """同一 CJob 的第二个 PJob 应接续前一个 PJob 的物料编号和 LoadPort 槽位。"""
+        plan = {
+            "device": self.device,
+            "recipes": [{"name": "R12", "time": 8, "modules": "PM1,PM2", "weight": {}}],
+            "cleans": [],
+            "routes": [_route("Route12", "PM1,PM2", "R12")],
+        }
+        update = build_round_update(plan, {"cjobs": [{"taskId": "1", "pjobs": [
+            {"jobName": "P1", "routeRef": "Route12", "loadPort": "LP1", "waferCount": 5},
+            {"jobName": "P2", "routeRef": "Route12", "loadPort": "LP1", "waferCount": 5},
+        ]}]}, 0.0, BuildState())
+        self.assertEqual(list(range(1, 6)), update["ProcessJobs"][0]["MatList"])
+        self.assertEqual(list(range(6, 11)), update["ProcessJobs"][1]["MatList"])
+        self.assertEqual(list(range(1, 11)), [material["SlotID"] for material in update["Materials"]])
 
     def test_route_step_and_visit_fields_are_preserved(self) -> None:
         """显式 StepID/PostStepID/NeedProcess 和 IVisit 字段应进入标准 Route。"""
@@ -185,9 +204,13 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn('id="stepDrawer"', html)
         self.assertIn('class="route-table"', html)
         self.assertIn('data-scope="stage-candidate-toggle"', html)
-        self.assertIn("<th>ProcessTime</th>", html)
-        self.assertIn("<b>Recipe</b>", html)
-        self.assertIn("<b>Weight · Offset</b>", html)
+        self.assertIn('class="visit-groups"', html)
+        self.assertIn("Step 概要", html)
+        self.assertIn("工艺信息", html)
+        self.assertIn("约束信息", html)
+        for field in ("ProcessTime", "Recipe", "ProcessType", "Weight", "MoveTimeOffset", "SlotID", "QTime", "Residency"):
+            self.assertIn(field, html)
+        self.assertIn("width: clamp(720px, 66vw, 980px)", html)
         self.assertIn("scheduleAutoSave", html)
         self.assertIn('window.addEventListener("pagehide"', html)
         self.assertIn("StepID", html)
@@ -208,6 +231,10 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn('data-scope="pjob"', html)
         self.assertIn("PJobNameList", html)
         self.assertIn("重算轮次 → CJob → PJob", html)
+        self.assertNotIn("<th>FoupID</th>", html)
+        self.assertNotIn("<th>Weight</th>", html)
+        self.assertIn("$ 运行失败：${error.message", html)
+        self.assertIn("EXPECTED_API_SCHEMA", html)
         self.assertIn("失败也会生成", html)
         self.assertNotIn('id="recipeList"', html)
 
@@ -245,13 +272,16 @@ class ConfigEditorServerTests(unittest.TestCase):
 
             loaded = get_workspace_device(device["id"], store_path)
             self.assertEqual(2, len(loaded["tests"]))
-            self.assertEqual([{"name": "RouteA"}], loaded["tests"][0]["routes"])
-            self.assertEqual([{"name": "RoutePM34"}], updated_second["routes"])
+            self.assertEqual([{"name": "RoutePM34"}], loaded["routes"])
+            self.assertEqual([{"name": "CleanA"}], loaded["cleans"])
+            self.assertTrue(all("routes" not in item and "cleans" not in item for item in loaded["tests"]))
+            self.assertNotIn("routes", updated_second)
             self.assertEqual(2, updated_second["roundCount"])
             migrated = updated_second["rounds"][1]["cjobs"][0]
             self.assertEqual("2", migrated["taskId"])
             self.assertEqual(["P1"], migrated["pJobNameList"])
-            self.assertEqual("Added", migrated["pjobs"][0]["foupId"])
+            self.assertNotIn("foupId", migrated["pjobs"][0])
+            self.assertNotIn("weight", migrated["pjobs"][0])
             self.assertEqual(2, list_workspace_devices(store_path)[0]["testCount"])
 
             delete_workspace_test(device["id"], first["id"], store_path)
@@ -259,6 +289,32 @@ class ConfigEditorServerTests(unittest.TestCase):
             self.assertEqual([second["id"]], [item["id"] for item in remaining])
             with self.assertRaises(ValueError):
                 delete_workspace_test(device["id"], second["id"], store_path)
+
+    def test_legacy_test_routes_merge_into_shared_device_library(self) -> None:
+        """Test3 有两条 Route、Test4 仅一条时，迁移后两者应使用设备的两条共享 Route。"""
+        with tempfile.TemporaryDirectory() as directory:
+            store_path = Path(directory) / "workspaces.json"
+            legacy = {
+                "version": 1,
+                "devices": [{
+                    "id": "device-1", "name": "PSE300.json", "device": self.device,
+                    "tests": [
+                        {"id": "test3", "name": "Test3", "updatedAt": "2026-01-01T00:00:00+08:00",
+                         "routes": [{"name": "R1"}, {"name": "R2"}], "cleans": [{"name": "C1"}]},
+                        {"id": "test4", "name": "Test4", "updatedAt": "2026-01-02T00:00:00+08:00",
+                         "routes": [{"name": "R1"}], "cleans": []},
+                    ],
+                }],
+            }
+            store_path.write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
+
+            loaded = get_workspace_device("device-1", store_path)
+
+            self.assertEqual(["R1", "R2"], [route["name"] for route in loaded["routes"]])
+            self.assertEqual(["C1"], [clean["name"] for clean in loaded["cleans"]])
+            self.assertTrue(all("routes" not in test and "cleans" not in test for test in loaded["tests"]))
+            migrated = json.loads(store_path.read_text(encoding="utf-8"))
+            self.assertEqual(2, migrated["version"])
 
     def test_nested_rounds_persist_without_reordering(self) -> None:
         """多轮、多 CJob/PJob 保存后重新读取，应保留时间与归属并重算只读字段。"""
@@ -290,9 +346,86 @@ class ConfigEditorServerTests(unittest.TestCase):
             self.assertEqual(2, len(second["cjobs"]))
             self.assertEqual(["2", "2"], [item["taskId"] for item in second["cjobs"]])
             self.assertEqual(["P1", "P2"], second["cjobs"][0]["pJobNameList"])
-            self.assertEqual([1, 2, 3], second["cjobs"][0]["pjobs"][0]["matList"])
+            self.assertEqual([3, 4, 5], second["cjobs"][0]["pjobs"][0]["matList"])
+            self.assertEqual([6], second["cjobs"][0]["pjobs"][1]["matList"])
+            self.assertEqual([7, 8, 9, 10], second["cjobs"][1]["pjobs"][0]["matList"])
             self.assertEqual(-1, second["cjobs"][1]["priority"])
             self.assertEqual("Sequential", second["cjobs"][1]["taskMode"])
+
+    def test_test3_nested_jobs_run_successfully(self) -> None:
+        """test3 形状的两轮、首轮双 PJob 配置应完成真实重算。"""
+        pse300 = json.loads(PSE300_PATH.read_text(encoding="utf-8"))
+        plan = {
+            "deviceName": PSE300_PATH.name,
+            "device": pse300,
+            "strategy": "heuristic",
+            "roundCount": 2,
+            "options": {},
+            "recipes": [{"name": "R1", "time": 20, "modules": "PM1,PM2", "weight": {}}],
+            "cleans": [],
+            "routes": [_route("R1", "PM1,PM2", "R1")],
+            "rounds": [
+                {"currentTime": 0, "cjobs": [{"taskId": "1", "jobType": "NormalLot", "priority": 1, "taskMode": "Smart", "pjobs": [
+                    {"jobName": "P1", "routeRef": "R1", "loadPort": "LP1", "waferCount": 5, "priority": 1},
+                    {"jobName": "P2", "routeRef": "R1", "loadPort": "LP1", "waferCount": 5, "priority": 1},
+                ]}]},
+                {"currentTime": 500, "cjobs": [{"taskId": "2", "jobType": "NormalLot", "priority": 1, "taskMode": "Smart", "pjobs": [
+                    {"jobName": "P1", "routeRef": "R1", "loadPort": "LP2", "waferCount": 5, "priority": 1},
+                ]}]},
+            ],
+        }
+        result = execute_plan(plan)
+        self.assertTrue(result["ok"])
+        self.assertEqual("passed", result["validation"])
+        self.assertEqual(2, len(result["rounds"]))
+        self.assertEqual(3, sum(round_row["jobCount"] for round_row in result["rounds"]))
+
+    def test_recompute_balances_loadlocks_and_starts_with_earlier_released_pm(self) -> None:
+        """上一轮最后使用 PM1 时，下一轮应从更早释放的 PM2 开始并同时使用 LA/LB。"""
+        pse300 = json.loads(PSE300_PATH.read_text(encoding="utf-8"))
+        plan = {
+            "deviceName": PSE300_PATH.name,
+            "device": pse300,
+            "strategy": "heuristic",
+            "roundCount": 2,
+            "options": {},
+            "recipes": [{"name": "R1", "time": 20, "modules": "PM1,PM2", "weight": {}}],
+            "cleans": [],
+            "routes": [_route("R1", "PM1,PM2", "R1")],
+            "rounds": [
+                {"currentTime": 0, "cjobs": [{"taskId": "1", "pjobs": [
+                    {"jobName": "P1", "routeRef": "R1", "loadPort": "LP1", "waferCount": 3},
+                    {"jobName": "P2", "routeRef": "R1", "loadPort": "LP1", "waferCount": 2},
+                ]}]},
+                {"currentTime": 500, "cjobs": [{"taskId": "2", "pjobs": [
+                    {"jobName": "P1", "routeRef": "R1", "loadPort": "LP2", "waferCount": 5},
+                ]}]},
+            ],
+        }
+
+        result = execute_plan(plan)
+        process_moves = [
+            move for move in result["output"]["MoveList"]
+            if move.get("MoveType") == 9 and move.get("MatIDList")
+        ]
+        last_initial = max(
+            (move for move in process_moves if "1.C1.P2" in (move.get("PJobName") or [])),
+            key=lambda move: float(move["EndTime"]),
+        )
+        first_added = min(
+            (move for move in process_moves if "2.C1.P1" in (move.get("PJobName") or [])),
+            key=lambda move: float(move["StartTime"]),
+        )
+        added_loadlocks = {
+            move.get("ModuleName")
+            for move in result["output"]["MoveList"]
+            if "2.C1.P1" in (move.get("PJobName") or [])
+            and move.get("ModuleName") in {"LA", "LB"}
+        }
+
+        self.assertEqual("PM1", last_initial["ModuleName"])
+        self.assertEqual("PM2", first_added["ModuleName"])
+        self.assertEqual({"LA", "LB"}, added_loadlocks)
 
     def test_pse300_arbitrary_recompute_waits_for_first_safe_time(self) -> None:
         """PSE300 任意时刻请求应保留旧 Move 到安全点，新 Move 从实际安全时间开始。"""
@@ -376,6 +509,24 @@ class ConfigEditorServerTests(unittest.TestCase):
             self.assertEqual({"Time", "Describe", "SimTime", "Info"}, set(entry))
         with self.assertRaises(LoggedPlanError):
             execute_plan(load_plan_from_log(entries))
+
+    def test_results_and_reproduction_logs_survive_memory_cache_reset(self) -> None:
+        """甘特图结果与复现日志应写入专用目录，服务内存清空后仍可读取。"""
+        with tempfile.TemporaryDirectory() as directory:
+            export_root = Path(directory)
+            with (
+                patch.object(config_server, "RESULT_EXPORT_DIR", export_root / "results"),
+                patch.object(config_server, "LOG_EXPORT_DIR", export_root / "logs"),
+            ):
+                result_id = config_server.save_result({"MoveList": [], "RecomputePoints": []})
+                log_id = config_server.save_reproduction_log([{"Describe": "Input", "Info": {}}])
+                config_server._RESULTS.clear()
+                config_server._REPRODUCTION_LOGS.clear()
+
+                self.assertEqual([], config_server.read_result(result_id)["MoveList"])
+                self.assertEqual("Input", config_server.read_reproduction_log(log_id)[0]["Describe"])
+                self.assertTrue((export_root / "results" / f"{result_id}.json").is_file())
+                self.assertTrue((export_root / "logs" / f"{log_id}.json").is_file())
 
     def test_two_recomputes_merge_movelist_and_markers(self) -> None:
         """首次排程加两次重算应合并 MoveList，并保留两条重算线。"""

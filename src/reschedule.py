@@ -242,7 +242,7 @@ def _build_recompute_problem(
             slot.material.step_id = 0
 
     incoming_wafers = [deepcopy(wafer) for wafer in incoming.wafers]
-    _assign_incoming_loadlocks(incoming_wafers, next_state)
+    _assign_incoming_resources(incoming_wafers, next_state, previous.chambers)
     existing_material_ids = set(locations)
     new_material_ids = {wafer.mat_id for wafer in incoming_wafers}
     duplicates = sorted(existing_material_ids & new_material_ids)
@@ -377,35 +377,93 @@ def _add_incoming_materials(state: MachineState, wafers: Sequence[Wafer]) -> Non
         )
 
 
-def _assign_incoming_loadlocks(wafers: Sequence[Wafer], state: MachineState) -> None:
-    """新增晶圆优先使用空闲且处于大气态的 LoadLock，避开在机残留片。"""
-    occupied = {
-        station_name
-        for station_name, station in state.stations.items()
-        if any(slot.material is not None for slot in station.slots.values())
-    }
+def _station_release_time(state: MachineState, station_name: str) -> float:
+    """返回实时状态中站点最后一次释放资源的绝对时刻。"""
+    station = state.stations.get(station_name)
+    if station is None:
+        return 0.0
+    return max(
+        float(station.door_busy_until),
+        float(station.transfer_busy_until),
+        float(station.environment_busy_until),
+        *(float(slot.busy_until) for slot in station.slots.values()),
+    )
+
+
+def _station_material_count(state: MachineState, station_name: str) -> int:
+    """返回站点当前仍未搬出的物料数，作为续排初始负载。"""
+    station = state.stations.get(station_name)
+    if station is None:
+        return 0
+    return sum(slot.material is not None for slot in station.slots.values())
+
+
+def _assign_incoming_resources(
+    wafers: Sequence[Wafer],
+    state: MachineState,
+    chambers: Mapping[str, Any],
+) -> None:
+    """让新增任务延续实时设备的并行腔负载，而不是从候选列表首项重新开始。
+
+    解析单轮任务时的 round-robin 会从零开始；重算若直接沿用，上一轮最后使用 PM1 后，
+    下一轮第一片仍会再次落到 PM1。这里以实时状态中的当前占用量和最后释放时刻为基线，
+    对同一候选池连续轮转：负载相同时优先选择更早释放的腔室。LoadLock 的进/出 stage
+    对同一晶圆保持同腔，同时保留完整候选集，避免把整批新增片永久绑定到 LA。
+    """
+    assigned: Dict[Tuple[str, Tuple[str, ...]], Dict[str, int]] = {}
+
+    def choose(kind: str, candidates: Sequence[str], *, prefer_atmosphere: bool = False) -> str:
+        pool = tuple(sorted(dict.fromkeys(str(name) for name in candidates if name)))
+        if not pool:
+            return ""
+        key = (kind, pool)
+        loads = assigned.setdefault(
+            key,
+            {
+                name: _station_material_count(state, name)
+                + int(
+                    prefer_atmosphere
+                    and isinstance(state.stations.get(name), LoadLockState)
+                    and state.stations[name].environment != ATMOSPHERE
+                )
+                for name in pool
+            },
+        )
+        chosen = min(pool, key=lambda name: (loads[name], _station_release_time(state, name), name))
+        loads[chosen] += 1
+        return chosen
+
     for wafer in wafers:
         loadlock_stages = [stage for stage in wafer.stages if stage.stage_type == "loadlock"]
-        candidates = sorted({
-            candidate
-            for stage in loadlock_stages
-            for candidate in (stage.cands or [stage.chamber])
-            if isinstance(state.stations.get(candidate), LoadLockState)
-        })
-        if not candidates:
-            continue
-        preferred = [
-            name for name in candidates
-            if name not in occupied
-            and isinstance(state.stations.get(name), LoadLockState)
-            and state.stations[name].environment == ATMOSPHERE
-        ]
-        chosen = (preferred or [name for name in candidates if name not in occupied] or candidates)[0]
-        for stage in loadlock_stages:
-            stage.chamber = chosen
-            stage.cands = [chosen]
-            stage.slot = 0 if stage.ll_type == "entry" else 1
-        occupied.add(chosen)
+        if loadlock_stages:
+            common_candidates = set(loadlock_stages[0].cands or [loadlock_stages[0].chamber])
+            for stage in loadlock_stages[1:]:
+                common_candidates &= set(stage.cands or [stage.chamber])
+            candidates = [
+                name for name in common_candidates
+                if isinstance(state.stations.get(name), LoadLockState)
+            ]
+            chosen = choose("loadlock", candidates, prefer_atmosphere=True)
+            if chosen:
+                for stage in loadlock_stages:
+                    stage.chamber = chosen
+                    # 保留 Route 的完整候选集；RL/后续 timing 仍可在合法候选中决策。
+                    stage.cands = list(stage.cands or [chosen])
+                    stage.slot = 0 if stage.ll_type == "entry" else 1
+                    chamber = chambers.get(chosen)
+                    if chamber is not None:
+                        duration = chamber.pump_time if stage.ll_type == "entry" else chamber.vent_time
+                        if duration is not None:
+                            stage.proc = float(duration)
+
+        for stage in wafer.stages:
+            if stage.stage_type != "process":
+                continue
+            candidates = [name for name in (stage.cands or [stage.chamber]) if name in chambers]
+            chosen = choose("process", candidates)
+            if chosen:
+                stage.chamber = chosen
+                stage.cands = list(stage.cands or [chosen])
 
 
 def _shift_moves(moves: Sequence[Mapping[str, Any]], offset: float) -> List[dict]:
