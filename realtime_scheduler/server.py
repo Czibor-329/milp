@@ -69,6 +69,7 @@ DATA_DIR = REALTIME_APP_DIR / "data"
 EXPORT_DIR = REALTIME_APP_DIR / "exports"
 EDITOR_PATH = FRONTEND_DIR / "config_editor.html"
 VIEWER_PATH = FRONTEND_DIR / "movelist_gantt_viewer.html"
+ROUTE_EDITOR_LOGIC_PATH = FRONTEND_DIR / "route_editor_logic.js"
 RL_MODEL_PATH = MODELS_DIR / "bc_policy_rl.pt"
 L2D_MODEL_CANDIDATES = (
     MODELS_DIR / "l2d_pse300_2job.pt",
@@ -1744,6 +1745,22 @@ def _normalize_test_case(raw_test: Mapping[str, Any], test_id: Optional[str] = N
 
 def _apply_device_library(device: Dict[str, Any], payload: Mapping[str, Any]) -> None:
     """将前端随保存请求提交的 Route/Clean 写入设备级共享库。"""
+    raw_aliases = payload.get("routeNameChanges")
+    aliases = {
+        str(old_name): str(new_name)
+        for old_name, new_name in (raw_aliases.items() if isinstance(raw_aliases, Mapping) else [])
+        if str(old_name) and str(new_name) and str(old_name) != str(new_name)
+    }
+    if aliases:
+        # Route 是设备共享数据，自动改名时必须同步所有测试，而不只更新当前编辑项。
+        for test_case in device.get("tests") or []:
+            for round_row in test_case.get("rounds") or []:
+                cjobs = round_row.get("cjobs") or []
+                for cjob in cjobs:
+                    for pjob in cjob.get("pjobs") or []:
+                        route_ref = str(pjob.get("routeRef") or "")
+                        if route_ref in aliases:
+                            pjob["routeRef"] = aliases[route_ref]
     if isinstance(payload.get("routes"), list):
         device["routes"] = deepcopy(payload["routes"])
     else:
@@ -1931,6 +1948,9 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             return
         if path == "/movelist_gantt_viewer.html":
             self._send_file(VIEWER_PATH, "text/html; charset=utf-8")
+            return
+        if path == "/route_editor_logic.js":
+            self._send_file(ROUTE_EDITOR_LOGIC_PATH, "text/javascript; charset=utf-8")
             return
         if path == "/api/health":
             l2d_model_path = _resolve_l2d_model_path()

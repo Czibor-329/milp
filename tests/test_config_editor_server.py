@@ -357,7 +357,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual(34, process_visit["ResidencyConstraint"])
 
     def test_editor_uses_persistent_route_table_and_step_drawer(self) -> None:
-        """Route 应使用候选设备列表和自动保存，抽屉只编辑简化的工艺时间表。"""
+        """Route 应按工艺结构折叠，抽屉使用统一候选参数表单。"""
         html = EDITOR_PATH.read_text(encoding="utf-8")
         self.assertIn('data-tab-target="schedule"', html)
         self.assertIn('data-tab-target="route"', html)
@@ -377,7 +377,13 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("StepID", html)
         self.assertIn("PostStepID", html)
         self.assertIn("NeedProcess", html)
-        self.assertIn('data-scope="visit"', html)
+        self.assertIn('data-scope="visit-shared"', html)
+        self.assertIn('src="/route_editor_logic.js"', html)
+        self.assertIn('data-action="toggle-route-group"', html)
+        self.assertIn('data-action="toggle-route"', html)
+        self.assertIn('data-action="copy-route"', html)
+        self.assertIn("候选腔室参数不一致", html)
+        self.assertIn("sync-stage-visits", html)
         self.assertIn("state.stationNames", html)
         self.assertIn('id="autoExportLog"', html)
         self.assertIn('id="logButton"', html)
@@ -486,6 +492,34 @@ class ConfigEditorServerTests(unittest.TestCase):
             self.assertEqual(["性能测试"], groups)
             self.assertEqual(["性能测试"], loaded["testGroups"])
             self.assertEqual([], loaded["tests"])
+
+    def test_automatic_route_rename_updates_every_test_reference(self) -> None:
+        """共享 Route 自动改名后，设备下所有测试的 PJob 引用都应同步迁移。"""
+        with tempfile.TemporaryDirectory() as directory:
+            store_path = Path(directory) / "workspaces.json"
+            device, _ = import_workspace_device("device.json", self.device, store_path)
+            base = {
+                "strategy": "heuristic", "roundCount": 1, "routes": [{"name": "R1"}],
+                "rounds": [{"cjobs": [{"pjobs": [{"routeRef": "R1", "loadPort": "LP1"}]}]}],
+            }
+            first = create_workspace_test(device["id"], {**base, "name": "测试一"}, store_path)
+            create_workspace_test(device["id"], {**base, "name": "测试二"}, store_path)
+
+            update_workspace_test(device["id"], first["id"], {
+                **first,
+                "routes": [{"name": "1道工序 · PM1/PM2"}],
+                "routeNameChanges": {"R1": "1道工序 · PM1/PM2"},
+                "rounds": [{"cjobs": [{"pjobs": [{
+                    "routeRef": "1道工序 · PM1/PM2", "loadPort": "LP1",
+                }]}]}],
+            }, store_path)
+
+            loaded = get_workspace_device(device["id"], store_path)
+            references = [
+                test["rounds"][0]["cjobs"][0]["pjobs"][0]["routeRef"]
+                for test in loaded["tests"]
+            ]
+            self.assertEqual(["1道工序 · PM1/PM2", "1道工序 · PM1/PM2"], references)
 
     def test_import_l2d_checkpoint_validates_and_saves_model(self) -> None:
         """页面上传的 checkpoint 必须可加载，并按训练阶段保存到模型目录。"""
