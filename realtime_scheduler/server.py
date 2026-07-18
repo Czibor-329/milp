@@ -72,6 +72,12 @@ LEGACY_WORKSPACE_STORE_PATH = ROOT / "results" / "config_editor_workspaces.json"
 DEVICE_INIT_DIR = DATA_DIR / "devices"
 RESULT_EXPORT_DIR = EXPORT_DIR / "results"
 LOG_EXPORT_DIR = EXPORT_DIR / "logs"
+PSE300_REQUIRED_STATIONS = {
+    "PM1", "PM2", "PM3", "PM4", "Buffer1", "Buffer2", "Buffer3", "Buffer4",
+    "LA", "LB", "LP1", "LP2", "LP3", "LP4",
+}
+PSE300_REQUIRED_ROBOTS = {"ATR", "VTR"}
+PSE300_LOADLOCK_COPIES = {"LC": "LA", "LD": "LB"}
 
 
 _RESULTS: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
@@ -172,6 +178,107 @@ def extract_init_data(raw: Any) -> Dict[str, Any]:
     return deepcopy(dict(value))
 
 
+def _clone_station_references(value: Any, source: str, target: str) -> Any:
+    """深复制一段设备配置，并把值中精确匹配的 Station 名称替换为新名称。"""
+    if isinstance(value, Mapping):
+        return {
+            (target if str(key) == source else str(key)): _clone_station_references(item, source, target)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_clone_station_references(item, source, target) for item in value]
+    return target if value == source else deepcopy(value)
+
+
+def _expand_robot_loadlocks(robot: Dict[str, Any]) -> None:
+    """为一台 PSE300 Robot 补齐 LC/LD 的时间矩阵、可达站点和手臂槽位映射。"""
+    for field_name in ("PlaceTime", "PickTime"):
+        station_times = robot.get(field_name)
+        if not isinstance(station_times, dict):
+            continue
+        for target, source in PSE300_LOADLOCK_COPIES.items():
+            if target not in station_times and source in station_times:
+                station_times[target] = deepcopy(station_times[source])
+
+    raw_transfers = robot.get("PrepTransTime")
+    if isinstance(raw_transfers, list):
+        original_transfers = [item for item in raw_transfers if isinstance(item, Mapping)]
+        known_transfers = {
+            (
+                str(item.get("SrcStation") or ""), str(item.get("DestStation") or ""),
+                item.get("TransType"), item.get("Time"),
+            )
+            for item in original_transfers
+        }
+        copies_by_source = {source: target for target, source in PSE300_LOADLOCK_COPIES.items()}
+        for transfer in original_transfers:
+            source_station = str(transfer.get("SrcStation") or "")
+            destination_station = str(transfer.get("DestStation") or "")
+            source_variants = [source_station]
+            destination_variants = [destination_station]
+            if source_station in copies_by_source:
+                source_variants.append(copies_by_source[source_station])
+            if destination_station in copies_by_source:
+                destination_variants.append(copies_by_source[destination_station])
+            for new_source in source_variants:
+                for new_destination in destination_variants:
+                    key = (new_source, new_destination, transfer.get("TransType"), transfer.get("Time"))
+                    if key in known_transfers:
+                        continue
+                    new_transfer = deepcopy(dict(transfer))
+                    new_transfer["SrcStation"] = new_source
+                    new_transfer["DestStation"] = new_destination
+                    raw_transfers.append(new_transfer)
+                    known_transfers.add(key)
+
+    arm_pairs = robot.get("ArmPointerPair")
+    if isinstance(arm_pairs, list):
+        for target, source in PSE300_LOADLOCK_COPIES.items():
+            copied_pairs = [
+                _clone_station_references(pair, source, target)
+                for pair in list(arm_pairs)
+                if isinstance(pair, list) and source in pair
+            ]
+            for pair in copied_pairs:
+                if pair not in arm_pairs:
+                    arm_pairs.append(pair)
+
+    arm_info = robot.get("ArmInfo")
+    if not isinstance(arm_info, Mapping):
+        return
+    for arm in arm_info.values():
+        if not isinstance(arm, dict):
+            continue
+        accessible = arm.get("AccessibleStations")
+        if isinstance(accessible, list):
+            for target, source in PSE300_LOADLOCK_COPIES.items():
+                if source in accessible and target not in accessible:
+                    accessible.append(target)
+        slot_map = arm.get("SlotsStationMap")
+        if isinstance(slot_map, dict):
+            for target, source in PSE300_LOADLOCK_COPIES.items():
+                if target not in slot_map and source in slot_map:
+                    slot_map[target] = _clone_station_references(slot_map[source], source, target)
+
+
+def expand_pse300_loadlocks(device: Dict[str, Any]) -> bool:
+    """识别 PSE300 拓扑并新增 LC/LD；LC 复制 LA，LD 复制 LB，返回是否发生修改。"""
+    stations = device.get("Stations")
+    robots = device.get("Robots")
+    if not isinstance(stations, dict) or not isinstance(robots, dict):
+        return False
+    if not PSE300_REQUIRED_STATIONS.issubset(stations) or not PSE300_REQUIRED_ROBOTS.issubset(robots):
+        return False
+    changed = any(target not in stations for target in PSE300_LOADLOCK_COPIES)
+    for target, source in PSE300_LOADLOCK_COPIES.items():
+        if target not in stations:
+            stations[target] = _clone_station_references(stations[source], source, target)
+    for robot in robots.values():
+        if isinstance(robot, dict):
+            _expand_robot_loadlocks(robot)
+    return changed
+
+
 def _name_index(rows: Sequence[Mapping[str, Any]], label: str) -> Dict[str, Dict[str, Any]]:
     """按唯一 Name 建立通用配置索引。"""
     result: Dict[str, Dict[str, Any]] = {}
@@ -182,6 +289,34 @@ def _name_index(rows: Sequence[Mapping[str, Any]], label: str) -> Dict[str, Dict
         if name in result:
             raise ValueError(f"{label} 名称重复：{name}")
         result[name] = deepcopy(dict(row))
+    return result
+
+
+def _recipe_index(rows: Sequence[Mapping[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """按 Recipe 名称建立引用索引，允许同名 Recipe 为不同模块定义不同参数。"""
+    result: Dict[str, Dict[str, Any]] = {}
+    modules_by_name: Dict[str, set[str]] = {}
+    for index, row in enumerate(rows, start=1):
+        name = str(row.get("name") or "").strip()
+        if not name:
+            raise ValueError(f"Recipe 第 {index} 项缺少名称")
+        module_list = _string_list(row.get("modules"))
+        modules = set(module_list)
+        if name not in result:
+            result[name] = deepcopy(dict(row))
+            result[name]["modules"] = module_list
+            modules_by_name[name] = modules
+            continue
+        occupied_modules = modules_by_name[name]
+        duplicate_modules = sorted(occupied_modules & modules)
+        if duplicate_modules or not occupied_modules or not modules:
+            detail = f"（模块：{','.join(duplicate_modules)}）" if duplicate_modules else ""
+            raise ValueError(f"Recipe 名称和模块重复：{name}{detail}")
+        occupied_modules.update(modules)
+        result[name]["modules"] = [
+            *result[name]["modules"],
+            *(module for module in module_list if module not in result[name]["modules"]),
+        ]
     return result
 
 
@@ -564,7 +699,7 @@ def build_round_update(
     recipes = [row for row in (plan.get("recipes") or []) if isinstance(row, Mapping)]
     cleans = [row for row in (plan.get("cleans") or []) if isinstance(row, Mapping)]
     routes = [row for row in (plan.get("routes") or []) if isinstance(row, Mapping)]
-    recipe_by_name = _name_index(recipes, "Recipe")
+    recipe_by_name = _recipe_index(recipes)
     clean_by_name = _name_index(cleans, "Clean")
     route_by_name = _name_index(routes, "Route")
     tool_topo = plan["device"]
@@ -1037,6 +1172,7 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
     started = time.perf_counter()
     plan = deepcopy(dict(raw_plan))
     plan["device"] = extract_init_data(plan.get("device"))
+    expand_pse300_loadlocks(plan["device"])
     reproduction.add("AlgInit", plan["device"])
     strategy = str(plan.get("strategy") or "heuristic").strip().lower()
     if strategy not in {"heuristic", "rl"}:
@@ -1206,7 +1342,7 @@ def _merge_named_assets(base: Sequence[Any], additions: Sequence[Any]) -> List[D
 
 
 def _migrate_workspace_catalog(catalog: Dict[str, Any]) -> bool:
-    """把旧测试集内的 Route/Clean 提升为设备级共享库，并移除测试集副本。"""
+    """迁移设备工作区结构，并为已有 PSE300 补齐 LC/LD LoadLock。"""
     changed = int(catalog.get("version") or 0) != WORKSPACE_STORE_VERSION
     for raw_device in catalog.get("devices") or []:
         if not isinstance(raw_device, dict):
@@ -1214,6 +1350,10 @@ def _migrate_workspace_catalog(catalog: Dict[str, Any]) -> bool:
         routes = list(raw_device.get("routes") or [])
         cleans = list(raw_device.get("cleans") or [])
         tests = [item for item in (raw_device.get("tests") or []) if isinstance(item, dict)]
+        raw_topology = raw_device.get("device")
+        if isinstance(raw_topology, dict) and expand_pse300_loadlocks(raw_topology):
+            raw_device["fingerprint"] = _device_fingerprint(raw_topology)
+            changed = True
         # 旧数据按更新时间从早到晚合并，因此最近编辑的同名定义成为设备共享定义。
         for test in sorted(tests, key=lambda item: str(item.get("updatedAt") or item.get("createdAt") or "")):
             if "routes" in test:
@@ -1350,6 +1490,7 @@ def import_workspace_device(
 ) -> Tuple[Dict[str, Any], bool]:
     """导入设备 init；相同拓扑通过指纹复用已有设备及其测试集。"""
     device_data = extract_init_data(raw_device)
+    expand_pse300_loadlocks(device_data)
     fingerprint = _device_fingerprint(device_data)
     with _WORKSPACE_STORE_LOCK:
         catalog = _read_workspace_catalog_unlocked(path)

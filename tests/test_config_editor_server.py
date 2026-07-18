@@ -90,6 +90,115 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("PM1", self.device["Stations"])
         self.assertIn("LP1", self.device["Stations"])
 
+    def test_same_recipe_name_supports_module_specific_parameters(self) -> None:
+        """同名 Recipe 在不同 PM 上可以使用不同加工时间，且仍由 Route 统一引用。"""
+        plan = {
+            "device": self.device,
+            "recipes": [
+                {"name": "SharedRecipe", "time": 60, "modules": ["PM1"], "weight": {}},
+                {"name": "SharedRecipe", "time": 20, "modules": ["PM2"], "weight": {}},
+            ],
+            "cleans": [],
+            "routes": [_route("Route12", "PM1,PM2", "SharedRecipe")],
+        }
+
+        update = build_round_update(
+            plan, {"jobs": [_job("Incoming", "Route12", "LP1")]}, 0.0, BuildState(),
+        )
+
+        recipe_times = {
+            recipe["ModuleName"]: recipe["Time"] for recipe in update["ProcessRecipes"]
+        }
+        self.assertEqual({"PM1": 60.0, "PM2": 20.0}, recipe_times)
+
+    def test_same_recipe_name_rejects_overlapping_modules(self) -> None:
+        """同名 Recipe 只有模块范围重叠时才属于真正的重复定义。"""
+        plan = {
+            "device": self.device,
+            "recipes": [
+                {"name": "SharedRecipe", "time": 60, "modules": ["PM1", "PM2"], "weight": {}},
+                {"name": "SharedRecipe", "time": 20, "modules": ["PM2"], "weight": {}},
+            ],
+            "cleans": [],
+            "routes": [_route("Route12", "PM1,PM2", "SharedRecipe")],
+        }
+
+        with self.assertRaisesRegex(ValueError, "Recipe 名称和模块重复：SharedRecipe"):
+            build_round_update(
+                plan, {"jobs": [_job("Incoming", "Route12", "LP1")]}, 0.0, BuildState(),
+            )
+
+    def test_pse300_expands_lc_and_ld_from_la_and_lb(self) -> None:
+        """PSE300 应完整复制 LoadLock 及两台 Robot 的相关访问和计时参数。"""
+        device = json.loads(PSE300_PATH.read_text(encoding="utf-8"))
+        original_transfer_counts = {
+            name: len(robot["PrepTransTime"]) for name, robot in device["Robots"].items()
+        }
+
+        self.assertTrue(config_server.expand_pse300_loadlocks(device))
+        self.assertFalse(config_server.expand_pse300_loadlocks(device))
+        for target, source in (("LC", "LA"), ("LD", "LB")):
+            expected_station = json.loads(json.dumps(device["Stations"][source]).replace(source, target))
+            self.assertEqual(expected_station, device["Stations"][target])
+            for robot in device["Robots"].values():
+                self.assertEqual(robot["PlaceTime"][source], robot["PlaceTime"][target])
+                self.assertEqual(robot["PickTime"][source], robot["PickTime"][target])
+                for arm in robot["ArmInfo"].values():
+                    self.assertIn(target, arm["AccessibleStations"])
+                    self.assertIn(target, arm["SlotsStationMap"])
+                    self.assertTrue(all(
+                        item["Key"] == target
+                        for slots in arm["SlotsStationMap"][target].values()
+                        for item in slots
+                    ))
+        self.assertIn(["LC", "LC"], device["Robots"]["VTR"]["ArmPointerPair"])
+        self.assertIn(["LD", "LD"], device["Robots"]["VTR"]["ArmPointerPair"])
+        for name, robot in device["Robots"].items():
+            self.assertGreater(len(robot["PrepTransTime"]), original_transfer_counts[name])
+            transfer_keys = {
+                (item["SrcStation"], item["DestStation"], item["TransType"])
+                for item in robot["PrepTransTime"]
+            }
+            self.assertTrue(all(
+                (source, destination, transfer_type) in transfer_keys
+                for source in ("LA", "LB", "LC", "LD")
+                for destination in ("LA", "LB", "LC", "LD")
+                for transfer_type in (0, 1)
+            ))
+
+    def test_pse300_loadlock_does_not_switch_environment_twice_without_opening(self) -> None:
+        """PSE300 多槽换片时，两次抽充气之间必须存在一次真实开门访问。"""
+        device = json.loads(PSE300_PATH.read_text(encoding="utf-8"))
+        plan = {
+            "deviceName": PSE300_PATH.name,
+            "device": device,
+            "strategy": "heuristic",
+            "roundCount": 1,
+            "options": {},
+            "recipes": [
+                {"name": "R3_Step4", "time": 60, "modules": ["PM1"], "weight": {}},
+                {"name": "R3_Step4", "time": 20, "modules": ["PM2", "PM3", "PM4"], "weight": {}},
+            ],
+            "cleans": [],
+            "routes": [_route("R3", "PM1,PM2,PM3,PM4", "R3_Step4")],
+            "rounds": [{"currentTime": 0, "jobs": [{
+                **_job("P1", "R3", "LP1"), "waferCount": 15,
+            }]}],
+        }
+
+        moves = execute_plan(plan)["output"]["MoveList"]
+
+        for loadlock in ("LA", "LB"):
+            last_event_type = None
+            for move in sorted(moves, key=lambda item: (item["StartTime"], item["MoveID"])):
+                if move.get("ModuleName") != loadlock or move.get("MoveType") not in {6, 10}:
+                    continue
+                self.assertFalse(
+                    last_event_type == 10 and move["MoveType"] == 10,
+                    f"{loadlock} 未开门便连续切换环境：MoveID={move['MoveID']}",
+                )
+                last_event_type = move["MoveType"]
+
     def test_job_route_is_bound_to_selected_load_port(self) -> None:
         """Job 复用公共 Route 时应生成独立 Route 并改写首尾 LoadPort。"""
         plan = {
@@ -426,6 +535,71 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual("PM1", last_initial["ModuleName"])
         self.assertEqual("PM2", first_added["ModuleName"])
         self.assertEqual({"LA", "LB"}, added_loadlocks)
+
+    def test_equal_normal_lots_run_concurrently_with_complete_pm_rotation(self) -> None:
+        """同优 NormalLot 应并发，并按物料顺序完整轮转各自的加工腔池。"""
+        pse300 = json.loads(PSE300_PATH.read_text(encoding="utf-8"))
+        plan = {
+            "deviceName": PSE300_PATH.name,
+            "device": pse300,
+            "strategy": "heuristic",
+            "roundCount": 2,
+            "options": {},
+            "recipes": [
+                {"name": "R1", "time": 20, "modules": "PM1,PM2", "weight": {}},
+                {"name": "R2", "time": 70, "modules": "PM3,PM4", "weight": {}},
+            ],
+            "cleans": [],
+            "routes": [
+                _route("R1", "PM1,PM2", "R1"),
+                _route("R2", "PM3,PM4", "R2"),
+            ],
+            "rounds": [
+                {"currentTime": 0, "cjobs": [{
+                    "taskId": "1", "jobType": "NormalLot", "priority": 1,
+                    "taskMode": "Smart", "pjobs": [{
+                        "jobName": "P1", "routeRef": "R1", "loadPort": "LP1",
+                        "waferCount": 10, "priority": 1,
+                    }],
+                }]},
+                {"currentTime": 200, "cjobs": [{
+                    "taskId": "2", "jobType": "NormalLot", "priority": 1,
+                    "taskMode": "Smart", "pjobs": [{
+                        "jobName": "P1", "routeRef": "R2", "loadPort": "LP2",
+                        "waferCount": 10, "priority": 1,
+                    }],
+                }]},
+            ],
+        }
+
+        result = execute_plan(plan)
+        self.assertEqual("passed", result["validation"])
+        process_by_job = {}
+        for job_name in ("1.C1.P1", "2.C1.P1"):
+            process_by_job[job_name] = sorted(
+                [(
+                    int(move["MatIDList"][0]),
+                    str(move["ModuleName"]),
+                    float(move["StartTime"]),
+                    float(move["EndTime"]),
+                )
+                for move in result["output"]["MoveList"]
+                if move.get("MoveType") == 9
+                and move.get("MatIDList")
+                and job_name in (move.get("PJobName") or [])
+                ],
+                key=lambda row: row[2],
+            )
+
+        self.assertEqual(list(range(1, 11)), [row[0] for row in process_by_job["1.C1.P1"]])
+        self.assertEqual(list(range(11, 21)), [row[0] for row in process_by_job["2.C1.P1"]])
+        self.assertEqual(["PM1", "PM2"] * 5, [row[1] for row in process_by_job["1.C1.P1"]])
+        self.assertEqual(["PM3", "PM4"] * 5, [row[1] for row in process_by_job["2.C1.P1"]])
+        self.assertTrue(any(
+            max(c1[2], c2[2]) < min(c1[3], c2[3]) - 1e-6
+            for c1 in process_by_job["1.C1.P1"]
+            for c2 in process_by_job["2.C1.P1"]
+        ))
 
     def test_pse300_arbitrary_recompute_uses_bounded_recovery_window(self) -> None:
         """任意时刻重算只保留在途收尾，新计划从请求时间带资源下界续排。"""

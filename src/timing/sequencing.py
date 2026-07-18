@@ -159,6 +159,42 @@ def _build_resource_map(ir: Problem, wmap: Dict[int, object], swap: bool = False
     return out
 
 
+def _process_predecessors(wafers) -> Dict[Tuple[int, int], Tuple[int, int]]:
+    """建立同一路线同一加工工序的前片约束，禁止后片越过前片进入 PM。
+
+    重算会裁掉每片已经完成的路线前缀，因此使用 ``resume_stage_index + j`` 恢复原始
+    工序编号；已经越过该加工工序的晶圆不会进入当前分组，也不会错误阻塞剩余晶圆。
+    """
+    grouped: Dict[Tuple[str, int], List[Tuple[int, int, int]]] = {}
+    for wafer in wafers:
+        for stage_index, stage in enumerate(wafer.stages):
+            if stage.stage_type != "process":
+                continue
+            absolute_stage_index = wafer.resume_stage_index + stage_index
+            grouped.setdefault((wafer.route_name, absolute_stage_index), []).append(
+                (wafer.route_rank, wafer.wid, stage_index)
+            )
+    predecessors: Dict[Tuple[int, int], Tuple[int, int]] = {}
+    for visits in grouped.values():
+        visits.sort()
+        for previous, current in zip(visits, visits[1:]):
+            _, previous_wid, previous_stage = previous
+            _, current_wid, current_stage = current
+            predecessors[(current_wid, current_stage)] = (previous_wid, previous_stage)
+    return predecessors
+
+
+def _process_entry_blocked(
+    process_predecessors: Dict[Tuple[int, int], Tuple[int, int]],
+    pos: Dict[int, int],
+    wid: int,
+    destination_stage: int,
+) -> bool:
+    """判断前一片是否尚未进入同一加工工序。"""
+    predecessor = process_predecessors.get((wid, destination_stage))
+    return predecessor is not None and pos[predecessor[0]] < predecessor[1]
+
+
 def _ll_elder_blocked(src: Optional[Tuple[str, int]], occ: dict,
                       ll_age: Optional[Dict[Tuple[str, int], int]]) -> bool:
     """LL swap 的「先进先出」规则：片在 LL 某槽、兄弟槽被【更早进腔】的片占着 ⇒ 本片不可离腔。
@@ -265,6 +301,7 @@ def decode_orders(ir: Problem, tm: Durations, wafers, *,
     K = {w.wid: len(w.stages) - 1 for w in wafers}
     res_map = _build_resource_map(ir, wmap, swap)  # (wid,j)→资源键，预算一次供候选/Banker 复用（热点提速）
     pos = {w.wid: 0 for w in wafers}            # 各片当前所在 stage
+    process_predecessors = _process_predecessors(wafers)
     place_t = {w.wid: 0.0 for w in wafers}      # 各片落位到当前 stage 的（近似）时刻
     occ: Dict[Tuple[str, int], int] = {}        # (腔,槽) → 当前占用片
     resv: Dict[Tuple[str, int], int] = {}       # (腔,槽) → 为其出口预留该资源的片
@@ -322,6 +359,11 @@ def decode_orders(ir: Problem, tm: Durations, wafers, *,
             if j == 0 and not w.already_released and any(
                 any(x.cjob_id == blocker and pos[x.wid] < K[x.wid] for x in wafers)
                 for blocker in w.dispatch_after
+            ):
+                continue
+            if (
+                w.stages[j + 1].stage_type == "process"
+                and _process_entry_blocked(process_predecessors, pos, wid, j + 1)
             ):
                 continue
             dest = res_map[(wid, j + 1)]
@@ -506,6 +548,7 @@ def decode_orders_choosing(ir: Problem, tm: Durations, wafers, *,
     wmap = {w.wid: w for w in wafers}
     K = {w.wid: len(w.stages) - 1 for w in wafers}
     pos = {w.wid: 0 for w in wafers}
+    process_predecessors = _process_predecessors(wafers)
     place_t = {w.wid: 0.0 for w in wafers}
     occ: Dict[Tuple[str, int], int] = {}
     resv: Dict[Tuple[str, int], int] = {}
@@ -552,6 +595,11 @@ def decode_orders_choosing(ir: Problem, tm: Durations, wafers, *,
             if j == 0 and not w.already_released and any(
                 any(x.cjob_id == blocker and pos[x.wid] < K[x.wid] for x in wafers)
                 for blocker in w.dispatch_after
+            ):
+                continue
+            if (
+                w.stages[j + 1].stage_type == "process"
+                and _process_entry_blocked(process_predecessors, pos, wid, j + 1)
             ):
                 continue
             if j == 0 and route_wids[w.route_name][next_rel[w.route_name]] != wid:

@@ -87,6 +87,7 @@ class LoadLockState(StationState):
     """带有大气或真空环境状态的 LoadLock。"""
 
     environment: str = ATMOSPHERE
+    last_environment_transition_was_empty: bool = False
 
 
 @dataclass

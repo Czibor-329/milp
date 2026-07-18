@@ -81,6 +81,10 @@ def _feed_chooser(quota: dict) -> _Chooser:
         for wid, p in state.pos.items():
             if p > 0:
                 w = state.wmap[wid]
+                # 重算切点已经在设备内的晶圆，其 j==0 是裁剪后的续排起点，不是本轮新发片。
+                # 若把它们计入 fed，新增同优 CJob 会先整批“追平”历史发片数，反而形成串行。
+                if w.already_released:
+                    continue
                 group = w.cjob_id or w.route_name
                 fed[group] = fed.get(group, 0) + 1
 

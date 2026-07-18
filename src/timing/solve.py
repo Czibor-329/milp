@@ -99,6 +99,29 @@ def solve_timing(ir: Problem, wafers, orders: Optional[_Orders]=None) -> SolveRe
         for lo, hi in zip(ws, ws[1:]):
             edges.append((nodes.r(lo.wid, 0), nodes.r(hi.wid, 0), 0.0))
 
+    # 同一路线同一加工工序按晶圆 rank 进入 PM，保证 round-robin 的腔分配顺序不会被
+    # 下游资源空闲差异打乱。解码层已用相同规则阻止超车；这里再给差分图加权威边，
+    # 覆盖不同机器手或后续 timing 下界导致的实际到站时间反转。
+    process_visits: Dict[Tuple[str, int], List[Tuple[int, int, int]]] = {}
+    for wafer in wafers:
+        for stage_index, stage in enumerate(wafer.stages):
+            if stage.stage_type != "process":
+                continue
+            absolute_stage_index = wafer.resume_stage_index + stage_index
+            process_visits.setdefault((wafer.route_name, absolute_stage_index), []).append(
+                (wafer.route_rank, wafer.wid, stage_index)
+            )
+    for visits in process_visits.values():
+        visits.sort()
+        for previous, current in zip(visits, visits[1:]):
+            _, previous_wid, previous_stage = previous
+            _, current_wid, current_stage = current
+            edges.append((
+                nodes.a(previous_wid, previous_stage),
+                nodes.a(current_wid, current_stage),
+                0.0,
+            ))
+
     # tagged：带「资源键 + 两端 op」标注的 cross-wafer 互斥边，供 _critical_resources 提瓶颈。
     tagged: List[Tuple[int, int, float, str, str, Tuple[int, int], Tuple[int, int]]] = []
 

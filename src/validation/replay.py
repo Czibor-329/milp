@@ -327,6 +327,7 @@ def _start_prepare(
             return _issue(move, f"无法确定 {station.name} 开门所需环境", environment=True)
         if station.environment != expected:
             return _issue(move, f"{station.name} 当前环境为 {station.environment}，不是 {expected}", environment=True)
+        station.last_environment_transition_was_empty = False
 
     station.door_busy_until = end_time
     _schedule(scheduled, move, end_time, lambda: setattr(station, "door", DoorState.OPEN))
@@ -575,6 +576,9 @@ def _start_preprepare(
         return _issue(move, f"{station.name} 当前环境为 {station.environment}，不是 {last_state}", environment=True)
 
     material_id = _first_value(move, "MatIDList")
+    is_empty_transition = material_id is None
+    if is_empty_transition and station.last_environment_transition_was_empty:
+        return _issue(move, f"{station.name} 未开门便连续执行无片抽气或充气", environment=True)
     slot: Optional[SlotState] = None
     material: Optional[MaterialState] = None
     if material_id is not None:
@@ -600,6 +604,7 @@ def _start_preprepare(
 
     def complete() -> None:
         station.environment = current_state
+        station.last_environment_transition_was_empty = is_empty_transition
         if slot is not None:
             _set_slot(slot, SlotPhase.COMPLETED, material)
 

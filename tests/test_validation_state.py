@@ -139,6 +139,17 @@ class ValidationStateTests(unittest.TestCase):
             [],
         )
 
+    def test_empty_environment_cycle_requires_opening_load_lock(self) -> None:
+        """连续无片抽充气之间必须开门访问 LoadLock，禁止纯抵消压力循环。"""
+        moves = [
+            _move(1, 10, 0, 1, ModuleName="LL", LastState="ATM", CurState="VAC"),
+            _move(2, 10, 1, 2, ModuleName="LL", LastState="VAC", CurState="ATM"),
+        ]
+
+        issues = validate_move_list(_problem(), moves)
+
+        self.assertIn("未开门便连续执行无片抽气或充气", issues[0])
+
     def test_load_lock_preprepare_completes_material(self) -> None:
         """LoadLock 抽充气完成后，槽内物料应可被真空侧取出。"""
         moves = [

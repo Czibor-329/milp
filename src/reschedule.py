@@ -235,6 +235,7 @@ class RealtimeRescheduler:
         moves = _serialize_initial_processing(moves, state)
         moves = _repair_loadlock_prepare_overlap(moves, state)
         moves = _prepend_environment_setups(problem, moves, state)
+        moves = _remove_redundant_empty_environment_cycles(moves, state)
         shifted = _shift_moves(moves, offset)
         issues = validate_move_list(problem, shifted, state)
         if issues:
@@ -639,6 +640,34 @@ def _prepend_environment_setups(
             break
 
         cut_time, station_name, last_state, required_state = mismatch
+        # 若最近一次无片转换之后没有开门，而它恰好把环境从下一次开门所需状态
+        # 翻走，则这条转换本身就是多槽占用排序产生的冗余 setup。删除它并重新
+        # 回放，比再补一条反向 setup 更符合真实 LoadLock 行为。
+        last_access_time = max(
+            (
+                float(move.get("StartTime") or 0.0)
+                for move in repaired
+                if move.get("MoveType") == PREPARE_MOVE
+                and str(move.get("Station") or move.get("ModuleName") or "") == station_name
+                and float(move.get("StartTime") or 0.0) < cut_time - TIME_TOLERANCE
+            ),
+            default=float("-inf"),
+        )
+        redundant_setups = [
+            move for move in repaired
+            if move.get("MoveType") == PRE_PREPARE_MOVE
+            and str(move.get("Station") or move.get("ModuleName") or "") == station_name
+            and not (move.get("MatIDList") or [])
+            and str(move.get("LastState") or "").upper() == required_state
+            and str(move.get("CurState") or "").upper() == last_state
+            and float(move.get("EndTime") or 0.0) <= cut_time + TIME_TOLERANCE
+            and float(move.get("StartTime") or 0.0) >= last_access_time - TIME_TOLERANCE
+        ]
+        if redundant_setups:
+            redundant = max(redundant_setups, key=sort_key)
+            repaired.remove(redundant)
+            continue
+
         chamber = problem.chambers.get(station_name)
         duration = 0.0
         if chamber is not None:
@@ -803,6 +832,203 @@ def _repair_loadlock_prepare_overlap(
         cut_time, delay = conflict
         for move in repaired:
             if float(move.get("StartTime") or 0.0) >= cut_time - TIME_TOLERANCE:
+                move["StartTime"] = float(move.get("StartTime") or 0.0) + delay
+                move["EndTime"] = float(move.get("EndTime") or 0.0) + delay
+    renumbered, _ = _renumber_segment(repaired, 1)
+    return renumbered
+
+
+def _remove_redundant_empty_environment_cycles(
+    moves: Sequence[Mapping[str, Any]],
+    state: MachineState,
+) -> List[dict]:
+    """删除两次开门之间成对抵消的无片抽气/充气动作。"""
+    repaired = [dict(move) for move in moves]
+    loadlocks = {
+        name for name, station in state.stations.items()
+        if isinstance(station, LoadLockState)
+    }
+    for station_name in loadlocks:
+        station_events = sorted(
+            (
+                move for move in repaired
+                if str(move.get("Station") or move.get("ModuleName") or "") == station_name
+                and move.get("MoveType") in {PREPARE_MOVE, PRE_PREPARE_MOVE}
+            ),
+            key=sort_key,
+        )
+        removable_ids: set[int] = set()
+        retained_events: List[dict] = []
+        for current in station_events:
+            previous = retained_events[-1] if retained_events else None
+            can_cancel = (
+                previous is not None
+                and previous.get("MoveType") == PRE_PREPARE_MOVE
+                and current.get("MoveType") == PRE_PREPARE_MOVE
+                and not (previous.get("MatIDList") or [])
+                and not (current.get("MatIDList") or [])
+                and str(previous.get("LastState") or "").upper()
+                == str(current.get("CurState") or "").upper()
+                and str(previous.get("CurState") or "").upper()
+                == str(current.get("LastState") or "").upper()
+            )
+            if can_cancel:
+                retained_events.pop()
+                removable_ids.update({
+                    int(previous.get("MoveID") or 0), int(current.get("MoveID") or 0),
+                })
+            else:
+                retained_events.append(current)
+        if removable_ids:
+            repaired = [
+                move for move in repaired
+                if int(move.get("MoveID") or 0) not in removable_ids
+            ]
+    renumbered, _ = _renumber_segment(repaired, 1)
+    return renumbered
+
+
+def _repair_loadlock_door_overlap(
+    moves: Sequence[Mapping[str, Any]],
+    state: MachineState,
+) -> List[dict]:
+    """串行化 LoadLock 跨槽共享门事务及环境转换。
+
+    timing 的 swap 模式允许 entry/exit 两个槽位同时占片，但两个槽位仍共用一扇物理门。
+    当相邻事务落在不同槽位时，压力态约束不足以保证 ``Complete → Prepare`` 严格串行；
+    抽气/充气也必须位于完整关门区间。修复时只移动冲突动作及其依赖后继，保留可以在
+    另一个槽位先完成的 VAC/ATM 取放事务。
+    """
+    repaired = [dict(move) for move in moves]
+    loadlocks = {
+        name for name, station in state.stations.items()
+        if isinstance(station, LoadLockState)
+    }
+    descendant_cache: Dict[int, set[int]] = {}
+
+    def descendant_ids(root_id: int) -> set[int]:
+        """返回指定动作及全部 PreMove 依赖后继。"""
+        if root_id in descendant_cache:
+            return descendant_cache[root_id]
+        descendants = {root_id}
+        changed = True
+        while changed:
+            changed = False
+            for move in repaired:
+                move_id = int(move.get("MoveID") or 0)
+                if move_id in descendants:
+                    continue
+                if any(int(value) in descendants for value in (move.get("PreMoveID") or [])):
+                    descendants.add(move_id)
+                    changed = True
+        descendant_cache[root_id] = descendants
+        return descendants
+
+    while True:
+        conflict: Optional[Tuple[float, float, set[int]]] = None
+        for station_name in sorted(loadlocks):
+            station_moves = [
+                move for move in repaired
+                if str(move.get("Station") or move.get("ModuleName") or "") == station_name
+            ]
+            prepares = sorted(
+                (move for move in station_moves if move.get("MoveType") == PREPARE_MOVE),
+                key=sort_key,
+            )
+            completes = [move for move in station_moves if move.get("MoveType") == COMPLETE_MOVE]
+            for previous_prepare, next_prepare in zip(prepares, prepares[1:]):
+                previous_end = float(previous_prepare.get("EndTime") or 0.0)
+                close_candidates = [
+                    move for move in completes
+                    if float(move.get("StartTime") or 0.0) >= previous_end - TIME_TOLERANCE
+                ]
+                if not close_candidates:
+                    continue
+                previous_close = min(close_candidates, key=sort_key)
+                close_end = float(previous_close.get("EndTime") or 0.0)
+                next_start = float(next_prepare.get("StartTime") or 0.0)
+                if close_end > next_start + TIME_TOLERANCE:
+                    conflict = (
+                        next_start,
+                        close_end - next_start,
+                        {int(previous_close.get("MoveID") or 0)},
+                    )
+                    break
+            if conflict is not None:
+                break
+            pressures = sorted(
+                (move for move in station_moves if move.get("MoveType") == PRE_PREPARE_MOVE),
+                key=sort_key,
+            )
+            transactions: List[Tuple[dict, dict]] = []
+            for prepare in prepares:
+                prepare_end = float(prepare.get("EndTime") or 0.0)
+                close_candidates = [
+                    move for move in completes
+                    if float(move.get("StartTime") or 0.0) >= prepare_end - TIME_TOLERANCE
+                ]
+                if close_candidates:
+                    transactions.append((prepare, min(close_candidates, key=sort_key)))
+            for pressure in pressures:
+                pressure_start = float(pressure.get("StartTime") or 0.0)
+                pressure_end = float(pressure.get("EndTime") or 0.0)
+                for prepare, close in transactions:
+                    prepare_start = float(prepare.get("StartTime") or 0.0)
+                    close_end = float(close.get("EndTime") or 0.0)
+                    if (
+                        pressure_start >= close_end - TIME_TOLERANCE
+                        or pressure_end <= prepare_start + TIME_TOLERANCE
+                    ):
+                        continue
+                    required_environment = (
+                        ATMOSPHERE if prepare.get("RelatedRobotType") == 0
+                        else VACUUM if prepare.get("RelatedRobotType") == 1
+                        else ""
+                    )
+                    pressure_last = str(pressure.get("LastState") or "").upper()
+                    pressure_current = str(pressure.get("CurState") or "").upper()
+                    if required_environment == pressure_last:
+                        transaction_ids = {
+                            move_id for move_id in descendant_ids(int(prepare.get("MoveID") or 0))
+                            if any(
+                                int(candidate.get("MoveID") or 0) == move_id
+                                and float(candidate.get("StartTime") or 0.0) < close_end + TIME_TOLERANCE
+                                for candidate in repaired
+                            )
+                        }
+                        conflict = (
+                            pressure_start,
+                            close_end - pressure_start,
+                            transaction_ids,
+                        )
+                    elif required_environment == pressure_current:
+                        conflict = (
+                            prepare_start,
+                            pressure_end - prepare_start,
+                            {int(pressure.get("MoveID") or 0)},
+                        )
+                    else:
+                        if pressure_start <= prepare_start:
+                            conflict = (
+                                prepare_start,
+                                pressure_end - prepare_start,
+                                {int(pressure.get("MoveID") or 0)},
+                            )
+                        else:
+                            conflict = (pressure_start, close_end - pressure_start, set())
+                    break
+                if conflict is not None:
+                    break
+            if conflict is not None:
+                break
+        if conflict is None:
+            break
+        cut_time, delay, excluded_ids = conflict
+        for move in repaired:
+            if (
+                float(move.get("StartTime") or 0.0) >= cut_time - TIME_TOLERANCE
+                and int(move.get("MoveID") or 0) not in excluded_ids
+            ):
                 move["StartTime"] = float(move.get("StartTime") or 0.0) + delay
                 move["EndTime"] = float(move.get("EndTime") or 0.0) + delay
     renumbered, _ = _renumber_segment(repaired, 1)

@@ -5,8 +5,10 @@ from pathlib import Path
 
 import scripts.reschedule as demo
 from src.model import Chamber, Problem, Robot, RuntimeAvailability, Stage, Wafer
-from src.reschedule import RealtimeRescheduler
+from src.reschedule import RealtimeRescheduler, _repair_loadlock_door_overlap
 from src.timing import start_schedule
+from src.validation.move_fields import COMPLETE_MOVE, PICK_MOVE, PREPARE_MOVE, PRE_PREPARE_MOVE
+from src.validation.state import LoadLockState, MachineState, SlotState
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -93,6 +95,45 @@ class RealtimeRescheduleTests(unittest.TestCase):
         self.assertTrue(result.feasible)
         self.assertGreaterEqual(result.schedule[0][1][2], 51.0)
         self.assertLess(result.schedule[1][1][2], 50.0)
+
+    def test_loadlock_shared_door_serializes_cross_slot_transactions(self) -> None:
+        """跨槽门事务和环境转换必须共享同一 LoadLock 物理门。"""
+        state = MachineState(stations={
+            "LA": LoadLockState("LA", "LoadLock", {1: SlotState(), 2: SlotState()}),
+        })
+        moves = [
+            {"MoveID": 1, "MoveType": PREPARE_MOVE, "StartTime": 0.0, "EndTime": 1.0,
+             "Station": "LA", "ModuleName": "LA", "SlotList": [2], "MatIDList": [1],
+             "RelatedRobotType": 1, "PreMoveID": []},
+            {"MoveID": 2, "MoveType": COMPLETE_MOVE, "StartTime": 5.0, "EndTime": 6.0,
+             "Station": "LA", "ModuleName": "LA", "SlotList": [2], "MatIDList": [1],
+             "PreMoveID": [1]},
+            {"MoveID": 3, "MoveType": PREPARE_MOVE, "StartTime": 5.9, "EndTime": 6.9,
+             "Station": "LA", "ModuleName": "LA", "SlotList": [1], "MatIDList": [2],
+             "RelatedRobotType": 1, "PreMoveID": []},
+            {"MoveID": 4, "MoveType": PICK_MOVE, "StartTime": 6.9, "EndTime": 8.0,
+             "ModuleName": "VTR", "SrcStationList": ["LA"], "SrcSlotList": [1],
+             "MatIDList": [2], "PreMoveID": [3]},
+            {"MoveID": 5, "MoveType": COMPLETE_MOVE, "StartTime": 8.0, "EndTime": 9.0,
+             "Station": "LA", "ModuleName": "LA", "SlotList": [1], "MatIDList": [2],
+             "PreMoveID": [3, 4]},
+            {"MoveID": 6, "MoveType": PRE_PREPARE_MOVE, "StartTime": 6.0, "EndTime": 16.0,
+             "Station": "LA", "ModuleName": "LA", "SlotList": [2], "MatIDList": [1],
+             "LastState": "VAC", "CurState": "ATM", "PreMoveID": [2]},
+        ]
+
+        repaired = _repair_loadlock_door_overlap(moves, state)
+        prepares = sorted(
+            (move for move in repaired if move.get("MoveType") == PREPARE_MOVE),
+            key=lambda move: float(move["StartTime"]),
+        )
+        completes = sorted(
+            (move for move in repaired if move.get("MoveType") == COMPLETE_MOVE),
+            key=lambda move: float(move["StartTime"]),
+        )
+        pressure = next(move for move in repaired if move.get("MoveType") == PRE_PREPARE_MOVE)
+        self.assertGreaterEqual(float(prepares[1]["StartTime"]), float(completes[0]["EndTime"]))
+        self.assertGreaterEqual(float(pressure["StartTime"]), float(completes[1]["EndTime"]))
 
     def test_viewer_reads_and_draws_recompute_points(self) -> None:
         """查看器应解析 RecomputePoints 并渲染重算竖线。"""
