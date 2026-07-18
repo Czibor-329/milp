@@ -21,6 +21,7 @@ import json
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import IntEnum
+from itertools import product
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -30,6 +31,10 @@ from src.log_setup import get_logger
 from src.model import Chamber, CleanSpec, Durations, Problem, Robot, Stage, Wafer
 
 log = get_logger(__name__)
+
+
+PROCESS_ASSIGNMENT_ROUND_ROBIN = "round_robin"
+PROCESS_ASSIGNMENT_ACYCLIC_ROUND_ROBIN = "acyclic_round_robin"
 
 
 # --------------------------------------------------------------------------- #
@@ -817,12 +822,85 @@ def _round_robin(candidates: List[str], rank: int) -> str:
     return candidates[rank % len(candidates)] if candidates else ""
 
 
+def _acyclic_process_paths(
+    route_name: str,
+    stage_steps: Sequence[Mapping[str, Any]],
+    process_pm_order: Optional[Sequence[str]],
+) -> Tuple[List[int], List[Tuple[str, ...]]]:
+    """枚举一条 Route 可采用的严格递增加工腔路径。
+
+    每道加工工序从自己的候选池选择一个 PM；同片不同工序不可重复使用 PM，且所选
+    PM 在固定顺序中必须严格递增。该约束消除不同晶圆形成相反 PM 资源环的可能性。
+
+    参数：
+        route_name: 用于错误信息的 Route 名称。
+        stage_steps: 已线性化的 Route stage 模板。
+        process_pm_order: PM 的全局固定顺序；未提供时按候选名称排序推导。
+
+    返回：
+        ``(加工 stage 下标, 合法 PM 路径)``。
+
+    Raises:
+        ValueError: 候选池为空、包含不在固定顺序内的 PM，或不存在合法路径。
+    """
+    process_indices = [
+        index for index, stage in enumerate(stage_steps)
+        if str(stage.get("stage_type")) == "process"
+    ]
+    if not process_indices:
+        return [], [tuple()]
+
+    pools = [list(stage_steps[index].get("visits") or []) for index in process_indices]
+    if any(not pool for pool in pools):
+        raise ValueError(f"Route {route_name!r} 的加工候选池不能为空：{pools}")
+
+    if process_pm_order is None:
+        pm_order = sorted({pm for pool in pools for pm in pool})
+    else:
+        pm_order = list(process_pm_order)
+    if len(pm_order) != len(set(pm_order)):
+        raise ValueError(f"process_pm_order 包含重复 PM：{pm_order}")
+    order_index = {pm: index for index, pm in enumerate(pm_order)}
+    unknown = sorted({pm for pool in pools for pm in pool if pm not in order_index})
+    if unknown:
+        raise ValueError(
+            f"Route {route_name!r} 的候选 PM {unknown} 不在固定顺序 {pm_order} 中"
+        )
+
+    valid_paths = [
+        tuple(path)
+        for path in product(*pools)
+        if all(order_index[left] < order_index[right] for left, right in zip(path, path[1:]))
+    ]
+    if not valid_paths:
+        raise ValueError(
+            f"Route {route_name!r} 没有合法的严格递增 PM 路径；候选池={pools}，"
+            f"固定顺序={pm_order}"
+        )
+    return process_indices, valid_paths
+
+
 def _expand_wafers(
     chambers: Dict[str, Chamber], dur: Durations,
     routes: Dict[str, _RouteTmpl], pjob_assignments: List[PJobAssignment],
+    *, process_assignment: str = PROCESS_ASSIGNMENT_ROUND_ROBIN,
+    process_pm_order: Optional[Sequence[str]] = None,
 ) -> List[Wafer]:
     """每个 pjob 的每片 material → Wafer，按 (pjob 顺序, material 顺序) 定全局 wid。
-    含 round-robin 定腔、loadlock 抽/充气时长、多容量腔 round-robin 槽位（取代旧 milp._expand）。"""
+    含定腔、loadlock 抽/充气时长、多容量腔 round-robin 槽位（取代旧 milp._expand）。
+
+    ``process_assignment`` 默认保持历史的逐工序 round-robin。L2D 使用可选的
+    ``acyclic_round_robin``：先枚举每条 Route 的严格递增 PM 路径，再按晶圆轮询整条路径，
+    从而同时保证同片 PM 不重复和跨片资源方向一致。
+    """
+    supported_assignments = {
+        PROCESS_ASSIGNMENT_ROUND_ROBIN,
+        PROCESS_ASSIGNMENT_ACYCLIC_ROUND_ROBIN,
+    }
+    if process_assignment not in supported_assignments:
+        raise ValueError(
+            f"未知 process_assignment={process_assignment!r}；可选值={sorted(supported_assignments)}"
+        )
     wafers: List[Wafer] = []
     wid = 0
     slot_counter: Dict[str, int] = {}
@@ -833,6 +911,14 @@ def _expand_wafers(
     # rank 从 0 重数，按 rank 轮转会让所有 dummy pjob 的首片挤同一 loadlock（进+出都是它，
     # 另一 LL 闲置 ⇒ dummy 段串行）；跨 pjob 接着轮后各 PM 的 dummy 片 LA/LB 交替。
     robin_counter: Dict[tuple, int] = {}
+    route_path_counter: Dict[str, int] = {}
+    route_paths: Dict[str, Tuple[List[int], List[Tuple[str, ...]]]] = {}
+    if process_assignment == PROCESS_ASSIGNMENT_ACYCLIC_ROUND_ROBIN:
+        route_paths = {
+            route_name: _acyclic_process_paths(route_name, route.stages, process_pm_order)
+            for route_name, route in routes.items()
+        }
+
     for pj in pjob_assignments:
         rt = routes[pj.route_name]
         stage_steps = rt.stages
@@ -840,13 +926,22 @@ def _expand_wafers(
         dummy_pj = pj.name.startswith("dummy_") or "_dummy_" in pj.route_name
         for rank, mat in enumerate(pj.material_ids):
             stages: List[Stage] = []
+            selected_process_chambers: Dict[int, str] = {}
+            if process_assignment == PROCESS_ASSIGNMENT_ACYCLIC_ROUND_ROBIN:
+                process_indices, valid_paths = route_paths[pj.route_name]
+                path_rank = route_path_counter.get(pj.route_name, 0)
+                route_path_counter[pj.route_name] = path_rank + 1
+                selected_path = valid_paths[path_rank % len(valid_paths)]
+                selected_process_chambers = dict(zip(process_indices, selected_path))
             # 同一片晶圆回到 source LoadPort 时必须复用它的初始物理槽位；若 source/sink 分别
             # 消耗全局 slot_counter，25 槽 LoadPort 在第 13 片就会绕回并产生初始占位冲突。
             home_slots: Dict[str, int] = {}
             for j, st in enumerate(stage_steps):
                 in_r = transports[j - 1] if j >= 1 else ""
                 out_r = transports[j] if j < len(transports) else ""
-                if st["stage_type"] == "process" or (dummy_pj and st["stage_type"] == "loadlock"):
+                if j in selected_process_chambers:
+                    chamber = selected_process_chambers[j]
+                elif st["stage_type"] == "process" or (dummy_pj and st["stage_type"] == "loadlock"):
                     rkey = (st["stage_type"], j, tuple(st["visits"]))
                     k = robin_counter.get(rkey, 0)
                     robin_counter[rkey] = k + 1
@@ -894,8 +989,13 @@ def _expand_wafers(
 # --------------------------------------------------------------------------- #
 # 主入口
 # --------------------------------------------------------------------------- #
-def _problem_from_payload(payload: Mapping[str, Any]) -> Problem:
-    """已组装/归一化的 task_payload → Problem。对 native payload 幂等。"""
+def _problem_from_payload(
+    payload: Mapping[str, Any],
+    *,
+    process_assignment: str = PROCESS_ASSIGNMENT_ROUND_ROBIN,
+    process_pm_order: Optional[Sequence[str]] = None,
+) -> Problem:
+    """已组装/归一化的 task_payload → Problem，并按指定模式固定加工腔。"""
     cjob_assignments = task_cjob_assignments(payload)
     if not cjob_assignments:
         raise ValueError("task payload has no usable ControlJobs")
@@ -921,7 +1021,14 @@ def _problem_from_payload(payload: Mapping[str, Any]) -> Problem:
 
     problem = Problem(chambers=chambers, robots=robots, wafers=[])
     dur = Durations(problem)
-    problem.wafers = _expand_wafers(chambers, dur, routes, pjob_assignments)
+    problem.wafers = _expand_wafers(
+        chambers,
+        dur,
+        routes,
+        pjob_assignments,
+        process_assignment=process_assignment,
+        process_pm_order=process_pm_order,
+    )
     problem.pre_clean = [s for name in route_order for s in routes[name].pre_clean]
     problem.post_clean = [s for name in route_order for s in routes[name].post_clean]
     problem.dummy_wac = [s for name in route_order for s in routes[name].dummy_wac]
@@ -935,12 +1042,22 @@ def _problem_from_payload(payload: Mapping[str, Any]) -> Problem:
     return problem
 
 
-def parse_task(tool_topo: Mapping[str, Any], update_params: Mapping[str, Any]) -> Problem:
+def parse_task(
+    tool_topo: Mapping[str, Any],
+    update_params: Mapping[str, Any],
+    *,
+    process_assignment: str = PROCESS_ASSIGNMENT_ROUND_ROBIN,
+    process_pm_order: Optional[Sequence[str]] = None,
+) -> Problem:
     """由 tool_topo + update_params 组装内部 task_payload，直接产出求解器要的 Problem。
 
     标准重算数据（文档接口格式）经 _assemble_routes 就地补齐成 native 形状；
     ProcessRecipes 在补齐前取出再传给补齐。PreDummyClean 合成 dummy 晶圆的
     route/PJob/CJob 须在 dual-view / 补齐之前。
+
+    ``process_assignment`` 默认使用历史逐工序 round-robin；传入 ``acyclic_round_robin``
+    时按 ``process_pm_order`` 枚举严格递增实际路径并整条轮询。返回值中的实际 PM、LA/LB
+    和槽位都已固定，可直接交给 timing 或 L2D 顺序策略。
     """
     process_recipes = update_params.get("ProcessRecipes")
     payload: Dict[str, Any] = {k: deepcopy(v) for k, v in update_params.items()}
@@ -950,4 +1067,8 @@ def parse_task(tool_topo: Mapping[str, Any], update_params: Mapping[str, Any]) -
     # 双腔设备：2 片成对建模（须在补齐之前，清洁解析基于成对视图）
     apply_dual_view(payload)
     _assemble_routes(payload, process_recipes)
-    return _problem_from_payload(payload)
+    return _problem_from_payload(
+        payload,
+        process_assignment=process_assignment,
+        process_pm_order=process_pm_order,
+    )

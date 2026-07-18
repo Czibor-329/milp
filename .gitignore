@@ -17,6 +17,7 @@ results/
 *.mps
 *.sol
 gurobi.log
+l2d_pse300_*.pt
 
 # IDE / OS
 .idea/

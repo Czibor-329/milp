@@ -12,3 +12,13 @@
 启动：`python realtime_scheduler/server.py --port 8765 --open`
 
 旧命令 `python scripts/config_editor_server.py` 仍可使用。
+
+## 运行策略
+
+- `启发式`：使用默认实时排程器。
+- `RL 搜索`：使用已有的行为克隆/RL模型做限时搜索。
+- `L2D 图策略`：仅用于PSE300，模型贪心生成一次析取图操作顺序，再由Timing求解器统一定时。
+
+L2D会优先加载`results/models/l2d_pse300_2job.pt`，也支持同目录的一阶段模型以及仓库根目录下训练命令默认生成的checkpoint。没有找到checkpoint时，可直接在运行策略区导入`.pt`文件；服务会先验证模型结构和特征版本，再保存并立即启用L2D选项。
+
+测试组别作为设备下的独立数据保存，允许先创建空组，再在当前组内新建或复制测试；旧测试会自动归入“未分组”，无需手工迁移。

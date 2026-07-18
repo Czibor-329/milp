@@ -12,7 +12,14 @@ from .sequencing import _Orders, decode_orders
 from .spans import _hop_span, _ll_reuse_setup, _robot_switch_gap, _stage_dwell
 
 
-def solve_timing(ir: Problem, wafers, orders: Optional[_Orders]=None) -> SolveResult:
+def solve_timing(
+    ir: Problem,
+    wafers,
+    orders: Optional[_Orders] = None,
+    *,
+    enforce_resumed_route_fifo: bool = True,
+) -> SolveResult:
+    """按固定资源顺序求最早可行时刻；可选关闭续排晶圆裁剪后首跳的伪发片 FIFO。"""
     t_start = time.perf_counter()
     tm = Durations(ir)
     wmap = {w.wid: w for w in wafers}
@@ -93,7 +100,8 @@ def solve_timing(ir: Problem, wafers, orders: Optional[_Orders]=None) -> SolveRe
     # 同 route FIFO 发片
     by_route: Dict[str, List] = {}
     for w in wafers:
-        by_route.setdefault(w.route_name, []).append(w)
+        if enforce_resumed_route_fifo or not w.already_released:
+            by_route.setdefault(w.route_name, []).append(w)
     for ws in by_route.values():
         ws.sort(key=lambda x: x.wid)
         for lo, hi in zip(ws, ws[1:]):

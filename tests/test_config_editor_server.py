@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import tempfile
 import unittest
@@ -199,6 +200,57 @@ class ConfigEditorServerTests(unittest.TestCase):
                 )
                 last_event_type = move["MoveType"]
 
+    def test_pse300_l2d_strategy_runs_graph_policy_inference(self) -> None:
+        """前端提交 l2d 后应加载图策略，并产出通过校验的 PSE300 MoveList。"""
+        from src.l2d.model import L2DPolicy
+
+        plan = {
+            "deviceName": PSE300_PATH.name,
+            "device": json.loads(PSE300_PATH.read_text(encoding="utf-8")),
+            "strategy": "l2d",
+            "roundCount": 2,
+            "options": {},
+            "recipes": [{
+                "name": "L2DRecipe",
+                "time": 60,
+                "modules": ["PM1", "PM2", "PM3", "PM4"],
+                "weight": {},
+            }],
+            "cleans": [],
+            "routes": [_route("L2DRoute", "PM1,PM2,PM3,PM4", "L2DRecipe")],
+            "rounds": [
+                {
+                    "currentTime": 0,
+                    "jobs": [{
+                        **_job("L2DJob1", "L2DRoute", "LP1"),
+                        "waferCount": 3,
+                    }],
+                },
+                {
+                    "currentTime": 70,
+                    "jobs": [{
+                        **_job("L2DJob2", "L2DRoute", "LP2"),
+                        "waferCount": 3,
+                    }],
+                },
+            ],
+        }
+
+        with patch.object(
+            config_server,
+            "_load_l2d_inference_policy",
+            return_value=L2DPolicy(),
+        ) as loader:
+            result = execute_plan(plan)
+
+        loader.assert_called_once_with()
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["strategy"], "l2d")
+        self.assertEqual(result["validation"], "passed")
+        self.assertGreater(result["moveCount"], 0)
+        self.assertEqual(len(result["rounds"]), 2)
+        self.assertEqual(len(result["output"]["RecomputePoints"]), 1)
+
     def test_job_route_is_bound_to_selected_load_port(self) -> None:
         """Job 复用公共 Route 时应生成独立 Route 并改写首尾 LoadPort。"""
         plan = {
@@ -329,6 +381,9 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("state.stationNames", html)
         self.assertIn('id="autoExportLog"', html)
         self.assertIn('id="logButton"', html)
+        self.assertIn('id="l2dStrategyInput"', html)
+        self.assertIn('value="l2d"', html)
+        self.assertIn("status.strategies?.l2d", html)
         self.assertIn('id="deviceSelect"', html)
         self.assertIn('id="testCaseSelect"', html)
         self.assertIn('id="copyTestButton"', html)
@@ -345,6 +400,10 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("$ 运行失败：${error.message", html)
         self.assertIn("EXPECTED_API_SCHEMA", html)
         self.assertIn("失败也会生成", html)
+        self.assertIn('id="testGroupSelect"', html)
+        self.assertIn('id="newGroupButton"', html)
+        self.assertIn('id="l2dCheckpointFile"', html)
+        self.assertIn("/api/models/l2d", html)
         self.assertNotIn('id="recipeList"', html)
 
     def test_device_workspace_persists_independent_test_cases(self) -> None:
@@ -398,6 +457,55 @@ class ConfigEditorServerTests(unittest.TestCase):
             self.assertEqual([second["id"]], [item["id"] for item in remaining])
             with self.assertRaises(ValueError):
                 delete_workspace_test(device["id"], second["id"], store_path)
+
+    def test_workspace_test_group_persists_across_create_and_update(self) -> None:
+        """测试集分组应独立保存，旧的空分组也保持兼容。"""
+        with tempfile.TemporaryDirectory() as directory:
+            store_path = Path(directory) / "workspaces.json"
+            device, _ = import_workspace_device("device.json", self.device, store_path)
+            created = create_workspace_test(device["id"], {
+                "name": "吞吐验证", "group": "L2D 对比", "roundCount": 1, "rounds": [{}],
+            }, store_path)
+            self.assertEqual("L2D 对比", created["group"])
+
+            updated = update_workspace_test(device["id"], created["id"], {
+                **created, "group": "回归测试",
+            }, store_path)
+            self.assertEqual("回归测试", updated["group"])
+            loaded = get_workspace_device(device["id"], store_path)
+            self.assertEqual("回归测试", loaded["tests"][0]["group"])
+            self.assertEqual(["L2D 对比", "回归测试"], loaded["testGroups"])
+
+    def test_workspace_group_can_exist_without_creating_test(self) -> None:
+        """点击组别加号只应增加空组，不应隐式增加测试。"""
+        with tempfile.TemporaryDirectory() as directory:
+            store_path = Path(directory) / "workspaces.json"
+            device, _ = import_workspace_device("device.json", self.device, store_path)
+            groups = config_server.create_workspace_test_group(device["id"], "性能测试", store_path)
+            loaded = get_workspace_device(device["id"], store_path)
+            self.assertEqual(["性能测试"], groups)
+            self.assertEqual(["性能测试"], loaded["testGroups"])
+            self.assertEqual([], loaded["tests"])
+
+    def test_import_l2d_checkpoint_validates_and_saves_model(self) -> None:
+        """页面上传的 checkpoint 必须可加载，并按训练阶段保存到模型目录。"""
+        from src.l2d.api import save_l2d_checkpoint
+        from src.l2d.model import L2DPolicy
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.pt"
+            save_l2d_checkpoint(
+                source, L2DPolicy(), phase="two-job",
+                topology=json.loads(PSE300_PATH.read_text(encoding="utf-8")), random_seed=7,
+            )
+            with patch.object(config_server, "MODELS_DIR", root / "models"):
+                summary = config_server.import_l2d_checkpoint(
+                    base64.b64encode(source.read_bytes()).decode("ascii")
+                )
+            self.assertEqual("two-job", summary["phase"])
+            self.assertEqual("l2d_pse300_2job.pt", summary["filename"])
+            self.assertTrue((root / "models" / summary["filename"]).is_file())
 
     def test_legacy_test_routes_merge_into_shared_device_library(self) -> None:
         """Test3 有两条 Route、Test4 仅一条时，迁移后两者应使用设备的两条共享 Route。"""

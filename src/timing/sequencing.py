@@ -20,7 +20,8 @@ chooser 排序，循环再套 Banker 安全掩码提交。同一候选合法性�
 排序，_make_default_chooser)、teacher(MILP 序，标签提取)、policy(网络打分，推理)。
 
 对外只有一个函数：decode_orders(ir, tm, wafers, *, chooser=None, prio=None, reserve=False,
-banker=True)。默认/派工偏置/驻留预留/自定义 chooser 全部走它，无薄封装层。
+banker=True, filter_safe_candidates=False)。默认/派工偏置/驻留预留/自定义 chooser 全部走它，
+无薄封装层。
 """
 
 from __future__ import annotations
@@ -28,7 +29,8 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass, field
 from collections import namedtuple
-from typing import Callable, Dict, List, Optional, Tuple
+from types import MappingProxyType
+from typing import Callable, Dict, List, Mapping, Optional, Tuple
 
 from src.model import Durations, Problem
 
@@ -95,6 +97,12 @@ class _DecodeState:
     # 选腔模式下（labels/policy）各腔累计被派入的片数，供 step_features 的选腔均衡特征用；
     # 默认/backward 定序不选腔 ⇒ None（特征退化为 0，对这些路径零影响）。
     ch_used: Optional[Dict[str, int]] = None
+    # 已提交的资源顺序以不可变快照暴露。策略可据此增加析取边，但不能改写解码器状态。
+    chamber_orders: Mapping[Tuple[str, int], Tuple[Tuple[int, int], ...]] = field(
+        default_factory=dict
+    )
+    robot_orders: Mapping[str, Tuple[Tuple[int, int], ...]] = field(default_factory=dict)
+    loadlock_orders: Mapping[str, Tuple[Tuple[int, int], ...]] = field(default_factory=dict)
 
 
 # chooser(state, cands) → 候选索引的偏好序（最优在前）。banker 时循环取序里第一个安全候选。
@@ -210,12 +218,20 @@ def _drain_completes(ir: Problem, wmap: Dict[int, object], K: Dict[int, int],
                      pos: Dict[int, int], occ: Dict[Tuple[str, int], int],
                      resv: Dict[Tuple[str, int], int], reserve: bool = False,
                      res_map: Optional[Dict[Tuple[int, int], Optional[Tuple[str, int]]]] = None,
-                     ll_age: Optional[Dict[Tuple[str, int], int]] = None) -> bool:
+                     ll_age: Optional[Dict[Tuple[str, int], int]] = None,
+                     process_predecessors: Optional[
+                         Dict[Tuple[int, int], Tuple[int, int]]
+                     ] = None,
+                     release_predecessors: Optional[Dict[int, int]] = None) -> bool:
     """安全谕示：从 (pos, occ, resv) 起，用纯下游清空（每步挑剩余最下游、去向未被占/预留的 hop）
     能否把所有片送完？能 ⇒ 当前状态安全（无死锁）。纯下游清空对单臂流水可证无死锁，故
     「存在完工序」当且仅当它能跑完。预留只挡新进、不挡在制片出腔，故不致死锁。
     res_map：预算好的 (wid,j)→资源键表（decode_orders 传入共享、避免重算）；None 时本地建一次。
-    ll_age：swap 模式下 LL 槽→进腔序号（谕示同样遵守 LL 先进先出，见 _ll_elder_blocked）；None=不启用。"""
+    ll_age：swap 模式下 LL 槽→进腔序号（谕示同样遵守 LL 先进先出，见 _ll_elder_blocked）；None=不启用。
+    process_predecessors / release_predecessors：传入时镜像真实解码器的同工序进入 FIFO 和
+    同 Route 发片 FIFO。L2D 安全预过滤必须包含这些约束，否则可能把后片占住前片下游 PM
+    的动作误判为安全；默认不传，以保持旧解码策略行为不变。
+    """
     if res_map is None:
         res_map = _build_resource_map(ir, wmap)
     pos = dict(pos)
@@ -228,6 +244,25 @@ def _drain_completes(ir: Problem, wmap: Dict[int, object], K: Dict[int, int],
         pick = None                       # (-j, wid)：最下游优先
         for wid, j in pos.items():
             if j >= K[wid]:
+                continue
+            wafer = wmap[wid]
+            if j == 0 and release_predecessors is not None:
+                release_predecessor = release_predecessors.get(wid)
+                if release_predecessor is not None and pos[release_predecessor] < 1:
+                    continue
+                if any(
+                    any(
+                        other.cjob_id == blocker and pos[other.wid] < K[other.wid]
+                        for other in wmap.values()
+                    )
+                    for blocker in wafer.dispatch_after
+                ):
+                    continue
+            if (
+                process_predecessors is not None
+                and wafer.stages[j + 1].stage_type == "process"
+                and _process_entry_blocked(process_predecessors, pos, wid, j + 1)
+            ):
                 continue
             dest = res_map[(wid, j + 1)]
             if _blocked(dest, occ, resv, wid):
@@ -275,11 +310,70 @@ def _make_default_chooser(prio: Optional[Dict[Tuple[int, int], float]]
     return chooser
 
 
+def _banker_candidate_is_safe(
+    ir: Problem,
+    wmap: Dict[int, object],
+    K: Dict[int, int],
+    pos: Dict[int, int],
+    occ: Dict[Tuple[str, int], int],
+    resv: Dict[Tuple[str, int], int],
+    reserve: bool,
+    res_map: Dict[Tuple[int, int], Optional[Tuple[str, int]]],
+    ll_age: Optional[Dict[Tuple[str, int], int]],
+    placed: int,
+    candidate: _Cand,
+    process_predecessors: Optional[Dict[Tuple[int, int], Tuple[int, int]]],
+    release_predecessors: Optional[Dict[int, int]],
+) -> bool:
+    """用现有 Banker 清空谕示判断单个候选提交后是否仍安全。
+
+    本函数只复制并模拟资源占用，不修改真实解码状态；候选预过滤和传统“按偏好逐个
+    检查”共用该实现，确保策略看到的安全动作与解码器最终提交动作完全一致。
+    """
+    temporary_pos = dict(pos)
+    temporary_occ = dict(occ)
+    temporary_resv = dict(resv) if reserve else {}
+    temporary_age = dict(ll_age) if ll_age is not None else None
+    source = res_map[(candidate.wid, candidate.j)]
+    if source is not None and temporary_occ.get(source) == candidate.wid:
+        del temporary_occ[source]
+        if temporary_age is not None:
+            temporary_age.pop(source, None)
+    if candidate.dest is not None and temporary_resv.get(candidate.dest) == candidate.wid:
+        del temporary_resv[candidate.dest]
+    if candidate.dest is not None:
+        temporary_occ[candidate.dest] = candidate.wid
+        next_stage = wmap[candidate.wid].stages[candidate.j + 1]
+        if temporary_age is not None and next_stage.stage_type == "loadlock":
+            temporary_age[candidate.dest] = placed
+    if reserve:
+        for reserved_resource in _reserve_for(
+            ir, wmap[candidate.wid], candidate.j + 1, res_map
+        ):
+            temporary_resv[reserved_resource] = candidate.wid
+    temporary_pos[candidate.wid] = candidate.j + 1
+    return _drain_completes(
+        ir,
+        wmap,
+        K,
+        temporary_pos,
+        temporary_occ,
+        temporary_resv,
+        reserve,
+        res_map,
+        temporary_age,
+        process_predecessors,
+        release_predecessors,
+    )
+
+
 def decode_orders(ir: Problem, tm: Durations, wafers, *,
                   chooser: Optional[_Chooser] = None,
                   prio: Optional[Dict[Tuple[int, int], float]] = None,
                   reserve: bool = False, banker: bool = True,
-                  swap: bool = False) -> _Orders:
+                  swap: bool = False,
+                  filter_safe_candidates: bool = False,
+                  enforce_resumed_route_fifo: bool = True) -> _Orders:
     """全局事件式构造：产出各 (腔,槽) 占用序与各机器手 hop 序（彼此自洽、无死锁）。每步生成
     合法候选(去向资源未占/未预留、j==0 满足发片 FIFO)，交 chooser 排偏好序，循环再套 Banker
     安全掩码提交。候选合法性 + Banker 安全 + 提交逻辑三方共用——换 chooser 不改这些（零回归）。
@@ -294,7 +388,14 @@ def decode_orders(ir: Problem, tm: Durations, wafers, *,
     banker：True=每步 Banker 安全检查(保证无死锁，默认/基线/换腔)；False=直接取偏好序首位
     (快~50×，搜索批量评估)，中途卡死抛 _DecodeDeadlock 由调用方判负。
     swap：True=loadlock 双槽按方向分槽（entry=0/exit=1），异型占用可共存——真空手可先放已加工片
-    再取未加工片（压力态时序由 solve_timing 按 ll_seq 补边）；False（默认）=LL 整腔互斥（旧口径）。"""
+    再取未加工片（压力态时序由 solve_timing 按 ll_seq 补边）；False（默认）=LL 整腔互斥（旧口径）。
+    filter_safe_candidates：默认关闭以保持旧策略行为；开启后先用同一 Banker 谕示过滤候选，
+    chooser 只会收到安全动作，因而它的首选动作就是实际提交动作。仅可与 banker=True 联用。
+    enforce_resumed_route_fifo：默认保持历史行为，让实时续排晶圆的裁剪后首跳也按 Route FIFO；
+    L2D 设为 False，只对尚未发片晶圆应用真正的 LoadPort 发片 FIFO。
+    """
+    if filter_safe_candidates and not banker:
+        raise ValueError("filter_safe_candidates=True 要求 banker=True")
     if chooser is None:
         chooser = _make_default_chooser(prio)
     wmap = {w.wid: w for w in wafers}
@@ -313,10 +414,16 @@ def decode_orders(ir: Problem, tm: Durations, wafers, *,
     # 同 route 按 wid 先来先发（与 solve_timing 的发片 FIFO 一致）
     route_wids: Dict[str, List[int]] = {}
     for w in wafers:
-        route_wids.setdefault(w.route_name, []).append(w.wid)
+        if enforce_resumed_route_fifo or not w.already_released:
+            route_wids.setdefault(w.route_name, []).append(w.wid)
     for v in route_wids.values():
         v.sort()
     next_rel = {r: 0 for r in route_wids}
+    release_predecessors = {
+        current: previous
+        for route in route_wids.values()
+        for previous, current in zip(route, route[1:])
+    }
 
     # 多容量加工腔的门簇互斥(Cd)未建模——与旧版口径一致，命中时告警
     multi_cap_proc = sorted({s.chamber for w in wafers for s in w.stages
@@ -371,7 +478,11 @@ def decode_orders(ir: Problem, tm: Durations, wafers, *,
                 continue
             if _ll_elder_blocked(res_map[(wid, j)], occ, ll_age):
                 continue
-            if j == 0 and route_wids[w.route_name][next_rel[w.route_name]] != wid:
+            if (
+                j == 0
+                and (enforce_resumed_route_fifo or not w.already_released)
+                and route_wids[w.route_name][next_rel[w.route_name]] != wid
+            ):
                 continue
             rob = w.transports[j]
             start = max(place_t[wid] + _stage_dwell(tm, w, j), robot_free.get(rob, 0.0))
@@ -382,38 +493,61 @@ def decode_orders(ir: Problem, tm: Durations, wafers, *,
                 raise RuntimeError("[timing] 定序构造无安全候选（疑似拓扑无可行解）")
             raise _DecodeDeadlock()        # 快速解码卡死 → 该 genome 死锁，搜索判负
 
-        state = _DecodeState(ir, tm, wmap, K, pos, occ, resv, place_t, robot_free,
-                             placed, total, reserve)
-        order = chooser(state, cands)      # 候选索引的偏好序（最优在前）
+        state = _DecodeState(
+            ir,
+            tm,
+            wmap,
+            K,
+            pos,
+            occ,
+            resv,
+            place_t,
+            robot_free,
+            placed,
+            total,
+            reserve,
+            chamber_orders=MappingProxyType(
+                {resource: tuple(sequence) for resource, sequence in chambers.items()}
+            ),
+            robot_orders=MappingProxyType(
+                {robot: tuple(sequence) for robot, sequence in robots.items()}
+            ),
+            loadlock_orders=MappingProxyType(
+                {loadlock: tuple(sequence) for loadlock, sequence in ll_seq.items()}
+            ),
+        )
 
-        if not banker:
-            chosen = cands[order[0]]       # 直接取偏好序首位
+        chooser_candidates = cands
+        if filter_safe_candidates:
+            chooser_candidates = [
+                candidate
+                for candidate in cands
+                if _banker_candidate_is_safe(
+                    ir, wmap, K, pos, occ, resv, reserve, res_map, ll_age,
+                    placed, candidate, process_predecessors, release_predecessors,
+                )
+            ]
+            if not chooser_candidates:
+                raise RuntimeError("[timing] 定序构造无安全候选（疑似拓扑无可行解）")
+
+        order = chooser(state, chooser_candidates)  # 候选索引的偏好序（最优在前）
+        if not order:
+            raise ValueError("chooser 必须返回至少一个候选索引")
+        if any(index < 0 or index >= len(chooser_candidates) for index in order):
+            raise IndexError("chooser 返回了超出候选范围的索引")
+
+        if not banker or filter_safe_candidates:
+            chosen = chooser_candidates[order[0]]  # 预过滤后首选即实际提交动作
         else:
             # Banker：取偏好序里第一个「保持状态安全」的候选；纯下游候选必安全 ⇒ 一定选得出
             chosen = None
             for idx in order:
-                c = cands[idx]
-                tpos = dict(pos)
-                tocc = dict(occ)
-                tresv = dict(resv) if reserve else {}
-                tage = dict(ll_age) if ll_age is not None else None
-                src = res_map[(c.wid, c.j)]
-                if src is not None and tocc.get(src) == c.wid:
-                    del tocc[src]
-                    if tage is not None:
-                        tage.pop(src, None)
-                if c.dest is not None and tresv.get(c.dest) == c.wid:
-                    del tresv[c.dest]
-                if c.dest is not None:
-                    tocc[c.dest] = c.wid
-                    if tage is not None and wmap[c.wid].stages[c.j + 1].stage_type == "loadlock":
-                        tage[c.dest] = placed
-                if reserve:
-                    for er in _reserve_for(ir, wmap[c.wid], c.j + 1, res_map):
-                        tresv[er] = c.wid
-                tpos[c.wid] = c.j + 1
-                if _drain_completes(ir, wmap, K, tpos, tocc, tresv, reserve, res_map, tage):
-                    chosen = c
+                candidate = chooser_candidates[idx]
+                if _banker_candidate_is_safe(
+                    ir, wmap, K, pos, occ, resv, reserve, res_map, ll_age,
+                    placed, candidate, None, None,
+                ):
+                    chosen = candidate
                     break
             if chosen is None:             # 理论不达：纯下游候选恒安全
                 raise RuntimeError("[timing] 定序构造无安全候选（疑似拓扑无可行解）")
@@ -440,7 +574,7 @@ def decode_orders(ir: Problem, tm: Durations, wafers, *,
         robots.setdefault(rob, []).append((wid, j))
         place_t[wid] = start + _hop_span(tm, w, j)
         robot_free[rob] = place_t[wid]
-        if j == 0:
+        if j == 0 and (enforce_resumed_route_fifo or not w.already_released):
             next_rel[w.route_name] += 1
         pos[wid] = j + 1
         placed += 1
@@ -623,8 +757,30 @@ def decode_orders_choosing(ir: Problem, tm: Durations, wafers, *,
                 raise RuntimeError("[timing] 选腔解码无安全候选（疑似拓扑无可行解）")
             raise _DecodeDeadlock()
 
-        state = _DecodeState(ir, tm, wmap, K, pos, occ, resv, place_t, robot_free,
-                             placed, total, reserve, ch_used)
+        state = _DecodeState(
+            ir,
+            tm,
+            wmap,
+            K,
+            pos,
+            occ,
+            resv,
+            place_t,
+            robot_free,
+            placed,
+            total,
+            reserve,
+            ch_used,
+            chamber_orders=MappingProxyType(
+                {resource: tuple(sequence) for resource, sequence in chambers.items()}
+            ),
+            robot_orders=MappingProxyType(
+                {robot: tuple(sequence) for robot, sequence in robots.items()}
+            ),
+            loadlock_orders=MappingProxyType(
+                {loadlock: tuple(sequence) for loadlock, sequence in ll_seq.items()}
+            ),
+        )
         order = chooser(state, cands)
 
         if not banker:

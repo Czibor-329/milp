@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from src.export import export_movelist
 from src.model import Durations, Problem, RuntimeAvailability, Stage, Wafer
-from src.parse import parse_task
+from src.parse import PROCESS_ASSIGNMENT_ACYCLIC_ROUND_ROBIN, parse_task
 from src.timing import start_schedule, start_schedule_by_rl
 from src.validation import MoveStateReplay, populate_premove_ids, validate_move_list
 from src.validation.move_fields import (
@@ -33,6 +33,7 @@ from src.validation.state import (
 
 TIME_TOLERANCE = 1e-6
 FIRST_SLOT_ID = 1
+L2D_PSE300_PM_ORDER = ("PM1", "PM2", "PM3", "PM4")
 
 
 @dataclass(frozen=True)
@@ -73,10 +74,10 @@ class RealtimeRescheduler:
         seed: int = 0,
     ) -> None:
         """解析首批任务，并用所选顶层策略立即生成第一段计划。"""
-        if strategy not in {"heuristic", "rl"}:
-            raise ValueError(f"实时重算只支持 heuristic/rl，收到 strategy={strategy}")
-        if strategy == "rl" and policy is None:
-            raise ValueError("RL 实时重算缺少已加载策略模型")
+        if strategy not in {"heuristic", "rl", "l2d"}:
+            raise ValueError(f"实时重算只支持 heuristic/rl/l2d，收到 strategy={strategy}")
+        if strategy in {"rl", "l2d"} and policy is None:
+            raise ValueError(f"{strategy.upper()} 实时重算缺少已加载策略模型")
         self.tool_topo = deepcopy(dict(tool_topo))
         self.strategy = strategy
         self.policy = policy
@@ -84,7 +85,14 @@ class RealtimeRescheduler:
         self.rl_rollouts = int(rl_rollouts)
         self.rl_temperature = float(rl_temperature)
         self.seed = int(seed)
-        self.problem = parse_task(self.tool_topo, update_params)
+        parse_options = (
+            {
+                "process_assignment": PROCESS_ASSIGNMENT_ACYCLIC_ROUND_ROBIN,
+                "process_pm_order": L2D_PSE300_PM_ORDER,
+            }
+            if strategy == "l2d" else {}
+        )
+        self.problem = parse_task(self.tool_topo, update_params, **parse_options)
         _apply_material_start_slots(self.problem, update_params)
         start_time = float(update_params.get("CurrentTime") or 0.0)
         initial_state = MachineState.from_sources(self.problem, init_data)
@@ -159,7 +167,14 @@ class RealtimeRescheduler:
             raise ValueError("新计划起点必须位于重算触发时间与收尾完成时间之间")
         self._ensure_safe_cut(timestamp, cutoff)
         snapshot = self._tracker.state.clone()
-        new_problem = parse_task(self.tool_topo, new_update_params)
+        parse_options = (
+            {
+                "process_assignment": PROCESS_ASSIGNMENT_ACYCLIC_ROUND_ROBIN,
+                "process_pm_order": L2D_PSE300_PM_ORDER,
+            }
+            if self.strategy == "l2d" else {}
+        )
+        new_problem = parse_task(self.tool_topo, new_update_params, **parse_options)
         _apply_material_start_slots(new_problem, new_update_params)
         combined_problem, next_state = _build_recompute_problem(self.problem, new_problem, snapshot)
         combined_problem.runtime_availability = _runtime_availability(
@@ -227,6 +242,11 @@ class RealtimeRescheduler:
                 temp=self.rl_temperature,
                 verbose=False,
             )
+        elif self.strategy == "l2d":
+            # 延迟导入，确保未安装 Torch 时 heuristic/RL 旧路径仍可独立使用。
+            from src.l2d import start_schedule_l2d
+
+            result = start_schedule_l2d(problem, self.policy)
         else:
             result = start_schedule(problem, verbose=False)
         if not getattr(result, "feasible", False):

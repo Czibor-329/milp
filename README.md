@@ -12,13 +12,45 @@ Cluster Tool（多腔晶圆制造设备）排程的 **MILP 最优求解器**，�
 - Python 3.10+
 - [Gurobi](https://www.gurobi.com/)（需 license，学术版免费）+ `gurobipy`
 - `numpy`
-- `torch`（仅 `bc` / `rl` 训练需要；推理可只用 NumPy）
+- `torch`（仅神经网络策略需要；PSE300 L2D 的训练和推理都需要）
 
 ```bash
 pip install -r requirements.txt
-# 训练神经网络策略时再安装，CPU 版即可
-pip install torch
+# 使用 PSE300 L2D 时再安装，CPU 版即可
+pip install -r requirements-l2d.txt
 ```
+
+## PSE300 L2D 动态析取图策略
+
+`src/l2d/` 实现固定选腔、只学习操作顺序的 L2D 风格 GraphCNN + Actor-Critic。解析期
+会为每片晶圆 round-robin 分配严格递增且不重复的实际 PM 路径，LA/LB 仍按 rank 固定；
+Actor 每步只在 Banker 安全候选中选择动作。完整顺序产生后只调用一次 timing 引擎求精确
+时刻，因此这不是在线 MILP，也不是生产过程中的实时重调度。
+
+```bash
+# 第一阶段：单 Job，PM1–PM4，1–3 道工序，5–25 片
+python -m src.l2d.train --phase one-job --output l2d_pse300_1job.pt
+
+# 第二阶段：从第一阶段参数继续训练两个 PM 不共享的 Job
+python -m src.l2d.train --phase two-job \
+  --init l2d_pse300_1job.pt --output l2d_pse300_2job.pt
+
+# 固定验证集评测 makespan、相对启发式 gap、耗时和 MoveList 合法性
+python -m src.l2d.evaluate --checkpoint l2d_pse300_2job.pt
+```
+
+代码接口：
+
+```python
+from src.l2d import load_l2d_policy, start_schedule_l2d
+
+policy = load_l2d_policy("l2d_pse300_1job.pt", device="cpu")
+result = start_schedule_l2d(problem, policy)
+```
+
+这里的 `problem` 应使用 `process_assignment="acyclic_round_robin"` 解析，使 PM 与 LA/LB
+在进入模型前已经固定。第一版不包含清洗、Residency/QTime、实时重调度、双臂 swap 或
+PM 动态选腔。
 
 ## 用法
 
