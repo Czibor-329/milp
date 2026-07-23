@@ -6,6 +6,7 @@ import base64
 import json
 import tempfile
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import patch
 
@@ -111,6 +112,12 @@ class ConfigEditorServerTests(unittest.TestCase):
             recipe["ModuleName"]: recipe["Time"] for recipe in update["ProcessRecipes"]
         }
         self.assertEqual({"PM1": 60.0, "PM2": 20.0}, recipe_times)
+        self.assertEqual(self.device["Robots"], update["Robots"])
+        self.assertEqual(self.device["Stations"], update["Stations"])
+        self.assertEqual(
+            int(self.device.get("InitialMoveID") or 0),
+            update["InitialMoveID"],
+        )
 
     def test_same_recipe_name_rejects_overlapping_modules(self) -> None:
         """同名 Recipe 只有模块范围重叠时才属于真正的重复定义。"""
@@ -320,6 +327,156 @@ class ConfigEditorServerTests(unittest.TestCase):
         with self.assertRaisesRegex(LoggedPlanError, "不能超过 12 片"):
             execute_plan({**base, "roundCount": 1, "rounds": [oversized_round]})
 
+    def test_external_greedy_strategy_calls_formal_init_and_update(self) -> None:
+        """前端选择 greedy 后应通过外部正式 init/update 入口完成首排。"""
+        plan = {
+            "deviceName": "fixture.json",
+            "device": self.device,
+            "strategy": "greedy",
+            "roundCount": 1,
+            "options": {},
+            "recipes": [{
+                "name": "GreedyRecipe",
+                "time": 20,
+                "modules": ["PM1", "PM2"],
+                "weight": {},
+            }],
+            "cleans": [],
+            "routes": [_route("GreedyRoute", "PM1,PM2", "GreedyRecipe")],
+            "rounds": [{
+                "currentTime": 0,
+                "jobs": [_job("GreedyJob", "GreedyRoute", "LP1")],
+            }],
+        }
+        external_output = {
+            "MoveList": [{
+                "MoveID": 1,
+                "MoveType": 9,
+                "StartTime": 2.0,
+                "EndTime": 22.0,
+                "ModuleName": "PM1",
+            }],
+            "Feedback": [],
+            "JobList": [{"JobName": "GreedyJob.P1"}],
+            "DummyReturnInfo": {},
+            "MatIntoPM": {"1": ["PM1"]},
+        }
+
+        with (
+            patch.object(config_server, "greedy_session", return_value=nullcontext()),
+            patch.object(config_server, "greedy_init") as init_entry,
+            patch.object(config_server, "greedy_update", return_value=external_output) as update_entry,
+        ):
+            result = execute_plan(plan)
+
+        init_entry.assert_called_once()
+        init_payload = init_entry.call_args.args[0]
+        self.assertEqual(self.device["Stations"]["PM1"], init_payload["Stations"]["PM1"])
+        self.assertIn("LC", init_payload["Stations"])
+        self.assertIn("LD", init_payload["Stations"])
+        update_payload = update_entry.call_args.args[0]
+        self.assertEqual(init_payload["Robots"], update_payload["Robots"])
+        self.assertEqual(init_payload["Stations"], update_payload["Stations"])
+        self.assertEqual("greedy", result["strategy"])
+        self.assertEqual(1, result["moveCount"])
+        self.assertEqual("CT.infer.scheduler.init/update", result["rounds"][0]["strategyDiagnostics"]["entry"])
+
+    def test_external_greedy_uses_machine_state_for_two_recomputes(self) -> None:
+        """两次重算应返回全量 update，并按状态机填写旧计划 RemoveList。"""
+        plan = {
+            "device": self.device,
+            "strategy": "greedy",
+            "roundCount": 3,
+            "recipes": [{"name": "R", "time": 20, "modules": ["PM1"], "weight": {}}],
+            "cleans": [],
+            "routes": [_route("R", "PM1", "R")],
+            "rounds": [
+                {"currentTime": 0, "jobs": [_job("J1", "R", "LP1")]},
+                {"currentTime": 10, "jobs": [_job("J2", "R", "LP2")]},
+                {"currentTime": 20, "jobs": [_job("J3", "R", "LP3")]},
+            ],
+        }
+        external_outputs = [
+            {
+                "MoveList": [{
+                    "MoveID": 1, "MoveType": 9,
+                    "StartTime": 100.0, "EndTime": 120.0, "ModuleName": "PM1",
+                }],
+                "Feedback": [],
+            },
+            {
+                "MoveList": [{
+                    "MoveID": 1, "MoveType": 9,
+                    "StartTime": 200.0, "EndTime": 220.0, "ModuleName": "PM1",
+                }],
+                "Feedback": [],
+            },
+            {
+                "MoveList": [{
+                    "MoveID": 1, "MoveType": 9,
+                    "StartTime": 300.0, "EndTime": 320.0, "ModuleName": "PM1",
+                }],
+                "Feedback": [],
+            },
+        ]
+
+        with (
+            patch.object(config_server, "greedy_session", return_value=nullcontext()),
+            patch.object(config_server, "greedy_init") as init_entry,
+            patch.object(
+                config_server,
+                "greedy_update",
+                side_effect=external_outputs,
+            ) as update_entry,
+        ):
+            result = execute_plan(plan)
+
+        init_entry.assert_called_once()
+        self.assertEqual(3, update_entry.call_count)
+        second_update = update_entry.call_args_list[1].args[0]
+        third_update = update_entry.call_args_list[2].args[0]
+        self.assertEqual([1], second_update["RemoveList"])
+        self.assertEqual([], second_update["MoveStates"])
+        self.assertEqual(2, len(second_update["Materials"]))
+        self.assertEqual(2, len(second_update["ProcessJobs"]))
+        self.assertEqual(2, len(second_update["ControlJobs"]))
+        self.assertEqual(3, len(third_update["Materials"]))
+        self.assertEqual(3, len(third_update["ProcessJobs"]))
+        self.assertEqual(3, len(third_update["ControlJobs"]))
+        self.assertEqual("ATR", second_update["Stations"]["LA"]["LastItem"])
+        self.assertEqual("src.validation.state.MachineState", result["rounds"][1]["strategyDiagnostics"]["stateSource"])
+        self.assertEqual(3, len(result["updates"]))
+        self.assertEqual(2, len(result["output"]["RecomputePoints"]))
+
+    def test_external_greedy_recovery_completes_loadlock_environment(self) -> None:
+        """外部 Greedy 收尾应执行 LoadLock 关门后的带片压力转换。"""
+        moves = [
+            {
+                "MoveID": 1, "MoveType": 1, "MatIDList": [1],
+                "StartTime": 10.0, "EndTime": 12.0,
+                "DestStationList": ["LA"],
+            },
+            {
+                "MoveID": 2, "MoveType": 7, "MatIDList": [1],
+                "StartTime": 12.0, "EndTime": 13.0, "ModuleName": "LA",
+            },
+            {
+                "MoveID": 3, "MoveType": 10, "MatIDList": [1],
+                "StartTime": 13.0, "EndTime": 30.0, "ModuleName": "LA",
+            },
+        ]
+
+        normal_tail = config_server._transport_tail_ids(moves, 1, 11.0)
+        greedy_tail = config_server._transport_tail_ids(
+            moves,
+            1,
+            11.0,
+            include_loadlock_environment=True,
+        )
+
+        self.assertNotIn(3, normal_tail)
+        self.assertIn(3, greedy_tail)
+
     def test_job_route_is_bound_to_selected_load_port(self) -> None:
         """Job 复用公共 Route 时应生成独立 Route 并改写首尾 LoadPort。"""
         plan = {
@@ -462,6 +619,10 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn('id="milpStrategyInput"', html)
         self.assertIn('value="milp"', html)
         self.assertIn("status.strategies?.milp", html)
+        self.assertIn('id="greedyStrategyInput"', html)
+        self.assertIn('value="greedy"', html)
+        self.assertIn("status.strategies?.greedy", html)
+        self.assertIn("init/update", html)
         self.assertIn("configuredWaferCount() > 12", html)
         self.assertIn('id="deviceSelect"', html)
         self.assertIn('id="testCaseSelect"', html)

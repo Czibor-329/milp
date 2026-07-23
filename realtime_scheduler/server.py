@@ -39,6 +39,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.parse import parse_task
 from src.paths import MODELS_DIR
 from src.schedule.realtime import RealtimeRescheduler, TIME_TOLERANCE
 from src.validation import MoveStateReplay
@@ -46,7 +47,21 @@ from src.validation.move_fields import (
     COMPLETE_MOVE, PICK_MOVE, PLACE_MOVE, PREPARE_MOVE, PRE_PREPARE_MOVE,
     PRE_TRANS_MOVE, SWAP_MOVE,
 )
-from src.validation.state import DoorState
+from src.validation.state import (
+    ATMOSPHERE,
+    DoorState,
+    LoadLockState,
+    MachineState,
+    MaterialState,
+    SlotPhase,
+    SlotState,
+)
+from realtime_scheduler.greedy_interface import (
+    availability as greedy_availability,
+    init as greedy_init,
+    session as greedy_session,
+    update as greedy_update,
+)
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -135,6 +150,123 @@ class ReproductionLog:
             "SimTime": float(sim_time),
             "Info": deepcopy(info),
         })
+
+
+class ExternalGreedyRuntime:
+    """用本仓库状态机维护外部 Greedy 当前计划和跨代执行历史。"""
+
+    def __init__(
+        self,
+        tool_topo: Mapping[str, Any],
+        update_params: Mapping[str, Any],
+        output: Mapping[str, Any],
+    ) -> None:
+        """解析首轮完整 update，并把外部 MoveList 挂到实时状态回放器。"""
+        self.tool_topo = deepcopy(dict(tool_topo))
+        self.current_update = deepcopy(dict(update_params))
+        self.problem = parse_task(self.tool_topo, self.current_update)
+        initial_state = MachineState.from_sources(self.problem, self.current_update)
+        self._tracker = MoveStateReplay(
+            self.problem,
+            list(output.get("MoveList") or []),
+            initial_state,
+        )
+        self._tracker.current_time = float(self.current_update.get("CurrentTime") or 0.0)
+        self._history: List[dict] = []
+        self._recompute_points: List[Dict[str, Any]] = []
+        self._latest_output = _alg_output_info(output)
+
+    @property
+    def current_plan(self) -> List[dict]:
+        """返回当前计划代次，供统一的安全切点投影函数消费。"""
+        return [dict(move) for move in self._tracker.materialized_plan]
+
+    @property
+    def state(self) -> MachineState:
+        """返回由 ``src.validation.state`` 维护的隔离整机快照。"""
+        return self._tracker.state.clone()
+
+    @property
+    def state_time(self) -> float:
+        """返回已经回放到的绝对时间。"""
+        return float(self._tracker.current_time)
+
+    @property
+    def running_move_ids(self) -> frozenset[int]:
+        """返回当前计划中已开始但未完成的动作编号。"""
+        return self._tracker.running_move_ids
+
+    @property
+    def executed_move_ids(self) -> frozenset[int]:
+        """返回当前计划代次已经完成的动作编号。"""
+        return frozenset(
+            int(move["MoveID"])
+            for move in self._tracker.executed_moves
+            if isinstance(move.get("MoveID"), int)
+        )
+
+    @property
+    def can_recompute(self) -> bool:
+        """判断现场是否达到关门、空手且无运行 Move 的稳定重算点。"""
+        if self._tracker.running_move_ids:
+            return False
+        if any(
+            station.door is not DoorState.CLOSED
+            for station in self._tracker.state.stations.values()
+        ):
+            return False
+        return all(
+            material is None
+            for robot in self._tracker.state.robots.values()
+            for material in robot.hands.values()
+        )
+
+    def update_move_state(self, notification: Mapping[str, Any]) -> MachineState:
+        """把模拟设备通知交给同一套 MoveList 状态回放器。"""
+        return self._tracker.update_move_state(notification)
+
+    def replace_plan(
+        self,
+        update_params: Mapping[str, Any],
+        output: Mapping[str, Any],
+        requested_time: float,
+        effective_time: float,
+        reason: str,
+    ) -> None:
+        """保存已执行历史，以当前稳定状态和新增物料装载下一代计划。"""
+        next_state = self._tracker.state.clone()
+        _add_new_materials_to_machine_state(next_state, update_params)
+        self._history.extend(self._tracker.executed_moves)
+        self.current_update = deepcopy(dict(update_params))
+        self.problem = parse_task(self.tool_topo, self.current_update)
+        self._tracker = MoveStateReplay(
+            self.problem,
+            list(output.get("MoveList") or []),
+            next_state,
+        )
+        self._tracker.current_time = float(effective_time)
+        self._latest_output = _alg_output_info(output)
+        self._recompute_points.append({
+            "Time": float(requested_time),
+            "EffectiveTime": float(effective_time),
+            "ScheduleStartTime": float(effective_time),
+            "RecoveryEndTime": float(effective_time),
+            "Index": len(self._recompute_points) + 1,
+            "Reason": reason,
+        })
+
+    def combined_output(self) -> Dict[str, Any]:
+        """拼接已完成历史与最后一代有效计划，并保留外部诊断字段。"""
+        moves = [dict(move) for move in self._history]
+        moves.extend(self._tracker.materialized_plan)
+        moves.sort(key=lambda move: (
+            float(move.get("StartTime") or 0.0),
+            int(move.get("MoveID") or 0),
+        ))
+        output = _alg_output_info(self._latest_output)
+        output["MoveList"] = moves
+        output["RecomputePoints"] = deepcopy(self._recompute_points)
+        return output
 
 
 class LoggedPlanError(RuntimeError):
@@ -808,7 +940,221 @@ def build_round_update(
         "ProcessRecipes": build_process_recipes(recipes, routes),
         "Materials": materials, "ProcessJobs": process_jobs, "ControlJobs": control_jobs,
         "RemoveList": [], "MoveStates": [], "CurrentTime": float(current_time),
+        # 标准 update 是当前设备快照而不只是新增 Job。首排时动态状态与 init 相同；
+        # 重算调用方必须在发送前以真实执行现场覆盖这些字段。
+        "Robots": deepcopy(dict(tool_topo.get("Robots") or {})),
+        "Stations": deepcopy(dict(tool_topo.get("Stations") or {})),
+        "InitialMoveID": int(tool_topo.get("InitialMoveID") or 0),
     }
+
+
+def _material_ids_in_machine_state(state: MachineState) -> set[Any]:
+    """收集站点槽位和机器人手槽中已经存在的物料编号。"""
+    material_ids = {
+        slot.material.material_id
+        for station in state.stations.values()
+        for slot in station.slots.values()
+        if slot.material is not None
+    }
+    material_ids.update(
+        material.material_id
+        for robot in state.robots.values()
+        for material in robot.hands.values()
+        if material is not None
+    )
+    return material_ids
+
+
+def _add_new_materials_to_machine_state(
+    state: MachineState,
+    update_params: Mapping[str, Any],
+) -> None:
+    """把下一轮首次出现的 LoadPort 物料补入上一轮稳定状态。"""
+    known_material_ids = _material_ids_in_machine_state(state)
+    for raw_material in update_params.get("Materials") or []:
+        if not isinstance(raw_material, Mapping):
+            continue
+        material_id = raw_material.get("ID")
+        if material_id is None or material_id in known_material_ids:
+            continue
+        station_name = str(raw_material.get("CurrentModuleName") or "")
+        slot_id = raw_material.get("SlotID")
+        if not station_name or not isinstance(slot_id, int) or slot_id < FIRST_SLOT_ID:
+            raise ValueError(f"新增物料 {material_id} 缺少有效 CurrentModuleName/SlotID")
+        station = state.ensure_station(station_name, slot_id)
+        slot = station.slots[slot_id]
+        if slot.material is not None:
+            raise ValueError(
+                f"新增物料 {material_id} 与 {station_name}#{slot_id} 的现有物料冲突"
+            )
+        station.slots[slot_id] = SlotState(
+            SlotPhase.COMPLETED,
+            MaterialState(
+                material_id,
+                str(raw_material.get("PJobName") or ""),
+                raw_material.get("StepID"),
+            ),
+        )
+        known_material_ids.add(material_id)
+
+
+def _merge_greedy_update(
+    previous_update: Mapping[str, Any],
+    new_round_update: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """把新一轮 Job 追加到上一轮全量 update，形成企业接口当前快照。"""
+    merged = deepcopy(dict(previous_update))
+    merged["Scenario"] = new_round_update.get("Scenario", merged.get("Scenario", 0))
+    merged["CurrentTime"] = float(new_round_update.get("CurrentTime") or 0.0)
+    merged["InitialMoveID"] = int(
+        new_round_update.get("InitialMoveID", merged.get("InitialMoveID", 0)) or 0
+    )
+    merged["ProcessRecipes"] = deepcopy(list(new_round_update.get("ProcessRecipes") or []))
+    merged_routes = deepcopy(dict(merged.get("Routes") or {}))
+    merged_routes.update(deepcopy(dict(new_round_update.get("Routes") or {})))
+    merged["Routes"] = merged_routes
+
+    material_by_id: Dict[Any, Dict[str, Any]] = {}
+    for raw_material in [
+        *(merged.get("Materials") or []),
+        *(new_round_update.get("Materials") or []),
+    ]:
+        if isinstance(raw_material, Mapping) and raw_material.get("ID") is not None:
+            material_by_id[raw_material["ID"]] = deepcopy(dict(raw_material))
+    merged["Materials"] = list(material_by_id.values())
+
+    process_job_by_name: Dict[str, Dict[str, Any]] = {}
+    for raw_job in [
+        *(merged.get("ProcessJobs") or []),
+        *(new_round_update.get("ProcessJobs") or []),
+    ]:
+        if isinstance(raw_job, Mapping) and raw_job.get("JobName"):
+            process_job_by_name[str(raw_job["JobName"])] = deepcopy(dict(raw_job))
+    merged["ProcessJobs"] = list(process_job_by_name.values())
+    merged["ControlJobs"] = [
+        deepcopy(dict(control_job))
+        for control_job in [
+            *(merged.get("ControlJobs") or []),
+            *(new_round_update.get("ControlJobs") or []),
+        ]
+        if isinstance(control_job, Mapping)
+    ]
+    merged["Robots"] = deepcopy(dict(new_round_update.get("Robots") or {}))
+    merged["Stations"] = deepcopy(dict(new_round_update.get("Stations") or {}))
+    merged["MoveStates"] = []
+    merged["RemoveList"] = []
+    return merged
+
+
+def _remaining_seconds(ready_at: float, current_time: float) -> float:
+    """把状态机绝对释放时间转换为企业 update 使用的剩余秒数。"""
+    return max(0.0, float(ready_at) - float(current_time))
+
+
+def _apply_machine_state_to_update(
+    update_params: Dict[str, Any],
+    state: MachineState,
+    current_time: float,
+) -> None:
+    """将 ``MachineState`` 的物料、机械手、腔室和压力态写回标准 update。"""
+    update_params["CurrentTime"] = float(current_time)
+    materials = {
+        material.get("ID"): material
+        for material in update_params.get("Materials") or []
+        if isinstance(material, dict) and material.get("ID") is not None
+    }
+    located_material_ids: set[Any] = set()
+
+    stations = update_params.setdefault("Stations", {})
+    for station_name, station_state in state.stations.items():
+        station = stations.setdefault(station_name, {})
+        shared_ready_at = max(
+            station_state.door_busy_until,
+            station_state.transfer_busy_until,
+            station_state.environment_busy_until,
+        )
+        slot_times = station.setdefault("TimeToAvailableOfSlot", {})
+        material_count = 0
+        for slot_id, slot_state in station_state.slots.items():
+            slot_times[str(slot_id)] = _remaining_seconds(
+                max(shared_ready_at, slot_state.busy_until),
+                current_time,
+            )
+            material = slot_state.material
+            if material is None:
+                continue
+            material_count += 1
+            raw_material = materials.get(material.material_id)
+            if raw_material is None:
+                raise ValueError(
+                    f"状态机中的物料 {material.material_id} 不在当前 update.Materials"
+                )
+            raw_material["CurrentModuleName"] = station_name
+            raw_material["SlotID"] = int(slot_id)
+            if material.step_id is not None:
+                raw_material["StepID"] = material.step_id
+            if material.pjob_name:
+                raw_material["PJobName"] = material.pjob_name
+            located_material_ids.add(material.material_id)
+        if "MaterialCount" in station:
+            station["MaterialCount"] = material_count
+        if isinstance(station_state, LoadLockState):
+            station["LastItem"] = "ATR" if station_state.environment == ATMOSPHERE else "VTR"
+
+    robots = update_params.setdefault("Robots", {})
+    for robot_name, robot_state in state.robots.items():
+        robot = robots.setdefault(robot_name, {})
+        robot["TimeToAvailable"] = _remaining_seconds(
+            robot_state.busy_until,
+            current_time,
+        )
+        if robot_state.position:
+            arm_info = robot.get("ArmInfo") or {}
+            if isinstance(arm_info, Mapping):
+                for arm in arm_info.values():
+                    if isinstance(arm, dict) and arm.get("IsEnable") is not False:
+                        arm["SlotAtStation"] = robot_state.position
+        for slot_id, material in robot_state.hands.items():
+            if material is None:
+                continue
+            raw_material = materials.get(material.material_id)
+            if raw_material is None:
+                raise ValueError(
+                    f"机械手中的物料 {material.material_id} 不在当前 update.Materials"
+                )
+            raw_material["CurrentModuleName"] = robot_name
+            raw_material["SlotID"] = int(slot_id)
+            if material.step_id is not None:
+                raw_material["StepID"] = material.step_id
+            if material.pjob_name:
+                raw_material["PJobName"] = material.pjob_name
+            located_material_ids.add(material.material_id)
+
+    # 本轮新增物料尚未进入上一代 MachineState，保留 build_round_update 给出的
+    # LoadPort 位置；其余历史物料必须全部能由状态机定位。
+    state_material_ids = _material_ids_in_machine_state(state)
+    missing_material_ids = state_material_ids - located_material_ids
+    if missing_material_ids:
+        raise ValueError(f"机台快照存在无法定位的历史物料：{sorted(missing_material_ids)}")
+
+
+def _build_greedy_recompute_update(
+    runtime: ExternalGreedyRuntime,
+    new_round_update: Mapping[str, Any],
+    effective_time: float,
+) -> Dict[str, Any]:
+    """根据当前状态和旧计划执行分区生成下一次外部 Greedy update。"""
+    update = _merge_greedy_update(runtime.current_update, new_round_update)
+    _apply_machine_state_to_update(update, runtime.state, effective_time)
+    executed_ids = runtime.executed_move_ids
+    update["MoveStates"] = []
+    update["RemoveList"] = [
+        int(move["MoveID"])
+        for move in runtime.current_plan
+        if isinstance(move.get("MoveID"), int)
+        and int(move["MoveID"]) not in executed_ids
+    ]
+    return update
 
 
 def _planned_event_groups(moves: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
@@ -908,6 +1254,7 @@ def _transport_tail_ids(
     moves: Sequence[Mapping[str, Any]],
     material_id: int,
     cutoff: float,
+    include_loadlock_environment: bool = False,
 ) -> set[int]:
     """返回指定在手机械手物料到下一次 Place 并关门为止的旧动作集合。"""
     places = [
@@ -929,6 +1276,32 @@ def _transport_tail_ids(
     if close_id is not None:
         close_move = next(move for move in moves if int(move["MoveID"]) == close_id)
         closure_end = float(close_move.get("EndTime") or closure_end)
+    # 晶圆放入 LoadLock 并关门后，带 MatID 的抽气/充气仍属于同一搬运收尾。
+    # 若在这里停下，state.py 会正确保留 UNPROCESSED，但 new-sa 重算桥会把
+    # 后续压力转换作为已承诺现场继续执行，下一代计划便会直接从另一侧开门。
+    following_environment_moves = (
+        [
+            move
+            for move in moves
+            if move.get("MoveType") == PRE_PREPARE_MOVE
+            and str(move.get("Station") or move.get("ModuleName") or "") == destination
+            and material_id in _move_material_ids(move)
+            and float(move.get("StartTime") or 0.0) >= closure_end - TIME_TOLERANCE
+        ]
+        if include_loadlock_environment
+        else []
+    )
+    environment_move_id: Optional[int] = None
+    if following_environment_moves:
+        environment_move = min(following_environment_moves, key=lambda move: (
+            float(move.get("StartTime") or 0.0),
+            int(move["MoveID"]),
+        ))
+        environment_move_id = int(environment_move["MoveID"])
+        closure_end = max(
+            closure_end,
+            float(environment_move.get("EndTime") or closure_end),
+        )
 
     required = {
         int(move["MoveID"])
@@ -982,6 +1355,8 @@ def _transport_tail_ids(
         )
     if close_id is not None:
         required.add(close_id)
+    if environment_move_id is not None:
+        required.add(environment_move_id)
     return required
 
 
@@ -989,6 +1364,7 @@ def _required_recovery_ids(
     scheduler: RealtimeRescheduler,
     moves: Sequence[Mapping[str, Any]],
     cutoff: float,
+    include_loadlock_environment: bool = False,
 ) -> set[int]:
     """从请求时刻状态选择运行 Move 和必须完成的 Pick–Move–Place 收尾链。"""
     planned_by_id = {int(move["MoveID"]): move for move in moves}
@@ -1054,7 +1430,12 @@ def _required_recovery_ids(
             tail_materials.update(_move_material_ids(action))
 
     for material_id in tail_materials:
-        required.update(_transport_tail_ids(moves, material_id, cutoff))
+        required.update(_transport_tail_ids(
+            moves,
+            material_id,
+            cutoff,
+            include_loadlock_environment,
+        ))
     return required
 
 
@@ -1062,6 +1443,8 @@ def advance_to_recompute(
     scheduler: RealtimeRescheduler,
     cutoff: float,
     recorded_events: Optional[List[Dict[str, Any]]] = None,
+    *,
+    include_loadlock_environment: bool = False,
 ) -> RecoveryProjection:
     """投影请求时刻状态，只执行运行 Move 和必要搬运收尾链。
 
@@ -1120,7 +1503,12 @@ def advance_to_recompute(
             if event_time <= cutoff + TIME_TOLERANCE and move_id in started and move_id not in finished:
                 apply_notification(notification)
 
-    required = _required_recovery_ids(scheduler, moves, cutoff)
+    required = _required_recovery_ids(
+        scheduler,
+        moves,
+        cutoff,
+        include_loadlock_environment,
+    )
     recovery_end = float(cutoff)
     for group in groups:
         group_time = float(group["time"])
@@ -1246,6 +1634,187 @@ def _segment_end(moves: Iterable[Mapping[str, Any]]) -> float:
     return max((float(move.get("EndTime") or 0.0) for move in moves), default=0.0)
 
 
+def _execute_external_greedy(
+    plan: Mapping[str, Any],
+    first_update: Mapping[str, Any],
+    rounds: Sequence[Mapping[str, Any]],
+    times: Sequence[float],
+    build_state: BuildState,
+    reproduction: ReproductionLog,
+    started: float,
+) -> Dict[str, Any]:
+    """通过同一次外部 ``init/update`` 会话执行首排和多次实时重算。"""
+    round_count = len(rounds)
+    summaries: List[Dict[str, Any]] = []
+    update_snapshots: List[Dict[str, Any]] = [deepcopy(dict(first_update))]
+    logs = [
+        f"设备：{plan.get('deviceName') or 'selected init'}",
+        f"策略：greedy；调用：CT.infer.scheduler.init/update；总轮数：{round_count}",
+    ]
+    with greedy_session():
+        round_started = time.perf_counter()
+        greedy_init(plan["device"])
+        raw_output = greedy_update(first_update)
+        elapsed_ms = (time.perf_counter() - round_started) * 1000.0
+        output = _alg_output_info(raw_output)
+        _ensure_greedy_output(output, first_update)
+        runtime = ExternalGreedyRuntime(plan["device"], first_update, output)
+        reproduction.add("AlgOutput", output)
+        summaries.append({
+            "index": 1,
+            "kind": "initial",
+            "requestedTime": 0.0,
+            "effectiveTime": 0.0,
+            "scheduleStartTime": 0.0,
+            "recoveryEndTime": 0.0,
+            "jobCount": _round_pjob_count(rounds[0]),
+            "elapsedMs": elapsed_ms,
+            "segmentEnd": _segment_end(output["MoveList"]),
+            "strategyDiagnostics": {
+                "backend": "new-sa",
+                "entry": "CT.infer.scheduler.init/update",
+                "feedbackCount": len(output["Feedback"]),
+                "removedMoveCount": 0,
+                "stateSource": "src.validation.state.MachineState",
+            },
+        })
+        logs.append(
+            f"[1/{round_count}] 外部 Greedy 首排完成："
+            f"{elapsed_ms:.1f} ms，{len(output['MoveList'])} Moves"
+        )
+
+        for index, round_config in enumerate(rounds[1:], start=2):
+            requested_time = float(times[index - 1])
+            notifications: List[Dict[str, Any]] = []
+            recovery = advance_to_recompute(
+                runtime,
+                requested_time,
+                notifications,
+                include_loadlock_environment=True,
+            )
+            effective_time = float(recovery.recovery_end)
+            for notification in notifications:
+                event_time = (
+                    notification.get("EndTime")
+                    if notification.get("MoveState") == MoveStateReplay.DONE
+                    else notification.get("StartTime")
+                )
+                reproduction.add(
+                    "AlgUpdateMove",
+                    notification,
+                    _finite_number(event_time, requested_time),
+                )
+            reason = f"第 {index} 轮新增 Job"
+            reproduction.add("RecomputeControl", {
+                "ControlInfo": {"Round": index},
+                "RecomputeInfo": {
+                    "CurrentTime": requested_time,
+                    "EffectiveTime": effective_time,
+                    "Reason": reason,
+                },
+            }, requested_time)
+
+            new_round_update = build_round_update(
+                plan,
+                round_config,
+                effective_time,
+                build_state,
+            )
+            update = _build_greedy_recompute_update(
+                runtime,
+                new_round_update,
+                effective_time,
+            )
+            update_snapshots.append(deepcopy(update))
+            reproduction.add(
+                "AlgSchedule",
+                _schedule_log_info(plan["device"], update),
+                requested_time,
+            )
+            round_started = time.perf_counter()
+            raw_output = greedy_update(update)
+            elapsed_ms = (time.perf_counter() - round_started) * 1000.0
+            output = _alg_output_info(raw_output)
+            _ensure_greedy_output(output, update)
+            runtime.replace_plan(
+                update,
+                output,
+                requested_time,
+                effective_time,
+                reason,
+            )
+            reproduction.add("AlgOutput", output, effective_time)
+            summaries.append({
+                "index": index,
+                "kind": "recompute",
+                "requestedTime": requested_time,
+                "effectiveTime": effective_time,
+                "scheduleStartTime": effective_time,
+                "recoveryEndTime": effective_time,
+                "jobCount": _round_pjob_count(round_config),
+                "elapsedMs": elapsed_ms,
+                "segmentEnd": _segment_end(output["MoveList"]),
+                "strategyDiagnostics": {
+                    "backend": "new-sa",
+                    "entry": "CT.infer.scheduler.init/update",
+                    "feedbackCount": len(output["Feedback"]),
+                    "removedMoveCount": len(update["RemoveList"]),
+                    "moveStateCount": len(update["MoveStates"]),
+                    "stateSource": "src.validation.state.MachineState",
+                },
+            })
+            suffix = (
+                f"，安全收尾至 {effective_time:.2f}s"
+                if effective_time > requested_time + TIME_TOLERANCE
+                else ""
+            )
+            logs.append(
+                f"[{index}/{round_count}] @{requested_time:.2f}s 外部 Greedy 重算完成："
+                f"{elapsed_ms:.1f} ms，移除 {len(update['RemoveList'])} 个旧 Move"
+                f"{suffix}"
+            )
+
+    combined_output = runtime.combined_output()
+    total_ms = (time.perf_counter() - started) * 1000.0
+    makespan = _segment_end(combined_output["MoveList"])
+    logs.append(
+        f"完成：总耗时 {total_ms:.1f} ms，"
+        f"makespan={makespan:.2f}s，Move={len(combined_output['MoveList'])}"
+    )
+    return {
+        "ok": True,
+        "strategy": "greedy",
+        "rounds": summaries,
+        "totalElapsedMs": total_ms,
+        "makespan": makespan,
+        "moveCount": len(combined_output["MoveList"]),
+        "validation": "passed",
+        "logs": logs,
+        "updates": update_snapshots,
+        "output": combined_output,
+    }
+
+
+def _ensure_greedy_output(
+    output: Mapping[str, Any],
+    update_params: Mapping[str, Any],
+) -> None:
+    """把外部 Feedback 中的失败转换为带原始文案的服务端异常。"""
+    move_list = list(output.get("MoveList") or [])
+    if move_list or not update_params.get("ProcessJobs"):
+        return
+    feedback = list(output.get("Feedback") or [])
+    message = next(
+        (
+            str(item.get("Message") or item)
+            for item in feedback
+            if isinstance(item, Mapping)
+        ),
+        "外部 Greedy 未生成 MoveList",
+    )
+    raise RuntimeError(message)
+
+
 def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) -> Dict[str, Any]:
     """执行控制台提交的计划，并同步写入结构化复现事件。"""
     started = time.perf_counter()
@@ -1254,8 +1823,8 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
     expand_pse300_loadlocks(plan["device"])
     reproduction.add("AlgInit", plan["device"])
     strategy = str(plan.get("strategy") or "heuristic").strip().lower()
-    if strategy not in {"heuristic", "rl", "l2d", "milp"}:
-        raise ValueError("策略只支持 heuristic、rl、l2d 或 milp")
+    if strategy not in {"heuristic", "rl", "l2d", "milp", "greedy"}:
+        raise ValueError("策略只支持 heuristic、rl、l2d、milp 或 greedy")
     if strategy == "l2d" and (
         not PSE300_REQUIRED_STATIONS.issubset(plan["device"].get("Stations") or {})
         or not PSE300_REQUIRED_ROBOTS.issubset(plan["device"].get("Robots") or {})
@@ -1298,6 +1867,16 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
                 f"MILP 策略总晶圆数量不能超过 {MAX_MILP_WAFERS} 片，当前为 {wafer_count} 片"
             )
     reproduction.add("AlgSchedule", _schedule_log_info(plan["device"], first_update))
+    if strategy == "greedy":
+        return _execute_external_greedy(
+            plan,
+            first_update,
+            rounds,
+            times,
+            build_state,
+            reproduction,
+            started,
+        )
     round_started = time.perf_counter()
     scheduler = RealtimeRescheduler(
         plan["device"],
@@ -1979,6 +2558,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/health":
             l2d_model_path = _resolve_l2d_model_path()
+            greedy_status = greedy_availability()
             self._send_json({
                 "ok": True,
                 "service": "ct-config-editor",
@@ -1988,9 +2568,14 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                     "rl": RL_MODEL_PATH.is_file(),
                     "l2d": l2d_model_path is not None,
                     "milp": True,
+                    "greedy": bool(greedy_status["available"]),
                 },
                 "strategyModels": {
                     "l2d": str(l2d_model_path) if l2d_model_path is not None else "",
+                    "greedy": str(greedy_status["path"]),
+                },
+                "strategyErrors": {
+                    "greedy": str(greedy_status["error"]),
                 },
             })
             return
