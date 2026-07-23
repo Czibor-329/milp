@@ -45,13 +45,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.parse import load_alg_entries, parse_task, resize_task_materials
 from src.paths import input_data_path, MODELS_DIR
-from src.marathon_gen import expand_topo_pms, PM_POOL_6
-from src.model import Durations
-from src.features import step_features
-from src.policy import CandidateScorer, Policy
-from src.timing import start_schedule, start_schedule_by_policy
+from src.parse.generator import expand_topo_pms, PM_POOL_6
+from src.parse.model import Durations
+from src.schedule.features import step_features
+from src.schedule.policy import CandidateScorer, Policy
+from src.schedule import start_schedule
+from src.schedule.api import start_schedule_by_policy
 from src.timing._common import _DecodeDeadlock
-from src.timing.sequencing import decode_orders_choosing
+from src.schedule.sequencing import decode_orders_choosing
 from src.timing.solve import solve_timing
 
 BASE_TOPO = "s1-1c1p-preclean"

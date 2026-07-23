@@ -16,14 +16,16 @@ from typing import List, Mapping, Optional, Sequence, Tuple
 
 import torch
 
-from src.model import Durations, Problem
-from src.timing.sequencing import _Cand, _DecodeState, decode_orders
+from src.parse.model import Durations, Problem
+from src.schedule.api import start_schedule
+from src.schedule.sequencing import _Cand, _DecodeState, decode_orders
 from src.timing.solve import solve_timing
 
-from .api import load_l2d_policy, save_l2d_checkpoint
-from .graph import GraphObservation, build_graph_observation
+from .api import load_l2d_policy, save_l2d_checkpoint, start_schedule_l2d
+from .graph import FEATURE_VERSION, GraphObservation, build_graph_observation
 from .model import L2DPolicy
 from .problems import (
+    PM_ORDER,
     load_pse300_topology,
     sample_one_job_problem,
     sample_two_job_problem,
@@ -38,6 +40,11 @@ DEFAULT_VALUE_COEFFICIENT = 0.5
 DEFAULT_MAX_GRADIENT_NORM = 0.5
 DEFAULT_PPO_EPOCHS = 4
 DEFAULT_EPISODES = 1000
+DEFAULT_EPISODES_PER_UPDATE = 4
+BALANCED_SINGLE_STAGE_INTERVAL = 4
+DEFAULT_VALIDATION_INTERVAL = 50
+VALIDATION_WAFER_COUNT = 12
+VALIDATION_PROCESS_TIME = 120
 
 
 @dataclass(frozen=True)
@@ -51,6 +58,7 @@ class PPOConfig:
     learning_rate: float = DEFAULT_LEARNING_RATE
     ppo_epochs: int = DEFAULT_PPO_EPOCHS
     mini_batch_size: int = 64
+    episodes_per_update: int = DEFAULT_EPISODES_PER_UPDATE
     maximum_gradient_norm: float = DEFAULT_MAX_GRADIENT_NORM
 
 
@@ -74,6 +82,7 @@ class EpisodeResult:
     makespan: float
     total_reward: float
     decision_count: int
+    baseline_makespan: Optional[float] = None
 
 
 def collect_episode(
@@ -81,21 +90,31 @@ def collect_episode(
     policy: L2DPolicy,
     *,
     gamma: float = DEFAULT_GAMMA,
+    baseline_makespan: Optional[float] = None,
 ) -> EpisodeResult:
     """采样一条完整安全轨迹，并用一次真实 timing makespan 构造稠密奖励。
 
     步进奖励是连续状态 makespan 下界的负变化；最后一步用真实 makespan 替代下一状态
-    下界，因此未折扣总奖励精确等于 ``(初始下界 - 真实makespan) / 时间尺度``。
+    下界。若提供与动作无关的训练基线，终局再加上 ``baseline-初始下界``，使未折扣总奖励
+    等于 ``(baseline-真实makespan) / 时间尺度``，降低不同实例难度带来的策略梯度方差。
     """
     durations = Durations(problem)
     observations: List[GraphObservation] = []
     actions: List[int] = []
     old_log_probabilities: List[float] = []
     old_values: List[float] = []
+    feature_version = str(
+        getattr(policy, "checkpoint_metadata", {}).get("feature_version")
+        or FEATURE_VERSION
+    )
 
     def training_chooser(state: _DecodeState, candidates: List[_Cand]) -> List[int]:
         """在预过滤后的安全候选上按当前 Actor 分布采样。"""
-        observation = build_graph_observation(state, candidates)
+        observation = build_graph_observation(
+            state,
+            candidates,
+            feature_version=feature_version,
+        )
         with torch.no_grad():
             action, log_probability, value = policy.choose_action(
                 observation, greedy=False
@@ -106,14 +125,7 @@ def collect_episode(
         old_values.append(float(value.item()))
         return [action, *(index for index in range(len(candidates)) if index != action)]
 
-    orders = decode_orders(
-        problem,
-        durations,
-        problem.wafers,
-        chooser=training_chooser,
-        banker=True,
-        filter_safe_candidates=True,
-    )
+    orders = decode_orders(problem, durations, problem.wafers, chooser=training_chooser)
     timing_result = solve_timing(problem, problem.wafers, orders)
     if not getattr(timing_result, "feasible", False) or not math.isfinite(timing_result.makespan):
         raise RuntimeError("Banker 安全轨迹未能产生可行 timing 排程")
@@ -129,6 +141,8 @@ def collect_episode(
             else timing_result.makespan
         )
         rewards.append((observation.lower_bound - next_bound) / reference)
+    if baseline_makespan is not None:
+        rewards[-1] += (baseline_makespan - observations[0].lower_bound) / reference
 
     returns = [0.0] * len(rewards)
     running_return = 0.0
@@ -159,6 +173,7 @@ def collect_episode(
         makespan=timing_result.makespan,
         total_reward=sum(rewards),
         decision_count=len(transitions),
+        baseline_makespan=baseline_makespan,
     )
 
 
@@ -246,6 +261,32 @@ def ppo_update(
     }
 
 
+def evaluate_single_stage_chamber_gaps(
+    policy: L2DPolicy,
+    topology: Mapping[str, object],
+    *,
+    seed: int,
+) -> Mapping[str, float]:
+    """在固定 12 片、120 秒的 1–4 腔矩阵上评估单次 greedy 相对启发式 gap。"""
+    gaps = {}
+    for chamber_count in range(1, len(PM_ORDER) + 1):
+        problem = sample_one_job_problem(
+            topology,
+            random.Random(seed + chamber_count),
+            wafer_count=VALIDATION_WAFER_COUNT,
+            candidate_pool_sizes=(chamber_count,),
+            process_range=(VALIDATION_PROCESS_TIME, VALIDATION_PROCESS_TIME),
+        )
+        model_result = start_schedule_l2d(problem, policy)
+        baseline_result = start_schedule(problem, verbose=False)
+        gaps[f"{chamber_count}ch_gap_percent"] = (
+            100.0 * (model_result.makespan - baseline_result.makespan)
+            / baseline_result.makespan
+        )
+    gaps["mean_gap_percent"] = sum(gaps.values()) / len(PM_ORDER)
+    return gaps
+
+
 def train_policy(
     *,
     phase: str,
@@ -257,6 +298,7 @@ def train_policy(
     ppo_config: Optional[PPOConfig] = None,
     process_range: Tuple[int, int] = (40, 120),
     log_interval: int = 10,
+    validation_interval: int = DEFAULT_VALIDATION_INTERVAL,
 ) -> L2DPolicy:
     """执行指定阶段训练、保存 checkpoint 并返回训练后的策略。"""
     if phase not in {"one-job", "two-job"}:
@@ -295,23 +337,83 @@ def train_policy(
             for parameter_group in optimizer.param_groups:
                 parameter_group["lr"] = config.learning_rate
 
+    if config.episodes_per_update < 1:
+        raise ValueError("episodes_per_update 必须为正整数")
     last_episode: Optional[EpisodeResult] = None
+    last_validation: Mapping[str, float] = {}
+    transition_batch: List[Transition] = []
+    last_losses: Optional[Mapping[str, float]] = None
     for episode_index in range(1, episodes + 1):
         if phase == "one-job":
-            problem = sample_one_job_problem(
-                topology, rng, process_range=process_range
-            )
+            balanced_episode = (episode_index - 1) % BALANCED_SINGLE_STAGE_INTERVAL == 0
+            if balanced_episode:
+                balanced_index = (episode_index - 1) // BALANCED_SINGLE_STAGE_INTERVAL
+                chamber_count = balanced_index % len(PM_ORDER) + 1
+                problem = sample_one_job_problem(
+                    topology,
+                    rng,
+                    candidate_pool_sizes=(chamber_count,),
+                    process_range=process_range,
+                )
+            else:
+                problem = sample_one_job_problem(
+                    topology, rng, process_range=process_range
+                )
         else:
             problem = sample_two_job_problem(
                 topology, rng, process_range=process_range
             )
-        last_episode = collect_episode(problem, policy, gamma=config.gamma)
-        losses = ppo_update(policy, optimizer, last_episode.transitions, config, rng)
+        # 训练期基线只降低回报方差，不参与动作选择，也不会进入线上单次推理。
+        baseline_result = start_schedule(problem, verbose=False)
+        baseline_makespan = (
+            baseline_result.makespan
+            if getattr(baseline_result, "feasible", False)
+            else None
+        )
+        last_episode = collect_episode(
+            problem,
+            policy,
+            gamma=config.gamma,
+            baseline_makespan=baseline_makespan,
+        )
+        transition_batch.extend(last_episode.transitions)
+        update_due = (
+            episode_index % config.episodes_per_update == 0
+            or episode_index == episodes
+        )
+        if update_due:
+            last_losses = ppo_update(policy, optimizer, transition_batch, config, rng)
+            transition_batch.clear()
         if episode_index == 1 or episode_index % max(log_interval, 1) == 0:
+            loss_text = (
+                f"actor={last_losses['actor_loss']:.4f} value={last_losses['value_loss']:.4f}"
+                if last_losses is not None
+                else f"collecting={len(transition_batch)}/{config.episodes_per_update} episodes"
+            )
             print(
                 f"episode={episode_index}/{episodes} phase={phase} "
                 f"makespan={last_episode.makespan:.2f} reward={last_episode.total_reward:.4f} "
-                f"actor={losses['actor_loss']:.4f} value={losses['value_loss']:.4f}"
+                f"{loss_text}"
+            )
+        if (
+            phase == "one-job"
+            and validation_interval > 0
+            and (
+                episode_index % validation_interval == 0
+                or episode_index == episodes
+            )
+        ):
+            last_validation = evaluate_single_stage_chamber_gaps(
+                policy,
+                topology,
+                seed=seed + 10_000,
+            )
+            print(
+                "validation "
+                + " ".join(
+                    f"{name}={value:+.2f}%"
+                    for name, value in last_validation.items()
+                )
             )
 
     save_l2d_checkpoint(
@@ -327,8 +429,11 @@ def train_policy(
             "clip": config.clip,
             "entropy_coefficient": config.entropy_coefficient,
             "learning_rate": config.learning_rate,
+            "episodes_per_update": config.episodes_per_update,
+            "reward_baseline": "heuristic",
             "process_range": list(process_range),
             "last_makespan": last_episode.makespan if last_episode else None,
+            "last_validation": dict(last_validation),
         },
     )
     return policy
@@ -349,9 +454,11 @@ def _argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--entropy", type=float, default=DEFAULT_ENTROPY_COEFFICIENT)
     parser.add_argument("--ppo-epochs", type=int, default=DEFAULT_PPO_EPOCHS)
     parser.add_argument("--mini-batch-size", type=int, default=64)
+    parser.add_argument("--episodes-per-update", type=int, default=DEFAULT_EPISODES_PER_UPDATE)
     parser.add_argument("--process-min", type=int, default=40)
     parser.add_argument("--process-max", type=int, default=120)
     parser.add_argument("--log-interval", type=int, default=10)
+    parser.add_argument("--validation-interval", type=int, default=DEFAULT_VALIDATION_INTERVAL)
     return parser
 
 
@@ -375,9 +482,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             learning_rate=args.learning_rate,
             ppo_epochs=args.ppo_epochs,
             mini_batch_size=args.mini_batch_size,
+            episodes_per_update=args.episodes_per_update,
         ),
         process_range=(args.process_min, args.process_max),
         log_interval=args.log_interval,
+        validation_interval=args.validation_interval,
     )
     print(f"checkpoint 已保存：{output}")
 

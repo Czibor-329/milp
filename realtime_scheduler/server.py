@@ -40,7 +40,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.paths import MODELS_DIR
-from src.reschedule import RealtimeRescheduler, TIME_TOLERANCE
+from src.schedule.realtime import RealtimeRescheduler, TIME_TOLERANCE
 from src.validation import MoveStateReplay
 from src.validation.move_fields import (
     COMPLETE_MOVE, PICK_MOVE, PLACE_MOVE, PREPARE_MOVE, PRE_PREPARE_MOVE,
@@ -58,6 +58,8 @@ WORKSPACE_STORE_VERSION = 2
 API_SCHEMA_VERSION = "cjob-pjob-v3"
 FIRST_SLOT_ID = 1
 MAX_WAFERS_PER_JOB = 25
+MAX_MILP_WAFERS = 12
+DEFAULT_MILP_TIME_LIMIT_SECONDS = 120.0
 DEFAULT_TRIGGER_UPPER = 9999.0
 CJOB_TYPE_VALUES = {"NormalLot": 0, "HighestLot": 2, "HigherLot": 3}
 TASK_MODE_VALUES = {"Smart": 0, "Pipeline": 1, "Sequential": 2, "Concurrent": 3}
@@ -1169,7 +1171,7 @@ def _load_rl_policy() -> Any:
             return _RL_POLICY
         if not RL_MODEL_PATH.exists():
             raise ValueError(f"RL 模型不存在：{RL_MODEL_PATH}")
-        from src.policy import load_policy
+        from src.schedule.policy import load_policy
 
         _RL_POLICY = load_policy(RL_MODEL_PATH)
         return _RL_POLICY
@@ -1192,7 +1194,7 @@ def _load_l2d_inference_policy() -> Any:
         signature = (str(model_path.resolve()), stat.st_mtime_ns, stat.st_size)
         if _L2D_POLICY is not None and _L2D_POLICY_SIGNATURE == signature:
             return _L2D_POLICY
-        from src.l2d import load_l2d_policy
+        from src.schedule.l2d import load_l2d_policy
 
         _L2D_POLICY = load_l2d_policy(model_path, device="cpu")
         _L2D_POLICY_SIGNATURE = signature
@@ -1211,7 +1213,7 @@ def import_l2d_checkpoint(encoded_data: str) -> Dict[str, Any]:
     if len(checkpoint_bytes) > MAX_L2D_CHECKPOINT_BYTES:
         raise ValueError("L2D checkpoint 超过 8MB 限制")
 
-    from src.l2d import load_l2d_policy
+    from src.schedule.l2d import load_l2d_policy
 
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     temporary_path = MODELS_DIR / ".l2d_pse300_import.pt.tmp"
@@ -1252,8 +1254,8 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
     expand_pse300_loadlocks(plan["device"])
     reproduction.add("AlgInit", plan["device"])
     strategy = str(plan.get("strategy") or "heuristic").strip().lower()
-    if strategy not in {"heuristic", "rl", "l2d"}:
-        raise ValueError("策略只支持 heuristic、rl 或 l2d")
+    if strategy not in {"heuristic", "rl", "l2d", "milp"}:
+        raise ValueError("策略只支持 heuristic、rl、l2d 或 milp")
     if strategy == "l2d" and (
         not PSE300_REQUIRED_STATIONS.issubset(plan["device"].get("Stations") or {})
         or not PSE300_REQUIRED_ROBOTS.issubset(plan["device"].get("Robots") or {})
@@ -1263,6 +1265,8 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
     round_count = int(_finite_number(plan.get("roundCount"), len(rounds)))
     if round_count < 1 or len(rounds) != round_count:
         raise ValueError("轮次数量与 roundCount 不一致")
+    if strategy == "milp" and round_count != 1:
+        raise ValueError("MILP 策略只支持首次排程，不能选择多次重算")
     times = [_finite_number(row.get("currentTime"), 0.0) for row in rounds]
     if abs(times[0]) > TIME_TOLERANCE:
         raise ValueError("首次排程时间必须为 0")
@@ -1284,6 +1288,15 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
     summaries: List[Dict[str, Any]] = []
 
     first_update = build_round_update(plan, rounds[0], 0.0, build_state)
+    if strategy == "milp":
+        wafer_count = sum(
+            len(process_job.get("MatList") or [])
+            for process_job in (first_update.get("ProcessJobs") or [])
+        )
+        if wafer_count > MAX_MILP_WAFERS:
+            raise ValueError(
+                f"MILP 策略总晶圆数量不能超过 {MAX_MILP_WAFERS} 片，当前为 {wafer_count} 片"
+            )
     reproduction.add("AlgSchedule", _schedule_log_info(plan["device"], first_update))
     round_started = time.perf_counter()
     scheduler = RealtimeRescheduler(
@@ -1294,9 +1307,14 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
         rl_search_seconds=_finite_number(options.get("rlSearchSeconds"), 4.0),
         rl_rollouts=max(0, int(_finite_number(options.get("rlRollouts"), 256))),
         rl_temperature=max(0.01, _finite_number(options.get("rlTemperature"), 0.7)),
+        milp_time_limit=max(
+            0.1,
+            _finite_number(options.get("milpTimeLimit"), DEFAULT_MILP_TIME_LIMIT_SECONDS),
+        ),
         seed=int(_finite_number(options.get("seed"), 0)),
     )
     elapsed_ms = (time.perf_counter() - round_started) * 1000.0
+    first_diagnostics = scheduler.last_strategy_diagnostics
     summaries.append({
         "index": 1,
         "kind": "initial",
@@ -1307,8 +1325,15 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
         "jobCount": _round_pjob_count(rounds[0]),
         "elapsedMs": elapsed_ms,
         "segmentEnd": _segment_end(scheduler.current_plan),
+        "strategyDiagnostics": first_diagnostics,
     })
     logs.append(f"[1/{round_count}] 首次排程完成：{elapsed_ms:.1f} ms，{len(scheduler.current_plan)} Moves")
+    if strategy == "milp":
+        proof = "已证明最优" if first_diagnostics.get("optimal") else "达到时限，返回当前最优可行解"
+        logs.append(
+            f"  MILP：{proof}；gap={float(first_diagnostics.get('gap', 0.0)) * 100:.3f}%；"
+            f"求解 {float(first_diagnostics.get('runtimeSeconds', 0.0)):.2f}s"
+        )
     reproduction.add("AlgOutput", _alg_output_info(scheduler.combined_output()))
 
     for index, round_config in enumerate(rounds[1:], start=2):
@@ -1962,6 +1987,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                     "heuristic": True,
                     "rl": RL_MODEL_PATH.is_file(),
                     "l2d": l2d_model_path is not None,
+                    "milp": True,
                 },
                 "strategyModels": {
                     "l2d": str(l2d_model_path) if l2d_model_path is not None else "",

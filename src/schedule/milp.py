@@ -1,38 +1,17 @@
-from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 import gurobipy as gp
 from gurobipy import GRB
 
-from src.milp_clean import _clean_specs, _dummy_order_pairs
-from src.model import Durations, Problem, Stage, Wafer
+from src.parse.clean_constraints import _clean_specs, _dummy_order_pairs
+from src.parse.model import Durations, Problem, Stage, Wafer
+from src.timing.solve import SolveResult
+from src.timing.spans import _ll_proc
 
 # --------------------------------------------------------------------------- #
-# 工作数据类（Stage / Wafer / Durations）已迁到 src.model；晶圆展开见 src.parse。
+# 工作数据类位于 src.parse.model；晶圆展开见 src.parse。
 # 本模块只消费 Problem（task.wafers / task.pre_clean / task.post_clean）。
 # --------------------------------------------------------------------------- #
-def _ll_proc(task: Problem, chamber: str, ll_type: str) -> float:
-    """loadlock 在某具体腔的停留时长：entry→pump，exit→vent（放开分配后按选中腔取）。"""
-    ch = task.chambers.get(chamber)
-    if ch is None or ll_type not in ("entry", "exit"):
-        return 0.0
-    return float((ch.pump_time if ll_type == "entry" else ch.vent_time) or 0.0)
-
-
-# --------------------------------------------------------------------------- #
-# 求解结果
-# --------------------------------------------------------------------------- #
-@dataclass
-class SolveResult:
-    status: int
-    makespan: float
-    # wid -> [(stage_type, chamber, a 进站, r 取走)]
-    schedule: Dict[int, List[Tuple[str, str, float, float]]] = field(default_factory=dict)
-    releases: List[Tuple[float, str, int]] = field(default_factory=list)  # (发片时刻, route, wid)
-    gap: float = 0.0
-    runtime: float = 0.0
-
-
 # --------------------------------------------------------------------------- #
 # 建模 + 求解
 # --------------------------------------------------------------------------- #

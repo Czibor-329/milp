@@ -22,27 +22,31 @@ pip install -r requirements-l2d.txt
 
 ## PSE300 L2D 动态析取图策略
 
-`src/l2d/` 实现固定选腔、只学习操作顺序的 L2D 风格 GraphCNN + Actor-Critic。解析期
+`src/schedule/l2d/` 实现固定选腔、只学习操作顺序的 L2D 风格 GraphCNN + Actor-Critic。解析期
 会为每片晶圆 round-robin 分配严格递增且不重复的实际 PM 路径，LA/LB 仍按 rank 固定；
 Actor 每步只在 Banker 安全候选中选择动作。完整顺序产生后只调用一次 timing 引擎求精确
 时刻，因此这不是在线 MILP，也不是生产过程中的实时重调度。
 
 ```bash
 # 第一阶段：单 Job，PM1–PM4，1–3 道工序，5–25 片
-python -m src.l2d.train --phase one-job --output l2d_pse300_1job.pt
+python -m src.schedule.l2d.train --phase one-job --output l2d_pse300_1job.pt
 
 # 第二阶段：从第一阶段参数继续训练两个 PM 不共享的 Job
-python -m src.l2d.train --phase two-job \
+python -m src.schedule.l2d.train --phase two-job \
   --init l2d_pse300_1job.pt --output l2d_pse300_2job.pt
 
 # 固定验证集评测 makespan、相对启发式 gap、耗时和 MoveList 合法性
-python -m src.l2d.evaluate --checkpoint l2d_pse300_2job.pt
+python -m src.schedule.l2d.evaluate --checkpoint l2d_pse300_2job.pt
 ```
+
+新训练默认使用 `pse300-hop-v2` 特征、跨 4 条轨迹的 PPO 更新和训练期方差基线；旧 v1
+checkpoint 仍可按原特征语义做一次 greedy 推理。三并行腔退化的复现矩阵、根因和重新训练
+验收要求见 [docs/l2d_three_chamber_investigation.md](docs/l2d_three_chamber_investigation.md)。
 
 代码接口：
 
 ```python
-from src.l2d import load_l2d_policy, start_schedule_l2d
+from src.schedule.l2d import load_l2d_policy, start_schedule_l2d
 
 policy = load_l2d_policy("l2d_pse300_1job.pt", device="cpu")
 result = start_schedule_l2d(problem, policy)
@@ -83,14 +87,11 @@ python scripts/train_rl.py --train-wafers 5 --eval-wafers 25
 
 ```
 src/
-  model.py            # 工作数据类：Chamber/Robot/Stage/Wafer/Problem/CleanSpec/Durations
-  parse.py            # parse_task(tool_topo, update_params) -> Problem（解析 + 晶圆展开，含 load_alg_entries）
-  clean.py            # 清洗条件解析 + dummy 晶圆合成
-  dual.py             # 双腔成对视图
-  milp.py             # 核心：建模 + 求解 + 自检 + MoveList 导出（消费 Problem）
-  timing/             # 定时层：差分约束图 + Bellman-Ford；RL/BC 只向它提供顶层资源顺序
-  features.py / labels.py / policy.py   # 模仿学习（BC）：特征 / 标签 / 候选打分网络
-  marathon_gen.py     # 合成 job / route 生成（纯 stdlib）
+  parse/              # JSON 解析、工作数据类、清洗条件、双腔视图和输入生成
+  timing/             # 固定资源顺序的差分约束图与精确定时
+  schedule/           # 启发式、RL、L2D、MILP 和实时重排
+  export/             # MoveList 导出
+  validation/         # MoveList 状态回放与验证
   paths.py            # 路径常量
   log_setup.py        # 日志
   input_data/*.json   # 样例场景

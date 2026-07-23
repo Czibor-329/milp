@@ -4,9 +4,9 @@ import unittest
 from pathlib import Path
 
 import scripts.reschedule as demo
-from src.model import Chamber, Problem, Robot, RuntimeAvailability, Stage, Wafer
-from src.reschedule import RealtimeRescheduler, _repair_loadlock_door_overlap
-from src.timing import start_schedule
+from src.parse.model import Chamber, Problem, Robot, RuntimeAvailability, Stage, Wafer
+from src.schedule.realtime import RealtimeRescheduler, _repair_loadlock_door_overlap
+from src.schedule import start_schedule
 from src.validation.move_fields import COMPLETE_MOVE, PICK_MOVE, PREPARE_MOVE, PRE_PREPARE_MOVE
 from src.validation.state import LoadLockState, MachineState, SlotState
 

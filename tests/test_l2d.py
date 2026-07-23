@@ -11,10 +11,15 @@ from unittest import mock
 import torch
 
 from src.export.export import check_solution, export_movelist
-from src.l2d.api import load_l2d_policy, save_l2d_checkpoint, start_schedule_l2d
-from src.l2d.graph import build_graph_observation
-from src.l2d.model import L2DPolicy
-from src.l2d.problems import (
+from src.schedule.l2d.api import load_l2d_policy, save_l2d_checkpoint, start_schedule_l2d
+from src.schedule.l2d.graph import (
+    FEATURE_DIMENSION,
+    LEGACY_FEATURE_DIMENSION,
+    LEGACY_FEATURE_VERSION,
+    build_graph_observation,
+)
+from src.schedule.l2d.model import L2DNetworkConfig, L2DPolicy
+from src.schedule.l2d.problems import (
     PM_ORDER,
     candidate_pool_configurations,
     enumerate_increasing_paths,
@@ -23,14 +28,11 @@ from src.l2d.problems import (
     sample_one_job_problem,
     sample_two_job_problem,
 )
-from src.l2d.train import PPOConfig, collect_episode, ppo_update
-from src.marathon_gen import JobSpec, build_update_params, job_process_recipes
-from src.model import Durations
+from src.schedule.l2d.train import PPOConfig, collect_episode, ppo_update
+from src.parse.generator import JobSpec, build_update_params, job_process_recipes
+from src.parse.model import Durations
 from src.parse import PROCESS_ASSIGNMENT_ACYCLIC_ROUND_ROBIN, parse_task
-from src.timing.sequencing import (
-    _build_resource_map,
-    _drain_completes,
-    _process_predecessors,
+from src.schedule.sequencing import (
     decode_orders,
 )
 from src.validation import validate_move_list
@@ -184,61 +186,11 @@ class L2DGraphAndPolicyTests(unittest.TestCase):
             chosen_by_robot.setdefault(selected.rob, []).append((selected.wid, selected.j))
             return list(range(len(candidates)))
 
-        orders = decode_orders(
-            problem,
-            durations,
-            problem.wafers,
-            chooser=chooser,
-            banker=True,
-            filter_safe_candidates=True,
-        )
+        orders = decode_orders(problem, durations, problem.wafers, chooser=chooser)
         self.assertEqual(chosen_by_robot, orders.robots)
         self.assertGreater(max(graph_edge_counts), min(graph_edge_counts))
         with self.assertRaises(TypeError):
             observed_history[-1]["VTR"] = ()
-
-    def test_banker_oracle_honors_process_fifo_when_resources_cross(self):
-        problem = _problem_with_full_candidate_pools(stage_count=2, wafer_count=2)
-        first, second = problem.wafers
-        first_process_indices = [
-            index for index, stage in enumerate(first.stages)
-            if stage.stage_type == "process"
-        ]
-        second_process_indices = [
-            index for index, stage in enumerate(second.stages)
-            if stage.stage_type == "process"
-        ]
-        first_stage, second_stage = first_process_indices
-        second_first_stage, second_second_stage = second_process_indices
-
-        # 构造旧安全谕示会误判的状态：后片占住 PM2，前片从 PM1 等待 PM2；
-        # 后片虽然可以去 PM3，但同工序 FIFO 要求前片先进入第二工序，因此实际已死锁。
-        first.stages[first_stage].chamber = "PM1"
-        first.stages[second_stage].chamber = "PM2"
-        second.stages[second_first_stage].chamber = "PM2"
-        second.stages[second_second_stage].chamber = "PM3"
-        wafers = {wafer.wid: wafer for wafer in problem.wafers}
-        positions = {first.wid: first_stage, second.wid: second_first_stage}
-        hop_counts = {
-            wafer.wid: len(wafer.stages) - 1 for wafer in problem.wafers
-        }
-        resource_map = _build_resource_map(problem, wafers)
-        occupied = {
-            resource_map[(first.wid, first_stage)]: first.wid,
-            resource_map[(second.wid, second_first_stage)]: second.wid,
-        }
-        self.assertFalse(
-            _drain_completes(
-                problem,
-                wafers,
-                hop_counts,
-                positions,
-                occupied,
-                {},
-                res_map=resource_map,
-                process_predecessors=_process_predecessors(problem.wafers),
-            )
-        )
 
     def test_model_supports_one_to_three_stages_and_two_jobs(self):
         policy = L2DPolicy()
@@ -257,16 +209,41 @@ class L2DGraphAndPolicyTests(unittest.TestCase):
                 captured.append((distribution.probs.shape[0], value.ndim))
                 return list(range(len(candidates)))
 
-            decode_orders(
-                problem,
-                Durations(problem),
-                problem.wafers,
-                chooser=chooser,
-                banker=True,
-                filter_safe_candidates=True,
-            )
+            decode_orders(problem, Durations(problem), problem.wafers, chooser=chooser)
             self.assertTrue(captured)
             self.assertTrue(all(count >= 1 and ndim == 0 for count, ndim in captured))
+
+    def test_v2_features_expose_candidate_start_resource_history_and_pm_identity(self):
+        """v2 候选特征不应再把已使用 PM 的动态负载全部编码成零。"""
+        problem = sample_one_job_problem(
+            load_pse300_topology(),
+            random.Random(47),
+            wafer_count=12,
+            candidate_pool_sizes=(3,),
+            process_range=(120, 120),
+        )
+        observed_resource_history = []
+        observed_candidate_starts = []
+        observed_process_pm_codes = []
+
+        def chooser(state, candidates):
+            """收集候选节点的 v2 动态与静态资源特征。"""
+            observation = build_graph_observation(state, candidates)
+            rows = observation.features[observation.candidate_nodes]
+            self.assertEqual(rows.shape[1], FEATURE_DIMENSION)
+            observed_resource_history.extend(rows[:, 11].tolist())
+            observed_candidate_starts.extend(rows[:, 12].tolist())
+            for candidate, row in zip(candidates, rows):
+                destination = state.wmap[candidate.wid].stages[candidate.j + 1]
+                if destination.stage_type == "process":
+                    observed_process_pm_codes.append(float(row[15:19].sum().item()))
+            return list(range(len(candidates)))
+
+        decode_orders(problem, Durations(problem), problem.wafers, chooser=chooser)
+        self.assertTrue(any(value > 0.0 for value in observed_resource_history))
+        self.assertTrue(any(value > 0.0 for value in observed_candidate_starts))
+        self.assertTrue(observed_process_pm_codes)
+        self.assertTrue(all(value == 1.0 for value in observed_process_pm_codes))
 
 
 class L2DTrainingAndInferenceTests(unittest.TestCase):
@@ -312,6 +289,32 @@ class L2DTrainingAndInferenceTests(unittest.TestCase):
             for expected, actual in zip(policy.parameters(), loaded.parameters()):
                 self.assertTrue(torch.equal(expected, actual))
 
+    def test_legacy_v1_checkpoint_remains_single_rollout_compatible(self):
+        """旧 12 维 checkpoint 应继续按 v1 特征推理，避免静默改变线上语义。"""
+        topology = load_pse300_topology()
+        policy = L2DPolicy(L2DNetworkConfig(feature_dimension=LEGACY_FEATURE_DIMENSION))
+        policy.checkpoint_metadata = {"feature_version": LEGACY_FEATURE_VERSION}
+        problem = sample_one_job_problem(
+            topology,
+            random.Random(59),
+            wafer_count=3,
+            candidate_pool_sizes=(3,),
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            checkpoint = Path(temporary_directory) / "legacy.pt"
+            save_l2d_checkpoint(
+                checkpoint,
+                policy,
+                phase="one-job",
+                topology=topology,
+                random_seed=59,
+            )
+            loaded = load_l2d_policy(checkpoint)
+            result = start_schedule_l2d(problem, loaded)
+
+        self.assertEqual(loaded.checkpoint_metadata["feature_version"], LEGACY_FEATURE_VERSION)
+        self.assertTrue(result.feasible)
+
     def test_inference_calls_timing_once_and_5_25_wafer_cases_are_valid(self):
         topology = load_pse300_topology()
         policy = L2DPolicy()
@@ -323,7 +326,7 @@ class L2DTrainingAndInferenceTests(unittest.TestCase):
                 stage_count=3,
             )
             with mock.patch(
-                "src.l2d.api.solve_timing",
+                "src.schedule.l2d.api.solve_timing",
                 wraps=__import__("src.timing.solve", fromlist=["solve_timing"]).solve_timing,
             ) as timing_mock:
                 result = start_schedule_l2d(problem, policy)

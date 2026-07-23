@@ -11,16 +11,26 @@ import itertools
 import math
 import random
 import time
-from typing import List, Optional
+from typing import List, Optional, Dict, Tuple
 
-from src.milp import SolveResult
-from src.model import Durations, Problem
+from src.parse.model import Durations, Problem
+from src.timing.solve import SolveResult, solve_timing
 
-from ._common import EPS, _DecodeDeadlock
-from .solve import solve_timing
-from .sequencing import (_Cand, _Chooser, _DecodeState, _make_default_chooser,
-                         decode_orders)
+from src.timing._common import EPS, _DecodeDeadlock
+from .sequencing import (_Cand, _Chooser, _DecodeState,decode_orders)
 
+
+def _make_default_chooser(prio: Optional[Dict[Tuple[int, int], float]]
+                          ) -> _Chooser:
+    """定死 backward 规则的 chooser：按 (最早可起+bias, 下游优先, wid) 排序。
+    bias 缺省 0 ⇒ 与旧定序逐字节同序（wid 唯一 ⇒ 决出全序，不触及 dest/rob 比较）。"""
+    def chooser(state: _DecodeState, cands: List[_Cand]) -> List[int]:
+        def key(i: int):
+            c = cands[i]
+            bias = prio.get((c.wid, c.j), 0.0) if prio else 0.0
+            return (c.start + bias, -c.j, c.wid)
+        return sorted(range(len(cands)), key=key)
+    return chooser
 
 # --------------------------------------------------------------------------- #
 # 解码评估
@@ -70,12 +80,12 @@ def _needs_drain(ir: Problem, wafers) -> bool:
 def _feed_chooser(quota: dict) -> _Chooser:
     """喂片优先 chooser：尽量把未加工片喂进加工腔/loadlock 以填满并行 PM（让 LL 常装未加工片、
     腔室不闲着）。每步偏好序：①搬进加工腔(启动 PM) > ②发新片(j==0，喂进 LL) > ③排空(按最早可起/
-    下游优先)。Banker 安全掩码在解码循环里兜底——喂得太满会死锁时自动退到安全候选，故只影响顺序
+    下游优先)。Petri 可达性掩码在解码循环里兜底——喂得太满会死锁时只暴露安全候选，故只影响顺序
     偏好、不破坏正确性。
 
     quota：route→发片配额权重（>0）。多 job 时按 fed[route]/quota[route] 最小者优先发片，即按
     配额交替发片（1:1 / 1:2 / …）；单 job 恒 0，退化为纯喂片优先。fed 从 state.pos 直接数
-    （pos>0=已离源），无需内部计数器 ⇒ 对 Banker 改选鲁棒。"""
+    （pos>0=已离源），无需内部计数器 ⇒ 对动作掩码改选鲁棒。"""
     def chooser(state: _DecodeState, cands: List[_Cand]) -> List[int]:
         fed: dict = {}
         for wid, p in state.pos.items():
@@ -168,8 +178,7 @@ def _heuristic_schedule(ir: Problem, durations: Durations, wafers,
 # 随机定序 rollout
 # --------------------------------------------------------------------------- #
 def _random_chooser(rng: random.Random) -> _Chooser:
-    """随机定序 chooser：每步给合法候选一个均匀随机偏好序。解码循环的 Banker 安全掩码会沿
-    该序回退——随机首选会导致死锁时自动跳到下一个安全候选，故任意随机序都解出可行占用序。"""
+    """随机定序 chooser：每步给 Petri 安全候选一个均匀随机偏好序。"""
     def chooser(state: _DecodeState, cands: List[_Cand]) -> List[int]:
         order = list(range(len(cands)))
         rng.shuffle(order)
@@ -179,7 +188,7 @@ def _random_chooser(rng: random.Random) -> _Chooser:
 
 def _random_rollouts(ir: Problem, durations: Durations, wafers, base: Optional[SolveResult],
                      *, n: int, seed: int, verbose: bool) -> Optional[SolveResult]:
-    """在给定腔分配基底上做 n 次随机定序 rollout（Banker 保证无死锁；放开 LL swap 空间——
+    """在给定腔分配基底上做 n 次随机定序 rollout（Petri 动作掩码保证无死锁；放开 LL swap 空间——
     它严格包含 no-swap 的可行序），solve_timing 精确评估，与 base 取 makespan 最优可行
     （不满足要求——死锁/驻留超限/更差——即回退到已有最优）。"""
     rng = random.Random(seed)
@@ -210,7 +219,7 @@ def _priority_eval(ir: Problem, durations: Durations, wafers, priorities: dict,
                    *, swap: bool) -> Optional[SolveResult]:
     """评估一组 hop 时间偏置；与 ``_decode_eval`` 不同，会保留驻留不可行结果供搜索修复。"""
     try:
-        orders = decode_orders(ir, durations, wafers, prio=priorities, swap=swap)
+        orders = decode_orders(ir, durations, wafers, swap=swap)
     except (RuntimeError, _DecodeDeadlock):
         return None
     return solve_timing(ir, wafers, orders=orders)
@@ -241,7 +250,7 @@ def _two_job_timed_search(ir: Problem, durations: Durations, wafers,
     """在严格时间预算内搜索两条 route 的发片交织，并用驻留违例定向修复。
 
     2-job 的 route 内发片顺序受 FIFO 固定，真正需要搜索的是两条有序序列的交织；例如 6+6 片
-    仅有 924 种。每个候选仍交给 Banker 解码并由 ``solve_timing`` 精确计时，所以任意时刻返回的
+    仅有 924 种。每个候选仍交给 Petri 解码并由 ``solve_timing`` 精确计时，所以任意时刻返回的
     ``best`` 都是已验证可行解。搜索优先使用 LL swap，并周期性覆盖整腔互斥口径。
 
     参数：
@@ -349,8 +358,8 @@ def _two_job_timed_search(ir: Problem, durations: Durations, wafers,
 # BC 策略 chooser（供 start_schedule_by_policy 用）
 # --------------------------------------------------------------------------- #
 def _greedy_chooser(policy) -> _Chooser:
-    """策略 chooser：对每候选打分，返回分数降序的偏好序（Banker 在解码循环里再保证无死锁）。"""
-    from src.features import step_features
+    """策略 chooser：对 Petri 安全候选打分，返回分数降序的偏好序。"""
+    from src.schedule.features import step_features
 
     def chooser(state: _DecodeState, cands: List[_Cand]) -> List[int]:
         scores = policy.score_step(step_features(state, cands))
@@ -363,7 +372,7 @@ def _sampling_chooser(policy, rng, temp: float) -> _Chooser:
     """随机 rollout 的 chooser：分数/temp 加 Gumbel 噪声后排序（= 按 softmax(分数/temp) 抽偏好序）。
     多次 rollout 用 timing 精确评估取最优，逼近策略下的最好序——仍是纯 BC（推理期解码，不训练）。"""
     import numpy as np
-    from src.features import step_features
+    from src.schedule.features import step_features
 
     def chooser(state: _DecodeState, cands: List[_Cand]) -> List[int]:
         s = policy.score_step(step_features(state, cands)) / temp

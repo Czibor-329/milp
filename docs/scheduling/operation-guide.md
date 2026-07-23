@@ -7,13 +7,16 @@
 python scripts/run.py --strategy heuristic --input s1-1c1p-preclean
 
 # 双作业策略对比
-python scripts/run.py --strategy heuristic search paper random bc --subsets train/2job --limit 3 --search-seconds 7 --random-orders 64 --seed 0
+python scripts/run.py --strategy heuristic search random bc --subsets train/2job --limit 3 --search-seconds 7 --random-orders 64 --seed 0
 
 # MILP 基准及 MoveList 导出
 python scripts/run.py --strategy milp --input s1-1c1p-preclean --tl 120 --export
 ```
 
-`--strategy all` 当前展开为 `heuristic search paper random bc`，不包含 MILP。`--export` 将结果写入 `results/output/<strategy>/<subset-or-input>/`；`--out eval.json` 在数据集模式额外写逐实例记录与汇总。`--seed` 控制 `search`、`random`、`bc` 的随机性；`--search-seconds` 只影响 `search` 与 `paper`；`--random-orders` 只影响 `random`；`--tl` 只影响 `milp`。
+`--strategy all` 当前展开为 `heuristic search random bc rl`，不包含 MILP。`--export`
+将结果写入 `results/output/<strategy>/<subset-or-input>/`；`--out eval.json` 在数据集模式
+额外写逐实例记录与汇总。`--seed` 控制搜索策略随机性；`--search-seconds` 只影响
+`search`；`--random-orders` 只影响 `random`；`--tl` 只影响 `milp`。
 
 ## 结果验收
 
@@ -31,8 +34,8 @@ python scripts/run.py --strategy milp --input s1-1c1p-preclean --tl 120 --export
 | 尽快获得可靠排程 | `heuristic` |
 | 保持基底并用少量额外时间改进 | `random` |
 | 两 route、可投入数秒 | `search` |
-| 关注 PM 任务池排序、可投入数秒 | `paper` |
 | 已训练 BC 模型，想利用历史 oracle 行为 | `bc`（默认保留 fallback） |
+| 已训练 RL 模型，要求限时搜索 | `rl` |
 | 获取基准/标签或证明最优性 | `milp` |
 
 比较策略时应固定输入、Gurobi时限、随机种子和策略预算，并同时报告 makespan、可行率、校验违例数与墙钟时间。对多容量加工腔，timing 系列与 MILP 的门簇建模口径不同，结论需单独标注。

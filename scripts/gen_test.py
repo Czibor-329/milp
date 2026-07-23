@@ -27,13 +27,13 @@ import yaml
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.marathon_gen import (
+from src.parse.generator import (
     JobSpec, build_update_params, build_concurrent_update, job_process_recipes,
     expand_topo_pms, PM_POOL_6, LP_POOL, CLEAN_TYPES,
 )
 from src.parse import parse_task, load_alg_entries
-from src.milp import solve_milp
-from export.export import check_solution, export_movelist
+from src.schedule.milp import solve_milp
+from src.export import check_solution, export_movelist
 from src.paths import input_data_path, TEST_ROOT, TRAIN_DIR
 
 BASE_TOPO = "s1-1c1p-preclean"

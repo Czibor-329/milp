@@ -280,12 +280,13 @@
 
       <aside class="side" id="scheduleSide">
         <article class="panel">
-          <div class="panel-head"><div><h2>运行策略</h2><p>启发式默认；RL 做限时搜索，L2D 执行一次图策略贪心推理。</p></div></div>
+          <div class="panel-head"><div><h2>运行策略</h2><p>启发式默认；RL 做限时搜索，L2D 只推理一次，MILP 仅用于不超过 12 片的单轮最优性验证。</p></div></div>
           <div class="panel-body">
             <div class="strategy-options">
               <label class="strategy-card"><input type="radio" name="strategy" value="heuristic" checked><b>启发式</b><span>稳定、快速</span></label>
               <label class="strategy-card"><input id="rlStrategyInput" type="radio" name="strategy" value="rl"><b>RL 搜索</b><span id="rlStrategyHint">调用已训练模型</span></label>
               <label class="strategy-card"><input id="l2dStrategyInput" type="radio" name="strategy" value="l2d"><b>L2D 图策略</b><span id="l2dStrategyHint">单次贪心推理</span></label>
+              <label class="strategy-card"><input id="milpStrategyInput" type="radio" name="strategy" value="milp"><b>MILP 最优求解</b><span>单轮 · 总计 ≤12 片</span></label>
             </div>
             <div style="margin-top:10px"><label class="btn small import-device">导入 L2D checkpoint<input id="l2dCheckpointFile" type="file" accept=".pt,application/octet-stream"></label></div>
             <div id="rlOptions" class="grid is-hidden" style="margin-top:14px">
@@ -293,6 +294,10 @@
               <div class="field span-6"><label>Rollouts</label><input data-option="rlRollouts" type="number" min="1" value="256"></div>
               <div class="field span-6"><label>温度</label><input data-option="rlTemperature" type="number" min="0.01" step="0.05" value="0.7"></div>
               <div class="field span-6"><label>随机种子</label><input data-option="seed" type="number" value="0"></div>
+            </div>
+            <div id="milpOptions" class="grid is-hidden" style="margin-top:14px">
+              <div class="field span-6"><label>求解时限（秒）</label><input data-option="milpTimeLimit" type="number" min="0.1" step="1" value="120"></div>
+              <div class="field span-6"><label>约束</label><div class="hint">只能运行首次排程，所有 PJob 的晶圆总数不能超过 12 片。</div></div>
             </div>
           </div>
           <div class="run-box"><h2>开始运行</h2><p>后端将依次排程、推进 Move 状态并触发重算。</p><label class="export-option"><input id="autoExportLog" type="checkbox">运行结束后自动下载 input_data 复现日志（失败也会生成）</label><button class="btn" id="runButton">▶ 运行后端策略</button></div>
@@ -328,7 +333,7 @@
     const state = {
       workspaceDevices: [], workspaceDevice: null, workspaceDeviceId: "", testCaseId: "", testCaseName: "", testCaseGroup: "", activeTestGroup: "", serviceCompatible: false, dirty: false,
       deviceName: "", device: null, stationNames: [], loadPorts: [], processModules: [], robotNames: [], robotScopes: {},
-      strategy: "heuristic", roundCount: 2, times: [0, 70], options: { rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, seed: 0 },
+      strategy: "heuristic", roundCount: 2, times: [0, 70], options: { rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
       cleans: [],
       routes: [{ name: "RouteA", group: "RouteA", bufferOption: 0, prePJobCleanRefs: [], postPJobCleanRefs: [], postCJobCleanRefs: [], stages: linkRouteSteps([makeStage("LP1"), makeStage("Robot"), makeStage("PM1,PM2", true, "RouteA_Step2"), makeStage("Robot"), makeStage("LP1")]) }],
       rounds: [makeRound(1, 0, "RouteA", "LP1"), makeRound(2, 70, "RouteA", "LP2")],
@@ -619,7 +624,7 @@
       const routeName = state.routes[0]?.name || "";
       return {
         name, group: state.activeTestGroup || "", strategy: "heuristic", roundCount: 2, times: [0, 70],
-        options: { rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, seed: 0 },
+        options: { rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
         cleans: state.cleans, routes: state.routes,
         rounds: [
           makeRound(1, 0, routeName, state.loadPorts[0] || ""),
@@ -690,13 +695,15 @@
       state.routeNameChanges.clear();
       state.testCaseId = value.id; state.testCaseName = value.name; state.testCaseGroup = String(value.group || ""); state.activeTestGroup = state.testCaseGroup; state.strategy = value.strategy || "heuristic";
       state.roundCount = Math.max(1, Number(value.roundCount) || 1); state.times = Array.isArray(value.times) ? value.times : [0];
-      state.options = value.options || { rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, seed: 0 };
+      state.options = value.options || { rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 };
+      state.options.milpTimeLimit = Number(state.options.milpTimeLimit) || 120;
       // v2：Route/Clean 来自设备共享库；仅在加载尚未迁移的旧数据时使用测试集副本兜底。
       if (!state.routes.length && Array.isArray(value.routes)) state.routes = value.routes;
       if (!state.cleans.length && Array.isArray(value.cleans)) state.cleans = value.cleans;
       state.routes.forEach(normalizeRoute);
       state.expandedRouteGroups.clear(); state.expandedRoutes.clear();
       state.rounds = Array.isArray(value.rounds) ? value.rounds : [];
+      if (state.strategy === "milp") state.roundCount = 1;
       while (state.times.length < state.roundCount) state.times.push((Number(state.times.at(-1)) || 0) + 70);
       while (state.rounds.length < state.roundCount) {
         const index = state.rounds.length;
@@ -709,6 +716,8 @@
       document.querySelectorAll('input[name="strategy"]').forEach(input => { input.checked = input.value === state.strategy; });
       document.querySelectorAll("[data-option]").forEach(input => { input.value = state.options[input.dataset.option] ?? input.value; });
       document.getElementById("rlOptions").classList.toggle("is-hidden", state.strategy !== "rl");
+      document.getElementById("milpOptions").classList.toggle("is-hidden", state.strategy !== "milp");
+      document.getElementById("roundCount").disabled = state.strategy === "milp";
       renderAll(); renderWorkspaceControls(); resetRunResult();
       if (routeNamesChanged) { setWorkspaceStatus("正在保存自动生成的 Route 名称…", "dirty"); scheduleAutoSave(); }
       else setWorkspaceStatus(`已载入“${state.testCaseName}”`, "saved");
@@ -857,7 +866,7 @@
     /** 同步轮数、时间和每轮 CJob/PJob 容器；缩放只裁剪尾部，已有轮次保持原位。 */
     function resizeRounds(count) {
       normalizeRounds();
-      const safe = Math.max(1, Math.min(8, Number(count) || 1)); state.roundCount = safe;
+      const safe = state.strategy === "milp" ? 1 : Math.max(1, Math.min(8, Number(count) || 1)); state.roundCount = safe;
       while (state.rounds.length < safe) {
         const index = state.rounds.length, priorTime = Number(state.rounds.at(-1)?.currentTime || 0);
         state.rounds.push(makeRound(index + 1, priorTime + 70, state.routes[0]?.name || "", state.loadPorts[index] || state.loadPorts[0] || ""));
@@ -994,7 +1003,7 @@
           const normalLot = cjob.jobType === "NormalLot";
           const pjobRows = cjob.pjobs.map((pjob, pjobIndex) => `<tr>
             <td><span class="readonly-pill">${escapeHtml(pjob.jobName)}</span></td>
-            <td><input class="pjob-number" type="number" min="1" max="25" data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="waferCount" value="${Number(pjob.waferCount)}"><small class="mat-list-preview">[${pjob.matList.join(", ")}]</small></td>
+            <td><input class="pjob-number" type="number" min="1" max="${state.strategy === "milp" ? 12 : 25}" data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="waferCount" value="${Number(pjob.waferCount)}"><small class="mat-list-preview">[${pjob.matList.join(", ")}]</small></td>
             <td><select data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="routeRef">${optionsHtml(routes, pjob.routeRef, routes.length ? "选择 Route" : "请先配置 Route")}</select></td>
             <td><span class="readonly-pill">${escapeHtml(pjob.taskId)}</span></td>
             <td><input class="pjob-number" type="number" min="1" data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="priority" value="${Number(pjob.priority)}"></td>
@@ -1188,6 +1197,15 @@
       return { schemaVersion: EXPECTED_API_SCHEMA, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options: state.options, recipes: collectRecipes(), cleans, routes, rounds: structuredClone(state.rounds) };
     }
 
+    /** 统计所有轮次 PJob 的产品晶圆总数，用于 MILP 前端硬限制。 */
+    function configuredWaferCount() {
+      return state.rounds.reduce((roundTotal, round) => roundTotal + round.cjobs.reduce(
+        (cjobTotal, cjob) => cjobTotal + cjob.pjobs.reduce(
+          (pjobTotal, pjob) => pjobTotal + Number(pjob.waferCount || 0), 0
+        ), 0
+      ), 0);
+    }
+
     /** 让本次运行生成的 input_data 日志可下载，并按选项自动导出。 */
     function prepareLogDownload(result) {
       if (!result?.logUrl) return false;
@@ -1206,6 +1224,8 @@
       try {
         const healthResponse = await fetch("/api/health", { cache: "no-store" }), health = await healthResponse.json();
         if (!healthResponse.ok || health.schemaVersion !== EXPECTED_API_SCHEMA) throw new Error("本地服务版本过旧，请重启 scripts/config_editor_server.py");
+        if (state.strategy === "milp" && state.roundCount !== 1) throw new Error("MILP 策略只能运行首次排程，不能选择多次重算");
+        if (state.strategy === "milp" && configuredWaferCount() > 12) throw new Error(`MILP 策略总晶圆数量不能超过 12 片，当前为 ${configuredWaferCount()} 片`);
         if (state.testCaseId) await saveCurrentTest(true);
         const payload = buildPayload(); button.disabled = true; button.classList.add("running"); button.textContent = "正在运行策略…";
         writeTerminal(`$ 开始运行 ${state.strategy}\n  总轮数: ${state.roundCount}\n  重算时间: ${state.rounds.map(round => round.currentTime).join(", ")} s`);
@@ -1247,12 +1267,13 @@
         if (!response.ok) throw new Error();
         const status = await response.json(), compatible = status.schemaVersion === EXPECTED_API_SCHEMA;
         state.serviceCompatible = compatible;
-        const rlAvailable = status.strategies?.rl !== false, l2dAvailable = status.strategies?.l2d === true;
+        const rlAvailable = status.strategies?.rl !== false, l2dAvailable = status.strategies?.l2d === true, milpAvailable = status.strategies?.milp === true;
         document.getElementById("rlStrategyInput").disabled = !rlAvailable;
         document.getElementById("rlStrategyHint").textContent = rlAvailable ? "调用已训练模型" : "缺少 RL 模型";
         document.getElementById("l2dStrategyInput").disabled = !l2dAvailable;
         const l2dModelName = String(status.strategyModels?.l2d || "").split(/[\\/]/).at(-1);
         document.getElementById("l2dStrategyHint").textContent = l2dAvailable ? `${l2dModelName} · 单次贪心推理` : "缺少 checkpoint，可在下方导入";
+        document.getElementById("milpStrategyInput").disabled = !milpAvailable;
         runButton.disabled = !compatible;
         renderWorkspaceControls();
         pill.textContent = compatible ? "本地服务已连接" : "服务版本过旧";
@@ -1291,7 +1312,14 @@
         if (["name", "modules", "jobType", "waferCount"].includes(event.target.dataset.key) || event.target.dataset.timeIndex !== undefined || event.target.dataset.roundTimeIndex !== undefined || ["stage-candidates", "stage-candidate-toggle", "cjob", "pjob"].includes(event.target.dataset.scope)) renderAll();
         else if (state.drawer) { renderRoutes(); renderStepDrawer(); }
       }
-      if (event.target.name === "strategy") { state.strategy = event.target.value; markTestDirty(); document.getElementById("rlOptions").classList.toggle("is-hidden", state.strategy !== "rl"); }
+      if (event.target.name === "strategy") {
+        state.strategy = event.target.value;
+        if (state.strategy === "milp") { resizeRounds(1); document.getElementById("roundCount").value = 1; }
+        document.getElementById("roundCount").disabled = state.strategy === "milp";
+        document.getElementById("rlOptions").classList.toggle("is-hidden", state.strategy !== "rl");
+        document.getElementById("milpOptions").classList.toggle("is-hidden", state.strategy !== "milp");
+        markTestDirty(); renderAll();
+      }
     });
     document.addEventListener("click", event => {
       const tab = event.target.closest("[data-tab-target]"); if (tab) switchTab(tab.dataset.tabTarget);

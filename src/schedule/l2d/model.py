@@ -1,4 +1,4 @@
-"""L2D 风格的 GraphCNN、Actor 与 Critic 网络。
+"""L2D 调度策略使用的 GraphCNN、Actor 与 Critic 网络。
 
 GraphCNN 使用三层 sum 邻居聚合；Actor 联合候选节点嵌入和全图平均池化嵌入打分，Critic
 只读取图嵌入。网络不依赖固定节点数或候选数，因此可在 1–3 工序、1/2 Job 和变长晶圆数

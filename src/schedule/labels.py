@@ -7,7 +7,7 @@
 
 **为何不再需要 Banker**：过去标签把 MILP 选腔决策丢掉、用 parse round-robin 腔重放 MILP 序 ⇒
 缝合怪死锁、被迫用 Banker 擦屁股、标签偏离 MILP、BC 天花板卡在选腔。现在 teacher 连腔一起复现，
-「MILP 序 + MILP 腔」本身可行无死锁（实测 dataset 全通），纯跟随即可完整复现，banker=False。
+「MILP 序 + MILP 腔」本身可行无死锁（实测 dataset 全通），纯跟随即可完整复现。
 
 MILP 的 hop 发生时刻 / 选腔取自 result.schedule：schedule[wid][j] = (stage_type, chamber, a进站, r取走)。
 hop (wid,j) 发生时刻 = 该 stage 的 r；hop (wid,j)→(j+1) 的去向腔 = stage j+1 的 chamber。
@@ -20,8 +20,8 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from src.features import step_features
-from src.milp import _ll_proc
+from src.schedule.features import step_features
+from src.timing.spans import _ll_proc
 
 _BIG = 1e18
 
@@ -58,7 +58,7 @@ def _replay_record(ir, tm, wafers, rtime, milp_ch
     """跟随 MILP 选腔+服务序复现，记录每步 (候选特征, 专家 idx)。返回 (records, completed)。
 
     候选：每片当前 hop 按其去向 stage 的候选腔（有空槽者）分裂成多个 _Cand（dest=(腔,槽)）；
-    专家：MILP 最早发生的 hop 且用 MILP 那个腔。banker=False 纯跟随（MILP 序+腔可行无死锁）。"""
+    专家：MILP 最早发生的 hop 且用 MILP 那个腔，纯跟随（MILP 序+腔可行无死锁）。"""
     from src.timing import _Cand, _DecodeState, _resource, _stage_dwell, _hop_span, _chamber_pool
 
     wafers = _clone_wafers(wafers)

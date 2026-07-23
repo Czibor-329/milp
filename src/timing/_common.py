@@ -7,4 +7,4 @@ SKIP_TYPES = {"loadport", "buffer", "dummyport"}
 
 
 class _DecodeDeadlock(Exception):
-    """快速解码(banker=False)中途无可动 hop = 该 genome 的占用序死锁。搜索里判负、跳过。"""
+    """解码中途无可动 hop = 该候选序死锁；搜索将其判负并跳过。"""

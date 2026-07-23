@@ -26,11 +26,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.parse import load_alg_entries
 from src.paths import input_data_path
-from src.marathon_gen import expand_topo_pms, PM_POOL_6
+from src.parse.generator import expand_topo_pms, PM_POOL_6
 from src.parse import parse_task
-from src.model import Durations
-from src.features import FEATURE_DIM
-from src.labels import extract_instance
+from src.parse.model import Durations
+from src.schedule.features import FEATURE_DIM
+from src.schedule.labels import extract_instance
 
 BASE_TOPO = "s1-1c1p-preclean"
 _ROOT = Path(__file__).resolve().parents[1]

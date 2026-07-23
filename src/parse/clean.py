@@ -1,4 +1,4 @@
-"""清洁条件解析 + DummyClean 合成。
+"""解析输入中的清洁条件并合成 DummyClean。
 
 清洁条件解析（接口 CleanCondition 条件树）：
   挂载点：Wac=Visit.AfterOutPM(CounterCondition)，PreClean/DummyClean=Route.PrePJob,

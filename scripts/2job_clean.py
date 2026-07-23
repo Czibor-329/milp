@@ -26,15 +26,15 @@ from pathlib import Path
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.marathon_gen import (
+from src.parse.generator import (
     JobSpec, build_update_params, job_process_recipes, expand_topo_pms,
     PM_POOL_6, CLEAN_TYPES,
 )
 from src.parse import parse_task, load_alg_entries
-from src.milp import solve_milp
-from src.model import Durations
+from src.schedule.milp import solve_milp
+from src.parse.model import Durations
 from export.export import check_solution, export_movelist
-from src.milp_clean import _clean_specs, _is_dummy_wafer
+from src.parse.clean_constraints import _clean_specs, _is_dummy_wafer
 from src.paths import input_data_path, output_path
 
 BASE_TOPO = "s1-1c1p-preclean"

@@ -12,13 +12,20 @@ from typing import Dict, List, Sequence, Tuple
 
 import torch
 
-from src.timing.sequencing import _Cand, _DecodeState
+from src.schedule.sequencing import _Cand, _DecodeState
 from src.timing.spans import _hop_span, _stage_dwell
 
 
-FEATURE_VERSION = "pse300-hop-v1"
-FEATURE_DIMENSION = 12
+LEGACY_FEATURE_VERSION = "pse300-hop-v1"
+FEATURE_VERSION = "pse300-hop-v2"
+LEGACY_FEATURE_DIMENSION = 12
+FEATURE_DIMENSION = 19
+SUPPORTED_FEATURE_DIMENSIONS = {
+    LEGACY_FEATURE_VERSION: LEGACY_FEATURE_DIMENSION,
+    FEATURE_VERSION: FEATURE_DIMENSION,
+}
 MAX_PROCESS_STAGES = 3
+PSE300_PROCESS_MODULES = ("PM1", "PM2", "PM3", "PM4")
 
 
 @dataclass(frozen=True)
@@ -64,7 +71,7 @@ def _operation_type(wafer, hop_index: int) -> Tuple[float, float, float, float, 
 
 
 def _resource_ready_time(state: _DecodeState, wafer, hop_index: int) -> float:
-    """估计目标腔当前可用时间；空闲或不占资源的目标返回零。"""
+    """按当前占用估计目标腔可用时间；保留 v1 checkpoint 的旧特征语义。"""
     destination = wafer.stages[hop_index + 1]
     occupying_wafers = [
         wid for (chamber, _slot), wid in state.occ.items()
@@ -73,6 +80,35 @@ def _resource_ready_time(state: _DecodeState, wafer, hop_index: int) -> float:
     if not occupying_wafers:
         return 0.0
     return max(state.place_t.get(wid, 0.0) for wid in occupying_wafers)
+
+
+def _resource_history_ready_time(
+    state: _DecodeState,
+    wafer,
+    hop_index: int,
+    candidate_resource: Tuple[str, int] | None = None,
+) -> float:
+    """用目标资源最后一次已提交访问的完成估计表示动态负载。
+
+    解码器只向策略暴露目标资源当前空闲的动作，因此旧的“当前占用”特征对所有候选恒为零。
+    v2 改用资源历史最后一片的近似完成时刻，让模型在资源刚释放后仍能看到此前积累的负载。
+    """
+    destination = wafer.stages[hop_index + 1]
+    resource = candidate_resource or (destination.chamber, destination.slot)
+    sequence = state.chamber_orders.get(resource, ())
+    if not sequence:
+        return 0.0
+    last_wafer_id, _stage_index = sequence[-1]
+    return state.place_t.get(last_wafer_id, 0.0)
+
+
+def _destination_pm_one_hot(wafer, hop_index: int) -> List[float]:
+    """返回目标加工腔 PM1–PM4 的 one-hot；非加工目标全为零。"""
+    destination = wafer.stages[hop_index + 1]
+    return [
+        1.0 if destination.stage_type == "process" and destination.chamber == module else 0.0
+        for module in PSE300_PROCESS_MODULES
+    ]
 
 
 def _estimate_completion_bounds(
@@ -134,12 +170,16 @@ def _add_sequence_edges(
 def build_graph_observation(
     state: _DecodeState,
     candidates: Sequence[_Cand],
+    *,
+    feature_version: str = FEATURE_VERSION,
 ) -> GraphObservation:
     """从解码快照和安全候选构建 GraphCNN 输入。
 
     节点顺序按 ``(wid, hop)`` 稳定排列。邻接矩阵使用 ``A[目标, 前驱]=1``，因此一次
     矩阵乘法会聚合合取/析取前驱；自环保证孤立节点仍保留自身信息。
     """
+    if feature_version not in SUPPORTED_FEATURE_DIMENSIONS:
+        raise ValueError(f"不支持的 L2D 特征版本：{feature_version}")
     operations = [
         (wafer_id, hop_index)
         for wafer_id in sorted(state.wmap)
@@ -147,6 +187,21 @@ def build_graph_observation(
     ]
     node_index = {operation: index for index, operation in enumerate(operations)}
     completion, lower_bound, time_scale = _estimate_completion_bounds(state)
+
+    candidate_starts = {
+        (candidate.wid, candidate.j): candidate.start for candidate in candidates
+    }
+    candidate_resources = {
+        (candidate.wid, candidate.j): candidate.dest for candidate in candidates
+    }
+    route_counts: Dict[str, int] = {}
+    for wafer in state.wmap.values():
+        route_counts[wafer.route_name] = route_counts.get(wafer.route_name, 0) + 1
+    unfinished_destination_load: Dict[str, int] = {}
+    for wafer in state.wmap.values():
+        for operation_index in range(state.pos[wafer.wid], state.K[wafer.wid]):
+            chamber = wafer.stages[operation_index + 1].chamber
+            unfinished_destination_load[chamber] = unfinished_destination_load.get(chamber, 0) + 1
 
     feature_rows: List[List[float]] = []
     for wafer_id, hop_index in operations:
@@ -158,7 +213,7 @@ def build_graph_observation(
         process_count = sum(
             stage.stage_type == "process" for stage in wafer.stages
         )
-        feature_rows.append([
+        feature_row = [
             completion[(wafer_id, hop_index)] / time_scale,
             float(hop_index < state.pos[wafer_id]),
             duration / time_scale,
@@ -166,8 +221,28 @@ def build_graph_observation(
             process_count / MAX_PROCESS_STAGES,
             *_operation_type(wafer, hop_index),
             state.robot_free.get(wafer.transports[hop_index], 0.0) / time_scale,
-            _resource_ready_time(state, wafer, hop_index) / time_scale,
-        ])
+            (
+                _resource_ready_time(state, wafer, hop_index)
+                if feature_version == LEGACY_FEATURE_VERSION
+                else _resource_history_ready_time(
+                    state,
+                    wafer,
+                    hop_index,
+                    candidate_resources.get((wafer_id, hop_index)),
+                )
+            ) / time_scale,
+        ]
+        if feature_version == FEATURE_VERSION:
+            route_count = max(route_counts.get(wafer.route_name, 1) - 1, 1)
+            destination = wafer.stages[hop_index + 1]
+            feature_row.extend([
+                candidate_starts.get((wafer_id, hop_index), 0.0) / time_scale,
+                wafer.route_rank / route_count,
+                unfinished_destination_load.get(destination.chamber, 0)
+                / max(len(state.wmap), 1),
+                *_destination_pm_one_hot(wafer, hop_index),
+            ])
+        feature_rows.append(feature_row)
 
     features = torch.tensor(feature_rows, dtype=torch.float32)
     adjacency = torch.zeros((len(operations), len(operations)), dtype=torch.float32)

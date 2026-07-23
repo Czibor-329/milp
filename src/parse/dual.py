@@ -1,4 +1,4 @@
-"""双腔设备（MultiProcessChamber）的"成对建模"视图转换。
+"""解析双腔设备（MultiProcessChamber）的成对建模视图。
 
 双腔设备：一个 PM 同时加工 2 片；VTR 每条臂 2 槽位（同取同放）；LoadLock 成对
 出现（LA+LB / LC+LD，VAC 臂 SlotsStationMap 给出配对名 LALB/LCLD）。把 2 片晶圆

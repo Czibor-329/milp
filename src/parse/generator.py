@@ -1,4 +1,4 @@
-"""随机 job 生成：基于 s1-1c1p 拓扑构造随机 update_params。
+"""解析层输入生成：基于 s1-1c1p 拓扑构造随机 update_params。
 
 两种用法：
   - 单 job 重算马拉松（run_marathon）：每轮一个裁剪版 s1-1c1p 路径，逐轮喂 scheduler.update。

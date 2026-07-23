@@ -4,7 +4,6 @@
   · heuristic  快速启发式定序（单 job 喂片 / 2+ job 配比搜 / 清洁排空 + backward 兜底）。start_schedule。
   · random     启发式基底上叠 N 次随机定序 rollout 取优。start_schedule(random_orders=N)。
   · search     面向 2-job 的限时结构化搜索（默认 7 秒）：发片交织 + 驻留违例定向修复。
-  · paper      论文式加工仓任务池搜索：直接优化 LoadLock→PM 加工端顺序。
   · bc         BC 策略【联合选腔 + 定序】。start_schedule_by_policy（需 results/models/bc_policy.pt）。
   · rl         RL 策略做顶层顺序限时搜索，底层由 timing 精确定时（需 bc_policy_rl.pt，硬限 <5 秒）。
   · milp       Gurobi oracle（重跑，非读标签）。solve_milp。作参考/oracle，覆盖旧 run_milp。
@@ -41,17 +40,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.parse import load_alg_entries, parse_task, resize_task_materials
 from src.paths import input_data_path, MODELS_DIR, OUTPUT_DIR
-from src.marathon_gen import expand_topo_pms, PM_POOL_6
-from src.timing import (start_schedule, start_schedule_by_policy,
-                        start_schedule_by_rl, start_schedule_paper)
-from src.milp import solve_milp
+from src.parse.generator import expand_topo_pms, PM_POOL_6
+from src.schedule.api import start_schedule, start_schedule_by_policy
+from src.schedule.milp import solve_milp
+from src.schedule.rl import start_schedule_by_rl
 from src.export import check_solution, export_movelist
 from src.validation import validate_move_list
 
 BASE_TOPO = "s1-1c1p-preclean"
 # 子集用「目录/名」限定：train/* 有 MILP 标签的配置网格（报 gap）；test/* 大规模外推（无标签，不计 gap）。
 SUBSETS = ["train/1stage", "train/2stage", "train/3stage", "train/2job", "train/clean", "test/1stage"]
-STRATEGIES = ["heuristic", "search", "paper", "random", "bc", "rl", "milp"]
+STRATEGIES = ["heuristic", "search", "random", "bc", "rl", "milp"]
 _DATASET = Path(__file__).resolve().parents[1] / "dataset"
 
 
@@ -78,9 +77,6 @@ def run_strategy(name: str, ir, *, policy=None, random_orders: int = 64,
     elif name == "search":
         res = start_schedule(ir, verbose=verbose, seed=seed,
                              search_seconds=search_seconds)
-    elif name == "paper":
-        res = start_schedule_paper(ir, verbose=verbose, seed=seed,
-                                   search_seconds=search_seconds)
     elif name == "random":
         res = start_schedule(ir, verbose=verbose, seed=seed, random_orders=random_orders)
     elif name == "bc":
@@ -146,7 +142,7 @@ def _instances(sub: str, limit: int = 0):
 def _load_policy(path: Path, strategy: str):
     """加载指定策略 checkpoint；失败时只跳过该神经网络策略。"""
     try:
-        from src.policy import load_policy
+        from src.schedule.policy import load_policy
         return load_policy(path)
     except Exception as e:  # noqa: BLE001
         print(f"[warn] {strategy} 模型加载失败（{path}: {e}），该策略将跳过。")
@@ -337,7 +333,7 @@ def main() -> None:
     ap.add_argument("--out", type=str, default=None, help="把逐实例+汇总写成 JSON（仅数据集模式）")
     args = ap.parse_args()
 
-    strategies = ["heuristic", "search", "paper", "random", "bc", "rl"] if args.strategy == ["all"] else args.strategy
+    strategies = ["heuristic", "search", "random", "bc", "rl"] if args.strategy == ["all"] else args.strategy
     bad = [s for s in strategies if s not in STRATEGIES]
     if bad:
         ap.error(f"未知策略 {bad}，可选 {STRATEGIES} 或 all")

@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-from src.model import Problem
+from src.parse.model import Problem
 from src.validation.move_fields import (
     COMPLETE_MOVE,
     PICK_MOVE,

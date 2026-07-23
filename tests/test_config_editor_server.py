@@ -202,7 +202,7 @@ class ConfigEditorServerTests(unittest.TestCase):
 
     def test_pse300_l2d_strategy_runs_graph_policy_inference(self) -> None:
         """前端提交 l2d 后应加载图策略，并产出通过校验的 PSE300 MoveList。"""
-        from src.l2d.model import L2DPolicy
+        from src.schedule.l2d.model import L2DPolicy
 
         plan = {
             "deviceName": PSE300_PATH.name,
@@ -250,6 +250,75 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertGreater(result["moveCount"], 0)
         self.assertEqual(len(result["rounds"]), 2)
         self.assertEqual(len(result["output"]["RecomputePoints"]), 1)
+
+    def test_milp_strategy_runs_once_and_reports_optimality(self) -> None:
+        """MILP 单轮策略应调用独立求解器，并把最优性诊断返回前端。"""
+        from src.schedule import start_schedule
+
+        plan = {
+            "deviceName": PSE300_PATH.name,
+            "device": json.loads(PSE300_PATH.read_text(encoding="utf-8")),
+            "strategy": "milp",
+            "roundCount": 1,
+            "options": {"milpTimeLimit": 30},
+            "recipes": [{
+                "name": "MilpRecipe", "time": 60,
+                "modules": ["PM1", "PM2", "PM3"], "weight": {},
+            }],
+            "cleans": [],
+            "routes": [_route("MilpRoute", "PM1,PM2,PM3", "MilpRecipe")],
+            "rounds": [{
+                "currentTime": 0,
+                "jobs": [{**_job("MilpJob", "MilpRoute", "LP1"), "waferCount": 3}],
+            }],
+        }
+
+        def fake_milp(problem, *, time_limit, verbose):
+            """用可行 timing 结果替代测试环境中的商业求解器。"""
+            self.assertEqual(time_limit, 30)
+            self.assertFalse(verbose)
+            return start_schedule(problem, verbose=False)
+
+        with patch("src.schedule.milp.solve_milp", side_effect=fake_milp) as solver:
+            result = execute_plan(plan)
+
+        solver.assert_called_once()
+        self.assertEqual(result["strategy"], "milp")
+        diagnostics = result["rounds"][0]["strategyDiagnostics"]
+        self.assertTrue(diagnostics["optimal"])
+        self.assertEqual(diagnostics["gap"], 0.0)
+
+    def test_milp_strategy_rejects_recompute_and_more_than_twelve_wafers(self) -> None:
+        """MILP 后端必须拒绝多轮重算以及总计超过 12 片的请求。"""
+        base = {
+            "deviceName": PSE300_PATH.name,
+            "device": json.loads(PSE300_PATH.read_text(encoding="utf-8")),
+            "strategy": "milp",
+            "options": {},
+            "recipes": [{
+                "name": "MilpRecipe", "time": 60,
+                "modules": ["PM1", "PM2", "PM3"], "weight": {},
+            }],
+            "cleans": [],
+            "routes": [_route("MilpRoute", "PM1,PM2,PM3", "MilpRecipe")],
+        }
+        first_round = {
+            "currentTime": 0,
+            "jobs": [{**_job("MilpJob", "MilpRoute", "LP1"), "waferCount": 3}],
+        }
+        second_round = {
+            "currentTime": 70,
+            "jobs": [{**_job("MilpJob2", "MilpRoute", "LP2"), "waferCount": 2}],
+        }
+        with self.assertRaisesRegex(LoggedPlanError, "不能选择多次重算"):
+            execute_plan({**base, "roundCount": 2, "rounds": [first_round, second_round]})
+
+        oversized_round = {
+            "currentTime": 0,
+            "jobs": [{**_job("MilpJob", "MilpRoute", "LP1"), "waferCount": 13}],
+        }
+        with self.assertRaisesRegex(LoggedPlanError, "不能超过 12 片"):
+            execute_plan({**base, "roundCount": 1, "rounds": [oversized_round]})
 
     def test_job_route_is_bound_to_selected_load_port(self) -> None:
         """Job 复用公共 Route 时应生成独立 Route 并改写首尾 LoadPort。"""
@@ -390,6 +459,10 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn('id="l2dStrategyInput"', html)
         self.assertIn('value="l2d"', html)
         self.assertIn("status.strategies?.l2d", html)
+        self.assertIn('id="milpStrategyInput"', html)
+        self.assertIn('value="milp"', html)
+        self.assertIn("status.strategies?.milp", html)
+        self.assertIn("configuredWaferCount() > 12", html)
         self.assertIn('id="deviceSelect"', html)
         self.assertIn('id="testCaseSelect"', html)
         self.assertIn('id="copyTestButton"', html)
@@ -523,8 +596,8 @@ class ConfigEditorServerTests(unittest.TestCase):
 
     def test_import_l2d_checkpoint_validates_and_saves_model(self) -> None:
         """页面上传的 checkpoint 必须可加载，并按训练阶段保存到模型目录。"""
-        from src.l2d.api import save_l2d_checkpoint
-        from src.l2d.model import L2DPolicy
+        from src.schedule.l2d.api import save_l2d_checkpoint
+        from src.schedule.l2d.model import L2DPolicy
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

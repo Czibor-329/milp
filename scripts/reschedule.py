@@ -21,9 +21,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.marathon_gen import JobSpec, build_update_params, job_process_recipes
+from src.parse.generator import JobSpec, build_update_params, job_process_recipes
 from src.parse import load_alg_entries
-from src.reschedule import RealtimeRescheduler
+from src.schedule.realtime import RealtimeRescheduler
 from src.validation import MoveStateReplay
 from src.validation.move_fields import PROCESS_MOVE
 from src.validation.state import DoorState

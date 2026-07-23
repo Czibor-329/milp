@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Set
 
-from src.model import Problem
+from src.parse.model import Problem
 
 
 DEFAULT_SLOT_ID = 1

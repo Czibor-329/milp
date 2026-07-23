@@ -2,9 +2,13 @@
 
 ## `bc`：行为克隆策略
 
-`start_schedule_by_policy(ir, policy, n_samples=64, temp=0.7, seed=0, fallback=True)` 接收由 `src.policy.load_policy` 读取的 PyTorch checkpoint。网络对每个候选的 25 维特征独立经共享 MLP 打分，因此候选数量可变且对候选排列不敏感。
+`start_schedule_by_policy(ir, policy, n_samples=64, temp=0.7, seed=0, fallback=True)` 接收由
+`src.schedule.policy.load_policy` 读取的 PyTorch checkpoint。网络对每个候选的 25 维特征
+独立经共享 MLP 打分，因此候选数量可变且对候选排列不敏感。
 
-特征由 `src.features.step_features` 生成，包含全局进度、在制品与候选规模、加工/取片机会、相对可开始时间、驻留紧迫度、并行腔空闲比例、机器人空闲程度、配方和 route 工作量，以及候选 LoadLock 的相对累计负载。特征采用相对量或比例，兼顾训练批量内分辨率与跨批量外推。
+特征由 `src.schedule.features.step_features` 生成，包含全局进度、在制品与候选规模、
+加工/取片机会、相对可开始时间、驻留紧迫度、并行腔空闲比例、机器人空闲程度、
+配方和 route 工作量，以及候选 LoadLock 的相对累计负载。
 
 训练标签来自 MILP 的 teacher-forced replay：每步选择 MILP 中最早发生的 hop；同一 hop 的多个 LoadLock 候选中，选择 MILP 实际使用的腔。标签提取与推理均把选择的腔写回 wafer，以保证后续资源键和抽/充气时间一致。
 

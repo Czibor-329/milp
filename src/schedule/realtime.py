@@ -6,14 +6,16 @@
 
 from __future__ import annotations
 
+import math
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from src.export import export_movelist
-from src.model import Durations, Problem, RuntimeAvailability, Stage, Wafer
+from src.parse.model import Durations, Problem, RuntimeAvailability, Stage, Wafer
 from src.parse import PROCESS_ASSIGNMENT_ACYCLIC_ROUND_ROBIN, parse_task
-from src.timing import start_schedule, start_schedule_by_rl
+from src.schedule.api import start_schedule
+from src.schedule.rl import start_schedule_by_rl
 from src.validation import MoveStateReplay, populate_premove_ids, validate_move_list
 from src.validation.move_fields import (
     COMPLETE_MOVE, PICK_MOVE, PLACE_MOVE, PREPARE_MOVE, PRE_PREPARE_MOVE,
@@ -34,6 +36,9 @@ from src.validation.state import (
 TIME_TOLERANCE = 1e-6
 FIRST_SLOT_ID = 1
 L2D_PSE300_PM_ORDER = ("PM1", "PM2", "PM3", "PM4")
+DEFAULT_MILP_TIME_LIMIT_SECONDS = 120.0
+GUROBI_OPTIMAL_STATUS = 2
+MAX_MILP_TOTAL_WAFERS = 12
 
 
 @dataclass(frozen=True)
@@ -71,11 +76,12 @@ class RealtimeRescheduler:
         rl_search_seconds: float = 4.0,
         rl_rollouts: int = 256,
         rl_temperature: float = 0.7,
+        milp_time_limit: float = DEFAULT_MILP_TIME_LIMIT_SECONDS,
         seed: int = 0,
     ) -> None:
         """解析首批任务，并用所选顶层策略立即生成第一段计划。"""
-        if strategy not in {"heuristic", "rl", "l2d"}:
-            raise ValueError(f"实时重算只支持 heuristic/rl/l2d，收到 strategy={strategy}")
+        if strategy not in {"heuristic", "rl", "l2d", "milp"}:
+            raise ValueError(f"实时重算只支持 heuristic/rl/l2d/milp，收到 strategy={strategy}")
         if strategy in {"rl", "l2d"} and policy is None:
             raise ValueError(f"{strategy.upper()} 实时重算缺少已加载策略模型")
         self.tool_topo = deepcopy(dict(tool_topo))
@@ -84,7 +90,9 @@ class RealtimeRescheduler:
         self.rl_search_seconds = float(rl_search_seconds)
         self.rl_rollouts = int(rl_rollouts)
         self.rl_temperature = float(rl_temperature)
+        self.milp_time_limit = float(milp_time_limit)
         self.seed = int(seed)
+        self._last_strategy_diagnostics: Dict[str, Any] = {}
         parse_options = (
             {
                 "process_assignment": PROCESS_ASSIGNMENT_ACYCLIC_ROUND_ROBIN,
@@ -93,6 +101,11 @@ class RealtimeRescheduler:
             if strategy == "l2d" else {}
         )
         self.problem = parse_task(self.tool_topo, update_params, **parse_options)
+        if strategy == "milp" and len(self.problem.wafers) > MAX_MILP_TOTAL_WAFERS:
+            raise ValueError(
+                f"MILP 策略包含清洁片在内的总晶圆数量不能超过 "
+                f"{MAX_MILP_TOTAL_WAFERS} 片，当前为 {len(self.problem.wafers)} 片"
+            )
         _apply_material_start_slots(self.problem, update_params)
         start_time = float(update_params.get("CurrentTime") or 0.0)
         initial_state = MachineState.from_sources(self.problem, init_data)
@@ -137,6 +150,11 @@ class RealtimeRescheduler:
         )
         return robots_empty
 
+    @property
+    def last_strategy_diagnostics(self) -> Dict[str, Any]:
+        """返回最近一段排程的求解诊断副本；当前主要用于展示 MILP 最优性。"""
+        return dict(self._last_strategy_diagnostics)
+
     def update_move_state(self, notification: Mapping[str, Any]) -> MachineState:
         """接收外部 Move 开始/结束通知并更新 ``src.validation.state`` 状态。"""
         return self._tracker.update_move_state(notification)
@@ -158,6 +176,8 @@ class RealtimeRescheduler:
         通常等于请求时刻；受收尾动作影响的资源和物料由运行时下界推迟，其余资源可在
         请求时刻后立即工作。甘特图重算线仍画在原始请求时刻。
         """
+        if self.strategy == "milp":
+            raise ValueError("MILP 策略只支持首次排程，不能执行实时重算")
         timestamp = float(current_time)
         cutoff = timestamp if cutoff_time is None else float(cutoff_time)
         schedule_start = timestamp if schedule_start_time is None else float(schedule_start_time)
@@ -232,6 +252,7 @@ class RealtimeRescheduler:
 
     def _schedule_segment(self, problem: Problem, state: MachineState, offset: float) -> List[dict]:
         """用所选顶层策略和 timing 定时生成一段绝对时间计划。"""
+        self._last_strategy_diagnostics = {}
         if self.strategy == "rl":
             result = start_schedule_by_rl(
                 problem,
@@ -244,9 +265,26 @@ class RealtimeRescheduler:
             )
         elif self.strategy == "l2d":
             # 延迟导入，确保未安装 Torch 时 heuristic/RL 旧路径仍可独立使用。
-            from src.l2d import start_schedule_l2d
+            from src.schedule.l2d import start_schedule_l2d
 
             result = start_schedule_l2d(problem, self.policy)
+        elif self.strategy == "milp":
+            # 延迟导入，确保不使用 MILP 时无需初始化 Gurobi 运行时与许可证。
+            from src.schedule.milp import solve_milp
+
+            result = solve_milp(
+                problem,
+                time_limit=self.milp_time_limit,
+                verbose=False,
+            )
+            result.feasible = bool(result.schedule) and math.isfinite(result.makespan)  # type: ignore[attr-defined]
+            self._last_strategy_diagnostics = {
+                "status": int(result.status),
+                "optimal": bool(result.status == GUROBI_OPTIMAL_STATUS),
+                "gap": float(result.gap),
+                "runtimeSeconds": float(result.runtime),
+                "timeLimitSeconds": self.milp_time_limit,
+            }
         else:
             result = start_schedule(problem, verbose=False)
         if not getattr(result, "feasible", False):
@@ -254,8 +292,11 @@ class RealtimeRescheduler:
         moves = export_movelist(problem, result, state)
         moves = _serialize_initial_processing(moves, state)
         moves = _repair_loadlock_prepare_overlap(moves, state)
-        moves = _prepend_environment_setups(problem, moves, state)
-        moves = _remove_redundant_empty_environment_cycles(moves, state)
+        # export 已包含完整且可执行的环境动作时，不再插入随后又会被删除的空抽/空充。
+        # 旧流程会在删除冗余动作后保留其整体平移，令最终 MoveList 偏离求解器 makespan。
+        if self.strategy != "milp" or validate_move_list(problem, moves, state):
+            moves = _prepend_environment_setups(problem, moves, state)
+            moves = _remove_redundant_empty_environment_cycles(moves, state)
         shifted = _shift_moves(moves, offset)
         issues = validate_move_list(problem, shifted, state)
         if issues:

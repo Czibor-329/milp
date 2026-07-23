@@ -9,11 +9,11 @@ from unittest.mock import patch
 
 import numpy as np
 
-from src.marathon_gen import PM_POOL_6, expand_topo_pms
+from src.parse.generator import PM_POOL_6, expand_topo_pms
 from src.parse import load_alg_entries, parse_task, resize_task_materials
 from src.paths import input_data_path
-from src.policy import _load_numpy_policy
-from src.timing import api
+from src.schedule.policy import _load_numpy_policy
+from src.schedule import rl
 
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -93,16 +93,16 @@ def test_rl_search_clamps_budget_and_uses_timing_result():
     clock = [0.0, 0.0, 0.1, 4.49, 4.49]
 
     with (
-        patch.object(api, "Durations", return_value=object()),
-        patch.object(api, "start_schedule", return_value=floor),
-        patch.object(api, "_greedy_chooser", return_value=object()),
-        patch.object(api, "_sampling_chooser", return_value=object()),
-        patch.object(api, "decode_orders_choosing", return_value=([], object())),
-        patch.object(api, "solve_timing", return_value=candidate) as solve,
-        patch.object(api, "check_solution", return_value=[]),
-        patch.object(api.time, "perf_counter", side_effect=clock),
+        patch.object(rl, "Durations", return_value=object()),
+        patch.object(rl, "start_schedule", return_value=floor),
+        patch.object(rl, "_greedy_chooser", return_value=object()),
+        patch.object(rl, "_sampling_chooser", return_value=object()),
+        patch.object(rl, "decode_orders_choosing", return_value=([], object())),
+        patch.object(rl, "solve_timing", return_value=candidate) as solve,
+        patch.object(rl, "check_solution", return_value=[]),
+        patch.object(rl.time, "perf_counter", side_effect=clock),
     ):
-        result = api.start_schedule_by_rl(
+        result = rl.start_schedule_by_rl(
             SimpleNamespace(wafers=[]), object(),
             search_seconds=99.0, max_rollouts=1,
         )
@@ -117,7 +117,7 @@ def test_rl_search_clamps_budget_and_uses_timing_result():
 def test_rl_search_rejects_invalid_budget():
     """负墙钟预算应在开始搜索前直接拒绝。"""
     try:
-        api.start_schedule_by_rl(SimpleNamespace(wafers=[]), object(), search_seconds=-0.1)
+        rl.start_schedule_by_rl(SimpleNamespace(wafers=[]), object(), search_seconds=-0.1)
     except ValueError as error:
         assert "search_seconds" in str(error)
     else:

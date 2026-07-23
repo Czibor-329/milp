@@ -20,7 +20,7 @@ import torch.nn as nn
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.policy import CandidateScorer
+from src.schedule.policy import CandidateScorer
 from src.paths import model_output_path
 
 _ROOT = Path(__file__).resolve().parents[1]

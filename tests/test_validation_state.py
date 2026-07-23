@@ -2,8 +2,8 @@
 
 import unittest
 
-from src.model import Chamber, Problem, Robot, Stage, Wafer
-from src.milp import SolveResult
+from src.parse.model import Chamber, Problem, Robot, Stage, Wafer
+from src.timing import SolveResult
 from src.export.export import export_movelist
 from src.validation import validate_move_list
 

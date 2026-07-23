@@ -15,8 +15,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from src.export.export import check_solution, export_movelist
-from src.model import Durations, Problem
-from src.timing.sequencing import decode_orders
+from src.parse.model import Durations, Problem
+from src.schedule.sequencing import decode_orders
 from src.timing.solve import solve_timing
 from src.validation import validate_move_list
 
@@ -54,10 +54,24 @@ def _validation_cases(
             ("two-job-1+3", _two_job_case_with_partition_shape(topology, rng, (1, 3))),
             ("two-job-2+2", _two_job_case_with_partition_shape(topology, rng, (2, 2))),
         ]
-    return [
+    cases = [
+        (
+            f"one-job-1stage-{chamber_count}ch-12w",
+            sample_one_job_problem(
+                topology,
+                rng,
+                wafer_count=12,
+                candidate_pool_sizes=(chamber_count,),
+                process_range=(120, 120),
+            ),
+        )
+        for chamber_count in range(1, 5)
+    ]
+    cases.extend([
         ("one-job-5", sample_one_job_problem(topology, rng, wafer_count=5)),
         ("one-job-25", sample_one_job_problem(topology, rng, wafer_count=25)),
-    ]
+    ])
+    return cases
 
 
 def evaluate_checkpoint(

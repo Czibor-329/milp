@@ -1,5 +1,7 @@
+"""把解析后的清洁配置展开为各调度策略共享的固定约束。"""
+
 from typing import Optional, List, Tuple, Dict
-from src.model import Problem, Wafer
+from src.parse.model import Problem, Wafer
 from dataclasses import dataclass
 
 # --------------------------------------------------------------------------- #

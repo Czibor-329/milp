@@ -24,7 +24,10 @@
 
 ## 共同的保底规则
 
-多数启发式候选会和既有可行解比较，只有 makespan 严格更小才替换。因此 `random`、`search`、`paper` 与默认 `bc` 都不会比其可行性地板更差。快速启发式本身先评估 backward 基线；当喂片序因驻留不可行时，`start_schedule` 还会以 `reserve=True` 的驻留预留解码回退。
+多数启发式候选会和既有可行解比较，只有 makespan 严格更小才替换。因此离线的
+`random`、`search` 与默认 `bc` 都不会比其可行性地板更差。快速启发式本身先评估
+backward 基线；当喂片序因驻留不可行时，`start_schedule` 还会以 `reserve=True`
+的驻留预留解码回退。
 
 ## 已知口径
 

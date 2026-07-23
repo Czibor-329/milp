@@ -13,12 +13,15 @@ from typing import Any, Dict, Mapping, Optional
 
 import torch
 
-from src.milp import SolveResult
-from src.model import Durations, Problem
-from src.timing.sequencing import _Cand, _DecodeState, decode_orders
-from src.timing.solve import solve_timing
+from src.parse.model import Durations, Problem
+from src.schedule.sequencing import _Cand, _DecodeState, decode_orders
+from src.timing.solve import SolveResult, solve_timing
 
-from .graph import FEATURE_VERSION, build_graph_observation
+from .graph import (
+    FEATURE_VERSION,
+    SUPPORTED_FEATURE_DIMENSIONS,
+    build_graph_observation,
+)
 from .model import L2DNetworkConfig, L2DPolicy
 from .problems import topology_digest
 
@@ -48,10 +51,14 @@ def save_l2d_checkpoint(
     除模型参数外还记录网络结构、特征版本、训练阶段、PSE300 拓扑摘要和随机种子；若传入
     optimizer，也保存其状态，便于第二阶段保持优化器动量。
     """
+    policy_feature_version = str(
+        getattr(policy, "checkpoint_metadata", {}).get("feature_version")
+        or FEATURE_VERSION
+    )
     checkpoint: Dict[str, Any] = {
         "model_state_dict": policy.state_dict(),
         "network_config": policy.config.to_dict(),
-        "feature_version": FEATURE_VERSION,
+        "feature_version": policy_feature_version,
         "training_phase": phase,
         "topology": _topology_summary(topology),
         "random_seed": int(random_seed),
@@ -79,11 +86,19 @@ def load_l2d_policy(
         payload = torch.load(checkpoint, map_location=device)
     if not isinstance(payload, dict) or "model_state_dict" not in payload:
         raise ValueError(f"{checkpoint} 不是有效的 L2D checkpoint")
-    if payload.get("feature_version") != FEATURE_VERSION:
+    checkpoint_feature_version = str(payload.get("feature_version") or "")
+    if checkpoint_feature_version not in SUPPORTED_FEATURE_DIMENSIONS:
+        supported = "、".join(sorted(SUPPORTED_FEATURE_DIMENSIONS))
         raise ValueError(
-            f"checkpoint 特征版本 {payload.get('feature_version')!r} 与当前 {FEATURE_VERSION!r} 不一致"
+            f"checkpoint 特征版本 {checkpoint_feature_version!r} 不受支持；支持：{supported}"
         )
     config = L2DNetworkConfig.from_dict(dict(payload.get("network_config") or {}))
+    expected_dimension = SUPPORTED_FEATURE_DIMENSIONS[checkpoint_feature_version]
+    if config.feature_dimension != expected_dimension:
+        raise ValueError(
+            f"checkpoint 特征维数 {config.feature_dimension} 与版本 "
+            f"{checkpoint_feature_version!r} 要求的 {expected_dimension} 不一致"
+        )
     policy = L2DPolicy(config).to(device)
     policy.load_state_dict(payload["model_state_dict"])
     policy.eval()
@@ -104,12 +119,20 @@ def start_schedule_l2d(problem: Problem, policy: L2DPolicy) -> SolveResult:
     started_at = time.perf_counter()
     durations = Durations(problem)
     decisions = []
+    feature_version = str(
+        getattr(policy, "checkpoint_metadata", {}).get("feature_version")
+        or FEATURE_VERSION
+    )
     was_training = policy.training
     policy.eval()
 
     def graph_chooser(state: _DecodeState, candidates: list[_Cand]) -> list[int]:
         """在解码器给出的安全候选上执行 Actor 贪心选择。"""
-        observation = build_graph_observation(state, candidates)
+        observation = build_graph_observation(
+            state,
+            candidates,
+            feature_version=feature_version,
+        )
         with torch.no_grad():
             action_index, _log_probability, _value = policy.choose_action(
                 observation, greedy=True
@@ -120,15 +143,8 @@ def start_schedule_l2d(problem: Problem, policy: L2DPolicy) -> SolveResult:
         return [action_index, *remaining]
 
     try:
-        orders = decode_orders(
-            problem,
-            durations,
-            problem.wafers,
-            chooser=graph_chooser,
-            banker=True,
-            filter_safe_candidates=True,
-            enforce_resumed_route_fifo=False,
-        )
+        orders = decode_orders(problem, durations, problem.wafers, chooser=graph_chooser,
+                               enforce_resumed_route_fifo=False)
         # 这是推理中唯一一次精确定时调用。
         result = solve_timing(
             problem,

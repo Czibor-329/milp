@@ -10,9 +10,18 @@
 
 from __future__ import annotations
 
-from src.model import Durations, Problem
+from src.parse.model import Durations, Problem
 
 from ._common import SKIP_TYPES
+
+
+def _ll_proc(task: Problem, chamber: str, ll_type: str) -> float:
+    """返回 LoadLock 在指定腔室执行抽气或充气的时长。"""
+    resource = task.chambers.get(chamber)
+    if resource is None or ll_type not in {"entry", "exit"}:
+        return 0.0
+    duration = resource.pump_time if ll_type == "entry" else resource.vent_time
+    return float(duration or 0.0)
 
 
 def _stage_dwell(tm: Durations, w, j: int) -> float:

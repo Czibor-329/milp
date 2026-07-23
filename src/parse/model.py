@@ -1,11 +1,11 @@
-"""求解器工作数据结构（取代旧 PreprocessedTask IR）。
+"""解析层共享工作数据结构（取代旧 PreprocessedTask IR）。
 
 解析（parse.parse_task）直接产出 Problem：拓扑（chambers/robots）+ 已展开的每片晶圆
 （wafers，取代旧 milp._expand）+ 每 PM 前/后清洗（pre_clean/post_clean）。milp/timing/il
 全路径只消费 Problem，不再有 Route/StageStep/PJob 持久 IR，也不再有二次展开。
 
 Durations（原 milp._Timing）从 Problem 的 robots/chambers 取各动作时长（含开关门）；
-接口（pick/place/move/pick_pre…）原样保留，features.py 里 state.tm 即 Durations 实例。
+接口（pick/place/move/pick_pre…）原样保留，调度特征中的 state.tm 即 Durations 实例。
 """
 
 from __future__ import annotations

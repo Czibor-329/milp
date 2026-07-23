@@ -1,4 +1,4 @@
-"""BC/RL 候选策略：permutation-invariant 共享 MLP + Torch/NumPy 推理封装。
+"""RL 搜索候选策略：共享 MLP 与 Torch/NumPy 推理封装。
 
 每候选特征 → 共享 MLP → 标量分；对候选 softmax（变长候选用 mask）。训练 = 候选上的交叉熵
 （专家选中 idx 为正类）。推理只需对每候选打分取最高（timing 的 Banker 解码再套安全掩码）。

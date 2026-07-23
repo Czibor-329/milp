@@ -1,21 +1,32 @@
-"""主入口：给定顺序 → 建全图 → Bellman-Ford → SolveResult"""
+"""定时主入口：给定固定资源顺序，构图并求最早可行时刻。"""
 
 import time
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
 
-from src.milp import SolveResult
-from src.milp_clean import _clean_specs, _dummy_order_pairs
-from src.model import Durations, Problem
+from src.parse.clean_constraints import _clean_specs, _dummy_order_pairs
+from src.parse.model import Durations, Problem
 
 from .graph import _Nodes, _bellman_ford_longest
-from .sequencing import _Orders, decode_orders
 from .spans import _hop_span, _ll_reuse_setup, _robot_switch_gap, _stage_dwell
+
+
+@dataclass
+class SolveResult:
+    """四种调度策略共享的定时结果。"""
+
+    status: int
+    makespan: float
+    schedule: Dict[int, List[Tuple[str, str, float, float]]] = field(default_factory=dict)
+    releases: List[Tuple[float, str, int]] = field(default_factory=list)
+    gap: float = 0.0
+    runtime: float = 0.0
 
 
 def solve_timing(
     ir: Problem,
     wafers,
-    orders: Optional[_Orders] = None,
+    orders: Optional[Any] = None,
     *,
     enforce_resumed_route_fifo: bool = True,
 ) -> SolveResult:
@@ -25,7 +36,7 @@ def solve_timing(
     wmap = {w.wid: w for w in wafers}
     nodes = _Nodes(wafers)
     if orders is None:
-        orders = decode_orders(ir, tm, wafers)
+        raise ValueError("solve_timing 只负责定时，调用方必须提供固定资源顺序 orders")
 
     edges: List[Tuple[int, int, float]] = []
     res_edges: List[Tuple[int, int, float]] = []   # 驻留后向边，单列以便诊断

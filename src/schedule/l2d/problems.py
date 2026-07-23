@@ -14,7 +14,7 @@ from itertools import product
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from src.marathon_gen import (
+from src.parse.generator import (
     PROC_MAX,
     PROC_MIN,
     JobSpec,
@@ -22,7 +22,7 @@ from src.marathon_gen import (
     build_update_params,
     job_process_recipes,
 )
-from src.model import Problem
+from src.parse.model import Problem
 from src.parse import PROCESS_ASSIGNMENT_ACYCLIC_ROUND_ROBIN, parse_task
 
 
@@ -30,7 +30,7 @@ PM_ORDER: Tuple[str, ...] = ("PM1", "PM2", "PM3", "PM4")
 ONE_JOB_WAFER_RANGE = (5, 25)
 TWO_JOB_WAFER_RANGE = (4, 12)
 TWO_JOB_WAFER_PATTERNS: Tuple[Tuple[int, int], ...] = ((4, 8), (6, 6), (8, 4))
-PSE300_TOPOLOGY_PATH = Path(__file__).resolve().parents[1] / "input_data" / "PSE300.json"
+PSE300_TOPOLOGY_PATH = Path(__file__).resolve().parents[2] / "input_data" / "PSE300.json"
 
 
 def prefix_candidate_pools(pm_pool: Sequence[str]) -> Tuple[Tuple[str, ...], ...]:
@@ -140,6 +140,7 @@ def sample_one_job_problem(
     *,
     wafer_count: Optional[int] = None,
     stage_count: Optional[int] = None,
+    candidate_pool_sizes: Optional[Sequence[int]] = None,
     process_range: Tuple[int, int] = (PROC_MIN, PROC_MAX),
 ) -> Problem:
     """生成第一阶段的单 Job PSE300 Problem。
@@ -148,7 +149,22 @@ def sample_one_job_problem(
     LA/LB 继续沿用按晶圆 rank 的轮询分配。
     """
     selected_wafer_count = wafer_count or rng.randint(*ONE_JOB_WAFER_RANGE)
-    selected_stage_count = stage_count or rng.randint(1, 3)
+    if candidate_pool_sizes is not None:
+        selected_stage_count = len(candidate_pool_sizes)
+        if stage_count is not None and stage_count != selected_stage_count:
+            raise ValueError("stage_count 与 candidate_pool_sizes 长度不一致")
+        if not 1 <= selected_stage_count <= 3:
+            raise ValueError("candidate_pool_sizes 必须描述 1–3 道工序")
+        if any(size < 1 or size > len(PM_ORDER) for size in candidate_pool_sizes):
+            raise ValueError("每道工序的候选腔数量必须在 1–4 之间")
+        selected_configuration = tuple(
+            tuple(PM_ORDER[:size]) for size in candidate_pool_sizes
+        )
+        if not enumerate_increasing_paths(selected_configuration):
+            raise ValueError(f"候选腔数量配置 {list(candidate_pool_sizes)} 没有合法递增 PM 路径")
+    else:
+        selected_stage_count = stage_count or rng.randint(1, 3)
+        selected_configuration = None
     job = _configured_job(
         0,
         rng,
@@ -157,6 +173,8 @@ def sample_one_job_problem(
         selected_wafer_count,
         process_range,
     )
+    if selected_configuration is not None:
+        job.stages = [list(pool) for pool in selected_configuration]
     recipes = job_process_recipes(job, 1)
     update_params, _ = build_update_params(
         job,
