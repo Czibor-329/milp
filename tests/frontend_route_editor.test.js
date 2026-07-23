@@ -44,6 +44,24 @@ test("Route 分组按工序数和候选数量序列排序", () => {
   assert.deepEqual(profiles.map(item => item.key), ["1", "1", "2"]);
 });
 
+test("运行时只提交测试任务实际引用的共享 Route", () => {
+  const routes = [{ name: "R10" }, { name: "R20" }, { name: "Unused" }];
+  const rounds = [
+    { cjobs: [{ pjobs: [{ routeRef: "R10" }] }] },
+    { cjobs: [{ pjobs: [{ routeRef: "R20" }, { routeRef: "R10" }] }] },
+  ];
+  assert.deepEqual(
+    logic.selectReferencedRoutes(routes, rounds).map(item => item.name),
+    ["R10", "R20"],
+  );
+});
+
+test("加工 Step 的空 Recipe 使用稳定派生名称", () => {
+  assert.equal(logic.processRecipeName("", "Route7_Step6"), "Route7_Step6");
+  assert.equal(logic.processRecipeName("   ", "Route7_Step8"), "Route7_Step8");
+  assert.equal(logic.processRecipeName("ExplicitRecipe", "Route7_Step6"), "ExplicitRecipe");
+});
+
 test("统一参数修改后深拷贝同步到全部候选 Visit", () => {
   const stage = { visits: [visit("PM1", 30), visit("PM2", 50)] };
   stage.visits[0].beforeCleanRefs = ["CleanA"];

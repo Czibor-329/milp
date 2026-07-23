@@ -92,6 +92,22 @@
     stage.visits = selected.map(name => prior.get(name) || { stationName: name, ...structuredClone(template) });
   }
 
+  function selectReferencedRoutes(routes, rounds) {
+    /** 只返回当前测试各轮 PJob 实际引用的 Route，避免共享库中的同名 Recipe 冲突。 */
+    const referencedNames = new Set((rounds || []).flatMap(round => (
+      (round.cjobs || []).flatMap(cjob => (
+        (cjob.pjobs || []).map(pjob => String(pjob.routeRef || "").trim())
+      ))
+    )));
+    return (routes || []).filter(route => referencedNames.has(String(route.name || "").trim()));
+  }
+
+  function processRecipeName(value, fallback) {
+    /** 空字符串和空白字符串都视为缺失，使用加工 Step 的稳定派生名称。 */
+    const explicitName = String(value ?? "").trim();
+    return explicitName || String(fallback ?? "").trim();
+  }
+
   return {
     VISIT_SHARED_FIELDS,
     cloneVisitParameters,
@@ -102,5 +118,7 @@
     differenceFields,
     synchronizeVisits,
     replaceCandidates,
+    selectReferencedRoutes,
+    processRecipeName,
   };
 }));

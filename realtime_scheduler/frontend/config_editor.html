@@ -164,6 +164,7 @@
     .run-box .btn.running::before { content: ""; width: 14px; height: 14px; border: 2px solid #b9c7eb; border-top-color: var(--brand); border-radius: 50%; animation: spin .8s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
     .strategy-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 10px; }
+    .other-algorithm-options { display: contents; }
     .strategy-card { padding: 12px; border: 1px solid var(--line); border-radius: 10px; }
     .strategy-card:has(input:checked) { border-color: var(--brand); background: var(--brand-soft); }
     .strategy-card input { width: auto; margin-right: 6px; }
@@ -280,14 +281,14 @@
 
       <aside class="side" id="scheduleSide">
         <article class="panel">
-          <div class="panel-head"><div><h2>运行策略</h2><p>可使用本项目四种策略，或通过正式 init/update 接口调用外部 new-sa Greedy。</p></div></div>
+          <div class="panel-head"><div><h2>运行策略</h2><p>可使用内置策略，也可以自动读取 other_alg 下采用 init/update 标准接口的算法包。</p></div></div>
           <div class="panel-body">
             <div class="strategy-options">
               <label class="strategy-card"><input type="radio" name="strategy" value="heuristic" checked><b>启发式</b><span>稳定、快速</span></label>
               <label class="strategy-card"><input id="rlStrategyInput" type="radio" name="strategy" value="rl"><b>RL 搜索</b><span id="rlStrategyHint">调用已训练模型</span></label>
               <label class="strategy-card"><input id="l2dStrategyInput" type="radio" name="strategy" value="l2d"><b>L2D 图策略</b><span id="l2dStrategyHint">单次贪心推理</span></label>
               <label class="strategy-card"><input id="milpStrategyInput" type="radio" name="strategy" value="milp"><b>MILP 最优求解</b><span>单轮 · 总计 ≤12 片</span></label>
-              <label class="strategy-card"><input id="greedyStrategyInput" type="radio" name="strategy" value="greedy"><b>外部 Greedy</b><span id="greedyStrategyHint">new-sa · init/update</span></label>
+              <div class="other-algorithm-options" id="otherAlgorithmOptions"></div>
             </div>
             <div style="margin-top:10px"><label class="btn small import-device">导入 L2D checkpoint<input id="l2dCheckpointFile" type="file" accept=".pt,application/octet-stream"></label></div>
             <div id="rlOptions" class="grid is-hidden" style="margin-top:14px">
@@ -329,12 +330,12 @@
     const CJOB_TYPES = ["NormalLot", "HighestLot", "HigherLot"];
     const TASK_MODES = ["Smart", "Pipeline", "Sequential", "Concurrent"];
     const EXPECTED_API_SCHEMA = "cjob-pjob-v3";
-    const { VISIT_SHARED_FIELDS } = RouteEditorLogic;
+    const { VISIT_SHARED_FIELDS, selectReferencedRoutes } = RouteEditorLogic;
 
     const state = {
       workspaceDevices: [], workspaceDevice: null, workspaceDeviceId: "", testCaseId: "", testCaseName: "", testCaseGroup: "", activeTestGroup: "", serviceCompatible: false, dirty: false,
       deviceName: "", device: null, stationNames: [], loadPorts: [], processModules: [], robotNames: [], robotScopes: {},
-      strategy: "heuristic", roundCount: 2, times: [0, 70], options: { rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
+      strategy: "heuristic", availableOtherAlgorithms: [], roundCount: 2, times: [0, 70], options: { rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
       cleans: [],
       routes: [{ name: "RouteA", group: "RouteA", bufferOption: 0, prePJobCleanRefs: [], postPJobCleanRefs: [], postCJobCleanRefs: [], stages: linkRouteSteps([makeStage("LP1"), makeStage("Robot"), makeStage("PM1,PM2", true, "RouteA_Step2"), makeStage("Robot"), makeStage("LP1")]) }],
       rounds: [makeRound(1, 0, "RouteA", "LP1"), makeRound(2, 70, "RouteA", "LP2")],
@@ -406,7 +407,7 @@
     function normalizeVisit(visit, recipeName = "") {
       visit.processTime = Number(visit.processTime ?? visit.recipeTime ?? 20);
       visit.recipeTime = Number(visit.recipeTime ?? visit.processTime);
-      visit.processRecipe ??= recipeName;
+      visit.processRecipe = RouteEditorLogic.processRecipeName(visit.processRecipe, recipeName);
       visit.processType ??= "";
       visit.slotIds ??= "1";
       visit.weight ??= "{}";
@@ -426,7 +427,7 @@
         stage.visits = Array.isArray(stage.visits) ? stage.visits : [];
         stage.kind = stageUsesRobot(stage, index) ? "robot" : "station";
         stage.needProcess = stage.kind === "station" && stage.visits.some(visit => state.processModules.includes(visit.stationName));
-        const recipeName = stage.needProcess ? `${route.name || "Route"}_Step${stage.stepId}` : "";
+        const recipeName = stage.needProcess ? `${route.group || route.name || "Route"}_Step${stage.stepId}` : "";
         stage.visits.forEach(visit => normalizeVisit(visit, recipeName));
       });
       return route;
@@ -1176,7 +1177,7 @@
     }
 
     /** 收集 Step/Clean 内嵌 Recipe，并合并同名 Recipe 的设备范围。 */
-    function collectRecipes() {
+    function collectRecipes(routes = state.routes) {
       const recipes = [];
       function add(name, time, modules, processType = "", weightText = "{}") {
         const weight = typeof weightText === "string" ? weightText : JSON.stringify(weightText ?? {}), moduleList = stringList(modules);
@@ -1185,7 +1186,7 @@
           existing.modules = [...new Set([...existing.modules, ...moduleList])];
         } else recipes.push({ name, time: Number(time), modules: moduleList, processType, weight });
       }
-      state.routes.forEach(route => { normalizeRoute(route); route.stages.forEach(stage => stage.visits.forEach(visit => { if (visit.processRecipe) add(visit.processRecipe, visit.processTime, [visit.stationName], visit.processType, visit.weight); })); });
+      routes.forEach(route => { normalizeRoute(route); route.stages.forEach(stage => stage.visits.forEach(visit => { if (visit.processRecipe) add(visit.processRecipe, visit.processTime, [visit.stationName], visit.processType, visit.weight); })); });
       state.cleans.forEach(clean => add(clean.recipeName, clean.recipeTime, clean.modules));
       return recipes;
     }
@@ -1193,9 +1194,9 @@
     /** 构造后端请求，Recipe 由 Route Step 和 Clean 自动生成。 */
     function buildPayload() {
       normalizeRounds();
-      const routes = state.routes.map(route => ({ ...normalizeRoute(route), stages: route.stages.map(stage => ({ ...stage, visits: stage.visits.map(visit => structuredClone(visit)) })) }));
+      const routes = selectReferencedRoutes(state.routes, state.rounds).map(route => ({ ...normalizeRoute(route), stages: route.stages.map(stage => ({ ...stage, visits: stage.visits.map(visit => structuredClone(visit)) })) }));
       const cleans = state.cleans.map(clean => ({ ...clean, recipeRef: clean.recipeName }));
-      return { schemaVersion: EXPECTED_API_SCHEMA, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options: state.options, recipes: collectRecipes(), cleans, routes, rounds: structuredClone(state.rounds) };
+      return { schemaVersion: EXPECTED_API_SCHEMA, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options: state.options, recipes: collectRecipes(routes), cleans, routes, rounds: structuredClone(state.rounds) };
     }
 
     /** 统计所有轮次 PJob 的产品晶圆总数，用于 MILP 前端硬限制。 */
@@ -1205,6 +1206,19 @@
           (pjobTotal, pjob) => pjobTotal + Number(pjob.waferCount || 0), 0
         ), 0
       ), 0);
+    }
+
+    /** 根据健康检查返回值绘制 other_alg 下动态发现的标准算法。 */
+    function renderOtherAlgorithmOptions(algorithms) {
+      state.availableOtherAlgorithms = Array.isArray(algorithms) ? algorithms : [];
+      const container = document.getElementById("otherAlgorithmOptions");
+      container.innerHTML = state.availableOtherAlgorithms.map(algorithm => `
+        <label class="strategy-card" title="${escapeHtml(algorithm.path || "")}">
+          <input type="radio" name="strategy" value="${escapeHtml(algorithm.strategy)}" ${algorithm.strategy === state.strategy ? "checked" : ""}>
+          <b>${escapeHtml(algorithm.name)}</b>
+          <span>other_alg · init/update</span>
+        </label>
+      `).join("");
     }
 
     /** 让本次运行生成的 input_data 日志可下载，并按选项自动导出。 */
@@ -1225,7 +1239,12 @@
       try {
         const healthResponse = await fetch("/api/health", { cache: "no-store" }), health = await healthResponse.json();
         if (!healthResponse.ok || health.schemaVersion !== EXPECTED_API_SCHEMA) throw new Error("本地服务版本过旧，请重启 scripts/config_editor_server.py");
-        if (health.strategies?.[state.strategy] === false) throw new Error(health.strategyErrors?.[state.strategy] || `${state.strategy} 策略当前不可用`);
+        if (state.strategy.startsWith("other_alg:")) {
+          const algorithm = (health.otherAlgorithms || []).find(item => item.strategy === state.strategy);
+          if (!algorithm?.available) throw new Error(`${state.strategy} 算法包不存在或入口不完整`);
+        } else if (health.strategies?.[state.strategy] === false) {
+          throw new Error(health.strategyErrors?.[state.strategy] || `${state.strategy} 策略当前不可用`);
+        }
         if (state.strategy === "milp" && state.roundCount !== 1) throw new Error("MILP 策略只能运行首次排程，不能选择多次重算");
         if (state.strategy === "milp" && configuredWaferCount() > 12) throw new Error(`MILP 策略总晶圆数量不能超过 12 片，当前为 ${configuredWaferCount()} 片`);
         if (state.testCaseId) await saveCurrentTest(true);
@@ -1269,15 +1288,14 @@
         if (!response.ok) throw new Error();
         const status = await response.json(), compatible = status.schemaVersion === EXPECTED_API_SCHEMA;
         state.serviceCompatible = compatible;
-        const rlAvailable = status.strategies?.rl !== false, l2dAvailable = status.strategies?.l2d === true, milpAvailable = status.strategies?.milp === true, greedyAvailable = status.strategies?.greedy === true;
+        const rlAvailable = status.strategies?.rl !== false, l2dAvailable = status.strategies?.l2d === true, milpAvailable = status.strategies?.milp === true;
         document.getElementById("rlStrategyInput").disabled = !rlAvailable;
         document.getElementById("rlStrategyHint").textContent = rlAvailable ? "调用已训练模型" : "缺少 RL 模型";
         document.getElementById("l2dStrategyInput").disabled = !l2dAvailable;
         const l2dModelName = String(status.strategyModels?.l2d || "").split(/[\\/]/).at(-1);
         document.getElementById("l2dStrategyHint").textContent = l2dAvailable ? `${l2dModelName} · 单次贪心推理` : "缺少 checkpoint，可在下方导入";
         document.getElementById("milpStrategyInput").disabled = !milpAvailable;
-        document.getElementById("greedyStrategyInput").disabled = !greedyAvailable;
-        document.getElementById("greedyStrategyHint").textContent = greedyAvailable ? "new-sa · init/update · 支持多轮重算" : (status.strategyErrors?.greedy || "未找到 new-sa");
+        renderOtherAlgorithmOptions(status.otherAlgorithms || []);
         runButton.disabled = !compatible;
         renderWorkspaceControls();
         pill.textContent = compatible ? "本地服务已连接" : "服务版本过旧";

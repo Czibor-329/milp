@@ -56,11 +56,11 @@ from src.validation.state import (
     SlotPhase,
     SlotState,
 )
-from realtime_scheduler.greedy_interface import (
-    availability as greedy_availability,
-    init as greedy_init,
-    session as greedy_session,
-    update as greedy_update,
+from realtime_scheduler.algorithm_interface import (
+    discover_other_algorithms,
+    init as algorithm_init,
+    session as algorithm_session,
+    update as algorithm_update,
 )
 
 
@@ -152,8 +152,8 @@ class ReproductionLog:
         })
 
 
-class ExternalGreedyRuntime:
-    """用本仓库状态机维护外部 Greedy 当前计划和跨代执行历史。"""
+class StandardAlgorithmRuntime:
+    """用本仓库状态机维护标准算法当前计划和跨代执行历史。"""
 
     def __init__(
         self,
@@ -998,7 +998,7 @@ def _add_new_materials_to_machine_state(
         known_material_ids.add(material_id)
 
 
-def _merge_greedy_update(
+def _merge_algorithm_update(
     previous_update: Mapping[str, Any],
     new_round_update: Mapping[str, Any],
 ) -> Dict[str, Any]:
@@ -1138,13 +1138,13 @@ def _apply_machine_state_to_update(
         raise ValueError(f"机台快照存在无法定位的历史物料：{sorted(missing_material_ids)}")
 
 
-def _build_greedy_recompute_update(
-    runtime: ExternalGreedyRuntime,
+def _build_algorithm_recompute_update(
+    runtime: StandardAlgorithmRuntime,
     new_round_update: Mapping[str, Any],
     effective_time: float,
 ) -> Dict[str, Any]:
-    """根据当前状态和旧计划执行分区生成下一次外部 Greedy update。"""
-    update = _merge_greedy_update(runtime.current_update, new_round_update)
+    """根据当前状态和旧计划执行分区生成下一次标准算法 update。"""
+    update = _merge_algorithm_update(runtime.current_update, new_round_update)
     _apply_machine_state_to_update(update, runtime.state, effective_time)
     executed_ids = runtime.executed_move_ids
     update["MoveStates"] = []
@@ -1277,7 +1277,7 @@ def _transport_tail_ids(
         close_move = next(move for move in moves if int(move["MoveID"]) == close_id)
         closure_end = float(close_move.get("EndTime") or closure_end)
     # 晶圆放入 LoadLock 并关门后，带 MatID 的抽气/充气仍属于同一搬运收尾。
-    # 若在这里停下，state.py 会正确保留 UNPROCESSED，但 new-sa 重算桥会把
+    # 若在这里停下，state.py 会正确保留 UNPROCESSED，但标准算法重算桥会把
     # 后续压力转换作为已承诺现场继续执行，下一代计划便会直接从另一侧开门。
     following_environment_moves = (
         [
@@ -1634,7 +1634,7 @@ def _segment_end(moves: Iterable[Mapping[str, Any]]) -> float:
     return max((float(move.get("EndTime") or 0.0) for move in moves), default=0.0)
 
 
-def _execute_external_greedy(
+def _execute_standard_algorithm(
     plan: Mapping[str, Any],
     first_update: Mapping[str, Any],
     rounds: Sequence[Mapping[str, Any]],
@@ -1642,23 +1642,27 @@ def _execute_external_greedy(
     build_state: BuildState,
     reproduction: ReproductionLog,
     started: float,
+    algorithm_id: str,
 ) -> Dict[str, Any]:
-    """通过同一次外部 ``init/update`` 会话执行首排和多次实时重算。"""
+    """通过同一次标准 ``init/update`` 会话执行首排和多次实时重算。"""
     round_count = len(rounds)
+    strategy = f"other_alg:{algorithm_id}"
+    backend = f"other_alg/{algorithm_id}"
+    display_name = algorithm_id
     summaries: List[Dict[str, Any]] = []
     update_snapshots: List[Dict[str, Any]] = [deepcopy(dict(first_update))]
     logs = [
         f"设备：{plan.get('deviceName') or 'selected init'}",
-        f"策略：greedy；调用：CT.infer.scheduler.init/update；总轮数：{round_count}",
+        f"策略：{strategy}；调用：CT.infer.scheduler.init/update；总轮数：{round_count}",
     ]
-    with greedy_session():
+    with algorithm_session(algorithm_id):
         round_started = time.perf_counter()
-        greedy_init(plan["device"])
-        raw_output = greedy_update(first_update)
+        algorithm_init(plan["device"])
+        raw_output = algorithm_update(first_update)
         elapsed_ms = (time.perf_counter() - round_started) * 1000.0
         output = _alg_output_info(raw_output)
-        _ensure_greedy_output(output, first_update)
-        runtime = ExternalGreedyRuntime(plan["device"], first_update, output)
+        _ensure_algorithm_output(output, first_update)
+        runtime = StandardAlgorithmRuntime(plan["device"], first_update, output)
         reproduction.add("AlgOutput", output)
         summaries.append({
             "index": 1,
@@ -1671,7 +1675,7 @@ def _execute_external_greedy(
             "elapsedMs": elapsed_ms,
             "segmentEnd": _segment_end(output["MoveList"]),
             "strategyDiagnostics": {
-                "backend": "new-sa",
+                "backend": backend,
                 "entry": "CT.infer.scheduler.init/update",
                 "feedbackCount": len(output["Feedback"]),
                 "removedMoveCount": 0,
@@ -1679,7 +1683,7 @@ def _execute_external_greedy(
             },
         })
         logs.append(
-            f"[1/{round_count}] 外部 Greedy 首排完成："
+            f"[1/{round_count}] {display_name} 首排完成："
             f"{elapsed_ms:.1f} ms，{len(output['MoveList'])} Moves"
         )
 
@@ -1720,7 +1724,7 @@ def _execute_external_greedy(
                 effective_time,
                 build_state,
             )
-            update = _build_greedy_recompute_update(
+            update = _build_algorithm_recompute_update(
                 runtime,
                 new_round_update,
                 effective_time,
@@ -1732,10 +1736,10 @@ def _execute_external_greedy(
                 requested_time,
             )
             round_started = time.perf_counter()
-            raw_output = greedy_update(update)
+            raw_output = algorithm_update(update)
             elapsed_ms = (time.perf_counter() - round_started) * 1000.0
             output = _alg_output_info(raw_output)
-            _ensure_greedy_output(output, update)
+            _ensure_algorithm_output(output, update)
             runtime.replace_plan(
                 update,
                 output,
@@ -1755,7 +1759,7 @@ def _execute_external_greedy(
                 "elapsedMs": elapsed_ms,
                 "segmentEnd": _segment_end(output["MoveList"]),
                 "strategyDiagnostics": {
-                    "backend": "new-sa",
+                    "backend": backend,
                     "entry": "CT.infer.scheduler.init/update",
                     "feedbackCount": len(output["Feedback"]),
                     "removedMoveCount": len(update["RemoveList"]),
@@ -1769,7 +1773,7 @@ def _execute_external_greedy(
                 else ""
             )
             logs.append(
-                f"[{index}/{round_count}] @{requested_time:.2f}s 外部 Greedy 重算完成："
+                f"[{index}/{round_count}] @{requested_time:.2f}s {display_name} 重算完成："
                 f"{elapsed_ms:.1f} ms，移除 {len(update['RemoveList'])} 个旧 Move"
                 f"{suffix}"
             )
@@ -1783,7 +1787,7 @@ def _execute_external_greedy(
     )
     return {
         "ok": True,
-        "strategy": "greedy",
+        "strategy": strategy,
         "rounds": summaries,
         "totalElapsedMs": total_ms,
         "makespan": makespan,
@@ -1795,7 +1799,7 @@ def _execute_external_greedy(
     }
 
 
-def _ensure_greedy_output(
+def _ensure_algorithm_output(
     output: Mapping[str, Any],
     update_params: Mapping[str, Any],
 ) -> None:
@@ -1810,7 +1814,7 @@ def _ensure_greedy_output(
             for item in feedback
             if isinstance(item, Mapping)
         ),
-        "外部 Greedy 未生成 MoveList",
+        "标准算法未生成 MoveList",
     )
     raise RuntimeError(message)
 
@@ -1822,9 +1826,24 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
     plan["device"] = extract_init_data(plan.get("device"))
     expand_pse300_loadlocks(plan["device"])
     reproduction.add("AlgInit", plan["device"])
-    strategy = str(plan.get("strategy") or "heuristic").strip().lower()
-    if strategy not in {"heuristic", "rl", "l2d", "milp", "greedy"}:
-        raise ValueError("策略只支持 heuristic、rl、l2d、milp 或 greedy")
+    strategy = str(plan.get("strategy") or "heuristic").strip()
+    normalized_strategy = strategy.lower()
+    other_algorithm_id = (
+        strategy.split(":", 1)[1]
+        if normalized_strategy.startswith("other_alg:") and ":" in strategy
+        else None
+    )
+    builtin_strategies = {"heuristic", "rl", "l2d", "milp"}
+    discovered_ids = {
+        str(item["id"])
+        for item in discover_other_algorithms()
+    }
+    if normalized_strategy not in builtin_strategies and other_algorithm_id not in discovered_ids:
+        raise ValueError(
+            "策略只支持 heuristic、rl、l2d、milp，"
+            "或 other_alg 下已发现的标准算法"
+        )
+    strategy = normalized_strategy if normalized_strategy in builtin_strategies else strategy
     if strategy == "l2d" and (
         not PSE300_REQUIRED_STATIONS.issubset(plan["device"].get("Stations") or {})
         or not PSE300_REQUIRED_ROBOTS.issubset(plan["device"].get("Robots") or {})
@@ -1867,8 +1886,8 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
                 f"MILP 策略总晶圆数量不能超过 {MAX_MILP_WAFERS} 片，当前为 {wafer_count} 片"
             )
     reproduction.add("AlgSchedule", _schedule_log_info(plan["device"], first_update))
-    if strategy == "greedy":
-        return _execute_external_greedy(
+    if other_algorithm_id is not None:
+        return _execute_standard_algorithm(
             plan,
             first_update,
             rounds,
@@ -1876,6 +1895,7 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
             build_state,
             reproduction,
             started,
+            other_algorithm_id,
         )
     round_started = time.perf_counter()
     scheduler = RealtimeRescheduler(
@@ -2032,6 +2052,41 @@ def _merge_named_assets(base: Sequence[Any], additions: Sequence[Any]) -> List[D
     return merged
 
 
+def _repair_workspace_route_recipes(routes: Sequence[Any]) -> bool:
+    """为旧共享 Route 中加工 Step 的空 Recipe 补稳定名称和已有加工时间。
+
+    早期导入数据可能只在第一道工序保存 ``processRecipe``，后续工序虽然
+    ``needProcess=true`` 且已有 ``processTime``，却无法生成 ProcessRecipes。
+    """
+    changed = False
+    for raw_route in routes:
+        if not isinstance(raw_route, dict):
+            continue
+        prefix = str(raw_route.get("group") or raw_route.get("name") or "Route").strip()
+        for stage_index, raw_stage in enumerate(raw_route.get("stages") or []):
+            if not isinstance(raw_stage, dict) or not bool(
+                raw_stage.get("needProcess", raw_stage.get("NeedProcess", False))
+            ):
+                continue
+            step_id = int(_finite_number(
+                raw_stage.get("stepId", raw_stage.get("StepID")),
+                stage_index,
+            ))
+            recipe_name = f"{prefix}_Step{step_id}"
+            for raw_visit in raw_stage.get("visits") or raw_stage.get("Visits") or []:
+                if not isinstance(raw_visit, dict):
+                    continue
+                recipe_key = "processRecipe" if "ProcessRecipe" not in raw_visit else "ProcessRecipe"
+                if not str(raw_visit.get(recipe_key) or "").strip():
+                    raw_visit[recipe_key] = recipe_name
+                    changed = True
+                time_key = "processTime" if "Time" not in raw_visit else "Time"
+                if raw_visit.get(time_key) in (None, "") and raw_visit.get("recipeTime") not in (None, ""):
+                    raw_visit[time_key] = raw_visit["recipeTime"]
+                    changed = True
+    return changed
+
+
 def _migrate_workspace_catalog(catalog: Dict[str, Any]) -> bool:
     """迁移设备工作区结构，并为已有 PSE300 补齐 LC/LD LoadLock。"""
     changed = int(catalog.get("version") or 0) != WORKSPACE_STORE_VERSION
@@ -2049,6 +2104,9 @@ def _migrate_workspace_catalog(catalog: Dict[str, Any]) -> bool:
             group = str(test.get("group") or "").strip()
             if group and group not in test_groups:
                 test_groups.append(group)
+            if str(test.get("strategy") or "").strip().lower() == "greedy":
+                test["strategy"] = "other_alg:greedy"
+                changed = True
         if raw_device.get("testGroups") != test_groups:
             raw_device["testGroups"] = test_groups
             changed = True
@@ -2066,6 +2124,8 @@ def _migrate_workspace_catalog(catalog: Dict[str, Any]) -> bool:
                 cleans = _merge_named_assets(cleans, test.get("cleans") or [])
                 test.pop("cleans", None)
                 changed = True
+        if _repair_workspace_route_recipes(routes):
+            changed = True
         if raw_device.get("routes") != routes:
             raw_device["routes"] = routes
             changed = True
@@ -2337,7 +2397,11 @@ def _normalize_test_case(raw_test: Mapping[str, Any], test_id: Optional[str] = N
         "id": test_id or uuid.uuid4().hex,
         "name": str(raw_test.get("name") or "未命名测试集").strip() or "未命名测试集",
         "group": str(raw_test.get("group") or "").strip(),
-        "strategy": str(raw_test.get("strategy") or "heuristic"),
+        "strategy": (
+            "other_alg:greedy"
+            if str(raw_test.get("strategy") or "").strip().lower() == "greedy"
+            else str(raw_test.get("strategy") or "heuristic")
+        ),
         "roundCount": round_count,
         "times": times,
         "options": deepcopy(dict(raw_test.get("options") or {})),
@@ -2558,7 +2622,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/health":
             l2d_model_path = _resolve_l2d_model_path()
-            greedy_status = greedy_availability()
+            other_algorithms = discover_other_algorithms()
             self._send_json({
                 "ok": True,
                 "service": "ct-config-editor",
@@ -2568,15 +2632,12 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                     "rl": RL_MODEL_PATH.is_file(),
                     "l2d": l2d_model_path is not None,
                     "milp": True,
-                    "greedy": bool(greedy_status["available"]),
                 },
                 "strategyModels": {
                     "l2d": str(l2d_model_path) if l2d_model_path is not None else "",
-                    "greedy": str(greedy_status["path"]),
                 },
-                "strategyErrors": {
-                    "greedy": str(greedy_status["error"]),
-                },
+                "strategyErrors": {},
+                "otherAlgorithms": other_algorithms,
             })
             return
         if path == "/api/workspaces":

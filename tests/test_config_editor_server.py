@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import realtime_scheduler.server as config_server
+from realtime_scheduler.algorithm_interface import discover_other_algorithms
 from scripts.config_editor_server import (
     BuildState,
     LoggedPlanError,
@@ -88,6 +89,13 @@ class ConfigEditorServerTests(unittest.TestCase):
     def test_extract_init_data_from_recording(self) -> None:
         """input_data 录制数组应只提取 AlgInit 的设备字段。"""
         self.assertIn("Stations", self.device)
+
+    def test_discovers_standard_algorithms_below_other_alg(self) -> None:
+        """后端应把 other_alg 下具有 infer/scheduler.py 的目录暴露给前端。"""
+        algorithms = discover_other_algorithms()
+        greedy = next(item for item in algorithms if item["id"] == "greedy")
+        self.assertEqual("other_alg:greedy", greedy["strategy"])
+        self.assertEqual("infer/scheduler.py", greedy["entry"])
         self.assertIn("Robots", self.device)
         self.assertIn("PM1", self.device["Stations"])
         self.assertIn("LP1", self.device["Stations"])
@@ -118,6 +126,25 @@ class ConfigEditorServerTests(unittest.TestCase):
             int(self.device.get("InitialMoveID") or 0),
             update["InitialMoveID"],
         )
+
+    def test_workspace_migration_repairs_empty_process_recipe(self) -> None:
+        """旧 Route 的后续加工 Step 应根据稳定分组名补齐 Recipe。"""
+        routes = [{
+            "name": "显示名称",
+            "group": "Route7",
+            "stages": [{
+                "stepId": 6,
+                "needProcess": True,
+                "visits": [{
+                    "stationName": "PM2",
+                    "processRecipe": "",
+                    "processTime": 300,
+                }],
+            }],
+        }]
+        self.assertTrue(config_server._repair_workspace_route_recipes(routes))
+        self.assertEqual("Route7_Step6", routes[0]["stages"][0]["visits"][0]["processRecipe"])
+        self.assertFalse(config_server._repair_workspace_route_recipes(routes))
 
     def test_same_recipe_name_rejects_overlapping_modules(self) -> None:
         """同名 Recipe 只有模块范围重叠时才属于真正的重复定义。"""
@@ -327,12 +354,12 @@ class ConfigEditorServerTests(unittest.TestCase):
         with self.assertRaisesRegex(LoggedPlanError, "不能超过 12 片"):
             execute_plan({**base, "roundCount": 1, "rounds": [oversized_round]})
 
-    def test_external_greedy_strategy_calls_formal_init_and_update(self) -> None:
-        """前端选择 greedy 后应通过外部正式 init/update 入口完成首排。"""
+    def test_local_standard_algorithm_calls_formal_init_and_update(self) -> None:
+        """前端选择 other_alg 算法后应通过本地正式 init/update 入口完成首排。"""
         plan = {
             "deviceName": "fixture.json",
             "device": self.device,
-            "strategy": "greedy",
+            "strategy": "other_alg:greedy",
             "roundCount": 1,
             "options": {},
             "recipes": [{
@@ -363,9 +390,9 @@ class ConfigEditorServerTests(unittest.TestCase):
         }
 
         with (
-            patch.object(config_server, "greedy_session", return_value=nullcontext()),
-            patch.object(config_server, "greedy_init") as init_entry,
-            patch.object(config_server, "greedy_update", return_value=external_output) as update_entry,
+            patch.object(config_server, "algorithm_session", return_value=nullcontext()),
+            patch.object(config_server, "algorithm_init") as init_entry,
+            patch.object(config_server, "algorithm_update", return_value=external_output) as update_entry,
         ):
             result = execute_plan(plan)
 
@@ -377,15 +404,15 @@ class ConfigEditorServerTests(unittest.TestCase):
         update_payload = update_entry.call_args.args[0]
         self.assertEqual(init_payload["Robots"], update_payload["Robots"])
         self.assertEqual(init_payload["Stations"], update_payload["Stations"])
-        self.assertEqual("greedy", result["strategy"])
+        self.assertEqual("other_alg:greedy", result["strategy"])
         self.assertEqual(1, result["moveCount"])
         self.assertEqual("CT.infer.scheduler.init/update", result["rounds"][0]["strategyDiagnostics"]["entry"])
 
-    def test_external_greedy_uses_machine_state_for_two_recomputes(self) -> None:
+    def test_local_standard_algorithm_uses_machine_state_for_two_recomputes(self) -> None:
         """两次重算应返回全量 update，并按状态机填写旧计划 RemoveList。"""
         plan = {
             "device": self.device,
-            "strategy": "greedy",
+            "strategy": "other_alg:greedy",
             "roundCount": 3,
             "recipes": [{"name": "R", "time": 20, "modules": ["PM1"], "weight": {}}],
             "cleans": [],
@@ -421,11 +448,11 @@ class ConfigEditorServerTests(unittest.TestCase):
         ]
 
         with (
-            patch.object(config_server, "greedy_session", return_value=nullcontext()),
-            patch.object(config_server, "greedy_init") as init_entry,
+            patch.object(config_server, "algorithm_session", return_value=nullcontext()),
+            patch.object(config_server, "algorithm_init") as init_entry,
             patch.object(
                 config_server,
-                "greedy_update",
+                "algorithm_update",
                 side_effect=external_outputs,
             ) as update_entry,
         ):
@@ -448,8 +475,8 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual(3, len(result["updates"]))
         self.assertEqual(2, len(result["output"]["RecomputePoints"]))
 
-    def test_external_greedy_recovery_completes_loadlock_environment(self) -> None:
-        """外部 Greedy 收尾应执行 LoadLock 关门后的带片压力转换。"""
+    def test_standard_algorithm_recovery_completes_loadlock_environment(self) -> None:
+        """标准算法收尾应执行 LoadLock 关门后的带片压力转换。"""
         moves = [
             {
                 "MoveID": 1, "MoveType": 1, "MatIDList": [1],
@@ -467,7 +494,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         ]
 
         normal_tail = config_server._transport_tail_ids(moves, 1, 11.0)
-        greedy_tail = config_server._transport_tail_ids(
+        algorithm_tail = config_server._transport_tail_ids(
             moves,
             1,
             11.0,
@@ -475,7 +502,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         )
 
         self.assertNotIn(3, normal_tail)
-        self.assertIn(3, greedy_tail)
+        self.assertIn(3, algorithm_tail)
 
     def test_job_route_is_bound_to_selected_load_port(self) -> None:
         """Job 复用公共 Route 时应生成独立 Route 并改写首尾 LoadPort。"""
@@ -619,10 +646,9 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn('id="milpStrategyInput"', html)
         self.assertIn('value="milp"', html)
         self.assertIn("status.strategies?.milp", html)
-        self.assertIn('id="greedyStrategyInput"', html)
-        self.assertIn('value="greedy"', html)
-        self.assertIn("status.strategies?.greedy", html)
         self.assertIn("init/update", html)
+        self.assertIn('id="otherAlgorithmOptions"', html)
+        self.assertIn("status.otherAlgorithms", html)
         self.assertIn("configuredWaferCount() > 12", html)
         self.assertIn('id="deviceSelect"', html)
         self.assertIn('id="testCaseSelect"', html)
