@@ -2,7 +2,7 @@ from src.parse.clean_constraints import _clean_specs, _dummy_order_pairs
 from src.parse.model import Chamber, Durations, Problem, Stage, Wafer
 from src.timing.solve import SolveResult
 from src.timing.spans import _ll_proc
-from src.validation import populate_premove_ids, validate_move_list
+from src.validation import validate_move_list
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from src.validation.state import MachineState, is_doorless_station
@@ -49,7 +49,16 @@ def export_movelist(
         by_c: Dict[str, list] = {}
         for wid, rows in res.schedule.items():
             for j, (stype, c, av, rv) in enumerate(rows):
-                if stype == "loadlock":
+                stage = wafers[wid].stages[j]
+                chamber = task.chambers.get(c)
+                is_physical_loadlock = (
+                    chamber is not None
+                    and str(chamber.type).lower() == "loadlock"
+                    and stage.ll_type in {"entry", "exit"}
+                )
+                # 实时续排会把已完成的当前 LoadLock 工序标为 source，以免重复抽/充气；
+                # 它仍是物理 LoadLock 占用，必须参与同门 swap 的开关门合并。
+                if stype == "loadlock" or is_physical_loadlock:
                     by_c.setdefault(c, []).append((wid, j, wafers[wid].stages[j], av, rv))
         supp_pp, supp_pre, press_after = set(), set(), {}
         for c, visits in by_c.items():
@@ -202,7 +211,6 @@ def export_movelist(
              MatIDList=[], CleanRecipe=cl.recipe, CleanTaskName=cl.task)
 
     moves.sort(key=lambda m: (m["StartTime"], m["MoveID"]))
-    populate_premove_ids(moves)
     return moves
 
 

@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import base64
+import inspect
 import json
 import tempfile
+import threading
+import time
 import unittest
 from contextlib import nullcontext
 from pathlib import Path
@@ -284,6 +287,200 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertGreater(result["moveCount"], 0)
         self.assertEqual(len(result["rounds"]), 2)
         self.assertEqual(len(result["output"]["RecomputePoints"]), 1)
+
+    def test_neural_strategy_runs_single_pass_inference_and_recompute(self) -> None:
+        """前端提交 neural 后应加载 NumPy 模型并完成首次排程与实时重算。"""
+        from src.schedule.neural import (
+            DEFAULT_MODEL_PATH,
+            MODEL_SCHEMA_VERSION,
+            load_neural_policy,
+        )
+
+        plan = {
+            "deviceName": DEVICE_PATH.name,
+            "device": self.device,
+            "strategy": "neural",
+            "roundCount": 2,
+            "options": {},
+            "recipes": [{
+                "name": "NeuralRecipe",
+                "time": 60,
+                "modules": ["PM1", "PM2"],
+                "weight": {},
+            }],
+            "cleans": [],
+            "routes": [_route("NeuralRoute", "PM1,PM2", "NeuralRecipe")],
+            "rounds": [
+                {
+                    "currentTime": 0,
+                    "jobs": [{
+                        **_job("NeuralJob1", "NeuralRoute", "LP1"),
+                        "waferCount": 3,
+                    }],
+                },
+                {
+                    "currentTime": 70,
+                    "jobs": [{
+                        **_job("NeuralJob2", "NeuralRoute", "LP2"),
+                        "waferCount": 3,
+                    }],
+                },
+            ],
+        }
+        policy = load_neural_policy(DEFAULT_MODEL_PATH)
+
+        with patch.object(
+            config_server,
+            "_load_neural_inference_policy",
+            return_value=policy,
+        ) as loader:
+            result = execute_plan(plan)
+
+        loader.assert_called_once_with()
+        self.assertTrue(result["ok"])
+        self.assertEqual("neural", result["strategy"])
+        self.assertEqual("passed", result["validation"])
+        self.assertGreater(result["moveCount"], 0)
+        self.assertEqual(2, len(result["rounds"]))
+        self.assertEqual(1, len(result["output"]["RecomputePoints"]))
+        for round_result in result["rounds"]:
+            diagnostics = round_result["strategyDiagnostics"]
+            self.assertEqual(MODEL_SCHEMA_VERSION, diagnostics["architecture"])
+            self.assertIn(
+                diagnostics["actionMask"],
+                {
+                    "complete-path-certificate",
+                    "petri-reachability",
+                    "structural-physics-shield",
+                    "failure-fallback",
+                    "quality-floor-fallback",
+                },
+            )
+            self.assertIn(
+                diagnostics["decisionSpace"],
+                {
+                    "hop-and-loadlock",
+                    "hop-and-loadlock-physics-repair",
+                    "baseline-fallback",
+                },
+            )
+
+    def test_neural_recompute_allows_required_cross_plan_empty_pressure_reversal(self) -> None:
+        """旧段在途空充收尾后，新段应能为真空侧任务执行必要的反向空抽。"""
+        from src.schedule.neural import DEFAULT_MODEL_PATH, load_neural_policy
+
+        plan = {
+            "deviceName": PSE300_PATH.name,
+            "device": json.loads(PSE300_PATH.read_text(encoding="utf-8")),
+            "strategy": "neural",
+            "roundCount": 2,
+            "options": {},
+            "recipes": [{
+                "name": "PressureBoundaryRecipe",
+                "time": 40,
+                "modules": ["PM1"],
+                "weight": {},
+            }],
+            "cleans": [],
+            "routes": [_route(
+                "PressureBoundaryRoute",
+                "PM1",
+                "PressureBoundaryRecipe",
+            )],
+            "rounds": [
+                {
+                    "currentTime": 0,
+                    "jobs": [{
+                        **_job(
+                            "PressureBoundaryJob1",
+                            "PressureBoundaryRoute",
+                            "LP1",
+                        ),
+                        "waferCount": 10,
+                    }],
+                },
+                {
+                    "currentTime": 200,
+                    "jobs": [{
+                        **_job(
+                            "PressureBoundaryJob2",
+                            "PressureBoundaryRoute",
+                            "LP2",
+                        ),
+                        "waferCount": 15,
+                    }],
+                },
+            ],
+        }
+        policy = load_neural_policy(DEFAULT_MODEL_PATH)
+
+        with patch.object(
+            config_server,
+            "_load_neural_inference_policy",
+            return_value=policy,
+        ):
+            result = execute_plan(plan)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("passed", result["validation"])
+        self.assertEqual(2, len(result["rounds"]))
+        self.assertEqual(1, len(result["output"]["RecomputePoints"]))
+
+    def test_neural_nested_recompute_keeps_committed_recovery_end_monotonic(self) -> None:
+        """后一请求落在前次收尾内时，EffectiveTime 不得回退或遗失旧恢复链。"""
+        from src.schedule.neural import DEFAULT_MODEL_PATH, load_neural_policy
+
+        plan = {
+            "deviceName": PSE300_PATH.name,
+            "device": json.loads(PSE300_PATH.read_text(encoding="utf-8")),
+            "strategy": "neural",
+            "roundCount": 3,
+            "options": {},
+            "recipes": [{
+                "name": "NestedRecoveryRecipe",
+                "time": 80,
+                "modules": ["PM1"],
+                "weight": {},
+            }],
+            "cleans": [],
+            "routes": [_route(
+                "NestedRecoveryRoute",
+                "PM1",
+                "NestedRecoveryRecipe",
+            )],
+            "rounds": [
+                {
+                    "currentTime": current_time,
+                    "jobs": [{
+                        **_job(
+                            f"NestedRecoveryJob{index}",
+                            "NestedRecoveryRoute",
+                            f"LP{index}",
+                        ),
+                        "waferCount": 10,
+                    }],
+                }
+                for index, current_time in enumerate((0, 50, 100), start=1)
+            ],
+        }
+        policy = load_neural_policy(DEFAULT_MODEL_PATH)
+
+        with patch.object(
+            config_server,
+            "_load_neural_inference_policy",
+            return_value=policy,
+        ):
+            result = execute_plan(plan)
+
+        effective_times = [
+            float(round_result["effectiveTime"])
+            for round_result in result["rounds"]
+        ]
+        self.assertTrue(result["ok"])
+        self.assertEqual("passed", result["validation"])
+        self.assertEqual(sorted(effective_times), effective_times)
+        self.assertGreater(effective_times[1], 50.0)
+        self.assertGreaterEqual(effective_times[2], effective_times[1])
 
     def test_milp_strategy_runs_once_and_reports_optimality(self) -> None:
         """MILP 单轮策略应调用独立求解器，并把最优性诊断返回前端。"""
@@ -670,7 +867,47 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn('id="newGroupButton"', html)
         self.assertIn('id="l2dCheckpointFile"', html)
         self.assertIn("/api/models/l2d", html)
+        self.assertIn('id="batchRunButton"', html)
+        self.assertIn('id="batchResults"', html)
+        self.assertIn('id="batchProgress"', html)
+        self.assertIn('id="batchGanttButton"', html)
+        self.assertIn("/api/run-batch", html)
+        self.assertIn("/api/run-batches/", html)
+        self.assertIn('method: "DELETE"', html)
+        self.assertIn("■ 终止调度", html)
+        self.assertIn('cancelled: "已终止"', html)
+        viewer = (ROOT / "realtime_scheduler" / "frontend" / "movelist_gantt_viewer.html").read_text(encoding="utf-8")
+        self.assertIn('getAll("src")', viewer)
+        self.assertIn("Promise.allSettled", viewer)
         self.assertNotIn('id="recipeList"', html)
+
+    def test_run_results_use_main_area_responsive_grid(self) -> None:
+        """运行结果应位于重算任务下方，右栏只保留运行控制。"""
+        html = EDITOR_PATH.read_text(encoding="utf-8")
+        schedule = html.split('<div class="tab-view active" data-tab-view="schedule">', 1)[1]
+        schedule = schedule.split('<div class="tab-view" data-tab-view="route">', 1)[0]
+        sidebar = html.split('<aside class="side" id="scheduleSide">', 1)[1]
+        sidebar = sidebar.split("</aside>", 1)[0]
+
+        self.assertLess(schedule.index("重算任务"), schedule.index("运行结果"))
+        self.assertIn('class="panel result-panel"', schedule)
+        self.assertIn("运行策略", sidebar)
+        self.assertNotIn("运行结果", sidebar)
+        self.assertIn("container-name: result-area", html)
+        self.assertIn(".batch-results { display: grid; grid-template-columns: repeat(4", html)
+        self.assertIn("@container result-area (max-width: 1100px)", html)
+        self.assertIn("@container result-area (max-width: 720px)", html)
+        self.assertIn("@container result-area (max-width: 520px)", html)
+        self.assertIn(".terminal { height: 150px;", html)
+        self.assertIn('class="batch-result-summary"', html)
+        self.assertNotIn('class="batch-result-metrics"', html)
+        self.assertIn("Makespan 当前值 / Heuristic Baseline", html)
+        self.assertIn("Baseline <b>", html)
+        self.assertIn("CPU Time <b>", html)
+        self.assertNotIn("改善 <b>", html)
+        self.assertIn("item.testId", html)
+        for label in ("测试名称", "等待中", "运行中", "成功", "失败", "Makespan", "Move", "耗时"):
+            self.assertIn(label, html)
 
     def test_device_workspace_persists_independent_test_cases(self) -> None:
         """同一设备的多套 Route/Clean/重算配置应独立保存并可复制、修改、删除。"""
@@ -753,6 +990,327 @@ class ConfigEditorServerTests(unittest.TestCase):
             self.assertEqual(["性能测试"], loaded["testGroups"])
             self.assertEqual([], loaded["tests"])
 
+    def test_batch_run_uses_selected_strategy_for_every_test_in_current_group(self) -> None:
+        """批量运行应筛选当前组，并把同一策略应用到组内全部测试。"""
+        routes = [_route("BatchRoute", "PM1,PM2", "BatchRecipe")]
+        grouped_tests = [
+            {
+                "id": "test-a", "name": "案例 A", "group": "回归",
+                "roundCount": 1, "options": {"seed": 1},
+                "rounds": [{"currentTime": 0, "jobs": [_job("A", "BatchRoute", "LP1")]}],
+            },
+            {
+                "id": "test-b", "name": "案例 B", "group": "回归",
+                "roundCount": 1, "options": {"seed": 2},
+                "rounds": [{"currentTime": 0, "jobs": [_job("B", "BatchRoute", "LP2")]}],
+            },
+            {
+                "id": "test-c", "name": "其他组", "group": "性能",
+                "roundCount": 1, "options": {},
+                "rounds": [{"currentTime": 0, "jobs": [_job("C", "BatchRoute", "LP1")]}],
+            },
+        ]
+        device = {
+            "id": "device-batch",
+            "name": "fixture.json",
+            "device": self.device,
+            "routes": routes,
+            "cleans": [],
+            "tests": grouped_tests,
+        }
+        submitted = []
+
+        def fake_execute(plan):
+            submitted.append(plan)
+            return {
+                "ok": True,
+                "totalElapsedMs": 10.0,
+                "makespan": 20.0,
+                "moveCount": 3,
+                "validation": "passed",
+                "output": {"MoveList": []},
+                "reproductionLog": [],
+            }
+
+        with (
+            patch.object(config_server, "get_workspace_device", return_value=device),
+            patch.object(config_server, "execute_plan", side_effect=fake_execute),
+            patch.object(config_server, "save_result", return_value="result-id"),
+            patch.object(config_server, "save_reproduction_log", return_value="log-id"),
+        ):
+            result = config_server.run_workspace_test_batch(
+                "device-batch", "回归", "rl", {"seed": 9}, maximum_workers=2,
+            )
+
+        self.assertEqual(2, result["testCount"])
+        self.assertEqual(2, result["succeeded"])
+        self.assertEqual({"案例 A", "案例 B"}, {item["testName"] for item in result["items"]})
+        self.assertEqual(4, len(submitted))
+        self.assertEqual(2, sum(plan["strategy"] == "heuristic" for plan in submitted))
+        self.assertEqual(2, sum(plan["strategy"] == "rl" for plan in submitted))
+        self.assertTrue(all(plan["options"]["seed"] == 9 for plan in submitted))
+        self.assertTrue(all([route["name"] for route in plan["routes"]] == ["BatchRoute"] for plan in submitted))
+        self.assertTrue(all(item["baseline"]["status"] == "succeeded" for item in result["items"]))
+        self.assertTrue(all(item["improvementPercent"] == 0 for item in result["items"]))
+
+    def test_background_batch_exposes_queued_running_and_completed_item_status(self) -> None:
+        """后台批量任务应在运行期间暴露逐项状态，并在结束后返回全部结果 URL。"""
+        device = {
+            "id": "device-progress",
+            "name": "fixture.json",
+            "device": self.device,
+            "routes": [_route("BatchRoute", "PM1,PM2", "BatchRecipe")],
+            "cleans": [],
+            "tests": [
+                {
+                    "id": f"test-{index}", "name": f"案例 {index}", "group": "回归",
+                    "roundCount": 1, "options": {},
+                    "rounds": [{"currentTime": 0, "jobs": [_job(f"J{index}", "BatchRoute", "LP1")]}],
+                }
+                for index in (1, 2)
+            ],
+        }
+        first_started = threading.Event()
+        release = threading.Event()
+
+        def fake_execute(_plan):
+            first_started.set()
+            self.assertTrue(release.wait(2))
+            return {
+                "ok": True, "totalElapsedMs": 10.0, "makespan": 20.0,
+                "moveCount": 3, "validation": "passed",
+                "output": {"MoveList": []}, "reproductionLog": [],
+            }
+
+        with (
+            patch.object(config_server, "get_workspace_device", return_value=device),
+            patch.object(config_server, "execute_plan", side_effect=fake_execute),
+            patch.object(config_server, "save_result", return_value="result-id"),
+            patch.object(config_server, "save_reproduction_log", return_value="log-id"),
+        ):
+            initial = config_server.start_workspace_test_batch(
+                "device-progress", "回归", "heuristic", {}, maximum_workers=1,
+            )
+            self.assertTrue(first_started.wait(2))
+            running = config_server.read_workspace_batch_run(initial["batchId"])
+            self.assertEqual(["running", "queued"], [item["status"] for item in running["items"]])
+            release.set()
+            deadline = time.time() + 3
+            while time.time() < deadline:
+                completed = config_server.read_workspace_batch_run(initial["batchId"])
+                if completed["status"] == "completed":
+                    break
+                time.sleep(0.01)
+            else:
+                self.fail("后台批量任务未在时限内完成")
+
+        self.assertEqual(2, completed["completed"])
+        self.assertEqual(["succeeded", "succeeded"], [item["status"] for item in completed["items"]])
+        self.assertTrue(all(item["resultUrl"] == "/api/results/result-id" for item in completed["items"]))
+
+    def test_non_heuristic_batch_creates_baseline_and_reports_improvement(self) -> None:
+        """其他策略首次运行时应先补算 Heuristic，并返回相对改善。"""
+        test_case = {
+            "id": "test-baseline", "name": "Baseline 案例", "group": "回归",
+            "roundCount": 1, "options": {},
+            "rounds": [{"currentTime": 0, "jobs": [_job("A", "BatchRoute", "LP1")]}],
+        }
+        device = {
+            "id": "device-baseline", "name": "fixture.json", "device": self.device,
+            "routes": [_route("BatchRoute", "PM1,PM2", "BatchRecipe")],
+            "cleans": [], "tests": [test_case],
+        }
+
+        def fake_execute(plan):
+            makespan = 100.0 if plan["strategy"] == "heuristic" else 80.0
+            return {
+                "ok": True, "totalElapsedMs": 12.0, "cpuTimeMs": 7.0,
+                "makespan": makespan, "moveCount": 3, "validation": "passed",
+                "output": {"MoveList": []}, "reproductionLog": [],
+            }
+
+        with (
+            patch.object(config_server, "get_workspace_device", return_value=device),
+            patch.object(config_server, "execute_plan", side_effect=fake_execute),
+            patch.object(config_server, "_persist_workspace_baseline", return_value=True),
+            patch.object(config_server, "save_result", return_value="result-id"),
+            patch.object(config_server, "save_reproduction_log", return_value="log-id"),
+        ):
+            result = config_server.run_workspace_test_batch(
+                "device-baseline", "回归", "rl", {}, maximum_workers=1,
+            )
+
+        item = result["items"][0]
+        self.assertEqual("succeeded", item["baseline"]["status"])
+        self.assertEqual(100.0, item["baseline"]["makespan"])
+        self.assertEqual(80.0, item["makespan"])
+        self.assertEqual(-20.0, item["makespanDelta"])
+        self.assertEqual(20.0, item["improvementPercent"])
+
+    def test_heuristic_refreshes_changed_baseline_result(self) -> None:
+        """再次运行 Heuristic 时，应以本次 makespan 和 CPU Time 覆盖旧值。"""
+        test_case = {
+            "id": "test-refresh", "name": "刷新案例", "group": "回归",
+            "roundCount": 1, "options": {},
+            "rounds": [{"currentTime": 0, "jobs": [_job("A", "BatchRoute", "LP1")]}],
+        }
+        device = {
+            "id": "device-refresh", "name": "fixture.json", "device": self.device,
+            "routes": [_route("BatchRoute", "PM1,PM2", "BatchRecipe")],
+            "cleans": [], "tests": [test_case],
+        }
+        fingerprint = config_server._workspace_baseline_fingerprint(device, test_case)
+        test_case["baseline"] = {
+            "status": "succeeded", "fingerprint": fingerprint,
+            "makespan": 90.0, "cpuTimeMs": 4.0,
+        }
+        refreshed = {
+            "ok": True, "totalElapsedMs": 13.0, "cpuTimeMs": 8.0,
+            "makespan": 100.0, "moveCount": 3, "validation": "passed",
+            "output": {"MoveList": []}, "reproductionLog": [],
+        }
+
+        with (
+            patch.object(config_server, "get_workspace_device", return_value=device),
+            patch.object(config_server, "execute_plan", return_value=refreshed),
+            patch.object(config_server, "_persist_workspace_baseline", return_value=True),
+            patch.object(config_server, "save_result", return_value="result-id"),
+            patch.object(config_server, "save_reproduction_log", return_value="log-id"),
+        ):
+            result = config_server.run_workspace_test_batch(
+                "device-refresh", "回归", "heuristic", {}, maximum_workers=1,
+            )
+
+        baseline = result["items"][0]["baseline"]
+        self.assertEqual(100.0, baseline["makespan"])
+        self.assertEqual(8.0, baseline["cpuTimeMs"])
+
+    def test_failed_baseline_replaces_old_data_and_reports_reason(self) -> None:
+        """Baseline 重算失败时不能继续返回旧数据，但其他策略结果仍可展示。"""
+        test_case = {
+            "id": "test-failed-base", "name": "失败案例", "group": "回归",
+            "roundCount": 1, "options": {"seed": 2},
+            "rounds": [{"currentTime": 0, "jobs": [_job("A", "BatchRoute", "LP1")]}],
+            "baseline": {
+                "status": "succeeded", "fingerprint": "stale",
+                "makespan": 50.0, "cpuTimeMs": 2.0,
+            },
+        }
+        device = {
+            "id": "device-failed-base", "name": "fixture.json", "device": self.device,
+            "routes": [_route("BatchRoute", "PM1,PM2", "BatchRecipe")],
+            "cleans": [], "tests": [test_case],
+        }
+
+        def fake_execute(plan):
+            if plan["strategy"] == "heuristic":
+                raise LoggedPlanError("Baseline 无可行解", [])
+            return {
+                "ok": True, "totalElapsedMs": 12.0, "cpuTimeMs": 7.0,
+                "makespan": 80.0, "moveCount": 3, "validation": "passed",
+                "output": {"MoveList": []}, "reproductionLog": [],
+            }
+
+        with (
+            patch.object(config_server, "get_workspace_device", return_value=device),
+            patch.object(config_server, "execute_plan", side_effect=fake_execute),
+            patch.object(config_server, "_persist_workspace_baseline", return_value=True),
+            patch.object(config_server, "save_result", return_value="result-id"),
+            patch.object(config_server, "save_reproduction_log", return_value="log-id"),
+        ):
+            result = config_server.run_workspace_test_batch(
+                "device-failed-base", "回归", "rl", {}, maximum_workers=1,
+            )
+
+        item = result["items"][0]
+        self.assertTrue(item["ok"])
+        self.assertEqual("failed", item["baseline"]["status"])
+        self.assertIn("Baseline 无可行解", item["baseline"]["error"])
+        self.assertNotIn("improvementPercent", item)
+        self.assertNotIn("makespan", item["baseline"])
+
+    def test_configuration_change_invalidates_baseline_fingerprint(self) -> None:
+        """测试配置变化后，旧 Baseline 应立即变为 invalid。"""
+        test_case = {
+            "id": "test-invalid", "name": "失效案例", "group": "回归",
+            "roundCount": 1, "options": {"seed": 1},
+            "rounds": [{"currentTime": 0, "jobs": [_job("A", "BatchRoute", "LP1")]}],
+        }
+        device = {
+            "id": "device-invalid", "name": "fixture.json", "device": self.device,
+            "routes": [_route("BatchRoute", "PM1,PM2", "BatchRecipe")],
+            "cleans": [], "tests": [test_case],
+        }
+        test_case["baseline"] = {
+            "status": "succeeded",
+            "fingerprint": config_server._workspace_baseline_fingerprint(device, test_case),
+            "makespan": 100.0,
+            "cpuTimeMs": 5.0,
+        }
+        test_case["options"]["seed"] = 9
+        config_server._invalidate_stale_device_baselines(device)
+
+        self.assertEqual("invalid", test_case["baseline"]["status"])
+        self.assertNotIn("makespan", test_case["baseline"])
+        self.assertIn("配置已修改", test_case["baseline"]["error"])
+
+    def test_background_batch_can_be_cancelled_without_overwriting_status(self) -> None:
+        """取消后排队和运行项都应立即终止，迟到的算法结果不能覆盖状态。"""
+        device = {
+            "id": "device-cancel",
+            "name": "fixture.json",
+            "device": self.device,
+            "routes": [_route("BatchRoute", "PM1,PM2", "BatchRecipe")],
+            "cleans": [],
+            "tests": [
+                {
+                    "id": f"test-{index}", "name": f"案例 {index}", "group": "回归",
+                    "roundCount": 1, "options": {},
+                    "rounds": [{"currentTime": 0, "jobs": [_job(f"J{index}", "BatchRoute", "LP1")]}],
+                }
+                for index in (1, 2)
+            ],
+        }
+        started = threading.Event()
+        release = threading.Event()
+
+        def fake_execute(_plan):
+            started.set()
+            self.assertTrue(release.wait(2))
+            return {
+                "ok": True, "totalElapsedMs": 10.0, "makespan": 20.0,
+                "moveCount": 3, "validation": "passed",
+                "output": {"MoveList": []}, "reproductionLog": [],
+            }
+
+        with (
+            patch.object(config_server, "get_workspace_device", return_value=device),
+            patch.object(config_server, "execute_plan", side_effect=fake_execute),
+        ):
+            initial = config_server.start_workspace_test_batch(
+                "device-cancel", "回归", "heuristic", {}, maximum_workers=1,
+            )
+            self.assertTrue(started.wait(2))
+            cancelled = config_server.cancel_workspace_batch_run(initial["batchId"])
+            self.assertEqual("cancelled", cancelled["status"])
+            self.assertEqual(2, cancelled["cancelled"])
+            self.assertEqual(["cancelled", "cancelled"], [item["status"] for item in cancelled["items"]])
+            release.set()
+            time.sleep(0.2)
+
+        final = config_server.read_workspace_batch_run(initial["batchId"])
+        self.assertEqual("cancelled", final["status"])
+        self.assertEqual(["cancelled", "cancelled"], [item["status"] for item in final["items"]])
+
+    def test_batch_status_route_is_served_by_get_and_cancelled_by_delete(self) -> None:
+        """轮询必须走 GET；DELETE 用于终止同一批量任务。"""
+        get_source = inspect.getsource(config_server.ConfigEditorHandler.do_GET)
+        post_source = inspect.getsource(config_server.ConfigEditorHandler.do_POST)
+        delete_source = inspect.getsource(config_server.ConfigEditorHandler.do_DELETE)
+        self.assertIn('path.startswith("/api/run-batches/")', get_source)
+        self.assertNotIn('path.startswith("/api/run-batches/")', post_source)
+        self.assertIn("cancel_workspace_batch_run", delete_source)
+
     def test_automatic_route_rename_updates_every_test_reference(self) -> None:
         """共享 Route 自动改名后，设备下所有测试的 PJob 引用都应同步迁移。"""
         with tempfile.TemporaryDirectory() as directory:
@@ -780,6 +1338,57 @@ class ConfigEditorServerTests(unittest.TestCase):
                 for test in loaded["tests"]
             ]
             self.assertEqual(["1道工序 · PM1/PM2", "1道工序 · PM1/PM2"], references)
+
+    def test_workspace_batch_only_includes_cleans_referenced_by_selected_routes(self) -> None:
+        """未被当前 Route 引用的共享 Clean 不应污染执行输入或 Baseline 指纹。"""
+        first_route = _route("R1", "PM1", "Recipe1")
+        first_route["prePJobCleanRefs"] = ["Clean1"]
+        second_route = _route("R2", "PM2", "Recipe2")
+        second_route["prePJobCleanRefs"] = ["Clean2"]
+        device = {
+            "name": "device.json",
+            "device": self.device,
+            "routes": [first_route, second_route],
+            "cleans": [
+                {
+                    "name": "Clean1",
+                    "recipeName": "CleanRecipe1",
+                    "recipeTime": 30,
+                    "modules": ["PM1"],
+                },
+                {
+                    "name": "Clean2",
+                    "recipeName": "CleanRecipe2",
+                    "recipeTime": 45,
+                    "modules": ["PM2"],
+                },
+            ],
+        }
+        test_case = {
+            "rounds": [{
+                "currentTime": 0,
+                "cjobs": [{
+                    "pjobs": [{
+                        "routeRef": "R1",
+                        "loadPort": "LP1",
+                        "waferCount": 1,
+                    }],
+                }],
+            }],
+        }
+
+        plan = config_server.build_workspace_batch_plan(
+            device,
+            test_case,
+            "neural",
+            {},
+        )
+
+        self.assertEqual(["R1"], [route["name"] for route in plan["routes"]])
+        self.assertEqual(["Clean1"], [clean["name"] for clean in plan["cleans"]])
+        recipe_names = {recipe["name"] for recipe in plan["recipes"]}
+        self.assertIn("CleanRecipe1", recipe_names)
+        self.assertNotIn("CleanRecipe2", recipe_names)
 
     def test_import_l2d_checkpoint_validates_and_saves_model(self) -> None:
         """页面上传的 checkpoint 必须可加载，并按训练阶段保存到模型目录。"""
@@ -1036,9 +1645,14 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual(100.0, result["rounds"][1]["scheduleStartTime"])
         self.assertEqual(effective_time, result["rounds"][1]["recoveryEndTime"])
         second_effective_time = result["rounds"][2]["effectiveTime"]
-        self.assertGreater(second_effective_time, 200.0)
+        # 若请求点恰好空闲可以立即重排；若仍有在途动作则只延到其收尾时刻。
+        self.assertGreaterEqual(second_effective_time, 200.0)
         self.assertLess(second_effective_time, result["rounds"][1]["segmentEnd"])
         self.assertEqual(200.0, result["rounds"][2]["scheduleStartTime"])
+        self.assertEqual(
+            second_effective_time,
+            result["rounds"][2]["recoveryEndTime"],
+        )
         points = result["output"]["RecomputePoints"]
         point = points[0]
         self.assertEqual(100.0, point["Time"])
@@ -1056,7 +1670,8 @@ class ConfigEditorServerTests(unittest.TestCase):
         final_moves = result["output"]["MoveList"]
         self.assertTrue(any(
             int(move["MoveID"]) in initial_move_ids
-            and 100.0 <= float(move["StartTime"]) < effective_time
+            and float(move["StartTime"]) < 100.0 < float(move["EndTime"])
+            and float(move["EndTime"]) <= effective_time + 1e-6
             for move in final_moves
         ))
         self.assertTrue(all(

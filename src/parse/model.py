@@ -97,7 +97,8 @@ class RuntimeAvailability:
 
     时间均为相对秒数。站点字段描述共享门、取放和环境资源；槽位字段保留
     多槽设备的独立占用；Robot 字段用于限制首个搬运；物料字段用于限制
-    投影状态在未来才生效的在机晶圆。
+    投影状态在未来才生效的在机晶圆；LoadLock 环境供局部压力态 manager
+    从真实大气/真空状态继续派工。
     """
 
     station_ready: Dict[str, float] = field(default_factory=dict)
@@ -105,6 +106,7 @@ class RuntimeAvailability:
     robot_ready: Dict[str, float] = field(default_factory=dict)
     robot_positions: Dict[str, str] = field(default_factory=dict)
     material_ready: Dict[int, float] = field(default_factory=dict)
+    loadlock_environment: Dict[str, str] = field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------- #

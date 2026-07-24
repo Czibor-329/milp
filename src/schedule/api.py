@@ -10,6 +10,10 @@ from src.parse.model import Durations, Problem
 from src.timing.solve import SolveResult, solve_timing
 
 from src.timing._common import _DecodeDeadlock
+from .loadlock_dispatch import (
+    LoadLockDispatchManager,
+    resolve_loadlock_manager,
+)
 from .sequencing import decode_orders, decode_orders_choosing
 from .heuristic import (_greedy_chooser, _heuristic_schedule, _pick_best,
                         _random_rollouts, _sampling_chooser,
@@ -22,7 +26,9 @@ _BC_DEFAULT_SAMPLES = 64
 
 
 def start_schedule(ir: Problem, *, verbose: bool = True, seed: int = 0,
-                   random_orders: int = 0, search_seconds: float = 0.0) -> SolveResult:
+                   random_orders: int = 0, search_seconds: float = 0.0,
+                   loadlock_manager: LoadLockDispatchManager | str | None = "petri-eta",
+                   ) -> SolveResult:
     """快速启发式定序 to solve_timing；可选 milp.check_solution 复核。
 
     heuristic：单 job 喂片优先(让 LL 常装未加工片、填满并行 PM)；2+ job 在几种
@@ -37,9 +43,16 @@ def start_schedule(ir: Problem, *, verbose: bool = True, seed: int = 0,
     并按驻留违例定向修复；0=关闭（保持原快速启发式行为），推荐限时模式传 7.0。
 
     快序（吞吐优先）因驻留(qtime)排不出时回退驻留预留定序（reserve=True）。"""
+    manager = resolve_loadlock_manager(loadlock_manager)
     durations = Durations(ir)
     wafers = ir.wafers
-    res = _heuristic_schedule(ir, durations, wafers, verbose)
+    res = _heuristic_schedule(
+        ir,
+        durations,
+        wafers,
+        verbose,
+        loadlock_manager=manager,
+    )
 
     # 启发式不可行（多为超驻留 qtime 排不出）→ 回退驻留预留定序（reserve=True，牺牲吞吐换可行）
     if res is None or not getattr(res, "feasible", False):
@@ -61,12 +74,23 @@ def start_schedule(ir: Problem, *, verbose: bool = True, seed: int = 0,
             if verbose:
                 print("MoveList Conflict")
             res.check_issues = issues  # type: ignore[attr-defined]
+    if res is not None:
+        res.loadlock_manager_requested = (  # type: ignore[attr-defined]
+            manager.name if manager is not None else "none"
+        )
+        res.loadlock_manager_selected = getattr(  # type: ignore[attr-defined]
+            res,
+            "loadlock_manager",
+            "fixed-baseline",
+        )
     return res
 
 
 def start_schedule_by_policy(ir: Problem, policy, *, n_samples: int = _BC_DEFAULT_SAMPLES,
                              temp: float = 0.7, seed: int = 0, fallback: bool = True,
-                             verbose: bool = False) -> SolveResult:
+                             verbose: bool = False,
+                             loadlock_manager: LoadLockDispatchManager | str | None = "petri-eta",
+                             ) -> SolveResult:
     """BC 策略【联合选腔 + 定序】→ solve_timing。策略 chooser 在每步的多候选腔候选上打分，
     decode_orders_choosing 联合决定 (hop, 腔)，把选中腔写回 wafers 后原样喂 solve_timing
     （train/推理同口径：标签也跟随 MILP 选腔）。
@@ -76,6 +100,7 @@ def start_schedule_by_policy(ir: Problem, policy, *, n_samples: int = _BC_DEFAUL
     (round-robin 腔，恒可行)为可行性地板，取「最优可行」
     ⇒ 保证可行(与启发式同 64/64)且单调不劣于启发式；纯 BC 评测可传 fallback=False。"""
     import numpy as np
+    manager = resolve_loadlock_manager(loadlock_manager)
     tm = Durations(ir)
     rng = np.random.default_rng(seed)
     wafers = ir.wafers
@@ -84,6 +109,18 @@ def start_schedule_by_policy(ir: Problem, policy, *, n_samples: int = _BC_DEFAUL
     choosers += [_sampling_chooser(policy, rng, temp) for _ in range(max(n_samples, 0))]
     best = None
     for ch in choosers:
+        if manager is not None:
+            # 旧 BC checkpoint 仍在物理候选上训练，使用 manager 的兼容折叠；
+            # 新的逻辑候选 checkpoint 可改用严格 ``separate_loadlock_choice``。
+            ch = (
+                lambda base: (
+                    lambda state, candidates: manager.rank_preferred_candidates(
+                        state,
+                        candidates,
+                        base(state, candidates),
+                    )
+                )
+            )(ch)
         try:
             wf, orders = decode_orders_choosing(ir, tm, wafers, chooser=ch, reserve=False)
         except (RuntimeError, _DecodeDeadlock):
@@ -93,12 +130,24 @@ def start_schedule_by_policy(ir: Problem, policy, *, n_samples: int = _BC_DEFAUL
             best = r
 
     if fallback:                                               # 启发式可行性地板（含 reserve 兜底，恒可行）
-        floor = start_schedule(ir, verbose=verbose)            # 单调不劣于启发式、保证可行
+        floor = start_schedule(
+            ir,
+            verbose=verbose,
+            loadlock_manager=manager,
+        )                                                       # 单调不劣于启发式、保证可行
         best = _pick_best(best, floor)
 
     res = best
     if res is not None:
         res.check_issues = check_solution(ir, res)             # type: ignore[attr-defined]
+        res.loadlock_manager_requested = (  # type: ignore[attr-defined]
+            manager.name if manager is not None else "none"
+        )
+        res.loadlock_manager_selected = getattr(  # type: ignore[attr-defined]
+            res,
+            "loadlock_manager",
+            "policy-or-fixed-floor",
+        )
     return res
 
 

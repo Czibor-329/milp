@@ -5,6 +5,7 @@
 | 策略 | 标识 | 适用场景 | 优化方式 |
 | --- | --- | --- | --- |
 | 快速启发式 | `heuristic` | 默认、需要低延迟 | 喂片优先、配比试探与安全兜底 |
+| 深层神经派工 | `neural` | 离线充分训练、在线低延迟 | 5.9 万参数集合注意力 + 独立路线同步波前 + 有预算物理修复 |
 | RL 搜索 | `rl` | 已有策略模型、要求限时改进 | 网络采样安全资源顺序，Timing 精确取优 |
 | L2D 图策略 | `l2d` | PSE300 固定选腔场景 | GraphCNN/Actor 生成安全操作顺序 |
 | MILP oracle | `milp` | 小中规模基准、标签与最优性参考 | Gurobi 混合整数优化 |
@@ -14,6 +15,9 @@
 - [公共解码与定时机制](common-engine.md)：所有非 MILP 策略共享的候选、Banker 安全检查、精确定时与约束口径。
 - [启发式与搜索策略](heuristic-and-search.md)：启发式及其离线搜索变体。
 - [学习策略与 MILP](learning-and-milp.md)：RL/L2D 的模型基础以及 `milp` 的建模决策。
+- [深层神经派工](neural-dispatch.md)：直觉与理论依据、离线训练、低延迟推理和质量验收。
+- [通用 LoadLock manager](neural-dispatch.md#loadlock策略无关的两层电梯式-petri-eta-manager)：
+  Heuristic、Neural、BC、RL 共用的 Petri 安全候选 + 动态 ETA 物理锁绑定层。
 - [运行、验收与选择](operation-guide.md)：命令行参数、输出、自检和选型建议。
 
 ## 统一术语

@@ -2,6 +2,7 @@
 
 取代旧 run_.py / run_milp.py / eval_dataset.py 三脚本。策略（--strategy，可多选）：
   · heuristic  快速启发式定序（单 job 喂片 / 2+ job 配比搜 / 清洁排空 + backward 兜底）。start_schedule。
+  · neural     离线训练的深层集合注意力网络；生产用 NumPy 贪心轨迹 + 有预算物理修复。
   · random     启发式基底上叠 N 次随机定序 rollout 取优。start_schedule(random_orders=N)。
   · search     面向 2-job 的限时结构化搜索（默认 7 秒）：发片交织 + 驻留违例定向修复。
   · bc         BC 策略【联合选腔 + 定序】。start_schedule_by_policy（需 results/models/bc_policy.pt）。
@@ -43,6 +44,7 @@ from src.paths import input_data_path, MODELS_DIR, OUTPUT_DIR
 from src.parse.generator import expand_topo_pms, PM_POOL_6
 from src.schedule.api import start_schedule, start_schedule_by_policy
 from src.schedule.milp import solve_milp
+from src.schedule.neural import DEFAULT_MODEL_PATH, load_neural_policy, start_schedule_neural
 from src.schedule.rl import start_schedule_by_rl
 from src.export import check_solution, export_movelist
 from src.validation import validate_move_list
@@ -50,7 +52,7 @@ from src.validation import validate_move_list
 BASE_TOPO = "s1-1c1p-preclean"
 # 子集用「目录/名」限定：train/* 有 MILP 标签的配置网格（报 gap）；test/* 大规模外推（无标签，不计 gap）。
 SUBSETS = ["train/1stage", "train/2stage", "train/3stage", "train/2job", "train/clean", "test/1stage"]
-STRATEGIES = ["heuristic", "search", "random", "bc", "rl", "milp"]
+STRATEGIES = ["heuristic", "neural", "search", "random", "bc", "rl", "milp"]
 _DATASET = Path(__file__).resolve().parents[1] / "dataset"
 
 
@@ -74,6 +76,10 @@ def run_strategy(name: str, ir, *, policy=None, random_orders: int = 64,
     t0 = time.perf_counter()
     if name == "heuristic":
         res = start_schedule(ir, verbose=verbose)
+    elif name == "neural":
+        if policy is None:
+            return None, float("nan")
+        res = start_schedule_neural(ir, policy=policy)
     elif name == "search":
         res = start_schedule(ir, verbose=verbose, seed=seed,
                              search_seconds=search_seconds)
@@ -142,6 +148,8 @@ def _instances(sub: str, limit: int = 0):
 def _load_policy(path: Path, strategy: str):
     """加载指定策略 checkpoint；失败时只跳过该神经网络策略。"""
     try:
+        if strategy == "neural":
+            return load_neural_policy(path)
         from src.schedule.policy import load_policy
         return load_policy(path)
     except Exception as e:  # noqa: BLE001
@@ -156,6 +164,21 @@ def run_dataset(args, strategies, policies) -> None:
     """批量评测所选策略；可按总片数构造无标签的规模外推实例。"""
     ai, _ = load_alg_entries(input_data_path(BASE_TOPO))
     ai = expand_topo_pms(ai, PM_POOL_6)
+    if args.wafer_count > 0:
+        # 离线规模外推没有真实 FOUP 更换事件。把 LoadPort 视作足够大的输入仓，
+        # 避免超过原 25 槽后 parse_task 取模复用槽位，造成两个物料占同一初始槽。
+        for station in (ai.get("Stations") or {}).values():
+            if str(station.get("Type") or "").lower() != "loadport":
+                continue
+            capacity = max(
+                int(station.get("Capacity") or 1),
+                int(args.wafer_count),
+            )
+            station["Capacity"] = capacity
+            station["Slots"] = list(range(1, capacity + 1))
+            station["TimeToAvailableOfSlot"] = {
+                str(slot): 0 for slot in range(1, capacity + 1)
+            }
 
     hdr = f"{'case':<26} {'MILP':>9} |"
     for s in strategies:
@@ -210,7 +233,14 @@ def run_dataset(args, strategies, policies) -> None:
                     res, ms = None, float("nan")
                 feas = _ok(res)
                 mk = res.makespan if feas else float("nan")
-                issues, ml = _check_all(ir, res, ai) if feas else ([], None)
+                # 规模外推会重建物料与 LoadPort 槽位；原始 AlgInit 中的 Materials 已不再
+                # 对应新任务，校验器应从 Problem 的首工序恢复物料，而不是加载旧快照。
+                validation_source = None if args.wafer_count > 0 else ai
+                issues, ml = (
+                    _check_all(ir, res, validation_source)
+                    if feas
+                    else ([], None)
+                )
                 viol = len(issues)
                 for x in issues[:4]:
                     print(f"  [viol] {name} {s}: {x}")
@@ -227,6 +257,10 @@ def run_dataset(args, strategies, policies) -> None:
                         f" {(f'{gap:+.2f}' if gap == gap else '-'):>7} {str(feas)[0]:>2} {viol:>2} |")
                 rec[s] = {"mk": mk if feas else None, "ms": ms if ms == ms else None,
                           "feas": feas, "viol": viol, "gap": gap if gap == gap else None}
+                if s == "neural" and feas:
+                    rec[s]["diagnostics"] = dict(
+                        getattr(res, "neural_diagnostics", {}) or {}
+                    )
             print(row)
             records.append(rec)
 
@@ -319,6 +353,8 @@ def main() -> None:
                     help="search 策略在每个 2-job 实例上的墙钟预算(秒)")
     ap.add_argument("--bc-model", type=Path, default=MODELS_DIR / "bc_policy.pt",
                     help="BC checkpoint 路径")
+    ap.add_argument("--neural-model", type=Path, default=DEFAULT_MODEL_PATH,
+                    help="深层集合注意力网络的安全 NumPy checkpoint 路径")
     ap.add_argument("--rl-model", type=Path, default=MODELS_DIR / "bc_policy_rl.pt",
                     help="RL checkpoint 路径")
     ap.add_argument("--rl-search-seconds", type=float, default=4.0,
@@ -333,7 +369,7 @@ def main() -> None:
     ap.add_argument("--out", type=str, default=None, help="把逐实例+汇总写成 JSON（仅数据集模式）")
     args = ap.parse_args()
 
-    strategies = ["heuristic", "search", "random", "bc", "rl"] if args.strategy == ["all"] else args.strategy
+    strategies = ["heuristic", "neural", "search", "random", "bc", "rl"] if args.strategy == ["all"] else args.strategy
     bad = [s for s in strategies if s not in STRATEGIES]
     if bad:
         ap.error(f"未知策略 {bad}，可选 {STRATEGIES} 或 all")
@@ -346,10 +382,14 @@ def main() -> None:
     if args.rl_temperature <= 0:
         ap.error("--rl-temperature 必须为正数")
 
-    model_paths = {"bc": args.bc_model, "rl": args.rl_model}
+    model_paths = {
+        "neural": args.neural_model,
+        "bc": args.bc_model,
+        "rl": args.rl_model,
+    }
     policies = {
         strategy: _load_policy(model_paths[strategy], strategy)
-        for strategy in ("bc", "rl")
+        for strategy in ("neural", "bc", "rl")
         if strategy in strategies
     }
     strategies = [

@@ -15,6 +15,10 @@ from src.timing.solve import SolveResult, solve_timing
 
 from .api import start_schedule
 from .heuristic import _greedy_chooser, _pick_best, _sampling_chooser
+from .loadlock_dispatch import (
+    LoadLockDispatchManager,
+    resolve_loadlock_manager,
+)
 from .sequencing import decode_orders_choosing
 
 
@@ -34,6 +38,7 @@ def start_schedule_by_rl(
     seed: int = 0,
     fallback: bool = True,
     verbose: bool = False,
+    loadlock_manager: LoadLockDispatchManager | str | None = "petri-eta",
 ) -> SolveResult:
     """在限时采样中搜索顶层资源顺序，并用定时器评估完整候选。"""
     if search_seconds < 0:
@@ -46,12 +51,17 @@ def start_schedule_by_rl(
     import numpy as np
 
     budget = min(float(search_seconds), _MAX_SEARCH_SECONDS)
+    manager = resolve_loadlock_manager(loadlock_manager)
     search_start = time.perf_counter()
     deadline = search_start + budget
     durations = Durations(ir)
     wafers = ir.wafers
     rng = np.random.default_rng(seed)
-    best = start_schedule(ir, verbose=False) if fallback else None
+    best = (
+        start_schedule(ir, verbose=False, loadlock_manager=manager)
+        if fallback
+        else None
+    )
     rollout_count = 0
     improvement_count = 0
     longest_rollout = 0.0
@@ -59,6 +69,16 @@ def start_schedule_by_rl(
     choosers = [_greedy_chooser(policy)]
     choosers.extend(_sampling_chooser(policy, rng, temp) for _ in range(max_rollouts))
     for chooser in choosers:
+        if manager is not None:
+            base_chooser = chooser
+
+            def chooser(state, candidates, base=base_chooser):
+                """让旧物理候选策略经公共 manager 绑定 LoadLock。"""
+                return manager.rank_preferred_candidates(
+                    state,
+                    candidates,
+                    base(state, candidates),
+                )
         now = time.perf_counter()
         guard = max(_MIN_ROLLOUT_GUARD_SECONDS, longest_rollout * 1.25)
         if budget <= 0 or now + guard >= deadline:
@@ -88,6 +108,14 @@ def start_schedule_by_rl(
     if best is not None:
         best.rl_search_runtime = runtime  # type: ignore[attr-defined]
         best.rl_search_budget = budget  # type: ignore[attr-defined]
+        best.loadlock_manager_requested = (  # type: ignore[attr-defined]
+            manager.name if manager is not None else "none"
+        )
+        best.loadlock_manager_selected = getattr(  # type: ignore[attr-defined]
+            best,
+            "loadlock_manager",
+            "policy-or-fixed-floor",
+        )
         best.rl_rollouts = rollout_count  # type: ignore[attr-defined]
         best.rl_improvements = improvement_count  # type: ignore[attr-defined]
         best.check_issues = check_solution(ir, best)  # type: ignore[attr-defined]

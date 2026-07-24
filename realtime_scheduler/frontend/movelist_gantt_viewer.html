@@ -2888,21 +2888,27 @@
       state.resizeTimer = window.setTimeout(renderCurrent, 80);
     }
 
-    /** 从调度终端的 src 查询参数自动读取合并后的 MoveList。 */
+    /** 从一个或多个 src 查询参数读取 MoveList，并把每个结果作为独立标签页。 */
     async function loadQuerySource() {
-      const source = new URLSearchParams(window.location.search).get("src");
-      if (!source) return;
-      try {
+      const params = new URLSearchParams(window.location.search);
+      const sources = params.getAll("src"), names = params.getAll("name");
+      if (!sources.length) return;
+      const loaded = await Promise.allSettled(sources.map(async (source, index) => {
         const response = await fetch(source, { cache: "no-store" });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        if (!response.ok) throw new Error(`${names[index] || source}: HTTP ${response.status}`);
         const content = await response.blob();
-        const file = new File([content], "scheduler-result.json", {
+        const safeName = String(names[index] || `scheduler-result-${index + 1}`)
+          .replace(/[\\/:*?"<>|]+/g, "_");
+        return new File([content], `${String(index + 1).padStart(2, "0")} · ${safeName}.json`, {
           type: "application/json",
-          lastModified: Date.now()
+          lastModified: Date.now() + index
         });
-        loadFileList([file], false);
-      } catch (error) {
-        renderEmpty(`Failed to load scheduler result: ${error instanceof Error ? error.message : String(error)}`);
+      }));
+      const files = loaded.filter(item => item.status === "fulfilled").map(item => item.value);
+      if (files.length) loadFileList(files, false);
+      const failures = loaded.filter(item => item.status === "rejected");
+      if (!files.length && failures.length) {
+        renderEmpty(`Failed to load scheduler results: ${failures.map(item => item.reason?.message || item.reason).join("; ")}`);
       }
     }
 

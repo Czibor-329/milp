@@ -54,6 +54,48 @@ class _ScheduledCompletion:
     complete: Callable[[], None]
 
 
+@dataclass(frozen=True)
+class _MoveLookup:
+    """按开始时刻和访问站点索引取放动作，供开门动作 O(1) 找关联 Move。"""
+
+    moves: Sequence[Mapping[str, Any]]
+    related: Mapping[Tuple[int, str], Mapping[str, Any]]
+
+
+def _time_bucket(value: float) -> int:
+    """把时间量化到校验容差网格。"""
+    return int(round(float(value) / TIME_TOLERANCE))
+
+
+def _build_move_lookup(
+    moves: Sequence[Mapping[str, Any]],
+) -> _MoveLookup:
+    """预索引开门可能关联的 pick/place/swap，避免逐开门扫描整个 MoveList。"""
+    related: Dict[Tuple[int, str], Mapping[str, Any]] = {}
+    for move in moves:
+        start_time = num(move.get("StartTime"))
+        if start_time is None:
+            continue
+        move_type = move.get("MoveType")
+        stations: Iterable[str]
+        if move_type == PICK_MOVE:
+            stations = [_first_text(move, "SrcStationList")]
+        elif move_type == PLACE_MOVE:
+            stations = [_first_text(move, "DestStationList")]
+        elif move_type == SWAP_MOVE:
+            stations = [
+                str(value)
+                for value in as_list(dict(move), "StationList")
+            ]
+        else:
+            continue
+        bucket = _time_bucket(start_time)
+        for station_name in stations:
+            if station_name:
+                related.setdefault((bucket, station_name), move)
+    return _MoveLookup(moves, related)
+
+
 class MoveStateReplay:
     """接收外部 Move 开始/结束通知并维护实时设备状态。
 
@@ -75,6 +117,7 @@ class MoveStateReplay:
         """用当前计划和初始整机状态创建实时回放器。"""
         self.task = task
         self.moves = [dict(move) for move in sorted(moves, key=sort_key)]
+        self._move_lookup = _build_move_lookup(self.moves)
         self.state = MachineState.from_sources(task, init_data)
         self.current_time = 0.0
         self._moves_by_id = {
@@ -108,7 +151,13 @@ class MoveStateReplay:
             for move in self.moves
         ]
 
-    def update_move_state(self, notification: Mapping[str, Any]) -> MachineState:
+    def update_move_state(
+        self,
+        notification: Mapping[str, Any],
+        *,
+        snapshot: bool = True,
+        track_reservations: bool = True,
+    ) -> Optional[MachineState]:
         """应用一条 Move 开始或结束通知并返回当前状态快照。
 
         通知至少包含 ``MoveID`` 和 ``MoveState``；开始通知可带 ``StartTime``，结束通知可带
@@ -120,12 +169,16 @@ class MoveStateReplay:
             raise ValueError(f"未知 MoveID={move_id}")
         move_state = self._notification_state(notification)
         if move_state == self.RUNNING:
-            self._start_notified_move(move_id, notification)
+            self._start_notified_move(
+                move_id,
+                notification,
+                track_reservations=track_reservations,
+            )
         elif move_state == self.DONE:
             self._finish_notified_move(move_id, notification)
         else:
             raise ValueError(f"MoveID={move_id} 已中止；请先完成设备恢复，再从稳定状态重算")
-        return self.state.clone()
+        return self.state.clone() if snapshot else None
 
     @classmethod
     def _notification_state(cls, notification: Mapping[str, Any]) -> int:
@@ -141,7 +194,13 @@ class MoveStateReplay:
             raise ValueError(f"不支持 MoveState={raw}")
         return states[name]
 
-    def _start_notified_move(self, move_id: int, notification: Mapping[str, Any]) -> None:
+    def _start_notified_move(
+        self,
+        move_id: int,
+        notification: Mapping[str, Any],
+        *,
+        track_reservations: bool,
+    ) -> None:
         """按开始通知执行使能检查并登记结束回调。"""
         if move_id in self._running or move_id in self._executed:
             raise ValueError(f"MoveID={move_id} 收到重复开始通知")
@@ -156,18 +215,37 @@ class MoveStateReplay:
             move["SrcStationList"] = list(notification["SrcStationList"])
         move["StartTime"] = actual_start
         move["EndTime"] = actual_start + max(0.0, planned_end - planned_start)
+        resource_refs = (
+            _busy_resource_refs(self.state)
+            if track_reservations
+            else []
+        )
         before = {
             (id(owner), field_name): float(getattr(owner, field_name))
-            for owner, field_name in _busy_resource_refs(self.state)
+            for owner, field_name in resource_refs
         }
-        error = _start_move(self.state, move, float(move["EndTime"]), self.moves, self._scheduled)
+        error = _start_move(
+            self.state,
+            move,
+            float(move["EndTime"]),
+            self._move_lookup,
+            self._scheduled,
+        )
         if error:
             raise ValueError(error)
-        self._reservations[move_id] = [
-            (owner, field_name)
-            for owner, field_name in _busy_resource_refs(self.state)
-            if abs(float(getattr(owner, field_name)) - before[(id(owner), field_name)]) > TIME_TOLERANCE
-        ]
+        self._reservations[move_id] = (
+            [
+                (owner, field_name)
+                for owner, field_name in resource_refs
+                if abs(
+                    float(getattr(owner, field_name))
+                    - before[(id(owner), field_name)]
+                )
+                > TIME_TOLERANCE
+            ]
+            if track_reservations
+            else []
+        )
         self._running[move_id] = move
         self.current_time = max(self.current_time, actual_start)
 
@@ -216,6 +294,7 @@ def validate_move_list(
     state = MachineState.from_sources(task, init_data)
     scheduled: List[_ScheduledCompletion] = []
     ordered_moves = sorted(moves, key=sort_key)
+    move_lookup = _build_move_lookup(ordered_moves)
 
     for move in ordered_moves:
         start_time = num(move.get("StartTime"))
@@ -227,7 +306,7 @@ def validate_move_list(
 
         # 先应用当前 Move 开始前已经结束的状态变更，再检查本次使能。
         _finish_until(scheduled, start_time)
-        error = _start_move(state, move, end_time, ordered_moves, scheduled)
+        error = _start_move(state, move, end_time, move_lookup, scheduled)
         if error:
             return [error]
 
@@ -265,7 +344,7 @@ def _start_move(
     state: MachineState,
     move: Mapping[str, Any],
     end_time: float,
-    all_moves: Sequence[Mapping[str, Any]],
+    all_moves: "Sequence[Mapping[str, Any]] | _MoveLookup",
     scheduled: List[_ScheduledCompletion],
 ) -> Optional[str]:
     """检查一条 Move 是否使能，并登记其结束时的状态更新。"""
@@ -695,7 +774,7 @@ def _start_swap(
 
 def _prepare_action(
     move: Mapping[str, Any],
-    all_moves: Sequence[Mapping[str, Any]],
+    all_moves: "Sequence[Mapping[str, Any]] | _MoveLookup",
 ) -> Tuple[Optional[int], Optional[Mapping[str, Any]]]:
     """读取开门关联动作；字段缺失时从开门结束时刻的取放或换片推断。"""
     action = move.get("RelatedActionType")
@@ -711,13 +790,26 @@ def _prepare_action(
     )
 
 
-def _related_move(move: Mapping[str, Any], all_moves: Sequence[Mapping[str, Any]]) -> Optional[Mapping[str, Any]]:
+def _related_move(
+    move: Mapping[str, Any],
+    all_moves: "Sequence[Mapping[str, Any]] | _MoveLookup",
+) -> Optional[Mapping[str, Any]]:
     """查找在开门结束时刻衔接、且访问同一站点的取放或换片动作。"""
     end_time = num(move.get("EndTime"))
     station_name = _station_name(move)
     if end_time is None:
         return None
-    for candidate in all_moves:
+    if isinstance(all_moves, _MoveLookup):
+        bucket = _time_bucket(end_time)
+        candidates = [
+            candidate
+            for neighbor in (bucket - 1, bucket, bucket + 1)
+            for candidate in [all_moves.related.get((neighbor, station_name))]
+            if candidate is not None
+        ]
+    else:
+        candidates = all_moves
+    for candidate in candidates:
         if abs((num(candidate.get("StartTime")) or float("inf")) - end_time) > TIME_TOLERANCE:
             continue
         if candidate.get("MoveType") == PICK_MOVE and _first_text(candidate, "SrcStationList") == station_name:

@@ -19,19 +19,22 @@ import binascii
 import hashlib
 import json
 import math
+import os
 import sys
 import threading
 import time
 import uuid
 import webbrowser
 from collections import OrderedDict
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 from urllib.parse import unquote, urlparse
 
 
@@ -69,8 +72,10 @@ DEFAULT_PORT = 8765
 MAX_REQUEST_BYTES = 12 * 1024 * 1024
 MAX_L2D_CHECKPOINT_BYTES = 8 * 1024 * 1024
 MAX_SAVED_RESULTS = 8
+MAX_SAVED_BATCH_RUNS = 8
 WORKSPACE_STORE_VERSION = 2
 API_SCHEMA_VERSION = "cjob-pjob-v3"
+HEURISTIC_BASELINE_SCHEMA_VERSION = "petri-look-dynamic-v1"
 FIRST_SLOT_ID = 1
 MAX_WAFERS_PER_JOB = 25
 MAX_MILP_WAFERS = 12
@@ -88,6 +93,7 @@ EDITOR_PATH = FRONTEND_DIR / "config_editor.html"
 VIEWER_PATH = FRONTEND_DIR / "movelist_gantt_viewer.html"
 ROUTE_EDITOR_LOGIC_PATH = FRONTEND_DIR / "route_editor_logic.js"
 RL_MODEL_PATH = MODELS_DIR / "bc_policy_rl.pt"
+NEURAL_MODEL_PATH = ROOT / "src" / "schedule" / "neural_policy.npz"
 L2D_MODEL_CANDIDATES = (
     MODELS_DIR / "l2d_pse300_2job.pt",
     ROOT / "l2d_pse300_2job.pt",
@@ -112,11 +118,51 @@ _RESULTS_LOCK = threading.Lock()
 _REPRODUCTION_LOGS: "OrderedDict[str, List[Dict[str, Any]]]" = OrderedDict()
 _REPRODUCTION_LOGS_LOCK = threading.Lock()
 _WORKSPACE_STORE_LOCK = threading.RLock()
+_BATCH_RUNS: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+_BATCH_RUNS_LOCK = threading.RLock()
+_BATCH_CANCEL_EVENTS: Dict[str, threading.Event] = {}
 _RL_POLICY: Any = None
 _RL_POLICY_LOCK = threading.Lock()
+_NEURAL_POLICY: Any = None
+_NEURAL_POLICY_SIGNATURE: Optional[Tuple[str, int, int]] = None
+_NEURAL_POLICY_LOCK = threading.Lock()
 _L2D_POLICY: Any = None
 _L2D_POLICY_SIGNATURE: Optional[Tuple[str, int, int]] = None
 _L2D_POLICY_LOCK = threading.Lock()
+
+
+@contextmanager
+def _workspace_catalog_guard(path: Path) -> Iterator[None]:
+    """串行化跨线程、跨进程的工作区读改写事务。
+
+    Python 的 ``RLock`` 只能保护当前服务进程。批量验收或桌面端误启第二个服务时，
+    两个进程若共用固定 ``.tmp`` 文件会破坏 JSON，单靠原子替换也会发生后写覆盖。
+    这里用一字节系统文件锁包住完整读改写事务；锁文件只承载互斥，不保存业务数据。
+    """
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with _WORKSPACE_STORE_LOCK, lock_path.open("a+b") as lock_file:
+        lock_file.seek(0, os.SEEK_END)
+        if lock_file.tell() == 0:
+            lock_file.write(b"\0")
+            lock_file.flush()
+        lock_file.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            lock_file.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 @dataclass
@@ -221,9 +267,24 @@ class StandardAlgorithmRuntime:
             for material in robot.hands.values()
         )
 
-    def update_move_state(self, notification: Mapping[str, Any]) -> MachineState:
+    def update_move_state(
+        self,
+        notification: Mapping[str, Any],
+        *,
+        snapshot: bool = True,
+        track_reservations: bool = True,
+    ) -> Optional[MachineState]:
         """把模拟设备通知交给同一套 MoveList 状态回放器。"""
-        return self._tracker.update_move_state(notification)
+        return self._tracker.update_move_state(
+            notification,
+            snapshot=snapshot,
+            track_reservations=track_reservations,
+        )
+
+    def robot_position(self, robot_name: str) -> Optional[str]:
+        """只读返回 Robot 当前指向，不复制完整设备快照。"""
+        robot = self._tracker.state.resolve_robot(robot_name)
+        return robot.position if robot is not None else None
 
     def replace_plan(
         self,
@@ -1470,10 +1531,16 @@ def advance_to_recompute(
             and not _move_material_ids(planned_move)
         ):
             robot_name = str(planned_move.get("Robot") or planned_move.get("ModuleName") or "")
-            robot = scheduler.state.resolve_robot(robot_name)
-            if robot is not None and robot.position:
-                applied["SrcStationList"] = [robot.position]
-        scheduler.update_move_state(applied)
+            robot_position = scheduler.robot_position(robot_name)
+            if robot_position:
+                applied["SrcStationList"] = [robot_position]
+        # 这里严格回放计划时间，不需要为每条通知复制整机状态，也不需要扫描所有
+        # LoadPort 槽位记录“实际结束时间”修正字段。
+        scheduler.update_move_state(
+            applied,
+            snapshot=False,
+            track_reservations=False,
+        )
         if applied.get("MoveState") == MoveStateReplay.RUNNING:
             started.add(move_id)
         else:
@@ -1509,7 +1576,13 @@ def advance_to_recompute(
         cutoff,
         include_loadlock_environment,
     )
-    recovery_end = float(cutoff)
+    # 前一轮请求可能发生在更早一次恢复链结束之前。那条旧链已经进入历史、
+    # 不再出现在 current_plan，但其动作仍是不可取消的物理承诺；本轮展示和
+    # 下一段状态投影的 EffectiveTime 不能因此倒退。
+    recovery_end = max(
+        float(cutoff),
+        float(scheduler.committed_recovery_end),
+    )
     for group in groups:
         group_time = float(group["time"])
         if group_time < cutoff - TIME_TOLERANCE:
@@ -1549,6 +1622,30 @@ def advance_to_recompute(
             f"开门={open_doors}，机械手持片={held}"
         )
     return RecoveryProjection(recovery_end, material_ready_times)
+
+
+def _load_neural_inference_policy() -> Any:
+    """按需加载纯 NumPy 神经模型，并在离线训练覆盖文件后自动刷新。"""
+    global _NEURAL_POLICY, _NEURAL_POLICY_SIGNATURE
+    with _NEURAL_POLICY_LOCK:
+        if not NEURAL_MODEL_PATH.is_file():
+            raise ValueError(
+                f"深层神经派工模型不存在：{NEURAL_MODEL_PATH}；"
+                "请先运行 python scripts/train_neural.py"
+            )
+        stat = NEURAL_MODEL_PATH.stat()
+        signature = (
+            str(NEURAL_MODEL_PATH.resolve()),
+            stat.st_mtime_ns,
+            stat.st_size,
+        )
+        if _NEURAL_POLICY is not None and _NEURAL_POLICY_SIGNATURE == signature:
+            return _NEURAL_POLICY
+        from src.schedule.neural import load_neural_policy
+
+        _NEURAL_POLICY = load_neural_policy(NEURAL_MODEL_PATH)
+        _NEURAL_POLICY_SIGNATURE = signature
+        return _NEURAL_POLICY
 
 
 def _load_rl_policy() -> Any:
@@ -1833,14 +1930,14 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
         if normalized_strategy.startswith("other_alg:") and ":" in strategy
         else None
     )
-    builtin_strategies = {"heuristic", "rl", "l2d", "milp"}
+    builtin_strategies = {"heuristic", "neural", "rl", "l2d", "milp"}
     discovered_ids = {
         str(item["id"])
         for item in discover_other_algorithms()
     }
     if normalized_strategy not in builtin_strategies and other_algorithm_id not in discovered_ids:
         raise ValueError(
-            "策略只支持 heuristic、rl、l2d、milp，"
+            "策略只支持 heuristic、neural、rl、l2d、milp，"
             "或 other_alg 下已发现的标准算法"
         )
     strategy = normalized_strategy if normalized_strategy in builtin_strategies else strategy
@@ -1861,13 +1958,32 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
     if any(right <= left + TIME_TOLERANCE for left, right in zip(times, times[1:])):
         raise ValueError("各轮重算时间必须严格递增")
 
-    if strategy == "rl":
+    if strategy == "neural":
+        policy = _load_neural_inference_policy()
+    elif strategy == "rl":
         policy = _load_rl_policy()
     elif strategy == "l2d":
         policy = _load_l2d_inference_policy()
     else:
         policy = None
     options = plan.get("options") if isinstance(plan.get("options"), Mapping) else {}
+    default_loadlock_manager_mode = (
+        "joint" if strategy == "neural" else "petri-look"
+    )
+    loadlock_manager_mode = str(
+        options.get("loadLockManager") or default_loadlock_manager_mode
+    ).strip().lower()
+    if loadlock_manager_mode not in {"joint", "petri-look"}:
+        raise ValueError("LoadLock manager 只支持 joint 或 petri-look")
+    contains_multi_process_route = any(
+        sum(
+            bool(stage.get("needProcess"))
+            for stage in (route.get("stages") or [])
+            if isinstance(stage, Mapping)
+        ) > 1
+        for route in (plan.get("routes") or [])
+        if isinstance(route, Mapping)
+    )
     build_state = BuildState()
     logs: List[str] = [
         f"设备：{plan.get('deviceName') or 'selected init'}",
@@ -1901,8 +2017,11 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
     scheduler = RealtimeRescheduler(
         plan["device"],
         first_update,
+        first_update,
         strategy=strategy,
         policy=policy,
+        loadlock_manager_mode=loadlock_manager_mode,
+        neural_force_quality_floor=contains_multi_process_route,
         rl_search_seconds=_finite_number(options.get("rlSearchSeconds"), 4.0),
         rl_rollouts=max(0, int(_finite_number(options.get("rlRollouts"), 256))),
         rl_temperature=max(0.01, _finite_number(options.get("rlTemperature"), 0.7)),
@@ -1933,6 +2052,22 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
             f"  MILP：{proof}；gap={float(first_diagnostics.get('gap', 0.0)) * 100:.3f}%；"
             f"求解 {float(first_diagnostics.get('runtimeSeconds', 0.0)):.2f}s"
         )
+    elif strategy == "neural":
+        wavefront_summary = (
+            f"；同步波前={int(first_diagnostics.get('wavefrontFamilies') or 0)} 路线族"
+            if first_diagnostics.get("inductiveBias")
+            == "balanced-disjoint-route-wavefront"
+            else ""
+        )
+        logs.append(
+            "  Neural："
+            f"{first_diagnostics.get('architecture', 'unknown')}；"
+            f"{int(first_diagnostics.get('parameterCount') or 0)} 参数；"
+            f"{int(first_diagnostics.get('forwardPasses') or 0)} 次候选集合前向；"
+            f"结果来源={first_diagnostics.get('selectedSource', 'unknown')}"
+            f"；LoadLock={first_diagnostics.get('loadLockManager', 'joint-network')}"
+            f"{wavefront_summary}"
+        )
     reproduction.add("AlgOutput", _alg_output_info(scheduler.combined_output()))
 
     for index, round_config in enumerate(rounds[1:], start=2):
@@ -1958,14 +2093,17 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
         update = build_round_update(plan, round_config, requested_time, build_state)
         reproduction.add("AlgSchedule", _schedule_log_info(plan["device"], update), requested_time)
         round_started = time.perf_counter()
-        scheduler.recompute(
-            update,
-            effective_time,
-            cutoff_time=requested_time,
-            schedule_start_time=requested_time,
-            material_ready_times=recovery.material_ready_times,
-            reason=f"第 {index} 轮新增 Job",
-        )
+        try:
+            scheduler.recompute(
+                update,
+                effective_time,
+                cutoff_time=requested_time,
+                schedule_start_time=requested_time,
+                material_ready_times=recovery.material_ready_times,
+                reason=f"第 {index} 轮新增 Job",
+            )
+        except Exception as error:
+            raise RuntimeError(f"第 {index} 轮重算失败：{error}") from error
         elapsed_ms = (time.perf_counter() - round_started) * 1000.0
         summaries.append({
             "index": index,
@@ -1977,6 +2115,7 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
             "jobCount": _round_pjob_count(round_config),
             "elapsedMs": elapsed_ms,
             "segmentEnd": _segment_end(scheduler.current_plan),
+            "strategyDiagnostics": scheduler.last_strategy_diagnostics,
         })
         suffix = (
             f"，固定旧动作最晚执行至 {effective_time:.2f}s；新计划从请求时刻并行开始"
@@ -2009,6 +2148,7 @@ def execute_plan(raw_plan: Mapping[str, Any]) -> Dict[str, Any]:
     """执行计划；成功和失败都生成可重放的 input_data 格式日志。"""
     reproduction = ReproductionLog()
     reproduction.add("Input", [deepcopy(dict(raw_plan))])
+    cpu_started = time.thread_time() if hasattr(time, "thread_time") else time.process_time()
     try:
         result = _execute_plan(raw_plan, reproduction)
     except Exception as error:  # noqa: BLE001
@@ -2018,6 +2158,8 @@ def execute_plan(raw_plan: Mapping[str, Any]) -> Dict[str, Any]:
             "Message": str(error),
         }]))
         raise LoggedPlanError(str(error), reproduction.entries) from error
+    cpu_finished = time.thread_time() if hasattr(time, "thread_time") else time.process_time()
+    result["cpuTimeMs"] = max(0.0, (cpu_finished - cpu_started) * 1000.0)
     result["reproductionLog"] = deepcopy(reproduction.entries)
     return result
 
@@ -2156,9 +2298,14 @@ def _read_workspace_catalog_unlocked(path: Path) -> Dict[str, Any]:
 def _write_text_atomic(path: Path, content: str) -> None:
     """原子写入 UTF-8 文本，避免异常退出留下半份文件。"""
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = path.with_suffix(path.suffix + ".tmp")
-    temporary_path.write_text(content, encoding="utf-8")
-    temporary_path.replace(path)
+    temporary_path = path.with_name(
+        f".{path.name}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp"
+    )
+    try:
+        temporary_path.write_text(content, encoding="utf-8")
+        temporary_path.replace(path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 def _write_json_atomic(path: Path, payload: Any) -> None:
@@ -2192,7 +2339,7 @@ def _write_workspace_catalog_unlocked(path: Path, catalog: Mapping[str, Any]) ->
 
 def list_workspace_devices(path: Path = WORKSPACE_STORE_PATH) -> List[Dict[str, Any]]:
     """列出本地保存的设备摘要，不返回体积较大的 init 和测试集内容。"""
-    with _WORKSPACE_STORE_LOCK:
+    with _workspace_catalog_guard(path):
         catalog = _read_workspace_catalog_unlocked(path)
         return [{
             "id": str(device.get("id") or ""),
@@ -2204,7 +2351,7 @@ def list_workspace_devices(path: Path = WORKSPACE_STORE_PATH) -> List[Dict[str, 
 
 def get_workspace_device(device_id: str, path: Path = WORKSPACE_STORE_PATH) -> Dict[str, Any]:
     """读取一个设备及其全部测试集，设备不存在时抛出明确错误。"""
-    with _WORKSPACE_STORE_LOCK:
+    with _workspace_catalog_guard(path):
         catalog = _read_workspace_catalog_unlocked(path)
         device = next((
             item for item in catalog["devices"]
@@ -2254,7 +2401,7 @@ def import_workspace_device(
     device_data = extract_init_data(raw_device)
     expand_pse300_loadlocks(device_data)
     fingerprint = _device_fingerprint(device_data)
-    with _WORKSPACE_STORE_LOCK:
+    with _workspace_catalog_guard(path):
         catalog = _read_workspace_catalog_unlocked(path)
         existing = next((
             item for item in catalog["devices"]
@@ -2393,7 +2540,7 @@ def _normalize_test_case(raw_test: Mapping[str, Any], test_id: Optional[str] = N
                 pjob["matList"] = list(range(next_material_id, next_material_id + wafer_count))
                 next_material_id += wafer_count
     times = [round_row["currentTime"] for round_row in rounds]
-    return {
+    normalized = {
         "id": test_id or uuid.uuid4().hex,
         "name": str(raw_test.get("name") or "未命名测试集").strip() or "未命名测试集",
         "group": str(raw_test.get("group") or "").strip(),
@@ -2409,6 +2556,9 @@ def _normalize_test_case(raw_test: Mapping[str, Any], test_id: Optional[str] = N
         "createdAt": str(raw_test.get("createdAt") or timestamp),
         "updatedAt": timestamp,
     }
+    if isinstance(raw_test.get("baseline"), Mapping):
+        normalized["baseline"] = deepcopy(dict(raw_test["baseline"]))
+    return normalized
 
 
 def _apply_device_library(device: Dict[str, Any], payload: Mapping[str, Any]) -> None:
@@ -2445,13 +2595,15 @@ def create_workspace_test(
     path: Path = WORKSPACE_STORE_PATH,
 ) -> Dict[str, Any]:
     """在指定设备下新增一个独立测试集，并自动消解重名。"""
-    with _WORKSPACE_STORE_LOCK:
+    with _workspace_catalog_guard(path):
         catalog = _read_workspace_catalog_unlocked(path)
         device = next((item for item in catalog["devices"] if item.get("id") == device_id), None)
         if device is None:
             raise ValueError(f"设备不存在：{device_id}")
         _apply_device_library(device, raw_test)
-        test_case = _normalize_test_case(raw_test)
+        normalized_input = dict(raw_test)
+        normalized_input.pop("baseline", None)
+        test_case = _normalize_test_case(normalized_input)
         test_case["name"] = _unique_workspace_name(
             test_case["name"],
             (str(item.get("name") or "") for item in device.get("tests") or []),
@@ -2459,6 +2611,7 @@ def create_workspace_test(
         if test_case["group"] and test_case["group"] not in device.setdefault("testGroups", []):
             device["testGroups"].append(test_case["group"])
         device.setdefault("tests", []).append(test_case)
+        _invalidate_stale_device_baselines(device)
         device["updatedAt"] = _workspace_timestamp()
         _write_workspace_catalog_unlocked(path, catalog)
         return deepcopy(test_case)
@@ -2471,7 +2624,7 @@ def update_workspace_test(
     path: Path = WORKSPACE_STORE_PATH,
 ) -> Dict[str, Any]:
     """覆盖保存一个测试集，同时保持创建时间和稳定 ID。"""
-    with _WORKSPACE_STORE_LOCK:
+    with _workspace_catalog_guard(path):
         catalog = _read_workspace_catalog_unlocked(path)
         device = next((item for item in catalog["devices"] if item.get("id") == device_id), None)
         if device is None:
@@ -2489,11 +2642,15 @@ def update_workspace_test(
             raise ValueError(f"测试集名称重复：{requested_name}")
         _apply_device_library(device, raw_test)
         merged = dict(raw_test)
+        merged.pop("baseline", None)
         merged["createdAt"] = tests[index].get("createdAt")
+        if isinstance(tests[index].get("baseline"), Mapping):
+            merged["baseline"] = deepcopy(tests[index]["baseline"])
         test_case = _normalize_test_case(merged, test_id)
         if test_case["group"] and test_case["group"] not in device.setdefault("testGroups", []):
             device["testGroups"].append(test_case["group"])
         tests[index] = test_case
+        _invalidate_stale_device_baselines(device)
         device["updatedAt"] = _workspace_timestamp()
         _write_workspace_catalog_unlocked(path, catalog)
         return deepcopy(test_case)
@@ -2508,7 +2665,7 @@ def create_workspace_test_group(
     group = str(name or "").strip()
     if not group:
         raise ValueError("测试组别名称不能为空")
-    with _WORKSPACE_STORE_LOCK:
+    with _workspace_catalog_guard(path):
         catalog = _read_workspace_catalog_unlocked(path)
         device = next((item for item in catalog["devices"] if item.get("id") == device_id), None)
         if device is None:
@@ -2528,7 +2685,7 @@ def delete_workspace_test(
     path: Path = WORKSPACE_STORE_PATH,
 ) -> None:
     """删除指定测试集；设备至少保留一个测试集以维持可运行状态。"""
-    with _WORKSPACE_STORE_LOCK:
+    with _workspace_catalog_guard(path):
         catalog = _read_workspace_catalog_unlocked(path)
         device = next((item for item in catalog["devices"] if item.get("id") == device_id), None)
         if device is None:
@@ -2603,6 +2760,599 @@ def _log_response_fields(log_id: str) -> Dict[str, str]:
     return {"logUrl": f"/api/logs/{log_id}", "logFileName": filename}
 
 
+def _batch_test_routes(
+    routes: Sequence[Mapping[str, Any]],
+    rounds: Sequence[Mapping[str, Any]],
+) -> List[Dict[str, Any]]:
+    """只保留测试各轮 PJob 实际引用的共享 Route。"""
+    referenced = {
+        str(pjob.get("routeRef") or "").strip()
+        for round_row in rounds
+        for cjob in _round_cjob_rows(round_row)
+        for pjob in (cjob.get("pjobs") or [])
+        if isinstance(pjob, Mapping)
+    }
+    return [
+        deepcopy(dict(route))
+        for route in routes
+        if str(route.get("name") or "").strip() in referenced
+    ]
+
+
+def _batch_test_cleans(
+    cleans: Sequence[Mapping[str, Any]],
+    routes: Sequence[Mapping[str, Any]],
+) -> List[Dict[str, Any]]:
+    """只保留当前测试 Route 实际引用的设备级 Clean 模板。"""
+    referenced: set[str] = set()
+    for route in routes:
+        for field_name in (
+            "prePJobCleanRefs",
+            "postPJobCleanRefs",
+            "postCJobCleanRefs",
+        ):
+            referenced.update(_string_list(route.get(field_name)))
+        for stage in route.get("stages") or []:
+            if not isinstance(stage, Mapping):
+                continue
+            for visit in _stage_visit_rows(stage):
+                referenced.update(_string_list(
+                    visit.get("beforeCleanRefs") or visit.get("BeforeInPM")
+                ))
+                referenced.update(_string_list(
+                    visit.get("afterCleanRefs") or visit.get("AfterOutPM")
+                ))
+    return [
+        deepcopy(dict(clean))
+        for clean in cleans
+        if str(clean.get("name") or "").strip() in referenced
+    ]
+
+
+def _batch_test_recipes(
+    routes: Sequence[Mapping[str, Any]],
+    cleans: Sequence[Mapping[str, Any]],
+) -> List[Dict[str, Any]]:
+    """从共享 Route/Clean 派生与前端单次运行一致的 Recipe 列表。"""
+    recipes: Dict[str, Dict[str, Any]] = {}
+
+    def add(
+        name: Any,
+        duration: Any,
+        modules: Any,
+        process_type: Any = "",
+        weight: Any = None,
+    ) -> None:
+        recipe_name = str(name or "").strip()
+        if not recipe_name:
+            return
+        module_names = _string_list(modules)
+        existing = recipes.get(recipe_name)
+        if existing is None:
+            recipes[recipe_name] = {
+                "name": recipe_name,
+                "time": _finite_number(duration, 0.0),
+                "modules": module_names,
+                "processType": str(process_type or ""),
+                "weight": deepcopy(weight if weight is not None else {}),
+            }
+            return
+        existing["modules"] = list(dict.fromkeys([*existing["modules"], *module_names]))
+
+    for route in routes:
+        for stage in route.get("stages") or []:
+            if not isinstance(stage, Mapping):
+                continue
+            for visit in _stage_visit_rows(stage):
+                add(
+                    visit.get("processRecipe") or visit.get("ProcessRecipe"),
+                    visit.get("processTime", visit.get("recipeTime", 0.0)),
+                    [visit.get("stationName") or visit.get("StationName")],
+                    visit.get("processType"),
+                    visit.get("weight") or {},
+                )
+    for clean in cleans:
+        add(
+            clean.get("recipeName") or clean.get("recipeRef"),
+            clean.get("recipeTime"),
+            clean.get("modules"),
+        )
+    return list(recipes.values())
+
+
+def build_workspace_batch_plan(
+    device: Mapping[str, Any],
+    test_case: Mapping[str, Any],
+    strategy: str,
+    options: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """将持久化测试与设备共享库组合成可直接执行的单次请求。"""
+    rounds = [
+        deepcopy(dict(row))
+        for row in (test_case.get("rounds") or [])
+        if isinstance(row, Mapping)
+    ]
+    routes = _batch_test_routes(
+        [row for row in (device.get("routes") or []) if isinstance(row, Mapping)],
+        rounds,
+    )
+    cleans = _batch_test_cleans(
+        [row for row in (device.get("cleans") or []) if isinstance(row, Mapping)],
+        routes,
+    )
+    merged_options = deepcopy(dict(test_case.get("options") or {}))
+    merged_options.update(deepcopy(dict(options)))
+    return {
+        "schemaVersion": API_SCHEMA_VERSION,
+        "deviceName": str(device.get("name") or "selected init"),
+        "device": deepcopy(device.get("device")),
+        "strategy": str(strategy or "heuristic"),
+        "roundCount": len(rounds),
+        "options": merged_options,
+        "recipes": _batch_test_recipes(routes, cleans),
+        "cleans": cleans,
+        "routes": routes,
+        "rounds": rounds,
+    }
+
+
+def _workspace_baseline_fingerprint(
+    device: Mapping[str, Any],
+    test_case: Mapping[str, Any],
+    options: Optional[Mapping[str, Any]] = None,
+) -> str:
+    """对实际 Heuristic 输入做稳定摘要，绑定测试及其引用的共享工艺配置。"""
+    plan = build_workspace_batch_plan(
+        device,
+        test_case,
+        "heuristic",
+        options if options is not None else dict(test_case.get("options") or {}),
+    )
+    canonical = json.dumps(
+        {
+            "baselineSchema": HEURISTIC_BASELINE_SCHEMA_VERSION,
+            "plan": plan,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _invalidate_stale_device_baselines(device: Dict[str, Any]) -> None:
+    """设备共享配置或测试内容变化后，使不匹配的 Baseline 立即失效。"""
+    for test_case in device.get("tests") or []:
+        baseline = test_case.get("baseline")
+        if not isinstance(baseline, Mapping):
+            continue
+        fingerprint = _workspace_baseline_fingerprint(device, test_case)
+        if str(baseline.get("fingerprint") or "") == fingerprint:
+            continue
+        test_case["baseline"] = {
+            "status": "invalid",
+            "fingerprint": fingerprint,
+            "error": "测试配置已修改，等待重新计算 Heuristic Baseline",
+            "updatedAt": _workspace_timestamp(),
+        }
+
+
+def _persist_workspace_baseline(
+    device_id: str,
+    test_id: str,
+    baseline: Mapping[str, Any],
+    path: Path = WORKSPACE_STORE_PATH,
+) -> bool:
+    """保存某个测试的 Baseline；测试夹具不存在于目录时返回 False。"""
+    with _workspace_catalog_guard(path):
+        catalog = _read_workspace_catalog_unlocked(path)
+        device = next((item for item in catalog["devices"] if item.get("id") == device_id), None)
+        if device is None:
+            return False
+        test_case = next((item for item in (device.get("tests") or []) if item.get("id") == test_id), None)
+        if test_case is None:
+            return False
+        test_case["baseline"] = deepcopy(dict(baseline))
+        device["updatedAt"] = _workspace_timestamp()
+        _write_workspace_catalog_unlocked(path, catalog)
+        return True
+
+
+def _successful_baseline(
+    fingerprint: str,
+    result: Mapping[str, Any],
+) -> Dict[str, Any]:
+    return {
+        "status": "succeeded",
+        "fingerprint": fingerprint,
+        "makespan": float(result["makespan"]),
+        "cpuTimeMs": float(result.get("cpuTimeMs", result.get("totalElapsedMs", 0.0))),
+        "updatedAt": _workspace_timestamp(),
+    }
+
+
+def _failed_baseline(fingerprint: str, error: BaseException) -> Dict[str, Any]:
+    return {
+        "status": "failed",
+        "fingerprint": fingerprint,
+        "error": str(error) or type(error).__name__,
+        "updatedAt": _workspace_timestamp(),
+    }
+
+
+def _baseline_comparison(
+    result: Mapping[str, Any],
+    baseline: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """为前端生成当前值、Baseline 和改善比例。"""
+    fields = {"baseline": deepcopy(dict(baseline))}
+    if baseline.get("status") != "succeeded":
+        return fields
+    current_makespan = float(result["makespan"])
+    baseline_makespan = float(baseline["makespan"])
+    current_cpu = float(result.get("cpuTimeMs", result.get("totalElapsedMs", 0.0)))
+    baseline_cpu = float(baseline["cpuTimeMs"])
+    fields.update({
+        "cpuTimeMs": current_cpu,
+        "makespanDelta": current_makespan - baseline_makespan,
+        "cpuTimeDeltaMs": current_cpu - baseline_cpu,
+        "improvementPercent": (
+            (baseline_makespan - current_makespan) / baseline_makespan * 100.0
+            if abs(baseline_makespan) > 1e-12 else 0.0
+        ),
+    })
+    return fields
+
+
+def _execute_workspace_test_with_baseline(
+    device: Mapping[str, Any],
+    test_case: Mapping[str, Any],
+    strategy: str,
+    options: Mapping[str, Any],
+    *,
+    selected_plan: Optional[Mapping[str, Any]] = None,
+) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any], Optional[Exception]]:
+    """确保 Baseline 有效并执行所选策略；Baseline 失败不复用旧值。"""
+    fingerprint = _workspace_baseline_fingerprint(device, test_case, options)
+    existing = test_case.get("baseline")
+    baseline = (
+        deepcopy(dict(existing))
+        if isinstance(existing, Mapping)
+        and existing.get("status") == "succeeded"
+        and str(existing.get("fingerprint") or "") == fingerprint
+        else None
+    )
+    device_id = str(device.get("id") or "")
+    test_id = str(test_case.get("id") or "")
+
+    def record(value: Mapping[str, Any]) -> Dict[str, Any]:
+        stored = deepcopy(dict(value))
+        if isinstance(test_case, dict):
+            test_case["baseline"] = deepcopy(stored)
+        _persist_workspace_baseline(device_id, test_id, stored)
+        return stored
+
+    if strategy == "heuristic":
+        plan = dict(selected_plan) if selected_plan is not None else build_workspace_batch_plan(
+            device, test_case, "heuristic", options,
+        )
+        try:
+            result = execute_plan(plan)
+        except Exception as error:  # noqa: BLE001
+            return None, record(_failed_baseline(fingerprint, error)), error
+        baseline = record(_successful_baseline(fingerprint, result))
+        return result, baseline, None
+
+    if baseline is None:
+        try:
+            baseline_result = execute_plan(build_workspace_batch_plan(
+                device, test_case, "heuristic", options,
+            ))
+            baseline = record(_successful_baseline(fingerprint, baseline_result))
+        except Exception as error:  # noqa: BLE001
+            baseline = record(_failed_baseline(fingerprint, error))
+
+    plan = dict(selected_plan) if selected_plan is not None else build_workspace_batch_plan(
+        device, test_case, strategy, options,
+    )
+    try:
+        return execute_plan(plan), baseline, None
+    except Exception as error:  # noqa: BLE001
+        return None, baseline, error
+
+
+def _workspace_group_tests(
+    device: Mapping[str, Any],
+    group: str,
+) -> Tuple[str, List[Mapping[str, Any]]]:
+    """返回规范化组名及该组按工作区顺序排列的测试。"""
+    normalized_group = str(group or "").strip()
+    tests = [
+        row for row in (device.get("tests") or [])
+        if isinstance(row, Mapping)
+        and str(row.get("group") or "").strip() == normalized_group
+    ]
+    if not tests:
+        raise ValueError(f"当前测试组“{normalized_group or '未分组'}”没有可运行测试")
+    return normalized_group, tests
+
+
+def _execute_workspace_test_batch(
+    device: Mapping[str, Any],
+    tests: Sequence[Mapping[str, Any]],
+    group: str,
+    strategy: str,
+    options: Mapping[str, Any],
+    *,
+    maximum_workers: int = 4,
+    progress_callback: Optional[Any] = None,
+    cancel_event: Optional[threading.Event] = None,
+) -> Dict[str, Any]:
+    """执行已解析的批量测试，并通过回调报告每项状态变化。"""
+    worker_count = max(1, min(int(maximum_workers), 4, len(tests)))
+    started = time.perf_counter()
+
+    def run_one(index: int, test_case: Mapping[str, Any]) -> Dict[str, Any]:
+        if cancel_event is not None and cancel_event.is_set():
+            return {
+                "index": index,
+                "ok": False,
+                "status": "cancelled",
+                "testId": str(test_case.get("id") or ""),
+                "testName": str(test_case.get("name") or f"测试 {index + 1}"),
+                "error": "用户终止调度",
+            }
+        if progress_callback is not None:
+            progress_callback(index, {"status": "running", "startedAt": _workspace_timestamp()})
+        try:
+            result, baseline, run_error = _execute_workspace_test_with_baseline(
+                device, test_case, strategy, options,
+            )
+            if run_error is not None or result is None:
+                error = run_error or RuntimeError("运行未返回结果")
+                failure = {
+                    "index": index,
+                    "ok": False,
+                    "status": "failed",
+                    "testId": str(test_case.get("id") or ""),
+                    "testName": str(test_case.get("name") or f"测试 {index + 1}"),
+                    "error": str(error) or type(error).__name__,
+                    "baseline": deepcopy(baseline),
+                }
+                if isinstance(error, LoggedPlanError):
+                    log_id = save_reproduction_log(error.reproduction_log)
+                    failure.update(_log_response_fields(log_id))
+                return failure
+            if cancel_event is not None and cancel_event.is_set():
+                return {
+                    "index": index,
+                    "ok": False,
+                    "status": "cancelled",
+                    "testId": str(test_case.get("id") or ""),
+                    "testName": str(test_case.get("name") or f"测试 {index + 1}"),
+                    "error": "用户终止调度",
+                }
+            result_id = save_result(result["output"])
+            log_id = save_reproduction_log(result["reproductionLog"])
+            return {
+                "index": index,
+                "ok": True,
+                "status": "succeeded",
+                "testId": str(test_case.get("id") or ""),
+                "testName": str(test_case.get("name") or f"测试 {index + 1}"),
+                "totalElapsedMs": result["totalElapsedMs"],
+                "cpuTimeMs": result.get("cpuTimeMs", result["totalElapsedMs"]),
+                "makespan": result["makespan"],
+                "moveCount": result["moveCount"],
+                "validation": result["validation"],
+                "resultUrl": f"/api/results/{result_id}",
+                "ganttUrl": f"/movelist_gantt_viewer.html?src=/api/results/{result_id}",
+                **_log_response_fields(log_id),
+                **_baseline_comparison(result, baseline),
+            }
+        except Exception as error:  # noqa: BLE001
+            return {
+                "index": index,
+                "ok": False,
+                "status": "failed",
+                "testId": str(test_case.get("id") or ""),
+                "testName": str(test_case.get("name") or f"测试 {index + 1}"),
+                "error": str(error) or type(error).__name__,
+            }
+
+    items: List[Dict[str, Any]] = []
+    executor = ThreadPoolExecutor(max_workers=worker_count)
+    futures = {
+        executor.submit(run_one, index, test_case): index
+        for index, test_case in enumerate(tests)
+    }
+    pending = set(futures)
+    cancelled = False
+    try:
+        while pending:
+            if cancel_event is not None and cancel_event.is_set():
+                cancelled = True
+                break
+            done, pending = wait(pending, timeout=0.1, return_when=FIRST_COMPLETED)
+            for future in done:
+                item = future.result()
+                items.append(item)
+                if progress_callback is not None:
+                    progress_callback(int(item["index"]), item)
+    finally:
+        if cancelled:
+            for future in pending:
+                future.cancel()
+            executor.shutdown(wait=False, cancel_futures=True)
+        else:
+            executor.shutdown(wait=True)
+    items.sort(key=lambda item: int(item["index"]))
+    succeeded = sum(bool(item["ok"]) for item in items)
+    return {
+        "ok": not cancelled and succeeded == len(items),
+        "strategy": strategy,
+        "group": group,
+        "status": "cancelled" if cancelled else "completed",
+        "completed": len(items),
+        "testCount": len(items),
+        "succeeded": succeeded,
+        "failed": len(items) - succeeded,
+        "cancelled": len(tests) - len(items) if cancelled else 0,
+        "workerCount": worker_count,
+        "totalElapsedMs": (time.perf_counter() - started) * 1000.0,
+        "items": items,
+    }
+
+
+def run_workspace_test_batch(
+    device_id: str,
+    group: str,
+    strategy: str,
+    options: Mapping[str, Any],
+    *,
+    maximum_workers: int = 4,
+) -> Dict[str, Any]:
+    """同步运行当前测试组；保留给测试和非 HTTP 调用方。"""
+    device = get_workspace_device(device_id)
+    normalized_group, tests = _workspace_group_tests(device, group)
+    return _execute_workspace_test_batch(
+        device,
+        tests,
+        normalized_group,
+        strategy,
+        options,
+        maximum_workers=maximum_workers,
+    )
+
+
+def read_workspace_batch_run(batch_id: str) -> Optional[Dict[str, Any]]:
+    """读取后台批量任务的当前快照。"""
+    with _BATCH_RUNS_LOCK:
+        batch = _BATCH_RUNS.get(batch_id)
+        return deepcopy(batch) if batch is not None else None
+
+
+def cancel_workspace_batch_run(batch_id: str) -> Optional[Dict[str, Any]]:
+    """终止批量任务；排队和运行项立即进入终止状态。"""
+    with _BATCH_RUNS_LOCK:
+        batch = _BATCH_RUNS.get(batch_id)
+        if batch is None:
+            return None
+        if batch.get("status") in {"completed", "failed", "cancelled"}:
+            return deepcopy(batch)
+        cancel_event = _BATCH_CANCEL_EVENTS.get(batch_id)
+        if cancel_event is not None:
+            cancel_event.set()
+        for item in batch.get("items") or []:
+            if item.get("status") in {"queued", "running"}:
+                item.update({
+                    "ok": False,
+                    "status": "cancelled",
+                    "error": "用户终止调度",
+                })
+        batch["ok"] = False
+        batch["status"] = "cancelled"
+        batch["completed"] = len(batch.get("items") or [])
+        batch["succeeded"] = sum(item.get("status") == "succeeded" for item in batch.get("items") or [])
+        batch["failed"] = sum(item.get("status") == "failed" for item in batch.get("items") or [])
+        batch["cancelled"] = sum(item.get("status") == "cancelled" for item in batch.get("items") or [])
+        batch["finishedAt"] = _workspace_timestamp()
+        return deepcopy(batch)
+
+
+def start_workspace_test_batch(
+    device_id: str,
+    group: str,
+    strategy: str,
+    options: Mapping[str, Any],
+    *,
+    maximum_workers: int = 4,
+) -> Dict[str, Any]:
+    """创建后台批量任务并立即返回可轮询的初始状态。"""
+    device = get_workspace_device(device_id)
+    normalized_group, tests = _workspace_group_tests(device, group)
+    batch_id = uuid.uuid4().hex
+    worker_count = max(1, min(int(maximum_workers), 4, len(tests)))
+    initial = {
+        "batchId": batch_id,
+        "ok": True,
+        "status": "queued",
+        "strategy": strategy,
+        "group": normalized_group,
+        "testCount": len(tests),
+        "completed": 0,
+        "succeeded": 0,
+        "failed": 0,
+        "cancelled": 0,
+        "workerCount": worker_count,
+        "totalElapsedMs": 0.0,
+        "createdAt": _workspace_timestamp(),
+        "items": [{
+            "index": index,
+            "ok": None,
+            "status": "queued",
+            "testId": str(test_case.get("id") or ""),
+            "testName": str(test_case.get("name") or f"测试 {index + 1}"),
+        } for index, test_case in enumerate(tests)],
+    }
+    cancel_event = threading.Event()
+    with _BATCH_RUNS_LOCK:
+        _BATCH_RUNS[batch_id] = initial
+        _BATCH_CANCEL_EVENTS[batch_id] = cancel_event
+        _BATCH_RUNS.move_to_end(batch_id)
+        while len(_BATCH_RUNS) > MAX_SAVED_BATCH_RUNS:
+            expired_id, _ = _BATCH_RUNS.popitem(last=False)
+            _BATCH_CANCEL_EVENTS.pop(expired_id, None)
+
+    def update_item(index: int, values: Mapping[str, Any]) -> None:
+        with _BATCH_RUNS_LOCK:
+            batch = _BATCH_RUNS.get(batch_id)
+            if batch is None or cancel_event.is_set() or batch.get("status") == "cancelled":
+                return
+            batch["status"] = "running"
+            batch["items"][index].update(deepcopy(dict(values)))
+            batch["completed"] = sum(
+                item.get("status") in {"succeeded", "failed"}
+                for item in batch["items"]
+            )
+            batch["succeeded"] = sum(item.get("status") == "succeeded" for item in batch["items"])
+            batch["failed"] = sum(item.get("status") == "failed" for item in batch["items"])
+
+    def background() -> None:
+        try:
+            result = _execute_workspace_test_batch(
+                device,
+                tests,
+                normalized_group,
+                strategy,
+                options,
+                maximum_workers=worker_count,
+                progress_callback=update_item,
+                cancel_event=cancel_event,
+            )
+            with _BATCH_RUNS_LOCK:
+                batch = _BATCH_RUNS.get(batch_id)
+                if batch is not None and not cancel_event.is_set() and batch.get("status") != "cancelled":
+                    batch.update(result)
+                    batch["batchId"] = batch_id
+                    batch["finishedAt"] = _workspace_timestamp()
+        except Exception as error:  # noqa: BLE001
+            with _BATCH_RUNS_LOCK:
+                batch = _BATCH_RUNS.get(batch_id)
+                if batch is not None and not cancel_event.is_set() and batch.get("status") != "cancelled":
+                    batch["ok"] = False
+                    batch["status"] = "failed"
+                    batch["error"] = str(error) or type(error).__name__
+                    batch["finishedAt"] = _workspace_timestamp()
+
+    threading.Thread(
+        target=background,
+        name=f"batch-run-{batch_id[:8]}",
+        daemon=True,
+    ).start()
+    return deepcopy(initial)
+
+
 class ConfigEditorHandler(BaseHTTPRequestHandler):
     """暴露调度控制台、设备测试集、甘特图和运行 API 的本地 HTTP 处理器。"""
 
@@ -2629,11 +3379,13 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                 "schemaVersion": API_SCHEMA_VERSION,
                 "strategies": {
                     "heuristic": True,
+                    "neural": NEURAL_MODEL_PATH.is_file(),
                     "rl": RL_MODEL_PATH.is_file(),
                     "l2d": l2d_model_path is not None,
                     "milp": True,
                 },
                 "strategyModels": {
+                    "neural": str(NEURAL_MODEL_PATH) if NEURAL_MODEL_PATH.is_file() else "",
                     "l2d": str(l2d_model_path) if l2d_model_path is not None else "",
                 },
                 "strategyErrors": {},
@@ -2673,6 +3425,13 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                     top_level_item_per_line=True,
                 )
             return
+        if path.startswith("/api/run-batches/"):
+            batch = read_workspace_batch_run(path.rsplit("/", 1)[-1])
+            if batch is None:
+                self._send_json({"ok": False, "error": "批量任务不存在或已过期"}, HTTPStatus.NOT_FOUND)
+            else:
+                self._send_json(batch)
+            return
         self._send_json({"ok": False, "error": "Not found"}, HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
@@ -2683,6 +3442,22 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                 payload = self._read_json_object()
                 model = import_l2d_checkpoint(str(payload.get("data") or ""))
                 self._send_json({"ok": True, "model": model}, HTTPStatus.CREATED)
+            except Exception as error:  # noqa: BLE001
+                self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
+            return
+        if path == "/api/run-batch":
+            try:
+                payload = self._read_json_object()
+                options = payload.get("options")
+                if not isinstance(options, Mapping):
+                    options = {}
+                result = start_workspace_test_batch(
+                    str(payload.get("deviceId") or ""),
+                    str(payload.get("group") or ""),
+                    str(payload.get("strategy") or "heuristic"),
+                    options,
+                )
+                self._send_json(result, HTTPStatus.ACCEPTED)
             except Exception as error:  # noqa: BLE001
                 self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
             return
@@ -2721,6 +3496,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": "Not found"}, HTTPStatus.NOT_FOUND)
             return
         payload: Any = None
+        baseline_response: Optional[Dict[str, Any]] = None
         try:
             length = int(self.headers.get("Content-Length") or 0)
             if length <= 0 or length > MAX_REQUEST_BYTES:
@@ -2728,7 +3504,29 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
             if not isinstance(payload, Mapping):
                 raise ValueError("请求体必须是 JSON 对象")
-            result = execute_plan(payload)
+            workspace_device_id = str(payload.get("workspaceDeviceId") or "")
+            workspace_test_id = str(payload.get("workspaceTestId") or "")
+            if workspace_device_id and workspace_test_id:
+                device = get_workspace_device(workspace_device_id)
+                test_case = next((
+                    item for item in (device.get("tests") or [])
+                    if str(item.get("id") or "") == workspace_test_id
+                ), None)
+                if test_case is None:
+                    raise ValueError(f"测试集不存在：{workspace_test_id}")
+                result, baseline, run_error = _execute_workspace_test_with_baseline(
+                    device,
+                    test_case,
+                    str(payload.get("strategy") or "heuristic"),
+                    dict(payload.get("options") or {}),
+                    selected_plan=payload,
+                )
+                baseline_response = deepcopy(baseline)
+                if run_error is not None or result is None:
+                    raise run_error or RuntimeError("运行未返回结果")
+                result.update(_baseline_comparison(result, baseline))
+            else:
+                result = execute_plan(payload)
             result_id = save_result(result["output"])
             log_id = save_reproduction_log(result["reproductionLog"])
             response = {
@@ -2743,6 +3541,8 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
         except LoggedPlanError as error:
             log_id = save_reproduction_log(error.reproduction_log)
             response = {"ok": False, "error": str(error)}
+            if baseline_response is not None:
+                response["baseline"] = baseline_response
             response.update(_log_response_fields(log_id))
             self._send_json(response, HTTPStatus.BAD_REQUEST)
         except Exception as error:  # noqa: BLE001
@@ -2755,6 +3555,8 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             }]))
             log_id = save_reproduction_log(reproduction.entries)
             response = {"ok": False, "error": str(error) or type(error).__name__}
+            if baseline_response is not None:
+                response["baseline"] = baseline_response
             response.update(_log_response_fields(log_id))
             self._send_json(response, HTTPStatus.BAD_REQUEST)
 
@@ -2775,6 +3577,13 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:
         """删除设备下指定测试集，并返回剩余测试集列表。"""
         path = unquote(urlparse(self.path).path)
+        if path.startswith("/api/run-batches/"):
+            batch = cancel_workspace_batch_run(path.rsplit("/", 1)[-1])
+            if batch is None:
+                self._send_json({"ok": False, "error": "批量任务不存在或已过期"}, HTTPStatus.NOT_FOUND)
+            else:
+                self._send_json(batch)
+            return
         parts = [part for part in path.split("/") if part]
         if len(parts) != 5 or parts[:2] != ["api", "workspaces"] or parts[3] != "tests":
             self._send_json({"ok": False, "error": "Not found"}, HTTPStatus.NOT_FOUND)

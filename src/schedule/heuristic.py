@@ -17,7 +17,17 @@ from src.parse.model import Durations, Problem
 from src.timing.solve import SolveResult, solve_timing
 
 from src.timing._common import EPS, _DecodeDeadlock
-from .sequencing import (_Cand, _Chooser, _DecodeState,decode_orders)
+from .loadlock_dispatch import (
+    LoadLockDispatchManager,
+    separate_loadlock_choice,
+)
+from .sequencing import (
+    _Cand,
+    _Chooser,
+    _DecodeState,
+    decode_orders,
+    decode_orders_choosing,
+)
 
 
 def _make_default_chooser(prio: Optional[Dict[Tuple[int, int], float]]
@@ -45,21 +55,126 @@ def _pick_best(a: Optional[SolveResult], b: Optional[SolveResult]) -> Optional[S
 
 
 def _decode_eval(ir: Problem, durations: Durations, wafers, *, swap: bool = False,
-                 chooser: Optional[_Chooser] = None) -> Optional[SolveResult]:
+                 chooser: Optional[_Chooser] = None,
+                 first_safe_by_preference: bool = False,
+                 trust_preferred_path: bool = False) -> Optional[SolveResult]:
     """一次「解码 → solve_timing 精确评估」：可行返回结果，解码死锁/排不出返回 None。"""
     try:
-        orders = decode_orders(ir, durations, wafers, chooser=chooser, swap=swap)
+        orders = decode_orders(
+            ir,
+            durations,
+            wafers,
+            chooser=chooser,
+            swap=swap,
+            first_safe_by_preference=first_safe_by_preference,
+            trust_preferred_path=trust_preferred_path,
+        )
     except (RuntimeError, _DecodeDeadlock):
         return None
     r = solve_timing(ir, wafers, orders=orders)
     return r if getattr(r, "feasible", False) else None
 
 
-def _eval_chooser(ir: Problem, durations: Durations, wafers, chooser: _Chooser,
-                  prev: Optional[SolveResult]) -> Optional[SolveResult]:
-    """一个 chooser 试 no-swap + swap 两条，与 prev 取 makespan 最优可行（单调不劣）。"""
-    r = _pick_best(_decode_eval(ir, durations, wafers, swap=False, chooser=chooser),
-                   _decode_eval(ir, durations, wafers, swap=True, chooser=chooser))
+def _decode_eval_dynamic_loadlock(
+    ir: Problem,
+    durations: Durations,
+    wafers,
+    chooser: _Chooser,
+    manager: LoadLockDispatchManager,
+) -> Optional[SolveResult]:
+    """用同一逻辑启发式和公共 manager 动态兑现 LoadLock/slot。"""
+    managed_chooser = separate_loadlock_choice(
+        chooser,
+        manager,
+    )
+    for trust_preferred_path in (True, False):
+        try:
+            selected_wafers, orders = decode_orders_choosing(
+                ir,
+                durations,
+                wafers,
+                chooser=managed_chooser,
+                swap=True,
+                trust_preferred_path=trust_preferred_path,
+                include_order_snapshots=False,
+            )
+        except (RuntimeError, _DecodeDeadlock):
+            continue
+        result = solve_timing(
+            ir,
+            selected_wafers,
+            orders=orders,
+            enforce_resumed_route_fifo=False,
+        )
+        if getattr(result, "feasible", False):
+            result.loadlock_manager = manager.name  # type: ignore[attr-defined]
+            return result
+    return None
+
+
+def _has_dynamic_loadlock_choice(ir: Problem, wafers) -> bool:
+    """是否存在值得交给 manager 的多 LoadLock 逻辑 stage。"""
+    return any(
+        stage.stage_type == "loadlock" and len(stage.cands) > 1
+        for wafer in wafers
+        for stage in wafer.stages
+    )
+
+
+def _eval_chooser(
+    ir: Problem,
+    durations: Durations,
+    wafers,
+    chooser: _Chooser,
+    prev: Optional[SolveResult],
+    loadlock_manager: Optional[LoadLockDispatchManager] = None,
+) -> Optional[SolveResult]:
+    """评估固定锁、swap 和 manager 三条路径并取最优，保证 manager 单调不劣。
+
+    ``loadlock_manager=None`` 是显式的旧基线，供 A/B 和故障隔离使用。
+    """
+    no_swap = _decode_eval(
+        ir,
+        durations,
+        wafers,
+        swap=False,
+        chooser=chooser,
+        first_safe_by_preference=True,
+    )
+    # swap 的双槽资源口径通常能让喂片偏好直接走到终态。先尝试首选路径；
+    # 若中途死锁，再回退完整 Petri 安全检查，结果与原逻辑保持一致。
+    swap_result = _decode_eval(
+        ir,
+        durations,
+        wafers,
+        swap=True,
+        chooser=chooser,
+        trust_preferred_path=True,
+    )
+    if swap_result is None:
+        swap_result = _decode_eval(
+            ir,
+            durations,
+            wafers,
+            swap=True,
+            chooser=chooser,
+            first_safe_by_preference=True,
+        )
+    r = _pick_best(
+        no_swap,
+        swap_result,
+    )
+    if loadlock_manager is not None and _has_dynamic_loadlock_choice(ir, wafers):
+        # manager 不再只是固定选锁失败后的恢复路径；每个逻辑启发式都生成一条动态绑定
+        # 候选，经同一 solve_timing 精确评估后仅在更优时采用。
+        managed = _decode_eval_dynamic_loadlock(
+            ir,
+            durations,
+            wafers,
+            chooser,
+            loadlock_manager,
+        )
+        r = _pick_best(r, managed)
     return _pick_best(prev, r)
 
 
@@ -131,8 +246,13 @@ def _feed_chooser(quota: dict) -> _Chooser:
     return chooser
 
 
-def _heuristic_schedule(ir: Problem, durations: Durations, wafers,
-                        verbose: bool) -> Optional[SolveResult]:
+def _heuristic_schedule(
+    ir: Problem,
+    durations: Durations,
+    wafers,
+    verbose: bool,
+    loadlock_manager: Optional[LoadLockDispatchManager] = None,
+) -> Optional[SolveResult]:
     """快速启发式定序（取代原固定 backward 定序）。不做组合寻优的全局搜索：
       · 含清洁(wac/dummy-wac)：排空优先(backward)——不追求 LL 常满，避免换出加工腔的片无处落脚死锁。
       · 单 job：喂片优先(_feed_chooser)——让 LL 常装未加工片、填满并行 PM。
@@ -146,28 +266,49 @@ def _heuristic_schedule(ir: Problem, durations: Durations, wafers,
     if _needs_drain(ir, wafers):
         if verbose:
             print("[timing] 启发式：dummy-wac 清洁 → 排空优先(drain/backward)")
-        return _eval_chooser(ir, durations, wafers, backward, None)
+        return _eval_chooser(
+            ir, durations, wafers, backward, None, loadlock_manager
+        )
 
     has_cjob_policy = any(w.cjob_id for w in wafers)
     # 标准 CJob 任务不能让不识别 JobType/Priority 的 backward 候选以更短
     # makespan 覆盖业务顺序；仅在业务 chooser 无可行解时才用它兜底。
-    best = None if has_cjob_policy else _eval_chooser(ir, durations, wafers, backward, None)
+    best = (
+        None
+        if has_cjob_policy
+        else _eval_chooser(
+            ir, durations, wafers, backward, None, loadlock_manager
+        )
+    )
 
     if len(routes) <= 1:
         if verbose:
             print("[timing] 启发式：单 job 喂片优先(feed) + backward 兜底")
         feed = _feed_chooser({routes[0]: 1} if routes else {})
-        result = _eval_chooser(ir, durations, wafers, feed, best)
-        return result or _eval_chooser(ir, durations, wafers, backward, None)
+        result = _eval_chooser(
+            ir, durations, wafers, feed, best, loadlock_manager
+        )
+        return result or _eval_chooser(
+            ir, durations, wafers, backward, None, loadlock_manager
+        )
 
     # 2+ job：在若干交替发片配比里搜索（非全局）。前两条 route 取配比，其余按权重 1 均分。
     A, B = routes[0], routes[1]
     others = {r: 1 for r in routes[2:]}
     ratios = [(1, 1), (1, 2), (2, 1), (1, 3), (3, 1), (2, 3), (3, 2)]
     for a, b in ratios:
-        best = _eval_chooser(ir, durations, wafers, _feed_chooser({A: a, B: b, **others}), best)
+        best = _eval_chooser(
+            ir,
+            durations,
+            wafers,
+            _feed_chooser({A: a, B: b, **others}),
+            best,
+            loadlock_manager,
+        )
     if best is None:
-        best = _eval_chooser(ir, durations, wafers, backward, None)
+        best = _eval_chooser(
+            ir, durations, wafers, backward, None, loadlock_manager
+        )
     if verbose:
         mk = best.makespan if best is not None and getattr(best, "feasible", False) else float("nan")
         print(f"[timing] 启发式：{len(routes)} job 交替配比搜索 ×{len(ratios)} + backward → makespan={mk:.2f}")

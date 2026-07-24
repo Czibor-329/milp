@@ -159,6 +159,11 @@
     .run-box h2 { margin: 0; font-size: 19px; }
     .run-box p { margin: 7px 0 18px; color: #dce6ff; font-size: 12px; }
     .run-box .btn { width: 100%; min-height: 46px; border-color: #fff; color: var(--brand-dark); background: #fff; }
+    .run-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+    .run-actions .btn.batch { color: #fff; background: transparent; }
+    .run-actions .btn.batch:hover { background: rgba(255,255,255,.12); }
+    .run-actions .btn.batch.cancel { border-color: #ffd1d6; color: #fff; background: rgba(168, 27, 43, .42); }
+    .run-actions .btn.batch.cancel:hover { background: rgba(168, 27, 43, .62); }
     .export-option { display: flex; align-items: center; gap: 8px; margin: -7px 0 14px; color: #e5ecff; font-size: 12px; cursor: pointer; }
     .export-option input { width: 16px; height: 16px; margin: 0; accent-color: #fff; }
     .run-box .btn.running::before { content: ""; width: 14px; height: 14px; border: 2px solid #b9c7eb; border-top-color: var(--brand); border-radius: 50%; animation: spin .8s linear infinite; }
@@ -169,13 +174,52 @@
     .strategy-card:has(input:checked) { border-color: var(--brand); background: var(--brand-soft); }
     .strategy-card input { width: auto; margin-right: 6px; }
     .strategy-card span { display: block; margin: 4px 0 0 22px; color: var(--muted); font-size: 11px; }
-    .result-metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-bottom: 14px; }
+    .result-panel { container-type: inline-size; container-name: result-area; }
+    .result-panel .panel-head { align-items: center; }
+    .result-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
     .metric { padding: 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--soft); }
     .metric span { display: block; color: var(--muted); font-size: 11px; }
     .metric strong { display: block; margin-top: 3px; font-size: 17px; }
-    .terminal { min-height: 190px; max-height: 350px; margin: 0; padding: 14px; overflow: auto; border-radius: 10px; color: #cce9db; background: #101927; white-space: pre-wrap; word-break: break-word; font: 12px/1.7 Consolas, monospace; }
+    .terminal-section { margin-top: 14px; }
+    .terminal-section-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 7px; }
+    .terminal-section-head strong { font-size: 12px; }
+    .terminal-section-head span { color: var(--muted); font-size: 10px; }
+    .terminal { height: 150px; min-height: 130px; max-height: 220px; margin: 0; padding: 13px 14px; overflow: auto; border-radius: 10px; color: #cce9db; background: #101927; white-space: pre-wrap; word-break: break-word; font: 12px/1.65 Consolas, monospace; resize: vertical; }
     .terminal.error { color: #ffb4bd; }
-    .result-actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 12px; }
+    .batch-results { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
+    .batch-results:empty { display: none; }
+    .batch-progress { display: none; margin-top: 12px; padding: 11px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--soft); }
+    .batch-progress.visible { display: block; }
+    .batch-progress-head { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 7px; font-size: 11px; font-weight: 800; }
+    .batch-progress-track { height: 7px; overflow: hidden; border-radius: 999px; background: #dce4ef; }
+    .batch-progress-bar { height: 100%; border-radius: inherit; background: var(--brand); transition: width .25s ease; }
+    .batch-result { display: grid; min-width: 0; gap: 7px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--soft); }
+    .batch-result.running { border-color: #9db5ef; background: var(--brand-soft); }
+    .batch-result.succeeded { border-color: #b9e8d4; background: var(--green-soft); }
+    .batch-result.failed { border-color: #f0bdc2; background: var(--red-soft); }
+    .batch-result.cancelled { border-color: #f2d49a; background: #fff8e8; }
+    .batch-result-head { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 7px; }
+    .batch-result-title { min-width: 0; }
+    .batch-result-title strong { display: block; overflow: hidden; font: 700 11px/1.2 Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+    .batch-result-actions { display: flex; gap: 4px; }
+    .batch-result-actions .btn { min-height: 25px; padding: 4px 7px; border-radius: 7px; font-size: 9px; }
+    .batch-result-actions [aria-disabled="true"] { color: #94a3b8; background: transparent; pointer-events: none; }
+    .batch-result-summary { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; color: #475569; font-size: 9px; }
+    .batch-result-summary span { min-width: 0; white-space: nowrap; }
+    .batch-result-summary b { color: #1e293b; font-size: 10px; }
+    .batch-result-summary b.summary-gain { color: var(--green); }
+    .batch-result-summary b.summary-loss { color: var(--red); }
+    .batch-result-summary .summary-error { color: var(--red); }
+    .batch-result-summary .summary-error { grid-column: 1 / -1; overflow: visible; white-space: normal; }
+    .batch-status { display: inline-flex; flex: 0 0 auto; width: fit-content; padding: 3px 8px; border-radius: 999px; color: #475569; background: #e2e8f0; font-size: 10px; font-weight: 800; white-space: nowrap; }
+    .batch-result.running .batch-status { color: var(--brand) !important; background: #dce6ff; }
+    .batch-result.succeeded .batch-status { color: var(--green) !important; background: #d5f2e5; }
+    .batch-result.failed .batch-status { color: var(--red) !important; background: #ffdfe2; }
+    .batch-result.cancelled .batch-status { color: #9a5b08 !important; background: #ffedc7; }
+    .result-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 10px; }
+    @container result-area (max-width: 1100px) { .batch-results { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+    @container result-area (max-width: 720px) { .batch-results, .result-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    @container result-area (max-width: 520px) { .batch-results, .result-metrics { grid-template-columns: 1fr; } }
     .is-hidden { display: none !important; }
     .drawer-layer { position: fixed; inset: 0; z-index: 50; pointer-events: none; background: rgba(15,23,42,0); transition: .2s background; }
     .drawer-layer.open { pointer-events: auto; background: rgba(15,23,42,.18); }
@@ -223,9 +267,9 @@
     .choice:has(input:checked) { border-color: #8da9ef; color: var(--brand); background: var(--brand-soft); }
     .switch-line { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
     .switch-line input { width: 18px; height: 18px; }
-    @media (max-width: 1040px) { .layout { grid-template-columns: 1fr; } .side { position: static; grid-row: 1; } }
+    @media (max-width: 1040px) { .layout { grid-template-columns: 1fr; } .side { position: static; grid-row: 1; } .batch-results { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
     @media (max-width: 900px) { .cjob-controls { grid-template-columns: 1fr 1fr; } }
-    @media (max-width: 700px) { .shell { padding: 18px 14px 48px; } .hero { align-items: flex-start; flex-direction: column; } .tabs { width: 100%; } .tab { flex: 1; min-width: 0; } .grid > * { grid-column: span 12 !important; } .route-meta-grid, .cjob-controls { grid-template-columns: 1fr; } .route-summary-head, .route-summary-toggle { grid-template-columns: 1fr; } .route-summary-head { padding: 8px 10px; } .route-summary-actions { justify-content: flex-start; flex-wrap: wrap; padding-left: 13px; } .round-head { align-items: flex-start; flex-direction: column; } .candidate-picker-menu { grid-template-columns: 1fr; } .drawer { width: 100vw; max-width: 100vw; } .drawer-head, .drawer-body { padding: 18px; } .step-summary { grid-template-columns: 1fr 1fr; } .visit-groups, .visit-fields, .visit-fields.constraints { grid-template-columns: 1fr; } .visit-group + .visit-group { border-top: 1px solid var(--line); border-left: 0; } .result-actions { grid-template-columns: 1fr; } }
+    @media (max-width: 700px) { .shell { padding: 18px 14px 48px; } .hero { align-items: flex-start; flex-direction: column; } .tabs { width: 100%; } .tab { flex: 1; min-width: 0; } .grid > * { grid-column: span 12 !important; } .route-meta-grid, .cjob-controls { grid-template-columns: 1fr; } .route-summary-head, .route-summary-toggle { grid-template-columns: 1fr; } .route-summary-head { padding: 8px 10px; } .route-summary-actions { justify-content: flex-start; flex-wrap: wrap; padding-left: 13px; } .round-head { align-items: flex-start; flex-direction: column; } .candidate-picker-menu { grid-template-columns: 1fr; } .drawer { width: 100vw; max-width: 100vw; } .drawer-head, .drawer-body { padding: 18px; } .step-summary { grid-template-columns: 1fr 1fr; } .visit-groups, .visit-fields, .visit-fields.constraints, .batch-results { grid-template-columns: 1fr; } .visit-group + .visit-group { border-top: 1px solid var(--line); border-left: 0; } .result-actions { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
@@ -262,6 +306,27 @@
             <div class="panel-head"><div><h2>重算任务</h2><p>重算轮次 → CJob → PJob</p></div><div class="field" style="width:140px"><label for="roundCount">总轮数</label><input id="roundCount" type="number" min="1" max="8" value="2"></div></div>
             <div class="panel-body"><div class="card-list" id="roundList"></div></div>
           </article>
+          <article class="panel result-panel">
+            <div class="panel-head">
+              <div><h2>运行结果</h2><p>集中查看总体进度、批量状态、结果入口与运行日志。</p></div>
+              <a class="btn primary" id="batchGanttButton" href="#" target="_blank" aria-disabled="true">全部甘特图</a>
+            </div>
+            <div class="panel-body">
+              <div class="result-metrics">
+                <div class="metric"><span id="metricTimeLabel">总耗时</span><strong id="metricTime">—</strong></div>
+                <div class="metric"><span id="metricMakespanLabel">Makespan</span><strong id="metricMakespan">—</strong></div>
+                <div class="metric"><span id="metricMovesLabel">Move 数</span><strong id="metricMoves">—</strong></div>
+                <div class="metric"><span id="metricValidationLabel">校验</span><strong id="metricValidation">—</strong></div>
+              </div>
+              <div class="batch-progress" id="batchProgress"><div class="batch-progress-head"><span id="batchProgressText">等待开始</span><span id="batchProgressCount">0/0</span></div><div class="batch-progress-track"><div class="batch-progress-bar" id="batchProgressBar" style="width:0%"></div></div></div>
+              <div class="batch-results" id="batchResults"></div>
+              <div class="terminal-section">
+                <div class="terminal-section-head"><strong>运行日志</strong><span>内容较多时可在区域内滚动</span></div>
+                <pre class="terminal" id="terminal">$ 等待运行…</pre>
+                <div class="result-actions"><button class="btn" id="clearButton">清空终端</button><a class="btn" id="logButton" href="#" download aria-disabled="true">导出复现日志</a><a class="btn primary" id="ganttButton" href="#" target="_blank" aria-disabled="true">打开甘特图</a></div>
+              </div>
+            </div>
+          </article>
         </div>
 
         <div class="tab-view" data-tab-view="route">
@@ -285,12 +350,16 @@
           <div class="panel-body">
             <div class="strategy-options">
               <label class="strategy-card"><input type="radio" name="strategy" value="heuristic" checked><b>启发式</b><span>稳定、快速</span></label>
+              <label class="strategy-card"><input id="neuralStrategyInput" type="radio" name="strategy" value="neural"><b>深层神经派工</b><span id="neuralStrategyHint">NumPy 快速推理 · 独立路线同步波前</span></label>
               <label class="strategy-card"><input id="rlStrategyInput" type="radio" name="strategy" value="rl"><b>RL 搜索</b><span id="rlStrategyHint">调用已训练模型</span></label>
               <label class="strategy-card"><input id="l2dStrategyInput" type="radio" name="strategy" value="l2d"><b>L2D 图策略</b><span id="l2dStrategyHint">单次贪心推理</span></label>
               <label class="strategy-card"><input id="milpStrategyInput" type="radio" name="strategy" value="milp"><b>MILP 最优求解</b><span>单轮 · 总计 ≤12 片</span></label>
               <div class="other-algorithm-options" id="otherAlgorithmOptions"></div>
             </div>
             <div style="margin-top:10px"><label class="btn small import-device">导入 L2D checkpoint<input id="l2dCheckpointFile" type="file" accept=".pt,application/octet-stream"></label></div>
+            <div id="loadlockOptions" class="grid" style="margin-top:14px">
+              <div class="field span-12"><label>LoadLock 管理器</label><select data-option="loadLockManager"><option value="petri-look">Petri-ETA 通用管理器（Heuristic 推荐）</option><option value="joint">当前策略联合选择 LA/LB（现有 Neural 默认）</option></select><div class="hint">上层策略决定发哪片；公共 manager 根据 Petri 安全候选、预计完成时刻和压力方向绑定具体锁。Heuristic/RL 默认使用；现有 Neural checkpoint 先保留联合选锁，下一阶段可切换后重训。</div></div>
+            </div>
             <div id="rlOptions" class="grid is-hidden" style="margin-top:14px">
               <div class="field span-6"><label>搜索秒数</label><input data-option="rlSearchSeconds" type="number" min="0.1" max="4.8" step="0.1" value="4"></div>
               <div class="field span-6"><label>Rollouts</label><input data-option="rlRollouts" type="number" min="1" value="256"></div>
@@ -302,15 +371,7 @@
               <div class="field span-6"><label>约束</label><div class="hint">只能运行首次排程，所有 PJob 的晶圆总数不能超过 12 片。</div></div>
             </div>
           </div>
-          <div class="run-box"><h2>开始运行</h2><p>后端将依次排程、推进 Move 状态并触发重算。</p><label class="export-option"><input id="autoExportLog" type="checkbox">运行结束后自动下载 input_data 复现日志（失败也会生成）</label><button class="btn" id="runButton">▶ 运行后端策略</button></div>
-        </article>
-        <article class="panel">
-          <div class="panel-head"><div><h2>运行结果</h2><p>耗时、makespan、校验与日志。</p></div></div>
-          <div class="panel-body">
-            <div class="result-metrics"><div class="metric"><span>总耗时</span><strong id="metricTime">—</strong></div><div class="metric"><span>Makespan</span><strong id="metricMakespan">—</strong></div><div class="metric"><span>Move 数</span><strong id="metricMoves">—</strong></div><div class="metric"><span>校验</span><strong id="metricValidation">—</strong></div></div>
-            <pre class="terminal" id="terminal">$ 等待运行…</pre>
-            <div class="result-actions"><button class="btn" id="clearButton">清空终端</button><a class="btn" id="logButton" href="#" download aria-disabled="true">导出复现日志</a><a class="btn primary" id="ganttButton" href="#" target="_blank" aria-disabled="true">打开甘特图</a></div>
-          </div>
+          <div class="run-box"><h2>开始运行</h2><p>单独运行当前测试，或用所选策略并行运行当前测试组。</p><label class="export-option"><input id="autoExportLog" type="checkbox">运行结束后自动下载 input_data 复现日志（失败也会生成）</label><div class="run-actions"><button class="btn" id="runButton">▶ 运行当前测试</button><button class="btn batch" id="batchRunButton">▦ 批量运行当前组</button></div></div>
         </article>
       </aside>
     </div>
@@ -334,8 +395,9 @@
 
     const state = {
       workspaceDevices: [], workspaceDevice: null, workspaceDeviceId: "", testCaseId: "", testCaseName: "", testCaseGroup: "", activeTestGroup: "", serviceCompatible: false, dirty: false,
+      activeBatchId: "", batchRunning: false, batchCancelRequested: false, batchCancelSent: false,
       deviceName: "", device: null, stationNames: [], loadPorts: [], processModules: [], robotNames: [], robotScopes: {},
-      strategy: "heuristic", availableOtherAlgorithms: [], roundCount: 2, times: [0, 70], options: { rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
+      strategy: "heuristic", availableOtherAlgorithms: [], roundCount: 2, times: [0, 70], options: { loadLockManager: "petri-look", rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
       cleans: [],
       routes: [{ name: "RouteA", group: "RouteA", bufferOption: 0, prePJobCleanRefs: [], postPJobCleanRefs: [], postCJobCleanRefs: [], stages: linkRouteSteps([makeStage("LP1"), makeStage("Robot"), makeStage("PM1,PM2", true, "RouteA_Step2"), makeStage("Robot"), makeStage("LP1")]) }],
       rounds: [makeRound(1, 0, "RouteA", "LP1"), makeRound(2, 70, "RouteA", "LP2")],
@@ -626,7 +688,7 @@
       const routeName = state.routes[0]?.name || "";
       return {
         name, group: state.activeTestGroup || "", strategy: "heuristic", roundCount: 2, times: [0, 70],
-        options: { rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
+        options: { loadLockManager: "petri-look", rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
         cleans: state.cleans, routes: state.routes,
         rounds: [
           makeRound(1, 0, routeName, state.loadPorts[0] || ""),
@@ -657,6 +719,7 @@
       document.getElementById("copyTestButton").disabled = !hasTest;
       document.getElementById("saveTestButton").disabled = !hasTest;
       document.getElementById("deleteTestButton").disabled = tests.length <= 1;
+      document.getElementById("batchRunButton").disabled = !state.serviceCompatible || !visibleTests.length;
       const deviceType = /PSE300/i.test(state.deviceName) ? "单腔非级联" : String(state.workspaceDevice?.deviceType || "单腔非级联");
       document.getElementById("deviceSummary").innerHTML = state.device ? `<span class="chip good">${escapeHtml(deviceType)}</span>` : `<span class="chip">尚未选择设备</span>`;
     }
@@ -685,7 +748,13 @@
     /** 清理上一测试集的运行指标和结果链接，避免把旧结果误认为当前结果。 */
     function resetRunResult() {
       ["metricTime", "metricMakespan", "metricMoves", "metricValidation"].forEach(id => { document.getElementById(id).textContent = "—"; });
-      for (const id of ["logButton", "ganttButton"]) {
+      document.getElementById("metricTimeLabel").textContent = "总耗时";
+      document.getElementById("metricMakespanLabel").textContent = "Makespan";
+      document.getElementById("metricMovesLabel").textContent = "Move 数";
+      document.getElementById("metricValidationLabel").textContent = "校验";
+      document.getElementById("batchProgress").classList.remove("visible");
+      document.getElementById("batchResults").innerHTML = "";
+      for (const id of ["logButton", "ganttButton", "batchGanttButton"]) {
         const link = document.getElementById(id); link.href = "#"; link.setAttribute("aria-disabled", "true");
       }
       writeTerminal("$ 测试集已就绪，等待运行…");
@@ -697,7 +766,8 @@
       state.routeNameChanges.clear();
       state.testCaseId = value.id; state.testCaseName = value.name; state.testCaseGroup = String(value.group || ""); state.activeTestGroup = state.testCaseGroup; state.strategy = value.strategy || "heuristic";
       state.roundCount = Math.max(1, Number(value.roundCount) || 1); state.times = Array.isArray(value.times) ? value.times : [0];
-      state.options = value.options || { rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 };
+      state.options = value.options || { loadLockManager: "petri-look", rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 };
+      state.options.loadLockManager = state.options.loadLockManager || "petri-look";
       state.options.milpTimeLimit = Number(state.options.milpTimeLimit) || 120;
       // v2：Route/Clean 来自设备共享库；仅在加载尚未迁移的旧数据时使用测试集副本兜底。
       if (!state.routes.length && Array.isArray(value.routes)) state.routes = value.routes;
@@ -717,6 +787,7 @@
       document.getElementById("roundCount").value = state.roundCount;
       document.querySelectorAll('input[name="strategy"]').forEach(input => { input.checked = input.value === state.strategy; });
       document.querySelectorAll("[data-option]").forEach(input => { input.value = state.options[input.dataset.option] ?? input.value; });
+      document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "neural", "rl"].includes(state.strategy));
       document.getElementById("rlOptions").classList.toggle("is-hidden", state.strategy !== "rl");
       document.getElementById("milpOptions").classList.toggle("is-hidden", state.strategy !== "milp");
       document.getElementById("roundCount").disabled = state.strategy === "milp";
@@ -1196,7 +1267,7 @@
       normalizeRounds();
       const routes = selectReferencedRoutes(state.routes, state.rounds).map(route => ({ ...normalizeRoute(route), stages: route.stages.map(stage => ({ ...stage, visits: stage.visits.map(visit => structuredClone(visit)) })) }));
       const cleans = state.cleans.map(clean => ({ ...clean, recipeRef: clean.recipeName }));
-      return { schemaVersion: EXPECTED_API_SCHEMA, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options: state.options, recipes: collectRecipes(routes), cleans, routes, rounds: structuredClone(state.rounds) };
+      return { schemaVersion: EXPECTED_API_SCHEMA, workspaceDeviceId: state.workspaceDeviceId, workspaceTestId: state.testCaseId, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options: state.options, recipes: collectRecipes(routes), cleans, routes, rounds: structuredClone(state.rounds) };
     }
 
     /** 统计所有轮次 PJob 的产品晶圆总数，用于 MILP 前端硬限制。 */
@@ -1235,7 +1306,8 @@
     /** 调用本地服务运行排程。 */
     async function runPlan() {
       const button = document.getElementById("runButton");
-      let logReady = false;
+      const batchButton = document.getElementById("batchRunButton");
+      let logReady = false, runResult = null;
       try {
         const healthResponse = await fetch("/api/health", { cache: "no-store" }), health = await healthResponse.json();
         if (!healthResponse.ok || health.schemaVersion !== EXPECTED_API_SCHEMA) throw new Error("本地服务版本过旧，请重启 scripts/config_editor_server.py");
@@ -1248,22 +1320,237 @@
         if (state.strategy === "milp" && state.roundCount !== 1) throw new Error("MILP 策略只能运行首次排程，不能选择多次重算");
         if (state.strategy === "milp" && configuredWaferCount() > 12) throw new Error(`MILP 策略总晶圆数量不能超过 12 片，当前为 ${configuredWaferCount()} 片`);
         if (state.testCaseId) await saveCurrentTest(true);
-        const payload = buildPayload(); button.disabled = true; button.classList.add("running"); button.textContent = "正在运行策略…";
+        const payload = buildPayload(); button.disabled = true; batchButton.disabled = true; button.classList.add("running"); button.textContent = "正在运行策略…";
+        resetRunResult();
         writeTerminal(`$ 开始运行 ${state.strategy}\n  总轮数: ${state.roundCount}\n  重算时间: ${state.rounds.map(round => round.currentTime).join(", ")} s`);
         const response = await fetch("/api/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
         const responseText = await response.text();
-        let result;
-        try { result = JSON.parse(responseText); }
+        try { runResult = JSON.parse(responseText); }
         catch { throw new Error(responseText.trim().slice(0, 240) || `服务返回 ${response.status}`); }
-        logReady = prepareLogDownload(result);
-        if (!response.ok || !result.ok) throw new Error(result.error || `服务返回 ${response.status}`); showResult(result);
-      } catch (error) { writeTerminal(`$ 运行失败：${error.message || "未知错误"}${logReady ? "\n  复现日志已生成，可点击“导出复现日志”" : ""}`, true); document.getElementById("metricValidation").textContent = "失败"; }
-      finally { button.disabled = false; button.classList.remove("running"); button.textContent = "▶ 运行后端策略"; }
+        logReady = prepareLogDownload(runResult);
+        if (!response.ok || !runResult.ok) throw new Error(runResult.error || `服务返回 ${response.status}`); showResult(runResult);
+      } catch (error) {
+        const baselineError = runResult?.baseline?.status === "failed" ? `\n  Baseline 失败：${runResult.baseline.error || "未知原因"}` : "";
+        writeTerminal(`$ 运行失败：${error.message || "未知错误"}${baselineError}${logReady ? "\n  复现日志已生成，可点击“导出复现日志”" : ""}`, true);
+        document.getElementById("metricValidation").textContent = "失败";
+      }
+      finally { button.disabled = false; button.classList.remove("running"); button.textContent = "▶ 运行当前测试"; renderWorkspaceControls(); }
+    }
+
+    /** 使用当前所选策略并行运行当前测试组中的全部测试。 */
+    async function runCurrentTestGroup() {
+      const button = document.getElementById("batchRunButton"), runButton = document.getElementById("runButton");
+      if (state.batchRunning) {
+        try {
+          await requestBatchCancellation();
+        } catch (error) {
+          state.batchCancelRequested = false; state.batchCancelSent = false;
+          button.disabled = false; button.classList.remove("running"); button.classList.add("cancel"); button.textContent = "■ 终止调度";
+          writeTerminal(`$ 终止失败：${error.message || "未知错误"}\n  批量任务仍在运行，可再次尝试终止。`, true);
+        }
+        return;
+      }
+      try {
+        if (!state.workspaceDeviceId) throw new Error("请先选择设备和测试组");
+        if (state.testCaseId) await saveCurrentTest(true);
+        const tests = (state.workspaceDevice?.tests || []).filter(test => String(test.group || "").trim() === state.activeTestGroup);
+        if (!tests.length) throw new Error("当前测试组没有可运行测试");
+        state.batchRunning = true; state.activeBatchId = ""; state.batchCancelRequested = false; state.batchCancelSent = false;
+        button.disabled = false; runButton.disabled = true; button.classList.add("cancel"); button.textContent = "■ 终止调度";
+        document.getElementById("batchResults").innerHTML = "";
+        writeTerminal(`$ 批量运行当前测试组\n  组别: ${state.activeTestGroup || "未分组"}\n  策略: ${state.strategy}\n  测试数: ${tests.length}\n  后端最多并行运行 4 项…`);
+        const response = await fetch("/api/run-batch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ deviceId: state.workspaceDeviceId, group: state.activeTestGroup, strategy: state.strategy, options: state.options }),
+        });
+        let result = await response.json();
+        if (!response.ok || !result.batchId || !Array.isArray(result.items)) throw new Error(result.error || `服务返回 ${response.status}`);
+        state.activeBatchId = result.batchId;
+        showBatchProgress(result);
+        if (state.batchCancelRequested) await sendBatchCancellation();
+        while (!["completed", "failed", "cancelled"].includes(result.status)) {
+          await new Promise(resolve => window.setTimeout(resolve, 450));
+          const statusResponse = await fetch(`/api/run-batches/${encodeURIComponent(result.batchId)}`, { cache: "no-store" });
+          result = await statusResponse.json();
+          if (!statusResponse.ok) throw new Error(result.error || `服务返回 ${statusResponse.status}`);
+          showBatchProgress(result);
+        }
+        if (result.status === "cancelled") {
+          showBatchProgress(result);
+          writeTerminal(`$ 批量调度已终止\n  已停止提交等待中的测试；仍在算法内部执行的任务结果将被忽略。`);
+          return;
+        }
+        if (result.status === "failed" && !Array.isArray(result.items)) throw new Error(result.error || "批量任务失败");
+        showBatchResult(result);
+      } catch (error) {
+        writeTerminal(`$ 批量运行失败：${error.message || "未知错误"}`, true);
+        document.getElementById("metricValidation").textContent = "失败";
+      } finally {
+        state.batchRunning = false; state.activeBatchId = ""; state.batchCancelRequested = false; state.batchCancelSent = false;
+        button.disabled = !state.serviceCompatible; runButton.disabled = !state.serviceCompatible;
+        button.classList.remove("running", "cancel"); button.textContent = "▦ 批量运行当前组";
+        renderWorkspaceControls();
+      }
+    }
+
+    /** 请求终止当前批量任务；任务 ID 返回前点击也会在创建后立即补发。 */
+    async function requestBatchCancellation() {
+      if (!state.batchRunning || state.batchCancelRequested) return;
+      state.batchCancelRequested = true;
+      const button = document.getElementById("batchRunButton");
+      button.disabled = true; button.classList.add("running"); button.textContent = "正在终止…";
+      writeTerminal("$ 正在终止批量调度…");
+      if (state.activeBatchId) await sendBatchCancellation();
+    }
+
+    /** 通知后端取消排队任务，并冻结当前批量结果。 */
+    async function sendBatchCancellation() {
+      if (!state.activeBatchId || state.batchCancelSent) return;
+      state.batchCancelSent = true;
+      const response = await fetch(`/api/run-batches/${encodeURIComponent(state.activeBatchId)}`, { method: "DELETE" });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || `终止失败，服务返回 ${response.status}`);
+      showBatchProgress(result);
+    }
+
+    /** 实时绘制总体进度和每个测试的排队、运行、成功、失败状态。 */
+    function showBatchProgress(result) {
+      const completed = Number(result.completed || 0), total = Number(result.testCount || result.items?.length || 0);
+      const percent = total ? Math.round(completed / total * 100) : 0;
+      const successful = (result.items || []).filter(item => item.status === "succeeded");
+      const averageMakespan = successful.length ? successful.reduce((sum, item) => sum + Number(item.makespan), 0) / successful.length : 0;
+      const comparable = successful.filter(item => item.baseline?.status === "succeeded");
+      const totalMakespan = comparable.reduce((sum, item) => sum + Number(item.makespan), 0);
+      const totalBaseline = comparable.reduce((sum, item) => sum + Number(item.baseline.makespan), 0);
+      const aggregateImprovement = totalBaseline > 0 ? (totalBaseline - totalMakespan) / totalBaseline * 100 : NaN;
+      const moveCount = successful.reduce((sum, item) => sum + Number(item.moveCount || 0), 0);
+      const progress = document.getElementById("batchProgress");
+      const statusText = result.status === "completed" ? "批量运行完成" : result.status === "cancelled" ? "批量调度已终止" : result.status === "failed" ? "批量运行失败" : "批量运行中";
+      progress.classList.add("visible");
+      document.getElementById("metricTimeLabel").textContent = "总耗时";
+      document.getElementById("batchProgressText").textContent = statusText;
+      document.getElementById("batchProgressCount").textContent = `${completed}/${total} · ${percent}%`;
+      document.getElementById("batchProgressBar").style.width = `${percent}%`;
+      document.getElementById("metricTime").textContent = result.status === "completed" ? `${(Number(result.totalElapsedMs) / 1000).toFixed(2)} s` : result.status === "cancelled" ? "已终止" : "运行中";
+      document.getElementById("metricMakespanLabel").textContent = comparable.length ? "总 Makespan / Baseline" : "平均 Makespan";
+      document.getElementById("metricMakespan").textContent = comparable.length
+        ? `${totalMakespan.toFixed(2)} / ${totalBaseline.toFixed(2)} s · ${aggregateImprovement >= 0 ? "提升" : "退化"} ${Math.abs(aggregateImprovement).toFixed(2)}%`
+        : successful.length ? `${averageMakespan.toFixed(2)} s` : "—";
+      document.getElementById("metricMovesLabel").textContent = "总 Move 数";
+      document.getElementById("metricMoves").textContent = moveCount || "—";
+      document.getElementById("metricValidationLabel").textContent = result.cancelled ? "成功 / 失败 / 终止" : "成功 / 失败";
+      document.getElementById("metricValidation").textContent = result.cancelled ? `${result.succeeded || 0} / ${result.failed || 0} / ${result.cancelled}` : `${result.succeeded || 0} / ${result.failed || 0}`;
+      renderBatchItems(result.items || []);
+      writeTerminal([
+        "$ 批量运行当前测试组",
+        `  组别: ${result.group || "未分组"} · 策略: ${result.strategy}`,
+        `  进度: ${completed}/${total} (${percent}%) · 并行数: ${result.workerCount}`,
+        `  等待: ${(result.items || []).filter(item => item.status === "queued").length} · 运行中: ${(result.items || []).filter(item => item.status === "running").length} · 成功: ${result.succeeded || 0} · 失败: ${result.failed || 0} · 终止: ${result.cancelled || 0}`,
+      ].join("\n"));
+    }
+
+    function renderBatchItems(items) {
+      const statusLabels = { queued: "等待中", running: "运行中", succeeded: "成功", failed: "失败", cancelled: "已终止" };
+      document.getElementById("batchResults").innerHTML = items.map(item => {
+        const finished = item.status === "succeeded";
+        const baseline = item.baseline || {}, baselineReady = baseline.status === "succeeded";
+        const cpuTime = Number(item.cpuTimeMs);
+        const improvement = Number(item.improvementPercent);
+        const improvementBadge = finished && baselineReady && Number.isFinite(improvement)
+          ? `<b class="${improvement >= 0 ? "summary-gain" : "summary-loss"}">${improvement >= 0 ? "提升" : "退化"} ${Math.abs(improvement).toFixed(2)}%</b>`
+          : "";
+        const baselineReason = baseline.status && baseline.status !== "succeeded"
+          ? `Baseline ${baseline.status === "failed" ? "失败" : "失效"}：${baseline.error || "等待重新计算"}`
+          : "";
+        const summaryError = baseline.status === "failed" ? baselineReason : item.status === "failed" ? `运行失败：${item.error || "未知错误"}` : item.status === "cancelled" ? "调度已终止" : baselineReason;
+        const displayId = String(item.testId || item.testName || "test").slice(0, 12);
+        return `
+          <div class="batch-result ${escapeHtml(item.status || "queued")}">
+            <div class="batch-result-head">
+              <div class="batch-result-title"><strong title="${escapeHtml(`${item.testId || ""} · ${item.testName || ""}`)}">${escapeHtml(displayId)}</strong></div>
+              <span class="batch-status">${statusLabels[item.status] || "等待中"}</span>
+              <div class="batch-result-actions">
+                ${item.logUrl ? `<a class="btn" href="${escapeHtml(item.logUrl)}" download>日志</a>` : `<span class="btn" aria-disabled="true">日志</span>`}
+                ${item.ganttUrl ? `<a class="btn primary" href="${escapeHtml(item.ganttUrl)}" target="_blank">甘特图</a>` : `<span class="btn" aria-disabled="true">甘特图</span>`}
+              </div>
+            </div>
+            <div class="batch-result-summary">
+              ${summaryError ? `<span class="summary-error" title="${escapeHtml(summaryError)}">${escapeHtml(summaryError)}</span>` : `
+                <span title="Makespan 当前值 / Heuristic Baseline">M <b>${finished ? Number(item.makespan).toFixed(2) : "—"}</b> / Baseline <b>${baselineReady ? Number(baseline.makespan).toFixed(2) : "—"} s</b>${improvementBadge ? ` · ${improvementBadge}` : ""}</span>
+                <span>CPU Time <b>${finished && Number.isFinite(cpuTime) ? `${cpuTime.toFixed(1)} ms` : "—"}</b></span>
+              `}
+            </div>
+          </div>`;
+      }).join("");
+    }
+
+    /** 生成一个甘特图页面 URL，其中每个成功测试作为独立标签页一次加载。 */
+    function batchGanttUrl(items) {
+      const params = new URLSearchParams();
+      items.filter(item => item.status === "succeeded" && item.resultUrl).forEach(item => {
+        params.append("src", item.resultUrl);
+        params.append("name", item.testName);
+      });
+      return params.size ? `/movelist_gantt_viewer.html?${params.toString()}` : "";
+    }
+
+    /** 汇总批量运行指标，并为每个测试保留甘特图和复现日志入口。 */
+    function showBatchResult(result) {
+      const successful = result.items.filter(item => item.status === "succeeded");
+      const averageMakespan = successful.length ? successful.reduce((sum, item) => sum + Number(item.makespan), 0) / successful.length : 0;
+      const comparable = successful.filter(item => item.baseline?.status === "succeeded");
+      const totalMakespan = comparable.reduce((sum, item) => sum + Number(item.makespan), 0);
+      const totalBaseline = comparable.reduce((sum, item) => sum + Number(item.baseline.makespan), 0);
+      const aggregateImprovement = totalBaseline > 0 ? (totalBaseline - totalMakespan) / totalBaseline * 100 : NaN;
+      const moveCount = successful.reduce((sum, item) => sum + Number(item.moveCount || 0), 0);
+      document.getElementById("metricTimeLabel").textContent = "总耗时";
+      document.getElementById("metricTime").textContent = `${(Number(result.totalElapsedMs) / 1000).toFixed(2)} s`;
+      document.getElementById("metricMakespanLabel").textContent = comparable.length ? "总 Makespan / Baseline" : "平均 Makespan";
+      document.getElementById("metricMakespan").textContent = comparable.length
+        ? `${totalMakespan.toFixed(2)} / ${totalBaseline.toFixed(2)} s · ${aggregateImprovement >= 0 ? "提升" : "退化"} ${Math.abs(aggregateImprovement).toFixed(2)}%`
+        : successful.length ? `${averageMakespan.toFixed(2)} s` : "—";
+      document.getElementById("metricMovesLabel").textContent = "总 Move 数";
+      document.getElementById("metricMoves").textContent = moveCount;
+      document.getElementById("metricValidationLabel").textContent = "成功 / 失败";
+      document.getElementById("metricValidation").textContent = `${result.succeeded} / ${result.failed}`;
+      writeTerminal([
+        "$ 批量运行完成",
+        `  组别: ${result.group || "未分组"} · 策略: ${result.strategy}`,
+        `  成功: ${result.succeeded} · 失败: ${result.failed} · 并行数: ${result.workerCount}`,
+        `  总耗时: ${(Number(result.totalElapsedMs) / 1000).toFixed(2)} s`,
+        ...(comparable.length ? [`  组级 Makespan: ${totalMakespan.toFixed(2)} / Baseline ${totalBaseline.toFixed(2)} s · ${aggregateImprovement >= 0 ? "提升" : "退化"} ${Math.abs(aggregateImprovement).toFixed(2)}%`] : []),
+        "",
+        ...result.items.map((item, index) => item.ok
+          ? `  #${index + 1} ${item.testName} | makespan=${Number(item.makespan).toFixed(2)}s | improvement=${Number.isFinite(Number(item.improvementPercent)) ? `${Number(item.improvementPercent).toFixed(2)}%` : "—"} | ${Number(item.totalElapsedMs).toFixed(1)}ms`
+          : `  #${index + 1} ${item.testName} | 失败: ${item.error}`),
+      ].join("\n"), result.failed > 0);
+      renderBatchItems(result.items);
+      const first = successful[0];
+      if (first) {
+        const gantt = document.getElementById("ganttButton"); gantt.href = first.ganttUrl; gantt.removeAttribute("aria-disabled");
+        const log = document.getElementById("logButton"); log.href = first.logUrl; log.download = first.logFileName; log.removeAttribute("aria-disabled");
+      }
+      const allGanttUrl = batchGanttUrl(result.items);
+      const allGantt = document.getElementById("batchGanttButton");
+      if (allGanttUrl) { allGantt.href = allGanttUrl; allGantt.removeAttribute("aria-disabled"); }
     }
 
     /** 显示运行指标和逐轮日志。 */
     function showResult(result) {
-      document.getElementById("metricTime").textContent = `${result.totalElapsedMs.toFixed(1)} ms`; document.getElementById("metricMakespan").textContent = `${result.makespan.toFixed(2)} s`; document.getElementById("metricMoves").textContent = result.moveCount; document.getElementById("metricValidation").textContent = result.validation === "passed" ? "通过" : result.validation;
+      document.getElementById("batchProgress").classList.remove("visible");
+      document.getElementById("batchResults").innerHTML = "";
+      const allGantt = document.getElementById("batchGanttButton"); allGantt.href = "#"; allGantt.setAttribute("aria-disabled", "true");
+      const baseline = result.baseline || {}, baselineReady = baseline.status === "succeeded";
+      const cpuTime = Number(result.cpuTimeMs ?? result.totalElapsedMs);
+      document.getElementById("metricTimeLabel").textContent = "CPU Time";
+      document.getElementById("metricMakespanLabel").textContent = "Makespan / Baseline";
+      document.getElementById("metricMovesLabel").textContent = "Move 数";
+      document.getElementById("metricValidationLabel").textContent = "校验";
+      document.getElementById("metricTime").textContent = `${cpuTime.toFixed(1)} ms`;
+      document.getElementById("metricMakespan").textContent = `${result.makespan.toFixed(2)} / ${baselineReady ? Number(baseline.makespan).toFixed(2) : "—"} s`;
+      document.getElementById("metricMoves").textContent = result.moveCount;
+      document.getElementById("metricValidation").textContent = result.validation === "passed" ? "通过" : result.validation;
       writeTerminal(["$ 调度完成", ...result.rounds.map(round => {
         if (round.kind === "initial") return `  #${round.index} 首次 | ${round.elapsedMs.toFixed(1)} ms`;
         const request = Number(round.requestedTime);
@@ -1283,12 +1570,16 @@
     async function checkService() {
       const pill = document.getElementById("serviceState");
       const runButton = document.getElementById("runButton");
+      const batchRunButton = document.getElementById("batchRunButton");
       try {
         const response = await fetch("/api/health", { cache: "no-store" });
         if (!response.ok) throw new Error();
         const status = await response.json(), compatible = status.schemaVersion === EXPECTED_API_SCHEMA;
         state.serviceCompatible = compatible;
-        const rlAvailable = status.strategies?.rl !== false, l2dAvailable = status.strategies?.l2d === true, milpAvailable = status.strategies?.milp === true;
+        const neuralAvailable = status.strategies?.neural === true, rlAvailable = status.strategies?.rl !== false, l2dAvailable = status.strategies?.l2d === true, milpAvailable = status.strategies?.milp === true;
+        document.getElementById("neuralStrategyInput").disabled = !neuralAvailable;
+        const neuralModelName = String(status.strategyModels?.neural || "").split(/[\\/]/).at(-1);
+        document.getElementById("neuralStrategyHint").textContent = neuralAvailable ? `${neuralModelName} · NumPy 快速推理 · 同步波前安全层` : "缺少模型，请先离线训练";
         document.getElementById("rlStrategyInput").disabled = !rlAvailable;
         document.getElementById("rlStrategyHint").textContent = rlAvailable ? "调用已训练模型" : "缺少 RL 模型";
         document.getElementById("l2dStrategyInput").disabled = !l2dAvailable;
@@ -1297,6 +1588,7 @@
         document.getElementById("milpStrategyInput").disabled = !milpAvailable;
         renderOtherAlgorithmOptions(status.otherAlgorithms || []);
         runButton.disabled = !compatible;
+        batchRunButton.disabled = !compatible;
         renderWorkspaceControls();
         pill.textContent = compatible ? "本地服务已连接" : "服务版本过旧";
         if (!compatible) {
@@ -1304,7 +1596,7 @@
           writeTerminal("$ 本地服务版本过旧\n  请重启: py scripts/config_editor_server.py", true);
         }
       }
-      catch { state.serviceCompatible = false; runButton.disabled = true; document.getElementById("newGroupButton").disabled = true; pill.textContent = "本地服务未连接"; pill.style.color = "var(--red)"; pill.style.background = "var(--red-soft)"; writeTerminal("$ 无法连接本地服务\n  请运行: py scripts/config_editor_server.py", true); }
+      catch { state.serviceCompatible = false; runButton.disabled = true; batchRunButton.disabled = true; document.getElementById("newGroupButton").disabled = true; pill.textContent = "本地服务未连接"; pill.style.color = "var(--red)"; pill.style.background = "var(--red-soft)"; writeTerminal("$ 无法连接本地服务\n  请运行: py scripts/config_editor_server.py", true); }
     }
 
     document.getElementById("deviceFile").addEventListener("change", event => loadDevice(event.target.files[0]).catch(error => { event.target.value = ""; writeTerminal(`$ 设备读取失败\n  ${error.message}`, true); }));
@@ -1320,9 +1612,11 @@
     document.getElementById("deleteTestButton").addEventListener("click", () => deleteCurrentTest().catch(error => writeTerminal(`$ 删除测试集失败\n  ${error.message}`, true)));
     document.getElementById("roundCount").addEventListener("input", event => { resizeRounds(event.target.value); markTestDirty(); });
     document.getElementById("runButton").addEventListener("click", runPlan);
-    document.getElementById("clearButton").addEventListener("click", () => writeTerminal("$ 等待运行…"));
+    document.getElementById("batchRunButton").addEventListener("click", runCurrentTestGroup);
+    document.getElementById("clearButton").addEventListener("click", () => { writeTerminal("$ 等待运行…"); document.getElementById("batchProgress").classList.remove("visible"); document.getElementById("batchResults").innerHTML = ""; });
     document.getElementById("logButton").addEventListener("click", event => { if (event.currentTarget.getAttribute("aria-disabled") === "true") event.preventDefault(); });
     document.getElementById("ganttButton").addEventListener("click", event => { if (event.currentTarget.getAttribute("aria-disabled") === "true") event.preventDefault(); });
+    document.getElementById("batchGanttButton").addEventListener("click", event => { if (event.currentTarget.getAttribute("aria-disabled") === "true") event.preventDefault(); });
     document.getElementById("closeDrawer").addEventListener("click", closeStepDrawer);
     document.getElementById("drawerLayer").addEventListener("click", event => { if (event.target.id === "drawerLayer") closeStepDrawer(); });
     document.addEventListener("keydown", event => { if (event.key === "Escape") closeStepDrawer(); });
@@ -1336,8 +1630,11 @@
       }
       if (event.target.name === "strategy") {
         state.strategy = event.target.value;
+        if (state.strategy === "neural") state.options.loadLockManager = "joint";
+        else if (["heuristic", "rl"].includes(state.strategy)) state.options.loadLockManager = "petri-look";
         if (state.strategy === "milp") { resizeRounds(1); document.getElementById("roundCount").value = 1; }
         document.getElementById("roundCount").disabled = state.strategy === "milp";
+        document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "neural", "rl"].includes(state.strategy));
         document.getElementById("rlOptions").classList.toggle("is-hidden", state.strategy !== "rl");
         document.getElementById("milpOptions").classList.toggle("is-hidden", state.strategy !== "milp");
         markTestDirty(); renderAll();

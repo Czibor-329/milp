@@ -5,7 +5,11 @@ from pathlib import Path
 
 import scripts.reschedule as demo
 from src.parse.model import Chamber, Problem, Robot, RuntimeAvailability, Stage, Wafer
-from src.schedule.realtime import RealtimeRescheduler, _repair_loadlock_door_overlap
+from src.schedule.realtime import (
+    RealtimeRescheduler,
+    _repair_loadlock_door_overlap,
+    _repair_loadlock_prepare_overlap,
+)
 from src.schedule import start_schedule
 from src.validation.move_fields import COMPLETE_MOVE, PICK_MOVE, PREPARE_MOVE, PRE_PREPARE_MOVE
 from src.validation.state import LoadLockState, MachineState, SlotState
@@ -134,6 +138,48 @@ class RealtimeRescheduleTests(unittest.TestCase):
         pressure = next(move for move in repaired if move.get("MoveType") == PRE_PREPARE_MOVE)
         self.assertGreaterEqual(float(prepares[1]["StartTime"]), float(completes[0]["EndTime"]))
         self.assertGreaterEqual(float(pressure["StartTime"]), float(completes[1]["EndTime"]))
+
+    def test_large_pressure_prepare_timeline_is_repaired_in_one_pass(self) -> None:
+        """长批量的泵气/开门冲突应保持时长并按累计间隙线性串行化。"""
+        state = MachineState(stations={
+            "LA": LoadLockState("LA", "LoadLock", {1: SlotState(), 2: SlotState()}),
+        })
+        moves = []
+        count = 500
+        for index in range(count):
+            base = float(index * 20)
+            moves.extend([
+                {
+                    "MoveID": index * 2 + 1,
+                    "MoveType": PRE_PREPARE_MOVE,
+                    "StartTime": base,
+                    "EndTime": base + 10.0,
+                    "Station": "LA",
+                },
+                {
+                    "MoveID": index * 2 + 2,
+                    "MoveType": PREPARE_MOVE,
+                    "StartTime": base + 5.0,
+                    "EndTime": base + 6.0,
+                    "Station": "LA",
+                },
+            ])
+
+        repaired = _repair_loadlock_prepare_overlap(moves, state)
+        prepares = [
+            move for move in repaired
+            if move.get("MoveType") == PREPARE_MOVE
+        ]
+        self.assertEqual(count, len(prepares))
+        for move in prepares:
+            self.assertAlmostEqual(
+                1.0,
+                float(move["EndTime"]) - float(move["StartTime"]),
+            )
+        self.assertAlmostEqual(
+            float((count - 1) * 25 + 10),
+            float(prepares[-1]["StartTime"]),
+        )
 
     def test_viewer_reads_and_draws_recompute_points(self) -> None:
         """查看器应解析 RecomputePoints 并渲染重算竖线。"""

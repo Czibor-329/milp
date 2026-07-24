@@ -15,8 +15,9 @@ from src.export import export_movelist
 from src.parse.model import Durations, Problem, RuntimeAvailability, Stage, Wafer
 from src.parse import PROCESS_ASSIGNMENT_ACYCLIC_ROUND_ROBIN, parse_task
 from src.schedule.api import start_schedule
+from src.schedule.neural import start_schedule_neural
 from src.schedule.rl import start_schedule_by_rl
-from src.validation import MoveStateReplay, populate_premove_ids, validate_move_list
+from src.validation import MoveStateReplay, validate_move_list
 from src.validation.move_fields import (
     COMPLETE_MOVE, PICK_MOVE, PLACE_MOVE, PREPARE_MOVE, PRE_PREPARE_MOVE,
     PROCESS_MOVE, SWAP_MOVE, sort_key,
@@ -39,6 +40,7 @@ L2D_PSE300_PM_ORDER = ("PM1", "PM2", "PM3", "PM4")
 DEFAULT_MILP_TIME_LIMIT_SECONDS = 120.0
 GUROBI_OPTIMAL_STATUS = 2
 MAX_MILP_TOTAL_WAFERS = 12
+NEURAL_REALIZED_MINIMUM_GAIN = 0.01
 
 
 @dataclass(frozen=True)
@@ -73,6 +75,8 @@ class RealtimeRescheduler:
         *,
         strategy: str = "heuristic",
         policy: Any = None,
+        loadlock_manager_mode: Optional[str] = None,
+        neural_force_quality_floor: bool = False,
         rl_search_seconds: float = 4.0,
         rl_rollouts: int = 256,
         rl_temperature: float = 0.7,
@@ -80,13 +84,20 @@ class RealtimeRescheduler:
         seed: int = 0,
     ) -> None:
         """解析首批任务，并用所选顶层策略立即生成第一段计划。"""
-        if strategy not in {"heuristic", "rl", "l2d", "milp"}:
-            raise ValueError(f"实时重算只支持 heuristic/rl/l2d/milp，收到 strategy={strategy}")
-        if strategy in {"rl", "l2d"} and policy is None:
+        if strategy not in {"heuristic", "neural", "rl", "l2d", "milp"}:
+            raise ValueError(
+                f"实时重算只支持 heuristic/neural/rl/l2d/milp，收到 strategy={strategy}"
+            )
+        if strategy in {"neural", "rl", "l2d"} and policy is None:
             raise ValueError(f"{strategy.upper()} 实时重算缺少已加载策略模型")
         self.tool_topo = deepcopy(dict(tool_topo))
         self.strategy = strategy
         self.policy = policy
+        self.loadlock_manager_mode = str(
+            loadlock_manager_mode
+            or ("joint" if strategy == "neural" else "petri-look")
+        )
+        self.neural_force_quality_floor = bool(neural_force_quality_floor)
         self.rl_search_seconds = float(rl_search_seconds)
         self.rl_rollouts = int(rl_rollouts)
         self.rl_temperature = float(rl_temperature)
@@ -109,8 +120,18 @@ class RealtimeRescheduler:
         _apply_material_start_slots(self.problem, update_params)
         start_time = float(update_params.get("CurrentTime") or 0.0)
         initial_state = MachineState.from_sources(self.problem, init_data)
+        initial_availability = (
+            self.problem.runtime_availability or RuntimeAvailability()
+        )
+        initial_availability.loadlock_environment = {
+            name: station.environment
+            for name, station in initial_state.stations.items()
+            if isinstance(station, LoadLockState)
+        }
+        self.problem.runtime_availability = initial_availability
         self._history: List[dict] = []
         self._points: List[RecomputePoint] = []
+        self._committed_recovery_end = start_time
         self._current_plan = self._schedule_segment(self.problem, initial_state, start_time)
         self._next_move_id = max((int(move["MoveID"]) for move in self._current_plan), default=0) + 1
         self._tracker = MoveStateReplay(self.problem, self._current_plan, initial_state)
@@ -130,6 +151,11 @@ class RealtimeRescheduler:
     def state_time(self) -> float:
         """返回当前状态已经推进到的绝对时间，不允许后续重算回退到该时刻之前。"""
         return float(self._tracker.current_time)
+
+    @property
+    def committed_recovery_end(self) -> float:
+        """返回此前重算已经承诺、因而不能取消的旧动作最晚结束时刻。"""
+        return float(self._committed_recovery_end)
 
     @property
     def running_move_ids(self) -> frozenset[int]:
@@ -155,9 +181,24 @@ class RealtimeRescheduler:
         """返回最近一段排程的求解诊断副本；当前主要用于展示 MILP 最优性。"""
         return dict(self._last_strategy_diagnostics)
 
-    def update_move_state(self, notification: Mapping[str, Any]) -> MachineState:
+    def update_move_state(
+        self,
+        notification: Mapping[str, Any],
+        *,
+        snapshot: bool = True,
+        track_reservations: bool = True,
+    ) -> Optional[MachineState]:
         """接收外部 Move 开始/结束通知并更新 ``src.validation.state`` 状态。"""
-        return self._tracker.update_move_state(notification)
+        return self._tracker.update_move_state(
+            notification,
+            snapshot=snapshot,
+            track_reservations=track_reservations,
+        )
+
+    def robot_position(self, robot_name: str) -> Optional[str]:
+        """只读返回 Robot 当前指向，避免高频回放为查询一个字段复制整机状态。"""
+        robot = self._tracker.state.resolve_robot(robot_name)
+        return robot.position if robot is not None else None
 
     def recompute(
         self,
@@ -187,6 +228,13 @@ class RealtimeRescheduler:
             raise ValueError("新计划起点必须位于重算触发时间与收尾完成时间之间")
         self._ensure_safe_cut(timestamp, cutoff)
         snapshot = self._tracker.state.clone()
+        # “上一次环境转换为空片”只用于拒绝同一计划内无意义的往返抽充气，
+        # 不是设备的物理状态。重算时，旧计划可能有一条在 cutoff 前已经启动、
+        # 因而必须收尾的空转换；新计划取消了它原本的后继后，可能合法地需要
+        # 反向转换。跨计划保留该意图标记会把这种必要恢复误判为连续空转换。
+        for station in snapshot.stations.values():
+            if isinstance(station, LoadLockState):
+                station.last_environment_transition_was_empty = False
         parse_options = (
             {
                 "process_assignment": PROCESS_ASSIGNMENT_ACYCLIC_ROUND_ROBIN,
@@ -209,6 +257,10 @@ class RealtimeRescheduler:
         new_segment, self._next_move_id = _renumber_segment(new_segment, self._next_move_id)
 
         self.problem = combined_problem
+        self._committed_recovery_end = max(
+            self._committed_recovery_end,
+            timestamp,
+        )
         self._current_plan = new_segment
         self._tracker = MoveStateReplay(combined_problem, new_segment, next_state)
         self._tracker.current_time = schedule_start
@@ -221,7 +273,6 @@ class RealtimeRescheduler:
         moves.sort(key=sort_key)
         for move in moves:
             move["PreMoveID"] = []
-        populate_premove_ids(moves)
         return {
             "MoveList": moves,
             "RecomputePoints": [point.to_dict() for point in self._points],
@@ -253,7 +304,18 @@ class RealtimeRescheduler:
     def _schedule_segment(self, problem: Problem, state: MachineState, offset: float) -> List[dict]:
         """用所选顶层策略和 timing 定时生成一段绝对时间计划。"""
         self._last_strategy_diagnostics = {}
-        if self.strategy == "rl":
+        if self.strategy == "neural":
+            result = start_schedule_neural(
+                problem,
+                policy=self.policy,
+                fallback_on_failure=True,
+                loadlock_manager_mode=self.loadlock_manager_mode,
+                force_quality_floor=self.neural_force_quality_floor,
+            )
+            self._last_strategy_diagnostics = dict(
+                getattr(result, "neural_diagnostics", {}) or {}
+            )
+        elif self.strategy == "rl":
             result = start_schedule_by_rl(
                 problem,
                 self.policy,
@@ -262,6 +324,7 @@ class RealtimeRescheduler:
                 max_rollouts=self.rl_rollouts,
                 temp=self.rl_temperature,
                 verbose=False,
+                loadlock_manager=self.loadlock_manager_mode,
             )
         elif self.strategy == "l2d":
             # 延迟导入，确保未安装 Torch 时 heuristic/RL 旧路径仍可独立使用。
@@ -286,22 +349,117 @@ class RealtimeRescheduler:
                 "timeLimitSeconds": self.milp_time_limit,
             }
         else:
-            result = start_schedule(problem, verbose=False)
+            result = start_schedule(
+                problem,
+                verbose=False,
+                loadlock_manager=self.loadlock_manager_mode,
+            )
+        if self.strategy in {"heuristic", "rl"}:
+            self._last_strategy_diagnostics.update({
+                "loadLockManagerRequested": getattr(
+                    result,
+                    "loadlock_manager_requested",
+                    self.loadlock_manager_mode,
+                ),
+                "loadLockSelectedPath": getattr(
+                    result,
+                    "loadlock_manager_selected",
+                    "unknown",
+                ),
+            })
         if not getattr(result, "feasible", False):
             raise RuntimeError(f"{self.strategy} 重算未找到可行计划")
-        moves = export_movelist(problem, result, state)
-        moves = _serialize_initial_processing(moves, state)
-        moves = _repair_loadlock_prepare_overlap(moves, state)
-        # export 已包含完整且可执行的环境动作时，不再插入随后又会被删除的空抽/空充。
-        # 旧流程会在删除冗余动作后保留其整体平移，令最终 MoveList 偏离求解器 makespan。
-        if self.strategy != "milp" or validate_move_list(problem, moves, state):
-            moves = _prepend_environment_setups(problem, moves, state)
-            moves = _remove_redundant_empty_environment_cycles(moves, state)
-        shifted = _shift_moves(moves, offset)
-        issues = validate_move_list(problem, shifted, state)
-        if issues:
-            raise RuntimeError(f"重算 MoveList 状态校验失败：{issues[0]}")
-        return shifted
+
+        def materialize(selected_result: Any, source_strategy: str) -> List[dict]:
+            """把 timing 结果兑现成经真实初态复核的绝对时间 MoveList。"""
+            moves = export_movelist(problem, selected_result, state)
+            moves = _serialize_initial_processing(moves, state)
+            moves = _repair_loadlock_prepare_overlap(moves, state)
+            # export 已包含完整且可执行的环境动作时，不再插入随后又会被删除的
+            # 空抽/空充。旧流程会在删除冗余动作后保留整体平移，扭曲 makespan。
+            if (
+                source_strategy not in {"milp", "neural"}
+                or validate_move_list(problem, moves, state)
+            ):
+                moves = _prepend_environment_setups(problem, moves, state)
+                moves = _remove_redundant_empty_environment_cycles(moves, state)
+            shifted = _shift_moves(moves, offset)
+            issues = validate_move_list(problem, shifted, state)
+            if issues:
+                raise RuntimeError(f"重算 MoveList 状态校验失败：{issues[0]}")
+            return shifted
+
+        materialize_strategy = self.strategy
+        if (
+            self.strategy == "neural"
+            and self._last_strategy_diagnostics.get("selectedSource")
+            in {
+                "failure-fallback",
+                "quality-floor-fallback",
+            }
+        ):
+            materialize_strategy = "heuristic"
+        try:
+            candidate_moves = materialize(result, materialize_strategy)
+            if self.strategy == "neural" and self.neural_force_quality_floor:
+                # timing makespan 不含从真实 Robot/LoadLock 初态兑现时追加的全部恢复
+                # 动作。对已知分布外的多工序计划，在 MoveList 层再比较一次实际段终点，
+                # 只有至少 1% 的明确收益才接受 Neural 轨迹，避免微小抽象优势换来下一
+                # 轮更差的压力相位。
+                floor_result = start_schedule(
+                    problem,
+                    verbose=False,
+                    loadlock_manager=self.loadlock_manager_mode,
+                )
+                if getattr(floor_result, "feasible", False):
+                    floor_moves = materialize(
+                        floor_result,
+                        "heuristic",
+                    )
+                    candidate_end = max(
+                        (float(move.get("EndTime") or 0.0) for move in candidate_moves),
+                        default=offset,
+                    )
+                    floor_end = max(
+                        (float(move.get("EndTime") or 0.0) for move in floor_moves),
+                        default=offset,
+                    )
+                    floor_duration = max(floor_end - offset, TIME_TOLERANCE)
+                    realized_gain = (
+                        floor_end - candidate_end
+                    ) / floor_duration
+                    if realized_gain < NEURAL_REALIZED_MINIMUM_GAIN:
+                        self._last_strategy_diagnostics.update({
+                            "selectedSource": "quality-floor-fallback",
+                            "actionMask": "baseline-fallback",
+                            "decisionSpace": "baseline-fallback",
+                            "realizedMoveListGain": float(realized_gain),
+                        })
+                        return floor_moves
+                    self._last_strategy_diagnostics["realizedMoveListGain"] = float(
+                        realized_gain
+                    )
+            return candidate_moves
+        except RuntimeError as neural_state_error:
+            if self.strategy != "neural":
+                raise
+            # timing/Petri 检查只覆盖抽象资源序；真实初态还含门、压力和槽位相位。
+            # Neural 兑现失败时用已验证的启发式轨迹恢复，而不是把非法 MoveList
+            # 交给设备。诊断明确记录这条状态级安全地板。
+            fallback = start_schedule(
+                problem,
+                verbose=False,
+                loadlock_manager=self.loadlock_manager_mode,
+            )
+            if not getattr(fallback, "feasible", False):
+                raise neural_state_error
+            self._last_strategy_diagnostics.update({
+                "selectedSource": "state-validation-fallback",
+                "actionMask": "baseline-fallback",
+                "decisionSpace": "baseline-fallback",
+                "stateValidationFailure": str(neural_state_error),
+            })
+            return materialize(fallback, "heuristic")
 
 
 def _build_recompute_problem(
@@ -326,7 +484,15 @@ def _build_recompute_problem(
             started_cjobs.add(wafer.cjob_id)
         if stage_index == len(wafer.stages) - 1 and wafer.stages[stage_index].stage_type == "sink":
             continue
-        residual.append(_trim_wafer(wafer, stage_index, station_name, slot.phase))
+        residual.append(
+            _trim_wafer(
+                wafer,
+                stage_index,
+                station_name,
+                slot_id,
+                slot.phase,
+            )
+        )
         if slot.material is not None:
             slot.material.step_id = 0
 
@@ -419,34 +585,50 @@ def _current_stage_index(
     material: Optional[MaterialState],
 ) -> int:
     """优先按 StepID，缺失时按当前站点和槽位恢复晶圆所在工序。"""
+    def accepts_station(stage: Stage) -> bool:
+        # 神经策略会在完整候选池中动态选择 LoadLock；Problem 中的 chamber 只是解析期
+        # 默认值，实时状态中的实际腔只要属于该 stage.cands 就是同一道工序。
+        return stage.chamber == station_name or station_name in (stage.cands or [])
+
     if material is not None and isinstance(material.step_id, int):
         index = material.step_id
-        if 0 <= index < len(wafer.stages) and wafer.stages[index].chamber == station_name:
+        if 0 <= index < len(wafer.stages) and accepts_station(wafer.stages[index]):
             return index
     slot_index = slot_id - FIRST_SLOT_ID
     matches = [
         index for index, stage in enumerate(wafer.stages)
-        if stage.chamber == station_name and stage.slot == slot_index
+        if accepts_station(stage) and stage.slot == slot_index
     ]
     if not matches:
-        matches = [index for index, stage in enumerate(wafer.stages) if stage.chamber == station_name]
+        matches = [
+            index for index, stage in enumerate(wafer.stages)
+            if accepts_station(stage)
+        ]
     if not matches:
         raise ValueError(f"MatID={wafer.mat_id} 的当前站点 {station_name} 不在剩余路线中")
     return max(matches)
 
 
-def _trim_wafer(wafer: Wafer, stage_index: int, station_name: str, phase: SlotPhase) -> Wafer:
+def _trim_wafer(
+    wafer: Wafer,
+    stage_index: int,
+    station_name: str,
+    slot_id: int,
+    phase: SlotPhase,
+) -> Wafer:
     """把旧晶圆已经完成的路线前缀裁掉，并以当前槽位作为新起点。"""
     stages = [deepcopy(stage) for stage in wafer.stages[stage_index:]]
     first = stages[0]
     first.chamber = station_name
+    first.slot = slot_id - FIRST_SLOT_ID
     first.in_robot = ""
     first.cands = [station_name]
     if phase is SlotPhase.COMPLETED:
         first.stage_type = "source"
         first.proc = 0.0
         first.residency = -1.0
-        first.ll_type = ""
+        # 已完成的 LoadLock stage 不再重复抽/充气，但保留 entry/exit 方向元数据；
+        # timing 的双槽压力顺序和 MoveList 的同门换片识别仍需要它。
         first.clean_time = 0.0
         first.clean_trigger = 0
         first.clean_recipe = ""
@@ -620,12 +802,18 @@ def _runtime_availability(
         int(material_id): relative(timestamp)
         for material_id, timestamp in material_ready_times.items()
     }
+    loadlock_environment = {
+        name: station.environment
+        for name, station in state.stations.items()
+        if isinstance(station, LoadLockState)
+    }
     return RuntimeAvailability(
         station_ready={name: value for name, value in station_ready.items() if value > TIME_TOLERANCE},
         slot_ready={key: value for key, value in slot_ready.items() if value > TIME_TOLERANCE},
         robot_ready={name: value for name, value in robot_ready.items() if value > TIME_TOLERANCE},
         robot_positions=robot_positions,
         material_ready={key: value for key, value in material_ready.items() if value > TIME_TOLERANCE},
+        loadlock_environment=loadlock_environment,
     )
 
 
@@ -660,6 +848,22 @@ def _prepend_environment_setups(
     }
     if not loadlocks:
         return repaired
+
+    station_reference_cache: Dict[int, set[str]] = {}
+
+    def uses_station(move: Mapping[str, Any], station_name: str) -> bool:
+        """用缓存后的动作站点集合判断是否占用指定 LoadLock。"""
+        cache_key = id(move)
+        station_references = station_reference_cache.get(cache_key)
+        if station_references is None:
+            station_references = {
+                str(move.get("Station") or move.get("ModuleName") or ""),
+                *(str(value) for value in (move.get("SrcStationList") or [])),
+                *(str(value) for value in (move.get("DestStationList") or [])),
+                *(str(value) for value in (move.get("StationList") or [])),
+            }
+            station_reference_cache[cache_key] = station_references
+        return station_name in station_references
 
     while True:
         environments = {name: station.environment for name, station in loadlocks.items()}
@@ -701,13 +905,17 @@ def _prepend_environment_setups(
             break
 
         cut_time, station_name, last_state, required_state = mismatch
+        station_moves = [
+            move for move in repaired
+            if uses_station(move, station_name)
+        ]
         # 若最近一次无片转换之后没有开门，而它恰好把环境从下一次开门所需状态
         # 翻走，则这条转换本身就是多槽占用排序产生的冗余 setup。删除它并重新
         # 回放，比再补一条反向 setup 更符合真实 LoadLock 行为。
         last_access_time = max(
             (
                 float(move.get("StartTime") or 0.0)
-                for move in repaired
+                for move in station_moves
                 if move.get("MoveType") == PREPARE_MOVE
                 and str(move.get("Station") or move.get("ModuleName") or "") == station_name
                 and float(move.get("StartTime") or 0.0) < cut_time - TIME_TOLERANCE
@@ -715,7 +923,7 @@ def _prepend_environment_setups(
             default=float("-inf"),
         )
         redundant_setups = [
-            move for move in repaired
+            move for move in station_moves
             if move.get("MoveType") == PRE_PREPARE_MOVE
             and str(move.get("Station") or move.get("ModuleName") or "") == station_name
             and not (move.get("MatIDList") or [])
@@ -740,15 +948,6 @@ def _prepend_environment_setups(
                 f"{station_name} 缺少 {last_state}->{required_state} 的环境转换时长"
             )
 
-        def uses_station(move: Mapping[str, Any]) -> bool:
-            """判断 Move 是否占用当前待修复 LoadLock。"""
-            return station_name in {
-                str(move.get("Station") or move.get("ModuleName") or ""),
-                *(str(value) for value in (move.get("SrcStationList") or [])),
-                *(str(value) for value in (move.get("DestStationList") or [])),
-                *(str(value) for value in (move.get("StationList") or [])),
-            }
-
         availability = problem.runtime_availability
         previous_end = float(
             availability.station_ready.get(station_name, 0.0)
@@ -759,9 +958,8 @@ def _prepend_environment_setups(
             max(
                 (
                     float(move.get("EndTime") or 0.0)
-                    for move in repaired
-                    if uses_station(move)
-                    and float(move.get("StartTime") or 0.0) < cut_time - TIME_TOLERANCE
+                    for move in station_moves
+                    if float(move.get("StartTime") or 0.0) < cut_time - TIME_TOLERANCE
                 ),
                 default=previous_end,
             ),
@@ -769,25 +967,28 @@ def _prepend_environment_setups(
         # 若当前环境下的门事务跨过 mismatch 时刻，必须先保留其关门动作，
         # 再做空抽/空充；该关门不能随待修复的新动作一起后移。
         blocking_close_ids: set[int] = set()
-        for prepare in repaired:
-            if prepare.get("MoveType") != PREPARE_MOVE or not uses_station(prepare):
-                continue
-            if float(prepare.get("StartTime") or 0.0) >= cut_time - TIME_TOLERANCE:
-                continue
+        prior_prepares = [
+            move for move in station_moves
+            if move.get("MoveType") == PREPARE_MOVE
+            and float(move.get("StartTime") or 0.0)
+            < cut_time - TIME_TOLERANCE
+        ]
+        if prior_prepares:
+            # 合法门时间线上最多只有最近一次开门事务可能跨过当前 mismatch；
+            # 旧实现为每个历史开门再扫描一次全部 Move，长批量退化为 O(M²)。
+            prepare = max(prior_prepares, key=sort_key)
             close_candidates = [
-                move for move in repaired
+                move for move in station_moves
                 if move.get("MoveType") == COMPLETE_MOVE
-                and uses_station(move)
                 and float(move.get("StartTime") or 0.0)
                 >= float(prepare.get("EndTime") or 0.0) - TIME_TOLERANCE
             ]
-            if not close_candidates:
-                continue
-            close = min(close_candidates, key=sort_key)
-            close_end = float(close.get("EndTime") or 0.0)
-            if close_end > cut_time + TIME_TOLERANCE:
-                blocking_close_ids.add(int(close.get("MoveID") or 0))
-                previous_end = max(previous_end, close_end)
+            if close_candidates:
+                close = min(close_candidates, key=sort_key)
+                close_end = float(close.get("EndTime") or 0.0)
+                if close_end > cut_time + TIME_TOLERANCE:
+                    blocking_close_ids.add(int(close.get("MoveID") or 0))
+                    previous_end = max(previous_end, close_end)
         setup_start = max(previous_end, cut_time - duration)
         delay = max(0.0, setup_start + duration - cut_time)
         if delay > TIME_TOLERANCE:
@@ -863,38 +1064,50 @@ def _repair_loadlock_prepare_overlap(
         name for name, station in state.stations.items()
         if isinstance(station, LoadLockState)
     }
-    while True:
-        conflict: Optional[Tuple[float, float]] = None
-        pressures = [
-            move for move in repaired
-            if move.get("MoveType") == PRE_PREPARE_MOVE
-            and str(move.get("Station") or move.get("ModuleName") or "") in loadlocks
-        ]
-        for prepare in sorted(repaired, key=sort_key):
-            station_name = str(prepare.get("Station") or prepare.get("ModuleName") or "")
-            if prepare.get("MoveType") != PREPARE_MOVE or station_name not in loadlocks:
-                continue
-            prepare_start = float(prepare.get("StartTime") or 0.0)
-            blocking_end = max(
-                (
-                    float(pressure.get("EndTime") or 0.0)
-                    for pressure in pressures
-                    if str(pressure.get("Station") or pressure.get("ModuleName") or "") == station_name
-                    and float(pressure.get("StartTime") or 0.0) <= prepare_start + TIME_TOLERANCE
-                    and float(pressure.get("EndTime") or 0.0) > prepare_start + TIME_TOLERANCE
-                ),
-                default=prepare_start,
+    if not loadlocks:
+        renumbered, _ = _renumber_segment(repaired, 1)
+        return renumbered
+
+    # 扫描时间线并累计插入的串行化间隙。旧实现每发现一个冲突就重新扫描、排序并
+    # 平移全部 Move；长批量有数千个门事务时退化为 O(M²)。这里每个动作只访问一次：
+    # 已开始的压力转换保留原结束时刻，冲突 Prepare 及其后续动作统一吃掉累计 delay。
+    pressure_end_by_station: Dict[str, float] = {}
+
+    def repair_order(item: Tuple[int, dict]) -> Tuple[float, int, int]:
+        index, move = item
+        move_type = move.get("MoveType")
+        priority = (
+            0 if move_type == PRE_PREPARE_MOVE
+            else 1 if move_type == PREPARE_MOVE
+            else 2
+        )
+        return (
+            float(move.get("StartTime") or 0.0),
+            priority,
+            int(move.get("MoveID") or index),
+        )
+
+    cumulative_delay = 0.0
+    for _index, move in sorted(enumerate(repaired), key=repair_order):
+        original_start = float(move.get("StartTime") or 0.0)
+        original_end = float(move.get("EndTime") or 0.0)
+        station_name = str(move.get("Station") or move.get("ModuleName") or "")
+        move_type = move.get("MoveType")
+        shifted_start = original_start + cumulative_delay
+
+        if move_type == PREPARE_MOVE and station_name in loadlocks:
+            blocking_end = pressure_end_by_station.get(station_name, shifted_start)
+            if blocking_end > shifted_start + TIME_TOLERANCE:
+                cumulative_delay += blocking_end - shifted_start
+                shifted_start = blocking_end
+
+        move["StartTime"] = shifted_start
+        move["EndTime"] = original_end + cumulative_delay
+        if move_type == PRE_PREPARE_MOVE and station_name in loadlocks:
+            pressure_end_by_station[station_name] = max(
+                pressure_end_by_station.get(station_name, float("-inf")),
+                float(move["EndTime"]),
             )
-            if blocking_end > prepare_start + TIME_TOLERANCE:
-                conflict = (prepare_start, blocking_end - prepare_start)
-                break
-        if conflict is None:
-            break
-        cut_time, delay = conflict
-        for move in repaired:
-            if float(move.get("StartTime") or 0.0) >= cut_time - TIME_TOLERANCE:
-                move["StartTime"] = float(move.get("StartTime") or 0.0) + delay
-                move["EndTime"] = float(move.get("EndTime") or 0.0) + delay
     renumbered, _ = _renumber_segment(repaired, 1)
     return renumbered
 
@@ -1106,7 +1319,6 @@ def _renumber_segment(moves: Sequence[Mapping[str, Any]], first_move_id: int) ->
         move["PreMoveID"] = []
         renumbered.append(move)
         next_move_id += 1
-    populate_premove_ids(renumbered)
     return renumbered, next_move_id
 
 

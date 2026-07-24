@@ -77,11 +77,24 @@ python scripts/train_rl.py --train-wafers 5 --eval-wafers 25
 ```
 
 统一入口 `scripts/run.py` 支持多种策略（`--strategy`，可多选）：
-`heuristic`（快速启发式定序）、`random`（启发式基底叠随机 rollout）、`bc`（模仿学习策略）、
+`heuristic`（快速启发式定序）、`neural`（深层集合注意力 NumPy 推理 + 有预算物理修复）、
+`random`（启发式基底叠随机 rollout）、`bc`（模仿学习策略）、
 `rl`（RL 策略限时采样顶层顺序，默认 4 秒且硬限制 4.5 秒）、`milp`（Gurobi oracle）。
 数据集模式与 `result.makespan`（MILP 标签）比 gap%；`--input` 单场景模式
 自检 + 导出。`--export` 把排程铺成 MoveList 写到 `results/output/<strategy>/<子集>/inst_XXXX.json`。
 `--wafer-count N` 可在解析前保持 PJob 比例地重建 N 片任务；缩放后原 MILP 标签自动视为不可用。
+
+六腔共享路线拆成三条双腔路线的 75 片严格 A/B 可直接复现：
+
+```bash
+python scripts/benchmark_neural_route_decomposition.py
+```
+
+该实验同时比较原六腔 Neural reference、拆分 Neural 和拆分 Heuristic，并输出 makespan、
+PM 负载、推理来源和端到端速度；设计与长期质量对照见
+[深层神经派工文档](docs/scheduling/neural-dispatch.md)。
+其中也说明了 Heuristic、Neural、BC 与 RL 共用的 Petri-ETA LoadLock manager、
+接口边界和启发式 A/B 结果。
 
 ## 目录结构
 
@@ -89,14 +102,15 @@ python scripts/train_rl.py --train-wafers 5 --eval-wafers 25
 src/
   parse/              # JSON 解析、工作数据类、清洗条件、双腔视图和输入生成
   timing/             # 固定资源顺序的差分约束图与精确定时
-  schedule/           # 启发式、RL、L2D、MILP 和实时重排
+  schedule/           # 深层神经、启发式、RL、L2D、MILP 和实时重排
   export/             # MoveList 导出
   validation/         # MoveList 状态回放与验证
   paths.py            # 路径常量
   log_setup.py        # 日志
   input_data/*.json   # 样例场景
 scripts/
-  run.py              # 统一入口：策略(heuristic/random/bc/milp) × 模式(数据集批量 / 单场景) → 评测/自检/导出
+  run.py              # 统一入口：多策略 × 模式(数据集批量 / 单场景) → 评测/自检/导出
+  train_neural.py     # 强教师轨迹蒸馏 → 安全 NumPy checkpoint
   gen_test.py         # 数据集生成（YAML 案例清单 → MILP 标注，swap 关）
   extract_labels.py / train_bc.py       # BC 标签抽取 / 训练
   train_rl.py         # 5片 self-critical RL 微调；结束时做 25 片规模外推验证

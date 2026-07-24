@@ -99,6 +99,17 @@ class _DecodeState:
     )
     robot_orders: Mapping[str, Tuple[Tuple[int, int], ...]] = field(default_factory=dict)
     loadlock_orders: Mapping[str, Tuple[Tuple[int, int], ...]] = field(default_factory=dict)
+    # 轻量 LoadLock manager 只需要每把锁最后一次服务及累计次数，不必在每个动作
+    # 复制完整历史序列。两个映射均为当前事件边界的不可变快照。
+    loadlock_last_services: Mapping[str, Tuple[int, int]] = field(default_factory=dict)
+    loadlock_service_counts: Mapping[str, int] = field(default_factory=dict)
+    # 各锁最近一次已提交服务（含关门、抽/充气、开门）的近似完成时刻。
+    # LoadLock manager 用它计算动态 ETA；缺省空映射保持旧 chooser 兼容。
+    loadlock_ready_at: Mapping[str, float] = field(default_factory=dict)
+    # 动态选腔解码器维护的增量路线统计。策略特征优先读取它们，避免每个动作都重新扫描
+    # 全部晶圆；未提供时仍可从 pos 回算，保持其他调用方兼容。
+    route_released: Optional[Mapping[str, int]] = None
+    route_wip: Optional[Mapping[str, int]] = None
 
 
 # chooser(state, cands) → 候选索引的偏好序（最优在前）。
@@ -164,18 +175,74 @@ def _blocked(dest, occ: dict, resv: dict, wid: int) -> bool:
     return dest in occ or (dest in resv and resv[dest] != wid)
 
 
+def _deadlock_diagnostic(
+    ir: Problem,
+    wmap: Mapping[int, object],
+    K: Mapping[int, int],
+    pos: Mapping[int, int],
+    occ: Mapping[Tuple[str, int], int],
+    *,
+    placed: int,
+    total: int,
+) -> str:
+    """给失败恢复留下紧凑的 Petri 标识，便于定位实时续排结构性死锁。"""
+    unfinished = []
+    for wid in sorted(pos):
+        j = pos[wid]
+        if j >= K[wid]:
+            continue
+        wafer = wmap[wid]
+        source = _resource(ir, wafer, j)
+        destination = wafer.stages[j + 1]
+        unfinished.append(
+            f"{wid}@{j}:{source}->{destination.stage_type}/"
+            f"{destination.chamber}#{destination.slot}"
+        )
+        if len(unfinished) >= 12:
+            break
+    occupied_items = []
+    for resource, wid in sorted(occ.items()):
+        wafer = wmap.get(wid)
+        if wafer is None:
+            occupied_items.append(f"{resource[0]}#{resource[1]}={wid}")
+            continue
+        j = pos.get(wid, -1)
+        if 0 <= j < K.get(wid, 0):
+            destination = wafer.stages[j + 1]
+            occupied_items.append(
+                f"{resource[0]}#{resource[1]}={wid}@{j}/{K[wid]}"
+                f"->{destination.stage_type}/{destination.chamber}"
+            )
+        else:
+            occupied_items.append(f"{resource[0]}#{resource[1]}={wid}@{j}/{K.get(wid)}")
+    occupied = ", ".join(occupied_items)
+    return (
+        f"placed={placed}/{total}; occ=[{occupied}]; "
+        f"unfinished=[{', '.join(unfinished)}]"
+    )
+
+
 def _build_resource_map(ir: Problem, wmap: Dict[int, object], swap: bool = False
                         ) -> Dict[Tuple[int, int], Optional[Tuple[str, int]]]:
     """预算每片每 stage 的 (腔,槽) 资源键一次。解码内热点 _drain_completes 被调数万次、每次 O(剩余)
     遍历，原先每格重算 _resource（数百万次）；预算后改 dict 查表，是解码提速的大头。
     swap=False（默认）：loadlock 并槽为 (腔,0)——entry/exit 整腔互斥（旧口径，逐字节复现）；
-    swap=True：按 s.slot 分槽（entry=0/exit=1），异型占用可共存（swap 定序）。"""
+    swap=True：容量至少 2 时按 s.slot 分槽（entry=0/exit=1），异型占用可共存；
+    单槽 LoadLock 仍合并到槽 0，不能生成不存在的第二物理槽。"""
     out: Dict[Tuple[int, int], Optional[Tuple[str, int]]] = {}
     for w in wmap.values():
         for j in range(len(w.stages)):
             r = _resource(ir, w, j)
             chamber = ir.chambers.get(r[0]) if r is not None else None
-            if r is not None and not swap and chamber is not None and str(chamber.type).lower() == "loadlock":
+            if (
+                r is not None
+                and chamber is not None
+                and str(chamber.type).lower() == "loadlock"
+                and (
+                    not swap
+                    or int(getattr(chamber, "capacity", 1) or 1) < 2
+                )
+            ):
                 r = (r[0], 0)
             out[(w.wid, j)] = r
     return out
@@ -228,6 +295,51 @@ def _ll_elder_blocked(src: Optional[Tuple[str, int]], occ: dict,
     return sib in occ and ll_age.get(sib, 1 << 60) < ll_age[src]
 
 
+def _seed_initial_loadlock_order(
+    ir: Problem,
+    wafers,
+    K: Mapping[int, int],
+    resources: Mapping[int, Optional[Tuple[str, int]]],
+    ll_seq: Dict[str, List[Tuple[int, int]]],
+    ll_age: Optional[Dict[Tuple[str, int], int]],
+) -> None:
+    """按剩余拓扑距离恢复重算切点的 LoadLock 槽间服务顺序。
+
+    实时状态只保存两槽当前占用，并不保存它们的历史入腔序。直接按本轮临时 ``wid``
+    猜测 FIFO 会把出站槽误判为较新，从而在 LL 与 PM 全满时人为制造闭锁。对无回流
+    路线，距离 sink 更近的 token 必须先排空；同距离再沿用业务路线顺序，得到稳定且
+    与 backward blocking-flow 定序一致的初始压力边。
+    """
+    occupied = []
+    for wafer in wafers:
+        if not wafer.already_released:
+            continue
+        source = resources.get(wafer.wid)
+        if source is None:
+            continue
+        chamber = ir.chambers.get(source[0])
+        if chamber is None or str(chamber.type).lower() != "loadlock":
+            continue
+        first = wafer.stages[0]
+        occupied.append(
+            (
+                source[0],
+                int(first.ll_type != "exit"),
+                int(K[wafer.wid]),
+                int(wafer.route_rank),
+                int(wafer.wid),
+                source,
+            )
+        )
+
+    ordered = sorted(occupied)
+    for age, item in enumerate(ordered, start=-len(ordered)):
+        loadlock, _direction, _remaining, _rank, wid, source = item
+        ll_seq.setdefault(loadlock, []).append((wid, 0))
+        if ll_age is not None:
+            ll_age[source] = age
+
+
 class _PetriFeasibility:
     """只处理动作可行性与可达性，不处理时间。
 
@@ -250,26 +362,35 @@ class _PetriFeasibility:
              age: int) -> _PetriMarking:
         """在副本上发射一个原子 pick-place 变迁。"""
         out = marking.clone()
+        self._fire_in_place(out, candidate, age)
+        return out
+
+    def _fire_in_place(
+        self,
+        marking: _PetriMarking,
+        candidate: _Cand,
+        age: int,
+    ) -> None:
+        """在隔离的模拟标识上原地发射，避免终态搜索每一步重复复制字典。"""
         wid, j, dest = candidate.wid, candidate.j, candidate.dest
         src = self.res_map[(wid, j)]
-        if src is not None and out.occ.get(src) == wid:
-            del out.occ[src]
-            if out.ll_age is not None:
-                out.ll_age.pop(src, None)
-        if dest is not None and out.resv.get(dest) == wid:
-            del out.resv[dest]
+        if src is not None and marking.occ.get(src) == wid:
+            del marking.occ[src]
+            if marking.ll_age is not None:
+                marking.ll_age.pop(src, None)
+        if dest is not None and marking.resv.get(dest) == wid:
+            del marking.resv[dest]
         if dest is not None:
-            out.occ[dest] = wid
-            if (out.ll_age is not None
+            marking.occ[dest] = wid
+            if (marking.ll_age is not None
                     and self.wmap[wid].stages[j + 1].stage_type == "loadlock"):
-                out.ll_age[dest] = age
+                marking.ll_age[dest] = age
         if self.reserve:
             for resource in _reserve_for(
                 self.ir, self.wmap[wid], j + 1, self.res_map
             ):
-                out.resv[resource] = wid
-        out.pos[wid] = j + 1
-        return out
+                marking.resv[resource] = wid
+        marking.pos[wid] = j + 1
 
     def _transition_enabled(self, marking: _PetriMarking, wid: int) -> bool:
         j = marking.pos[wid]
@@ -313,7 +434,7 @@ class _PetriFeasibility:
             wafer = self.wmap[wid]
             candidate = _Cand(wid, j, self.res_map[(wid, j + 1)],
                               wafer.transports[j], 0.0)
-            marking = self.fire(marking, candidate, age)
+            self._fire_in_place(marking, candidate, age)
             age += 1
             remaining -= 1
         return True
@@ -332,6 +453,8 @@ def decode_orders(ir: Problem,
                   chooser: Optional[_Chooser] = None,
                   reserve: bool = False,
                   swap: bool = False,
+                  first_safe_by_preference: bool = False,
+                  trust_preferred_path: bool = False,
                   enforce_resumed_route_fifo: bool = True) -> _Orders:
     """全局事件式构造：产出各 (腔,槽) 占用序与各机器手 hop 序（彼此自洽、无死锁）。每步生成
     合法候选(去向资源未占/未预留、j==0 满足发片 FIFO)，再经 Petri 终态可达性掩码后交
@@ -347,6 +470,10 @@ def decode_orders(ir: Problem,
     候选的首选动作会直接提交；中途卡死抛 _DecodeDeadlock 由调用方判负。
     swap：True=loadlock 双槽按方向分槽（entry=0/exit=1），异型占用可共存——真空手可先放已加工片
     再取未加工片（压力态时序由 solve_timing 按 ll_seq 补边）；False（默认）=LL 整腔互斥（旧口径）。
+    first_safe_by_preference：按 chooser 偏好依次检查候选，找到第一个安全动作即停止。适用于
+    偏好不依赖安全候选集合的启发式，可避免为最终不会选择的动作重复做完整终态可达性搜索。
+    trust_preferred_path：直接提交 chooser 的首选动作；调用方必须在死锁时用完整安全检查重试。
+    若首选路径能走到终态，则路径上的每个动作本身即有该后续路径作为可达性证明。
     enforce_resumed_route_fifo：默认保持历史行为，让实时续排晶圆的裁剪后首跳也按 Route FIFO；
     L2D 设为 False，只对尚未发片晶圆应用真正的 LoadPort 发片 FIFO。
     """
@@ -454,14 +581,17 @@ def decode_orders(ir: Problem,
             cands.append(_Cand(wid, j, dest, rob, start))
 
         if not cands:                      # 无可动 hop 却未完工
-            raise _DecodeDeadlock()        # 该候选序死锁，搜索判负
-
-        # Petri 可达性掩码在 chooser 之前执行；策略看到的动作就是允许提交的动作。
-        cands = petri.safe_candidates(
-            _PetriMarking(pos, occ, resv if reserve else {}, ll_age), cands, placed
-        )
-        if not cands:
-            raise RuntimeError("[timing] Petri 标识无可达终态的使能变迁")
+            raise _DecodeDeadlock(
+                _deadlock_diagnostic(
+                    ir,
+                    wmap,
+                    K,
+                    pos,
+                    occ,
+                    placed=placed,
+                    total=total,
+                )
+            )                              # 该候选序死锁，搜索判负
 
         state = _DecodeState(
             ir,
@@ -487,12 +617,48 @@ def decode_orders(ir: Problem,
             ),
         )
 
-        order = chooser(state, cands)  # 候选索引的偏好序（最优在前）
+        marking = _PetriMarking(pos, occ, resv if reserve else {}, ll_age)
+        if trust_preferred_path:
+            order = chooser(state, cands)
+            if not order:
+                raise ValueError("chooser 必须返回至少一个候选索引")
+            if any(index < 0 or index >= len(cands) for index in order):
+                raise IndexError("chooser 返回了超出候选范围的索引")
+            chosen = cands[order[0]]
+        elif first_safe_by_preference:
+            # 启发式的偏好键不依赖安全候选集合，因此“先排序、再取首个安全”
+            # 与“先筛出全部安全候选、再排序”的最终选择完全一致。
+            order = chooser(state, cands)
+            chosen = next(
+                (
+                    cands[index]
+                    for index in order
+                    if 0 <= index < len(cands)
+                    and petri.can_reach_final(
+                        petri.fire(marking, cands[index], placed),
+                        placed + 1,
+                    )
+                ),
+                None,
+            )
+            if chosen is None:
+                if any(index < 0 or index >= len(cands) for index in order):
+                    raise IndexError("chooser 返回了超出候选范围的索引")
+                raise RuntimeError("[timing] Petri 标识无可达终态的使能变迁")
+        else:
+            # 策略模型可能依赖完整安全动作集合，仍保持先生成动作掩码的原有口径。
+            cands = petri.safe_candidates(marking, cands, placed)
+            if not cands:
+                raise RuntimeError("[timing] Petri 标识无可达终态的使能变迁")
+            order = chooser(state, cands)
+            if not order:
+                raise ValueError("chooser 必须返回至少一个候选索引")
+            if any(index < 0 or index >= len(cands) for index in order):
+                raise IndexError("chooser 返回了超出候选范围的索引")
+            chosen = cands[order[0]]
+
         if not order:
             raise ValueError("chooser 必须返回至少一个候选索引")
-        if any(index < 0 or index >= len(cands) for index in order):
-            raise IndexError("chooser 返回了超出候选范围的索引")
-        chosen = cands[order[0]]
 
         wid, j, dest, rob, start = chosen
         w = wmap[wid]
@@ -540,11 +706,17 @@ def _chamber_pool(nxt) -> List[str]:
 
 
 def _free_slot(ir: Problem, occ: dict, cc: str, nxt, swap: bool = False) -> Optional[int]:
-    """去向 stage nxt 落腔 cc 的可用槽位，无空槽返回 None。loadlock：swap=True 双槽按方向定死
-    （entry=0 / exit=1，同 _expand）⇒ 异型占用可共存（swap）；swap=False 并槽 (cc,0) 整腔互斥
-    （旧口径）。其余腔取最小空槽。"""
+    """去向 stage nxt 落腔 cc 的可用槽位，无空槽返回 None。
+
+    LoadLock 容量至少 2 且 ``swap=True`` 时按方向分槽；单槽锁或 ``swap=False``
+    始终使用槽 0，防止导出不存在的物理槽。其余腔取最小空槽。
+    """
     if nxt.stage_type == "loadlock":
-        s = (0 if nxt.ll_type == "entry" else 1) if swap else 0
+        chamber = ir.chambers.get(cc)
+        capacity = int(getattr(chamber, "capacity", 1) or 1)
+        s = (
+            0 if nxt.ll_type == "entry" else 1
+        ) if swap and capacity >= 2 else 0
         return None if (cc, s) in occ else s
     ch = ir.chambers.get(cc)
     cap = int(ch.capacity) if ch else 1
@@ -658,11 +830,16 @@ def _dynamic_petri_safe_candidates(
 
 def decode_orders_choosing(ir: Problem, tm: Durations, wafers, *,
                            chooser: _Chooser, reserve: bool = False,
-                           swap: bool = False) -> Tuple[List, _Orders]:
+                           swap: bool = False,
+                           trust_preferred_path: bool = False,
+                           include_order_snapshots: bool = True) -> Tuple[List, _Orders]:
     """选腔解码：返回 (有效 wafers, _Orders)。有效 wafers 已把选中腔写回各 stage，必须原样喂
     solve_timing（腔分配口径一致）。候选/特征/提交口径与 labels 的 teacher 复现一致，仅 chooser 不同：
     每步候选按去向 stage 的多候选腔（有空槽）分裂，chooser 联合决定 (hop, 腔)。
-    swap：口径同 decode_orders——默认 False 保持 LL 整腔互斥（策略网按此分布训练）。"""
+    swap：口径同 decode_orders——默认 False 保持 LL 整腔互斥（策略网按此分布训练）。
+    trust_preferred_path：跳过逐候选终态搜索，直接提交 chooser 首选动作；若最终走到终态，
+    整条已完成路径本身就是每一步的可达性证明。调用方必须在死锁时用完整 Petri 掩码重试。
+    include_order_snapshots=False 供不读取历史序列的策略使用，避免长批量下每步复制累计历史。"""
     from src.timing.spans import _ll_proc
 
     wafers = [copy.copy(w) for w in wafers]              # 克隆：提交要改 stage.chamber，不污染 ir.wafers
@@ -681,7 +858,10 @@ def decode_orders_choosing(ir: Problem, tm: Durations, wafers, *,
 
     route_wids: Dict[str, List[int]] = {}
     for w in wafers:
-        route_wids.setdefault(w.route_name, []).append(w.wid)
+        # 实时续排会把在机晶圆的当前位置裁成新的 stage 0；它们已经越过 LoadPort
+        # 发片顺序，不能再被尚未发片的路线头阻塞。
+        if not w.already_released:
+            route_wids.setdefault(w.route_name, []).append(w.wid)
     for v in route_wids.values():
         v.sort()
     next_rel = {r: 0 for r in route_wids}
@@ -690,12 +870,42 @@ def decode_orders_choosing(ir: Problem, tm: Durations, wafers, *,
         for route in route_wids.values()
         for previous, current in zip(route, route[1:])
     }
+    wafer_order = {wafer.wid: index for index, wafer in enumerate(wafers)}
+    # 只需考察“已经在设备内的片”和“每条路线下一片待发片”。旧实现每次动作扫描全部
+    # 晶圆，复杂度随批量近似二次增长；这个事件前沿与旧候选集合完全等价。
+    active_wids = {wafer.wid for wafer in wafers if wafer.already_released}
+    remaining_by_cjob: Dict[int, int] = {}
+    route_released: Dict[str, int] = {}
+    route_wip: Dict[str, int] = {}
+    for wafer in wafers:
+        remaining_by_cjob[wafer.cjob_id] = (
+            remaining_by_cjob.get(wafer.cjob_id, 0) + 1
+        )
+        if wafer.already_released:
+            route_released[wafer.route_name] = (
+                route_released.get(wafer.route_name, 0) + 1
+            )
+            if K[wafer.wid] > 0:
+                route_wip[wafer.route_name] = (
+                    route_wip.get(wafer.route_name, 0) + 1
+                )
 
     chambers: Dict[Tuple[str, int], List[Tuple[int, int]]] = {}
     robots: Dict[str, List[Tuple[int, int]]] = {}
     ll_seq: Dict[str, List[Tuple[int, int]]] = {}
+    runtime = getattr(ir, "runtime_availability", None)
+    loadlock_ready_at: Dict[str, float] = {
+        str(loadlock): float(ready_at)
+        for loadlock, ready_at in (
+            getattr(runtime, "station_ready", {}) if runtime is not None else {}
+        ).items()
+        if (
+            loadlock in ir.chambers
+            and str(ir.chambers[loadlock].type).lower() == "loadlock"
+        )
+    }
     initial_resources = _build_resource_map(ir, wmap, swap)
-    initial_age = 0
+    initial_loadlock_resources: Dict[int, Optional[Tuple[str, int]]] = {}
     for w in wafers:
         if not w.already_released:
             continue
@@ -707,22 +917,34 @@ def decode_orders_choosing(ir: Problem, tm: Durations, wafers, *,
         occ[source] = w.wid
         chambers.setdefault(source, []).append((w.wid, 0))
         if str(ir.chambers[source[0]].type).lower() == "loadlock":
-            ll_seq.setdefault(source[0], []).append((w.wid, 0))
-            if ll_age is not None:
-                ll_age[source] = initial_age
-                initial_age += 1
+            initial_loadlock_resources[w.wid] = source
+    _seed_initial_loadlock_order(
+        ir,
+        wafers,
+        K,
+        initial_loadlock_resources,
+        ll_seq,
+        ll_age,
+    )
     total = sum(K.values())
     placed = 0
     while placed < total:
         cands: List[_Cand] = []
-        for w in wafers:
+        frontier = set(active_wids)
+        for route_name, route in route_wids.items():
+            release_index = next_rel[route_name]
+            if release_index < len(route):
+                frontier.add(route[release_index])
+        for wid in sorted(frontier, key=wafer_order.__getitem__):
+            w = wmap[wid]
             wid = w.wid
             j = pos[wid]
             if j >= K[wid]:
                 continue
-            if j == 0 and not w.already_released and any(
-                any(x.cjob_id == blocker and pos[x.wid] < K[x.wid] for x in wafers)
-                for blocker in w.dispatch_after
+            if (
+                j == 0
+                and not w.already_released
+                and any(remaining_by_cjob.get(blocker, 0) > 0 for blocker in w.dispatch_after)
             ):
                 continue
             if (
@@ -730,7 +952,11 @@ def decode_orders_choosing(ir: Problem, tm: Durations, wafers, *,
                 and _process_entry_blocked(process_predecessors, pos, wid, j + 1)
             ):
                 continue
-            if j == 0 and route_wids[w.route_name][next_rel[w.route_name]] != wid:
+            if (
+                j == 0
+                and not w.already_released
+                and route_wids[w.route_name][next_rel[w.route_name]] != wid
+            ):
                 continue
             if _ll_elder_blocked(_resource(ir, w, j), occ, ll_age):
                 continue
@@ -747,16 +973,41 @@ def decode_orders_choosing(ir: Problem, tm: Durations, wafers, *,
                 if s is not None:
                     cands.append(_Cand(wid, j, (cc, s), rob, start))
         if not cands:
-            raise _DecodeDeadlock()
+            raise _DecodeDeadlock(
+                _deadlock_diagnostic(
+                    ir,
+                    wmap,
+                    K,
+                    pos,
+                    occ,
+                    placed=placed,
+                    total=total,
+                )
+            )
 
-        cands = _dynamic_petri_safe_candidates(
-            ir, wmap, K, pos, occ, ll_age, cands, swap=swap,
-            process_predecessors=process_predecessors,
-            release_predecessors=release_predecessors, age=placed,
-        )
-        if not cands:
-            raise RuntimeError("[timing] 动态选腔 Petri 标识无可达终态的使能变迁")
+        if not trust_preferred_path:
+            cands = _dynamic_petri_safe_candidates(
+                ir, wmap, K, pos, occ, ll_age, cands, swap=swap,
+                process_predecessors=process_predecessors,
+                release_predecessors=release_predecessors, age=placed,
+            )
+            if not cands:
+                raise RuntimeError("[timing] 动态选腔 Petri 标识无可达终态的使能变迁")
 
+        if include_order_snapshots:
+            chamber_order_snapshot = MappingProxyType(
+                {resource: tuple(sequence) for resource, sequence in chambers.items()}
+            )
+            robot_order_snapshot = MappingProxyType(
+                {robot: tuple(sequence) for robot, sequence in robots.items()}
+            )
+            loadlock_order_snapshot = MappingProxyType(
+                {loadlock: tuple(sequence) for loadlock, sequence in ll_seq.items()}
+            )
+        else:
+            chamber_order_snapshot = {}
+            robot_order_snapshot = {}
+            loadlock_order_snapshot = {}
         state = _DecodeState(
             ir,
             tm,
@@ -771,15 +1022,21 @@ def decode_orders_choosing(ir: Problem, tm: Durations, wafers, *,
             total,
             reserve,
             ch_used,
-            chamber_orders=MappingProxyType(
-                {resource: tuple(sequence) for resource, sequence in chambers.items()}
-            ),
-            robot_orders=MappingProxyType(
-                {robot: tuple(sequence) for robot, sequence in robots.items()}
-            ),
-            loadlock_orders=MappingProxyType(
-                {loadlock: tuple(sequence) for loadlock, sequence in ll_seq.items()}
-            ),
+            chamber_orders=chamber_order_snapshot,
+            robot_orders=robot_order_snapshot,
+            loadlock_orders=loadlock_order_snapshot,
+            loadlock_last_services=MappingProxyType({
+                loadlock: sequence[-1]
+                for loadlock, sequence in ll_seq.items()
+                if sequence
+            }),
+            loadlock_service_counts=MappingProxyType({
+                loadlock: len(sequence)
+                for loadlock, sequence in ll_seq.items()
+            }),
+            loadlock_ready_at=MappingProxyType(loadlock_ready_at),
+            route_released=MappingProxyType(route_released),
+            route_wip=MappingProxyType(route_wip),
         )
         order = chooser(state, cands)
 
@@ -791,6 +1048,7 @@ def decode_orders_choosing(ir: Problem, tm: Durations, wafers, *,
 
         wid, j, dest, rob, start = chosen
         w = wmap[wid]
+        was_wip = (j > 0 or bool(w.already_released)) and j < K[wid]
         src = _resource(ir, w, j)
         if src is not None and occ.get(src) == wid:
             del occ[src]
@@ -803,6 +1061,11 @@ def decode_orders_choosing(ir: Problem, tm: Durations, wafers, *,
             if nxt.stage_type == "loadlock":
                 nxt.proc = _ll_proc(ir, cc, nxt.ll_type)
                 ll_seq.setdefault(cc, []).append((wid, j + 1))
+                loadlock_ready_at[cc] = (
+                    start
+                    + _hop_span(tm, w, j)
+                    + _stage_dwell(tm, w, j + 1)
+                )
                 if ll_age is not None:
                     ll_age[dest] = placed
             occ[dest] = wid
@@ -811,9 +1074,21 @@ def decode_orders_choosing(ir: Problem, tm: Durations, wafers, *,
         robots.setdefault(rob, []).append((wid, j))
         robot_free[rob] = start + _hop_span(tm, w, j)
         place_t[wid] = robot_free[rob]
-        if j == 0:
+        if j == 0 and not w.already_released:
             next_rel[w.route_name] += 1
+            route_released[w.route_name] = (
+                route_released.get(w.route_name, 0) + 1
+            )
+            if j + 1 < K[wid]:
+                route_wip[w.route_name] = route_wip.get(w.route_name, 0) + 1
+            if j + 1 < K[wid]:
+                active_wids.add(wid)
         pos[wid] = j + 1
+        if pos[wid] >= K[wid]:
+            active_wids.discard(wid)
+            remaining_by_cjob[w.cjob_id] -= 1
+            if was_wip and route_wip.get(w.route_name, 0) > 0:
+                route_wip[w.route_name] -= 1
         placed += 1
 
     return wafers, _Orders(chambers=chambers, robots=robots, ll_seq=ll_seq)

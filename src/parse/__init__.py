@@ -957,10 +957,12 @@ def _expand_wafers(
                     proc = float((ch.pump_time if entry else ch.vent_time) or 0.0) if ch else 0.0
                 ch = chambers.get(chamber)
                 if st["stage_type"] == "loadlock":
-                    # LL 双槽按方向定死：上槽(0)=entry 未加工片、下槽(1)=exit 已加工片。
-                    # 互斥退到同槽内 ⇒ entry/exit 可共存（swap：真空手先放已加工片再取
-                    # 未加工片）；跨槽压力态时序由 timing 层补边（见 timing/solve.py）。
-                    slot = 0 if ll_type == "entry" else 1
+                    # 双槽 LL 才按方向分槽；单槽 LL 的 entry/exit 必须都落物理槽 0。
+                    # 互斥退到同槽内，不能为单槽设备导出不存在的 SlotID=2。
+                    capacity = int(ch.capacity) if ch else 1
+                    slot = (
+                        0 if ll_type == "entry" else 1
+                    ) if capacity >= 2 else 0
                 else:
                     cap = int(ch.capacity) if ch else 1
                     if st["stage_type"] == "sink" and chamber in home_slots:
