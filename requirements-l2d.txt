@@ -1,4 +1,0 @@
-# PSE300 L2D 训练与推理的可选依赖；核心 MILP/timing 不需要安装本文件。
--r requirements.txt
-torch>=2.2
-typing_extensions>=4.10

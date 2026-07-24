@@ -26,7 +26,7 @@ MoveList 用一条 `MoveType=4` 表示中间的原子动作。`RecvMatList` 是�
 等式约束。PM 资源间隙由“pick + 关门 + 开门 + place”缩短为
 “pick-old + place-new”。若换片差分图不可行，自动回退原顺序。
 
-Heuristic、Neural、RL、L2D 共用该定时路径。MILP 保留其选腔和析取顺序，
+Heuristic、Neural、RL 共用该定时路径。MILP 保留其选腔和析取顺序，
 求解后从该顺序恢复同样的换片重定时；重定时无改善时保留原 MILP 解。
 
 ## 少片验证

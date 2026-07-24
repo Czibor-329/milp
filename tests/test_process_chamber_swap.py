@@ -112,7 +112,7 @@ class ProcessChamberSwapTests(unittest.TestCase):
 
     def test_shared_decoder_path_emits_process_swaps(self) -> None:
         """四种共享解码路径都应在最小两片场景生成一次 PM 换片。"""
-        for strategy in ("heuristic", "neural", "rl", "l2d"):
+        for strategy in ("heuristic", "neural", "rl"):
             with self.subTest(strategy=strategy):
                 self._assert_pm_swaps(strategy, wafer_count=2)
 

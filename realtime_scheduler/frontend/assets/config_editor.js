@@ -744,26 +744,6 @@ async function saveCurrentTest(silent = false) {
   setWorkspaceStatus(`${silent ? "\u5DF2\u81EA\u52A8\u4FDD\u5B58" : "\u5DF2\u4FDD\u5B58"}\u201C${state.testCaseName}\u201D`, "saved");
   return true;
 }
-async function importL2dCheckpoint(file) {
-  if (!file) return;
-  if (!file.name.toLowerCase().endsWith(".pt")) throw new Error("\u8BF7\u9009\u62E9 .pt checkpoint \u6587\u4EF6");
-  if (file.size > 8 * 1024 * 1024) throw new Error("checkpoint \u4E0D\u80FD\u8D85\u8FC7 8MB");
-  const dataUrl = await new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(file);
-  });
-  const result = await requestJson("/api/models/l2d", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ data: String(dataUrl).split(",", 2)[1] || "" })
-  });
-  document.getElementById("l2dCheckpointFile").value = "";
-  await checkService();
-  writeTerminal(`$ \u5DF2\u5BFC\u5165 L2D checkpoint
-  ${result.model.filename} \xB7 ${result.model.phase}`);
-}
 async function createTestCase(copyCurrent = false, targetGroup = state.activeTestGroup) {
   if (!state.workspaceDeviceId) throw new Error("\u8BF7\u5148\u9009\u62E9\u8BBE\u5907");
   if (state.dirty) await saveCurrentTest(true);
@@ -1414,7 +1394,6 @@ function renderOtherAlgorithmOptions(algorithms) {
     <label class="strategy-card" title="${escapeHtml(algorithm.path || "")}">
       <input type="radio" name="strategy" value="${escapeHtml(algorithm.strategy)}" ${algorithm.strategy === state.strategy ? "checked" : ""}>
       <b>${escapeHtml(algorithm.name)}</b>
-      <span>other_alg \xB7 init/update</span>
     </label>
   `).join("");
 }
@@ -1729,15 +1708,9 @@ async function checkService() {
     if (!response.ok) throw new Error();
     const status = await response.json(), compatible = status.schemaVersion === EXPECTED_API_SCHEMA;
     state.serviceCompatible = compatible;
-    const neuralAvailable = status.strategies?.neural === true, rlAvailable = status.strategies?.rl !== false, l2dAvailable = status.strategies?.l2d === true, milpAvailable = status.strategies?.milp === true;
+    const neuralAvailable = status.strategies?.neural === true, rlAvailable = status.strategies?.rl !== false, milpAvailable = status.strategies?.milp === true;
     document.getElementById("neuralStrategyInput").disabled = !neuralAvailable;
-    const neuralModelName = String(status.strategyModels?.neural || "").split(/[\\/]/).at(-1);
-    document.getElementById("neuralStrategyHint").textContent = neuralAvailable ? `${neuralModelName} \xB7 NumPy \u5FEB\u901F\u63A8\u7406 \xB7 \u540C\u6B65\u6CE2\u524D\u5B89\u5168\u5C42` : "\u7F3A\u5C11\u6A21\u578B\uFF0C\u8BF7\u5148\u79BB\u7EBF\u8BAD\u7EC3";
     document.getElementById("rlStrategyInput").disabled = !rlAvailable;
-    document.getElementById("rlStrategyHint").textContent = rlAvailable ? "\u8C03\u7528\u5DF2\u8BAD\u7EC3\u6A21\u578B" : "\u7F3A\u5C11 RL \u6A21\u578B";
-    document.getElementById("l2dStrategyInput").disabled = !l2dAvailable;
-    const l2dModelName = String(status.strategyModels?.l2d || "").split(/[\\/]/).at(-1);
-    document.getElementById("l2dStrategyHint").textContent = l2dAvailable ? `${l2dModelName} \xB7 \u5355\u6B21\u8D2A\u5FC3\u63A8\u7406` : "\u7F3A\u5C11 checkpoint\uFF0C\u53EF\u5728\u4E0B\u65B9\u5BFC\u5165";
     document.getElementById("milpStrategyInput").disabled = !milpAvailable;
     renderOtherAlgorithmOptions(status.otherAlgorithms || []);
     runButton.disabled = !compatible;
@@ -1764,11 +1737,6 @@ document.getElementById("workspaceDialogCancel").addEventListener("click", () =>
 document.getElementById("deviceFile").addEventListener("change", (event) => loadDevice(event.target.files[0]).catch((error) => {
   event.target.value = "";
   writeTerminal(`$ \u8BBE\u5907\u8BFB\u53D6\u5931\u8D25
-  ${error.message}`, true);
-}));
-document.getElementById("l2dCheckpointFile").addEventListener("change", (event) => importL2dCheckpoint(event.target.files[0]).catch((error) => {
-  event.target.value = "";
-  writeTerminal(`$ L2D checkpoint \u5BFC\u5165\u5931\u8D25
   ${error.message}`, true);
 }));
 document.getElementById("deviceSelect").addEventListener("change", (event) => (async () => {

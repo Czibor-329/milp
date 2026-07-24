@@ -466,22 +466,6 @@ async function saveCurrentTest(silent = false) {
   return true;
 }
 
-/** 上传并校验 L2D checkpoint；成功后无需重启服务即可选择图策略。 */
-async function importL2dCheckpoint(file) {
-  if (!file) return;
-  if (!file.name.toLowerCase().endsWith(".pt")) throw new Error("请选择 .pt checkpoint 文件");
-  if (file.size > 8 * 1024 * 1024) throw new Error("checkpoint 不能超过 8MB");
-  const dataUrl = await new Promise((resolve, reject) => {
-    const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = () => reject(reader.error); reader.readAsDataURL(file);
-  });
-  const result = await requestJson("/api/models/l2d", {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ data: String(dataUrl).split(",", 2)[1] || "" })
-  });
-  document.getElementById("l2dCheckpointFile").value = "";
-  await checkService();
-  writeTerminal(`$ 已导入 L2D checkpoint\n  ${result.model.filename} · ${result.model.phase}`);
-}
-
 /** 新建空白测试集，或复制当前测试集形成独立副本。 */
 async function createTestCase(copyCurrent = false, targetGroup = state.activeTestGroup) {
   if (!state.workspaceDeviceId) throw new Error("请先选择设备");
@@ -1082,7 +1066,6 @@ function renderOtherAlgorithmOptions(algorithms) {
     <label class="strategy-card" title="${escapeHtml(algorithm.path || "")}">
       <input type="radio" name="strategy" value="${escapeHtml(algorithm.strategy)}" ${algorithm.strategy === state.strategy ? "checked" : ""}>
       <b>${escapeHtml(algorithm.name)}</b>
-      <span>other_alg · init/update</span>
     </label>
   `).join("");
 }
@@ -1360,7 +1343,7 @@ function showResult(result) {
 /** 写入终端。 */
 function writeTerminal(message, error = false) { const terminal = document.getElementById("terminal"); terminal.textContent = message; terminal.classList.toggle("error", error); }
 
-/** 检查本地服务以及 RL/L2D 模型可用性。 */
+/** 检查本地服务以及内置策略模型可用性。 */
 async function checkService() {
   const pill = document.getElementById("serviceState");
   const runButton = document.getElementById("runButton");
@@ -1370,15 +1353,9 @@ async function checkService() {
     if (!response.ok) throw new Error();
     const status = await response.json(), compatible = status.schemaVersion === EXPECTED_API_SCHEMA;
     state.serviceCompatible = compatible;
-    const neuralAvailable = status.strategies?.neural === true, rlAvailable = status.strategies?.rl !== false, l2dAvailable = status.strategies?.l2d === true, milpAvailable = status.strategies?.milp === true;
+    const neuralAvailable = status.strategies?.neural === true, rlAvailable = status.strategies?.rl !== false, milpAvailable = status.strategies?.milp === true;
     document.getElementById("neuralStrategyInput").disabled = !neuralAvailable;
-    const neuralModelName = String(status.strategyModels?.neural || "").split(/[\\/]/).at(-1);
-    document.getElementById("neuralStrategyHint").textContent = neuralAvailable ? `${neuralModelName} · NumPy 快速推理 · 同步波前安全层` : "缺少模型，请先离线训练";
     document.getElementById("rlStrategyInput").disabled = !rlAvailable;
-    document.getElementById("rlStrategyHint").textContent = rlAvailable ? "调用已训练模型" : "缺少 RL 模型";
-    document.getElementById("l2dStrategyInput").disabled = !l2dAvailable;
-    const l2dModelName = String(status.strategyModels?.l2d || "").split(/[\\/]/).at(-1);
-    document.getElementById("l2dStrategyHint").textContent = l2dAvailable ? `${l2dModelName} · 单次贪心推理` : "缺少 checkpoint，可在下方导入";
     document.getElementById("milpStrategyInput").disabled = !milpAvailable;
     renderOtherAlgorithmOptions(status.otherAlgorithms || []);
     runButton.disabled = !compatible;
@@ -1395,7 +1372,6 @@ async function checkService() {
 
 document.getElementById("workspaceDialogCancel").addEventListener("click", () => document.getElementById("workspaceDialog").close("cancel"));
 document.getElementById("deviceFile").addEventListener("change", event => loadDevice(event.target.files[0]).catch(error => { event.target.value = ""; writeTerminal(`$ 设备读取失败\n  ${error.message}`, true); }));
-document.getElementById("l2dCheckpointFile").addEventListener("change", event => importL2dCheckpoint(event.target.files[0]).catch(error => { event.target.value = ""; writeTerminal(`$ L2D checkpoint 导入失败\n  ${error.message}`, true); }));
 document.getElementById("deviceSelect").addEventListener("change", event => (async () => { if (state.dirty) await saveCurrentTest(true); await selectWorkspaceDevice(event.target.value); })().catch(error => writeTerminal(`$ 设备切换失败\n  ${error.message}`, true)));
 document.getElementById("testGroupSelect").addEventListener("change", event => selectWorkspaceGroup(event.target.value).catch(error => writeTerminal(`$ 测试组别切换失败\n  ${error.message}`, true)));
 document.getElementById("testCaseSelect").addEventListener("change", event => selectWorkspaceTest(event.target.value).catch(error => writeTerminal(`$ 测试集切换失败\n  ${error.message}`, true)));

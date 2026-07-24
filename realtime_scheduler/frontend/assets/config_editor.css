@@ -193,7 +193,6 @@
     .strategy-card { padding: 12px; border: 1px solid var(--line); border-radius: 10px; }
     .strategy-card:has(input:checked) { border-color: var(--brand); background: var(--brand-soft); }
     .strategy-card input { width: auto; margin-right: 6px; }
-    .strategy-card span { display: block; margin: 4px 0 0 22px; color: var(--muted); font-size: 11px; }
     .result-panel { container-type: inline-size; container-name: result-area; }
     .result-panel .panel-head { align-items: center; }
     .result-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }

@@ -479,8 +479,8 @@ def decode_orders(ir: Problem,
     偏好不依赖安全候选集合的启发式，可避免为最终不会选择的动作重复做完整终态可达性搜索。
     trust_preferred_path：直接提交 chooser 的首选动作；调用方必须在死锁时用完整安全检查重试。
     若首选路径能走到终态，则路径上的每个动作本身即有该后续路径作为可达性证明。
-    enforce_resumed_route_fifo：默认保持历史行为，让实时续排晶圆的裁剪后首跳也按 Route FIFO；
-    L2D 设为 False，只对尚未发片晶圆应用真正的 LoadPort 发片 FIFO。
+    enforce_resumed_route_fifo：默认让实时续排晶圆的裁剪后首跳也按 Route FIFO；设为
+    False 时只对尚未发片晶圆应用真正的 LoadPort 发片 FIFO。
     """
     if chooser is None:
         def chooser(_state: _DecodeState, candidates: List[_Cand]) -> List[int]:

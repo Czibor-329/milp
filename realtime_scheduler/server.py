@@ -14,8 +14,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
-import binascii
 import hashlib
 import json
 import math
@@ -73,8 +71,6 @@ from realtime_scheduler.plan_builder import (
     CJOB_TYPE_VALUES,
     FIRST_SLOT_ID,
     MAX_WAFERS_PER_JOB,
-    PSE300_REQUIRED_ROBOTS,
-    PSE300_REQUIRED_STATIONS,
     TASK_MODE_VALUES,
     BuildState,
     _enum_value,
@@ -95,7 +91,6 @@ from realtime_scheduler.plan_builder import (
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 MAX_REQUEST_BYTES = 12 * 1024 * 1024
-MAX_L2D_CHECKPOINT_BYTES = 8 * 1024 * 1024
 MAX_SAVED_RESULTS = 8
 MAX_SAVED_BATCH_RUNS = 8
 WORKSPACE_STORE_VERSION = 2
@@ -115,12 +110,6 @@ ROUTE_EDITOR_LOGIC_PATH = FRONTEND_DIR / "route_editor_logic.js"
 FRONTEND_ASSET_DIR = FRONTEND_DIR / "assets"
 RL_MODEL_PATH = MODELS_DIR / "bc_policy_rl.pt"
 NEURAL_MODEL_PATH = ROOT / "src" / "schedule" / "neural_policy.npz"
-L2D_MODEL_CANDIDATES = (
-    MODELS_DIR / "l2d_pse300_2job.pt",
-    ROOT / "l2d_pse300_2job.pt",
-    MODELS_DIR / "l2d_pse300_1job.pt",
-    ROOT / "l2d_pse300_1job.pt",
-)
 WORKSPACE_STORE_PATH = DATA_DIR / "workspaces.json"
 LEGACY_WORKSPACE_STORE_PATH = ROOT / "results" / "config_editor_workspaces.json"
 DEVICE_INIT_DIR = DATA_DIR / "devices"
@@ -139,9 +128,6 @@ _RL_POLICY_LOCK = threading.Lock()
 _NEURAL_POLICY: Any = None
 _NEURAL_POLICY_SIGNATURE: Optional[Tuple[str, int, int]] = None
 _NEURAL_POLICY_LOCK = threading.Lock()
-_L2D_POLICY: Any = None
-_L2D_POLICY_SIGNATURE: Optional[Tuple[str, int, int]] = None
-_L2D_POLICY_LOCK = threading.Lock()
 
 
 @contextmanager
@@ -1132,70 +1118,6 @@ def _load_rl_policy() -> Any:
         return _RL_POLICY
 
 
-def _resolve_l2d_model_path() -> Optional[Path]:
-    """按“双 Job 优先、标准模型目录优先”的顺序查找 L2D checkpoint。"""
-    return next((path for path in L2D_MODEL_CANDIDATES if path.is_file()), None)
-
-
-def _load_l2d_inference_policy() -> Any:
-    """按需加载 L2D 策略，并在 checkpoint 被重新训练覆盖后自动刷新缓存。"""
-    global _L2D_POLICY, _L2D_POLICY_SIGNATURE
-    with _L2D_POLICY_LOCK:
-        model_path = _resolve_l2d_model_path()
-        if model_path is None:
-            searched = "、".join(str(path) for path in L2D_MODEL_CANDIDATES)
-            raise ValueError(f"L2D 模型不存在；已检查：{searched}")
-        stat = model_path.stat()
-        signature = (str(model_path.resolve()), stat.st_mtime_ns, stat.st_size)
-        if _L2D_POLICY is not None and _L2D_POLICY_SIGNATURE == signature:
-            return _L2D_POLICY
-        from src.schedule.l2d import load_l2d_policy
-
-        _L2D_POLICY = load_l2d_policy(model_path, device="cpu")
-        _L2D_POLICY_SIGNATURE = signature
-        return _L2D_POLICY
-
-
-def import_l2d_checkpoint(encoded_data: str) -> Dict[str, Any]:
-    """校验并保存页面导入的 L2D checkpoint，返回可展示的模型摘要。"""
-    global _L2D_POLICY, _L2D_POLICY_SIGNATURE
-    try:
-        checkpoint_bytes = base64.b64decode(encoded_data, validate=True)
-    except (ValueError, binascii.Error) as error:
-        raise ValueError("L2D checkpoint 不是有效的 Base64 数据") from error
-    if not checkpoint_bytes:
-        raise ValueError("L2D checkpoint 为空")
-    if len(checkpoint_bytes) > MAX_L2D_CHECKPOINT_BYTES:
-        raise ValueError("L2D checkpoint 超过 8MB 限制")
-
-    from src.schedule.l2d import load_l2d_policy
-
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    temporary_path = MODELS_DIR / ".l2d_pse300_import.pt.tmp"
-    temporary_path.write_bytes(checkpoint_bytes)
-    try:
-        policy = load_l2d_policy(temporary_path, device="cpu")
-        metadata = dict(getattr(policy, "checkpoint_metadata", {}) or {})
-        phase = str(metadata.get("training_phase") or "one-job")
-        filename = "l2d_pse300_2job.pt" if phase == "two-job" else "l2d_pse300_1job.pt"
-        destination = MODELS_DIR / filename
-        temporary_path.replace(destination)
-    except Exception:
-        temporary_path.unlink(missing_ok=True)
-        raise
-
-    signature = (str(destination.resolve()), destination.stat().st_mtime_ns, destination.stat().st_size)
-    with _L2D_POLICY_LOCK:
-        _L2D_POLICY = policy
-        _L2D_POLICY_SIGNATURE = signature
-    return {
-        "path": str(destination),
-        "filename": destination.name,
-        "phase": phase,
-        "featureVersion": metadata.get("feature_version"),
-    }
-
-
 def _segment_end(moves: Iterable[Mapping[str, Any]]) -> float:
     """返回一组 Move 的最大结束时刻。"""
     return max((float(move.get("EndTime") or 0.0) for move in moves), default=0.0)
@@ -1419,22 +1341,17 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
         if normalized_strategy.startswith("other_alg:") and ":" in strategy
         else None
     )
-    builtin_strategies = {"heuristic", "neural", "rl", "l2d", "milp"}
+    builtin_strategies = {"heuristic", "neural", "rl", "milp"}
     discovered_ids = {
         str(item["id"])
         for item in discover_other_algorithms()
     }
     if normalized_strategy not in builtin_strategies and other_algorithm_id not in discovered_ids:
         raise ValueError(
-            "策略只支持 heuristic、neural、rl、l2d、milp，"
+            "策略只支持 heuristic、neural、rl、milp，"
             "或 other_alg 下已发现的标准算法"
         )
     strategy = normalized_strategy if normalized_strategy in builtin_strategies else strategy
-    if strategy == "l2d" and (
-        not PSE300_REQUIRED_STATIONS.issubset(plan["device"].get("Stations") or {})
-        or not PSE300_REQUIRED_ROBOTS.issubset(plan["device"].get("Robots") or {})
-    ):
-        raise ValueError("L2D checkpoint 仅适用于 PSE300（PM1–PM4、ATR、VTR）")
     rounds = [row for row in (plan.get("rounds") or []) if isinstance(row, Mapping)]
     round_count = int(_finite_number(plan.get("roundCount"), len(rounds)))
     if round_count < 1 or len(rounds) != round_count:
@@ -1451,8 +1368,6 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
         policy = _load_neural_inference_policy()
     elif strategy == "rl":
         policy = _load_rl_policy()
-    elif strategy == "l2d":
-        policy = _load_l2d_inference_policy()
     else:
         policy = None
     options = plan.get("options") if isinstance(plan.get("options"), Mapping) else {}
@@ -3024,7 +2939,6 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             self._send_frontend_asset(path.removeprefix("/assets/"))
             return
         if path == "/api/health":
-            l2d_model_path = _resolve_l2d_model_path()
             other_algorithms = discover_other_algorithms()
             self._send_json({
                 "ok": True,
@@ -3034,12 +2948,10 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                     "heuristic": True,
                     "neural": NEURAL_MODEL_PATH.is_file(),
                     "rl": RL_MODEL_PATH.is_file(),
-                    "l2d": l2d_model_path is not None,
                     "milp": True,
                 },
                 "strategyModels": {
                     "neural": str(NEURAL_MODEL_PATH) if NEURAL_MODEL_PATH.is_file() else "",
-                    "l2d": str(l2d_model_path) if l2d_model_path is not None else "",
                 },
                 "strategyErrors": {},
                 "otherAlgorithms": other_algorithms,
@@ -3090,14 +3002,6 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         """接收控制台配置并同步运行后端策略。"""
         path = unquote(urlparse(self.path).path)
-        if path == "/api/models/l2d":
-            try:
-                payload = self._read_json_object()
-                model = import_l2d_checkpoint(str(payload.get("data") or ""))
-                self._send_json({"ok": True, "model": model}, HTTPStatus.CREATED)
-            except Exception as error:  # noqa: BLE001
-                self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
-            return
         if path == "/api/run-batch":
             try:
                 payload = self._read_json_object()

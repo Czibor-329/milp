@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from src.export import export_movelist
 from src.parse.model import Durations, Problem, RuntimeAvailability, Stage, Wafer
-from src.parse import PROCESS_ASSIGNMENT_ACYCLIC_ROUND_ROBIN, parse_task
+from src.parse import parse_task
 from src.schedule.api import start_schedule
 from src.schedule.neural import start_schedule_neural
 from src.schedule.rl import start_schedule_by_rl
@@ -36,7 +36,6 @@ from src.validation.state import (
 
 TIME_TOLERANCE = 1e-6
 FIRST_SLOT_ID = 1
-L2D_PSE300_PM_ORDER = ("PM1", "PM2", "PM3", "PM4")
 DEFAULT_MILP_TIME_LIMIT_SECONDS = 120.0
 GUROBI_OPTIMAL_STATUS = 2
 MAX_MILP_TOTAL_WAFERS = 12
@@ -85,11 +84,11 @@ class RealtimeRescheduler:
         seed: int = 0,
     ) -> None:
         """解析首批任务，并用所选顶层策略立即生成第一段计划。"""
-        if strategy not in {"heuristic", "neural", "rl", "l2d", "milp"}:
+        if strategy not in {"heuristic", "neural", "rl", "milp"}:
             raise ValueError(
-                f"实时重算只支持 heuristic/neural/rl/l2d/milp，收到 strategy={strategy}"
+                f"实时重算只支持 heuristic/neural/rl/milp，收到 strategy={strategy}"
             )
-        if strategy in {"neural", "rl", "l2d"} and policy is None:
+        if strategy in {"neural", "rl"} and policy is None:
             raise ValueError(f"{strategy.upper()} 实时重算缺少已加载策略模型")
         self.tool_topo = deepcopy(dict(tool_topo))
         self.strategy = strategy
@@ -106,14 +105,7 @@ class RealtimeRescheduler:
         self.milp_time_limit = float(milp_time_limit)
         self.seed = int(seed)
         self._last_strategy_diagnostics: Dict[str, Any] = {}
-        parse_options = (
-            {
-                "process_assignment": PROCESS_ASSIGNMENT_ACYCLIC_ROUND_ROBIN,
-                "process_pm_order": L2D_PSE300_PM_ORDER,
-            }
-            if strategy == "l2d" else {}
-        )
-        self.problem = parse_task(self.tool_topo, update_params, **parse_options)
+        self.problem = parse_task(self.tool_topo, update_params)
         if strategy == "milp" and len(self.problem.wafers) > MAX_MILP_TOTAL_WAFERS:
             raise ValueError(
                 f"MILP 策略包含清洁片在内的总晶圆数量不能超过 "
@@ -258,14 +250,7 @@ class RealtimeRescheduler:
         for station in snapshot.stations.values():
             if isinstance(station, LoadLockState):
                 station.last_environment_transition_was_empty = False
-        parse_options = (
-            {
-                "process_assignment": PROCESS_ASSIGNMENT_ACYCLIC_ROUND_ROBIN,
-                "process_pm_order": L2D_PSE300_PM_ORDER,
-            }
-            if self.strategy == "l2d" else {}
-        )
-        new_problem = parse_task(self.tool_topo, new_update_params, **parse_options)
+        new_problem = parse_task(self.tool_topo, new_update_params)
         _apply_material_start_slots(new_problem, new_update_params)
         combined_problem, next_state = _build_recompute_problem(self.problem, new_problem, snapshot)
         combined_problem.runtime_availability = _runtime_availability(
@@ -351,11 +336,6 @@ class RealtimeRescheduler:
                 loadlock_manager=self.loadlock_manager_mode,
                 loadlock_exchange=self.loadlock_exchange_mode,
             )
-        elif self.strategy == "l2d":
-            # 延迟导入，确保未安装 Torch 时 heuristic/RL 旧路径仍可独立使用。
-            from src.schedule.l2d import start_schedule_l2d
-
-            result = start_schedule_l2d(problem, self.policy)
         elif self.strategy == "milp":
             # 延迟导入，确保不使用 MILP 时无需初始化 Gurobi 运行时与许可证。
             from src.schedule.milp import solve_milp

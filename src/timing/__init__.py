@@ -1,7 +1,7 @@
 """固定资源顺序的定时层。
 
 本包不选择调度策略，只负责构造差分约束图并计算最早可行时刻。资源顺序由
-``src.schedule`` 中的启发式、RL 或 L2D 策略产生；MILP 也复用统一结果结构。
+``src.schedule`` 中的启发式、Neural 或 RL 策略产生；MILP 也复用统一结果结构。
 """
 
 from .graph import _Nodes, _bellman_ford_longest

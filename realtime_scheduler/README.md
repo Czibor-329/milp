@@ -37,11 +37,8 @@ npm run build
 - `深层神经派工`：离线多场景长训练，在线 NumPy 联合派工；互不共享 PM 的等负载路线使用同步波前避免 LoadLock 队首阻塞，分布外轨迹再做有预算物理修复，全部失败才显式调用启发式故障兜底。
 - `LoadLock 管理器`：Heuristic 与 RL 默认共用 Petri-ETA 管理器；上层策略只决定发哪片和工艺顺序，管理器在 Petri 安全候选内按动态完成时刻绑定 LA/LB。现有深层神经 checkpoint 暂以 `joint` 为默认，仍可显式切到 manager 供下一阶段重训与 A/B。
 - `RL 搜索`：使用已有的行为克隆/RL模型做限时搜索。
-- `L2D 图策略`：仅用于PSE300，模型贪心生成一次析取图操作顺序，再由Timing求解器统一定时。
 - `MILP 最优求解`：独立调用 Gurobi，只允许首次排程且所有 PJob 产品晶圆总数不超过12片；页面显示是否已证明最优和最终 gap。
 - `other_alg 标准算法`：自动扫描仓库 `other_alg/<算法名>`，通过包内正式 `CT.infer.scheduler.init/update` 入口运行。每次重算前使用 `src/validation/state.py` 回放当前 MoveList，生成全量物料、机台、机器人快照以及 `RemoveList`，支持连续多轮重算；结果中的 `updates` 保留每次实际发送的数据。
-
-L2D会优先加载`results/models/l2d_pse300_2job.pt`，也支持同目录的一阶段模型以及仓库根目录下训练命令默认生成的checkpoint。没有找到checkpoint时，可直接在运行策略区导入`.pt`文件；服务会先验证模型结构和特征版本，再保存并立即启用L2D选项。
 
 标准算法目录可保留打包后的 `CT/infer/scheduler.py` 结构，也可以直接包含
 `infer/scheduler.py`、`ropn_sa/` 和 `config/`。前端健康检查会动态返回所有有效算法包，

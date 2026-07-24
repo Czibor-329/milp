@@ -214,7 +214,7 @@ class NeuralScheduleTests(unittest.TestCase):
         self.assertIn("item.improvementPercent", html)
         self.assertIn("总 Makespan / Baseline", html)
         self.assertIn('"neural": NEURAL_MODEL_PATH.is_file()', server_source)
-        self.assertIn('{"heuristic", "neural", "rl", "l2d", "milp"}', server_source)
+        self.assertIn('{"heuristic", "neural", "rl", "milp"}', server_source)
 
 
 if __name__ == "__main__":

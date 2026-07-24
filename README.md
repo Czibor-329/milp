@@ -12,49 +12,11 @@ Cluster Tool（多腔晶圆制造设备）排程的 **MILP 最优求解器**，�
 - Python 3.10+
 - [Gurobi](https://www.gurobi.com/)（需 license，学术版免费）+ `gurobipy`
 - `numpy`
-- `torch`（仅神经网络策略需要；PSE300 L2D 的训练和推理都需要）
+- `torch`（仅神经网络策略训练需要）
 
 ```bash
 pip install -r requirements.txt
-# 使用 PSE300 L2D 时再安装，CPU 版即可
-pip install -r requirements-l2d.txt
 ```
-
-## PSE300 L2D 动态析取图策略
-
-`src/schedule/l2d/` 实现固定选腔、只学习操作顺序的 L2D 风格 GraphCNN + Actor-Critic。解析期
-会为每片晶圆 round-robin 分配严格递增且不重复的实际 PM 路径，LA/LB 仍按 rank 固定；
-Actor 每步只在 Banker 安全候选中选择动作。完整顺序产生后只调用一次 timing 引擎求精确
-时刻，因此这不是在线 MILP，也不是生产过程中的实时重调度。
-
-```bash
-# 第一阶段：单 Job，PM1–PM4，1–3 道工序，5–25 片
-python -m src.schedule.l2d.train --phase one-job --output l2d_pse300_1job.pt
-
-# 第二阶段：从第一阶段参数继续训练两个 PM 不共享的 Job
-python -m src.schedule.l2d.train --phase two-job \
-  --init l2d_pse300_1job.pt --output l2d_pse300_2job.pt
-
-# 固定验证集评测 makespan、相对启发式 gap、耗时和 MoveList 合法性
-python -m src.schedule.l2d.evaluate --checkpoint l2d_pse300_2job.pt
-```
-
-新训练默认使用 `pse300-hop-v2` 特征、跨 4 条轨迹的 PPO 更新和训练期方差基线；旧 v1
-checkpoint 仍可按原特征语义做一次 greedy 推理。三并行腔退化的复现矩阵、根因和重新训练
-验收要求见 [docs/l2d_three_chamber_investigation.md](docs/l2d_three_chamber_investigation.md)。
-
-代码接口：
-
-```python
-from src.schedule.l2d import load_l2d_policy, start_schedule_l2d
-
-policy = load_l2d_policy("l2d_pse300_1job.pt", device="cpu")
-result = start_schedule_l2d(problem, policy)
-```
-
-这里的 `problem` 应使用 `process_assignment="acyclic_round_robin"` 解析，使 PM 与 LA/LB
-在进入模型前已经固定。第一版不包含清洗、Residency/QTime、实时重调度、双臂 swap 或
-PM 动态选腔。
 
 ## 用法
 
@@ -102,7 +64,7 @@ PM 负载、推理来源和端到端速度；设计与长期质量对照见
 src/
   parse/              # JSON 解析、工作数据类、清洗条件、双腔视图和输入生成
   timing/             # 固定资源顺序的差分约束图与精确定时
-  schedule/           # 深层神经、启发式、RL、L2D、MILP 和实时重排
+  schedule/           # 深层神经、启发式、RL、MILP 和实时重排
   export/             # MoveList 导出
   validation/         # MoveList 状态回放与验证
   paths.py            # 路径常量
