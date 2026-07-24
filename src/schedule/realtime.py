@@ -181,6 +181,27 @@ class RealtimeRescheduler:
         """返回最近一段排程的求解诊断副本；当前主要用于展示 MILP 最优性。"""
         return dict(self._last_strategy_diagnostics)
 
+    def release_completed_load_ports(
+        self,
+        load_port_names: Sequence[str],
+    ) -> Tuple[set[Any], set[str]]:
+        """卸载已经回到源端口的成品晶圆，并返回被清空的 LoadPort。
+
+        该操作只在稳定重算切点调用。完成晶圆会同时从当前 Problem 中移除，
+        使后续轮次可以安全地从同一 LoadPort 的 1 号槽重新装片。
+        """
+        released_ids, empty_ports = release_completed_load_port_materials(
+            self.problem,
+            self._tracker.state,
+            load_port_names,
+        )
+        if released_ids:
+            self.problem.wafers = [
+                wafer for wafer in self.problem.wafers
+                if wafer.mat_id not in released_ids
+            ]
+        return released_ids, empty_ports
+
     def update_move_state(
         self,
         notification: Mapping[str, Any],
@@ -543,6 +564,56 @@ def _build_recompute_problem(
         for stage in wafer.stages:
             next_state.ensure_station(stage.chamber, stage.slot + FIRST_SLOT_ID)
     return problem, next_state
+
+
+def release_completed_load_port_materials(
+    problem: Problem,
+    state: MachineState,
+    load_port_names: Sequence[str],
+) -> Tuple[set[Any], set[str]]:
+    """从 LoadPort 卸载已经走到 Route 终点的晶圆。
+
+    参数:
+        problem: 当前一代仍在跟踪的调度问题。
+        state: 已推进到稳定重算切点的可变整机状态。
+        load_port_names: 曾经装载过任务的 LoadPort 名称。
+
+    返回:
+        ``(已卸载 MatID, 当前空 LoadPort)``。只有物料的 StepID 明确位于
+        Route 最后一站时才会卸载，避免把尚未加工的源端晶圆误判为成品。
+    """
+    wafer_by_material = {wafer.mat_id: wafer for wafer in problem.wafers}
+    released_ids: set[Any] = set()
+    empty_ports: set[str] = set()
+    for load_port_name in {str(name) for name in load_port_names if str(name)}:
+        station = state.stations.get(load_port_name)
+        if station is None:
+            continue
+        for slot in station.slots.values():
+            material = slot.material
+            if material is None:
+                continue
+            wafer = wafer_by_material.get(material.material_id)
+            if wafer is None or not wafer.stages:
+                continue
+            final_stage_index = len(wafer.stages) - 1
+            final_stage = wafer.stages[final_stage_index]
+            accepts_load_port = (
+                final_stage.chamber == load_port_name
+                or load_port_name in (final_stage.cands or [])
+            )
+            if (
+                final_stage.stage_type != "sink"
+                or not accepts_load_port
+                or material.step_id != final_stage_index
+            ):
+                continue
+            released_ids.add(material.material_id)
+            slot.phase = SlotPhase.EMPTY
+            slot.material = None
+        if all(slot.material is None for slot in station.slots.values()):
+            empty_ports.add(load_port_name)
+    return released_ids, empty_ports
 
 
 def _apply_material_start_slots(problem: Problem, update_params: Mapping[str, Any]) -> None:

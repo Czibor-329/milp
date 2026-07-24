@@ -783,6 +783,67 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual(list(range(6, 11)), update["ProcessJobs"][1]["MatList"])
         self.assertEqual(list(range(1, 11)), [material["SlotID"] for material in update["Materials"]])
 
+    def test_different_load_ports_allocate_slots_from_one_independently(self) -> None:
+        """LP1/LP2 的槽位应分别从 1 开始，MatID 仍保持设备内全局唯一。"""
+        plan = {
+            "device": self.device,
+            "recipes": [{"name": "R12", "time": 8, "modules": "PM1,PM2", "weight": {}}],
+            "cleans": [],
+            "routes": [_route("Route12", "PM1,PM2", "R12")],
+        }
+        update = build_round_update(plan, {"cjobs": [{"taskId": "1", "pjobs": [
+            {"jobName": "P1", "routeRef": "Route12", "loadPort": "LP1", "waferCount": 5},
+            {"jobName": "P2", "routeRef": "Route12", "loadPort": "LP2", "waferCount": 5},
+        ]}]}, 0.0, BuildState())
+
+        self.assertEqual(list(range(1, 11)), [
+            material["ID"] for material in update["Materials"]
+        ])
+        slots_by_port = {
+            load_port: [
+                material["SlotID"]
+                for material in update["Materials"]
+                if material["CurrentModuleName"] == load_port
+            ]
+            for load_port in ("LP1", "LP2")
+        }
+        self.assertEqual({"LP1": [1, 2, 3, 4, 5], "LP2": [1, 2, 3, 4, 5]}, slots_by_port)
+
+    def test_fifth_round_reuses_lp1_after_completed_materials_are_unloaded(self) -> None:
+        """四端口轮转回 LP1 时，已完成的首轮晶圆应卸载并从 1 号槽重新装片。"""
+        route = _route("Route1", "PM1", "Recipe1")
+        rotations = [
+            (0, "LP1"),
+            (100, "LP2"),
+            (200, "LP3"),
+            (300, "LP4"),
+            (400, "LP1"),
+        ]
+        result = execute_plan({
+            "deviceName": "fixture",
+            "device": self.device,
+            "strategy": "heuristic",
+            "options": {},
+            "recipes": [{"name": "Recipe1", "time": 8, "modules": "PM1", "weight": {}}],
+            "cleans": [],
+            "routes": [route],
+            "roundCount": len(rotations),
+            "rounds": [
+                {"currentTime": current_time, "jobs": [_job(f"J{index}", "Route1", load_port)]}
+                for index, (current_time, load_port) in enumerate(rotations, start=1)
+            ],
+        })
+        schedules = [
+            entry["Info"]
+            for entry in result["reproductionLog"]
+            if entry["Describe"] == "AlgSchedule"
+        ]
+
+        self.assertEqual(5, len(schedules))
+        self.assertEqual("LP1", schedules[-1]["Materials"][0]["CurrentModuleName"])
+        self.assertEqual(1, schedules[-1]["Materials"][0]["SlotID"])
+        self.assertTrue(any("清空 LoadPort" in line for line in result["logs"]))
+
     def test_route_step_and_visit_fields_are_preserved(self) -> None:
         """显式 StepID/PostStepID/NeedProcess 和 IVisit 字段应进入标准 Route。"""
         route = {
@@ -867,7 +928,17 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn('data-scope="cjob"', html)
         self.assertIn('data-scope="pjob"', html)
         self.assertIn("PJobNameList", html)
-        self.assertIn("重算轮次 → CJob → PJob", html)
+        page_template = EDITOR_PATH.read_text(encoding="utf-8")
+        for removed_text in (
+            "设备保存共享工艺库，测试集只保存排程任务。",
+            "重算轮次 → CJob → PJob",
+            "集中查看总体进度、批量状态、结果入口与运行日志。",
+            "可使用内置策略，也可以自动读取 other_alg 下采用 init/update 标准接口的算法包。",
+            "单独运行当前测试，或用所选策略并行运行当前测试组。",
+        ):
+            self.assertNotIn(removed_text, page_template)
+        self.assertIn('data-scope="pjob-route-group"', html)
+        self.assertIn("晶圆数量 / LoadPort 槽位", html)
         self.assertNotIn("<th>FoupID</th>", html)
         self.assertNotIn("<th>Weight</th>", html)
         self.assertIn("$ 运行失败：${error.message", html)
@@ -912,8 +983,9 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn('class="batch-result-summary"', html)
         self.assertNotIn('class="batch-result-metrics"', html)
         self.assertIn("Makespan 当前值 / Heuristic Baseline", html)
-        self.assertIn("Baseline <b>", html)
-        self.assertIn("CPU Time <b>", html)
+        self.assertIn('const displayId = `t${index + 1}`', html)
+        self.assertIn("；Cpu time <b>", html)
+        self.assertIn("overflow-wrap: anywhere", html)
         self.assertNotIn("改善 <b>", html)
         self.assertIn("item.testId", html)
         for label in ("测试名称", "等待中", "运行中", "成功", "失败", "Makespan", "Move", "耗时"):
@@ -970,6 +1042,22 @@ class ConfigEditorServerTests(unittest.TestCase):
             self.assertEqual([second["id"]], [item["id"] for item in remaining])
             with self.assertRaises(ValueError):
                 delete_workspace_test(device["id"], second["id"], store_path)
+
+    def test_different_groups_allow_same_test_name(self) -> None:
+        """测试名称只需在组内唯一，不同组可以使用完全相同的名称。"""
+        with tempfile.TemporaryDirectory() as directory:
+            store_path = Path(directory) / "workspaces.json"
+            device, _ = import_workspace_device("device.json", self.device, store_path)
+            first = create_workspace_test(device["id"], {
+                "name": "r1", "group": "R1", "roundCount": 1, "rounds": [{}],
+            }, store_path)
+            second = create_workspace_test(device["id"], {
+                "name": "r1", "group": "R2", "roundCount": 1, "rounds": [{}],
+            }, store_path)
+
+            self.assertEqual("r1", first["name"])
+            self.assertEqual("r1", second["name"])
+            self.assertNotEqual(first["id"], second["id"])
 
     def test_workspace_test_group_persists_across_create_and_update(self) -> None:
         """测试集分组应独立保存，旧的空分组也保持兼容。"""

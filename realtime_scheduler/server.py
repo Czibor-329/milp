@@ -44,7 +44,11 @@ if str(ROOT) not in sys.path:
 
 from src.parse import parse_task
 from src.paths import MODELS_DIR
-from src.schedule.realtime import RealtimeRescheduler, TIME_TOLERANCE
+from src.schedule.realtime import (
+    RealtimeRescheduler,
+    TIME_TOLERANCE,
+    release_completed_load_port_materials,
+)
 from src.validation import MoveStateReplay
 from src.validation.move_fields import (
     COMPLETE_MOVE, PICK_MOVE, PLACE_MOVE, PREPARE_MOVE, PRE_PREPARE_MOVE,
@@ -197,6 +201,54 @@ class ReproductionLog:
         })
 
 
+def _remove_released_materials_from_update(
+    update_params: Dict[str, Any],
+    released_material_ids: set[Any],
+) -> None:
+    """从标准算法全量 update 中移除已卸载晶圆及已经结束的空 PJob/CJob。"""
+    if not released_material_ids:
+        return
+    update_params["Materials"] = [
+        material
+        for material in update_params.get("Materials") or []
+        if not isinstance(material, Mapping)
+        or material.get("ID") not in released_material_ids
+    ]
+    process_jobs: List[Dict[str, Any]] = []
+    material_count_by_job: Dict[str, int] = {}
+    for raw_job in update_params.get("ProcessJobs") or []:
+        if not isinstance(raw_job, Mapping):
+            continue
+        job = deepcopy(dict(raw_job))
+        job["MatList"] = [
+            material_id
+            for material_id in job.get("MatList") or []
+            if material_id not in released_material_ids
+        ]
+        if not job["MatList"]:
+            continue
+        job_name = str(job.get("JobName") or "")
+        material_count_by_job[job_name] = len(job["MatList"])
+        process_jobs.append(job)
+    update_params["ProcessJobs"] = process_jobs
+    control_jobs: List[Dict[str, Any]] = []
+    for raw_job in update_params.get("ControlJobs") or []:
+        if not isinstance(raw_job, Mapping):
+            continue
+        job = deepcopy(dict(raw_job))
+        pjob_names = [
+            str(name)
+            for name in job.get("PJobNameList") or []
+            if str(name) in material_count_by_job
+        ]
+        if not pjob_names:
+            continue
+        job["PJobNameList"] = pjob_names
+        job["MaterialCount"] = sum(material_count_by_job[name] for name in pjob_names)
+        control_jobs.append(job)
+    update_params["ControlJobs"] = control_jobs
+
+
 class StandardAlgorithmRuntime:
     """用本仓库状态机维护标准算法当前计划和跨代执行历史。"""
 
@@ -265,6 +317,24 @@ class StandardAlgorithmRuntime:
             for robot in self._tracker.state.robots.values()
             for material in robot.hands.values()
         )
+
+    def release_completed_load_ports(
+        self,
+        load_port_names: Sequence[str],
+    ) -> Tuple[set[Any], set[str]]:
+        """卸载已完成晶圆，并同步裁剪标准算法下一轮使用的全量 update。"""
+        released_ids, empty_ports = release_completed_load_port_materials(
+            self.problem,
+            self._tracker.state,
+            load_port_names,
+        )
+        if released_ids:
+            self.problem.wafers = [
+                wafer for wafer in self.problem.wafers
+                if wafer.mat_id not in released_ids
+            ]
+            _remove_released_materials_from_update(self.current_update, released_ids)
+        return released_ids, empty_ports
 
     def update_move_state(
         self,
@@ -1082,6 +1152,19 @@ def _segment_end(moves: Iterable[Mapping[str, Any]]) -> float:
     return max((float(move.get("EndTime") or 0.0) for move in moves), default=0.0)
 
 
+def _release_finished_load_ports(
+    runtime: Any,
+    build_state: BuildState,
+) -> Tuple[set[Any], set[str]]:
+    """在新一轮装片前卸载成品，并重置已经清空的 LoadPort 槽位计数。"""
+    released_ids, empty_ports = runtime.release_completed_load_ports(
+        tuple(build_state.next_slot_by_port),
+    )
+    for load_port_name in empty_ports:
+        build_state.next_slot_by_port[load_port_name] = 0
+    return released_ids, empty_ports
+
+
 def _execute_standard_algorithm(
     plan: Mapping[str, Any],
     first_update: Mapping[str, Any],
@@ -1145,6 +1228,7 @@ def _execute_standard_algorithm(
                 include_loadlock_environment=True,
             )
             effective_time = float(recovery.recovery_end)
+            released_ids, empty_ports = _release_finished_load_ports(runtime, build_state)
             for notification in notifications:
                 event_time = (
                     notification.get("EndTime")
@@ -1225,6 +1309,11 @@ def _execute_standard_algorithm(
                 f"{elapsed_ms:.1f} ms，移除 {len(update['RemoveList'])} 个旧 Move"
                 f"{suffix}"
             )
+            if released_ids:
+                logs.append(
+                    f"  已卸载 {len(released_ids)} 片成品；"
+                    f"清空 LoadPort={','.join(sorted(empty_ports)) or '无'}"
+                )
 
     combined_output = runtime.combined_output()
     total_ms = (time.perf_counter() - started) * 1000.0
@@ -1426,6 +1515,7 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
         notifications: List[Dict[str, Any]] = []
         recovery = advance_to_recompute(scheduler, requested_time, notifications)
         effective_time = recovery.recovery_end
+        released_ids, empty_ports = _release_finished_load_ports(scheduler, build_state)
         for notification in notifications:
             event_time = (
                 notification.get("EndTime")
@@ -1476,6 +1566,11 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
             f"[{index}/{round_count}] @{requested_time:.2f}s 重算完成：{elapsed_ms:.1f} ms，"
             f"新增 {_round_pjob_count(round_config)} PJobs{suffix}"
         )
+        if released_ids:
+            logs.append(
+                f"  已卸载 {len(released_ids)} 片成品；"
+                f"清空 LoadPort={','.join(sorted(empty_ports)) or '无'}"
+            )
         reproduction.add("AlgOutput", _alg_output_info(scheduler.combined_output()), effective_time)
 
     output = scheduler.combined_output()

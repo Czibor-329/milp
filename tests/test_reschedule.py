@@ -2,6 +2,7 @@
 
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import scripts.reschedule as demo
 from src.parse.model import Chamber, Problem, Robot, RuntimeAvailability, Stage, Wafer
@@ -10,10 +11,18 @@ from src.schedule.realtime import (
     _assign_incoming_resources,
     _repair_loadlock_door_overlap,
     _repair_loadlock_prepare_overlap,
+    release_completed_load_port_materials,
 )
 from src.schedule import start_schedule
 from src.validation.move_fields import COMPLETE_MOVE, PICK_MOVE, PREPARE_MOVE, PRE_PREPARE_MOVE
-from src.validation.state import LoadLockState, MachineState, SlotState
+from src.validation.state import (
+    LoadLockState,
+    MachineState,
+    MaterialState,
+    SlotPhase,
+    SlotState,
+    StationState,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,6 +50,31 @@ class RealtimeRescheduleTests(unittest.TestCase):
             }
         self.assertEqual(modules_by_job["2.P1-1"], {"PM1", "PM2"})
         self.assertEqual(modules_by_job["3.P1-1"], {"PM3", "PM4"})
+
+    def test_completed_load_port_materials_are_unloaded_and_port_becomes_reusable(self) -> None:
+        """同一 LoadPort 的晶圆全部回到终点后，应清空槽位供下一轮从 1 号槽装片。"""
+        source = SimpleNamespace(chamber="LP1", cands=["LP1"], stage_type="source")
+        sink = SimpleNamespace(chamber="LP1", cands=["LP1"], stage_type="sink")
+        problem = SimpleNamespace(wafers=[
+            SimpleNamespace(mat_id=1, stages=[source, sink]),
+            SimpleNamespace(mat_id=2, stages=[source, sink]),
+        ])
+        state = MachineState(stations={
+            "LP1": StationState("LP1", "LoadPort", {
+                1: SlotState(SlotPhase.UNPROCESSED, MaterialState(1, "1.C1.P1", 1)),
+                2: SlotState(SlotPhase.UNPROCESSED, MaterialState(2, "1.C1.P1", 1)),
+            }),
+        })
+
+        released, empty_ports = release_completed_load_port_materials(
+            problem,
+            state,
+            ["LP1"],
+        )
+
+        self.assertEqual({1, 2}, released)
+        self.assertEqual({"LP1"}, empty_ports)
+        self.assertTrue(all(slot.material is None for slot in state.stations["LP1"].slots.values()))
 
     def test_recompute_discards_unstarted_old_moves(self) -> None:
         """切点及其后的旧 MoveID 不得出现在拼接后的有效 MoveList。"""

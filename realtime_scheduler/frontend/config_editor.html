@@ -23,7 +23,7 @@
       <section class="main">
         <div class="tab-view active" data-tab-view="schedule">
           <article class="panel">
-            <div class="panel-head"><div><h2>设备与测试集</h2><p>设备保存共享工艺库，测试集只保存排程任务。</p></div></div>
+            <div class="panel-head"><div><h2>设备与测试集</h2></div></div>
             <div class="panel-body">
               <div class="grid">
                 <div class="field span-4"><label for="deviceSelect">设备</label><select id="deviceSelect"><option value="">尚未导入设备</option></select></div>
@@ -37,12 +37,12 @@
             </div>
           </article>
           <article class="panel">
-            <div class="panel-head"><div><h2>重算任务</h2><p>重算轮次 → CJob → PJob</p></div><div class="field" style="width:140px"><label for="roundCount">总轮数</label><input id="roundCount" type="number" min="1" max="8" value="2"></div></div>
+            <div class="panel-head"><div><h2>重算任务</h2></div><div class="field" style="width:140px"><label for="roundCount">总轮数</label><input id="roundCount" type="number" min="1" max="8" value="2"></div></div>
             <div class="panel-body"><div class="card-list" id="roundList"></div></div>
           </article>
           <article class="panel result-panel">
             <div class="panel-head">
-              <div><h2>运行结果</h2><p>集中查看总体进度、批量状态、结果入口与运行日志。</p></div>
+              <div><h2>运行结果</h2></div>
               <a class="btn primary" id="batchGanttButton" href="#" target="_blank" aria-disabled="true">全部甘特图</a>
             </div>
             <div class="panel-body">
@@ -80,7 +80,7 @@
 
       <aside class="side" id="scheduleSide">
         <article class="panel">
-          <div class="panel-head"><div><h2>运行策略</h2><p>可使用内置策略，也可以自动读取 other_alg 下采用 init/update 标准接口的算法包。</p></div></div>
+          <div class="panel-head"><div><h2>运行策略</h2></div></div>
           <div class="panel-body">
             <div class="strategy-options">
               <label class="strategy-card"><input type="radio" name="strategy" value="heuristic" checked><b>启发式</b><span>稳定、快速</span></label>
@@ -105,7 +105,7 @@
               <div class="field span-6"><label>约束</label><div class="hint">只能运行首次排程，所有 PJob 的晶圆总数不能超过 12 片。</div></div>
             </div>
           </div>
-          <div class="run-box"><h2>开始运行</h2><p>单独运行当前测试，或用所选策略并行运行当前测试组。</p><label class="export-option"><input id="autoExportLog" type="checkbox">运行结束后自动下载 input_data 复现日志（失败也会生成）</label><div class="run-actions"><button class="btn" id="runButton">▶ 运行当前测试</button><button class="btn batch" id="batchRunButton">▦ 批量运行当前组</button></div></div>
+          <div class="run-box"><h2>开始运行</h2><label class="export-option"><input id="autoExportLog" type="checkbox">运行结束后自动下载 input_data 复现日志（失败也会生成）</label><div class="run-actions"><button class="btn" id="runButton">▶ 运行当前测试</button><button class="btn batch" id="batchRunButton">▦ 批量运行当前组</button></div></div>
         </article>
       </aside>
     </div>

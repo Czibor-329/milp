@@ -948,17 +948,48 @@ function renderRoutes() {
     return `<section class="route-type-group"><button class="route-type-head" data-action="toggle-route-group" data-group-key="${escapeHtml(group.key)}"><span class="collapse-arrow ${groupOpen ? "open" : ""}">\u25B6</span><strong>${escapeHtml(group.label)}</strong><span class="route-count">${group.routes.length} \u6761 Route \xB7 ${groupOpen ? "\u5DF2\u5C55\u5F00" : "\u5DF2\u6536\u8D77"}</span></button>${groupOpen ? `<div class="route-group-body">${routes}</div>` : ""}</section>`;
   }).join("") : `<div class="empty">\u81F3\u5C11\u521B\u5EFA\u4E00\u6761 Route\uFF0CJob \u624D\u80FD\u5F15\u7528\u3002</div>`;
 }
+function pjobLoadPortSlots(roundIndex, cjobIndex, pjobIndex) {
+  const target = state.rounds[roundIndex].cjobs[cjobIndex].pjobs[pjobIndex];
+  let occupied = 0;
+  for (let currentCJobIndex = 0; currentCJobIndex <= cjobIndex; currentCJobIndex += 1) {
+    const pjobs = state.rounds[roundIndex].cjobs[currentCJobIndex].pjobs;
+    const end = currentCJobIndex === cjobIndex ? pjobIndex : pjobs.length - 1;
+    for (let currentPJobIndex = 0; currentPJobIndex <= end; currentPJobIndex += 1) {
+      const pjob = pjobs[currentPJobIndex];
+      if (pjob.loadPort !== target.loadPort) continue;
+      const start = occupied + 1;
+      occupied += Number(pjob.waferCount);
+      if (currentCJobIndex === cjobIndex && currentPJobIndex === pjobIndex) {
+        return Array.from({ length: Number(pjob.waferCount) }, (_, index) => start + index);
+      }
+    }
+  }
+  return [];
+}
+function renderPJobRoutePicker(pjob, roundIndex, cjobIndex, pjobIndex) {
+  const groups = groupedRoutes();
+  const selectedRoute = state.routes.find((route) => route.name === pjob.routeRef);
+  const selectedKey = selectedRoute ? routeProcessProfile(selectedRoute).key : groups[0]?.key || "";
+  const selectedGroup = groups.find((group) => group.key === selectedKey);
+  const common = `data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}"`;
+  const groupOptions = groups.map((group) => `<option value="${escapeHtml(group.key)}" ${group.key === selectedKey ? "selected" : ""}>${escapeHtml(group.label)}</option>`).join("");
+  const routeOptions = (selectedGroup?.routes || []).map(({ route }) => `<option value="${escapeHtml(route.name)}" ${route.name === pjob.routeRef ? "selected" : ""}>${escapeHtml(route.name)}</option>`).join("");
+  return `<div class="pjob-route-picker">
+    <select class="pjob-route-process" data-scope="pjob-route-group" ${common}>${groupOptions || `<option value="">\u6682\u65E0\u5DE5\u5E8F</option>`}</select>
+    <select data-scope="pjob" data-key="routeRef" ${common}>${routeOptions ? `<option value="">\u9009\u62E9\u8DEF\u5F84</option>${routeOptions}` : `<option value="">\u8BF7\u5148\u914D\u7F6E Route</option>`}</select>
+  </div>`;
+}
 function renderRounds() {
   normalizeRounds();
-  const routes = state.routes.map((item) => item.name).filter(Boolean), host = document.getElementById("roundList");
+  const host = document.getElementById("roundList");
   host.innerHTML = state.rounds.map((round, roundIndex) => {
     const roundTitle = roundIndex ? `\u7B2C ${roundIndex + 1} \u8F6E\u91CD\u7B97` : "\u9996\u6B21\u6392\u7A0B";
     const cjobs = round.cjobs.map((cjob, cjobIndex) => {
       const normalLot = cjob.jobType === "NormalLot";
       const pjobRows = cjob.pjobs.map((pjob, pjobIndex) => `<tr>
         <td><span class="readonly-pill">${escapeHtml(pjob.jobName)}</span></td>
-        <td><input class="pjob-number" type="number" min="1" max="${state.strategy === "milp" ? 12 : 25}" data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="waferCount" value="${Number(pjob.waferCount)}"><small class="mat-list-preview">[${pjob.matList.join(", ")}]</small></td>
-        <td><select data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="routeRef">${optionsHtml(routes, pjob.routeRef, routes.length ? "\u9009\u62E9 Route" : "\u8BF7\u5148\u914D\u7F6E Route")}</select></td>
+        <td><input class="pjob-number" type="number" min="1" max="${state.strategy === "milp" ? 12 : 25}" data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="waferCount" value="${Number(pjob.waferCount)}"><small class="mat-list-preview">\u69FD\u4F4D [${pjobLoadPortSlots(roundIndex, cjobIndex, pjobIndex).join(", ")}]</small></td>
+        <td>${renderPJobRoutePicker(pjob, roundIndex, cjobIndex, pjobIndex)}</td>
         <td><span class="readonly-pill">${escapeHtml(pjob.taskId)}</span></td>
         <td><input class="pjob-number" type="number" min="1" data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="priority" value="${Number(pjob.priority)}"></td>
         <td><select data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="loadPort">${optionsHtml(state.loadPorts, pjob.loadPort, state.loadPorts.length ? "\u9009\u62E9\u7AEF\u53E3" : "\u65E0\u7AEF\u53E3")}</select></td>
@@ -972,7 +1003,7 @@ function renderRounds() {
           <div class="field"><label>TaskMode</label><select data-scope="cjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-key="taskMode">${TASK_MODES.map((value) => `<option ${value === cjob.taskMode ? "selected" : ""}>${value}</option>`).join("")}</select></div>
           <div class="field"><label>PJobNameList</label><div class="pjob-name-list">${cjob.pJobNameList.map((name) => `<span>${escapeHtml(name)}</span>`).join("")}</div></div>
         </div>
-        <div class="pjob-table-wrap"><table class="pjob-table"><thead><tr><th>JobName</th><th>\u6676\u5706\u6570\u91CF / MatList</th><th>OriginRoute</th><th>TaskID</th><th>Priority</th><th>LoadPort</th><th></th></tr></thead><tbody>${pjobRows}</tbody></table></div>
+        <div class="pjob-table-wrap"><table class="pjob-table"><thead><tr><th>JobName</th><th>\u6676\u5706\u6570\u91CF / LoadPort \u69FD\u4F4D</th><th>OriginRoute</th><th>TaskID</th><th>Priority</th><th>LoadPort</th><th></th></tr></thead><tbody>${pjobRows}</tbody></table></div>
       </section>`;
     }).join("");
     return `<section class="round-card"><header class="round-head"><div class="round-title"><div class="round-number">${roundIndex + 1}</div><div><strong>${roundTitle}</strong><span class="readonly-pill">@ ${Number(round.currentTime)}s</span></div></div><div class="round-time-editor field"><label>${roundIndex ? "\u91CD\u7B97\u65F6\u95F4" : "\u6392\u7A0B\u65F6\u95F4"}</label><div><input type="number" min="0" step="0.1" data-round-time-index="${roundIndex}" value="${Number(round.currentTime)}" ${roundIndex ? "" : "disabled"}><span>s</span></div></div><button class="btn small" data-action="add-cjob" data-round-index="${roundIndex}">\uFF0B CJob</button></header><div class="cjob-list">${cjobs}</div></section>`;
@@ -1079,6 +1110,13 @@ function updateStateFromControl(control) {
     cjob[key] = value;
     if (key === "jobType") cjob.priority = value === "NormalLot" ? cjob.priority > 0 ? cjob.priority : 1 : -1;
     normalizeRounds();
+  }
+  if (scope === "pjob-route-group") {
+    const pjob = state.rounds[Number(control.dataset.roundIndex)].cjobs[Number(control.dataset.cjobIndex)].pjobs[Number(control.dataset.pjobIndex)];
+    const route = state.routes.find((item) => routeProcessProfile(item).key === String(value));
+    pjob.routeRef = route?.name || "";
+    normalizeRounds();
+    return;
   }
   if (scope === "pjob") {
     const pjob = state.rounds[Number(control.dataset.roundIndex)].cjobs[Number(control.dataset.cjobIndex)].pjobs[Number(control.dataset.pjobIndex)];
@@ -1418,7 +1456,7 @@ function showBatchProgress(result) {
 }
 function renderBatchItems(items) {
   const statusLabels = { queued: "\u7B49\u5F85\u4E2D", running: "\u8FD0\u884C\u4E2D", succeeded: "\u6210\u529F", failed: "\u5931\u8D25", cancelled: "\u5DF2\u7EC8\u6B62" };
-  document.getElementById("batchResults").innerHTML = items.map((item) => {
+  document.getElementById("batchResults").innerHTML = items.map((item, index) => {
     const finished = item.status === "succeeded";
     const baseline = item.baseline || {}, baselineReady = baseline.status === "succeeded";
     const cpuTime = Number(item.cpuTimeMs);
@@ -1426,7 +1464,7 @@ function renderBatchItems(items) {
     const improvementBadge = finished && baselineReady && Number.isFinite(improvement) ? `<b class="${improvement >= 0 ? "summary-gain" : "summary-loss"}">${improvement >= 0 ? "\u63D0\u5347" : "\u9000\u5316"} ${Math.abs(improvement).toFixed(2)}%</b>` : "";
     const baselineReason = baseline.status && baseline.status !== "succeeded" ? `Baseline ${baseline.status === "failed" ? "\u5931\u8D25" : "\u5931\u6548"}\uFF1A${baseline.error || "\u7B49\u5F85\u91CD\u65B0\u8BA1\u7B97"}` : "";
     const summaryError = baseline.status === "failed" ? baselineReason : item.status === "failed" ? `\u8FD0\u884C\u5931\u8D25\uFF1A${item.error || "\u672A\u77E5\u9519\u8BEF"}` : item.status === "cancelled" ? "\u8C03\u5EA6\u5DF2\u7EC8\u6B62" : baselineReason;
-    const displayId = String(item.testId || item.testName || "test").slice(0, 12);
+    const displayId = `t${index + 1}`;
     return `
       <div class="batch-result ${escapeHtml(item.status || "queued")}">
         <div class="batch-result-head">
@@ -1439,8 +1477,7 @@ function renderBatchItems(items) {
         </div>
         <div class="batch-result-summary">
           ${summaryError ? `<span class="summary-error" title="${escapeHtml(summaryError)}">${escapeHtml(summaryError)}</span>` : `
-            <span title="Makespan \u5F53\u524D\u503C / Heuristic Baseline">M <b>${finished ? Number(item.makespan).toFixed(2) : "\u2014"}</b> / Baseline <b>${baselineReady ? Number(baseline.makespan).toFixed(2) : "\u2014"} s</b>${improvementBadge ? ` \xB7 ${improvementBadge}` : ""}</span>
-            <span>CPU Time <b>${finished && Number.isFinite(cpuTime) ? `${cpuTime.toFixed(1)} ms` : "\u2014"}</b></span>
+            <span title="Makespan \u5F53\u524D\u503C / Heuristic Baseline"><b>${finished ? `${Number(item.makespan).toFixed(2)} s` : "\u2014"}</b> / <b>${baselineReady ? `${Number(baseline.makespan).toFixed(2)} s` : "\u2014"}</b>${improvementBadge ? ` ${improvementBadge}` : ""}\uFF1BCpu time <b>${finished && Number.isFinite(cpuTime) ? `${cpuTime.toFixed(1)} ms` : "\u2014"}</b></span>
           `}
         </div>
       </div>`;
@@ -1652,7 +1689,7 @@ document.addEventListener("input", (event) => {
 document.addEventListener("change", (event) => {
   if (event.target.matches("[data-scope], [data-option], [data-time-index], [data-round-time-index]")) {
     updateStateFromControl(event.target);
-    if (["name", "modules", "jobType", "waferCount"].includes(event.target.dataset.key) || event.target.dataset.timeIndex !== void 0 || event.target.dataset.roundTimeIndex !== void 0 || ["stage-candidates", "stage-candidate-toggle", "cjob", "pjob"].includes(event.target.dataset.scope)) renderAll();
+    if (["name", "modules", "jobType", "waferCount"].includes(event.target.dataset.key) || event.target.dataset.timeIndex !== void 0 || event.target.dataset.roundTimeIndex !== void 0 || ["stage-candidates", "stage-candidate-toggle", "cjob", "pjob", "pjob-route-group"].includes(event.target.dataset.scope)) renderAll();
     else if (state.drawer) {
       renderRoutes();
       renderStepDrawer();
