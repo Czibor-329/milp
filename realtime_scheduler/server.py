@@ -81,6 +81,7 @@ from realtime_scheduler.plan_builder import (
     _finite_number,
     _round_cjob_rows,
     _round_pjob_count,
+    _runtime_clean,
     _stage_visit_rows,
     _string_list,
     build_process_recipes,
@@ -2439,24 +2440,66 @@ def _batch_test_recipes(
             return
         existing["modules"] = list(dict.fromkeys([*existing["modules"], *module_names]))
 
+    clean_modules: Dict[str, List[str]] = {}
+
+    def add_clean_modules(names: Any, modules: Iterable[Any]) -> None:
+        module_names = _string_list(list(modules))
+        for clean_name in _string_list(names):
+            targets = clean_modules.setdefault(clean_name, [])
+            for module_name in module_names:
+                if module_name not in targets:
+                    targets.append(module_name)
+
     for route in routes:
+        route_modules: List[str] = []
         for stage in route.get("stages") or []:
             if not isinstance(stage, Mapping):
                 continue
             for visit in _stage_visit_rows(stage):
+                module_name = str(
+                    visit.get("stationName") or visit.get("StationName") or ""
+                ).strip()
+                process_recipe = (
+                    visit.get("processRecipe") or visit.get("ProcessRecipe")
+                )
                 add(
-                    visit.get("processRecipe") or visit.get("ProcessRecipe"),
+                    process_recipe,
                     visit.get("processTime", visit.get("recipeTime", 0.0)),
-                    [visit.get("stationName") or visit.get("StationName")],
+                    [module_name],
                     visit.get("processType"),
                     visit.get("weight") or {},
                 )
+                if process_recipe and module_name and module_name not in route_modules:
+                    route_modules.append(module_name)
+                if module_name:
+                    add_clean_modules(
+                        visit.get("beforeCleanRefs") or visit.get("BeforeInPM"),
+                        [module_name],
+                    )
+                    add_clean_modules(
+                        visit.get("afterCleanRefs") or visit.get("AfterOutPM"),
+                        [module_name],
+                    )
+        for field_name in (
+            "prePJobCleanRefs",
+            "postPJobCleanRefs",
+            "postCJobCleanRefs",
+        ):
+            add_clean_modules(route.get(field_name), route_modules)
     for clean in cleans:
+        runtime_clean = _runtime_clean(clean)
+        modules = clean_modules.get(str(runtime_clean.get("name") or ""), [])
         add(
-            clean.get("recipeName") or clean.get("recipeRef"),
-            clean.get("recipeTime"),
-            clean.get("modules"),
+            runtime_clean.get("recipeRef"),
+            runtime_clean.get("recipeTime"),
+            modules,
         )
+        if runtime_clean.get("cleanType") == "dummywac":
+            add(
+                runtime_clean.get("emptyRecipeRef"),
+                runtime_clean.get("wacRecipeTime"),
+                modules,
+            )
     return list(recipes.values())
 
 
@@ -2476,10 +2519,17 @@ def build_workspace_batch_plan(
         [row for row in (device.get("routes") or []) if isinstance(row, Mapping)],
         rounds,
     )
-    cleans = _batch_test_cleans(
-        [row for row in (device.get("cleans") or []) if isinstance(row, Mapping)],
-        routes,
-    )
+    cleans = [
+        _runtime_clean(clean)
+        for clean in _batch_test_cleans(
+            [
+                row
+                for row in (device.get("cleans") or [])
+                if isinstance(row, Mapping)
+            ],
+            routes,
+        )
+    ]
     merged_options = deepcopy(dict(test_case.get("options") or {}))
     merged_options.update(deepcopy(dict(options)))
     return {

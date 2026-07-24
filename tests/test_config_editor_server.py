@@ -15,6 +15,8 @@ from unittest.mock import patch
 
 import realtime_scheduler.server as config_server
 from realtime_scheduler.algorithm_interface import discover_other_algorithms
+from realtime_scheduler.plan_builder import _runtime_clean
+from src.parse import parse_task
 from scripts.config_editor_server import (
     BuildState,
     LoggedPlanError,
@@ -877,6 +879,126 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual(12, process_visit["QTimeLimit"])
         self.assertEqual(34, process_visit["ResidencyConstraint"])
 
+    def test_clean_types_expand_to_scheduler_conditions(self) -> None:
+        """五类精简 Clean 应展开为正确任务、触发变量和 Dummy 参数。"""
+        pre = _runtime_clean({"name": "Pre", "cleanType": "preclean", "recipeTime": 10})
+        post = _runtime_clean({"name": "Post", "cleanType": "postclean", "recipeTime": 11})
+        wac = _runtime_clean({
+            "name": "Wac", "cleanType": "wacclean",
+            "recipeTime": 12, "triggerCount": 7,
+        })
+        dummy = _runtime_clean({"name": "Dummy", "cleanType": "dummy", "recipeTime": 13})
+        dummy_wac = _runtime_clean({
+            "name": "DummyWac", "cleanType": "dummywac",
+            "recipeTime": 14, "wacRecipeTime": 6,
+        })
+
+        self.assertEqual("PreClean", pre["taskName"])
+        self.assertEqual("PostClean", post["taskName"])
+        self.assertEqual(("ProcessCount", 7), (wac["stateVariable"], wac["lower"]))
+        self.assertEqual(("WacClean", ["ProcessCount"]), (wac["taskName"], wac["updateStateVariables"]))
+        self.assertEqual(("PreDummyClean", 2), (dummy["taskName"], dummy["materialCount"]))
+        self.assertEqual(("PreWacClean", 2), (dummy_wac["taskName"], dummy_wac["materialCount"]))
+        self.assertEqual("DummyWac-Recipe-WAC", dummy_wac["emptyRecipeRef"])
+        self.assertEqual(6, dummy_wac["wacRecipeTime"])
+        self.assertEqual([], dummy_wac["modules"])
+
+    def test_step_clean_references_bind_to_process_chamber_by_category(self) -> None:
+        """Step 引用 Clean 后，应按类别自动挂到该 Step 的 PM，而无需 Clean 选择腔室。"""
+        route = _route("CleanRoute", "PM1", "Recipe1")
+        route["stages"][4]["beforeCleanRefs"] = ["DummyWac"]
+        route["stages"][4]["afterCleanRefs"] = ["Post", "Wac"]
+        clean_rows = [
+            _runtime_clean({"name": "DummyWac", "cleanType": "dummywac", "recipeTime": 30}),
+            _runtime_clean({"name": "Post", "cleanType": "postclean", "recipeTime": 20}),
+            _runtime_clean({"name": "Wac", "cleanType": "wacclean", "recipeTime": 8, "triggerCount": 5}),
+        ]
+        clean_by_name = {clean["name"]: clean for clean in clean_rows}
+
+        built = build_route(
+            route,
+            {"Recipe1": {"name": "Recipe1"}},
+            clean_by_name,
+            {"ATR", "VTR"},
+        )
+
+        dummy_task = built["PrePJob"]["PM1"][0]["CheckConditions"]["DummyWac"][0]
+        post_task = built["PostPJob"]["PM1"][0]["CheckConditions"]["Post"][0]
+        process_visit = built["RouteSteps"][4]["Visits"][0]
+        wac_condition = process_visit["AfterOutPM"][0]
+        self.assertEqual((2, "DummyWac-Recipe-WAC"), (
+            dummy_task["MaterialCount"],
+            dummy_task["EmptyCleanRecipeAfterMaterial"],
+        ))
+        self.assertEqual("PostClean", post_task["TaskName"])
+        self.assertEqual(
+            [5.0, 9999.0],
+            wac_condition["ExecuteOrder"][0]["ThresholdValueList"],
+        )
+        self.assertEqual([], process_visit["BeforeInPM"])
+
+    def test_dummy_wac_batch_plan_derives_recipes_and_dummy_port_material(self) -> None:
+        """Dummy WAC 应从 Route PM 自动生成两段 Recipe，并准备可复用 DummyPort 晶圆。"""
+        route = _route("DummyRoute", "PM1", "Recipe1")
+        route["stages"][4]["recipeTime"] = 10
+        route["stages"][4]["beforeCleanRefs"] = ["DummyWac"]
+        device = {
+            "name": "device.json",
+            "device": self.device,
+            "routes": [route],
+            "cleans": [{
+                "name": "DummyWac",
+                "cleanType": "dummywac",
+                "recipeTime": 30,
+                "wacRecipeTime": 8,
+            }],
+        }
+        test_case = {
+            "rounds": [{
+                "currentTime": 0,
+                "jobs": [_job("J1", "DummyRoute", "LP1")],
+            }],
+        }
+
+        plan = config_server.build_workspace_batch_plan(
+            device,
+            test_case,
+            "heuristic",
+            {},
+        )
+        clean_recipes = {
+            recipe["name"]: recipe
+            for recipe in plan["recipes"]
+            if recipe["name"].startswith("DummyWac")
+        }
+        self.assertEqual({"DummyWac-Recipe", "DummyWac-Recipe-WAC"}, set(clean_recipes))
+        self.assertEqual(["PM1"], clean_recipes["DummyWac-Recipe"]["modules"])
+        self.assertEqual(8, clean_recipes["DummyWac-Recipe-WAC"]["time"])
+
+        update = build_round_update(
+            plan,
+            test_case["rounds"][0],
+            0.0,
+            BuildState(),
+        )
+        dummy_materials = [
+            material
+            for material in update["Materials"]
+            if material["CurrentModuleName"] == "DummyPort"
+        ]
+        self.assertEqual(2, len(dummy_materials))
+        self.assertEqual(1, dummy_materials[0]["SlotID"])
+        problem = parse_task(self.device, update)
+        dummy_wafers = [
+            wafer for wafer in problem.wafers
+            if wafer.pjob_name.startswith("dummy_")
+        ]
+        self.assertEqual(2, len(dummy_wafers))
+        self.assertEqual(8, problem.dummy_wac[0].time)
+        result = execute_plan(plan)
+        self.assertTrue(result["ok"])
+        self.assertGreater(result["makespan"], 0)
+
     def test_editor_uses_persistent_route_table_and_step_drawer(self) -> None:
         """Route 应按工艺结构折叠，抽屉使用统一候选参数表单。"""
         html = _editor_source()
@@ -893,6 +1015,33 @@ class ConfigEditorServerTests(unittest.TestCase):
         for field in ("ProcessTime", "Recipe", "ProcessType", "Weight", "MoveTimeOffset", "SlotID", "QTime", "Residency"):
             self.assertIn(field, html)
         self.assertIn("width: clamp(720px, 66vw, 980px)", html)
+
+    def test_clean_editor_is_grouped_and_only_exposes_category_parameters(self) -> None:
+        """Clean 页面应按五类折叠，且不再编辑腔室和底层条件字段。"""
+        html = _editor_source()
+        clean_editor = html.split("function renderCleans()", 1)[1]
+        clean_editor = clean_editor.split("/** 返回 Step 类型", 1)[0]
+        template = EDITOR_PATH.read_text(encoding="utf-8")
+
+        self.assertNotIn("当前设备共享，清洁 Recipe 归属于 Clean。", template)
+        for label in ("PreClean", "PostClean", "WAC Clean", "Dummy", "Dummy WAC"):
+            self.assertIn(label, html)
+        self.assertIn('data-action="toggle-clean-type"', clean_editor)
+        self.assertIn("清洁类别", clean_editor)
+        self.assertIn("清洁时间（秒）", clean_editor)
+        self.assertIn("触发次数", clean_editor)
+        self.assertIn("WAC 清洁长度（秒）", clean_editor)
+        for removed_label in (
+            "Clean 名称 / Alias",
+            "Recipe 名称",
+            "适用腔室",
+            "StateVariable",
+            "TaskName",
+            "触发下限",
+            "触发上限",
+            "更新状态量（逗号分隔）",
+        ):
+            self.assertNotIn(removed_label, clean_editor)
         self.assertIn("scheduleAutoSave", html)
         self.assertIn('window.addEventListener("pagehide"', html)
         self.assertIn("StepID", html)
@@ -1795,9 +1944,14 @@ class ConfigEditorServerTests(unittest.TestCase):
         )
         initial_move_ids = {int(move["MoveID"]) for move in first_output["MoveList"]}
         final_moves = result["output"]["MoveList"]
+        # 双槽交换可能让请求时刻落在“门已开、下一动作尚未开始”的短间隙；
+        # 此时没有单个 Move 横跨 100 s，但仍必须保留旧计划的稳定化收尾。
         self.assertTrue(any(
             int(move["MoveID"]) in initial_move_ids
-            and float(move["StartTime"]) < 100.0 < float(move["EndTime"])
+            and (
+                float(move["StartTime"]) < 100.0 < float(move["EndTime"])
+                or 100.0 <= float(move["StartTime"]) < effective_time
+            )
             and float(move["EndTime"]) <= effective_time + 1e-6
             for move in final_moves
         ))

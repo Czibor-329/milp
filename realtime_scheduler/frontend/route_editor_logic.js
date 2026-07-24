@@ -28,6 +28,7 @@ __export(route_editor_logic_exports, {
   processProfile: () => processProfile,
   processRecipeName: () => processRecipeName,
   replaceCandidates: () => replaceCandidates,
+  routeCleanSignature: () => routeCleanSignature,
   selectReferencedRoutes: () => selectReferencedRoutes,
   synchronizeVisits: () => synchronizeVisits
 });
@@ -76,10 +77,32 @@ function formatSeconds(value) {
   const number = Number(value);
   return Number.isFinite(number) ? `${Number.isInteger(number) ? number : number.toFixed(2).replace(/0+$/, "").replace(/\.$/, "")}s` : "\u672A\u8BBE\u7F6E";
 }
-function automaticRouteName(profile) {
-  return profile.processCount === 0 ? "\u65E0\u52A0\u5DE5\u5DE5\u5E8F" : `${profile.processCount}\u9053\u5DE5\u5E8F \xB7 ${profile.candidatePath.map(
+function cleanNames(value) {
+  const rows = Array.isArray(value) ? value : value ? [value] : [];
+  return [...new Set(rows.map((item) => String(item || "").trim()).filter(Boolean))];
+}
+function routeCleanSignature(route) {
+  const parts = [];
+  const append = (label, value) => {
+    const names = cleanNames(value);
+    if (names.length) parts.push(`${label}:${names.join("+")}`);
+  };
+  append("Pre", route.prePJobCleanRefs);
+  append("Post", route.postPJobCleanRefs);
+  append("CJob", route.postCJobCleanRefs);
+  (route.stages || []).filter((stage) => stage.needProcess).forEach((stage, index) => {
+    const before = [...new Set((stage.visits || []).flatMap((visit) => cleanNames(visit.beforeCleanRefs)))];
+    const after = [...new Set((stage.visits || []).flatMap((visit) => cleanNames(visit.afterCleanRefs)))];
+    append(`S${index + 1}\u524D`, before);
+    append(`S${index + 1}\u540E`, after);
+  });
+  return parts.join(" \xB7 ");
+}
+function automaticRouteName(profile, cleanSignature = "") {
+  const processName = profile.processCount === 0 ? "\u65E0\u52A0\u5DE5\u5DE5\u5E8F" : profile.candidatePath.map(
     (path, index) => `${path}(${formatSeconds(profile.processTimes[index])})`
-  ).join(" \u2192 ")}`;
+  ).join(" \u2192 ");
+  return cleanSignature ? `${processName} \xB7 ${cleanSignature}` : processName;
 }
 var EXAMPLE_ROUTE_SPECS = [
   ...[["PM1"], ["PM1", "PM2"], ["PM1", "PM2", "PM3"], ["PM1", "PM2", "PM3", "PM4"]].flatMap((candidates) => [40, 80, 120].map((time) => ({ candidates: [candidates], times: [time] }))),
@@ -146,6 +169,7 @@ function processRecipeName(value, fallback) {
   processProfile,
   processRecipeName,
   replaceCandidates,
+  routeCleanSignature,
   selectReferencedRoutes,
   synchronizeVisits
 });

@@ -23,10 +23,34 @@ test("Route 只按加工工序数分组", () => {
   assert.equal(logic.processProfile({ stages: [{ needProcess: false, visits: [visit("ATR")] }] }).label, "无加工工序");
 });
 
-test("Route 名称由工序数、腔室种类和加工时间自动生成", () => {
-  assert.equal(logic.automaticRouteName(logic.processProfile(route(["PM1"]))), "1道工序 · PM1(20s)");
-  assert.equal(logic.automaticRouteName(logic.processProfile(route(["PM1", "PM2"]))), "1道工序 · PM1/PM2(20s)");
-  assert.equal(logic.automaticRouteName(logic.processProfile(route(["PM1", "PM2"], ["PM3", "PM4"]))), "2道工序 · PM1/PM2(20s) → PM3/PM4(20s)");
+test("Route 名称由腔室种类和加工时间自动生成且不带工序数前缀", () => {
+  assert.equal(logic.automaticRouteName(logic.processProfile(route(["PM1"]))), "PM1(20s)");
+  assert.equal(logic.automaticRouteName(logic.processProfile(route(["PM1", "PM2"]))), "PM1/PM2(20s)");
+  assert.equal(logic.automaticRouteName(logic.processProfile(route(["PM1", "PM2"], ["PM3", "PM4"]))), "PM1/PM2(20s) → PM3/PM4(20s)");
+});
+
+test("同一加工路径按 Clean 引用生成不同名称", () => {
+  const first = route(["PM1", "PM2"]);
+  first.prePJobCleanRefs = ["PreA"];
+  const second = structuredClone(first);
+  second.prePJobCleanRefs = ["PreB"];
+  assert.equal(logic.routeCleanSignature(first), "Pre:PreA");
+  assert.equal(logic.routeCleanSignature(second), "Pre:PreB");
+  assert.equal(
+    logic.automaticRouteName(logic.processProfile(first), logic.routeCleanSignature(first)),
+    "PM1/PM2(20s) · Pre:PreA",
+  );
+  assert.notEqual(
+    logic.automaticRouteName(logic.processProfile(first), logic.routeCleanSignature(first)),
+    logic.automaticRouteName(logic.processProfile(second), logic.routeCleanSignature(second)),
+  );
+});
+
+test("加工 Step Clean 也进入 Route 名称", () => {
+  const value = route(["PM1"], ["PM2"]);
+  value.stages[0].visits[0].beforeCleanRefs = ["DummyA"];
+  value.stages[1].visits[0].afterCleanRefs = ["WacA"];
+  assert.equal(logic.routeCleanSignature(value), "S1前:DummyA · S2后:WacA");
 });
 
 test("示例 Route 覆盖 1–3 道工序且加工时间均为 40–120 秒", () => {

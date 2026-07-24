@@ -30,6 +30,9 @@ export interface RouteStage {
 export interface RouteDefinition {
   name?: string;
   stages?: RouteStage[];
+  prePJobCleanRefs?: string[] | string;
+  postPJobCleanRefs?: string[] | string;
+  postCJobCleanRefs?: string[] | string;
   [key: string]: unknown;
 }
 
@@ -99,13 +102,38 @@ function formatSeconds(value: number): string {
     : "未设置";
 }
 
-/** 根据加工路径和加工时间生成稳定、可读的 Route 名称。 */
-export function automaticRouteName(profile: RouteProcessProfile): string {
-  return profile.processCount === 0
+function cleanNames(value: unknown): string[] {
+  const rows = Array.isArray(value) ? value : value ? [value] : [];
+  return [...new Set(rows.map((item) => String(item || "").trim()).filter(Boolean))];
+}
+
+/** 汇总 Route 级和加工 Step 级 Clean 引用，供自动名称区分清洁配置。 */
+export function routeCleanSignature(route: RouteDefinition): string {
+  const parts: string[] = [];
+  const append = (label: string, value: unknown) => {
+    const names = cleanNames(value);
+    if (names.length) parts.push(`${label}:${names.join("+")}`);
+  };
+  append("Pre", route.prePJobCleanRefs);
+  append("Post", route.postPJobCleanRefs);
+  append("CJob", route.postCJobCleanRefs);
+  (route.stages || []).filter((stage) => stage.needProcess).forEach((stage, index) => {
+    const before = [...new Set((stage.visits || []).flatMap((visit) => cleanNames(visit.beforeCleanRefs)))];
+    const after = [...new Set((stage.visits || []).flatMap((visit) => cleanNames(visit.afterCleanRefs)))];
+    append(`S${index + 1}前`, before);
+    append(`S${index + 1}后`, after);
+  });
+  return parts.join(" · ");
+}
+
+/** 根据加工路径、加工时间和 Clean 配置生成稳定、可读的 Route 名称。 */
+export function automaticRouteName(profile: RouteProcessProfile, cleanSignature = ""): string {
+  const processName = profile.processCount === 0
     ? "无加工工序"
-    : `${profile.processCount}道工序 · ${profile.candidatePath.map(
+    : profile.candidatePath.map(
       (path, index) => `${path}(${formatSeconds(profile.processTimes[index])})`,
-    ).join(" → ")}`;
+    ).join(" → ");
+  return cleanSignature ? `${processName} · ${cleanSignature}` : processName;
 }
 
 const EXAMPLE_ROUTE_SPECS: ExampleRouteSpec[] = [

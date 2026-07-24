@@ -27,16 +27,100 @@ const { VISIT_SHARED_FIELDS, selectReferencedRoutes } = RouteEditorLogic;
 
 const EXPECTED_API_SCHEMA = "cjob-pjob-v3";
 
+const CLEAN_TYPE_DEFINITIONS = [
+  { key: "preclean", label: "PreClean" },
+  { key: "postclean", label: "PostClean" },
+  { key: "wacclean", label: "WAC Clean" },
+  { key: "dummy", label: "Dummy" },
+  { key: "dummywac", label: "Dummy WAC" },
+];
+const ROUTE_CLEAN_KEYS = ["prePJobCleanRefs", "postPJobCleanRefs", "postCJobCleanRefs"];
+
 const state = {
   workspaceDevices: [], workspaceDevice: null, workspaceDeviceId: "", testCaseId: "", testCaseName: "", testCaseGroup: "", activeTestGroup: "", serviceCompatible: false, dirty: false,
   activeBatchId: "", batchRunning: false, batchCancelRequested: false, batchCancelSent: false,
   deviceName: "", device: null, stationNames: [], loadPorts: [], processModules: [], robotNames: [], robotScopes: {},
-  strategy: "heuristic", availableOtherAlgorithms: [], roundCount: 2, times: [0, 70], options: { loadLockManager: "petri-look", rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
+  strategy: "heuristic", availableOtherAlgorithms: [], roundCount: 2, times: [0, 70], options: { loadLockManager: "petri-look", loadLockExchange: "auto", rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
   cleans: [],
   routes: [{ name: "RouteA", group: "RouteA", bufferOption: 0, prePJobCleanRefs: [], postPJobCleanRefs: [], postCJobCleanRefs: [], stages: linkRouteSteps([makeStage("LP1"), makeStage("Robot"), makeStage("PM1,PM2", true, "RouteA_Step2"), makeStage("Robot"), makeStage("LP1")]) }],
   rounds: [makeRound(1, 0, "RouteA", "LP1"), makeRound(2, 70, "RouteA", "LP2")],
-  drawer: null, expandedRouteGroups: new Set(), expandedRoutes: new Set(), routeNameChanges: new Map()
+  drawer: null, expandedRouteGroups: new Set(), expandedRoutes: new Set(), expandedCleanTypes: new Set(), routeNameChanges: new Map()
 };
+
+/** 从新版字段或旧版任务参数识别清洁类别。 */
+function inferCleanType(clean) {
+  const explicit = String(clean.cleanType || clean.category || "").toLowerCase().replace(/[-_\s]/g, "");
+  if (["preclean", "postclean", "wacclean", "dummy", "dummywac"].includes(explicit)) return explicit;
+  if (explicit === "dummyclean") return "dummy";
+  if (explicit === "dummywacclean") return "dummywac";
+  const signature = `${clean.taskName || ""} ${clean.name || ""}`.toLowerCase();
+  if (/dummy.*wac|wac.*dummy|prewac/.test(signature) || clean.emptyRecipeRef) return "dummywac";
+  if (Number(clean.materialCount || 0) > 0 || /dummy/.test(signature)) return "dummy";
+  if (String(clean.stateVariable || "").toLowerCase() === "processcount" || /wac/.test(signature)) return "wacclean";
+  if (/post/.test(signature)) return "postclean";
+  return "preclean";
+}
+
+/** 兼容旧 Clean，并只保留页面需要编辑的类型及时长参数。 */
+function normalizeClean(clean) {
+  const value = { ...(clean || {}) }, cleanType = inferCleanType(value);
+  const name = String(value.name || `Clean${state.cleans.length + 1}`).trim() || `Clean${state.cleans.length + 1}`;
+  value.name = name;
+  value.cleanType = cleanType;
+  value.recipeName = String(value.recipeName || value.recipeRef || `${name}-Recipe`).trim() || `${name}-Recipe`;
+  const recipeTime = Number(value.recipeTime);
+  value.recipeTime = Math.max(0, Number.isFinite(recipeTime) ? recipeTime : 0);
+  value.triggerCount = Math.max(1, Math.floor(Number(value.triggerCount ?? value.lower) || 5));
+  const wacRecipeTime = Number(value.wacRecipeTime ?? value.emptyRecipeTime);
+  value.wacRecipeTime = Math.max(0, Number.isFinite(wacRecipeTime) ? wacRecipeTime : 20);
+  return value;
+}
+
+/** 将精简编辑模型展开为调度接口使用的 Clean 模板。 */
+function runtimeClean(clean) {
+  const value = normalizeClean(clean), type = value.cleanType;
+  const taskNames = { preclean: "PreClean", postclean: "PostClean", wacclean: "WacClean", dummy: "PreDummyClean", dummywac: "PreWacClean" };
+  const isWac = type === "wacclean", isDummy = type === "dummy" || type === "dummywac";
+  return {
+    ...value,
+    recipeRef: value.recipeName,
+    modules: [],
+    taskName: taskNames[type],
+    stateVariable: isWac ? "ProcessCount" : "IdleTime",
+    lower: isWac ? value.triggerCount : 0,
+    upper: 9999,
+    updateStateVariables: isWac ? ["ProcessCount"] : isDummy ? ["IdleTime", "DummyCount"] : type === "preclean" ? ["IdleTime"] : [],
+    materialCount: isDummy ? 2 : 0,
+    preJudge: false,
+    emptyRecipeRef: type === "dummywac" ? `${value.recipeName}-WAC` : "",
+  };
+}
+
+/** 创建不会与现有引用重名的 Clean。 */
+function makeClean(cleanType = "preclean") {
+  const occupied = new Set(state.cleans.map(clean => clean.name)); let suffix = state.cleans.length + 1;
+  while (occupied.has(`Clean${suffix}`)) suffix += 1;
+  return normalizeClean({ name: `Clean${suffix}`, cleanType, recipeTime: 20, triggerCount: 5, wacRecipeTime: 20 });
+}
+
+/** 返回指定类别的 Clean 名称，供 Route 引用控件筛选。 */
+function cleanNamesFor(types) {
+  const allowed = new Set(types);
+  return state.cleans.filter(clean => allowed.has(inferCleanType(clean))).map(clean => clean.name).filter(Boolean);
+}
+
+/** 删除某个 Clean 的所有 Route 引用，避免删除或换类型后留下失效引用。 */
+function removeCleanReferences(cleanName) {
+  state.routes.forEach(route => {
+    for (const key of ["prePJobCleanRefs", "postPJobCleanRefs", "postCJobCleanRefs"]) {
+      route[key] = stringList(route[key]).filter(name => name !== cleanName);
+    }
+    (route.stages || []).forEach(stage => (stage.visits || []).forEach(visit => {
+      visit.beforeCleanRefs = stringList(visit.beforeCleanRefs).filter(name => name !== cleanName);
+      visit.afterCleanRefs = stringList(visit.afterCleanRefs).filter(name => name !== cleanName);
+    }));
+  });
+}
 
 /** 用 PSE300 拓扑构造示例 Route；进出真空段均允许 LA/LB，工艺段间由 VTR 搬运。 */
 function makeExampleRoute(spec, catalogIndex) {
@@ -60,11 +144,11 @@ function generateExampleRoutes() {
     && ["LA", "LB"].every(name => state.stationNames.includes(name))
     && ["ATR", "VTR"].every(name => state.robotNames.includes(name));
   if (!hasPse300Topology) return null;
-  const existing = new Set(state.routes.map(route => RouteEditorLogic.automaticRouteName(routeProcessProfile(route))));
+  const existing = new Set(state.routes.map(route => generatedRouteName(route)));
   let added = 0;
   RouteEditorLogic.exampleRouteSpecs().forEach((spec, catalogIndex) => {
     const route = makeExampleRoute(spec, catalogIndex);
-    const signature = RouteEditorLogic.automaticRouteName(routeProcessProfile(route));
+    const signature = generatedRouteName(route);
     if (existing.has(signature)) return;
     existing.add(signature); state.routes.push(route); added += 1;
   });
@@ -85,6 +169,7 @@ function cloneVisitParameters(visit) {
 /** 统一补全 Step 的派生字段，避免 StepID、PostStepID、NeedProcess 被手工改坏。 */
 function normalizeRoute(route) {
   route.stages = Array.isArray(route.stages) ? route.stages : [];
+  ROUTE_CLEAN_KEYS.forEach(key => { route[key] = stringList(route[key]).slice(0, 1); });
   linkRouteSteps(route.stages);
   route.stages.forEach((stage, index) => {
     stage.visits = Array.isArray(stage.visits) ? stage.visits : [];
@@ -215,7 +300,7 @@ function makeDefaultTestCase(name = "默认测试集") {
   const routeName = state.routes[0]?.name || "";
   return {
     name, group: state.activeTestGroup || "", strategy: "heuristic", roundCount: 2, times: [0, 70],
-    options: { loadLockManager: "petri-look", rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
+    options: { loadLockManager: "petri-look", loadLockExchange: "auto", rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
     cleans: state.cleans, routes: state.routes,
     rounds: [
       makeRound(1, 0, routeName, state.loadPorts[0] || ""),
@@ -319,12 +404,13 @@ function applyTestCase(testCase) {
   state.routeNameChanges.clear();
   state.testCaseId = value.id; state.testCaseName = value.name; state.testCaseGroup = String(value.group || ""); state.activeTestGroup = state.testCaseGroup; state.strategy = value.strategy || "heuristic";
   state.roundCount = Math.max(1, Number(value.roundCount) || 1); state.times = Array.isArray(value.times) ? value.times : [0];
-  state.options = value.options || { loadLockManager: "petri-look", rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 };
+  state.options = value.options || { loadLockManager: "petri-look", loadLockExchange: "auto", rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 };
   state.options.loadLockManager = state.options.loadLockManager || "petri-look";
+  state.options.loadLockExchange = state.options.loadLockExchange || "auto";
   state.options.milpTimeLimit = Number(state.options.milpTimeLimit) || 120;
   // v2：Route/Clean 来自设备共享库；仅在加载尚未迁移的旧数据时使用测试集副本兜底。
   if (!state.routes.length && Array.isArray(value.routes)) state.routes = value.routes;
-  if (!state.cleans.length && Array.isArray(value.cleans)) state.cleans = value.cleans;
+  if (!state.cleans.length && Array.isArray(value.cleans)) state.cleans = value.cleans.map(normalizeClean);
   state.routes.forEach(normalizeRoute);
   state.expandedRouteGroups.clear(); state.expandedRoutes.clear();
   state.rounds = Array.isArray(value.rounds) ? value.rounds : [];
@@ -352,7 +438,7 @@ function applyTestCase(testCase) {
 /** 整理保存请求；Route/Clean 随请求提交，但后端会写入设备共享库而非测试集。 */
 function currentTestSnapshot(name = state.testCaseName) {
   normalizeRounds();
-  return structuredClone({ name, group: state.testCaseGroup, strategy: state.strategy, roundCount: state.roundCount, times: state.times, options: state.options, cleans: state.cleans, routes: state.routes, routeNameChanges: Object.fromEntries(state.routeNameChanges), rounds: state.rounds });
+  return structuredClone({ name, group: state.testCaseGroup, strategy: state.strategy, roundCount: state.roundCount, times: state.times, options: state.options, cleans: state.cleans.map(runtimeClean), routes: state.routes, routeNameChanges: Object.fromEntries(state.routeNameChanges), rounds: state.rounds });
 }
 
 /** 保存当前测试集；运行和切换前可静默调用。 */
@@ -512,7 +598,8 @@ async function selectWorkspaceDevice(deviceId, preferredTestId = "") {
   state.activeTestGroup = ""; state.testCaseGroup = "";
   applyDeviceTopology(result.device.device, result.device.name);
   state.routes = Array.isArray(result.device.routes) ? structuredClone(result.device.routes) : [];
-  state.cleans = Array.isArray(result.device.cleans) ? structuredClone(result.device.cleans) : [];
+  state.cleans = Array.isArray(result.device.cleans) ? structuredClone(result.device.cleans).map(normalizeClean) : [];
+  state.expandedCleanTypes = new Set(state.cleans.map(clean => clean.cleanType));
   if (!result.device.tests.length) {
     const created = await requestJson(`/api/workspaces/${deviceId}/tests`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(makeDefaultTestCase())
@@ -554,20 +641,27 @@ function resizeRounds(count) {
 /** 重算时间已合并到轮次卡片，此函数仅维持旧调用点的状态同步。 */
 function renderTimes() { normalizeRounds(); }
 
-/** 绘制 Clean；清洁 Recipe 内嵌在 Clean 中。 */
+/** 绘制按清洁类别分组、可折叠的精简 Clean 编辑器。 */
 function renderCleans() {
   const host = document.getElementById("cleanList");
-  host.innerHTML = state.cleans.length ? state.cleans.map((clean, index) => `<div class="edit-card"><div class="edit-card-head"><strong>Clean ${index + 1} · ${escapeHtml(clean.name || "未命名")}</strong><button class="btn danger small" data-action="remove-clean" data-index="${index}">删除</button></div><div class="edit-card-body grid">
-    <div class="field span-4"><label>Clean 名称 / Alias</label><input data-scope="clean" data-index="${index}" data-key="name" value="${escapeHtml(clean.name)}"></div>
-    <div class="field span-4"><label>Recipe 名称</label><input data-scope="clean" data-index="${index}" data-key="recipeName" value="${escapeHtml(clean.recipeName)}"></div>
-    <div class="field span-4"><label>清洁时间（秒）</label><input type="number" min="0" step="0.1" data-scope="clean" data-index="${index}" data-key="recipeTime" value="${Number(clean.recipeTime)}"></div>
-    <div class="field span-6"><label>适用腔室</label><select multiple data-scope="clean" data-index="${index}" data-key="modules">${multiOptionsHtml(state.processModules, clean.modules)}</select><div class="hint">只能选择设备内的 ProcessChamber。</div></div>
-    <div class="field span-3"><label>StateVariable</label><input data-scope="clean" data-index="${index}" data-key="stateVariable" value="${escapeHtml(clean.stateVariable)}"></div>
-    <div class="field span-3"><label>TaskName</label><input data-scope="clean" data-index="${index}" data-key="taskName" value="${escapeHtml(clean.taskName)}"></div>
-    <div class="field span-3"><label>触发下限</label><input type="number" data-scope="clean" data-index="${index}" data-key="lower" value="${Number(clean.lower)}"></div>
-    <div class="field span-3"><label>触发上限</label><input type="number" data-scope="clean" data-index="${index}" data-key="upper" value="${Number(clean.upper)}"></div>
-    <div class="field span-6"><label>更新状态量（逗号分隔）</label><input data-scope="clean" data-index="${index}" data-key="updateStateVariables" value="${escapeHtml(clean.updateStateVariables)}"></div>
-  </div></div>`).join("") : `<div class="empty">当前没有 Clean。无需清洁时可保持为空。</div>`;
+  state.cleans = state.cleans.map(normalizeClean);
+  host.innerHTML = CLEAN_TYPE_DEFINITIONS.map(type => {
+    const rows = state.cleans.map((clean, index) => ({ clean, index })).filter(item => item.clean.cleanType === type.key);
+    const open = state.expandedCleanTypes.has(type.key);
+    const cards = rows.map(({ clean, index }) => {
+      const conditional = clean.cleanType === "wacclean"
+        ? `<div class="field"><label>触发次数</label><input type="number" min="1" step="1" data-scope="clean" data-index="${index}" data-key="triggerCount" value="${Number(clean.triggerCount)}"></div>`
+        : clean.cleanType === "dummywac"
+          ? `<div class="field"><label>WAC 清洁长度（秒）</label><input type="number" min="0" step="0.1" data-scope="clean" data-index="${index}" data-key="wacRecipeTime" value="${Number(clean.wacRecipeTime)}"></div>`
+          : "";
+      return `<article class="clean-card"><div class="clean-card-title"><strong>${escapeHtml(clean.name)}</strong><button class="btn danger small" data-action="remove-clean" data-index="${index}">删除</button></div><div class="clean-fields">
+        <div class="field"><label>清洁类别</label><select data-scope="clean" data-index="${index}" data-key="cleanType">${CLEAN_TYPE_DEFINITIONS.map(option => `<option value="${option.key}" ${option.key === clean.cleanType ? "selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}</select></div>
+        <div class="field"><label>清洁时间（秒）</label><input type="number" min="0" step="0.1" data-scope="clean" data-index="${index}" data-key="recipeTime" value="${Number(clean.recipeTime)}"></div>
+        ${conditional}
+      </div></article>`;
+    }).join("");
+    return `<section class="clean-type-group"><button class="clean-type-head" data-action="toggle-clean-type" data-clean-type="${type.key}"><span class="collapse-arrow ${open ? "open" : ""}">▶</span><strong>${escapeHtml(type.label)}</strong><span class="route-count">${rows.length} 个 · ${open ? "已展开" : "已收起"}</span></button>${open ? `<div class="clean-type-body">${cards || `<div class="clean-type-empty">暂无 ${escapeHtml(type.label)}</div>`}</div>` : ""}</section>`;
+  }).join("");
 }
 
 /** 返回 Step 类型的简短名称。 */
@@ -604,6 +698,11 @@ function routeProcessProfile(route) {
   return RouteEditorLogic.processProfile(route);
 }
 
+/** 按加工路径和 Clean 组合生成 Route 名称；Clean 不同的同路径 Route 不会重名。 */
+function generatedRouteName(route) {
+  return RouteEditorLogic.automaticRouteName(routeProcessProfile(route), RouteEditorLogic.routeCleanSignature(route));
+}
+
 /** 记录 Route 自动改名链，并同步当前测试中引用该 Route 的 PJob。 */
 function recordRouteRename(oldName, newName) {
   if (!oldName || oldName === newName) return;
@@ -621,7 +720,7 @@ function recordRouteRename(oldName, newName) {
 function synchronizeRouteNames() {
   const occurrences = new Map(); let changed = false;
   state.routes.forEach(route => {
-    const baseName = RouteEditorLogic.automaticRouteName(routeProcessProfile(route));
+    const baseName = generatedRouteName(route);
     const occurrence = (occurrences.get(baseName) || 0) + 1; occurrences.set(baseName, occurrence);
     const generatedName = occurrence === 1 ? baseName : `${baseName} (${occurrence})`;
     if (route.name !== generatedName) {
@@ -647,16 +746,18 @@ function groupedRoutes() {
 }
 
 /** 绘制一个已展开 Route 的原有编辑能力。 */
-function renderRouteDetails(route, index, cleans) {
+function renderRouteDetails(route, index) {
+  const preCleans = cleanNamesFor(["preclean", "dummy", "dummywac"]);
+  const postCleans = cleanNamesFor(["postclean"]);
   return `<div class="route-details"><div class="edit-card-head"><strong>Route 详情</strong><div><button class="btn small" data-action="add-stage" data-index="${index}">＋ Step 组</button> <button class="btn danger small" data-action="remove-route" data-index="${index}">删除</button></div></div>
     <div class="route-meta"><div class="route-meta-grid"><div class="field"><label>Route 名称（自动生成）</label><input value="${escapeHtml(route.name)}" readonly></div><div class="field"><label>Group</label><input data-scope="route" data-index="${index}" data-key="group" value="${escapeHtml(route.group)}"></div><div class="field"><label>BufferOption</label><input type="number" data-scope="route" data-index="${index}" data-key="bufferOption" value="${Number(route.bufferOption)}"></div></div>
-    <details class="route-clean-details"><summary>Route 级 Clean 设置</summary><div class="grid"><div class="field span-4"><label>PJob 前</label><select multiple data-scope="route" data-index="${index}" data-key="prePJobCleanRefs">${multiOptionsHtml(cleans, route.prePJobCleanRefs)}</select></div><div class="field span-4"><label>PJob 后</label><select multiple data-scope="route" data-index="${index}" data-key="postPJobCleanRefs">${multiOptionsHtml(cleans, route.postPJobCleanRefs)}</select></div><div class="field span-4"><label>CJob 后</label><select multiple data-scope="route" data-index="${index}" data-key="postCJobCleanRefs">${multiOptionsHtml(cleans, route.postCJobCleanRefs)}</select></div></div></details></div>
+    <details class="route-clean-details"><summary>Route 级 Clean 设置</summary><div class="grid"><div class="field span-4"><label>PJob 前</label><select data-scope="route" data-index="${index}" data-key="prePJobCleanRefs">${optionsHtml(preCleans, stringList(route.prePJobCleanRefs)[0] || "", "不需要清洁")}</select></div><div class="field span-4"><label>PJob 后</label><select data-scope="route" data-index="${index}" data-key="postPJobCleanRefs">${optionsHtml(postCleans, stringList(route.postPJobCleanRefs)[0] || "", "不需要清洁")}</select></div><div class="field span-4"><label>CJob 后</label><select data-scope="route" data-index="${index}" data-key="postCJobCleanRefs">${optionsHtml(postCleans, stringList(route.postCJobCleanRefs)[0] || "", "不需要清洁")}</select></div></div></details></div>
     <div class="route-table-wrap"><table class="route-table"><thead><tr><th>StepID</th><th>类型</th><th>可选腔室 / 机器手</th><th>PostStepID</th><th>NeedProcess</th><th></th></tr></thead><tbody>${renderSteps(route, index)}</tbody></table></div></div>`;
 }
 
 /** 绘制按工艺结构分组、分组和 Route 均可折叠的主视图。 */
 function renderRoutes() {
-  const cleans = state.cleans.map(item => item.name).filter(Boolean), host = document.getElementById("routeList"), groups = groupedRoutes();
+  const host = document.getElementById("routeList"), groups = groupedRoutes();
   host.innerHTML = groups.length ? groups.map(group => {
     const groupOpen = state.expandedRouteGroups.has(group.key);
     const routes = group.routes.map(({ route, routeIndex, profile }) => {
@@ -664,7 +765,7 @@ function renderRoutes() {
       return `<article class="route-summary-card"><div class="route-summary-head"><button class="route-summary-toggle" data-action="toggle-route" data-route-index="${routeIndex}">
         <div class="route-summary-title"><span class="collapse-arrow ${routeOpen ? "open" : ""}">▶</span><strong>${escapeHtml(route.name || "未命名 Route")}</strong></div><div class="route-summary-meta">${escapeHtml(processSummary)} · ${route.stages.length} Steps</div></button>
         <div class="route-summary-actions"><button class="btn small" data-action="edit-route" data-route-index="${routeIndex}">编辑</button><button class="btn small" data-action="copy-route" data-route-index="${routeIndex}">复制</button><button class="btn danger small" data-action="remove-route" data-index="${routeIndex}">删除</button></div>
-      </div>${routeOpen ? renderRouteDetails(route, routeIndex, cleans) : ""}</article>`;
+      </div>${routeOpen ? renderRouteDetails(route, routeIndex) : ""}</article>`;
     }).join("");
     return `<section class="route-type-group"><button class="route-type-head" data-action="toggle-route-group" data-group-key="${escapeHtml(group.key)}"><span class="collapse-arrow ${groupOpen ? "open" : ""}">▶</span><strong>${escapeHtml(group.label)}</strong><span class="route-count">${group.routes.length} 条 Route · ${groupOpen ? "已展开" : "已收起"}</span></button>${groupOpen ? `<div class="route-group-body">${routes}</div>` : ""}</section>`;
   }).join("") : `<div class="empty">至少创建一条 Route，Job 才能引用。</div>`;
@@ -774,8 +875,8 @@ function renderStepDrawer() {
       ${renderVisitField("SlotIDs", "slotIds", first.slotIds, routeIndex, stageIndex)}
       ${renderVisitField("QTime", "qTimeLimit", first.qTimeLimit, routeIndex, stageIndex, { number: true })}
       ${renderVisitField("Residency", "residencyConstraint", first.residencyConstraint, routeIndex, stageIndex, { number: true })}
-      ${renderVisitField("Before Clean", "beforeCleanRefs", first.beforeCleanRefs, routeIndex, stageIndex, { multiple: true, values: state.cleans.map(clean => clean.name).filter(Boolean), wide: true })}
-      ${renderVisitField("After Clean", "afterCleanRefs", first.afterCleanRefs, routeIndex, stageIndex, { multiple: true, values: state.cleans.map(clean => clean.name).filter(Boolean), wide: true })}
+      ${renderVisitField("Before Clean", "beforeCleanRefs", first.beforeCleanRefs, routeIndex, stageIndex, { multiple: true, values: cleanNamesFor(["preclean", "dummy", "dummywac"]), wide: true })}
+      ${renderVisitField("After Clean", "afterCleanRefs", first.afterCleanRefs, routeIndex, stageIndex, { multiple: true, values: cleanNamesFor(["postclean", "wacclean"]), wide: true })}
     </div></section>
   </div></div>` : `<div class="empty">未选择候选设备，请先在 Route 列表中选择。</div>`;
   document.getElementById("drawerBody").innerHTML = `<section class="drawer-section"><h3>Step 概要</h3><div class="step-summary"><div class="step-summary-item"><span>StepID</span><strong>${stage.stepId}</strong></div><div class="step-summary-item"><span>PostStepID</span><strong>${stage.postStepIds?.length ? stage.postStepIds.join(", ") : "结束"}</strong></div><div class="step-summary-item"><span>NeedProcess</span><strong>${stage.needProcess ? "true" : "false"}</strong></div><div class="step-summary-item"><span>候选数量</span><strong>${stage.visits.length}</strong></div></div></section><section class="drawer-section"><h3>候选腔室</h3><div class="candidate-chip-list">${candidates.length ? candidates.map(name => `<span class="chip">${escapeHtml(name)}</span>`).join("") : `<span class="candidate-picker-empty">未选择</span>`}</div></section>${warning}<section class="drawer-section">${form}</section>`;
@@ -804,8 +905,16 @@ function updateStateFromControl(control) {
   }
   if (control.dataset.option) { state.options[control.dataset.option] = value; return; }
   const scope = control.dataset.scope;
-  if (scope === "clean") state.cleans[Number(control.dataset.index)][key] = value;
-  if (scope === "route") state.routes[Number(control.dataset.index)][key] = value;
+  if (scope === "clean") {
+    const cleanIndex = Number(control.dataset.index), clean = state.cleans[cleanIndex];
+    if (key === "cleanType" && clean.cleanType !== value) {
+      removeCleanReferences(clean.name);
+      clean.cleanType = value;
+      state.expandedCleanTypes.add(value);
+    } else clean[key] = value;
+    state.cleans[cleanIndex] = normalizeClean(clean);
+  }
+  if (scope === "route") state.routes[Number(control.dataset.index)][key] = ROUTE_CLEAN_KEYS.includes(key) ? (value ? [value] : []) : value;
   if (scope === "stage-candidates") setStageCandidates(Number(control.dataset.routeIndex), Number(control.dataset.stageIndex), Array.from(control.selectedOptions, item => item.value));
   if (scope === "stage-candidate-toggle") {
     const routeIndex = Number(control.dataset.routeIndex), stageIndex = Number(control.dataset.stageIndex);
@@ -852,6 +961,11 @@ function handleAction(button) {
     if (state.expandedRouteGroups.has(key)) state.expandedRouteGroups.delete(key); else state.expandedRouteGroups.add(key);
     renderRoutes(); return;
   }
+  if (action === "toggle-clean-type") {
+    const cleanType = button.dataset.cleanType;
+    if (state.expandedCleanTypes.has(cleanType)) state.expandedCleanTypes.delete(cleanType); else state.expandedCleanTypes.add(cleanType);
+    renderCleans(); return;
+  }
   if (action === "toggle-route" || action === "edit-route") {
     if (action === "toggle-route" && state.expandedRoutes.has(routeIndex)) state.expandedRoutes.delete(routeIndex); else state.expandedRoutes.add(routeIndex);
     state.expandedRouteGroups.add(routeProcessProfile(state.routes[routeIndex]).key);
@@ -861,8 +975,14 @@ function handleAction(button) {
     synchronizeStageVisits(state.routes[routeIndex].stages[stageIndex]);
     markTestDirty(); renderStepDrawer(); return;
   }
-  if (action === "add-clean") state.cleans.push({ name: `Clean${state.cleans.length + 1}`, recipeName: `Clean${state.cleans.length + 1}Recipe`, recipeTime: 20, modules: state.processModules.slice(0, 2), taskName: `Clean${state.cleans.length + 1}`, stateVariable: "IdleTime", lower: 0, upper: 9999, updateStateVariables: "" });
-  if (action === "remove-clean") state.cleans.splice(index, 1);
+  if (action === "add-clean") {
+    const clean = makeClean("preclean");
+    state.cleans.push(clean); state.expandedCleanTypes.add(clean.cleanType);
+  }
+  if (action === "remove-clean") {
+    removeCleanReferences(state.cleans[index]?.name);
+    state.cleans.splice(index, 1);
+  }
   if (action === "add-route") {
     const name = `Route${state.routes.length + 1}`, route = { name, group: name, bufferOption: 0, prePJobCleanRefs: [], postPJobCleanRefs: [], postCJobCleanRefs: [], stages: state.device ? defaultRouteStages(name) : linkRouteSteps([makeStage(""), makeStage(""), makeStage("", true, `${name}_Step2`), makeStage(""), makeStage("")]) };
     state.routes.push(route); const newIndex = state.routes.length - 1; state.expandedRoutes.add(newIndex); state.expandedRouteGroups.add(routeProcessProfile(route).key);
@@ -910,7 +1030,30 @@ function collectRecipes(routes = state.routes) {
     } else recipes.push({ name, time: Number(time), modules: moduleList, processType, weight });
   }
   routes.forEach(route => { normalizeRoute(route); route.stages.forEach(stage => stage.visits.forEach(visit => { if (visit.processRecipe) add(visit.processRecipe, visit.processTime, [visit.stationName], visit.processType, visit.weight); })); });
-  state.cleans.forEach(clean => add(clean.recipeName, clean.recipeTime, clean.modules));
+  const cleanModules = new Map();
+  function addCleanModules(names, modules) {
+    stringList(names).forEach(name => {
+      const targets = cleanModules.get(name) || new Set();
+      stringList(modules).forEach(module => targets.add(module));
+      cleanModules.set(name, targets);
+    });
+  }
+  routes.forEach(route => {
+    const routeModules = [...new Set((route.stages || []).flatMap(stage => (stage.visits || []).filter(visit => state.processModules.includes(visit.stationName)).map(visit => visit.stationName)))];
+    addCleanModules(route.prePJobCleanRefs, routeModules);
+    addCleanModules(route.postPJobCleanRefs, routeModules);
+    addCleanModules(route.postCJobCleanRefs, routeModules);
+    (route.stages || []).forEach(stage => (stage.visits || []).forEach(visit => {
+      if (!state.processModules.includes(visit.stationName)) return;
+      addCleanModules(visit.beforeCleanRefs, [visit.stationName]);
+      addCleanModules(visit.afterCleanRefs, [visit.stationName]);
+    }));
+  });
+  state.cleans.map(runtimeClean).forEach(clean => {
+    const modules = [...(cleanModules.get(clean.name) || [])];
+    add(clean.recipeRef, clean.recipeTime, modules);
+    if (clean.cleanType === "dummywac") add(clean.emptyRecipeRef, clean.wacRecipeTime, modules);
+  });
   return recipes;
 }
 
@@ -918,7 +1061,7 @@ function collectRecipes(routes = state.routes) {
 function buildPayload() {
   normalizeRounds();
   const routes = selectReferencedRoutes(state.routes, state.rounds).map(route => ({ ...normalizeRoute(route), stages: route.stages.map(stage => ({ ...stage, visits: stage.visits.map(visit => structuredClone(visit)) })) }));
-  const cleans = state.cleans.map(clean => ({ ...clean, recipeRef: clean.recipeName }));
+  const cleans = state.cleans.map(runtimeClean);
   return { schemaVersion: EXPECTED_API_SCHEMA, workspaceDeviceId: state.workspaceDeviceId, workspaceTestId: state.testCaseId, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options: state.options, recipes: collectRecipes(routes), cleans, routes, rounds: structuredClone(state.rounds) };
 }
 
@@ -1280,7 +1423,7 @@ document.addEventListener("input", event => { if (event.target.matches("[data-sc
 document.addEventListener("change", event => {
   if (event.target.matches("[data-scope], [data-option], [data-time-index], [data-round-time-index]")) {
     updateStateFromControl(event.target);
-    if (["name", "modules", "jobType", "waferCount"].includes(event.target.dataset.key) || event.target.dataset.timeIndex !== undefined || event.target.dataset.roundTimeIndex !== undefined || ["stage-candidates", "stage-candidate-toggle", "cjob", "pjob", "pjob-route-group"].includes(event.target.dataset.scope)) renderAll();
+    if (["name", "cleanType", "jobType", "waferCount", ...ROUTE_CLEAN_KEYS].includes(event.target.dataset.key) || event.target.dataset.timeIndex !== undefined || event.target.dataset.roundTimeIndex !== undefined || ["stage-candidates", "stage-candidate-toggle", "cjob", "pjob", "pjob-route-group"].includes(event.target.dataset.scope)) renderAll();
     else if (state.drawer) { renderRoutes(); renderStepDrawer(); }
   }
   if (event.target.name === "strategy") {

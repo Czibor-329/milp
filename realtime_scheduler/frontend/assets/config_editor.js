@@ -16,6 +16,7 @@ __export(route_editor_logic_exports, {
   processProfile: () => processProfile,
   processRecipeName: () => processRecipeName,
   replaceCandidates: () => replaceCandidates,
+  routeCleanSignature: () => routeCleanSignature,
   selectReferencedRoutes: () => selectReferencedRoutes,
   synchronizeVisits: () => synchronizeVisits
 });
@@ -63,10 +64,32 @@ function formatSeconds(value) {
   const number = Number(value);
   return Number.isFinite(number) ? `${Number.isInteger(number) ? number : number.toFixed(2).replace(/0+$/, "").replace(/\.$/, "")}s` : "\u672A\u8BBE\u7F6E";
 }
-function automaticRouteName(profile) {
-  return profile.processCount === 0 ? "\u65E0\u52A0\u5DE5\u5DE5\u5E8F" : `${profile.processCount}\u9053\u5DE5\u5E8F \xB7 ${profile.candidatePath.map(
+function cleanNames(value) {
+  const rows = Array.isArray(value) ? value : value ? [value] : [];
+  return [...new Set(rows.map((item) => String(item || "").trim()).filter(Boolean))];
+}
+function routeCleanSignature(route) {
+  const parts = [];
+  const append = (label, value) => {
+    const names = cleanNames(value);
+    if (names.length) parts.push(`${label}:${names.join("+")}`);
+  };
+  append("Pre", route.prePJobCleanRefs);
+  append("Post", route.postPJobCleanRefs);
+  append("CJob", route.postCJobCleanRefs);
+  (route.stages || []).filter((stage) => stage.needProcess).forEach((stage, index) => {
+    const before = [...new Set((stage.visits || []).flatMap((visit) => cleanNames(visit.beforeCleanRefs)))];
+    const after = [...new Set((stage.visits || []).flatMap((visit) => cleanNames(visit.afterCleanRefs)))];
+    append(`S${index + 1}\u524D`, before);
+    append(`S${index + 1}\u540E`, after);
+  });
+  return parts.join(" \xB7 ");
+}
+function automaticRouteName(profile, cleanSignature = "") {
+  const processName = profile.processCount === 0 ? "\u65E0\u52A0\u5DE5\u5DE5\u5E8F" : profile.candidatePath.map(
     (path, index) => `${path}(${formatSeconds(profile.processTimes[index])})`
-  ).join(" \u2192 ")}`;
+  ).join(" \u2192 ");
+  return cleanSignature ? `${processName} \xB7 ${cleanSignature}` : processName;
 }
 var EXAMPLE_ROUTE_SPECS = [
   ...[["PM1"], ["PM1", "PM2"], ["PM1", "PM2", "PM3"], ["PM1", "PM2", "PM3", "PM4"]].flatMap((candidates) => [40, 80, 120].map((time) => ({ candidates: [candidates], times: [time] }))),
@@ -279,6 +302,14 @@ function normalizeRound(raw, roundIndex, fallbackTime) {
 // src/config_editor.ts
 var { VISIT_SHARED_FIELDS: VISIT_SHARED_FIELDS2, selectReferencedRoutes: selectReferencedRoutes2 } = route_editor_logic_exports;
 var EXPECTED_API_SCHEMA = "cjob-pjob-v3";
+var CLEAN_TYPE_DEFINITIONS = [
+  { key: "preclean", label: "PreClean" },
+  { key: "postclean", label: "PostClean" },
+  { key: "wacclean", label: "WAC Clean" },
+  { key: "dummy", label: "Dummy" },
+  { key: "dummywac", label: "Dummy WAC" }
+];
+var ROUTE_CLEAN_KEYS = ["prePJobCleanRefs", "postPJobCleanRefs", "postCJobCleanRefs"];
 var state = {
   workspaceDevices: [],
   workspaceDevice: null,
@@ -304,15 +335,80 @@ var state = {
   availableOtherAlgorithms: [],
   roundCount: 2,
   times: [0, 70],
-  options: { loadLockManager: "petri-look", rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
+  options: { loadLockManager: "petri-look", loadLockExchange: "auto", rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
   cleans: [],
   routes: [{ name: "RouteA", group: "RouteA", bufferOption: 0, prePJobCleanRefs: [], postPJobCleanRefs: [], postCJobCleanRefs: [], stages: linkRouteSteps([makeStage("LP1"), makeStage("Robot"), makeStage("PM1,PM2", true, "RouteA_Step2"), makeStage("Robot"), makeStage("LP1")]) }],
   rounds: [makeRound(1, 0, "RouteA", "LP1"), makeRound(2, 70, "RouteA", "LP2")],
   drawer: null,
   expandedRouteGroups: /* @__PURE__ */ new Set(),
   expandedRoutes: /* @__PURE__ */ new Set(),
+  expandedCleanTypes: /* @__PURE__ */ new Set(),
   routeNameChanges: /* @__PURE__ */ new Map()
 };
+function inferCleanType(clean) {
+  const explicit = String(clean.cleanType || clean.category || "").toLowerCase().replace(/[-_\s]/g, "");
+  if (["preclean", "postclean", "wacclean", "dummy", "dummywac"].includes(explicit)) return explicit;
+  if (explicit === "dummyclean") return "dummy";
+  if (explicit === "dummywacclean") return "dummywac";
+  const signature = `${clean.taskName || ""} ${clean.name || ""}`.toLowerCase();
+  if (/dummy.*wac|wac.*dummy|prewac/.test(signature) || clean.emptyRecipeRef) return "dummywac";
+  if (Number(clean.materialCount || 0) > 0 || /dummy/.test(signature)) return "dummy";
+  if (String(clean.stateVariable || "").toLowerCase() === "processcount" || /wac/.test(signature)) return "wacclean";
+  if (/post/.test(signature)) return "postclean";
+  return "preclean";
+}
+function normalizeClean(clean) {
+  const value = { ...clean || {} }, cleanType = inferCleanType(value);
+  const name = String(value.name || `Clean${state.cleans.length + 1}`).trim() || `Clean${state.cleans.length + 1}`;
+  value.name = name;
+  value.cleanType = cleanType;
+  value.recipeName = String(value.recipeName || value.recipeRef || `${name}-Recipe`).trim() || `${name}-Recipe`;
+  const recipeTime = Number(value.recipeTime);
+  value.recipeTime = Math.max(0, Number.isFinite(recipeTime) ? recipeTime : 0);
+  value.triggerCount = Math.max(1, Math.floor(Number(value.triggerCount ?? value.lower) || 5));
+  const wacRecipeTime = Number(value.wacRecipeTime ?? value.emptyRecipeTime);
+  value.wacRecipeTime = Math.max(0, Number.isFinite(wacRecipeTime) ? wacRecipeTime : 20);
+  return value;
+}
+function runtimeClean(clean) {
+  const value = normalizeClean(clean), type = value.cleanType;
+  const taskNames = { preclean: "PreClean", postclean: "PostClean", wacclean: "WacClean", dummy: "PreDummyClean", dummywac: "PreWacClean" };
+  const isWac = type === "wacclean", isDummy = type === "dummy" || type === "dummywac";
+  return {
+    ...value,
+    recipeRef: value.recipeName,
+    modules: [],
+    taskName: taskNames[type],
+    stateVariable: isWac ? "ProcessCount" : "IdleTime",
+    lower: isWac ? value.triggerCount : 0,
+    upper: 9999,
+    updateStateVariables: isWac ? ["ProcessCount"] : isDummy ? ["IdleTime", "DummyCount"] : type === "preclean" ? ["IdleTime"] : [],
+    materialCount: isDummy ? 2 : 0,
+    preJudge: false,
+    emptyRecipeRef: type === "dummywac" ? `${value.recipeName}-WAC` : ""
+  };
+}
+function makeClean(cleanType = "preclean") {
+  const occupied = new Set(state.cleans.map((clean) => clean.name));
+  let suffix = state.cleans.length + 1;
+  while (occupied.has(`Clean${suffix}`)) suffix += 1;
+  return normalizeClean({ name: `Clean${suffix}`, cleanType, recipeTime: 20, triggerCount: 5, wacRecipeTime: 20 });
+}
+function cleanNamesFor(types) {
+  const allowed = new Set(types);
+  return state.cleans.filter((clean) => allowed.has(inferCleanType(clean))).map((clean) => clean.name).filter(Boolean);
+}
+function removeCleanReferences(cleanName) {
+  state.routes.forEach((route) => {
+    for (const key of ["prePJobCleanRefs", "postPJobCleanRefs", "postCJobCleanRefs"]) {
+      route[key] = stringList(route[key]).filter((name) => name !== cleanName);
+    }
+    (route.stages || []).forEach((stage) => (stage.visits || []).forEach((visit) => {
+      visit.beforeCleanRefs = stringList(visit.beforeCleanRefs).filter((name) => name !== cleanName);
+      visit.afterCleanRefs = stringList(visit.afterCleanRefs).filter((name) => name !== cleanName);
+    }));
+  });
+}
 function makeExampleRoute(spec, catalogIndex) {
   const prefix = `AutoRoute${catalogIndex + 1}`;
   const stages = [makeStage(state.loadPorts[0] || "LP1"), makeStage("ATR"), makeStage(["LA", "LB"]), makeStage("VTR")];
@@ -330,11 +426,11 @@ function makeExampleRoute(spec, catalogIndex) {
 function generateExampleRoutes() {
   const hasPse300Topology = ["PM1", "PM2", "PM3", "PM4"].every((name) => state.processModules.includes(name)) && ["LA", "LB"].every((name) => state.stationNames.includes(name)) && ["ATR", "VTR"].every((name) => state.robotNames.includes(name));
   if (!hasPse300Topology) return null;
-  const existing = new Set(state.routes.map((route) => automaticRouteName(routeProcessProfile(route))));
+  const existing = new Set(state.routes.map((route) => generatedRouteName(route)));
   let added = 0;
   exampleRouteSpecs().forEach((spec, catalogIndex) => {
     const route = makeExampleRoute(spec, catalogIndex);
-    const signature = automaticRouteName(routeProcessProfile(route));
+    const signature = generatedRouteName(route);
     if (existing.has(signature)) return;
     existing.add(signature);
     state.routes.push(route);
@@ -348,6 +444,9 @@ function stageUsesRobot(stage, index) {
 }
 function normalizeRoute(route) {
   route.stages = Array.isArray(route.stages) ? route.stages : [];
+  ROUTE_CLEAN_KEYS.forEach((key) => {
+    route[key] = stringList(route[key]).slice(0, 1);
+  });
   linkRouteSteps(route.stages);
   route.stages.forEach((stage, index) => {
     stage.visits = Array.isArray(stage.visits) ? stage.visits : [];
@@ -460,7 +559,7 @@ function makeDefaultTestCase(name = "\u9ED8\u8BA4\u6D4B\u8BD5\u96C6") {
     strategy: "heuristic",
     roundCount: 2,
     times: [0, 70],
-    options: { loadLockManager: "petri-look", rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
+    options: { loadLockManager: "petri-look", loadLockExchange: "auto", rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
     cleans: state.cleans,
     routes: state.routes,
     rounds: [
@@ -569,11 +668,12 @@ function applyTestCase(testCase) {
   state.strategy = value.strategy || "heuristic";
   state.roundCount = Math.max(1, Number(value.roundCount) || 1);
   state.times = Array.isArray(value.times) ? value.times : [0];
-  state.options = value.options || { loadLockManager: "petri-look", rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 };
+  state.options = value.options || { loadLockManager: "petri-look", loadLockExchange: "auto", rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 };
   state.options.loadLockManager = state.options.loadLockManager || "petri-look";
+  state.options.loadLockExchange = state.options.loadLockExchange || "auto";
   state.options.milpTimeLimit = Number(state.options.milpTimeLimit) || 120;
   if (!state.routes.length && Array.isArray(value.routes)) state.routes = value.routes;
-  if (!state.cleans.length && Array.isArray(value.cleans)) state.cleans = value.cleans;
+  if (!state.cleans.length && Array.isArray(value.cleans)) state.cleans = value.cleans.map(normalizeClean);
   state.routes.forEach(normalizeRoute);
   state.expandedRouteGroups.clear();
   state.expandedRoutes.clear();
@@ -612,7 +712,7 @@ function applyTestCase(testCase) {
 }
 function currentTestSnapshot(name = state.testCaseName) {
   normalizeRounds();
-  return structuredClone({ name, group: state.testCaseGroup, strategy: state.strategy, roundCount: state.roundCount, times: state.times, options: state.options, cleans: state.cleans, routes: state.routes, routeNameChanges: Object.fromEntries(state.routeNameChanges), rounds: state.rounds });
+  return structuredClone({ name, group: state.testCaseGroup, strategy: state.strategy, roundCount: state.roundCount, times: state.times, options: state.options, cleans: state.cleans.map(runtimeClean), routes: state.routes, routeNameChanges: Object.fromEntries(state.routeNameChanges), rounds: state.rounds });
 }
 async function saveCurrentTest(silent = false) {
   if (!state.workspaceDeviceId || !state.testCaseId) return false;
@@ -800,7 +900,8 @@ async function selectWorkspaceDevice(deviceId, preferredTestId = "") {
   state.testCaseGroup = "";
   applyDeviceTopology(result.device.device, result.device.name);
   state.routes = Array.isArray(result.device.routes) ? structuredClone(result.device.routes) : [];
-  state.cleans = Array.isArray(result.device.cleans) ? structuredClone(result.device.cleans) : [];
+  state.cleans = Array.isArray(result.device.cleans) ? structuredClone(result.device.cleans).map(normalizeClean) : [];
+  state.expandedCleanTypes = new Set(state.cleans.map((clean) => clean.cleanType));
   if (!result.device.tests.length) {
     const created = await requestJson(`/api/workspaces/${deviceId}/tests`, {
       method: "POST",
@@ -845,17 +946,20 @@ function renderTimes() {
 }
 function renderCleans() {
   const host = document.getElementById("cleanList");
-  host.innerHTML = state.cleans.length ? state.cleans.map((clean, index) => `<div class="edit-card"><div class="edit-card-head"><strong>Clean ${index + 1} \xB7 ${escapeHtml(clean.name || "\u672A\u547D\u540D")}</strong><button class="btn danger small" data-action="remove-clean" data-index="${index}">\u5220\u9664</button></div><div class="edit-card-body grid">
-    <div class="field span-4"><label>Clean \u540D\u79F0 / Alias</label><input data-scope="clean" data-index="${index}" data-key="name" value="${escapeHtml(clean.name)}"></div>
-    <div class="field span-4"><label>Recipe \u540D\u79F0</label><input data-scope="clean" data-index="${index}" data-key="recipeName" value="${escapeHtml(clean.recipeName)}"></div>
-    <div class="field span-4"><label>\u6E05\u6D01\u65F6\u95F4\uFF08\u79D2\uFF09</label><input type="number" min="0" step="0.1" data-scope="clean" data-index="${index}" data-key="recipeTime" value="${Number(clean.recipeTime)}"></div>
-    <div class="field span-6"><label>\u9002\u7528\u8154\u5BA4</label><select multiple data-scope="clean" data-index="${index}" data-key="modules">${multiOptionsHtml(state.processModules, clean.modules)}</select><div class="hint">\u53EA\u80FD\u9009\u62E9\u8BBE\u5907\u5185\u7684 ProcessChamber\u3002</div></div>
-    <div class="field span-3"><label>StateVariable</label><input data-scope="clean" data-index="${index}" data-key="stateVariable" value="${escapeHtml(clean.stateVariable)}"></div>
-    <div class="field span-3"><label>TaskName</label><input data-scope="clean" data-index="${index}" data-key="taskName" value="${escapeHtml(clean.taskName)}"></div>
-    <div class="field span-3"><label>\u89E6\u53D1\u4E0B\u9650</label><input type="number" data-scope="clean" data-index="${index}" data-key="lower" value="${Number(clean.lower)}"></div>
-    <div class="field span-3"><label>\u89E6\u53D1\u4E0A\u9650</label><input type="number" data-scope="clean" data-index="${index}" data-key="upper" value="${Number(clean.upper)}"></div>
-    <div class="field span-6"><label>\u66F4\u65B0\u72B6\u6001\u91CF\uFF08\u9017\u53F7\u5206\u9694\uFF09</label><input data-scope="clean" data-index="${index}" data-key="updateStateVariables" value="${escapeHtml(clean.updateStateVariables)}"></div>
-  </div></div>`).join("") : `<div class="empty">\u5F53\u524D\u6CA1\u6709 Clean\u3002\u65E0\u9700\u6E05\u6D01\u65F6\u53EF\u4FDD\u6301\u4E3A\u7A7A\u3002</div>`;
+  state.cleans = state.cleans.map(normalizeClean);
+  host.innerHTML = CLEAN_TYPE_DEFINITIONS.map((type) => {
+    const rows = state.cleans.map((clean, index) => ({ clean, index })).filter((item) => item.clean.cleanType === type.key);
+    const open = state.expandedCleanTypes.has(type.key);
+    const cards = rows.map(({ clean, index }) => {
+      const conditional = clean.cleanType === "wacclean" ? `<div class="field"><label>\u89E6\u53D1\u6B21\u6570</label><input type="number" min="1" step="1" data-scope="clean" data-index="${index}" data-key="triggerCount" value="${Number(clean.triggerCount)}"></div>` : clean.cleanType === "dummywac" ? `<div class="field"><label>WAC \u6E05\u6D01\u957F\u5EA6\uFF08\u79D2\uFF09</label><input type="number" min="0" step="0.1" data-scope="clean" data-index="${index}" data-key="wacRecipeTime" value="${Number(clean.wacRecipeTime)}"></div>` : "";
+      return `<article class="clean-card"><div class="clean-card-title"><strong>${escapeHtml(clean.name)}</strong><button class="btn danger small" data-action="remove-clean" data-index="${index}">\u5220\u9664</button></div><div class="clean-fields">
+        <div class="field"><label>\u6E05\u6D01\u7C7B\u522B</label><select data-scope="clean" data-index="${index}" data-key="cleanType">${CLEAN_TYPE_DEFINITIONS.map((option) => `<option value="${option.key}" ${option.key === clean.cleanType ? "selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}</select></div>
+        <div class="field"><label>\u6E05\u6D01\u65F6\u95F4\uFF08\u79D2\uFF09</label><input type="number" min="0" step="0.1" data-scope="clean" data-index="${index}" data-key="recipeTime" value="${Number(clean.recipeTime)}"></div>
+        ${conditional}
+      </div></article>`;
+    }).join("");
+    return `<section class="clean-type-group"><button class="clean-type-head" data-action="toggle-clean-type" data-clean-type="${type.key}"><span class="collapse-arrow ${open ? "open" : ""}">\u25B6</span><strong>${escapeHtml(type.label)}</strong><span class="route-count">${rows.length} \u4E2A \xB7 ${open ? "\u5DF2\u5C55\u5F00" : "\u5DF2\u6536\u8D77"}</span></button>${open ? `<div class="clean-type-body">${cards || `<div class="clean-type-empty">\u6682\u65E0 ${escapeHtml(type.label)}</div>`}</div>` : ""}</section>`;
+  }).join("");
 }
 function stepKind(route, index) {
   return stageUsesRobot(route.stages[index], index) ? "Robot" : "Station";
@@ -883,6 +987,9 @@ function routeProcessProfile(route) {
   normalizeRoute(route);
   return processProfile(route);
 }
+function generatedRouteName(route) {
+  return automaticRouteName(routeProcessProfile(route), routeCleanSignature(route));
+}
 function recordRouteRename(oldName, newName) {
   if (!oldName || oldName === newName) return;
   let extended = false;
@@ -901,7 +1008,7 @@ function synchronizeRouteNames() {
   const occurrences = /* @__PURE__ */ new Map();
   let changed = false;
   state.routes.forEach((route) => {
-    const baseName = automaticRouteName(routeProcessProfile(route));
+    const baseName = generatedRouteName(route);
     const occurrence = (occurrences.get(baseName) || 0) + 1;
     occurrences.set(baseName, occurrence);
     const generatedName = occurrence === 1 ? baseName : `${baseName} (${occurrence})`;
@@ -928,14 +1035,16 @@ function groupedRoutes() {
     routes: group.routes.sort((left, right) => natural(left.route.name || "", right.route.name || ""))
   }));
 }
-function renderRouteDetails(route, index, cleans) {
+function renderRouteDetails(route, index) {
+  const preCleans = cleanNamesFor(["preclean", "dummy", "dummywac"]);
+  const postCleans = cleanNamesFor(["postclean"]);
   return `<div class="route-details"><div class="edit-card-head"><strong>Route \u8BE6\u60C5</strong><div><button class="btn small" data-action="add-stage" data-index="${index}">\uFF0B Step \u7EC4</button> <button class="btn danger small" data-action="remove-route" data-index="${index}">\u5220\u9664</button></div></div>
     <div class="route-meta"><div class="route-meta-grid"><div class="field"><label>Route \u540D\u79F0\uFF08\u81EA\u52A8\u751F\u6210\uFF09</label><input value="${escapeHtml(route.name)}" readonly></div><div class="field"><label>Group</label><input data-scope="route" data-index="${index}" data-key="group" value="${escapeHtml(route.group)}"></div><div class="field"><label>BufferOption</label><input type="number" data-scope="route" data-index="${index}" data-key="bufferOption" value="${Number(route.bufferOption)}"></div></div>
-    <details class="route-clean-details"><summary>Route \u7EA7 Clean \u8BBE\u7F6E</summary><div class="grid"><div class="field span-4"><label>PJob \u524D</label><select multiple data-scope="route" data-index="${index}" data-key="prePJobCleanRefs">${multiOptionsHtml(cleans, route.prePJobCleanRefs)}</select></div><div class="field span-4"><label>PJob \u540E</label><select multiple data-scope="route" data-index="${index}" data-key="postPJobCleanRefs">${multiOptionsHtml(cleans, route.postPJobCleanRefs)}</select></div><div class="field span-4"><label>CJob \u540E</label><select multiple data-scope="route" data-index="${index}" data-key="postCJobCleanRefs">${multiOptionsHtml(cleans, route.postCJobCleanRefs)}</select></div></div></details></div>
+    <details class="route-clean-details"><summary>Route \u7EA7 Clean \u8BBE\u7F6E</summary><div class="grid"><div class="field span-4"><label>PJob \u524D</label><select data-scope="route" data-index="${index}" data-key="prePJobCleanRefs">${optionsHtml(preCleans, stringList(route.prePJobCleanRefs)[0] || "", "\u4E0D\u9700\u8981\u6E05\u6D01")}</select></div><div class="field span-4"><label>PJob \u540E</label><select data-scope="route" data-index="${index}" data-key="postPJobCleanRefs">${optionsHtml(postCleans, stringList(route.postPJobCleanRefs)[0] || "", "\u4E0D\u9700\u8981\u6E05\u6D01")}</select></div><div class="field span-4"><label>CJob \u540E</label><select data-scope="route" data-index="${index}" data-key="postCJobCleanRefs">${optionsHtml(postCleans, stringList(route.postCJobCleanRefs)[0] || "", "\u4E0D\u9700\u8981\u6E05\u6D01")}</select></div></div></details></div>
     <div class="route-table-wrap"><table class="route-table"><thead><tr><th>StepID</th><th>\u7C7B\u578B</th><th>\u53EF\u9009\u8154\u5BA4 / \u673A\u5668\u624B</th><th>PostStepID</th><th>NeedProcess</th><th></th></tr></thead><tbody>${renderSteps(route, index)}</tbody></table></div></div>`;
 }
 function renderRoutes() {
-  const cleans = state.cleans.map((item) => item.name).filter(Boolean), host = document.getElementById("routeList"), groups = groupedRoutes();
+  const host = document.getElementById("routeList"), groups = groupedRoutes();
   host.innerHTML = groups.length ? groups.map((group) => {
     const groupOpen = state.expandedRouteGroups.has(group.key);
     const routes = group.routes.map(({ route, routeIndex, profile }) => {
@@ -943,7 +1052,7 @@ function renderRoutes() {
       return `<article class="route-summary-card"><div class="route-summary-head"><button class="route-summary-toggle" data-action="toggle-route" data-route-index="${routeIndex}">
         <div class="route-summary-title"><span class="collapse-arrow ${routeOpen ? "open" : ""}">\u25B6</span><strong>${escapeHtml(route.name || "\u672A\u547D\u540D Route")}</strong></div><div class="route-summary-meta">${escapeHtml(processSummary)} \xB7 ${route.stages.length} Steps</div></button>
         <div class="route-summary-actions"><button class="btn small" data-action="edit-route" data-route-index="${routeIndex}">\u7F16\u8F91</button><button class="btn small" data-action="copy-route" data-route-index="${routeIndex}">\u590D\u5236</button><button class="btn danger small" data-action="remove-route" data-index="${routeIndex}">\u5220\u9664</button></div>
-      </div>${routeOpen ? renderRouteDetails(route, routeIndex, cleans) : ""}</article>`;
+      </div>${routeOpen ? renderRouteDetails(route, routeIndex) : ""}</article>`;
     }).join("");
     return `<section class="route-type-group"><button class="route-type-head" data-action="toggle-route-group" data-group-key="${escapeHtml(group.key)}"><span class="collapse-arrow ${groupOpen ? "open" : ""}">\u25B6</span><strong>${escapeHtml(group.label)}</strong><span class="route-count">${group.routes.length} \u6761 Route \xB7 ${groupOpen ? "\u5DF2\u5C55\u5F00" : "\u5DF2\u6536\u8D77"}</span></button>${groupOpen ? `<div class="route-group-body">${routes}</div>` : ""}</section>`;
   }).join("") : `<div class="empty">\u81F3\u5C11\u521B\u5EFA\u4E00\u6761 Route\uFF0CJob \u624D\u80FD\u5F15\u7528\u3002</div>`;
@@ -1040,8 +1149,8 @@ function renderStepDrawer() {
       ${renderVisitField("SlotIDs", "slotIds", first.slotIds, routeIndex, stageIndex)}
       ${renderVisitField("QTime", "qTimeLimit", first.qTimeLimit, routeIndex, stageIndex, { number: true })}
       ${renderVisitField("Residency", "residencyConstraint", first.residencyConstraint, routeIndex, stageIndex, { number: true })}
-      ${renderVisitField("Before Clean", "beforeCleanRefs", first.beforeCleanRefs, routeIndex, stageIndex, { multiple: true, values: state.cleans.map((clean) => clean.name).filter(Boolean), wide: true })}
-      ${renderVisitField("After Clean", "afterCleanRefs", first.afterCleanRefs, routeIndex, stageIndex, { multiple: true, values: state.cleans.map((clean) => clean.name).filter(Boolean), wide: true })}
+      ${renderVisitField("Before Clean", "beforeCleanRefs", first.beforeCleanRefs, routeIndex, stageIndex, { multiple: true, values: cleanNamesFor(["preclean", "dummy", "dummywac"]), wide: true })}
+      ${renderVisitField("After Clean", "afterCleanRefs", first.afterCleanRefs, routeIndex, stageIndex, { multiple: true, values: cleanNamesFor(["postclean", "wacclean"]), wide: true })}
     </div></section>
   </div></div>` : `<div class="empty">\u672A\u9009\u62E9\u5019\u9009\u8BBE\u5907\uFF0C\u8BF7\u5148\u5728 Route \u5217\u8868\u4E2D\u9009\u62E9\u3002</div>`;
   document.getElementById("drawerBody").innerHTML = `<section class="drawer-section"><h3>Step \u6982\u8981</h3><div class="step-summary"><div class="step-summary-item"><span>StepID</span><strong>${stage.stepId}</strong></div><div class="step-summary-item"><span>PostStepID</span><strong>${stage.postStepIds?.length ? stage.postStepIds.join(", ") : "\u7ED3\u675F"}</strong></div><div class="step-summary-item"><span>NeedProcess</span><strong>${stage.needProcess ? "true" : "false"}</strong></div><div class="step-summary-item"><span>\u5019\u9009\u6570\u91CF</span><strong>${stage.visits.length}</strong></div></div></section><section class="drawer-section"><h3>\u5019\u9009\u8154\u5BA4</h3><div class="candidate-chip-list">${candidates.length ? candidates.map((name) => `<span class="chip">${escapeHtml(name)}</span>`).join("") : `<span class="candidate-picker-empty">\u672A\u9009\u62E9</span>`}</div></section>${warning}<section class="drawer-section">${form}</section>`;
@@ -1084,8 +1193,16 @@ function updateStateFromControl(control) {
     return;
   }
   const scope = control.dataset.scope;
-  if (scope === "clean") state.cleans[Number(control.dataset.index)][key] = value;
-  if (scope === "route") state.routes[Number(control.dataset.index)][key] = value;
+  if (scope === "clean") {
+    const cleanIndex = Number(control.dataset.index), clean = state.cleans[cleanIndex];
+    if (key === "cleanType" && clean.cleanType !== value) {
+      removeCleanReferences(clean.name);
+      clean.cleanType = value;
+      state.expandedCleanTypes.add(value);
+    } else clean[key] = value;
+    state.cleans[cleanIndex] = normalizeClean(clean);
+  }
+  if (scope === "route") state.routes[Number(control.dataset.index)][key] = ROUTE_CLEAN_KEYS.includes(key) ? value ? [value] : [] : value;
   if (scope === "stage-candidates") setStageCandidates(Number(control.dataset.routeIndex), Number(control.dataset.stageIndex), Array.from(control.selectedOptions, (item) => item.value));
   if (scope === "stage-candidate-toggle") {
     const routeIndex = Number(control.dataset.routeIndex), stageIndex = Number(control.dataset.stageIndex);
@@ -1133,6 +1250,13 @@ function handleAction(button) {
     renderRoutes();
     return;
   }
+  if (action === "toggle-clean-type") {
+    const cleanType = button.dataset.cleanType;
+    if (state.expandedCleanTypes.has(cleanType)) state.expandedCleanTypes.delete(cleanType);
+    else state.expandedCleanTypes.add(cleanType);
+    renderCleans();
+    return;
+  }
   if (action === "toggle-route" || action === "edit-route") {
     if (action === "toggle-route" && state.expandedRoutes.has(routeIndex)) state.expandedRoutes.delete(routeIndex);
     else state.expandedRoutes.add(routeIndex);
@@ -1146,8 +1270,15 @@ function handleAction(button) {
     renderStepDrawer();
     return;
   }
-  if (action === "add-clean") state.cleans.push({ name: `Clean${state.cleans.length + 1}`, recipeName: `Clean${state.cleans.length + 1}Recipe`, recipeTime: 20, modules: state.processModules.slice(0, 2), taskName: `Clean${state.cleans.length + 1}`, stateVariable: "IdleTime", lower: 0, upper: 9999, updateStateVariables: "" });
-  if (action === "remove-clean") state.cleans.splice(index, 1);
+  if (action === "add-clean") {
+    const clean = makeClean("preclean");
+    state.cleans.push(clean);
+    state.expandedCleanTypes.add(clean.cleanType);
+  }
+  if (action === "remove-clean") {
+    removeCleanReferences(state.cleans[index]?.name);
+    state.cleans.splice(index, 1);
+  }
   if (action === "add-route") {
     const name = `Route${state.routes.length + 1}`, route = { name, group: name, bufferOption: 0, prePJobCleanRefs: [], postPJobCleanRefs: [], postCJobCleanRefs: [], stages: state.device ? defaultRouteStages(name) : linkRouteSteps([makeStage(""), makeStage(""), makeStage("", true, `${name}_Step2`), makeStage(""), makeStage("")]) };
     state.routes.push(route);
@@ -1235,13 +1366,36 @@ function collectRecipes(routes = state.routes) {
       if (visit.processRecipe) add(visit.processRecipe, visit.processTime, [visit.stationName], visit.processType, visit.weight);
     }));
   });
-  state.cleans.forEach((clean) => add(clean.recipeName, clean.recipeTime, clean.modules));
+  const cleanModules = /* @__PURE__ */ new Map();
+  function addCleanModules(names, modules) {
+    stringList(names).forEach((name) => {
+      const targets = cleanModules.get(name) || /* @__PURE__ */ new Set();
+      stringList(modules).forEach((module) => targets.add(module));
+      cleanModules.set(name, targets);
+    });
+  }
+  routes.forEach((route) => {
+    const routeModules = [...new Set((route.stages || []).flatMap((stage) => (stage.visits || []).filter((visit) => state.processModules.includes(visit.stationName)).map((visit) => visit.stationName)))];
+    addCleanModules(route.prePJobCleanRefs, routeModules);
+    addCleanModules(route.postPJobCleanRefs, routeModules);
+    addCleanModules(route.postCJobCleanRefs, routeModules);
+    (route.stages || []).forEach((stage) => (stage.visits || []).forEach((visit) => {
+      if (!state.processModules.includes(visit.stationName)) return;
+      addCleanModules(visit.beforeCleanRefs, [visit.stationName]);
+      addCleanModules(visit.afterCleanRefs, [visit.stationName]);
+    }));
+  });
+  state.cleans.map(runtimeClean).forEach((clean) => {
+    const modules = [...cleanModules.get(clean.name) || []];
+    add(clean.recipeRef, clean.recipeTime, modules);
+    if (clean.cleanType === "dummywac") add(clean.emptyRecipeRef, clean.wacRecipeTime, modules);
+  });
   return recipes;
 }
 function buildPayload() {
   normalizeRounds();
   const routes = selectReferencedRoutes2(state.routes, state.rounds).map((route) => ({ ...normalizeRoute(route), stages: route.stages.map((stage) => ({ ...stage, visits: stage.visits.map((visit) => structuredClone(visit)) })) }));
-  const cleans = state.cleans.map((clean) => ({ ...clean, recipeRef: clean.recipeName }));
+  const cleans = state.cleans.map(runtimeClean);
   return { schemaVersion: EXPECTED_API_SCHEMA, workspaceDeviceId: state.workspaceDeviceId, workspaceTestId: state.testCaseId, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options: state.options, recipes: collectRecipes(routes), cleans, routes, rounds: structuredClone(state.rounds) };
 }
 function configuredWaferCount() {
@@ -1689,7 +1843,7 @@ document.addEventListener("input", (event) => {
 document.addEventListener("change", (event) => {
   if (event.target.matches("[data-scope], [data-option], [data-time-index], [data-round-time-index]")) {
     updateStateFromControl(event.target);
-    if (["name", "modules", "jobType", "waferCount"].includes(event.target.dataset.key) || event.target.dataset.timeIndex !== void 0 || event.target.dataset.roundTimeIndex !== void 0 || ["stage-candidates", "stage-candidate-toggle", "cjob", "pjob", "pjob-route-group"].includes(event.target.dataset.scope)) renderAll();
+    if (["name", "cleanType", "jobType", "waferCount", ...ROUTE_CLEAN_KEYS].includes(event.target.dataset.key) || event.target.dataset.timeIndex !== void 0 || event.target.dataset.roundTimeIndex !== void 0 || ["stage-candidates", "stage-candidate-toggle", "cjob", "pjob", "pjob-route-group"].includes(event.target.dataset.scope)) renderAll();
     else if (state.drawer) {
       renderRoutes();
       renderStepDrawer();

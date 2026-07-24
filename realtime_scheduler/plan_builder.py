@@ -33,6 +33,7 @@ class BuildState:
     next_material_id: int = 1
     next_slot_by_port: Dict[str, int] = field(default_factory=dict)
     job_names: set[str] = field(default_factory=set)
+    dummy_material_count: int = 0
 
 
 def extract_init_data(raw: Any) -> Dict[str, Any]:
@@ -240,8 +241,111 @@ def _finite_number(value: Any, default: float) -> float:
     return number if math.isfinite(number) else default
 
 
+def _clean_type(clean: Mapping[str, Any]) -> str:
+    """识别精简 Clean 类别，并兼容旧版任务字段。"""
+    explicit = "".join(
+        char
+        for char in str(clean.get("cleanType") or clean.get("category") or "").lower()
+        if char not in "-_ "
+    )
+    aliases = {
+        "preclean": "preclean",
+        "postclean": "postclean",
+        "wacclean": "wacclean",
+        "dummy": "dummy",
+        "dummyclean": "dummy",
+        "dummywac": "dummywac",
+        "dummywacclean": "dummywac",
+    }
+    if explicit in aliases:
+        return aliases[explicit]
+    signature = (
+        f"{clean.get('taskName') or ''} {clean.get('name') or ''}"
+    ).lower()
+    if (
+        ("dummy" in signature and "wac" in signature)
+        or "prewac" in signature
+        or clean.get("emptyRecipeRef")
+    ):
+        return "dummywac"
+    if int(_finite_number(clean.get("materialCount"), 0)) > 0 or "dummy" in signature:
+        return "dummy"
+    if (
+        str(clean.get("stateVariable") or "").lower() == "processcount"
+        or "wac" in signature
+    ):
+        return "wacclean"
+    if "post" in signature:
+        return "postclean"
+    return "preclean"
+
+
+def _runtime_clean(clean: Mapping[str, Any]) -> Dict[str, Any]:
+    """把精简编辑字段展开为标准 Clean 模板，同时保留旧字段兼容性。"""
+    value = deepcopy(dict(clean))
+    name = str(value.get("name") or "").strip()
+    clean_type = _clean_type(value)
+    recipe_name = str(
+        value.get("recipeRef") or value.get("recipeName") or f"{name}-Recipe"
+    ).strip()
+    trigger_count = max(
+        1,
+        int(_finite_number(
+            value.get("triggerCount", value.get("lower")),
+            5,
+        )),
+    )
+    is_wac = clean_type == "wacclean"
+    is_dummy = clean_type in {"dummy", "dummywac"}
+    task_names = {
+        "preclean": "PreClean",
+        "postclean": "PostClean",
+        "wacclean": "WacClean",
+        "dummy": "PreDummyClean",
+        "dummywac": "PreWacClean",
+    }
+    value.update({
+        "name": name,
+        "cleanType": clean_type,
+        "recipeName": recipe_name,
+        "recipeRef": recipe_name,
+        "recipeTime": max(0.0, _finite_number(value.get("recipeTime"), 0.0)),
+        "modules": [],
+        "taskName": task_names[clean_type],
+        "stateVariable": "ProcessCount" if is_wac else "IdleTime",
+        "lower": trigger_count if is_wac else 0,
+        "upper": DEFAULT_TRIGGER_UPPER,
+        "triggerCount": trigger_count,
+        "updateStateVariables": (
+            ["ProcessCount"]
+            if is_wac
+            else ["IdleTime", "DummyCount"]
+            if is_dummy
+            else ["IdleTime"]
+            if clean_type == "preclean"
+            else []
+        ),
+        "materialCount": 2 if is_dummy else 0,
+        "preJudge": False,
+        "emptyRecipeRef": (
+            str(value.get("emptyRecipeRef") or f"{recipe_name}-WAC").strip()
+            if clean_type == "dummywac"
+            else ""
+        ),
+        "wacRecipeTime": max(
+            0.0,
+            _finite_number(
+                value.get("wacRecipeTime", value.get("emptyRecipeTime")),
+                20.0,
+            ),
+        ),
+    })
+    return value
+
+
 def _clean_condition(clean: Mapping[str, Any]) -> Dict[str, Any]:
     """把一个通用 Clean 模板展开成标准 ICleanCondition。"""
+    clean = _runtime_clean(clean)
     alias = str(clean.get("name") or "").strip()
     state_variable = str(clean.get("stateVariable") or "IdleTime").strip() or "IdleTime"
     lower = _finite_number(clean.get("lower"), 0.0)
@@ -275,6 +379,54 @@ def _clean_conditions(names: Any, clean_by_name: Mapping[str, Mapping[str, Any]]
             raise ValueError(f"Route 引用了不存在的 Clean：{name}")
         conditions.append(_clean_condition(clean))
     return conditions
+
+
+def _clean_names_for_types(
+    names: Any,
+    clean_by_name: Mapping[str, Mapping[str, Any]],
+    allowed_types: set[str],
+) -> List[str]:
+    """按清洁类别筛选引用，防止挂到不兼容的 Route 位置。"""
+    result: List[str] = []
+    for name in _string_list(names):
+        clean = clean_by_name.get(name)
+        if clean is None:
+            raise ValueError(f"Route 引用了不存在的 Clean：{name}")
+        if _clean_type(clean) in allowed_types:
+            result.append(name)
+    return result
+
+
+def _append_module_clean_conditions(
+    table: Dict[str, List[Dict[str, Any]]],
+    module: str,
+    clean_names: Any,
+    clean_by_name: Mapping[str, Mapping[str, Any]],
+) -> None:
+    """向指定腔室追加 Clean 条件并去重。"""
+    if not module:
+        return
+    target = table.setdefault(module, [])
+    for condition in _clean_conditions(clean_names, clean_by_name):
+        if condition not in target:
+            target.append(condition)
+
+
+def _dummy_material_count(route: Mapping[str, Any]) -> int:
+    """统计一条标准 Route 同时需要的 DummyPort 清洁晶圆数。"""
+    total = 0
+    for conditions in (route.get("PrePJob") or {}).values():
+        for condition in conditions or []:
+            if not isinstance(condition, Mapping):
+                continue
+            for tasks in (condition.get("CheckConditions") or {}).values():
+                for task in tasks or []:
+                    if isinstance(task, Mapping):
+                        total += max(
+                            0,
+                            int(_finite_number(task.get("MaterialCount"), 0)),
+                        )
+    return total
 
 
 def _route_process_modules(route: Mapping[str, Any]) -> List[str]:
@@ -323,6 +475,8 @@ def _stage_visit_rows(stage: Mapping[str, Any]) -> List[Dict[str, Any]]:
         "stationName": station,
         "slotIds": stage.get("slots"),
         "processRecipe": stage.get("recipeRef"),
+        "processTime": stage.get("processTime", stage.get("recipeTime", 0.0)),
+        "recipeTime": stage.get("recipeTime", stage.get("processTime", 0.0)),
         "moveTimeOffset": {},
         "qTimeLimit": stage.get("qTime"),
         "residencyConstraint": stage.get("residency"),
@@ -358,8 +512,15 @@ def _route_clean_dict(
     clean_by_name: Mapping[str, Mapping[str, Any]],
     recipe_by_name: Mapping[str, Mapping[str, Any]],
     route: Mapping[str, Any],
+    allowed_types: Optional[set[str]] = None,
 ) -> Dict[str, List[Dict[str, Any]]]:
     """把 Route 顶层 Clean 引用展开为 PM 到条件列表的标准字典。"""
+    if allowed_types is not None:
+        clean_names = _clean_names_for_types(
+            clean_names,
+            clean_by_name,
+            allowed_types,
+        )
     conditions = _clean_conditions(clean_names, clean_by_name)
     return {
         module: deepcopy(conditions)
@@ -380,6 +541,27 @@ def build_route(
         raise ValueError(f"Route {route_name} 至少需要源和汇两个 Step")
     if len(stages) < 3 or len(stages) % 2 == 0:
         raise ValueError(f"Route {route_name} 的 Step 数必须是大于等于 3 的奇数")
+    pre_pjob = _route_clean_dict(
+        route.get("prePJobCleanRefs"),
+        clean_by_name,
+        recipe_by_name,
+        route,
+        {"preclean", "dummy", "dummywac"},
+    )
+    post_pjob = _route_clean_dict(
+        route.get("postPJobCleanRefs"),
+        clean_by_name,
+        recipe_by_name,
+        route,
+        {"postclean"},
+    )
+    post_cjob = _route_clean_dict(
+        route.get("postCJobCleanRefs"),
+        clean_by_name,
+        recipe_by_name,
+        route,
+        {"postclean"},
+    )
     route_steps: List[Dict[str, Any]] = []
     for index, stage in enumerate(stages):
         visit_rows = _stage_visit_rows(stage)
@@ -414,6 +596,36 @@ def build_route(
                     ) from None
             if not isinstance(move_offsets, Mapping):
                 raise ValueError(f"Route {route_name} Step {index} Visit {visit_index} 的 MoveTimeOffset 必须是对象")
+            before_names = visit.get("beforeCleanRefs") or visit.get("BeforeInPM")
+            after_names = visit.get("afterCleanRefs") or visit.get("AfterOutPM")
+            before_pjob_names = _clean_names_for_types(
+                before_names,
+                clean_by_name,
+                {"preclean", "dummy", "dummywac"},
+            )
+            after_pjob_names = _clean_names_for_types(
+                after_names,
+                clean_by_name,
+                {"postclean"},
+            )
+            after_wac_names = _clean_names_for_types(
+                after_names,
+                clean_by_name,
+                {"wacclean"},
+            )
+            if recipe_name:
+                _append_module_clean_conditions(
+                    pre_pjob,
+                    station,
+                    before_pjob_names,
+                    clean_by_name,
+                )
+                _append_module_clean_conditions(
+                    post_pjob,
+                    station,
+                    after_pjob_names,
+                    clean_by_name,
+                )
             visits.append({
                 "SlotID": _slot_list(visit.get("slotIds") or visit.get("SlotID")),
                 "StationName": station,
@@ -423,12 +635,8 @@ def build_route(
                 "ResidencyConstraint": _finite_number(
                     visit.get("residencyConstraint", visit.get("ResidencyConstraint")), -1.0,
                 ),
-                "AfterOutPM": _clean_conditions(
-                    visit.get("afterCleanRefs") or visit.get("AfterOutPM"), clean_by_name,
-                ),
-                "BeforeInPM": _clean_conditions(
-                    visit.get("beforeCleanRefs") or visit.get("BeforeInPM"), clean_by_name,
-                ),
+                "AfterOutPM": _clean_conditions(after_wac_names, clean_by_name),
+                "BeforeInPM": [],
             })
         step_id = int(_finite_number(stage.get("stepId", stage.get("StepID")), index))
         explicit_post = stage.get("postStepIds", stage.get("PostStepID"))
@@ -458,15 +666,9 @@ def build_route(
         "BufferOption": int(_finite_number(route.get("bufferOption"), 0)),
         "BoundedStepIDs": [],
         "Group": str(route.get("group") or route_name).strip() or route_name,
-        "PrePJob": _route_clean_dict(
-            route.get("prePJobCleanRefs"), clean_by_name, recipe_by_name, route,
-        ),
-        "PostPJob": _route_clean_dict(
-            route.get("postPJobCleanRefs"), clean_by_name, recipe_by_name, route,
-        ),
-        "PostCJob": _route_clean_dict(
-            route.get("postCJobCleanRefs"), clean_by_name, recipe_by_name, route,
-        ),
+        "PrePJob": pre_pjob,
+        "PostPJob": post_pjob,
+        "PostCJob": post_cjob,
     }
 
 
@@ -579,7 +781,11 @@ def build_round_update(
 ) -> Dict[str, Any]:
     """把一轮 ``CJob → PJob`` 展开成标准 IUpdateParams。"""
     recipes = [row for row in (plan.get("recipes") or []) if isinstance(row, Mapping)]
-    cleans = [row for row in (plan.get("cleans") or []) if isinstance(row, Mapping)]
+    cleans = [
+        _runtime_clean(row)
+        for row in (plan.get("cleans") or [])
+        if isinstance(row, Mapping)
+    ]
     routes = [row for row in (plan.get("routes") or []) if isinstance(row, Mapping)]
     recipe_by_name = _recipe_index(recipes)
     clean_by_name = _name_index(cleans, "Clean")
@@ -598,6 +804,7 @@ def build_round_update(
     process_jobs: List[Dict[str, Any]] = []
     control_jobs: List[Dict[str, Any]] = []
     referenced_routes: Dict[str, Dict[str, Any]] = {}
+    round_dummy_material_count = 0
     for cjob_index, cjob in enumerate(cjobs, start=1):
         task_id = str(cjob.get("taskId") or cjob.get("TaskID") or cjob_index).strip()
         pjobs = [row for row in (cjob.get("pjobs") or []) if isinstance(row, Mapping)]
@@ -633,6 +840,10 @@ def build_round_update(
             priority = max(1, int(_finite_number(pjob.get("priority"), 1)))
             runtime_route_name = f"{route_name}__{legacy_name or pjob_name}"
             runtime_route = deepcopy(route)
+            round_dummy_material_count = max(
+                round_dummy_material_count,
+                _dummy_material_count(runtime_route),
+            )
             runtime_route["Name"] = runtime_route_name
             route_steps = runtime_route.get("RouteSteps") or []
             for step_index in (0, len(route_steps) - 1):
@@ -670,6 +881,43 @@ def build_round_update(
             "TaskMode": task_mode, "PJobNameList": runtime_pjob_names,
             "MaterialCount": cjob_material_count,
         })
+    if round_dummy_material_count > build_state.dummy_material_count:
+        dummy_port = next(
+            (
+                str(name)
+                for name, station in (tool_topo.get("Stations") or {}).items()
+                if str((station or {}).get("Type") or "").lower() == "dummyport"
+            ),
+            "",
+        )
+        if not dummy_port:
+            raise ValueError("Dummy / Dummy WAC 清洁需要设备配置 DummyPort")
+        capacity = _load_port_capacity(tool_topo, dummy_port)
+        if round_dummy_material_count > capacity:
+            raise ValueError(
+                f"DummyPort 容量不足：需要 {round_dummy_material_count} 片，容量 {capacity}"
+            )
+        for slot_id in range(
+            build_state.dummy_material_count + FIRST_SLOT_ID,
+            round_dummy_material_count + FIRST_SLOT_ID,
+        ):
+            material_id = build_state.next_material_id
+            build_state.next_material_id += 1
+            materials.append({
+                "Name": str(material_id),
+                "ID": material_id,
+                "TaskID": "DummyClean",
+                "LotID": "DummyClean",
+                "FoupID": "DummyFoup",
+                "Priority": -1,
+                "StepID": 0,
+                "CurrentModuleName": dummy_port,
+                "SlotID": slot_id,
+                "NeedSchedule": True,
+                "PJobName": "",
+                "SrcPortName": dummy_port,
+            })
+        build_state.dummy_material_count = round_dummy_material_count
     return {
         "Scenario": 0, "Routes": referenced_routes,
         "ProcessRecipes": build_process_recipes(recipes, routes),
