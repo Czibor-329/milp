@@ -990,6 +990,35 @@ class ConfigEditorServerTests(unittest.TestCase):
             self.assertEqual(["性能测试"], loaded["testGroups"])
             self.assertEqual([], loaded["tests"])
 
+    def test_workspace_group_can_rename_and_delete_its_tests(self) -> None:
+        """组别改名应同步测试；删除组别必须一并移除组内测试。"""
+        with tempfile.TemporaryDirectory() as directory:
+            store_path = Path(directory) / "workspaces.json"
+            device, _ = import_workspace_device("device.json", self.device, store_path)
+            config_server.create_workspace_test_group(device["id"], "回归", store_path)
+            config_server.create_workspace_test_group(device["id"], "保留", store_path)
+            created = create_workspace_test(device["id"], {
+                "name": "回归案例", "group": "回归", "roundCount": 1, "rounds": [{}],
+            }, store_path)
+            create_workspace_test(device["id"], {
+                "name": "保留案例", "group": "保留", "roundCount": 1, "rounds": [{}],
+            }, store_path)
+
+            renamed = config_server.rename_workspace_test_group(device["id"], "回归", "冒烟", store_path)
+            self.assertEqual(["冒烟", "保留"], renamed["groups"])
+            self.assertEqual("冒烟", next(test for test in renamed["tests"] if test["id"] == created["id"])["group"])
+
+            deleted = config_server.delete_workspace_test_group(device["id"], "冒烟", store_path)
+            self.assertEqual(1, deleted["deletedTestCount"])
+            self.assertEqual(["保留"], deleted["groups"])
+            self.assertEqual(["保留案例"], [test["name"] for test in deleted["tests"]])
+            ungrouped = create_workspace_test(device["id"], {
+                "name": "未分组案例", "roundCount": 1, "rounds": [{}],
+            }, store_path)
+            deleted_ungrouped = config_server.delete_workspace_test_group(device["id"], "", store_path)
+            self.assertEqual(1, deleted_ungrouped["deletedTestCount"])
+            self.assertNotIn(ungrouped["id"], [test["id"] for test in deleted_ungrouped["tests"]])
+
     def test_batch_run_uses_selected_strategy_for_every_test_in_current_group(self) -> None:
         """批量运行应筛选当前组，并把同一策略应用到组内全部测试。"""
         routes = [_route("BatchRoute", "PM1,PM2", "BatchRecipe")]

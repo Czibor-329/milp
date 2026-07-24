@@ -2594,7 +2594,7 @@ def create_workspace_test(
     raw_test: Mapping[str, Any],
     path: Path = WORKSPACE_STORE_PATH,
 ) -> Dict[str, Any]:
-    """在指定设备下新增一个独立测试集，并自动消解重名。"""
+    """在指定设备下新增一个独立测试集，并自动消解同组重名。"""
     with _workspace_catalog_guard(path):
         catalog = _read_workspace_catalog_unlocked(path)
         device = next((item for item in catalog["devices"] if item.get("id") == device_id), None)
@@ -2603,10 +2603,17 @@ def create_workspace_test(
         _apply_device_library(device, raw_test)
         normalized_input = dict(raw_test)
         normalized_input.pop("baseline", None)
+        requested_name = str(raw_test.get("name") or "").strip()
+        if not requested_name:
+            raise ValueError("测试集名称不能为空")
         test_case = _normalize_test_case(normalized_input)
         test_case["name"] = _unique_workspace_name(
             test_case["name"],
-            (str(item.get("name") or "") for item in device.get("tests") or []),
+            (
+                str(item.get("name") or "")
+                for item in device.get("tests") or []
+                if str(item.get("group") or "").strip() == test_case["group"]
+            ),
         )
         if test_case["group"] and test_case["group"] not in device.setdefault("testGroups", []):
             device["testGroups"].append(test_case["group"])
@@ -2633,10 +2640,15 @@ def update_workspace_test(
         index = next((position for position, item in enumerate(tests) if item.get("id") == test_id), None)
         if index is None:
             raise ValueError(f"测试集不存在：{test_id}")
-        requested_name = str(raw_test.get("name") or "").strip() or "未命名测试集"
+        requested_name = str(raw_test.get("name") or "").strip()
+        if not requested_name:
+            raise ValueError("测试集名称不能为空")
+        requested_group = str(raw_test.get("group") or "").strip()
         duplicate = next((
             item for item in tests
-            if item.get("id") != test_id and str(item.get("name") or "") == requested_name
+            if item.get("id") != test_id
+            and str(item.get("group") or "").strip() == requested_group
+            and str(item.get("name") or "") == requested_name
         ), None)
         if duplicate is not None:
             raise ValueError(f"测试集名称重复：{requested_name}")
@@ -2677,6 +2689,80 @@ def create_workspace_test_group(
         device["updatedAt"] = _workspace_timestamp()
         _write_workspace_catalog_unlocked(path, catalog)
         return deepcopy(groups)
+
+
+def rename_workspace_test_group(
+    device_id: str,
+    old_name: str,
+    name: str,
+    path: Path = WORKSPACE_STORE_PATH,
+) -> Dict[str, Any]:
+    """重命名设备下的测试组，并同步组内测试的 group 字段。"""
+    old_group = str(old_name or "").strip()
+    group = str(name or "").strip()
+    if not old_group:
+        raise ValueError("默认“未分组”不能重命名")
+    if not group:
+        raise ValueError("测试组别名称不能为空")
+    with _workspace_catalog_guard(path):
+        catalog = _read_workspace_catalog_unlocked(path)
+        device = next((item for item in catalog["devices"] if item.get("id") == device_id), None)
+        if device is None:
+            raise ValueError(f"设备不存在：{device_id}")
+        groups = device.setdefault("testGroups", [])
+        if old_group not in groups:
+            raise ValueError(f"测试组别不存在：{old_group}")
+        if group != old_group and group in groups:
+            raise ValueError(f"测试组别“{group}”已经存在")
+        if group != old_group:
+            groups[groups.index(old_group)] = group
+            for test_case in device.get("tests") or []:
+                if str(test_case.get("group") or "").strip() == old_group:
+                    test_case["group"] = group
+            device["updatedAt"] = _workspace_timestamp()
+            _write_workspace_catalog_unlocked(path, catalog)
+        return {"groups": deepcopy(groups), "tests": deepcopy(device.get("tests") or [])}
+
+
+def delete_workspace_test_group(
+    device_id: str,
+    name: str,
+    path: Path = WORKSPACE_STORE_PATH,
+) -> Dict[str, Any]:
+    """删除一个测试组及其包含的测试集；空名称代表“未分组”。"""
+    group = str(name or "").strip()
+    with _workspace_catalog_guard(path):
+        catalog = _read_workspace_catalog_unlocked(path)
+        device = next((item for item in catalog["devices"] if item.get("id") == device_id), None)
+        if device is None:
+            raise ValueError(f"设备不存在：{device_id}")
+        groups = device.setdefault("testGroups", [])
+        has_group_tests = any(
+            str(item.get("group") or "").strip() == group
+            for item in device.get("tests") or []
+        )
+        if group and group not in groups:
+            raise ValueError(f"测试组别不存在：{group}")
+        if not group and not has_group_tests:
+            raise ValueError("“未分组”中没有可删除的测试")
+        deleted_tests = [
+            item for item in device.get("tests") or []
+            if str(item.get("group") or "").strip() == group
+        ]
+        if group:
+            device["testGroups"] = [item for item in groups if item != group]
+        device["tests"] = [
+            item for item in device.get("tests") or []
+            if str(item.get("group") or "").strip() != group
+        ]
+        _invalidate_stale_device_baselines(device)
+        device["updatedAt"] = _workspace_timestamp()
+        _write_workspace_catalog_unlocked(path, catalog)
+        return {
+            "groups": deepcopy(device["testGroups"]),
+            "tests": deepcopy(device["tests"]),
+            "deletedTestCount": len(deleted_tests),
+        }
 
 
 def delete_workspace_test(
@@ -3561,9 +3647,19 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             self._send_json(response, HTTPStatus.BAD_REQUEST)
 
     def do_PUT(self) -> None:
-        """保存设备下已有测试集的完整可运行配置。"""
+        """保存测试集或重命名设备下的测试组别。"""
         path = unquote(urlparse(self.path).path)
         parts = [part for part in path.split("/") if part]
+        if len(parts) == 4 and parts[:2] == ["api", "workspaces"] and parts[3] == "groups":
+            try:
+                payload = self._read_json_object()
+                result = rename_workspace_test_group(
+                    parts[2], str(payload.get("oldName") or ""), str(payload.get("name") or ""),
+                )
+                self._send_json({"ok": True, **result})
+            except Exception as error:  # noqa: BLE001
+                self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
+            return
         if len(parts) != 5 or parts[:2] != ["api", "workspaces"] or parts[3] != "tests":
             self._send_json({"ok": False, "error": "Not found"}, HTTPStatus.NOT_FOUND)
             return
@@ -3575,7 +3671,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
 
     def do_DELETE(self) -> None:
-        """删除设备下指定测试集，并返回剩余测试集列表。"""
+        """删除设备下指定测试集或测试组，并返回剩余数据。"""
         path = unquote(urlparse(self.path).path)
         if path.startswith("/api/run-batches/"):
             batch = cancel_workspace_batch_run(path.rsplit("/", 1)[-1])
@@ -3585,6 +3681,14 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                 self._send_json(batch)
             return
         parts = [part for part in path.split("/") if part]
+        if len(parts) == 4 and parts[:2] == ["api", "workspaces"] and parts[3] == "groups":
+            try:
+                payload = self._read_json_object()
+                result = delete_workspace_test_group(parts[2], str(payload.get("name") or ""))
+                self._send_json({"ok": True, **result})
+            except Exception as error:  # noqa: BLE001
+                self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
+            return
         if len(parts) != 5 or parts[:2] != ["api", "workspaces"] or parts[3] != "tests":
             self._send_json({"ok": False, "error": "Not found"}, HTTPStatus.NOT_FOUND)
             return

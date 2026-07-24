@@ -57,9 +57,20 @@
     .file-select strong { display: block; color: var(--brand); }
     .workspace-actions { display: flex; flex-wrap: wrap; gap: 7px; align-items: end; }
     .workspace-actions .btn { flex: 1 1 auto; }
-    .workspace-inline { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; }
+    .group-control { display: grid; gap: 7px; }
+    .group-actions { display: flex; flex-wrap: wrap; gap: 7px; }
+    .group-actions .btn { flex: 1 1 auto; }
     .test-picker { display: grid; grid-template-columns: minmax(120px, .85fr) minmax(140px, 1.15fr); gap: 7px; }
-    .compact-icon { min-width: 42px; padding-inline: 12px; font-size: 18px; }
+    .empty-group-hint { display: none; align-items: center; justify-content: space-between; gap: 8px; margin-top: 7px; padding: 8px 10px; border: 1px dashed #bdc8d8; border-radius: 9px; color: var(--muted); font-size: 11px; }
+    .empty-group-hint.visible { display: flex; }
+    dialog { width: min(420px, calc(100vw - 32px)); padding: 0; border: 1px solid var(--line); border-radius: 14px; color: var(--ink); box-shadow: 0 20px 60px rgba(15, 23, 42, .22); }
+    dialog::backdrop { background: rgba(15, 23, 42, .28); }
+    .dialog-body { padding: 18px; }
+    .dialog-body h3 { margin: 0 0 6px; font-size: 16px; }
+    .dialog-body p { margin: 0; color: var(--muted); }
+    .dialog-body input { width: 100%; min-height: 39px; margin-top: 14px; padding: 8px 10px; border: 1px solid #cdd6e2; border-radius: 9px; outline: none; }
+    .dialog-body input:focus { border-color: #7396ee; box-shadow: 0 0 0 3px rgba(36,87,214,.11); }
+    .dialog-actions { display: flex; justify-content: flex-end; gap: 7px; margin-top: 16px; }
     .import-device { position: relative; overflow: hidden; }
     .import-device input { position: absolute; inset: 0; width: 100%; opacity: 0; cursor: pointer; }
     .workspace-status { display: flex; align-items: center; gap: 7px; min-height: 28px; color: var(--muted); font-size: 12px; }
@@ -295,9 +306,9 @@
                 <div class="field span-4"><label for="deviceSelect">设备</label><select id="deviceSelect"><option value="">尚未导入设备</option></select></div>
                 <div class="field span-4"><label>导入新设备</label><label class="btn import-device">＋ 导入设备<input id="deviceFile" type="file" accept=".json,application/json"></label></div>
                 <div class="field span-4"><label>设备信息</label><div class="chips" id="deviceSummary"><span class="chip">尚未选择设备</span></div></div>
-                <div class="field span-4"><label for="testGroupSelect">测试组别</label><div class="workspace-inline"><select id="testGroupSelect"><option value="">未分组</option></select><button class="btn small compact-icon" id="newGroupButton" title="新建测试组别" disabled>＋</button></div></div>
-                <div class="field span-4"><label for="testCaseSelect">具体测试 / 名称</label><div class="test-picker"><select id="testCaseSelect"><option value="">请先选择设备</option></select><input id="testCaseName" value="" placeholder="测试名称" disabled></div></div>
-                <div class="field span-4"><label>测试操作</label><div class="workspace-actions"><button class="btn small" id="newTestButton" disabled>新建</button><button class="btn small" id="copyTestButton" disabled>复制</button><button class="btn primary small" id="saveTestButton" disabled>保存</button><button class="btn danger small" id="deleteTestButton" disabled>删除</button></div></div>
+                <div class="field span-4"><label for="testGroupSelect">测试组别</label><div class="group-control"><select id="testGroupSelect"><option value="">未分组</option></select><div class="group-actions"><button class="btn small" id="newGroupButton" disabled>＋ 新增组别</button><button class="btn small" id="renameGroupButton" disabled>✎ 重命名</button><button class="btn danger small" id="deleteGroupButton" disabled>🗑 删除</button></div><div class="hint" id="groupActionHint"></div></div></div>
+                <div class="field span-4"><label for="testCaseSelect">具体测试 / 名称</label><div class="test-picker"><select id="testCaseSelect"><option value="">请先选择设备</option></select><input id="testCaseName" value="" placeholder="测试名称" disabled></div><div class="empty-group-hint" id="emptyGroupHint"><span>该组暂无测试</span><button class="btn small" id="emptyGroupNewTestButton" disabled>立即新建测试</button></div></div>
+                <div class="field span-4"><label>测试操作</label><div class="workspace-actions"><button class="btn small" id="newTestButton" disabled>新建</button><button class="btn small" id="copyTestButton" disabled>复制为新测试</button><button class="btn primary small" id="saveTestButton" disabled>保存</button><button class="btn danger small" id="deleteTestButton" disabled>删除</button></div></div>
                 <div class="span-12 workspace-status" id="workspaceStatus">导入或选择一个设备后开始。</div>
               </div>
             </div>
@@ -376,6 +387,15 @@
       </aside>
     </div>
   </main>
+
+  <dialog id="workspaceDialog" aria-labelledby="workspaceDialogTitle">
+    <form method="dialog" class="dialog-body" id="workspaceDialogForm">
+      <h3 id="workspaceDialogTitle">操作确认</h3>
+      <p id="workspaceDialogMessage"></p>
+      <input id="workspaceDialogInput" type="text" maxlength="80" autocomplete="off">
+      <div class="dialog-actions"><button class="btn small" type="button" id="workspaceDialogCancel">取消</button><button class="btn primary small" id="workspaceDialogConfirm" value="confirm">确认</button></div>
+    </form>
+  </dialog>
 
   <div class="drawer-layer" id="drawerLayer">
     <aside class="drawer" id="stepDrawer" aria-label="Route Step 详细设置">
@@ -697,6 +717,21 @@
       };
     }
 
+    /** 显示小型输入或确认弹窗，并在打开时把焦点交给可操作控件。 */
+    function showWorkspaceDialog({ title, message, value = "", needsInput = false, dangerous = false }) {
+      const dialog = document.getElementById("workspaceDialog"), input = document.getElementById("workspaceDialogInput"), confirm = document.getElementById("workspaceDialogConfirm");
+      document.getElementById("workspaceDialogTitle").textContent = title;
+      document.getElementById("workspaceDialogMessage").textContent = message;
+      input.hidden = !needsInput; input.required = needsInput; input.value = value;
+      confirm.textContent = dangerous ? "确认删除" : "确认";
+      confirm.classList.toggle("danger", dangerous); confirm.classList.toggle("primary", !dangerous);
+      dialog.showModal();
+      window.setTimeout(() => (needsInput ? input : confirm).focus(), 0);
+      return new Promise(resolve => dialog.addEventListener("close", () => {
+        resolve(dialog.returnValue === "confirm" ? (needsInput ? input.value.trim() : true) : null);
+      }, { once: true }));
+    }
+
     /** 更新设备、测试集下拉框和保存状态相关按钮。 */
     function renderWorkspaceControls() {
       const deviceSelect = document.getElementById("deviceSelect"), tests = state.workspaceDevice?.tests || [];
@@ -706,20 +741,31 @@
       const groups = [...new Set(["", ...(state.workspaceDevice?.testGroups || []), ...tests.map(test => String(test.group || "").trim())])].sort((left, right) => (!left) - (!right) || natural(left, right));
       const selectedGroup = groups.includes(state.activeTestGroup) ? state.activeTestGroup : (groups[0] || "");
       const groupSelect = document.getElementById("testGroupSelect");
-      groupSelect.innerHTML = groups.length ? groups.map(group => `<option value="${escapeHtml(group)}" ${group === selectedGroup ? "selected" : ""}>${escapeHtml(group || "未分组")}</option>`).join("") : `<option value="">未分组</option>`;
-      groupSelect.disabled = !tests.length;
+      groupSelect.innerHTML = groups.length ? groups.map(group => `<option value="${escapeHtml(group)}" title="${escapeHtml(group || "未分组")}" ${group === selectedGroup ? "selected" : ""}>${escapeHtml(group || "未分组")}</option>`).join("") : `<option value="">未分组</option>`;
+      groupSelect.title = selectedGroup || "未分组";
+      groupSelect.disabled = !state.workspaceDeviceId;
       const testSelect = document.getElementById("testCaseSelect");
       const visibleTests = tests.filter(test => String(test.group || "").trim() === selectedGroup).sort((left, right) => natural(left.name, right.name));
-      testSelect.innerHTML = visibleTests.length ? visibleTests.map(test => `<option value="${escapeHtml(test.id)}" ${test.id === state.testCaseId ? "selected" : ""}>${escapeHtml(test.name)}</option>`).join("") : `<option value="">该组暂无测试</option>`;
+      testSelect.innerHTML = visibleTests.length ? visibleTests.map(test => `<option value="${escapeHtml(test.id)}" title="${escapeHtml(test.name)}" ${test.id === state.testCaseId ? "selected" : ""}>${escapeHtml(test.name)}</option>`).join("") : `<option value="">该组暂无测试</option>`;
+      testSelect.title = visibleTests.find(test => test.id === state.testCaseId)?.name || "该组暂无测试";
       testSelect.disabled = !visibleTests.length;
       const hasTest = Boolean(state.testCaseId);
-      const nameInput = document.getElementById("testCaseName"); nameInput.disabled = !hasTest; nameInput.value = state.testCaseName || "";
+      const nameInput = document.getElementById("testCaseName"); nameInput.disabled = !hasTest; nameInput.value = state.testCaseName || ""; nameInput.title = state.testCaseName || "";
       document.getElementById("newTestButton").disabled = !state.workspaceDeviceId;
-      document.getElementById("newGroupButton").disabled = !state.workspaceDeviceId || !state.serviceCompatible;
+      document.getElementById("newGroupButton").disabled = !state.workspaceDeviceId;
+      const isDefaultGroup = !selectedGroup;
+      const hasGroupTests = tests.some(test => String(test.group || "").trim() === selectedGroup);
+      document.getElementById("renameGroupButton").disabled = !state.workspaceDeviceId || isDefaultGroup;
+      document.getElementById("deleteGroupButton").disabled = !state.workspaceDeviceId || (isDefaultGroup && !hasGroupTests);
+      document.getElementById("deleteGroupButton").title = isDefaultGroup ? "删除“未分组”中的全部测试" : "删除当前测试组别";
+      document.getElementById("groupActionHint").textContent = isDefaultGroup && state.workspaceDeviceId ? "“未分组”不可重命名；有测试时可以删除其中全部测试。" : "";
       document.getElementById("copyTestButton").disabled = !hasTest;
       document.getElementById("saveTestButton").disabled = !hasTest;
       document.getElementById("deleteTestButton").disabled = tests.length <= 1;
       document.getElementById("batchRunButton").disabled = !state.serviceCompatible || !visibleTests.length;
+      const emptyHint = document.getElementById("emptyGroupHint");
+      emptyHint.classList.toggle("visible", Boolean(state.workspaceDeviceId) && !visibleTests.length);
+      document.getElementById("emptyGroupNewTestButton").disabled = !state.workspaceDeviceId;
       const deviceType = /PSE300/i.test(state.deviceName) ? "单腔非级联" : String(state.workspaceDevice?.deviceType || "单腔非级联");
       document.getElementById("deviceSummary").innerHTML = state.device ? `<span class="chip good">${escapeHtml(deviceType)}</span>` : `<span class="chip">尚未选择设备</span>`;
     }
@@ -806,10 +852,20 @@
     async function saveCurrentTest(silent = false) {
       if (!state.workspaceDeviceId || !state.testCaseId) return false;
       const inputName = document.getElementById("testCaseName").value.trim();
-      if (inputName) state.testCaseName = inputName;
-      const result = await requestJson(`/api/workspaces/${state.workspaceDeviceId}/tests/${state.testCaseId}`, {
-        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(currentTestSnapshot())
-      });
+      if (!inputName) {
+        setWorkspaceStatus("测试名称不能为空，请输入名称后再保存", "dirty");
+        throw new Error("测试名称不能为空");
+      }
+      state.testCaseName = inputName;
+      let result;
+      try {
+        result = await requestJson(`/api/workspaces/${state.workspaceDeviceId}/tests/${state.testCaseId}`, {
+          method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(currentTestSnapshot())
+        });
+      } catch (error) {
+        setWorkspaceStatus(`保存失败：${error.message}`, "dirty");
+        throw error;
+      }
       const index = state.workspaceDevice.tests.findIndex(test => test.id === state.testCaseId);
       state.workspaceDevice.tests[index] = result.test; state.testCaseName = result.test.name; state.dirty = false; state.routeNameChanges.clear();
       state.workspaceDevice.routes = structuredClone(state.routes); state.workspaceDevice.cleans = structuredClone(state.cleans);
@@ -847,11 +903,10 @@
       applyTestCase(result.test);
     }
 
-    /** 新建一个测试组别，并在组内创建首个测试。 */
+    /** 新建一个空测试组别，并自动切换到该组。 */
     async function createTestGroup() {
-      const name = window.prompt("请输入新的测试组别名称");
-      if (name === null) return;
-      const group = name.trim();
+      const group = await showWorkspaceDialog({ title: "新增测试组别", message: "请输入组别名称；新建后会自动切换到该组。", needsInput: true });
+      if (group === null) return;
       if (!group) throw new Error("测试组别名称不能为空");
       const exists = (state.workspaceDevice?.testGroups || []).includes(group)
         || (state.workspaceDevice?.tests || []).some(test => String(test.group || "").trim() === group);
@@ -871,9 +926,51 @@
       renderWorkspaceControls(); resetRunResult(); setWorkspaceStatus(`已新建测试组别“${group}”，请在该组中新建测试`, "saved");
     }
 
+    /** 重命名当前测试组别，并同步更新该组内所有测试。 */
+    async function renameCurrentTestGroup() {
+      const oldName = state.activeTestGroup;
+      if (!oldName) throw new Error("默认“未分组”不能重命名");
+      const group = await showWorkspaceDialog({ title: "重命名测试组别", message: "组内测试会保留，并同步使用新组别名称。", value: oldName, needsInput: true });
+      if (group === null || group === oldName) return;
+      if (!group) throw new Error("测试组别名称不能为空");
+      if (state.dirty) await saveCurrentTest(true);
+      const result = await requestJson(`/api/workspaces/${state.workspaceDeviceId}/groups`, {
+        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ oldName, name: group })
+      });
+      state.workspaceDevice.testGroups = result.groups; state.workspaceDevice.tests = result.tests;
+      state.activeTestGroup = group; state.testCaseGroup = group;
+      const current = result.tests.find(test => test.id === state.testCaseId);
+      if (current) applyTestCase(current); else await selectWorkspaceGroup(group);
+      setWorkspaceStatus(`已将测试组别重命名为“${group}”`, "saved");
+    }
+
+    /** 删除当前测试组别；若组内有测试，确认后会一并删除。 */
+    async function deleteCurrentTestGroup() {
+      const group = state.activeTestGroup;
+      const testCount = (state.workspaceDevice?.tests || []).filter(test => String(test.group || "").trim() === group).length;
+      if (!group && !testCount) throw new Error("“未分组”中没有可删除的测试");
+      const impact = testCount ? `该组含有 ${testCount} 个测试，删除后这些测试将无法恢复。` : "该组为空，删除后无法恢复。";
+      const displayName = group || "未分组";
+      const confirmed = await showWorkspaceDialog({ title: "删除测试组别", message: `确定删除“${displayName}”吗？${impact}`, dangerous: true });
+      if (!confirmed) return;
+      if (state.dirty) await saveCurrentTest(true);
+      const result = await requestJson(`/api/workspaces/${state.workspaceDeviceId}/groups`, {
+        method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: group })
+      });
+      state.workspaceDevice.testGroups = result.groups; state.workspaceDevice.tests = result.tests;
+      const summary = state.workspaceDevices.find(device => device.id === state.workspaceDeviceId); if (summary) summary.testCount = result.tests.length;
+      const nextGroup = result.groups[0] || "";
+      state.activeTestGroup = nextGroup; state.testCaseId = ""; state.testCaseName = ""; state.testCaseGroup = nextGroup; state.dirty = false;
+      const nextTest = result.tests.find(test => String(test.group || "").trim() === nextGroup) || result.tests[0];
+      if (nextTest) applyTestCase(nextTest);
+      else { renderWorkspaceControls(); resetRunResult(); setWorkspaceStatus(`已删除测试组别“${displayName}”`, "saved"); }
+    }
+
     /** 删除当前测试集并切换到该设备的第一套剩余测试。 */
     async function deleteCurrentTest() {
-      if (!state.testCaseId || !window.confirm(`确定删除测试集“${state.testCaseName}”吗？`)) return;
+      if (!state.testCaseId) return;
+      const confirmed = await showWorkspaceDialog({ title: "删除测试", message: `确定删除测试“${state.testCaseName}”吗？删除后无法恢复。`, dangerous: true });
+      if (!confirmed) return;
       const result = await requestJson(`/api/workspaces/${state.workspaceDeviceId}/tests/${state.testCaseId}`, { method: "DELETE" });
       state.workspaceDevice.tests = result.tests;
       const summary = state.workspaceDevices.find(device => device.id === state.workspaceDeviceId); if (summary) summary.testCount = result.tests.length;
@@ -1596,9 +1693,10 @@
           writeTerminal("$ 本地服务版本过旧\n  请重启: py scripts/config_editor_server.py", true);
         }
       }
-      catch { state.serviceCompatible = false; runButton.disabled = true; batchRunButton.disabled = true; document.getElementById("newGroupButton").disabled = true; pill.textContent = "本地服务未连接"; pill.style.color = "var(--red)"; pill.style.background = "var(--red-soft)"; writeTerminal("$ 无法连接本地服务\n  请运行: py scripts/config_editor_server.py", true); }
+      catch { state.serviceCompatible = false; runButton.disabled = true; batchRunButton.disabled = true; renderWorkspaceControls(); pill.textContent = "本地服务未连接"; pill.style.color = "var(--red)"; pill.style.background = "var(--red-soft)"; writeTerminal("$ 无法连接本地服务\n  请运行: py scripts/config_editor_server.py", true); }
     }
 
+    document.getElementById("workspaceDialogCancel").addEventListener("click", () => document.getElementById("workspaceDialog").close("cancel"));
     document.getElementById("deviceFile").addEventListener("change", event => loadDevice(event.target.files[0]).catch(error => { event.target.value = ""; writeTerminal(`$ 设备读取失败\n  ${error.message}`, true); }));
     document.getElementById("l2dCheckpointFile").addEventListener("change", event => importL2dCheckpoint(event.target.files[0]).catch(error => { event.target.value = ""; writeTerminal(`$ L2D checkpoint 导入失败\n  ${error.message}`, true); }));
     document.getElementById("deviceSelect").addEventListener("change", event => (async () => { if (state.dirty) await saveCurrentTest(true); await selectWorkspaceDevice(event.target.value); })().catch(error => writeTerminal(`$ 设备切换失败\n  ${error.message}`, true)));
@@ -1606,7 +1704,10 @@
     document.getElementById("testCaseSelect").addEventListener("change", event => selectWorkspaceTest(event.target.value).catch(error => writeTerminal(`$ 测试集切换失败\n  ${error.message}`, true)));
     document.getElementById("testCaseName").addEventListener("input", event => { state.testCaseName = event.target.value; markTestDirty(); });
     document.getElementById("newGroupButton").addEventListener("click", () => createTestGroup().catch(error => writeTerminal(`$ 新建测试组别失败\n  ${error.message}`, true)));
+    document.getElementById("renameGroupButton").addEventListener("click", () => renameCurrentTestGroup().catch(error => { setWorkspaceStatus(`重命名测试组别失败：${error.message}`, "dirty"); writeTerminal(`$ 重命名测试组别失败\n  ${error.message}`, true); }));
+    document.getElementById("deleteGroupButton").addEventListener("click", () => deleteCurrentTestGroup().catch(error => { setWorkspaceStatus(`删除测试组别失败：${error.message}`, "dirty"); writeTerminal(`$ 删除测试组别失败\n  ${error.message}`, true); }));
     document.getElementById("newTestButton").addEventListener("click", () => createTestCase(false).catch(error => writeTerminal(`$ 新建测试集失败\n  ${error.message}`, true)));
+    document.getElementById("emptyGroupNewTestButton").addEventListener("click", () => createTestCase(false).catch(error => writeTerminal(`$ 新建测试集失败\n  ${error.message}`, true)));
     document.getElementById("copyTestButton").addEventListener("click", () => createTestCase(true).catch(error => writeTerminal(`$ 复制测试集失败\n  ${error.message}`, true)));
     document.getElementById("saveTestButton").addEventListener("click", () => saveCurrentTest(false).catch(error => writeTerminal(`$ 保存测试集失败\n  ${error.message}`, true)));
     document.getElementById("deleteTestButton").addEventListener("click", () => deleteCurrentTest().catch(error => writeTerminal(`$ 删除测试集失败\n  ${error.message}`, true)));
