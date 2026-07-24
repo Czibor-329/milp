@@ -7,6 +7,7 @@ import scripts.reschedule as demo
 from src.parse.model import Chamber, Problem, Robot, RuntimeAvailability, Stage, Wafer
 from src.schedule.realtime import (
     RealtimeRescheduler,
+    _assign_incoming_resources,
     _repair_loadlock_door_overlap,
     _repair_loadlock_prepare_overlap,
 )
@@ -99,6 +100,61 @@ class RealtimeRescheduleTests(unittest.TestCase):
         self.assertTrue(result.feasible)
         self.assertGreaterEqual(result.schedule[0][1][2], 51.0)
         self.assertLess(result.schedule[1][1][2], 50.0)
+
+    def test_recompute_balances_incoming_wafers_by_residual_process_work(self) -> None:
+        """新增片选 PM 时应计入旧片未来工序，不能只看切点瞬时占用。"""
+        chambers = {
+            name: Chamber(name, "ProcessChamber", 1)
+            for name in ("PM1", "PM2", "PM3")
+        }
+        candidates = list(chambers)
+
+        def process_wafer(wid: int, chamber: str) -> Wafer:
+            """构造一片尚有一道并行 PM 工序的晶圆。"""
+            return Wafer(
+                wid,
+                wid + 1,
+                "shared-route",
+                0,
+                [
+                    Stage(0, "LP1", "source", 0.0, "", "R1", -1.0),
+                    Stage(
+                        1,
+                        chamber,
+                        "process",
+                        40.0,
+                        "R1",
+                        "R1",
+                        -1.0,
+                        cands=list(candidates),
+                    ),
+                    Stage(2, "LP1", "sink", 0.0, "R1", "", -1.0),
+                ],
+                ["R1", "R1"],
+            )
+
+        residual = [
+            process_wafer(0, "PM1"),
+            process_wafer(1, "PM1"),
+            process_wafer(2, "PM3"),
+        ]
+        incoming = [
+            process_wafer(3, "PM1"),
+            process_wafer(4, "PM2"),
+            process_wafer(5, "PM3"),
+        ]
+
+        _assign_incoming_resources(
+            incoming,
+            MachineState(),
+            chambers,
+            residual,
+        )
+
+        total_loads = {name: 0 for name in candidates}
+        for wafer in [*residual, *incoming]:
+            total_loads[wafer.stages[1].chamber] += 1
+        self.assertEqual(total_loads, {"PM1": 2, "PM2": 2, "PM3": 2})
 
     def test_loadlock_shared_door_serializes_cross_slot_transactions(self) -> None:
         """跨槽门事务和环境转换必须共享同一 LoadLock 物理门。"""

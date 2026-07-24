@@ -18,6 +18,7 @@
 - [深层神经派工](neural-dispatch.md)：直觉与理论依据、离线训练、低延迟推理和质量验收。
 - [通用 LoadLock manager](neural-dispatch.md#loadlock策略无关的两层电梯式-petri-eta-manager)：
   Heuristic、Neural、BC、RL 共用的 Petri 安全候选 + 动态 ETA 物理锁绑定层。
+- [实时重算性能退化调研](realtime-recompute-investigation.md)：R2 公平对照、滚动调度研究依据、根因与修复结果。
 - [运行、验收与选择](operation-guide.md)：命令行参数、输出、自检和选型建议。
 
 ## 统一术语

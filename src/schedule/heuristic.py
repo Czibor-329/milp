@@ -192,7 +192,12 @@ def _needs_drain(ir: Problem, wafers) -> bool:
     return bool(ir.dummy_wac)
 
 
-def _feed_chooser(quota: dict) -> _Chooser:
+def _feed_chooser(
+    quota: dict,
+    *,
+    prioritize_resumed: bool = False,
+    balance_by_cjob: bool = True,
+) -> _Chooser:
     """喂片优先 chooser：尽量把未加工片喂进加工腔/loadlock 以填满并行 PM（让 LL 常装未加工片、
     腔室不闲着）。每步偏好序：①搬进加工腔(启动 PM) > ②发新片(j==0，喂进 LL) > ③排空(按最早可起/
     下游优先)。Petri 可达性掩码在解码循环里兜底——喂得太满会死锁时只暴露安全候选，故只影响顺序
@@ -200,7 +205,14 @@ def _feed_chooser(quota: dict) -> _Chooser:
 
     quota：route→发片配额权重（>0）。多 job 时按 fed[route]/quota[route] 最小者优先发片，即按
     配额交替发片（1:1 / 1:2 / …）；单 job 恒 0，退化为纯喂片优先。fed 从 state.pos 直接数
-    （pos>0=已离源），无需内部计数器 ⇒ 对动作掩码改选鲁棒。"""
+    （pos>0=已离源），无需内部计数器 ⇒ 对动作掩码改选鲁棒。
+
+    prioritize_resumed=True 是重算组合中的保守候选：先排空在机 WIP。默认候选允许
+    新旧任务利用空闲资源并行；两者都经精确定时，最终只保留 makespan 更小的可行解。
+    balance_by_cjob=True 保留旧版按 CJob 追平发片量的语义，供既有 Neural 修复路径
+    兼容调用；实时启发式的自适应候选显式传 False，按 Route 计量，使同优先级、
+    同 Route 的拆单不改变主派工语义。
+    """
     def chooser(state: _DecodeState, cands: List[_Cand]) -> List[int]:
         fed: dict = {}
         for wid, p in state.pos.items():
@@ -210,7 +222,11 @@ def _feed_chooser(quota: dict) -> _Chooser:
                 # 若把它们计入 fed，新增同优 CJob 会先整批“追平”历史发片数，反而形成串行。
                 if w.already_released:
                     continue
-                group = w.cjob_id or w.route_name
+                group = (
+                    w.cjob_id
+                    if balance_by_cjob and w.cjob_id
+                    else w.route_name
+                )
                 fed[group] = fed.get(group, 0) + 1
 
         def load_ratio(route: str) -> float:
@@ -234,12 +250,26 @@ def _feed_chooser(quota: dict) -> _Chooser:
             dtype = w.stages[c.j + 1].stage_type
             into_proc = 0 if dtype == "process" else 1     # ①搬进加工腔最优
             feed = 0 if c.j == 0 else 1                     # ②发新片次之
-            group = w.cjob_id or w.route_name
-            # 重算切点已经在设备内的晶圆先按原 Route 深度从下游向上游排空，
-            # 避免 timing 把新片放进状态中仍被占用的 LL/PM 槽位。
-            resume = (0, -w.resume_stage_index) if c.j == 0 and w.already_released else (1, 0)
-            return (resume, *business_rank(w), into_proc, feed,
-                    load_ratio(group), c.start, -c.j, c.wid)
+            group = (
+                w.cjob_id
+                if balance_by_cjob and w.cjob_id
+                else w.route_name
+            )
+            # 初始占用已经由 Petri 标识和 runtime availability 精确约束；不能再把
+            # “在机片”设成压过所有正常候选的全局优先级。否则每次重算都会先整批
+            # 排空 WIP，再重新建立流水线，新增任务到达得越晚反而越容易损失吞吐。
+            # 仅在其他派工语义完全相同时，以原 Route 深度作为稳定的平局规则。
+            resume_depth = -w.resume_stage_index if c.j == 0 and w.already_released else 0
+            if prioritize_resumed:
+                resume_rank = (
+                    (0, resume_depth)
+                    if c.j == 0 and w.already_released
+                    else (1, 0)
+                )
+                return (resume_rank, *business_rank(w), into_proc, feed,
+                        load_ratio(group), c.start, -c.j, c.wid)
+            return (*business_rank(w), into_proc, feed,
+                    load_ratio(group), c.start, resume_depth, -c.j, c.wid)
 
         return sorted(range(len(cands)), key=key)
 
@@ -280,14 +310,36 @@ def _heuristic_schedule(
             ir, durations, wafers, backward, None, loadlock_manager
         )
     )
+    has_resumed = any(wafer.already_released for wafer in wafers)
+    has_multiple_cjobs = (
+        len({wafer.cjob_id for wafer in wafers if wafer.cjob_id}) > 1
+    )
+    # 稳定候选先评估；_pick_best 在 makespan 相同时保留先到候选，相当于以
+    # “少改旧计划”作为同目标下的第二层字典序。
+    feed_variants = (
+        ((True, has_multiple_cjobs), (False, False))
+        if has_resumed
+        else ((False, False),)
+    )
 
     if len(routes) <= 1:
         if verbose:
-            print("[timing] 启发式：单 job 喂片优先(feed) + backward 兜底")
-        feed = _feed_chooser({routes[0]: 1} if routes else {})
-        result = _eval_chooser(
-            ir, durations, wafers, feed, best, loadlock_manager
-        )
+            print("[timing] 启发式：单 job 喂片优先(feed) + 重算排空候选 + backward 兜底")
+        quota = {routes[0]: 1} if routes else {}
+        result = best
+        for prioritize_resumed, balance_by_cjob in feed_variants:
+            result = _eval_chooser(
+                ir,
+                durations,
+                wafers,
+                _feed_chooser(
+                    quota,
+                    prioritize_resumed=prioritize_resumed,
+                    balance_by_cjob=balance_by_cjob,
+                ),
+                result,
+                loadlock_manager,
+            )
         return result or _eval_chooser(
             ir, durations, wafers, backward, None, loadlock_manager
         )
@@ -297,14 +349,20 @@ def _heuristic_schedule(
     others = {r: 1 for r in routes[2:]}
     ratios = [(1, 1), (1, 2), (2, 1), (1, 3), (3, 1), (2, 3), (3, 2)]
     for a, b in ratios:
-        best = _eval_chooser(
-            ir,
-            durations,
-            wafers,
-            _feed_chooser({A: a, B: b, **others}),
-            best,
-            loadlock_manager,
-        )
+        quota = {A: a, B: b, **others}
+        for prioritize_resumed, balance_by_cjob in feed_variants:
+            best = _eval_chooser(
+                ir,
+                durations,
+                wafers,
+                _feed_chooser(
+                    quota,
+                    prioritize_resumed=prioritize_resumed,
+                    balance_by_cjob=balance_by_cjob,
+                ),
+                best,
+                loadlock_manager,
+            )
     if best is None:
         best = _eval_chooser(
             ir, durations, wafers, backward, None, loadlock_manager

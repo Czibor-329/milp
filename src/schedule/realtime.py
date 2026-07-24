@@ -514,7 +514,12 @@ def _build_recompute_problem(
         if wafer.cjob_job_type == 3:
             blockers.update(cjob for cjob in started_cjobs if cjob)
         wafer.dispatch_after = tuple(sorted(blockers))
-    _assign_incoming_resources(incoming_wafers, next_state, previous.chambers)
+    _assign_incoming_resources(
+        incoming_wafers,
+        next_state,
+        previous.chambers,
+        residual,
+    )
     existing_material_ids = set(locations)
     new_material_ids = {wafer.mat_id for wafer in incoming_wafers}
     duplicates = sorted(existing_material_ids & new_material_ids)
@@ -696,17 +701,43 @@ def _assign_incoming_resources(
     wafers: Sequence[Wafer],
     state: MachineState,
     chambers: Mapping[str, Any],
+    residual_wafers: Sequence[Wafer] = (),
 ) -> None:
-    """让新增任务延续实时设备的并行腔负载，而不是从候选列表首项重新开始。
+    """按残余工作量让新增任务延续并行腔负载，而不是从候选列表首项重新开始。
 
     解析单轮任务时的 round-robin 会从零开始；重算若直接沿用，上一轮最后使用 PM1 后，
-    下一轮第一片仍会再次落到 PM1。这里以实时状态中的当前占用量和最后释放时刻为基线，
-    对同一候选池连续轮转：负载相同时优先选择更早释放的腔室。LoadLock 的进/出 stage
-    对同一晶圆保持同腔，同时保留完整候选集，避免把整批新增片永久绑定到 LA。
+    下一轮第一片仍会再次落到 PM1。这里只看切点瞬时占用同样不够：已经离开 PM、但
+    后续仍要进入该 PM 的旧晶圆会被漏掉，使新增片出现 1/3/2 一类静态失衡。这里以
+    残余路线的剩余加工工时为 PM 基线，并用实时占用和最后释放时刻处理 LoadLock
+    与平局。LoadLock 的进/出 stage 对同一晶圆保持同腔，同时保留完整候选集。
     """
-    assigned: Dict[Tuple[str, Tuple[str, ...]], Dict[str, int]] = {}
+    assigned: Dict[Tuple[str, Tuple[str, ...]], Dict[str, float]] = {}
+    residual_loads: Dict[Tuple[str, Tuple[str, ...]], Dict[str, float]] = {}
 
-    def choose(kind: str, candidates: Sequence[str], *, prefer_atmosphere: bool = False) -> str:
+    for wafer in residual_wafers:
+        for stage in wafer.stages:
+            if stage.stage_type != "process":
+                continue
+            pool = tuple(sorted(dict.fromkeys(
+                str(name) for name in (stage.cands or [stage.chamber]) if name
+            )))
+            if stage.chamber not in pool:
+                continue
+            key = ("process", pool)
+            loads = residual_loads.setdefault(
+                key,
+                {name: 0.0 for name in pool},
+            )
+            loads[stage.chamber] += max(float(stage.proc), TIME_TOLERANCE)
+
+    def choose(
+        kind: str,
+        candidates: Sequence[str],
+        workload: float,
+        *,
+        prefer_atmosphere: bool = False,
+    ) -> str:
+        """从同一候选池选择累计剩余工时最小的资源。"""
         pool = tuple(sorted(dict.fromkeys(str(name) for name in candidates if name)))
         if not pool:
             return ""
@@ -714,17 +745,26 @@ def _assign_incoming_resources(
         loads = assigned.setdefault(
             key,
             {
-                name: _station_material_count(state, name)
-                + int(
-                    prefer_atmosphere
-                    and isinstance(state.stations.get(name), LoadLockState)
-                    and state.stations[name].environment != ATMOSPHERE
+                name: residual_loads.get(key, {}).get(name, 0.0)
+                + (
+                    float(_station_material_count(state, name))
+                    if kind == "loadlock"
+                    else 0.0
+                )
+                + (
+                    1.0
+                    if (
+                        prefer_atmosphere
+                        and isinstance(state.stations.get(name), LoadLockState)
+                        and state.stations[name].environment != ATMOSPHERE
+                    )
+                    else 0.0
                 )
                 for name in pool
             },
         )
         chosen = min(pool, key=lambda name: (loads[name], _station_release_time(state, name), name))
-        loads[chosen] += 1
+        loads[chosen] += max(float(workload), TIME_TOLERANCE)
         return chosen
 
     for wafer in wafers:
@@ -737,7 +777,12 @@ def _assign_incoming_resources(
                 name for name in common_candidates
                 if isinstance(state.stations.get(name), LoadLockState)
             ]
-            chosen = choose("loadlock", candidates, prefer_atmosphere=True)
+            chosen = choose(
+                "loadlock",
+                candidates,
+                sum(max(float(stage.proc), TIME_TOLERANCE) for stage in loadlock_stages),
+                prefer_atmosphere=True,
+            )
             if chosen:
                 for stage in loadlock_stages:
                     stage.chamber = chosen
@@ -754,7 +799,7 @@ def _assign_incoming_resources(
             if stage.stage_type != "process":
                 continue
             candidates = [name for name in (stage.cands or [stage.chamber]) if name in chambers]
-            chosen = choose("process", candidates)
+            chosen = choose("process", candidates, float(stage.proc))
             if chosen:
                 stage.chamber = chosen
                 stage.cands = list(stage.cands or [chosen])
