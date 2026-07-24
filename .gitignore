@@ -22,6 +22,7 @@ l2d_pse300_*.pt
 # IDE / OS
 .idea/
 .vscode/
+node_modules/
 .DS_Store
 Thumbs.db
 /timing_data_structures.xlsx

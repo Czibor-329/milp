@@ -1,0 +1,683 @@
+"""调度请求数据建模。
+
+本模块负责设备初始化数据归一化、PSE300 LoadLock 扩展、Route/Recipe 构造以及
+各轮 CJob/PJob 请求展开。它不执行调度算法，也不处理 HTTP 或工作区持久化。
+"""
+
+from __future__ import annotations
+
+import json
+import math
+from copy import deepcopy
+from dataclasses import dataclass, field
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+
+
+FIRST_SLOT_ID = 1
+MAX_WAFERS_PER_JOB = 25
+DEFAULT_TRIGGER_UPPER = 9999.0
+CJOB_TYPE_VALUES = {"NormalLot": 0, "HighestLot": 2, "HigherLot": 3}
+TASK_MODE_VALUES = {"Smart": 0, "Pipeline": 1, "Sequential": 2, "Concurrent": 3}
+PSE300_REQUIRED_STATIONS = {
+    "PM1", "PM2", "PM3", "PM4", "Buffer1", "Buffer2", "Buffer3", "Buffer4",
+    "LA", "LB", "LP1", "LP2", "LP3", "LP4",
+}
+PSE300_REQUIRED_ROBOTS = {"ATR", "VTR"}
+PSE300_LOADLOCK_COPIES = {"LC": "LA", "LD": "LB"}
+
+
+@dataclass
+class BuildState:
+    """跨轮生成 Job 接口对象时使用的全局编号和 LoadPort 槽位状态。"""
+
+    next_material_id: int = 1
+    next_slot_by_port: Dict[str, int] = field(default_factory=dict)
+    job_names: set[str] = field(default_factory=set)
+
+
+def extract_init_data(raw: Any) -> Dict[str, Any]:
+    """兼容原始 init_data、AlgInit 录制数组和一层 Info 包装。"""
+    value = raw
+    if isinstance(value, list):
+        entry = next(
+            (
+                item for item in value
+                if isinstance(item, Mapping) and str(item.get("Describe") or "").lower() == "alginit"
+            ),
+            None,
+        )
+        if entry is None:
+            raise ValueError("设备文件数组中找不到 Describe=AlgInit")
+        value = entry.get("Info")
+    if isinstance(value, Mapping) and isinstance(value.get("InitData"), Mapping):
+        value = value["InitData"]
+    if isinstance(value, Mapping) and isinstance(value.get("Info"), Mapping):
+        value = value["Info"]
+    if not isinstance(value, Mapping):
+        raise ValueError("设备文件不是有效 JSON 对象")
+    if not isinstance(value.get("Stations"), Mapping) or not isinstance(value.get("Robots"), Mapping):
+        raise ValueError("设备文件必须包含 Stations 和 Robots")
+    return deepcopy(dict(value))
+
+
+def _clone_station_references(value: Any, source: str, target: str) -> Any:
+    """深复制一段设备配置，并把值中精确匹配的 Station 名称替换为新名称。"""
+    if isinstance(value, Mapping):
+        return {
+            (target if str(key) == source else str(key)): _clone_station_references(item, source, target)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_clone_station_references(item, source, target) for item in value]
+    return target if value == source else deepcopy(value)
+
+
+def _expand_robot_loadlocks(robot: Dict[str, Any]) -> None:
+    """为一台 PSE300 Robot 补齐 LC/LD 的时间矩阵、可达站点和手臂槽位映射。"""
+    for field_name in ("PlaceTime", "PickTime"):
+        station_times = robot.get(field_name)
+        if not isinstance(station_times, dict):
+            continue
+        for target, source in PSE300_LOADLOCK_COPIES.items():
+            if target not in station_times and source in station_times:
+                station_times[target] = deepcopy(station_times[source])
+
+    raw_transfers = robot.get("PrepTransTime")
+    if isinstance(raw_transfers, list):
+        original_transfers = [item for item in raw_transfers if isinstance(item, Mapping)]
+        known_transfers = {
+            (
+                str(item.get("SrcStation") or ""), str(item.get("DestStation") or ""),
+                item.get("TransType"), item.get("Time"),
+            )
+            for item in original_transfers
+        }
+        copies_by_source = {source: target for target, source in PSE300_LOADLOCK_COPIES.items()}
+        for transfer in original_transfers:
+            source_station = str(transfer.get("SrcStation") or "")
+            destination_station = str(transfer.get("DestStation") or "")
+            source_variants = [source_station]
+            destination_variants = [destination_station]
+            if source_station in copies_by_source:
+                source_variants.append(copies_by_source[source_station])
+            if destination_station in copies_by_source:
+                destination_variants.append(copies_by_source[destination_station])
+            for new_source in source_variants:
+                for new_destination in destination_variants:
+                    key = (new_source, new_destination, transfer.get("TransType"), transfer.get("Time"))
+                    if key in known_transfers:
+                        continue
+                    new_transfer = deepcopy(dict(transfer))
+                    new_transfer["SrcStation"] = new_source
+                    new_transfer["DestStation"] = new_destination
+                    raw_transfers.append(new_transfer)
+                    known_transfers.add(key)
+
+    arm_pairs = robot.get("ArmPointerPair")
+    if isinstance(arm_pairs, list):
+        for target, source in PSE300_LOADLOCK_COPIES.items():
+            copied_pairs = [
+                _clone_station_references(pair, source, target)
+                for pair in list(arm_pairs)
+                if isinstance(pair, list) and source in pair
+            ]
+            for pair in copied_pairs:
+                if pair not in arm_pairs:
+                    arm_pairs.append(pair)
+
+    arm_info = robot.get("ArmInfo")
+    if not isinstance(arm_info, Mapping):
+        return
+    for arm in arm_info.values():
+        if not isinstance(arm, dict):
+            continue
+        accessible = arm.get("AccessibleStations")
+        if isinstance(accessible, list):
+            for target, source in PSE300_LOADLOCK_COPIES.items():
+                if source in accessible and target not in accessible:
+                    accessible.append(target)
+        slot_map = arm.get("SlotsStationMap")
+        if isinstance(slot_map, dict):
+            for target, source in PSE300_LOADLOCK_COPIES.items():
+                if target not in slot_map and source in slot_map:
+                    slot_map[target] = _clone_station_references(slot_map[source], source, target)
+
+
+def expand_pse300_loadlocks(device: Dict[str, Any]) -> bool:
+    """识别 PSE300 拓扑并新增 LC/LD；LC 复制 LA，LD 复制 LB，返回是否发生修改。"""
+    stations = device.get("Stations")
+    robots = device.get("Robots")
+    if not isinstance(stations, dict) or not isinstance(robots, dict):
+        return False
+    if not PSE300_REQUIRED_STATIONS.issubset(stations) or not PSE300_REQUIRED_ROBOTS.issubset(robots):
+        return False
+    changed = any(target not in stations for target in PSE300_LOADLOCK_COPIES)
+    for target, source in PSE300_LOADLOCK_COPIES.items():
+        if target not in stations:
+            stations[target] = _clone_station_references(stations[source], source, target)
+    for robot in robots.values():
+        if isinstance(robot, dict):
+            _expand_robot_loadlocks(robot)
+    return changed
+
+
+def _name_index(rows: Sequence[Mapping[str, Any]], label: str) -> Dict[str, Dict[str, Any]]:
+    """按唯一 Name 建立通用配置索引。"""
+    result: Dict[str, Dict[str, Any]] = {}
+    for index, row in enumerate(rows, start=1):
+        name = str(row.get("name") or "").strip()
+        if not name:
+            raise ValueError(f"{label} 第 {index} 项缺少名称")
+        if name in result:
+            raise ValueError(f"{label} 名称重复：{name}")
+        result[name] = deepcopy(dict(row))
+    return result
+
+
+def _recipe_index(rows: Sequence[Mapping[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """按 Recipe 名称建立引用索引，允许同名 Recipe 为不同模块定义不同参数。"""
+    result: Dict[str, Dict[str, Any]] = {}
+    modules_by_name: Dict[str, set[str]] = {}
+    for index, row in enumerate(rows, start=1):
+        name = str(row.get("name") or "").strip()
+        if not name:
+            raise ValueError(f"Recipe 第 {index} 项缺少名称")
+        module_list = _string_list(row.get("modules"))
+        modules = set(module_list)
+        if name not in result:
+            result[name] = deepcopy(dict(row))
+            result[name]["modules"] = module_list
+            modules_by_name[name] = modules
+            continue
+        occupied_modules = modules_by_name[name]
+        duplicate_modules = sorted(occupied_modules & modules)
+        if duplicate_modules or not occupied_modules or not modules:
+            detail = f"（模块：{','.join(duplicate_modules)}）" if duplicate_modules else ""
+            raise ValueError(f"Recipe 名称和模块重复：{name}{detail}")
+        occupied_modules.update(modules)
+        result[name]["modules"] = [
+            *result[name]["modules"],
+            *(module for module in module_list if module not in result[name]["modules"]),
+        ]
+    return result
+
+
+def _string_list(value: Any) -> List[str]:
+    """把数组或逗号分隔文本收敛为去重字符串列表。"""
+    if isinstance(value, str):
+        items = value.replace("，", ",").split(",")
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        items = value
+    else:
+        items = []
+    result: List[str] = []
+    for item in items:
+        text = str(item).strip()
+        if text and text not in result:
+            result.append(text)
+    return result
+
+
+def _slot_list(value: Any) -> List[int]:
+    """解析 Route Visit 使用的一基槽位列表。"""
+    slots: List[int] = []
+    for item in _string_list(value):
+        try:
+            slot = int(item)
+        except ValueError:
+            continue
+        if slot >= FIRST_SLOT_ID and slot not in slots:
+            slots.append(slot)
+    return slots or [FIRST_SLOT_ID]
+
+
+def _finite_number(value: Any, default: float) -> float:
+    """读取有限浮点数，非法值回退默认值。"""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number if math.isfinite(number) else default
+
+
+def _clean_condition(clean: Mapping[str, Any]) -> Dict[str, Any]:
+    """把一个通用 Clean 模板展开成标准 ICleanCondition。"""
+    alias = str(clean.get("name") or "").strip()
+    state_variable = str(clean.get("stateVariable") or "IdleTime").strip() or "IdleTime"
+    lower = _finite_number(clean.get("lower"), 0.0)
+    upper = _finite_number(clean.get("upper"), DEFAULT_TRIGGER_UPPER)
+    if upper < lower:
+        raise ValueError(f"Clean {alias} 的触发上限小于下限")
+    task = {
+        "TaskName": str(clean.get("taskName") or alias).strip() or alias,
+        "CleanRecipe": str(clean.get("recipeRef") or "").strip(),
+        "UpdateStateVariables": _string_list(clean.get("updateStateVariables")),
+        "MaterialCount": max(0, int(_finite_number(clean.get("materialCount"), 0))),
+        "EmptyCleanRecipeAfterMaterial": str(clean.get("emptyRecipeRef") or "").strip(),
+    }
+    return {
+        "CheckConditions": {alias: [task]},
+        "ExecuteOrder": [{
+            "StateVariableName": state_variable,
+            "ThresholdValueList": [lower, upper],
+            "PreJuge": bool(clean.get("preJudge", False)),
+            "Alias": alias,
+        }],
+    }
+
+
+def _clean_conditions(names: Any, clean_by_name: Mapping[str, Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """按引用名称复制 Clean 条件，引用不存在时立即报错。"""
+    conditions: List[Dict[str, Any]] = []
+    for name in _string_list(names):
+        clean = clean_by_name.get(name)
+        if clean is None:
+            raise ValueError(f"Route 引用了不存在的 Clean：{name}")
+        conditions.append(_clean_condition(clean))
+    return conditions
+
+
+def _route_process_modules(route: Mapping[str, Any]) -> List[str]:
+    """收集 Route 中所有引用 Recipe 的候选加工模块。"""
+    modules: List[str] = []
+    for stage in route.get("stages") or []:
+        if not isinstance(stage, Mapping):
+            continue
+        visit_rows = stage.get("visits")
+        if isinstance(visit_rows, Sequence) and not isinstance(visit_rows, (str, bytes)):
+            for visit in visit_rows:
+                if not isinstance(visit, Mapping) or not str(
+                    visit.get("processRecipe") or visit.get("ProcessRecipe") or ""
+                ).strip():
+                    continue
+                module = str(visit.get("stationName") or visit.get("StationName") or "").strip()
+                if module and module not in modules:
+                    modules.append(module)
+            continue
+        if str(stage.get("recipeRef") or "").strip():
+            for module in _string_list(stage.get("stations")):
+                if module not in modules:
+                    modules.append(module)
+    return modules
+
+
+def _integer_list(value: Any) -> List[int]:
+    """把数组或逗号文本解析为去重整数列表。"""
+    result: List[int] = []
+    for item in _string_list(value):
+        try:
+            number = int(item)
+        except ValueError:
+            raise ValueError(f"无法解析整数列表项：{item}") from None
+        if number not in result:
+            result.append(number)
+    return result
+
+
+def _stage_visit_rows(stage: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    """读取新 IVisit 编辑结构，并兼容旧版 Step 聚合字段。"""
+    raw_visits = stage.get("visits")
+    if isinstance(raw_visits, Sequence) and not isinstance(raw_visits, (str, bytes)):
+        return [deepcopy(dict(visit)) for visit in raw_visits if isinstance(visit, Mapping)]
+    return [{
+        "stationName": station,
+        "slotIds": stage.get("slots"),
+        "processRecipe": stage.get("recipeRef"),
+        "moveTimeOffset": {},
+        "qTimeLimit": stage.get("qTime"),
+        "residencyConstraint": stage.get("residency"),
+        "afterCleanRefs": stage.get("afterCleanRefs"),
+        "beforeCleanRefs": stage.get("beforeCleanRefs"),
+    } for station in _string_list(stage.get("stations"))]
+
+
+def _clean_target_modules(
+    clean_names: Any,
+    clean_by_name: Mapping[str, Mapping[str, Any]],
+    recipe_by_name: Mapping[str, Mapping[str, Any]],
+    route: Mapping[str, Any],
+) -> List[str]:
+    """由 Clean 所引用 Recipe 的适用模块推断 Route 顶层清洁目标。"""
+    targets: List[str] = []
+    route_modules = _route_process_modules(route)
+    for clean_name in _string_list(clean_names):
+        clean = clean_by_name.get(clean_name)
+        if clean is None:
+            raise ValueError(f"Route 引用了不存在的 Clean：{clean_name}")
+        recipe_name = str(clean.get("recipeRef") or "").strip()
+        recipe = recipe_by_name.get(recipe_name)
+        modules = _string_list(recipe.get("modules")) if recipe else []
+        for module in modules or route_modules:
+            if module not in targets:
+                targets.append(module)
+    return targets
+
+
+def _route_clean_dict(
+    clean_names: Any,
+    clean_by_name: Mapping[str, Mapping[str, Any]],
+    recipe_by_name: Mapping[str, Mapping[str, Any]],
+    route: Mapping[str, Any],
+) -> Dict[str, List[Dict[str, Any]]]:
+    """把 Route 顶层 Clean 引用展开为 PM 到条件列表的标准字典。"""
+    conditions = _clean_conditions(clean_names, clean_by_name)
+    return {
+        module: deepcopy(conditions)
+        for module in _clean_target_modules(clean_names, clean_by_name, recipe_by_name, route)
+    }
+
+
+def build_route(
+    route: Mapping[str, Any],
+    recipe_by_name: Mapping[str, Mapping[str, Any]],
+    clean_by_name: Mapping[str, Mapping[str, Any]],
+    robot_names: Optional[set[str]] = None,
+) -> Dict[str, Any]:
+    """把控制台 Route 展开成解析器接受的标准 Route。"""
+    route_name = str(route.get("name") or "").strip()
+    stages = [stage for stage in (route.get("stages") or []) if isinstance(stage, Mapping)]
+    if len(stages) < 2:
+        raise ValueError(f"Route {route_name} 至少需要源和汇两个 Step")
+    if len(stages) < 3 or len(stages) % 2 == 0:
+        raise ValueError(f"Route {route_name} 的 Step 数必须是大于等于 3 的奇数")
+    route_steps: List[Dict[str, Any]] = []
+    for index, stage in enumerate(stages):
+        visit_rows = _stage_visit_rows(stage)
+        stations = [
+            str(visit.get("stationName") or visit.get("StationName") or "").strip()
+            for visit in visit_rows
+        ]
+        if not stations or any(not station for station in stations):
+            raise ValueError(f"Route {route_name} 的 Step {index} 没有完整 Visit StationName")
+        if robot_names is not None:
+            contains_robot = [station in robot_names for station in stations]
+            expected_robot = index % 2 == 1
+            if any(contains_robot) != all(contains_robot):
+                raise ValueError(f"Route {route_name} 的 Step {index} 混用了 Robot 和 Station")
+            if bool(contains_robot[0]) != expected_robot:
+                expected = "Robot" if expected_robot else "Station"
+                raise ValueError(f"Route {route_name} 的 Step {index} 必须填写 {expected}")
+        visits: List[Dict[str, Any]] = []
+        for visit_index, (station, visit) in enumerate(zip(stations, visit_rows)):
+            recipe_name = str(visit.get("processRecipe") or visit.get("ProcessRecipe") or "").strip()
+            if index % 2 == 1 and recipe_name:
+                raise ValueError(f"Route {route_name} 的 Robot Step {index} Visit 不能引用 Recipe")
+            if recipe_name and recipe_name not in recipe_by_name:
+                raise ValueError(f"Route {route_name} Visit 引用了不存在的 Recipe：{recipe_name}")
+            move_offsets = visit.get("moveTimeOffset") or visit.get("MoveTimeOffset") or {}
+            if isinstance(move_offsets, str):
+                try:
+                    move_offsets = json.loads(move_offsets or "{}")
+                except json.JSONDecodeError:
+                    raise ValueError(
+                        f"Route {route_name} Step {index} Visit {visit_index} 的 MoveTimeOffset 不是有效 JSON"
+                    ) from None
+            if not isinstance(move_offsets, Mapping):
+                raise ValueError(f"Route {route_name} Step {index} Visit {visit_index} 的 MoveTimeOffset 必须是对象")
+            visits.append({
+                "SlotID": _slot_list(visit.get("slotIds") or visit.get("SlotID")),
+                "StationName": station,
+                "ProcessRecipe": recipe_name,
+                "MoveTimeOffset": deepcopy(dict(move_offsets)),
+                "QTimeLimit": _finite_number(visit.get("qTimeLimit", visit.get("QTimeLimit")), -1.0),
+                "ResidencyConstraint": _finite_number(
+                    visit.get("residencyConstraint", visit.get("ResidencyConstraint")), -1.0,
+                ),
+                "AfterOutPM": _clean_conditions(
+                    visit.get("afterCleanRefs") or visit.get("AfterOutPM"), clean_by_name,
+                ),
+                "BeforeInPM": _clean_conditions(
+                    visit.get("beforeCleanRefs") or visit.get("BeforeInPM"), clean_by_name,
+                ),
+            })
+        step_id = int(_finite_number(stage.get("stepId", stage.get("StepID")), index))
+        explicit_post = stage.get("postStepIds", stage.get("PostStepID"))
+        post_step_ids = (
+            _integer_list(explicit_post)
+            if explicit_post is not None
+            else ([index + 1] if index + 1 < len(stages) else [])
+        )
+        need_process = bool(stage.get("needProcess", stage.get("NeedProcess", any(
+            visit["ProcessRecipe"] for visit in visits
+        ))))
+        route_steps.append({
+            "StepID": step_id,
+            "PostStepID": post_step_ids,
+            "NeedProcess": need_process,
+            "Visits": visits,
+        })
+    step_ids = [step["StepID"] for step in route_steps]
+    if len(step_ids) != len(set(step_ids)):
+        raise ValueError(f"Route {route_name} 的 StepID 重复")
+    unknown_posts = sorted({post for step in route_steps for post in step["PostStepID"] if post not in step_ids})
+    if unknown_posts:
+        raise ValueError(f"Route {route_name} 的 PostStepID 不存在：{unknown_posts}")
+    return {
+        "Name": route_name,
+        "RouteSteps": route_steps,
+        "BufferOption": int(_finite_number(route.get("bufferOption"), 0)),
+        "BoundedStepIDs": [],
+        "Group": str(route.get("group") or route_name).strip() or route_name,
+        "PrePJob": _route_clean_dict(
+            route.get("prePJobCleanRefs"), clean_by_name, recipe_by_name, route,
+        ),
+        "PostPJob": _route_clean_dict(
+            route.get("postPJobCleanRefs"), clean_by_name, recipe_by_name, route,
+        ),
+        "PostCJob": _route_clean_dict(
+            route.get("postCJobCleanRefs"), clean_by_name, recipe_by_name, route,
+        ),
+    }
+
+
+def build_process_recipes(
+    recipes: Sequence[Mapping[str, Any]],
+    routes: Sequence[Mapping[str, Any]],
+) -> List[Dict[str, Any]]:
+    """把通用 Recipe 按适用模块展开成 IProcessRecipe 列表。"""
+    derived_modules: Dict[str, List[str]] = {}
+    for route in routes:
+        for stage in route.get("stages") or []:
+            if not isinstance(stage, Mapping):
+                continue
+            visit_rows = _stage_visit_rows(stage)
+            for visit in visit_rows:
+                recipe_name = str(
+                    visit.get("processRecipe") or visit.get("ProcessRecipe") or ""
+                ).strip()
+                module = str(visit.get("stationName") or visit.get("StationName") or "").strip()
+                if not recipe_name or not module:
+                    continue
+                derived_modules.setdefault(recipe_name, [])
+                if module not in derived_modules[recipe_name]:
+                    derived_modules[recipe_name].append(module)
+    result: List[Dict[str, Any]] = []
+    for recipe in recipes:
+        name = str(recipe.get("name") or "").strip()
+        modules = _string_list(recipe.get("modules")) or derived_modules.get(name, [])
+        if not modules:
+            continue
+        weight = recipe.get("weight") or {}
+        if isinstance(weight, str):
+            try:
+                weight = json.loads(weight or "{}")
+            except json.JSONDecodeError:
+                raise ValueError(f"Recipe {name} 的 Weight 不是有效 JSON") from None
+        if not isinstance(weight, Mapping):
+            raise ValueError(f"Recipe {name} 的 Weight 必须是对象")
+        for module in modules:
+            result.append({
+                "Time": max(0.0, _finite_number(recipe.get("time"), 0.0)),
+                "ModuleName": module,
+                "Name": name,
+                "ProcessType": str(recipe.get("processType") or ""),
+                "Weight": deepcopy(dict(weight)),
+            })
+    return result
+
+
+def _load_port_capacity(tool_topo: Mapping[str, Any], name: str) -> int:
+    """读取所选 LoadPort 容量，接口缺失时使用 25。"""
+    station = (tool_topo.get("Stations") or {}).get(name) or {}
+    try:
+        return max(1, int(station.get("Capacity") or MAX_WAFERS_PER_JOB))
+    except (TypeError, ValueError):
+        return MAX_WAFERS_PER_JOB
+
+
+def _enum_value(raw: Any, values: Mapping[str, int], field_name: str, default: str) -> int:
+    """把页面枚举名称或兼容的整数值转换成后端枚举。"""
+    if raw is None or raw == "":
+        return values[default]
+    if isinstance(raw, str) and raw in values:
+        return values[raw]
+    try:
+        numeric = int(raw)
+    except (TypeError, ValueError):
+        numeric = -999
+    if numeric in values.values():
+        return numeric
+    raise ValueError(f"{field_name} 不支持：{raw}")
+
+
+def _round_cjob_rows(round_config: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    """读取新 CJob/PJob 层级，并把旧版扁平 Job 兼容为一 Job 一 CJob。"""
+    raw_cjobs = round_config.get("cjobs")
+    if isinstance(raw_cjobs, Sequence) and not isinstance(raw_cjobs, (str, bytes)):
+        return [deepcopy(dict(row)) for row in raw_cjobs if isinstance(row, Mapping)]
+    rows: List[Dict[str, Any]] = []
+    for index, job in enumerate(round_config.get("jobs") or [], start=1):
+        if not isinstance(job, Mapping):
+            continue
+        name = str(job.get("name") or f"Job{index}").strip()
+        pjob = deepcopy(dict(job))
+        pjob["jobName"] = "P1"
+        rows.append({
+            "taskId": name,
+            "jobType": job.get("jobType", 0),
+            "priority": job.get("priority", 1),
+            "taskMode": job.get("taskMode", 0),
+            "pjobs": [pjob],
+            "_legacyName": name,
+        })
+    return rows
+
+
+def _round_pjob_count(round_config: Mapping[str, Any]) -> int:
+    """返回一轮内的 PJob 数量，兼容旧版 jobs。"""
+    cjobs = round_config.get("cjobs")
+    if isinstance(cjobs, Sequence) and not isinstance(cjobs, (str, bytes)):
+        return sum(len(cjob.get("pjobs") or []) for cjob in cjobs if isinstance(cjob, Mapping))
+    return len([job for job in (round_config.get("jobs") or []) if isinstance(job, Mapping)])
+
+
+def build_round_update(
+    plan: Mapping[str, Any],
+    round_config: Mapping[str, Any],
+    current_time: float,
+    build_state: BuildState,
+) -> Dict[str, Any]:
+    """把一轮 ``CJob → PJob`` 展开成标准 IUpdateParams。"""
+    recipes = [row for row in (plan.get("recipes") or []) if isinstance(row, Mapping)]
+    cleans = [row for row in (plan.get("cleans") or []) if isinstance(row, Mapping)]
+    routes = [row for row in (plan.get("routes") or []) if isinstance(row, Mapping)]
+    recipe_by_name = _recipe_index(recipes)
+    clean_by_name = _name_index(cleans, "Clean")
+    route_by_name = _name_index(routes, "Route")
+    tool_topo = plan["device"]
+    robot_names = {str(name) for name in (tool_topo.get("Robots") or {})}
+    built_routes = {
+        name: build_route(route, recipe_by_name, clean_by_name, robot_names)
+        for name, route in route_by_name.items()
+    }
+    cjobs = _round_cjob_rows(round_config)
+    if not cjobs:
+        raise ValueError("每一轮至少需要一个 CJob")
+
+    materials: List[Dict[str, Any]] = []
+    process_jobs: List[Dict[str, Any]] = []
+    control_jobs: List[Dict[str, Any]] = []
+    referenced_routes: Dict[str, Dict[str, Any]] = {}
+    for cjob_index, cjob in enumerate(cjobs, start=1):
+        task_id = str(cjob.get("taskId") or cjob.get("TaskID") or cjob_index).strip()
+        pjobs = [row for row in (cjob.get("pjobs") or []) if isinstance(row, Mapping)]
+        if not pjobs:
+            raise ValueError(f"CJob {cjob_index} 至少需要一个 PJob")
+        job_type = _enum_value(cjob.get("jobType", cjob.get("JobType")), CJOB_TYPE_VALUES, "JobType", "NormalLot")
+        task_mode = _enum_value(cjob.get("taskMode", cjob.get("TaskMode")), TASK_MODE_VALUES, "TaskMode", "Smart")
+        cjob_priority = max(1, int(_finite_number(cjob.get("priority"), 1))) if job_type == 0 else -1
+        runtime_pjob_names: List[str] = []
+        cjob_material_count = 0
+        legacy_name = str(cjob.get("_legacyName") or "").strip()
+
+        for pjob_index, pjob in enumerate(pjobs, start=1):
+            display_name = str(pjob.get("jobName") or pjob.get("name") or f"P{pjob_index}").strip()
+            pjob_name = f"{legacy_name}.P1" if legacy_name else f"{task_id}.C{cjob_index}.{display_name}"
+            if pjob_name in build_state.job_names:
+                raise ValueError(f"PJob 名称跨轮重复：{pjob_name}")
+            build_state.job_names.add(pjob_name)
+            runtime_pjob_names.append(pjob_name)
+            origin_route = pjob.get("originRoute")
+            if isinstance(origin_route, Mapping):
+                origin_route = origin_route.get("name") or origin_route.get("Name")
+            route_name = str(pjob.get("routeRef") or origin_route or "").strip()
+            route = built_routes.get(route_name)
+            if route is None:
+                raise ValueError(f"PJob {display_name} 引用了不存在的 Route：{route_name}")
+            load_port = str(pjob.get("loadPort") or "").strip()
+            if load_port not in (tool_topo.get("Stations") or {}):
+                raise ValueError(f"PJob {display_name} 的 LoadPort 不存在：{load_port}")
+            wafer_count = int(_finite_number(pjob.get("waferCount"), len(pjob.get("matList") or []) or 1))
+            if wafer_count < 1 or wafer_count > MAX_WAFERS_PER_JOB:
+                raise ValueError(f"PJob {display_name} 晶圆数必须为 1~{MAX_WAFERS_PER_JOB}")
+            priority = max(1, int(_finite_number(pjob.get("priority"), 1)))
+            runtime_route_name = f"{route_name}__{legacy_name or pjob_name}"
+            runtime_route = deepcopy(route)
+            runtime_route["Name"] = runtime_route_name
+            route_steps = runtime_route.get("RouteSteps") or []
+            for step_index in (0, len(route_steps) - 1):
+                if 0 <= step_index < len(route_steps):
+                    for visit in route_steps[step_index].get("Visits") or []:
+                        visit["StationName"] = load_port
+            material_ids: List[int] = []
+            next_slot = build_state.next_slot_by_port.get(load_port, 0)
+            capacity = _load_port_capacity(tool_topo, load_port)
+            if next_slot + wafer_count > capacity:
+                raise ValueError(f"{load_port} 总片数超过容量 {capacity}")
+            for _ in range(wafer_count):
+                next_slot += 1
+                material_id = build_state.next_material_id
+                build_state.next_material_id += 1
+                material_ids.append(material_id)
+                materials.append({
+                    "Name": str(material_id), "ID": material_id, "TaskID": task_id,
+                    "LotID": f"{task_id}.C{cjob_index}",
+                    "FoupID": f"{task_id}-C{cjob_index}-{display_name}",
+                    "Priority": priority, "StepID": 0, "CurrentModuleName": load_port,
+                    "SlotID": next_slot, "NeedSchedule": True, "PJobName": pjob_name,
+                    "SrcPortName": load_port, "Route": deepcopy(runtime_route),
+                })
+            build_state.next_slot_by_port[load_port] = next_slot
+            referenced_routes[runtime_route_name] = deepcopy(runtime_route)
+            process_jobs.append({
+                "JobName": pjob_name, "TaskID": task_id, "Priority": priority,
+                "State": 0, "OriginRoute": deepcopy(runtime_route), "MatList": material_ids,
+            })
+            cjob_material_count += wafer_count
+
+        control_jobs.append({
+            "TaskID": task_id, "JobType": job_type, "Priority": cjob_priority,
+            "TaskMode": task_mode, "PJobNameList": runtime_pjob_names,
+            "MaterialCount": cjob_material_count,
+        })
+    return {
+        "Scenario": 0, "Routes": referenced_routes,
+        "ProcessRecipes": build_process_recipes(recipes, routes),
+        "Materials": materials, "ProcessJobs": process_jobs, "ControlJobs": control_jobs,
+        "RemoveList": [], "MoveStates": [], "CurrentTime": float(current_time),
+        # 标准 update 是当前设备快照而不只是新增 Job。首排时动态状态与 init 相同；
+        # 重算调用方必须在发送前以真实执行现场覆盖这些字段。
+        "Robots": deepcopy(dict(tool_topo.get("Robots") or {})),
+        "Stations": deepcopy(dict(tool_topo.get("Stations") or {})),
+        "InitialMoveID": int(tool_topo.get("InitialMoveID") or 0),
+    }

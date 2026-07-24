@@ -2,8 +2,12 @@
 
 此目录集中保存实时调度前端及其本地数据：
 
-- `server.py`：本地调度服务与工作区接口。
-- `frontend/`：配置终端和 MoveList 甘特图页面。
+- `server.py`：本地调度服务、工作区接口与静态资源入口，不再承载前端实现。
+- `plan_builder.py`：设备归一化、Route/Recipe 和各轮 CJob/PJob 请求建模。
+- `frontend/config_editor.html`：只保存配置终端的页面骨架。
+- `frontend/src/`：TypeScript 前端源码，按 API、数据模型、Route 逻辑和页面入口拆分。
+- `frontend/assets/`：可由 Python 服务直接托管的构建产物与样式。
+- `frontend/movelist_gantt_viewer.html`：MoveList 甘特图页面。
 - `data/workspaces.json`：设备、设备级共享 Route/Clean、测试集任务。
 - `data/devices/`：按设备 ID 独立保存的 init 信息。
 - `exports/logs/`：每次运行生成的 input_data 复现日志。
@@ -12,6 +16,20 @@
 启动：`python realtime_scheduler/server.py --port 8765 --open`
 
 旧命令 `python scripts/config_editor_server.py` 仍可使用。
+
+## 前端开发
+
+部署和运行仍然只依赖 Python；仓库已经保存构建后的浏览器资源。修改配置终端前端时，
+在 `realtime_scheduler/frontend` 下执行：
+
+```powershell
+npm install
+npm run check
+npm run build
+```
+
+`npm run check` 检查独立 TypeScript 业务模块，`npm run build` 更新
+`assets/config_editor.js`，并生成供 Node 单元测试兼容使用的 `route_editor_logic.js`。
 
 ## 运行策略
 

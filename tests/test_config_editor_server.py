@@ -36,6 +36,16 @@ ROOT = Path(__file__).resolve().parents[1]
 DEVICE_PATH = ROOT / "src" / "input_data" / "s1-1c2p-reschedule.json"
 PSE300_PATH = ROOT / "src" / "input_data" / "PSE300.json"
 EDITOR_PATH = ROOT / "realtime_scheduler" / "frontend" / "config_editor.html"
+EDITOR_STYLE_PATH = ROOT / "realtime_scheduler" / "frontend" / "assets" / "config_editor.css"
+EDITOR_SCRIPT_PATH = ROOT / "realtime_scheduler" / "frontend" / "src" / "config_editor.ts"
+
+
+def _editor_source() -> str:
+    """合并页面模板、样式和 TypeScript 源码，供前端结构回归断言使用。"""
+    return "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (EDITOR_PATH, EDITOR_STYLE_PATH, EDITOR_SCRIPT_PATH)
+    )
 
 
 def _device_recording() -> list[dict]:
@@ -808,7 +818,7 @@ class ConfigEditorServerTests(unittest.TestCase):
 
     def test_editor_uses_persistent_route_table_and_step_drawer(self) -> None:
         """Route 应按工艺结构折叠，抽屉使用统一候选参数表单。"""
-        html = EDITOR_PATH.read_text(encoding="utf-8")
+        html = _editor_source()
         self.assertIn('data-tab-target="schedule"', html)
         self.assertIn('data-tab-target="route"', html)
         self.assertIn('data-tab-target="clean"', html)
@@ -828,7 +838,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("PostStepID", html)
         self.assertIn("NeedProcess", html)
         self.assertIn('data-scope="visit-shared"', html)
-        self.assertIn('src="/route_editor_logic.js"', html)
+        self.assertIn('src="/assets/config_editor.js"', html)
         self.assertIn('data-action="toggle-route-group"', html)
         self.assertIn('data-action="toggle-route"', html)
         self.assertIn('data-action="copy-route"', html)
@@ -883,7 +893,7 @@ class ConfigEditorServerTests(unittest.TestCase):
 
     def test_run_results_use_main_area_responsive_grid(self) -> None:
         """运行结果应位于重算任务下方，右栏只保留运行控制。"""
-        html = EDITOR_PATH.read_text(encoding="utf-8")
+        html = _editor_source()
         schedule = html.split('<div class="tab-view active" data-tab-view="schedule">', 1)[1]
         schedule = schedule.split('<div class="tab-view" data-tab-view="route">', 1)[0]
         sidebar = html.split('<aside class="side" id="scheduleSide">', 1)[1]

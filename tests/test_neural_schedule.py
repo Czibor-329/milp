@@ -196,9 +196,11 @@ class NeuralScheduleTests(unittest.TestCase):
 
     def test_frontend_and_health_endpoint_expose_neural_strategy(self) -> None:
         """页面选择器和服务健康检查应使用同一稳定策略标识。"""
-        html = (
-            ROOT / "realtime_scheduler" / "frontend" / "config_editor.html"
-        ).read_text(encoding="utf-8")
+        frontend_root = ROOT / "realtime_scheduler" / "frontend"
+        html = "\n".join([
+            (frontend_root / "config_editor.html").read_text(encoding="utf-8"),
+            (frontend_root / "src" / "config_editor.ts").read_text(encoding="utf-8"),
+        ])
         server_source = (
             ROOT / "realtime_scheduler" / "server.py"
         ).read_text(encoding="utf-8")

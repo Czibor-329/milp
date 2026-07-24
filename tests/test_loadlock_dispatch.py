@@ -305,7 +305,12 @@ class LoadLockManagerFrontendTests(unittest.TestCase):
 
     def test_editor_exposes_recommended_petri_look_option(self) -> None:
         """公共设置应提供 Petri-ETA/联合选择两项并默认公共 manager。"""
-        html = EDITOR_PATH.read_text(encoding="utf-8")
+        html = "\n".join([
+            EDITOR_PATH.read_text(encoding="utf-8"),
+            (
+                ROOT / "realtime_scheduler" / "frontend" / "src" / "config_editor.ts"
+            ).read_text(encoding="utf-8"),
+        ])
 
         self.assertIn('id="loadlockOptions"', html)
         self.assertIn('data-option="loadLockManager"', html)
