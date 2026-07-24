@@ -76,6 +76,7 @@ class RealtimeRescheduler:
         strategy: str = "heuristic",
         policy: Any = None,
         loadlock_manager_mode: Optional[str] = None,
+        loadlock_exchange_mode: str = "auto",
         neural_force_quality_floor: bool = False,
         rl_search_seconds: float = 4.0,
         rl_rollouts: int = 256,
@@ -97,6 +98,7 @@ class RealtimeRescheduler:
             loadlock_manager_mode
             or ("joint" if strategy == "neural" else "petri-look")
         )
+        self.loadlock_exchange_mode = str(loadlock_exchange_mode or "auto")
         self.neural_force_quality_floor = bool(neural_force_quality_floor)
         self.rl_search_seconds = float(rl_search_seconds)
         self.rl_rollouts = int(rl_rollouts)
@@ -331,6 +333,7 @@ class RealtimeRescheduler:
                 policy=self.policy,
                 fallback_on_failure=True,
                 loadlock_manager_mode=self.loadlock_manager_mode,
+                loadlock_exchange_mode=self.loadlock_exchange_mode,
                 force_quality_floor=self.neural_force_quality_floor,
             )
             self._last_strategy_diagnostics = dict(
@@ -346,6 +349,7 @@ class RealtimeRescheduler:
                 temp=self.rl_temperature,
                 verbose=False,
                 loadlock_manager=self.loadlock_manager_mode,
+                loadlock_exchange=self.loadlock_exchange_mode,
             )
         elif self.strategy == "l2d":
             # 延迟导入，确保未安装 Torch 时 heuristic/RL 旧路径仍可独立使用。
@@ -374,6 +378,7 @@ class RealtimeRescheduler:
                 problem,
                 verbose=False,
                 loadlock_manager=self.loadlock_manager_mode,
+                loadlock_exchange=self.loadlock_exchange_mode,
             )
         if self.strategy in {"heuristic", "rl"}:
             self._last_strategy_diagnostics.update({
@@ -385,6 +390,16 @@ class RealtimeRescheduler:
                 "loadLockSelectedPath": getattr(
                     result,
                     "loadlock_manager_selected",
+                    "unknown",
+                ),
+                "loadLockExchangeRequested": getattr(
+                    result,
+                    "loadlock_exchange_requested",
+                    self.loadlock_exchange_mode,
+                ),
+                "loadLockExchangeSelected": getattr(
+                    result,
+                    "loadlock_exchange_selected",
                     "unknown",
                 ),
             })
@@ -404,7 +419,15 @@ class RealtimeRescheduler:
             ):
                 moves = _prepend_environment_setups(problem, moves, state)
                 moves = _remove_redundant_empty_environment_cycles(moves, state)
-            shifted = _shift_moves(moves, offset)
+            earliest_start = min(
+                (float(move.get("StartTime") or 0.0) for move in moves),
+                default=0.0,
+            )
+            # DummyPort 等非默认首站可能需要首个 Pick 前的空载转位。若抽象
+            # release 没有为这段转位预留完整时长，export 会产生轻微负时间；
+            # 整段平移到本轮起点，保持动作间隔和资源顺序不变。
+            initial_reposition_shift = max(0.0, -earliest_start)
+            shifted = _shift_moves(moves, offset + initial_reposition_shift)
             issues = validate_move_list(problem, shifted, state)
             if issues:
                 raise RuntimeError(f"重算 MoveList 状态校验失败：{issues[0]}")
@@ -431,6 +454,7 @@ class RealtimeRescheduler:
                     problem,
                     verbose=False,
                     loadlock_manager=self.loadlock_manager_mode,
+                    loadlock_exchange=self.loadlock_exchange_mode,
                 )
                 if getattr(floor_result, "feasible", False):
                     floor_moves = materialize(
@@ -471,6 +495,7 @@ class RealtimeRescheduler:
                 problem,
                 verbose=False,
                 loadlock_manager=self.loadlock_manager_mode,
+                loadlock_exchange=self.loadlock_exchange_mode,
             )
             if not getattr(fallback, "feasible", False):
                 raise neural_state_error

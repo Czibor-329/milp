@@ -295,6 +295,30 @@ class ValidationStateTests(unittest.TestCase):
         ]
         self.assertEqual(validate_move_list(_problem(robot_capacity=2, wafers=wafers), moves), [])
 
+    def test_swap_requires_dual_arm_and_distinct_robot_slots(self) -> None:
+        """单臂机器人或同一手槽收发都不能执行原子换片。"""
+        wafers = [
+            Wafer(0, 1, "route", 0, [_stage(0, "LP")], [], "P"),
+            Wafer(1, 2, "route", 1, [_stage(0, "PM1")], [], "P"),
+        ]
+        moves = [
+            _move(1, 6, 0, 1, ModuleName="LP", SlotList=[1], RelatedActionType=1, MatIDList=[1]),
+            _move(2, 0, 1, 2, Robot="R", RobotSlotList=[1], SrcStationList=["LP"], SrcSlotList=[1], MatIDList=[1]),
+            _move(3, 7, 2, 3, ModuleName="LP"),
+            _move(4, 5, 2, 3, Robot="R", RobotSlotList=[1], SrcStationList=["LP"], DestStationList=["PM1"], MatIDList=[1]),
+            _move(5, 6, 3, 4, ModuleName="PM1", SlotList=[1], RelatedActionType=2, MatIDList=[1, 2]),
+            _move(6, 4, 4, 5, Robot="R", StationList=["PM1", "PM1"], StnRecvSlotList=[1],
+                  StnSendSlotList=[1], RecvSlotList=[2], SendSlotList=[1],
+                  RecvMatList=[2], SendMatList=[1]),
+        ]
+
+        single_arm_issues = validate_move_list(_problem(robot_capacity=1, wafers=wafers), moves)
+        self.assertIn("不支持双臂换片", single_arm_issues[0])
+
+        moves[-1]["RecvSlotList"] = [1]
+        same_slot_issues = validate_move_list(_problem(robot_capacity=2, wafers=wafers), moves)
+        self.assertIn("接收手槽和发送手槽必须不同", same_slot_issues[0])
+
     def test_premove_ids_do_not_affect_validation(self) -> None:
         """PreMoveID 即使不合法也不能改变状态校验结果。"""
         moves = [_move(1, 9, 0, 1, ModuleName="PM1", SlotList=[1], MatIDList=[], PreMoveID=[999])]

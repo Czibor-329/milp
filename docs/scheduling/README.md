@@ -18,6 +18,10 @@
 - [深层神经派工](neural-dispatch.md)：直觉与理论依据、离线训练、低延迟推理和质量验收。
 - [通用 LoadLock manager](neural-dispatch.md#loadlock策略无关的两层电梯式-petri-eta-manager)：
   Heuristic、Neural、BC、RL 共用的 Petri 安全候选 + 动态 ETA 物理锁绑定层。
+- [LoadLock 双槽交换与群控策略对比](loadlock-strategies.md)：
+  真实双槽交换，以及 ETA、collective LOOK、轮询、方向分区和交换优先的文献映射与基准。
+- [双臂 Robot 的加工腔原子换片](dual-arm-process-swap.md)：
+  单槽 PM 的 pick-old/place-new 时序、策略共用实现和 2/3 片逐动作验证。
 - [实时重算性能退化调研](realtime-recompute-investigation.md)：R2 公平对照、滚动调度研究依据、根因与修复结果。
 - [运行、验收与选择](operation-guide.md)：命令行参数、输出、自检和选型建议。
 
@@ -27,7 +31,8 @@
 - **定序**：确定每个腔/槽和每台机器手上 hop 的先后次序；不是直接为每个动作填绝对时间。
 - **解码**：从逐步选择的候选 hop 构建定序。默认解码保持同 route 发片 FIFO。
 - **精确定时**：定序确定后，`solve_timing` 用差分约束图计算最早可行时间与 makespan，并检查驻留上界。
-- **swap**：LoadLock 采用 entry/exit 分槽、允许异型片共存的变体；定时器会补充压力状态先后约束。
+- **LoadLock swap**：LoadLock 采用 entry/exit 分槽、允许异型片共存；定时器补充压力状态约束。
+- **PM swap**：双臂 Robot 在同一次 PM 开门内先取已加工片、再把未加工片放入同一槽。
 
 代码入口：`src/schedule/api.py` 提供启发式与 RL 搜索入口，`src/schedule/l2d/`
 提供 L2D，`src/schedule/milp.py` 提供 MILP；`src/timing/solve.py` 只负责固定顺序定时。

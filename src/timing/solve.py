@@ -1,5 +1,6 @@
-"""定时主入口：给定固定资源顺序，构图并求最早可行时刻。"""
+"""定时主入口：给定固定资源顺序，识别双臂 PM 换片并求最早可行时刻。"""
 
+import copy
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
@@ -23,20 +24,114 @@ class SolveResult:
     runtime: float = 0.0
 
 
+def _promote_process_chamber_swaps(ir: Problem, wafers, orders):
+    """把安全的 ``出 PM→入 PM`` 双跳顺序提升为双臂原子换片。
+
+    解码器仍按容量 Petri 网产生保守的 backward 顺序，因此不会因为换片能力扩大
+    可达动作集合而引入死锁。这里仅识别同一单槽加工腔的连续占用：若出片 hop 后
+    紧接同一双臂 Robot 的入片 hop，就把 Robot 局部顺序改为“携新片到 PM→换出旧片”，
+    并记录给差分图和 MoveList 导出器。两片之间存在 WAC/dummy 清洁时禁止合并。
+    """
+    if not getattr(orders, "chambers", None) or not getattr(orders, "robots", None):
+        return orders
+
+    wmap = {wafer.wid: wafer for wafer in wafers}
+    forbidden_pairs = {
+        (clean.after, clean.before)
+        for clean in _clean_specs(ir, list(wafers))
+        if clean.after is not None and clean.before is not None
+    }
+    forbidden_pairs.update(_dummy_order_pairs(ir, list(wafers)))
+
+    promoted = copy.copy(orders)
+    promoted.robots = {
+        robot: list(sequence)
+        for robot, sequence in orders.robots.items()
+    }
+    promoted.process_swaps = []
+
+    for (chamber_name, _slot), occupants in orders.chambers.items():
+        chamber = ir.chambers.get(chamber_name)
+        if chamber is None:
+            continue
+        for outgoing_visit, incoming_visit in zip(occupants, occupants[1:]):
+            outgoing_wid, outgoing_stage_index = outgoing_visit
+            incoming_wid, incoming_stage_index = incoming_visit
+            if outgoing_wid == incoming_wid or incoming_stage_index <= 0:
+                continue
+            if (outgoing_visit, incoming_visit) in forbidden_pairs:
+                continue
+
+            outgoing_wafer = wmap[outgoing_wid]
+            incoming_wafer = wmap[incoming_wid]
+            outgoing_stage = outgoing_wafer.stages[outgoing_stage_index]
+            incoming_stage = incoming_wafer.stages[incoming_stage_index]
+            if (
+                outgoing_stage.stage_type != "process"
+                or incoming_stage.stage_type != "process"
+            ):
+                continue
+            robot_name = outgoing_stage.out_robot
+            if not robot_name or robot_name != incoming_stage.in_robot:
+                continue
+            robot = ir.robots.get(robot_name)
+            if robot is None or not robot.can_swap or int(robot.capacity) < 2:
+                continue
+
+            outgoing_hop = (outgoing_wid, outgoing_stage_index)
+            incoming_hop = (incoming_wid, incoming_stage_index - 1)
+            robot_sequence = promoted.robots.get(robot_name)
+            if robot_sequence is None:
+                continue
+            try:
+                outgoing_index = robot_sequence.index(outgoing_hop)
+                incoming_index = robot_sequence.index(incoming_hop)
+            except ValueError:
+                continue
+            if incoming_index != outgoing_index + 1:
+                continue
+
+            robot_sequence[outgoing_index], robot_sequence[incoming_index] = (
+                incoming_hop,
+                outgoing_hop,
+            )
+            promoted.process_swaps.append(
+                (incoming_hop, outgoing_hop, chamber_name)
+            )
+    return promoted
+
+
 def solve_timing(
     ir: Problem,
     wafers,
     orders: Optional[Any] = None,
     *,
     enforce_resumed_route_fifo: bool = True,
+    enable_process_swaps: bool = True,
 ) -> SolveResult:
-    """按固定资源顺序求最早可行时刻；可选关闭续排晶圆裁剪后首跳的伪发片 FIFO。"""
+    """按固定资源顺序求最早可行时刻，并自动启用安全的双臂 PM 换片。
+
+    ``enable_process_swaps=False`` 供换片差分图意外不可行时内部回退，也可用于复现
+    旧口径。关闭续排 FIFO 的含义保持不变。
+    """
     t_start = time.perf_counter()
     tm = Durations(ir)
     wmap = {w.wid: w for w in wafers}
     nodes = _Nodes(wafers)
     if orders is None:
         raise ValueError("solve_timing 只负责定时，调用方必须提供固定资源顺序 orders")
+    original_orders = orders
+    if enable_process_swaps:
+        orders = _promote_process_chamber_swaps(ir, wafers, orders)
+    process_swaps = list(getattr(orders, "process_swaps", ()) or ())
+    swap_by_incoming = {
+        incoming_hop: (outgoing_hop, chamber)
+        for incoming_hop, outgoing_hop, chamber in process_swaps
+    }
+    swap_by_outgoing = {
+        outgoing_hop: (incoming_hop, chamber)
+        for incoming_hop, outgoing_hop, chamber in process_swaps
+    }
 
     edges: List[Tuple[int, int, float]] = []
     res_edges: List[Tuple[int, int, float]] = []   # 驻留后向边，单列以便诊断
@@ -100,6 +195,16 @@ def solve_timing(
         for j in range(K):
             ai, ri, an = nodes.a(w.wid, j), nodes.r(w.wid, j), nodes.a(w.wid, j + 1)
             pdur, Lj = _stage_dwell(tm, w, j), _hop_span(tm, w, j)
+            if (w.wid, j) in swap_by_incoming:
+                outgoing_hop, chamber = swap_by_incoming[(w.wid, j)]
+                outgoing_wafer = wmap[outgoing_hop[0]]
+                outgoing_stage = outgoing_wafer.stages[outgoing_hop[1]]
+                Lj += tm.pick_t(outgoing_stage.out_robot, chamber)
+            elif (w.wid, j) in swap_by_outgoing:
+                incoming_hop, chamber = swap_by_outgoing[(w.wid, j)]
+                incoming_wafer = wmap[incoming_hop[0]]
+                incoming_stage = incoming_wafer.stages[incoming_hop[1] + 1]
+                Lj += tm.place_t(incoming_stage.in_robot, chamber)
             edges.append((ai, ri, pdur))            # (P)   r ≥ a + 停留
             edges.append((ri, an, Lj))              # 链正  a_next ≥ r + L
             edges.append((an, ri, -Lj))             # 链反  r ≥ a_next − L（下一腔被占则推迟 pick）
@@ -155,10 +260,27 @@ def solve_timing(
                 continue                            # 同片重访：precedence 已序
             stage_leave = wmap[wid_leave].stages[j_leave]
             stage_enter = wmap[wid_enter].stages[j_enter]
-            # gap = pick + post_prepare + place + post_prepare + ll time
-            gap = (tm.pick_t(stage_leave.out_robot, chamber) + tm.pick_post(stage_leave.out_robot, chamber)
-                   + tm.place_t(stage_enter.in_robot, chamber) + tm.place_pre(stage_enter.in_robot, chamber)
-                   + _ll_reuse_setup(ir, stage_leave, stage_enter))
+            incoming_hop = (wid_enter, j_enter - 1)
+            outgoing_hop = (wid_leave, j_leave)
+            is_process_swap = (
+                swap_by_incoming.get(incoming_hop)
+                == (outgoing_hop, chamber)
+            )
+            if is_process_swap:
+                # PM 门只开关一次：先从 PM 取旧片，再把另一臂的新片放入同一槽。
+                gap = (
+                    tm.pick_t(stage_leave.out_robot, chamber)
+                    + tm.place_t(stage_enter.in_robot, chamber)
+                )
+            else:
+                # gap = pick + post_prepare + place + post_prepare + ll time
+                gap = (
+                    tm.pick_t(stage_leave.out_robot, chamber)
+                    + tm.pick_post(stage_leave.out_robot, chamber)
+                    + tm.place_t(stage_enter.in_robot, chamber)
+                    + tm.place_pre(stage_enter.in_robot, chamber)
+                    + _ll_reuse_setup(ir, stage_leave, stage_enter)
+                )
             tail, head = nodes.r(wid_leave, j_leave), nodes.a(wid_enter, j_enter)
             # tail + gap <= head
             edges.append((tail, head, gap))
@@ -195,12 +317,42 @@ def solve_timing(
         for (wid_prev, j_prev), (wid_next, j_next) in zip(hops, hops[1:]):
             if wid_prev == wid_next:
                 continue                            # 同片重访：precedence 已序
+            if swap_by_incoming.get((wid_prev, j_prev), (None, None))[0] == (
+                wid_next,
+                j_next,
+            ):
+                # 双臂 PM 换片的两个逻辑 hop 在时间上重叠，由下方专用等式约束。
+                continue
             wafer_prev, wafer_next = wmap[wid_prev], wmap[wid_next]
             gap = _robot_switch_gap(ir, tm, rob, wafer_prev, j_prev, wafer_next, j_next)
             tail, head = nodes.a(wid_prev, j_prev + 1), nodes.r(wid_next, j_next)
             # tail + gap <= head
             edges.append((tail, head, gap))
             tagged.append((tail, head, gap, "R", rob, (wid_prev, j_prev), (wid_next, j_next)))
+
+    # 双臂 PM 换片：入片先在上游被取起并转到 PM；到达 PM 的时刻等于旧片 pick
+    # 起点。两条反向边把等式钉死，配合上方扩展后的两个 hop span，共享一次
+    # pick-old + place-new 服务而不重复转位。
+    for incoming_hop, outgoing_hop, chamber in process_swaps:
+        incoming_wid, incoming_stage_index = incoming_hop
+        outgoing_wid, outgoing_stage_index = outgoing_hop
+        incoming_wafer = wmap[incoming_wid]
+        incoming_source = incoming_wafer.stages[incoming_stage_index].chamber
+        robot_name = incoming_wafer.transports[incoming_stage_index]
+        approach = tm.pick_t(robot_name, incoming_source) + tm.move(robot_name)
+        incoming_pick = nodes.r(incoming_wid, incoming_stage_index)
+        outgoing_pick = nodes.r(outgoing_wid, outgoing_stage_index)
+        edges.append((incoming_pick, outgoing_pick, approach))
+        edges.append((outgoing_pick, incoming_pick, -approach))
+        tagged.append((
+            incoming_pick,
+            outgoing_pick,
+            approach,
+            "S",
+            chamber,
+            incoming_hop,
+            outgoing_hop,
+        ))
 
     # 清洁时间预留（与 MILP Part A 一一对应，只加时间边、不改占腔顺序/不加资源）：
     #   pre  → 源点绝对下界：a(首片) ≥ pre_dur + place（占腔起点不早于 pre_dur）
@@ -243,6 +395,7 @@ def solve_timing(
 
     if ok:
         _fill_schedule(res, wafers, nodes, dist)
+        res.process_swaps = process_swaps              # type: ignore[attr-defined]
         for cl in post_events:                     # 后清洁计入 makespan（末片占腔终点 + post_dur）
             wa, ja = cl.after
             sa = wmap[wa].stages[ja]
@@ -256,6 +409,14 @@ def solve_timing(
     # 不可行：去掉驻留边再求一次，用来区分「真死锁」和「纯粹驻留超限」
     dist0, ok0 = _bellman_ford_longest(len(nodes), edges)
     if not ok0:
+        if process_swaps and enable_process_swaps:
+            return solve_timing(
+                ir,
+                wafers,
+                original_orders,
+                enforce_resumed_route_fifo=enforce_resumed_route_fifo,
+                enable_process_swaps=False,
+            )
         return res
     viols = []
     for w in wafers:

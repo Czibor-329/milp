@@ -1,4 +1,4 @@
-"""Petri 标识图定序（面向单臂机器手）+ 可搜索候选解码器。
+"""Petri 标识图定序（兼容单臂与双臂换片）+ 可搜索候选解码器。
 
 单臂机器手一次只持一片：要把上游片搬进某腔，该腔必须先空。于是对一条流水顺序
 LA→PM1→LB，唯一无死锁的机器手节拍是「先把 PM1 的片搬到 LB（清空 PM1），再退回
@@ -67,6 +67,11 @@ class _Orders:
     # loadlock 每腔跨槽合并的占用提交序 腔→[(wid, stage)]：entry/exit 分槽共存（swap）后，
     # 同槽序管不到异型相邻占用，solve_timing 靠它补跨槽压力态边。
     ll_seq: Dict[str, List[Tuple[int, int]]] = field(default_factory=dict)
+    # 双臂加工腔原子换片，由 solve_timing 从既有安全顺序中识别并填充：
+    # [((入片 wid, 入片前 stage), (出片 wid, PM stage), PM 名)]。
+    process_swaps: List[
+        Tuple[Tuple[int, int], Tuple[int, int], str]
+    ] = field(default_factory=list)
 
 
 # —— 可注入决策的解码：每步先做 Petri 可达性掩码，再把安全候选交给 chooser 排序提交。

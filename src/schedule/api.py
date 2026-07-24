@@ -11,7 +11,9 @@ from src.timing.solve import SolveResult, solve_timing
 
 from src.timing._common import _DecodeDeadlock
 from .loadlock_dispatch import (
+    EXCHANGE_DISABLED,
     LoadLockDispatchManager,
+    resolve_loadlock_exchange_mode,
     resolve_loadlock_manager,
 )
 from .sequencing import decode_orders, decode_orders_choosing
@@ -28,6 +30,7 @@ _BC_DEFAULT_SAMPLES = 64
 def start_schedule(ir: Problem, *, verbose: bool = True, seed: int = 0,
                    random_orders: int = 0, search_seconds: float = 0.0,
                    loadlock_manager: LoadLockDispatchManager | str | None = "petri-eta",
+                   loadlock_exchange: str | bool | None = "auto",
                    ) -> SolveResult:
     """快速启发式定序 to solve_timing；可选 milp.check_solution 复核。
 
@@ -44,6 +47,7 @@ def start_schedule(ir: Problem, *, verbose: bool = True, seed: int = 0,
 
     快序（吞吐优先）因驻留(qtime)排不出时回退驻留预留定序（reserve=True）。"""
     manager = resolve_loadlock_manager(loadlock_manager)
+    exchange_mode = resolve_loadlock_exchange_mode(loadlock_exchange)
     durations = Durations(ir)
     wafers = ir.wafers
     res = _heuristic_schedule(
@@ -52,22 +56,36 @@ def start_schedule(ir: Problem, *, verbose: bool = True, seed: int = 0,
         wafers,
         verbose,
         loadlock_manager=manager,
+        loadlock_exchange_mode=exchange_mode,
     )
 
     # 启发式不可行（多为超驻留 qtime 排不出）→ 回退驻留预留定序（reserve=True，牺牲吞吐换可行）
     if res is None or not getattr(res, "feasible", False):
         if verbose:
             print("[timing] 启发式不可行（疑似超驻留）→ 回退驻留预留定序(reserve=True)")
-        orders = decode_orders(ir, durations, wafers, reserve=True)
+        orders = decode_orders(
+            ir,
+            durations,
+            wafers,
+            reserve=True,
+            swap=exchange_mode != EXCHANGE_DISABLED,
+        )
         fb = solve_timing(ir, wafers, orders=orders)
+        fb.loadlock_exchange = (  # type: ignore[attr-defined]
+            "enabled"
+            if exchange_mode != EXCHANGE_DISABLED
+            else EXCHANGE_DISABLED
+        )
         res = _pick_best(res, fb) or fb
 
     if random_orders > 0:
         res = _random_rollouts(ir, durations, wafers, res,
-                               n=random_orders, seed=seed, verbose=verbose)
+                               n=random_orders, seed=seed, verbose=verbose,
+                               swap=exchange_mode != EXCHANGE_DISABLED)
     if search_seconds > 0:
         res = _two_job_timed_search(ir, durations, wafers, res,
-                                    seconds=search_seconds, seed=seed, verbose=verbose)
+                                    seconds=search_seconds, seed=seed, verbose=verbose,
+                                    loadlock_exchange_mode=exchange_mode)
     if getattr(res, "feasible", False):
         issues = check_solution(ir, res)
         if issues:
@@ -82,6 +100,12 @@ def start_schedule(ir: Problem, *, verbose: bool = True, seed: int = 0,
             res,
             "loadlock_manager",
             "fixed-baseline",
+        )
+        res.loadlock_exchange_requested = exchange_mode  # type: ignore[attr-defined]
+        res.loadlock_exchange_selected = getattr(  # type: ignore[attr-defined]
+            res,
+            "loadlock_exchange",
+            "unknown",
         )
     return res
 

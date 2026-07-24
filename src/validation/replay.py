@@ -721,12 +721,9 @@ def _start_swap(
         return station_send_slot
     if robot_receive_slot is None or robot_send_slot is None:
         return _issue(move, "SwapMove 缺少机器人接收或发送槽位")
-    error = _robot_slot_error(robot, robot_receive_slot, move)
-    if error:
-        return error
-    error = _robot_slot_error(robot, robot_send_slot, move)
-    if error:
-        return error
+    swap_slot_error = robot.swap_slot_error(robot_receive_slot, robot_send_slot)
+    if swap_slot_error:
+        return _issue(move, swap_slot_error)
     error = _robot_station_access_error(robot, station_name, move)
     if error:
         return error

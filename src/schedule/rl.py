@@ -16,7 +16,9 @@ from src.timing.solve import SolveResult, solve_timing
 from .api import start_schedule
 from .heuristic import _greedy_chooser, _pick_best, _sampling_chooser
 from .loadlock_dispatch import (
+    EXCHANGE_DISABLED,
     LoadLockDispatchManager,
+    resolve_loadlock_exchange_mode,
     resolve_loadlock_manager,
 )
 from .sequencing import decode_orders_choosing
@@ -39,6 +41,7 @@ def start_schedule_by_rl(
     fallback: bool = True,
     verbose: bool = False,
     loadlock_manager: LoadLockDispatchManager | str | None = "petri-eta",
+    loadlock_exchange: str | bool | None = "auto",
 ) -> SolveResult:
     """在限时采样中搜索顶层资源顺序，并用定时器评估完整候选。"""
     if search_seconds < 0:
@@ -52,13 +55,19 @@ def start_schedule_by_rl(
 
     budget = min(float(search_seconds), _MAX_SEARCH_SECONDS)
     manager = resolve_loadlock_manager(loadlock_manager)
+    exchange_mode = resolve_loadlock_exchange_mode(loadlock_exchange)
     search_start = time.perf_counter()
     deadline = search_start + budget
     durations = Durations(ir)
     wafers = ir.wafers
     rng = np.random.default_rng(seed)
     best = (
-        start_schedule(ir, verbose=False, loadlock_manager=manager)
+        start_schedule(
+            ir,
+            verbose=False,
+            loadlock_manager=manager,
+            loadlock_exchange=exchange_mode,
+        )
         if fallback
         else None
     )
@@ -91,6 +100,7 @@ def start_schedule_by_rl(
                 wafers,
                 chooser=chooser,
                 reserve=False,
+                swap=exchange_mode != EXCHANGE_DISABLED,
             )
         except (RuntimeError, _DecodeDeadlock):
             longest_rollout = max(longest_rollout, time.perf_counter() - rollout_start)
@@ -115,6 +125,12 @@ def start_schedule_by_rl(
             best,
             "loadlock_manager",
             "policy-or-fixed-floor",
+        )
+        best.loadlock_exchange_requested = exchange_mode  # type: ignore[attr-defined]
+        best.loadlock_exchange_selected = getattr(  # type: ignore[attr-defined]
+            best,
+            "loadlock_exchange",
+            "enabled" if exchange_mode != EXCHANGE_DISABLED else EXCHANGE_DISABLED,
         )
         best.rl_rollouts = rollout_count  # type: ignore[attr-defined]
         best.rl_improvements = improvement_count  # type: ignore[attr-defined]

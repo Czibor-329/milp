@@ -5,13 +5,19 @@ from src.timing.spans import _ll_proc
 from src.validation import validate_move_list
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
-from src.validation.state import MachineState, is_doorless_station
+from src.validation.state import (
+    ATMOSPHERE,
+    VACUUM,
+    MachineState,
+    is_doorless_station,
+)
 
 
 RELATED_ACTION_PLACE = 0
 RELATED_ACTION_PICK = 1
 RELATED_ROBOT_ATMOSPHERE = 0
 RELATED_ROBOT_VACUUM = 1
+PRIMARY_ROBOT_SLOT = 1
 
 
 def export_movelist(
@@ -84,6 +90,15 @@ def export_movelist(
         return supp_pp, supp_pre, press_after
 
     supp_place_post, supp_pick_pre, press_after_swap = _detect_swaps()
+    process_swaps = list(getattr(res, "process_swaps", ()) or ())
+    process_swap_by_incoming = {
+        incoming_hop: (outgoing_hop, chamber)
+        for incoming_hop, outgoing_hop, chamber in process_swaps
+    }
+    process_swap_by_outgoing = {
+        outgoing_hop: (incoming_hop, chamber)
+        for incoming_hop, outgoing_hop, chamber in process_swaps
+    }
 
     def emit(mtype: int, start: float, end: float, *, station: str = "",
              robot: str = "", src: str = "", dst: str = "", cslot: int = 1,
@@ -99,7 +114,7 @@ def export_movelist(
             mv["Station"] = station
         if robot:
             mv["Robot"] = robot
-            mv["RobotSlotList"] = [1]
+            mv["RobotSlotList"] = [PRIMARY_ROBOT_SLOT]
         if src:
             mv["SrcStationList"] = [src]; mv["SrcSlotList"] = [srcslot or cslot]
         if dst:
@@ -109,8 +124,203 @@ def export_movelist(
         mv.update(extra)
         moves.append(mv)
 
+    def emit_process_swap_incoming(
+        incoming_wafer: Wafer,
+        incoming_stage_index: int,
+        outgoing_hop: Tuple[int, int],
+        chamber: str,
+    ) -> None:
+        """导出双臂 PM 换片的入站半程、原子 SwapMove 与一次关门。"""
+        outgoing_wafer = wafers[outgoing_hop[0]]
+        outgoing_stage_index = outgoing_hop[1]
+        incoming_rows = res.schedule[incoming_wafer.wid]
+        outgoing_rows = res.schedule[outgoing_wafer.wid]
+        source = incoming_rows[incoming_stage_index][1]
+        incoming_pick_start = incoming_rows[incoming_stage_index][3]
+        incoming_pm_stage = incoming_stage_index + 1
+        incoming_slot = incoming_wafer.stages[incoming_pm_stage].slot + 1
+        outgoing_slot = outgoing_wafer.stages[outgoing_stage_index].slot + 1
+        robot = incoming_wafer.transports[incoming_stage_index]
+        source_slot = incoming_wafer.stages[incoming_stage_index].slot + 1
+        source_pick = tm.pick_t(robot, source)
+        source_pick_pre = tm.pick_pre(robot, source)
+        source_pick_post = tm.pick_post(robot, source)
+        swap_start = outgoing_rows[outgoing_stage_index][3]
+        swap_end = incoming_rows[incoming_pm_stage][2]
+        related_robot_type = (
+            RELATED_ROBOT_ATMOSPHERE
+            if robot in tm.atm_robots
+            else RELATED_ROBOT_VACUUM
+        )
+
+        robot_hops.setdefault(robot, []).append(
+            (incoming_pick_start, source, chamber)
+        )
+        if (
+            not is_doorless_station(source)
+            and (incoming_wafer.wid, incoming_stage_index) not in supp_pick_pre
+        ):
+            emit(
+                6,
+                incoming_pick_start - source_pick_pre,
+                incoming_pick_start,
+                station=source,
+                cslot=source_slot,
+                w=incoming_wafer,
+                RelatedActionType=RELATED_ACTION_PICK,
+                RelatedRobotType=related_robot_type,
+            )
+        emit(
+            0,
+            incoming_pick_start,
+            incoming_pick_start + source_pick,
+            robot=robot,
+            src=source,
+            cslot=source_slot,
+            w=incoming_wafer,
+        )
+        if not is_doorless_station(source):
+            emit(
+                7,
+                incoming_pick_start + source_pick,
+                incoming_pick_start + source_pick + source_pick_post,
+                station=source,
+                cslot=source_slot,
+                w=incoming_wafer,
+            )
+        emit(
+            5,
+            incoming_pick_start + source_pick,
+            swap_start,
+            robot=robot,
+            src=source,
+            dst=chamber,
+            cslot=source_slot,
+            srcslot=source_slot,
+            dstslot=incoming_slot,
+            w=incoming_wafer,
+        )
+        emit(
+            6,
+            swap_start - tm.pick_pre(robot, chamber),
+            swap_start,
+            station=chamber,
+            cslot=outgoing_slot,
+            w=outgoing_wafer,
+            RelatedActionType=2,
+            RelatedRobotType=related_robot_type,
+        )
+        emit(
+            4,
+            swap_start,
+            swap_end,
+            robot=robot,
+            cslot=incoming_slot,
+            MatIDList=[outgoing_wafer.mat_id, incoming_wafer.mat_id],
+            StepIDList=[
+                outgoing_wafer.stages[outgoing_stage_index].j + 1,
+                incoming_wafer.stages[incoming_pm_stage].j,
+            ],
+            StationList=[chamber, chamber],
+            StnRecvSlotList=[incoming_slot],
+            StnSendSlotList=[outgoing_slot],
+            RecvMatList=[outgoing_wafer.mat_id],
+            SendMatList=[incoming_wafer.mat_id],
+            RecvSlotList=[2],
+            SendSlotList=[1],
+            SwapMode=0,
+        )
+        emit(
+            7,
+            swap_end,
+            swap_end + tm.place_post(robot, chamber),
+            station=chamber,
+            cslot=incoming_slot,
+            w=incoming_wafer,
+        )
+
+    def emit_process_swap_outgoing(
+        outgoing_wafer: Wafer,
+        outgoing_stage_index: int,
+        incoming_hop: Tuple[int, int],
+        chamber: str,
+    ) -> None:
+        """导出双臂 PM 换片后旧片离站、转位并放入下一站的半程。"""
+        outgoing_rows = res.schedule[outgoing_wafer.wid]
+        incoming_rows = res.schedule[incoming_hop[0]]
+        robot = outgoing_wafer.transports[outgoing_stage_index]
+        destination = outgoing_rows[outgoing_stage_index + 1][1]
+        destination_slot = outgoing_wafer.stages[outgoing_stage_index + 1].slot + 1
+        outgoing_slot = outgoing_wafer.stages[outgoing_stage_index].slot + 1
+        swap_end = incoming_rows[incoming_hop[1] + 1][2]
+        destination_arrival = swap_end + tm.move(robot)
+        destination_place_end = outgoing_rows[outgoing_stage_index + 1][2]
+        related_robot_type = (
+            RELATED_ROBOT_ATMOSPHERE
+            if robot in tm.atm_robots
+            else RELATED_ROBOT_VACUUM
+        )
+
+        robot_hops.setdefault(robot, []).append(
+            (outgoing_rows[outgoing_stage_index][3], chamber, destination)
+        )
+        emit(
+            5,
+            swap_end,
+            destination_arrival,
+            robot=robot,
+            src=chamber,
+            dst=destination,
+            cslot=outgoing_slot,
+            srcslot=outgoing_slot,
+            dstslot=destination_slot,
+            w=outgoing_wafer,
+        )
+        if not is_doorless_station(destination):
+            emit(
+                6,
+                destination_arrival - tm.place_pre(robot, destination),
+                destination_arrival,
+                station=destination,
+                cslot=destination_slot,
+                w=outgoing_wafer,
+                RelatedActionType=RELATED_ACTION_PLACE,
+                RelatedRobotType=related_robot_type,
+            )
+        emit(
+            1,
+            destination_arrival,
+            destination_place_end,
+            robot=robot,
+            dst=destination,
+            cslot=destination_slot,
+            w=outgoing_wafer,
+            StepIDList=[outgoing_wafer.stages[outgoing_stage_index + 1].j],
+        )
+        if (
+            not is_doorless_station(destination)
+            and (outgoing_wafer.wid, outgoing_stage_index + 1)
+            not in supp_place_post
+        ):
+            emit(
+                7,
+                destination_place_end,
+                destination_place_end + tm.place_post(robot, destination),
+                station=destination,
+                cslot=destination_slot,
+                w=outgoing_wafer,
+            )
+
     def emit_hop(w: Wafer, j: int) -> None:
         """普通单片原子搬运 c→下一腔：源 开门(6)→pick(0)→关门(7) → 走位(5) → 目标 开门(6)→place(1)→关门(7)。"""
+        if (w.wid, j) in process_swap_by_incoming:
+            outgoing_hop, chamber = process_swap_by_incoming[(w.wid, j)]
+            emit_process_swap_incoming(w, j, outgoing_hop, chamber)
+            return
+        if (w.wid, j) in process_swap_by_outgoing:
+            incoming_hop, chamber = process_swap_by_outgoing[(w.wid, j)]
+            emit_process_swap_outgoing(w, j, incoming_hop, chamber)
+            return
         rows = res.schedule[w.wid]
         c, rv = rows[j][1], rows[j][3]
         cs = w.stages[j].slot + 1
@@ -184,6 +394,32 @@ def export_movelist(
         ch = task.chambers.get(c)
         vent = float((ch.vent_time if ch else 0.0) or 0.0)
         pump = float((ch.pump_time if ch else 0.0) or 0.0)
+        first_start, _, first_direction = occs[0]
+        initial_station = initial_state.stations.get(c)
+        initial_environment = getattr(
+            initial_station,
+            "environment",
+            ATMOSPHERE,
+        )
+        required_environment = (
+            ATMOSPHERE if first_direction == "entry" else VACUUM
+        )
+        if initial_environment != required_environment:
+            setup, last, cur = (
+                (vent, VACUUM, ATMOSPHERE)
+                if required_environment == ATMOSPHERE
+                else (pump, ATMOSPHERE, VACUUM)
+            )
+            if setup > 0:
+                emit(
+                    10,
+                    first_start - setup,
+                    first_start,
+                    station=c,
+                    MatIDList=[],
+                    LastState=last,
+                    CurState=cur,
+                )
         for (s0, e0, t0), (s1, e1, t1) in zip(occs, occs[1:]):
             # entry→entry 须空充(VAC→ATM 回大气才能再接收大气片)，exit→exit 须空抽(ATM→VAC)。
             # LastState=前态、CurState=目标态：与每片 type-10 串成 ATM/VAC 交替链；无片用空 MatIDList 标记。
@@ -211,16 +447,107 @@ def export_movelist(
              MatIDList=[], CleanRecipe=cl.recipe, CleanTaskName=cl.task)
 
     moves.sort(key=lambda m: (m["StartTime"], m["MoveID"]))
+    _assign_robot_slots(moves, initial_state)
     return moves
 
 
+def _assign_robot_slots(moves: List[dict], initial_state: MachineState) -> None:
+    """按 Robot 动作时序分配真实手槽，使普通搬运与双臂 SwapMove 连续一致。
+
+    旧导出器把所有动作写成手槽 1，在出现 PM 原子换片后会丢失“旧片留在另一臂”
+    的状态。这里不改变动作时刻，只模拟 Robot 手中物料：pick 占空槽、place 释放
+    对应槽、swap 用一槽送新片并用另一空槽接旧片。
+    """
+    robot_hands: Dict[str, Dict[int, Optional[Any]]] = {}
+    for robot_name, robot_state in initial_state.robots.items():
+        robot_hands[robot_name] = {
+            int(slot): (
+                hand.material_id if hand is not None else None
+            )
+            for slot, hand in robot_state.hands.items()
+        }
+
+    def material_id(move: Mapping[str, Any], field: str = "MatIDList"):
+        values = list(move.get(field) or [])
+        return values[0] if values else None
+
+    def matching_slot(hands: Mapping[int, Optional[Any]], material: Any) -> Optional[int]:
+        return next(
+            (slot for slot, held in sorted(hands.items()) if held == material),
+            None,
+        )
+
+    def empty_slot(hands: Mapping[int, Optional[Any]], excluded: set[int] | None = None) -> int:
+        excluded = excluded or set()
+        slot = next(
+            (
+                candidate
+                for candidate, held in sorted(hands.items())
+                if held is None and candidate not in excluded
+            ),
+            None,
+        )
+        if slot is None:
+            raise ValueError("双臂换片时 Robot 没有可用空手槽")
+        return slot
+
+    for move in moves:
+        move_type = int(move.get("MoveType", -1))
+        robot_name = str(move.get("Robot") or move.get("ModuleName") or "")
+        hands = robot_hands.get(robot_name)
+        if hands is None or move_type not in {0, 1, 4, 5}:
+            continue
+        if move_type == 0:
+            material = material_id(move)
+            slot = empty_slot(hands)
+            move["RobotSlotList"] = [slot]
+            hands[slot] = material
+        elif move_type == 1:
+            material = material_id(move)
+            slot = matching_slot(hands, material)
+            if slot is None:
+                slot = empty_slot(hands)
+            move["RobotSlotList"] = [slot]
+            hands[slot] = None
+        elif move_type == 4:
+            send_material = material_id(move, "SendMatList")
+            receive_material = material_id(move, "RecvMatList")
+            send_slot = matching_slot(hands, send_material)
+            if send_slot is None:
+                raise ValueError(
+                    f"{robot_name} 执行 PM 换片时未持有待放入物料 {send_material}"
+                )
+            receive_slot = empty_slot(hands, {send_slot})
+            move["SendSlotList"] = [send_slot]
+            move["RecvSlotList"] = [receive_slot]
+            hands[send_slot] = None
+            hands[receive_slot] = receive_material
+        else:
+            material = material_id(move)
+            if material is None:
+                move["RobotSlotList"] = [min(hands, default=PRIMARY_ROBOT_SLOT)]
+                continue
+            slot = matching_slot(hands, material)
+            if slot is not None:
+                move["RobotSlotList"] = [slot]
+
+
 def check_solution(task: Problem, res: SolveResult) -> List[str]:
-    """独立复核：把解代回各约束，返回违例列表（空=通过）。验证 MILP 自身正确。"""
+    """独立复核：把解代回各约束，含双臂 PM 重叠换片的合法例外。"""
     tm = Durations(task)
     wafers = {w.wid: w for w in task.wafers}
     sched = res.schedule
     issues: List[str] = []
     eps = 1e-4
+    process_swaps = list(getattr(res, "process_swaps", ()) or ())
+    process_swap_visits = {
+        (outgoing_hop, (incoming_hop[0], incoming_hop[1] + 1))
+        for incoming_hop, outgoing_hop, _chamber in process_swaps
+    }
+    process_swap_hops = {
+        (incoming_hop, outgoing_hop)
+        for incoming_hop, outgoing_hop, _chamber in process_swaps
+    }
 
     # (P) place 关门 + 加工 + pick 开门 完成才能取
     for wid, rows in sched.items():
@@ -236,7 +563,10 @@ def check_solution(task: Problem, res: SolveResult) -> List[str]:
 
     # (C) 每 (腔,槽位) 不重叠（跳过 loadport/buffer/dummyport 与 source/sink）
     skip_types = {"loadport", "buffer", "dummyport"}
-    intervals: Dict[Tuple[str, int], List[Tuple[float, float, int]]] = {}
+    intervals: Dict[
+        Tuple[str, int],
+        List[Tuple[float, float, int, int]],
+    ] = {}
     for wid, rows in sched.items():
         w = wafers[wid]
         for j, (_, c, av, rv) in enumerate(rows):
@@ -246,26 +576,42 @@ def check_solution(task: Problem, res: SolveResult) -> List[str]:
                 continue
             st = av - (tm.place_t(s.in_robot, c) + tm.place_pre(s.in_robot, c) if s.in_robot else 0.0)
             en = rv + (tm.pick_t(s.out_robot, c) + tm.pick_post(s.out_robot, c) if s.out_robot else 0.0)
-            intervals.setdefault((c, s.slot), []).append((st, en, wid))
+            intervals.setdefault((c, s.slot), []).append((st, en, wid, j))
     for (c, slot), ivs in intervals.items():
         ivs.sort()
         for i in range(len(ivs) - 1):
             if ivs[i][1] > ivs[i + 1][0] + eps:
-                issues.append(f"C 重叠 腔{c}#{slot}: w{ivs[i][2]}[..{ivs[i][1]:.1f}] 与 w{ivs[i+1][2]}[{ivs[i+1][0]:.1f}..]")
+                previous_visit = (ivs[i][2], ivs[i][3])
+                following_visit = (ivs[i + 1][2], ivs[i + 1][3])
+                if (previous_visit, following_visit) in process_swap_visits:
+                    continue
+                issues.append(
+                    f"C 重叠 腔{c}#{slot}: "
+                    f"w{ivs[i][2]}[..{ivs[i][1]:.1f}] 与 "
+                    f"w{ivs[i + 1][2]}[{ivs[i + 1][0]:.1f}..]"
+                )
 
     # (R) 机器手不重叠
-    rob_iv: Dict[str, List[Tuple[float, float, int]]] = {}
+    rob_iv: Dict[str, List[Tuple[float, float, int, int]]] = {}
     for wid, rows in sched.items():
         w = wafers[wid]
         for j in range(len(rows) - 1):
             _, _, _, rv = rows[j]
             _, _, av_next, _ = rows[j + 1]
-            rob_iv.setdefault(w.transports[j], []).append((rv, av_next, wid))
+            rob_iv.setdefault(w.transports[j], []).append((rv, av_next, wid, j))
     for rob, ivs in rob_iv.items():
         ivs.sort()
         for i in range(len(ivs) - 1):
             if ivs[i][1] > ivs[i + 1][0] + eps:
-                issues.append(f"R 重叠 手{rob}: w{ivs[i][2]}[..{ivs[i][1]:.1f}] 与 w{ivs[i+1][2]}[{ivs[i+1][0]:.1f}..]")
+                previous_hop = (ivs[i][2], ivs[i][3])
+                following_hop = (ivs[i + 1][2], ivs[i + 1][3])
+                if (previous_hop, following_hop) in process_swap_hops:
+                    continue
+                issues.append(
+                    f"R 重叠 手{rob}: "
+                    f"w{ivs[i][2]}[..{ivs[i][1]:.1f}] 与 "
+                    f"w{ivs[i + 1][2]}[{ivs[i + 1][0]:.1f}..]"
+                )
 
     # (LL) loadlock 抽充气状态机：按腔重建时序占用，校验连续用例间是否预留了空抽/空充(preprepare)
     # 间隙——补 MILP/movelist 未独立复核的 LL 状态。初始态按首用所需（preprepare：开机把 LL 预置到

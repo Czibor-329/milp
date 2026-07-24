@@ -693,7 +693,8 @@ def _build_robots(robots_raw: Mapping[str, Any]) -> Dict[str, Robot]:
 def _build_chambers(stations_raw: Mapping[str, Any]) -> Dict[str, Chamber]:
     """从 task_payload["Stations"] 提取站点静态配置 + 门动作时长，折进 Chamber 类。
 
-    含 loadport（作为门动作时长载体）；LL 建模容量钳为 1（单一压力态/抽充气计时正确）。
+    含 loadport（作为门动作时长载体）。LoadLock 保留物理容量；双槽异型共存时，
+    sequencing/timing 通过跨槽 ``ll_seq`` 统一约束单一压力态。
     """
     out: Dict[str, Chamber] = {}
     for name, entry in (stations_raw or {}).items():
@@ -720,8 +721,6 @@ def _build_chambers(stations_raw: Mapping[str, Any]) -> Dict[str, Chamber]:
         if entry.get("VentTime") is not None:
             chamber.vent_time = float(entry["VentTime"])
         if cls.lower() == "loadlock":
-            # 建模容量钳为 1（保持单一压力态/抽充气计时正确）。
-            chamber.capacity = 1
             # 接口 pump/vent 在 PrePrepareTime 列表里；显式字段优先。LL 时长保留小数。
             for pp in (entry.get("PrePrepareTime") or []):
                 if not isinstance(pp, Mapping) or pp.get("Time") is None:

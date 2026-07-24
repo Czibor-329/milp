@@ -23,6 +23,9 @@ VACUUM = "vacuum"
 ENTRY = "entry"
 EXIT = "exit"
 LOADLOCK_TYPE = "loadlock"
+EXCHANGE_AUTO = "auto"
+EXCHANGE_ENABLED = "enabled"
+EXCHANGE_DISABLED = "disabled"
 
 
 @dataclass(frozen=True)
@@ -131,6 +134,16 @@ class PetriEtaLoadLockManager:
     """
 
     name = "petri-eta-v2"
+
+    def _ordering_key(
+        self,
+        decision: LoadLockDecision,
+        marking: LoadLockDispatchMarking,
+        request: LoadLockRequest,
+    ) -> Tuple[Any, ...]:
+        """返回本 manager 的候选排序键，供派生策略替换群控规则。"""
+        del marking, request
+        return decision.ordering_key
 
     def marking(self, state: Any) -> LoadLockDispatchMarking:
         """由解码器只读状态重建双锁压力、占用、服务次数和回程容量。"""
@@ -335,7 +348,14 @@ class PetriEtaLoadLockManager:
                 return_risk=return_risk,
                 service_count=car.service_count,
             ))
-        return sorted(decisions, key=lambda decision: decision.ordering_key)
+        return sorted(
+            decisions,
+            key=lambda decision: self._ordering_key(
+                decision,
+                marking,
+                request,
+            ),
+        )
 
     def rank_candidates(
         self,
@@ -364,8 +384,159 @@ class PetriEtaLoadLockManager:
         )
 
 
+class CollectiveLookLoadLockManager(PetriEtaLoadLockManager):
+    """两层集选 LOOK：优先继续当前压力方向，再比较完成时刻。
+
+    两层电梯没有中间楼层，LOOK/collective control 退化为“先服务当前侧请求，再空返”。
+    对 LoadLock 而言，这等价于优先避免一次空抽或空充；它适合作为压力循环最少基线。
+    """
+
+    name = "collective-look-v1"
+
+    def _ordering_key(
+        self,
+        decision: LoadLockDecision,
+        marking: LoadLockDispatchMarking,
+        request: LoadLockRequest,
+    ) -> Tuple[Any, ...]:
+        """先比较空压力循环，再以 ETA、回程风险和稳定名称打破平局。"""
+        del marking, request
+        return (
+            int(decision.empty_pressure_cycles),
+            float(decision.service_finish_at),
+            float(decision.return_risk),
+            float(decision.service_count),
+            decision.loadlock,
+            int(decision.slot),
+            int(decision.candidate_index),
+        )
+
+
+class RoundRobinLoadLockManager(PetriEtaLoadLockManager):
+    """轮询/最少服务次数：优先把请求交给历史服务次数最少的锁。"""
+
+    name = "round-robin-v1"
+
+    def _ordering_key(
+        self,
+        decision: LoadLockDecision,
+        marking: LoadLockDispatchMarking,
+        request: LoadLockRequest,
+    ) -> Tuple[Any, ...]:
+        """以累计服务次数实现无内部游标、可从解码标识恢复的稳定轮询。"""
+        del marking, request
+        return (
+            int(decision.service_count),
+            float(decision.service_finish_at),
+            float(decision.return_risk),
+            decision.loadlock,
+            int(decision.slot),
+            int(decision.candidate_index),
+        )
+
+
+class DedicatedDirectionLoadLockManager(PetriEtaLoadLockManager):
+    """方向分区：首把锁负责 entry，末把锁负责 exit，其余按 ETA 回退。
+
+    这是两层电梯 zoning/dedication 的直接对应，可减少压力方向切换，但在流量不对称时
+    可能牺牲利用率。首选锁不在当前 Petri 安全候选内时，仍会使用其他锁继续排程。
+    """
+
+    name = "dedicated-direction-v1"
+
+    def _ordering_key(
+        self,
+        decision: LoadLockDecision,
+        marking: LoadLockDispatchMarking,
+        request: LoadLockRequest,
+    ) -> Tuple[Any, ...]:
+        """先选择方向专用锁，再按 ETA 在同一分区内排序。"""
+        loadlocks = sorted(marking.cars)
+        preferred = (
+            loadlocks[0]
+            if request.direction == ENTRY
+            else loadlocks[-1]
+        )
+        return (
+            int(decision.loadlock != preferred),
+            float(decision.service_finish_at),
+            float(decision.return_risk),
+            float(decision.service_count),
+            decision.loadlock,
+            int(decision.slot),
+            int(decision.candidate_index),
+        )
+
+
+class ExchangeLookLoadLockManager(PetriEtaLoadLockManager):
+    """交换优先 LOOK：优先选择同门已有反向晶圆的锁，再按 ETA 排序。
+
+    entry 请求若遇到 outbound token，可在大气侧先取成品再放入生片；exit 请求若遇到
+    inbound token，可在真空侧先放入成品再取出生片。实际双槽共存、门合并和压力互锁仍
+    由 sequencing、timing 与 MoveList 状态回放负责，本规则只保留交换机会。
+    """
+
+    name = "exchange-look-v1"
+
+    def _ordering_key(
+        self,
+        decision: LoadLockDecision,
+        marking: LoadLockDispatchMarking,
+        request: LoadLockRequest,
+    ) -> Tuple[Any, ...]:
+        """先最大化可配对的反向 token 数，再比较服务完成时刻。"""
+        car = marking.cars[decision.loadlock]
+        pairable_tokens = (
+            car.outbound_tokens
+            if request.direction == ENTRY
+            else car.inbound_tokens
+        )
+        return (
+            int(pairable_tokens <= 0),
+            -int(pairable_tokens),
+            float(decision.service_finish_at),
+            float(decision.return_risk),
+            float(decision.service_count),
+            decision.loadlock,
+            int(decision.slot),
+            int(decision.candidate_index),
+        )
+
+
 # 保留旧导入名与前端 ``petri-look`` 配置；行为已经升级为基于真实时长的 ETA v2。
 PetriLookLoadLockManager = PetriEtaLoadLockManager
+
+
+def resolve_loadlock_exchange_mode(mode: str | bool | None) -> str:
+    """规范化双槽交换配置。
+
+    ``auto`` 同时评估普通与交换轨迹并取优；``enabled`` 只评估双槽交换资源口径；
+    ``disabled`` 复现整腔互斥基线。布尔值用于兼容程序化调用。
+    """
+    if mode is None:
+        return EXCHANGE_AUTO
+    if isinstance(mode, bool):
+        return EXCHANGE_ENABLED if mode else EXCHANGE_DISABLED
+    normalized = str(mode).strip().lower()
+    aliases = {
+        "": EXCHANGE_AUTO,
+        "auto": EXCHANGE_AUTO,
+        "best": EXCHANGE_AUTO,
+        "on": EXCHANGE_ENABLED,
+        "true": EXCHANGE_ENABLED,
+        "enabled": EXCHANGE_ENABLED,
+        "swap": EXCHANGE_ENABLED,
+        "off": EXCHANGE_DISABLED,
+        "false": EXCHANGE_DISABLED,
+        "disabled": EXCHANGE_DISABLED,
+        "no-swap": EXCHANGE_DISABLED,
+    }
+    if normalized in aliases:
+        return aliases[normalized]
+    raise ValueError(
+        "LoadLock exchange 只支持 auto、enabled 或 disabled，"
+        f"收到 {mode}"
+    )
 
 
 def separate_loadlock_choice(
@@ -492,7 +663,16 @@ def resolve_loadlock_manager(
         return None
     if mode in {"petri-look", "petri-eta", "eta"}:
         return PetriEtaLoadLockManager()
+    if mode in {"collective", "collective-look", "look"}:
+        return CollectiveLookLoadLockManager()
+    if mode in {"round-robin", "roundrobin", "rr"}:
+        return RoundRobinLoadLockManager()
+    if mode in {"dedicated", "dedicated-direction", "zoning"}:
+        return DedicatedDirectionLoadLockManager()
+    if mode in {"exchange", "exchange-look", "swap-look"}:
+        return ExchangeLookLoadLockManager()
     raise ValueError(
-        "LoadLock manager 只支持 joint/none 或 petri-look/petri-eta，"
+        "LoadLock manager 只支持 joint/none、petri-eta、collective-look、"
+        "round-robin、dedicated-direction 或 exchange-look，"
         f"收到 {manager}"
     )

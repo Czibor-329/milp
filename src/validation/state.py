@@ -92,13 +92,26 @@ class LoadLockState(StationState):
 
 @dataclass
 class RobotState:
-    """一个机器人当前指向、手槽物料、可达范围和忙碌时间。"""
+    """一个机器人当前指向、手槽物料、可达范围、换片能力和忙碌时间。"""
 
     name: str
     hands: Dict[int, Optional[MaterialState]] = field(default_factory=dict)
     scope: Set[str] = field(default_factory=set)
     position: Optional[str] = None
     busy_until: float = 0.0
+    can_swap: bool = False
+
+    def swap_slot_error(self, receive_slot: int, send_slot: int) -> Optional[str]:
+        """返回双臂原子换片的手槽配置错误；配置合法时返回 ``None``。"""
+        if not self.can_swap or len(self.hands) < 2:
+            return f"{self.name} 不支持双臂换片"
+        if receive_slot == send_slot:
+            return f"{self.name} 换片的接收手槽和发送手槽必须不同"
+        if receive_slot not in self.hands:
+            return f"{self.name} 未启用手槽 {receive_slot}"
+        if send_slot not in self.hands:
+            return f"{self.name} 未启用手槽 {send_slot}"
+        return None
 
 
 @dataclass
@@ -258,7 +271,7 @@ def _station_from_task(name: str, task_station: Any) -> StationState:
 
 
 def _robot_from_config(name: str, config: Mapping[str, Any]) -> RobotState:
-    """从机器人手臂配置读取手槽、可达范围和共同初始指向。"""
+    """从机器人手臂配置读取手槽、可达范围、换片能力和共同初始指向。"""
     hands: Dict[int, Optional[MaterialState]] = {}
     scope: Set[str] = set()
     positions: Set[str] = set()
@@ -272,16 +285,28 @@ def _robot_from_config(name: str, config: Mapping[str, Any]) -> RobotState:
     if not hands:
         capacity = int(config.get("Capacity", DEFAULT_SLOT_ID) or DEFAULT_SLOT_ID)
         hands = {slot: None for slot in range(DEFAULT_SLOT_ID, max(capacity, DEFAULT_SLOT_ID) + ZERO_BASED_SLOT_OFFSET)}
-    return RobotState(name, hands, scope, next(iter(positions)) if len(positions) == 1 else None)
+    configured_capacity = max(
+        int(config.get("Capacity", len(hands)) or len(hands)),
+        DEFAULT_SLOT_ID,
+    )
+    can_swap = configured_capacity >= 2 and len(hands) >= 2
+    return RobotState(
+        name=name,
+        hands=hands,
+        scope=scope,
+        position=next(iter(positions)) if len(positions) == 1 else None,
+        can_swap=can_swap,
+    )
 
 
 def _robot_from_task(name: str, task_robot: Any) -> RobotState:
     """从 ``Problem`` 机器人补建没有 init data 的初始状态。"""
     capacity = max(int(getattr(task_robot, "capacity", DEFAULT_SLOT_ID) or DEFAULT_SLOT_ID), DEFAULT_SLOT_ID)
     return RobotState(
-        name,
-        {slot: None for slot in range(DEFAULT_SLOT_ID, capacity + ZERO_BASED_SLOT_OFFSET)},
-        {str(station) for station in getattr(task_robot, "scope", [])},
+        name=name,
+        hands={slot: None for slot in range(DEFAULT_SLOT_ID, capacity + ZERO_BASED_SLOT_OFFSET)},
+        scope={str(station) for station in getattr(task_robot, "scope", [])},
+        can_swap=bool(getattr(task_robot, "can_swap", False)) and capacity >= 2,
     )
 
 

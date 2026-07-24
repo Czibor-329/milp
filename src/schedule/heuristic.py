@@ -18,6 +18,9 @@ from src.timing.solve import SolveResult, solve_timing
 
 from src.timing._common import EPS, _DecodeDeadlock
 from .loadlock_dispatch import (
+    EXCHANGE_AUTO,
+    EXCHANGE_DISABLED,
+    EXCHANGE_ENABLED,
     LoadLockDispatchManager,
     separate_loadlock_choice,
 )
@@ -72,7 +75,12 @@ def _decode_eval(ir: Problem, durations: Durations, wafers, *, swap: bool = Fals
     except (RuntimeError, _DecodeDeadlock):
         return None
     r = solve_timing(ir, wafers, orders=orders)
-    return r if getattr(r, "feasible", False) else None
+    if getattr(r, "feasible", False):
+        r.loadlock_exchange = (  # type: ignore[attr-defined]
+            EXCHANGE_ENABLED if swap else EXCHANGE_DISABLED
+        )
+        return r
+    return None
 
 
 def _decode_eval_dynamic_loadlock(
@@ -81,6 +89,8 @@ def _decode_eval_dynamic_loadlock(
     wafers,
     chooser: _Chooser,
     manager: LoadLockDispatchManager,
+    *,
+    swap: bool,
 ) -> Optional[SolveResult]:
     """用同一逻辑启发式和公共 manager 动态兑现 LoadLock/slot。"""
     managed_chooser = separate_loadlock_choice(
@@ -94,7 +104,7 @@ def _decode_eval_dynamic_loadlock(
                 durations,
                 wafers,
                 chooser=managed_chooser,
-                swap=True,
+                swap=swap,
                 trust_preferred_path=trust_preferred_path,
                 include_order_snapshots=False,
             )
@@ -108,6 +118,9 @@ def _decode_eval_dynamic_loadlock(
         )
         if getattr(result, "feasible", False):
             result.loadlock_manager = manager.name  # type: ignore[attr-defined]
+            result.loadlock_exchange = (  # type: ignore[attr-defined]
+                EXCHANGE_ENABLED if swap else EXCHANGE_DISABLED
+            )
             return result
     return None
 
@@ -128,53 +141,62 @@ def _eval_chooser(
     chooser: _Chooser,
     prev: Optional[SolveResult],
     loadlock_manager: Optional[LoadLockDispatchManager] = None,
+    loadlock_exchange_mode: str = EXCHANGE_AUTO,
 ) -> Optional[SolveResult]:
-    """评估固定锁、swap 和 manager 三条路径并取最优，保证 manager 单调不劣。
+    """按交换配置评估固定锁与 manager 轨迹并取优。
 
     ``loadlock_manager=None`` 是显式的旧基线，供 A/B 和故障隔离使用。
     """
-    no_swap = _decode_eval(
-        ir,
-        durations,
-        wafers,
-        swap=False,
-        chooser=chooser,
-        first_safe_by_preference=True,
-    )
+    r: Optional[SolveResult] = None
+    if loadlock_exchange_mode in {EXCHANGE_AUTO, EXCHANGE_DISABLED}:
+        no_swap = _decode_eval(
+            ir,
+            durations,
+            wafers,
+            swap=False,
+            chooser=chooser,
+            first_safe_by_preference=True,
+        )
+        r = _pick_best(r, no_swap)
     # swap 的双槽资源口径通常能让喂片偏好直接走到终态。先尝试首选路径；
     # 若中途死锁，再回退完整 Petri 安全检查，结果与原逻辑保持一致。
-    swap_result = _decode_eval(
-        ir,
-        durations,
-        wafers,
-        swap=True,
-        chooser=chooser,
-        trust_preferred_path=True,
-    )
-    if swap_result is None:
+    if loadlock_exchange_mode in {EXCHANGE_AUTO, EXCHANGE_ENABLED}:
         swap_result = _decode_eval(
             ir,
             durations,
             wafers,
             swap=True,
             chooser=chooser,
-            first_safe_by_preference=True,
+            trust_preferred_path=True,
         )
-    r = _pick_best(
-        no_swap,
-        swap_result,
-    )
+        if swap_result is None:
+            swap_result = _decode_eval(
+                ir,
+                durations,
+                wafers,
+                swap=True,
+                chooser=chooser,
+                first_safe_by_preference=True,
+            )
+        r = _pick_best(r, swap_result)
     if loadlock_manager is not None and _has_dynamic_loadlock_choice(ir, wafers):
         # manager 不再只是固定选锁失败后的恢复路径；每个逻辑启发式都生成一条动态绑定
         # 候选，经同一 solve_timing 精确评估后仅在更优时采用。
-        managed = _decode_eval_dynamic_loadlock(
-            ir,
-            durations,
-            wafers,
-            chooser,
-            loadlock_manager,
-        )
-        r = _pick_best(r, managed)
+        manager_swap_modes = []
+        if loadlock_exchange_mode in {EXCHANGE_AUTO, EXCHANGE_DISABLED}:
+            manager_swap_modes.append(False)
+        if loadlock_exchange_mode in {EXCHANGE_AUTO, EXCHANGE_ENABLED}:
+            manager_swap_modes.append(True)
+        for swap in manager_swap_modes:
+            managed = _decode_eval_dynamic_loadlock(
+                ir,
+                durations,
+                wafers,
+                chooser,
+                loadlock_manager,
+                swap=swap,
+            )
+            r = _pick_best(r, managed)
     return _pick_best(prev, r)
 
 
@@ -282,6 +304,7 @@ def _heuristic_schedule(
     wafers,
     verbose: bool,
     loadlock_manager: Optional[LoadLockDispatchManager] = None,
+    loadlock_exchange_mode: str = EXCHANGE_AUTO,
 ) -> Optional[SolveResult]:
     """快速启发式定序（取代原固定 backward 定序）。不做组合寻优的全局搜索：
       · 含清洁(wac/dummy-wac)：排空优先(backward)——不追求 LL 常满，避免换出加工腔的片无处落脚死锁。
@@ -297,7 +320,13 @@ def _heuristic_schedule(
         if verbose:
             print("[timing] 启发式：dummy-wac 清洁 → 排空优先(drain/backward)")
         return _eval_chooser(
-            ir, durations, wafers, backward, None, loadlock_manager
+            ir,
+            durations,
+            wafers,
+            backward,
+            None,
+            loadlock_manager,
+            loadlock_exchange_mode,
         )
 
     has_cjob_policy = any(w.cjob_id for w in wafers)
@@ -307,7 +336,13 @@ def _heuristic_schedule(
         None
         if has_cjob_policy
         else _eval_chooser(
-            ir, durations, wafers, backward, None, loadlock_manager
+            ir,
+            durations,
+            wafers,
+            backward,
+            None,
+            loadlock_manager,
+            loadlock_exchange_mode,
         )
     )
     has_resumed = any(wafer.already_released for wafer in wafers)
@@ -339,9 +374,16 @@ def _heuristic_schedule(
                 ),
                 result,
                 loadlock_manager,
+                loadlock_exchange_mode,
             )
         return result or _eval_chooser(
-            ir, durations, wafers, backward, None, loadlock_manager
+            ir,
+            durations,
+            wafers,
+            backward,
+            None,
+            loadlock_manager,
+            loadlock_exchange_mode,
         )
 
     # 2+ job：在若干交替发片配比里搜索（非全局）。前两条 route 取配比，其余按权重 1 均分。
@@ -362,10 +404,17 @@ def _heuristic_schedule(
                 ),
                 best,
                 loadlock_manager,
+                loadlock_exchange_mode,
             )
     if best is None:
         best = _eval_chooser(
-            ir, durations, wafers, backward, None, loadlock_manager
+            ir,
+            durations,
+            wafers,
+            backward,
+            None,
+            loadlock_manager,
+            loadlock_exchange_mode,
         )
     if verbose:
         mk = best.makespan if best is not None and getattr(best, "feasible", False) else float("nan")
@@ -386,7 +435,8 @@ def _random_chooser(rng: random.Random) -> _Chooser:
 
 
 def _random_rollouts(ir: Problem, durations: Durations, wafers, base: Optional[SolveResult],
-                     *, n: int, seed: int, verbose: bool) -> Optional[SolveResult]:
+                     *, n: int, seed: int, verbose: bool,
+                     swap: bool = True) -> Optional[SolveResult]:
     """在给定腔分配基底上做 n 次随机定序 rollout（Petri 动作掩码保证无死锁；放开 LL swap 空间——
     它严格包含 no-swap 的可行序），solve_timing 精确评估，与 base 取 makespan 最优可行
     （不满足要求——死锁/驻留超限/更差——即回退到已有最优）。"""
@@ -394,7 +444,13 @@ def _random_rollouts(ir: Problem, durations: Durations, wafers, base: Optional[S
     best = base
     picked = 0
     for _ in range(max(n, 0)):
-        r = _decode_eval(ir, durations, wafers, swap=True, chooser=_random_chooser(rng))
+        r = _decode_eval(
+            ir,
+            durations,
+            wafers,
+            swap=swap,
+            chooser=_random_chooser(rng),
+        )
         if r is not None and (best is None or not getattr(best, "feasible", False)
                               or r.makespan < best.makespan - EPS):
             best, picked = r, picked + 1
@@ -445,7 +501,9 @@ def _repair_residency(priorities: dict, result: SolveResult,
 
 def _two_job_timed_search(ir: Problem, durations: Durations, wafers,
                           base: Optional[SolveResult], *, seconds: float,
-                          seed: int, verbose: bool) -> Optional[SolveResult]:
+                          seed: int, verbose: bool,
+                          loadlock_exchange_mode: str = EXCHANGE_AUTO
+                          ) -> Optional[SolveResult]:
     """在严格时间预算内搜索两条 route 的发片交织，并用驻留违例定向修复。
 
     2-job 的 route 内发片顺序受 FIFO 固定，真正需要搜索的是两条有序序列的交织；例如 6+6 片
@@ -483,8 +541,18 @@ def _two_job_timed_search(ir: Problem, durations: Durations, wafers,
                  if enumerated else [])
     if positions:
         rng.shuffle(positions)
-    phases = [(spacing, True) for spacing in _RELEASE_SPACINGS]
-    phases.append((_RELEASE_SPACINGS[0], False))
+    allowed_swap_modes = (
+        (False,)
+        if loadlock_exchange_mode == EXCHANGE_DISABLED
+        else (True,)
+        if loadlock_exchange_mode == EXCHANGE_ENABLED
+        else (True, False)
+    )
+    phases = [
+        (spacing, swap)
+        for swap in allowed_swap_modes
+        for spacing in _RELEASE_SPACINGS
+    ]
     phase_index = 0
     position_index = 0
     seen = set()
@@ -499,7 +567,7 @@ def _two_job_timed_search(ir: Problem, durations: Durations, wafers,
             portfolio_finished = True
         if in_portfolio:
             spacing = rng.choice(_RELEASE_SPACINGS)
-            swap = (trials % 8) != 0
+            swap = allowed_swap_modes[trials % len(allowed_swap_modes)]
         else:
             spacing, swap = phases[phase_index % len(phases)]
         if enumerated:

@@ -1,3 +1,6 @@
+"""精确 MILP 调度，并用已证明安全的资源顺序执行双臂 PM 换片重定时。"""
+
+import copy
 from typing import Dict, List, Optional, Tuple
 
 import gurobipy as gp
@@ -8,6 +11,94 @@ from src.parse.model import Durations, Problem, Stage, Wafer
 from src.timing.solve import SolveResult
 from src.timing.spans import _ll_proc
 
+
+def _retime_milp_order_with_process_swaps(
+    task: Problem,
+    result: SolveResult,
+) -> SolveResult:
+    """从 MILP 解恢复资源顺序，并尝试双臂 PM 换片的最早时刻重排。
+
+    MILP 仍负责选腔与全局析取顺序；重排只对同一顺序内相邻的 PM 出入片做原子换片，
+    因而不会把启发式选择偷偷带入精确求解结果。若换片图不可行或没有改善，保留原解。
+    选中重排结果时会把 MILP 的实际 LoadLock 腔分配同步回 ``task.wafers``，供导出一致使用。
+    """
+    if not result.schedule:
+        return result
+
+    from src.schedule.sequencing import _Orders, _resource
+    from src.timing.solve import solve_timing
+
+    candidate_task = copy.copy(task)
+    candidate_task.wafers = copy.deepcopy(task.wafers)
+    tm = Durations(candidate_task)
+
+    for wafer in candidate_task.wafers:
+        for stage_index, row in enumerate(result.schedule[wafer.wid]):
+            actual_chamber = row[1]
+            stage = wafer.stages[stage_index]
+            stage.chamber = actual_chamber
+            if stage.stage_type == "loadlock":
+                stage.proc = _ll_proc(candidate_task, actual_chamber, stage.ll_type)
+
+    chamber_rows: Dict[
+        Tuple[str, int],
+        List[Tuple[float, Tuple[int, int]]],
+    ] = {}
+    robot_rows: Dict[str, List[Tuple[float, Tuple[int, int]]]] = {}
+    loadlock_rows: Dict[str, List[Tuple[float, Tuple[int, int]]]] = {}
+    for wafer in candidate_task.wafers:
+        rows = result.schedule[wafer.wid]
+        for stage_index, (_stage_type, chamber, arrival, release) in enumerate(rows):
+            stage = wafer.stages[stage_index]
+            resource = _resource(candidate_task, wafer, stage_index)
+            occupancy_start = arrival - (
+                tm.place_t(stage.in_robot, chamber)
+                + tm.place_pre(stage.in_robot, chamber)
+                if stage.in_robot
+                else 0.0
+            )
+            if resource is not None:
+                chamber_rows.setdefault(resource, []).append(
+                    (occupancy_start, (wafer.wid, stage_index))
+                )
+            if stage.stage_type == "loadlock":
+                loadlock_rows.setdefault(chamber, []).append(
+                    (occupancy_start, (wafer.wid, stage_index))
+                )
+            if stage_index < len(rows) - 1:
+                robot_rows.setdefault(wafer.transports[stage_index], []).append(
+                    (release, (wafer.wid, stage_index))
+                )
+
+    orders = _Orders(
+        chambers={
+            resource: [visit for _start, visit in sorted(sequence)]
+            for resource, sequence in chamber_rows.items()
+        },
+        robots={
+            robot: [hop for _start, hop in sorted(sequence)]
+            for robot, sequence in robot_rows.items()
+        },
+        ll_seq={
+            chamber: [visit for _start, visit in sorted(sequence)]
+            for chamber, sequence in loadlock_rows.items()
+        },
+    )
+    retimed = solve_timing(candidate_task, candidate_task.wafers, orders)
+    if (
+        not retimed.schedule
+        or not getattr(retimed, "process_swaps", ())
+        or retimed.makespan > result.makespan + 1e-4
+    ):
+        return result
+
+    retimed.status = result.status
+    retimed.gap = result.gap
+    retimed.runtime = result.runtime
+    retimed.milp_base_makespan = result.makespan  # type: ignore[attr-defined]
+    task.wafers = candidate_task.wafers
+    return retimed
+
 # --------------------------------------------------------------------------- #
 # 工作数据类位于 src.parse.model；晶圆展开见 src.parse。
 # 本模块只消费 Problem（task.wafers / task.pre_clean / task.post_clean）。
@@ -16,6 +107,7 @@ from src.timing.spans import _ll_proc
 # 建模 + 求解
 # --------------------------------------------------------------------------- #
 def solve_milp(task: Problem, *, time_limit: float = 10.0, verbose: bool = False) -> SolveResult:
+    """求解原 MILP 模型，并在其可行资源顺序上尝试双臂 PM 换片重定时。"""
 
     tm = Durations(task)
     wafers = task.wafers
@@ -309,4 +401,4 @@ def solve_milp(task: Problem, *, time_limit: float = 10.0, verbose: bool = False
             res.schedule[w.wid] = row
         rel = [(r[w.wid, 0].X, w.route_name, w.wid) for w in wafers]
         res.releases = sorted(rel)
-    return res
+    return _retime_milp_order_with_process_swaps(task, res)

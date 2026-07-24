@@ -738,23 +738,42 @@ def _transport_tail_ids(
     cutoff: float,
     include_loadlock_environment: bool = False,
 ) -> set[int]:
-    """返回指定在手机械手物料到下一次 Place 并关门为止的旧动作集合。"""
-    places = [
+    """返回在手机械手物料到下一次 Place 或 Swap 入站并关门的旧动作集合。"""
+    terminal_actions = [
         move for move in moves
-        if move.get("MoveType") == PLACE_MOVE
-        and material_id in _move_material_ids(move)
+        if (
+            (
+                move.get("MoveType") == PLACE_MOVE
+                and material_id in _move_material_ids(move)
+            )
+            or (
+                move.get("MoveType") == SWAP_MOVE
+                and material_id in {
+                    int(value)
+                    for value in (move.get("SendMatList") or [])
+                    if isinstance(value, int)
+                }
+            )
+        )
         and float(move.get("EndTime") or 0.0) > cutoff + TIME_TOLERANCE
     ]
-    if not places:
-        raise ValueError(f"旧计划找不到 MatID={material_id} 的后续 Place")
-    place = min(places, key=lambda move: (
+    if not terminal_actions:
+        raise ValueError(f"旧计划找不到 MatID={material_id} 的后续 Place 或 Swap 入站")
+    terminal_action = min(terminal_actions, key=lambda move: (
         float(move.get("StartTime") or 0.0),
         int(move["MoveID"]),
     ))
-    destination = str((place.get("DestStationList") or [""])[0])
-    place_end = float(place.get("EndTime") or place.get("StartTime") or cutoff)
-    close_id = _following_close_id(moves, destination, place_end)
-    closure_end = place_end
+    if terminal_action.get("MoveType") == SWAP_MOVE:
+        destination = str((terminal_action.get("StationList") or [""])[0])
+    else:
+        destination = str((terminal_action.get("DestStationList") or [""])[0])
+    action_end = float(
+        terminal_action.get("EndTime")
+        or terminal_action.get("StartTime")
+        or cutoff
+    )
+    close_id = _following_close_id(moves, destination, action_end)
+    closure_end = action_end
     if close_id is not None:
         close_move = next(move for move in moves if int(move["MoveID"]) == close_id)
         closure_end = float(close_move.get("EndTime") or closure_end)
@@ -804,10 +823,10 @@ def _transport_tail_ids(
             and material_id in _move_material_ids(move)
             and abs(
                 float(move.get("EndTime") or 0.0)
-                - float(place.get("StartTime") or 0.0)
+                - float(terminal_action.get("StartTime") or 0.0)
             ) <= TIME_TOLERANCE
         ),
-        default=place_end,
+        default=action_end,
     )
     required.update(
         int(move["MoveID"])
@@ -852,6 +871,7 @@ def _required_recovery_ids(
     planned_by_id = {int(move["MoveID"]): move for move in moves}
     required = set(scheduler.running_move_ids)
     tail_materials: set[int] = set()
+    running_swap_close_ids: set[int] = set()
 
     # 运行中的加工、清洁和抽充气只保留自身；搬运类动作还要把晶圆落到
     # 原计划下一目标。关门动作是否属于搬运中段由实时持片状态统一判断。
@@ -864,13 +884,41 @@ def _required_recovery_ids(
             tail_materials.update(
                 int(value) for value in (move.get("RecvMatList") or []) if isinstance(value, int)
             )
+            station_name = str(
+                ((move.get("StationList") or [""])[0])
+            )
+            close_id = _following_close_id(
+                moves,
+                station_name,
+                float(move.get("EndTime") or cutoff),
+            )
+            if close_id is not None:
+                running_swap_close_ids.add(close_id)
+    required.update(running_swap_close_ids)
 
+    # 运行中的 SwapMove 在结束回调前，状态机仍把待放入的新片保留在 Robot 手槽。
+    # 它实际上会在本次 swap 结束时进入 PM，不能被下面的“当前持片”扫描误判为
+    # 还需沿旧计划继续运输；真正需要收尾的是 RecvMatList 中刚换出的旧片。
+    running_swap_send_materials = {
+        int(value)
+        for move_id in required
+        for value in (
+            planned_by_id[move_id].get("SendMatList") or []
+            if planned_by_id[move_id].get("MoveType") == SWAP_MOVE
+            else []
+        )
+        if isinstance(value, int)
+    }
     state = scheduler.state
     for robot in state.robots.values():
         tail_materials.update(
             int(material.material_id)
             for material in robot.hands.values()
-            if material is not None and isinstance(material.material_id, int)
+            if (
+                material is not None
+                and isinstance(material.material_id, int)
+                and int(material.material_id) not in running_swap_send_materials
+            )
         )
 
     # 开门已完成但对应取放恰好从 cutoff 开始时，该 Move 尚未收到 Running。
@@ -1413,8 +1461,27 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
     loadlock_manager_mode = str(
         options.get("loadLockManager") or default_loadlock_manager_mode
     ).strip().lower()
-    if loadlock_manager_mode not in {"joint", "petri-look"}:
-        raise ValueError("LoadLock manager 只支持 joint 或 petri-look")
+    supported_loadlock_managers = {
+        "joint",
+        "petri-look",
+        "petri-eta",
+        "collective-look",
+        "round-robin",
+        "dedicated-direction",
+        "exchange-look",
+    }
+    if loadlock_manager_mode not in supported_loadlock_managers:
+        raise ValueError(
+            "LoadLock manager 只支持 joint、petri-eta、collective-look、"
+            "round-robin、dedicated-direction 或 exchange-look"
+        )
+    loadlock_exchange_mode = str(
+        options.get("loadLockExchange") or "auto"
+    ).strip().lower()
+    if loadlock_exchange_mode not in {"auto", "enabled", "disabled"}:
+        raise ValueError(
+            "LoadLock exchange 只支持 auto、enabled 或 disabled"
+        )
     contains_multi_process_route = any(
         sum(
             bool(stage.get("needProcess"))
@@ -1461,6 +1528,7 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
         strategy=strategy,
         policy=policy,
         loadlock_manager_mode=loadlock_manager_mode,
+        loadlock_exchange_mode=loadlock_exchange_mode,
         neural_force_quality_floor=contains_multi_process_route,
         rl_search_seconds=_finite_number(options.get("rlSearchSeconds"), 4.0),
         rl_rollouts=max(0, int(_finite_number(options.get("rlRollouts"), 256))),

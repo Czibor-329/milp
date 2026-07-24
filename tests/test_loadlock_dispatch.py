@@ -22,12 +22,17 @@ from realtime_scheduler.server import (
 from src.export import check_solution
 from src.parse import load_alg_entries, parse_task
 from src.parse.generator import PM_POOL_6, expand_topo_pms
+from src.parse.model import Durations
 from src.paths import input_data_path
 from src.schedule.api import start_schedule
 from src.schedule.loadlock_dispatch import (
+    CollectiveLookLoadLockManager,
+    DedicatedDirectionLoadLockManager,
     ENTRY,
+    ExchangeLookLoadLockManager,
     EXIT,
     PetriLookLoadLockManager,
+    RoundRobinLoadLockManager,
     resolve_loadlock_manager,
     separate_loadlock_choice,
 )
@@ -81,6 +86,7 @@ def _decode_state(
     ready_times: Mapping[str, float] | None = None,
     planned_ready_times: Mapping[str, float] | None = None,
     service_counts: Mapping[str, int] | None = None,
+    occupied_directions: Mapping[tuple[str, int], str] | None = None,
 ) -> SimpleNamespace:
     """构造仅含 manager 读取字段的最小解码标识。
 
@@ -99,6 +105,17 @@ def _decode_state(
         history_wafer_id = -offset
         wafers[history_wafer_id] = _wafer(direction)
         loadlock_last_services[loadlock] = (history_wafer_id, 1)
+
+    positions = {wafer_id: 0 for wafer_id in request_directions}
+    occupancy = {}
+    for offset, (resource, direction) in enumerate(
+        (occupied_directions or {}).items(),
+        start=100,
+    ):
+        occupied_wafer_id = -offset
+        wafers[occupied_wafer_id] = _wafer(direction)
+        positions[occupied_wafer_id] = 1
+        occupancy[resource] = occupied_wafer_id
 
     runtime = SimpleNamespace(
         loadlock_environment={
@@ -120,9 +137,9 @@ def _decode_state(
             runtime_availability=runtime,
         ),
         wmap=wafers,
-        pos={wafer_id: 0 for wafer_id in request_directions},
-        K={wafer_id: 2 for wafer_id in request_directions},
-        occ={},
+        pos=positions,
+        K={wafer_id: 2 for wafer_id in positions},
+        occ=occupancy,
         loadlock_last_services=loadlock_last_services,
         loadlock_service_counts=dict(service_counts or {}),
         loadlock_ready_at=dict(planned_ready_times or {}),
@@ -241,6 +258,92 @@ class PetriLookLoadLockManagerTests(unittest.TestCase):
         self.assertEqual(set(range(4)), set(ordered))
 
 
+class LoadLockManagerStrategyTests(unittest.TestCase):
+    """验证复现的电梯群控规则在同一 Petri 安全候选上产生不同选择。"""
+
+    def test_collective_look_keeps_pressure_direction_before_eta(self) -> None:
+        """集选 LOOK 应保留当前压力侧，即使另一把锁的 ETA 略早。"""
+        state = _decode_state(
+            {1: EXIT},
+            last_directions={"LA": ENTRY, "LB": EXIT},
+            ready_times={"LA": 40.0, "LB": 0.0},
+        )
+        candidates = [_candidate(1, "LA"), _candidate(1, "LB")]
+
+        ranked = CollectiveLookLoadLockManager().rank_candidates(
+            state,
+            candidates,
+            range(2),
+        )
+
+        self.assertEqual("LA", candidates[ranked[0]].dest[0])
+
+    def test_round_robin_balances_service_counts(self) -> None:
+        """轮询规则应优先累计服务次数较少的锁。"""
+        state = _decode_state(
+            {1: ENTRY},
+            service_counts={"LA": 5, "LB": 1},
+        )
+        candidates = [_candidate(1, "LA"), _candidate(1, "LB")]
+
+        ranked = RoundRobinLoadLockManager().rank_candidates(
+            state,
+            candidates,
+            range(2),
+        )
+
+        self.assertEqual("LB", candidates[ranked[0]].dest[0])
+
+    def test_direction_dedication_uses_opposite_cars(self) -> None:
+        """方向分区应固定首锁进片、末锁出片。"""
+        manager = DedicatedDirectionLoadLockManager()
+        for direction, expected in ((ENTRY, "LA"), (EXIT, "LB")):
+            with self.subTest(direction=direction):
+                state = _decode_state({1: direction})
+                candidates = [_candidate(1, "LB"), _candidate(1, "LA")]
+
+                ranked = manager.rank_candidates(state, candidates, range(2))
+
+                self.assertEqual(expected, candidates[ranked[0]].dest[0])
+
+    def test_exchange_look_preserves_opposite_token_pair(self) -> None:
+        """交换优先规则应把生片送往已有成品、可同门交换的锁。"""
+        state = _decode_state(
+            {1: ENTRY},
+            ready_times={"LA": 0.0, "LB": 40.0},
+            occupied_directions={("LB", 1): EXIT},
+        )
+        candidates = [_candidate(1, "LA"), _candidate(1, "LB")]
+
+        eta_ranked = PetriLookLoadLockManager().rank_candidates(
+            state,
+            candidates,
+            range(2),
+        )
+        exchange_ranked = ExchangeLookLoadLockManager().rank_candidates(
+            state,
+            candidates,
+            range(2),
+        )
+
+        self.assertEqual("LA", candidates[eta_ranked[0]].dest[0])
+        self.assertEqual("LB", candidates[exchange_ranked[0]].dest[0])
+
+    def test_resolver_exposes_all_comparison_strategies(self) -> None:
+        """公共配置名应稳定解析为各自 manager，便于前端与批量实验复用。"""
+        expected = {
+            "petri-eta": "petri-eta-v2",
+            "collective-look": "collective-look-v1",
+            "round-robin": "round-robin-v1",
+            "dedicated-direction": "dedicated-direction-v1",
+            "exchange-look": "exchange-look-v1",
+        }
+
+        for mode, name in expected.items():
+            with self.subTest(mode=mode):
+                self.assertEqual(name, resolve_loadlock_manager(mode).name)
+
+
 class LoadLockManagerHeuristicTests(unittest.TestCase):
     """验证公共 manager 能被 Heuristic 使用并改善完整排程。"""
 
@@ -253,16 +356,18 @@ class LoadLockManagerHeuristicTests(unittest.TestCase):
         cls.problem = parse_task(topology, payload["update_params"])
 
     def test_manager_materially_improves_heuristic_without_losing_safety(self) -> None:
-        """动态绑定应在该独立案例降低至少 10% makespan，且保持全约束可行。"""
+        """双槽交换与 manager 组合应显著优于禁用交换的旧基线。"""
         baseline = start_schedule(
             self.problem,
             verbose=False,
             loadlock_manager=None,
+            loadlock_exchange="disabled",
         )
         managed = start_schedule(
             self.problem,
             verbose=False,
             loadlock_manager="petri-eta",
+            loadlock_exchange="auto",
         )
 
         self.assertTrue(getattr(baseline, "feasible", False))
@@ -270,7 +375,11 @@ class LoadLockManagerHeuristicTests(unittest.TestCase):
         self.assertEqual([], check_solution(self.problem, managed))
         self.assertEqual(
             "petri-eta-v2",
-            getattr(managed, "loadlock_manager", ""),
+            managed.loadlock_manager_requested,
+        )
+        self.assertEqual(
+            "enabled",
+            managed.loadlock_exchange_selected,
         )
         self.assertLessEqual(
             float(managed.makespan) / float(baseline.makespan),
@@ -299,6 +408,50 @@ class LoadLockManagerHeuristicTests(unittest.TestCase):
             result.loadlock_manager_requested,
         )
 
+    def test_enabled_exchange_produces_same_door_place_then_pick(self) -> None:
+        """双槽模式应真实产生同锁异型片的 place→pick 合并访问。"""
+        result = start_schedule(
+            self.problem,
+            verbose=False,
+            loadlock_manager="exchange-look",
+            loadlock_exchange="enabled",
+        )
+        wafer_map = {wafer.wid: wafer for wafer in self.problem.wafers}
+        visits = []
+        for wafer_id, rows in result.schedule.items():
+            for stage_index, (stage_type, chamber, available, release) in enumerate(rows):
+                if stage_type != "loadlock":
+                    continue
+                stage = wafer_map[wafer_id].stages[stage_index]
+                visits.append(
+                    (
+                        chamber,
+                        stage.ll_type,
+                        stage.in_robot,
+                        stage.out_robot,
+                        float(available),
+                        float(release),
+                    )
+                )
+        durations = Durations(self.problem)
+        paired_visits = [
+            (placed, picked)
+            for placed in visits
+            for picked in visits
+            if placed is not picked
+            and placed[0] == picked[0]
+            and placed[1] != picked[1]
+            and placed[2]
+            and placed[2] == picked[3]
+            and abs(
+                picked[5]
+                - (placed[4] + durations.move(placed[2]))
+            ) <= 1e-4
+        ]
+
+        self.assertTrue(paired_visits)
+        self.assertEqual([], check_solution(self.problem, result))
+
 
 class LoadLockManagerFrontendTests(unittest.TestCase):
     """验证 Neural LoadLock manager 选项可见且可随测试集保存。"""
@@ -314,12 +467,24 @@ class LoadLockManagerFrontendTests(unittest.TestCase):
 
         self.assertIn('id="loadlockOptions"', html)
         self.assertIn('data-option="loadLockManager"', html)
+        self.assertIn('data-option="loadLockExchange"', html)
         self.assertIn(
             '<option value="petri-look">Petri-ETA 通用管理器（Heuristic 推荐）</option>',
             html,
         )
+        for option in (
+            '<option value="collective-look">集选 LOOK（压力方向优先）</option>',
+            '<option value="round-robin">轮询（服务次数均衡）</option>',
+            '<option value="dedicated-direction">方向分区（LA 进、LB 出）</option>',
+            '<option value="exchange-look">交换优先 LOOK（成品/生片配对）</option>',
+        ):
+            self.assertIn(option, html)
         self.assertIn(
             '<option value="joint">当前策略联合选择 LA/LB（现有 Neural 默认）</option>',
+            html,
+        )
+        self.assertIn(
+            '<option value="disabled">禁用交换（旧单槽基线）</option>',
             html,
         )
         self.assertIn(
@@ -353,7 +518,10 @@ class LoadLockManagerFrontendTests(unittest.TestCase):
                 "strategy": "neural",
                 "roundCount": 1,
                 "times": [0],
-                "options": {"loadLockManager": "joint"},
+                "options": {
+                    "loadLockManager": "joint",
+                    "loadLockExchange": "disabled",
+                },
                 "rounds": [{"currentTime": 0, "cjobs": []}],
             }
 
@@ -361,8 +529,13 @@ class LoadLockManagerFrontendTests(unittest.TestCase):
             loaded = get_workspace_device(device["id"], store_path)["tests"][0]
             self.assertEqual("joint", created["options"]["loadLockManager"])
             self.assertEqual("joint", loaded["options"]["loadLockManager"])
+            self.assertEqual(
+                "disabled",
+                loaded["options"]["loadLockExchange"],
+            )
 
             raw_test["options"]["loadLockManager"] = "petri-look"
+            raw_test["options"]["loadLockExchange"] = "auto"
             updated = update_workspace_test(
                 device["id"],
                 created["id"],
@@ -378,6 +551,7 @@ class LoadLockManagerFrontendTests(unittest.TestCase):
                 "petri-look",
                 reloaded["options"]["loadLockManager"],
             )
+            self.assertEqual("auto", reloaded["options"]["loadLockExchange"])
 
 
 if __name__ == "__main__":

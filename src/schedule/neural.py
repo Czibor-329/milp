@@ -23,7 +23,9 @@ from src.timing.solve import SolveResult, solve_timing
 from src.timing.spans import _ll_proc, _stage_dwell
 
 from .loadlock_dispatch import (
+    EXCHANGE_DISABLED,
     LoadLockDispatchManager,
+    resolve_loadlock_exchange_mode,
     resolve_loadlock_manager,
 )
 from .sequencing import decode_orders, decode_orders_choosing
@@ -1034,6 +1036,7 @@ def start_schedule_neural(
     policy: Optional[SetAttentionNetwork] = None,
     fallback_on_failure: bool = True,
     loadlock_manager_mode: LoadLockDispatchManager | str | None = "joint",
+    loadlock_exchange_mode: str | bool | None = "auto",
     force_quality_floor: bool = False,
 ) -> SolveResult:
     """用训练好的深层集合网络做贪心解码，并在失败时执行有预算物理修复。
@@ -1052,6 +1055,7 @@ def start_schedule_neural(
     """
     network = policy or SetAttentionNetwork()
     loadlock_manager = resolve_loadlock_manager(loadlock_manager_mode)
+    exchange_mode = resolve_loadlock_exchange_mode(loadlock_exchange_mode)
     if isinstance(loadlock_manager_mode, str):
         requested_loadlock_manager = loadlock_manager_mode
     elif loadlock_manager_mode is None:
@@ -1068,7 +1072,7 @@ def start_schedule_neural(
         else "not-requested"
     )
     durations = Durations(problem)
-    loadlock_swap_enabled = any(
+    loadlock_swap_enabled = exchange_mode != EXCHANGE_DISABLED and any(
         str(chamber.type).lower() == "loadlock"
         and int(getattr(chamber, "capacity", 1) or 1) >= 2
         for chamber in problem.chambers.values()
@@ -1175,6 +1179,8 @@ def start_schedule_neural(
             problem.wafers,
             _feed_chooser({route_name: 1 for route_name in routes}),
             None,
+            loadlock_manager,
+            exchange_mode,
         )
         if result is None or not getattr(result, "feasible", False):
             return None, "等配额启动专家未找到可行资源顺序"
@@ -1528,6 +1534,7 @@ def start_schedule_neural(
             problem,
             verbose=False,
             loadlock_manager=loadlock_manager,
+            loadlock_exchange=exchange_mode,
         )
         selected_source = "failure-fallback"
     elif (
@@ -1549,6 +1556,7 @@ def start_schedule_neural(
             problem,
             verbose=False,
             loadlock_manager=loadlock_manager,
+            loadlock_exchange=exchange_mode,
         )
         if getattr(quality_floor, "feasible", False):
             floor_makespan = float(quality_floor.makespan)
@@ -1660,7 +1668,19 @@ def start_schedule_neural(
         "loadLockManagerRequested": requested_loadlock_manager,
         "loadLockManagerEligibility": loadlock_manager_eligibility,
         "loadLockSelectedPath": selected_loadlock_path,
+        "loadLockExchangeRequested": exchange_mode,
+        "loadLockExchangeSelected": getattr(
+            selected,
+            "loadlock_exchange",
+            "enabled" if loadlock_swap_enabled else EXCHANGE_DISABLED,
+        ),
         "qualityFloorForced": bool(force_quality_floor),
     }
+    selected.loadlock_exchange_requested = exchange_mode  # type: ignore[attr-defined]
+    selected.loadlock_exchange_selected = getattr(  # type: ignore[attr-defined]
+        selected,
+        "loadlock_exchange",
+        "enabled" if loadlock_swap_enabled else EXCHANGE_DISABLED,
+    )
     selected.check_issues = check_solution(problem, selected)  # type: ignore[attr-defined]
     return selected
