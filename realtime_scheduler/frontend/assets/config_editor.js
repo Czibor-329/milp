@@ -1414,10 +1414,17 @@ function prepareLogDownload(result) {
   }
   return true;
 }
+function prepareGanttView(result) {
+  if (!result?.ganttUrl) return false;
+  const link = document.getElementById("ganttButton");
+  link.href = result.ganttUrl;
+  link.removeAttribute("aria-disabled");
+  return true;
+}
 async function runPlan() {
   const button = document.getElementById("runButton");
   const batchButton = document.getElementById("batchRunButton");
-  let logReady = false, runResult = null;
+  let logReady = false, ganttReady = false, runResult = null;
   try {
     const healthResponse = await fetch("/api/health", { cache: "no-store" }), health = await healthResponse.json();
     if (!healthResponse.ok || health.schemaVersion !== EXPECTED_API_SCHEMA) throw new Error("\u672C\u5730\u670D\u52A1\u7248\u672C\u8FC7\u65E7\uFF0C\u8BF7\u91CD\u542F scripts/config_editor_server.py");
@@ -1447,12 +1454,24 @@ async function runPlan() {
       throw new Error(responseText.trim().slice(0, 240) || `\u670D\u52A1\u8FD4\u56DE ${response.status}`);
     }
     logReady = prepareLogDownload(runResult);
+    ganttReady = prepareGanttView(runResult);
     if (!response.ok || !runResult.ok) throw new Error(runResult.error || `\u670D\u52A1\u8FD4\u56DE ${response.status}`);
     showResult(runResult);
   } catch (error) {
     const baselineError = runResult?.baseline?.status === "failed" ? `
   Baseline \u5931\u8D25\uFF1A${runResult.baseline.error || "\u672A\u77E5\u539F\u56E0"}` : "";
-    writeTerminal(`$ \u8FD0\u884C\u5931\u8D25\uFF1A${error.message || "\u672A\u77E5\u9519\u8BEF"}${baselineError}${logReady ? "\n  \u590D\u73B0\u65E5\u5FD7\u5DF2\u751F\u6210\uFF0C\u53EF\u70B9\u51FB\u201C\u5BFC\u51FA\u590D\u73B0\u65E5\u5FD7\u201D" : ""}`, true);
+    const validationIssues = Array.isArray(runResult?.validationIssues) ? runResult.validationIssues.map((issue) => `  ${issue}`) : [];
+    if (ganttReady) {
+      document.getElementById("metricMoves").textContent = runResult.moveCount ?? "\u2014";
+      document.getElementById("metricMakespan").textContent = Number.isFinite(Number(runResult.makespan)) ? `${Number(runResult.makespan).toFixed(2)} s` : "\u2014";
+    }
+    writeTerminal([
+      `$ \u8FD0\u884C\u5931\u8D25\uFF1A${error.message || "\u672A\u77E5\u9519\u8BEF"}`,
+      ...validationIssues,
+      ...baselineError ? [baselineError.trim()] : [],
+      ...ganttReady ? ["  \u5931\u8D25 MoveList \u5DF2\u4FDD\u7559\uFF0C\u53EF\u70B9\u51FB\u201C\u6253\u5F00\u7518\u7279\u56FE\u201D\u67E5\u770B\u7EA2\u8272\u95EE\u9898 Move"] : [],
+      ...logReady ? ["  \u590D\u73B0\u65E5\u5FD7\u5DF2\u751F\u6210\uFF0C\u53EF\u70B9\u51FB\u201C\u5BFC\u51FA\u590D\u73B0\u65E5\u5FD7\u201D"] : []
+    ].join("\n"), true);
     document.getElementById("metricValidation").textContent = "\u5931\u8D25";
   } finally {
     button.disabled = false;
@@ -1618,7 +1637,7 @@ function renderBatchItems(items) {
 }
 function batchGanttUrl(items) {
   const params = new URLSearchParams();
-  items.filter((item) => item.status === "succeeded" && item.resultUrl).forEach((item) => {
+  items.filter((item) => item.resultUrl).forEach((item) => {
     params.append("src", item.resultUrl);
     params.append("name", item.testName);
   });
@@ -1650,15 +1669,19 @@ function showBatchResult(result) {
     ...result.items.map((item, index) => item.ok ? `  #${index + 1} ${item.testName} | makespan=${Number(item.makespan).toFixed(2)}s | improvement=${Number.isFinite(Number(item.improvementPercent)) ? `${Number(item.improvementPercent).toFixed(2)}%` : "\u2014"} | ${Number(item.totalElapsedMs).toFixed(1)}ms` : `  #${index + 1} ${item.testName} | \u5931\u8D25: ${item.error}`)
   ].join("\n"), result.failed > 0);
   renderBatchItems(result.items);
-  const first = successful[0];
+  const first = result.items.find((item) => item.ganttUrl || item.logUrl);
   if (first) {
-    const gantt = document.getElementById("ganttButton");
-    gantt.href = first.ganttUrl;
-    gantt.removeAttribute("aria-disabled");
-    const log = document.getElementById("logButton");
-    log.href = first.logUrl;
-    log.download = first.logFileName;
-    log.removeAttribute("aria-disabled");
+    if (first.ganttUrl) {
+      const gantt = document.getElementById("ganttButton");
+      gantt.href = first.ganttUrl;
+      gantt.removeAttribute("aria-disabled");
+    }
+    if (first.logUrl) {
+      const log = document.getElementById("logButton");
+      log.href = first.logUrl;
+      log.download = first.logFileName;
+      log.removeAttribute("aria-disabled");
+    }
   }
   const allGanttUrl = batchGanttUrl(result.items);
   const allGantt = document.getElementById("batchGanttButton");

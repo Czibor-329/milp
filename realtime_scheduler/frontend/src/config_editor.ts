@@ -1081,11 +1081,20 @@ function prepareLogDownload(result) {
   return true;
 }
 
+/** 为成功结果或带失败 MoveList 的诊断结果启用甘特图入口。 */
+function prepareGanttView(result) {
+  if (!result?.ganttUrl) return false;
+  const link = document.getElementById("ganttButton");
+  link.href = result.ganttUrl;
+  link.removeAttribute("aria-disabled");
+  return true;
+}
+
 /** 调用本地服务运行排程。 */
 async function runPlan() {
   const button = document.getElementById("runButton");
   const batchButton = document.getElementById("batchRunButton");
-  let logReady = false, runResult = null;
+  let logReady = false, ganttReady = false, runResult = null;
   try {
     const healthResponse = await fetch("/api/health", { cache: "no-store" }), health = await healthResponse.json();
     if (!healthResponse.ok || health.schemaVersion !== EXPECTED_API_SCHEMA) throw new Error("本地服务版本过旧，请重启 scripts/config_editor_server.py");
@@ -1106,10 +1115,26 @@ async function runPlan() {
     try { runResult = JSON.parse(responseText); }
     catch { throw new Error(responseText.trim().slice(0, 240) || `服务返回 ${response.status}`); }
     logReady = prepareLogDownload(runResult);
+    ganttReady = prepareGanttView(runResult);
     if (!response.ok || !runResult.ok) throw new Error(runResult.error || `服务返回 ${response.status}`); showResult(runResult);
   } catch (error) {
     const baselineError = runResult?.baseline?.status === "failed" ? `\n  Baseline 失败：${runResult.baseline.error || "未知原因"}` : "";
-    writeTerminal(`$ 运行失败：${error.message || "未知错误"}${baselineError}${logReady ? "\n  复现日志已生成，可点击“导出复现日志”" : ""}`, true);
+    const validationIssues = Array.isArray(runResult?.validationIssues)
+      ? runResult.validationIssues.map(issue => `  ${issue}`)
+      : [];
+    if (ganttReady) {
+      document.getElementById("metricMoves").textContent = runResult.moveCount ?? "—";
+      document.getElementById("metricMakespan").textContent = Number.isFinite(Number(runResult.makespan))
+        ? `${Number(runResult.makespan).toFixed(2)} s`
+        : "—";
+    }
+    writeTerminal([
+      `$ 运行失败：${error.message || "未知错误"}`,
+      ...validationIssues,
+      ...(baselineError ? [baselineError.trim()] : []),
+      ...(ganttReady ? ["  失败 MoveList 已保留，可点击“打开甘特图”查看红色问题 Move"] : []),
+      ...(logReady ? ["  复现日志已生成，可点击“导出复现日志”"] : []),
+    ].join("\n"), true);
     document.getElementById("metricValidation").textContent = "失败";
   }
   finally { button.disabled = false; button.classList.remove("running"); button.textContent = "▶ 运行当前测试"; renderWorkspaceControls(); }
@@ -1265,7 +1290,7 @@ function renderBatchItems(items) {
 /** 生成一个甘特图页面 URL，其中每个成功测试作为独立标签页一次加载。 */
 function batchGanttUrl(items) {
   const params = new URLSearchParams();
-  items.filter(item => item.status === "succeeded" && item.resultUrl).forEach(item => {
+  items.filter(item => item.resultUrl).forEach(item => {
     params.append("src", item.resultUrl);
     params.append("name", item.testName);
   });
@@ -1303,10 +1328,14 @@ function showBatchResult(result) {
       : `  #${index + 1} ${item.testName} | 失败: ${item.error}`),
   ].join("\n"), result.failed > 0);
   renderBatchItems(result.items);
-  const first = successful[0];
+  const first = result.items.find(item => item.ganttUrl || item.logUrl);
   if (first) {
-    const gantt = document.getElementById("ganttButton"); gantt.href = first.ganttUrl; gantt.removeAttribute("aria-disabled");
-    const log = document.getElementById("logButton"); log.href = first.logUrl; log.download = first.logFileName; log.removeAttribute("aria-disabled");
+    if (first.ganttUrl) {
+      const gantt = document.getElementById("ganttButton"); gantt.href = first.ganttUrl; gantt.removeAttribute("aria-disabled");
+    }
+    if (first.logUrl) {
+      const log = document.getElementById("logButton"); log.href = first.logUrl; log.download = first.logFileName; log.removeAttribute("aria-disabled");
+    }
   }
   const allGanttUrl = batchGanttUrl(result.items);
   const allGantt = document.getElementById("batchGanttButton");

@@ -18,6 +18,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import sys
 import threading
 import time
@@ -236,6 +237,25 @@ def _remove_released_materials_from_update(
     update_params["ControlJobs"] = control_jobs
 
 
+class MoveListValidationError(RuntimeError):
+    """携带原始算法输出和诊断甘特图数据的 MoveList 校验异常。"""
+
+    def __init__(
+        self,
+        message: str,
+        algorithm_output: Mapping[str, Any],
+        validation_issues: Sequence[Any],
+        gantt_output: Mapping[str, Any],
+        sim_time: float,
+    ) -> None:
+        """保存失败现场，使接口仍能导出并展示问题 Move。"""
+        super().__init__(message)
+        self.algorithm_output = deepcopy(dict(algorithm_output))
+        self.validation_issues = [str(issue) for issue in validation_issues]
+        self.gantt_output = deepcopy(dict(gantt_output))
+        self.sim_time = float(sim_time)
+
+
 class StandardAlgorithmRuntime:
     """用本仓库状态机维护标准算法当前计划和跨代执行历史。"""
 
@@ -257,15 +277,23 @@ class StandardAlgorithmRuntime:
             initial_state,
         )
         if validation_issues:
-            raise RuntimeError(
+            message = (
                 "标准算法首次排程 MoveList 状态校验失败："
                 f"{validation_issues[0]}"
+            )
+            raise MoveListValidationError(
+                message,
+                output,
+                validation_issues,
+                _build_validation_gantt_output(output, validation_issues),
+                float(self.current_update.get("CurrentTime") or 0.0),
             )
         self._tracker = MoveStateReplay(
             self.problem,
             initial_moves,
             initial_state,
         )
+        self._generation_initial_state = initial_state.clone()
         self._tracker.current_time = float(self.current_update.get("CurrentTime") or 0.0)
         self._history: List[dict] = []
         self._recompute_points: List[Dict[str, Any]] = []
@@ -361,6 +389,94 @@ class StandardAlgorithmRuntime:
         robot = self._tracker.state.resolve_robot(robot_name)
         return robot.position if robot is not None else None
 
+    def project_started_moves(
+        self,
+        cutoff: float,
+        released_material_ids: Optional[set[Any]] = None,
+    ) -> Tuple[MachineState, List[dict]]:
+        """把重算时刻前已启动的 Move 全部投影到完成态。
+
+        外部算法的 update 不由前端执行安全收尾，但标准接口要求现场快照体现
+        已经启动、不可取消动作的完成态。这里从本代初始状态重新回放，只提交
+        ``StartTime < cutoff`` 的动作；重算时刻及之后的动作留给 RemoveList。
+
+        参数:
+            cutoff: 用户请求的原始重算时刻。
+            released_material_ids: 已在本轮卸载、不得重新写入快照的物料编号。
+
+        返回:
+            投影后的整机状态，以及本代所有已承诺动作的 MoveList。
+        """
+        committed_ids = {
+            int(move["MoveID"])
+            for move in self.current_plan
+            if (
+                isinstance(move.get("MoveID"), int)
+                and float(move.get("StartTime") or 0.0)
+                < float(cutoff) - TIME_TOLERANCE
+            )
+        }
+        projection = MoveStateReplay(
+            self.problem,
+            self.current_plan,
+            self._generation_initial_state,
+        )
+        started: set[int] = set()
+        finished: set[int] = set()
+        for group in _planned_event_groups(self.current_plan):
+            for _, notification in group["priorFinishes"]:
+                move_id = int(notification["MoveID"])
+                if move_id in committed_ids and move_id in started and move_id not in finished:
+                    projection.update_move_state(
+                        notification,
+                        snapshot=False,
+                        track_reservations=False,
+                    )
+                    finished.add(move_id)
+            for _, notification in group["starts"]:
+                move_id = int(notification["MoveID"])
+                if move_id in committed_ids and move_id not in started:
+                    projection.update_move_state(
+                        notification,
+                        snapshot=False,
+                        track_reservations=False,
+                    )
+                    started.add(move_id)
+            for _, notification in group["sameFinishes"]:
+                move_id = int(notification["MoveID"])
+                if move_id in committed_ids and move_id in started and move_id not in finished:
+                    projection.update_move_state(
+                        notification,
+                        snapshot=False,
+                        track_reservations=False,
+                    )
+                    finished.add(move_id)
+        missing = committed_ids - finished
+        if missing:
+            raise ValueError(
+                f"无法投影重算时刻前已启动的 Move：{sorted(missing)[:8]}"
+            )
+
+        projected_state = projection.state.clone()
+        released_ids = set(released_material_ids or ())
+        if released_ids:
+            for station in projected_state.stations.values():
+                for slot in station.slots.values():
+                    if (
+                        slot.material is not None
+                        and slot.material.material_id in released_ids
+                    ):
+                        slot.phase = SlotPhase.EMPTY
+                        slot.material = None
+            for robot in projected_state.robots.values():
+                for slot_id, material in robot.hands.items():
+                    if (
+                        material is not None
+                        and material.material_id in released_ids
+                    ):
+                        robot.hands[slot_id] = None
+        return projected_state, projection.executed_moves
+
     def replace_plan(
         self,
         update_params: Mapping[str, Any],
@@ -368,9 +484,16 @@ class StandardAlgorithmRuntime:
         requested_time: float,
         effective_time: float,
         reason: str,
+        *,
+        initial_state: Optional[MachineState] = None,
+        committed_moves: Optional[Sequence[Mapping[str, Any]]] = None,
     ) -> None:
-        """保存已执行历史，以当前稳定状态和新增物料装载下一代计划。"""
-        next_state = self._tracker.state.clone()
+        """保存已执行历史，以调用方给定的重算快照装载下一代计划。"""
+        next_state = (
+            initial_state.clone()
+            if initial_state is not None
+            else self._tracker.state.clone()
+        )
         _add_new_materials_to_machine_state(next_state, update_params)
         next_update = deepcopy(dict(update_params))
         next_problem = parse_task(self.tool_topo, next_update)
@@ -381,18 +504,50 @@ class StandardAlgorithmRuntime:
             next_state,
         )
         if validation_issues:
-            raise RuntimeError(
-                f"{reason} MoveList 状态校验失败：{validation_issues[0]}"
+            message = f"{reason} MoveList 状态校验失败：{validation_issues[0]}"
+            committed = (
+                deepcopy(list(committed_moves))
+                if committed_moves is not None
+                else self._tracker.executed_moves
+            )
+            recompute_point = {
+                "Time": float(requested_time),
+                "EffectiveTime": float(effective_time),
+                "ScheduleStartTime": float(effective_time),
+                "RecoveryEndTime": float(effective_time),
+                "Index": len(self._recompute_points) + 1,
+                "Reason": reason,
+                "Validation": "failed",
+            }
+            raise MoveListValidationError(
+                message,
+                output,
+                validation_issues,
+                _build_validation_gantt_output(
+                    output,
+                    validation_issues,
+                    prefix_moves=[*self._history, *committed],
+                    recompute_points=[
+                        *self._recompute_points,
+                        recompute_point,
+                    ],
+                ),
+                float(effective_time),
             )
         next_tracker = MoveStateReplay(
             next_problem,
             next_moves,
             next_state,
         )
-        self._history.extend(self._tracker.executed_moves)
+        self._history.extend(
+            deepcopy(list(committed_moves))
+            if committed_moves is not None
+            else self._tracker.executed_moves
+        )
         self.current_update = next_update
         self.problem = next_problem
         self._tracker = next_tracker
+        self._generation_initial_state = next_state.clone()
         self._tracker.current_time = float(effective_time)
         self._committed_recovery_end = max(
             self._committed_recovery_end,
@@ -425,9 +580,23 @@ class StandardAlgorithmRuntime:
 class LoggedPlanError(RuntimeError):
     """携带可下载复现日志的排程异常。"""
 
-    def __init__(self, message: str, reproduction_log: Sequence[Mapping[str, Any]]) -> None:
+    def __init__(
+        self,
+        message: str,
+        reproduction_log: Sequence[Mapping[str, Any]],
+        *,
+        failure_output: Optional[Mapping[str, Any]] = None,
+        validation_issues: Optional[Sequence[str]] = None,
+    ) -> None:
+        """保存错误日志，并可选携带供甘特图查看的失败 MoveList。"""
         super().__init__(message)
         self.reproduction_log = deepcopy(list(reproduction_log))
+        self.failure_output = (
+            deepcopy(dict(failure_output))
+            if failure_output is not None
+            else None
+        )
+        self.validation_issues = list(validation_issues or ())
 
 
 def _alg_output_info(
@@ -443,6 +612,73 @@ def _alg_output_info(
         "DummyReturnInfo": deepcopy(dict(source.get("DummyReturnInfo") or {})),
         "MatIntoPM": deepcopy(dict(source.get("MatIntoPM") or {})),
     }
+
+
+def _validation_issue_records(
+    validation_issues: Sequence[Any],
+) -> List[Dict[str, Any]]:
+    """把校验文案转换成甘特图可定位的结构化错误记录。"""
+    records: List[Dict[str, Any]] = []
+    move_id_pattern = re.compile(
+        r"(?:\bMoveID\b|\bid\b)\s*[=:]\s*(-?\d+)",
+        re.IGNORECASE,
+    )
+    for issue in validation_issues:
+        message = str(issue)
+        match = move_id_pattern.search(message)
+        record: Dict[str, Any] = {"Message": message}
+        if match is not None:
+            record["MoveID"] = int(match.group(1))
+        records.append(record)
+    return records
+
+
+def _build_validation_gantt_output(
+    algorithm_output: Mapping[str, Any],
+    validation_issues: Sequence[Any],
+    *,
+    prefix_moves: Optional[Sequence[Mapping[str, Any]]] = None,
+    recompute_points: Optional[Sequence[Mapping[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """生成包含错误 Move 标记的只读诊断甘特图数据。"""
+    issue_records = _validation_issue_records(validation_issues)
+    issues_by_move_id: Dict[int, List[str]] = {}
+    for issue in issue_records:
+        move_id = issue.get("MoveID")
+        if isinstance(move_id, int):
+            issues_by_move_id.setdefault(move_id, []).append(
+                str(issue["Message"])
+            )
+
+    invalid_moves = deepcopy(list(algorithm_output.get("MoveList") or []))
+    for move in invalid_moves:
+        if not isinstance(move, dict):
+            continue
+        move_id = move.get("MoveID")
+        if not isinstance(move_id, int) or move_id not in issues_by_move_id:
+            continue
+        move["ValidationFailed"] = True
+        move["ValidationIssues"] = deepcopy(issues_by_move_id[move_id])
+
+    combined_moves = [
+        deepcopy(dict(move))
+        for move in (prefix_moves or ())
+        if isinstance(move, Mapping)
+    ]
+    combined_moves.extend(invalid_moves)
+    combined_moves.sort(key=lambda move: (
+        float(move.get("StartTime") or 0.0),
+        int(move.get("MoveID") or 0),
+    ))
+    output = _alg_output_info(algorithm_output)
+    output["MoveList"] = combined_moves
+    output["RecomputePoints"] = deepcopy(list(recompute_points or ()))
+    output["Validation"] = {
+        "Status": "failed",
+        "Issues": issue_records,
+        "InvalidMoveIDs": sorted(issues_by_move_id),
+    }
+    return output
 
 
 def _schedule_log_info(device: Mapping[str, Any], update: Mapping[str, Any]) -> Dict[str, Any]:
@@ -646,18 +882,19 @@ def _apply_machine_state_to_update(
 def _build_algorithm_recompute_update(
     runtime: StandardAlgorithmRuntime,
     new_round_update: Mapping[str, Any],
-    effective_time: float,
+    requested_time: float,
+    projected_state: MachineState,
 ) -> Dict[str, Any]:
-    """根据当前状态和旧计划执行分区生成下一次标准算法 update。"""
+    """按原始重算时刻生成外部算法 update，不替算法执行任何收尾动作。"""
     update = _merge_algorithm_update(runtime.current_update, new_round_update)
-    _apply_machine_state_to_update(update, runtime.state, effective_time)
-    executed_ids = runtime.executed_move_ids
+    _apply_machine_state_to_update(update, projected_state, requested_time)
     update["MoveStates"] = []
     update["RemoveList"] = [
         int(move["MoveID"])
         for move in runtime.current_plan
         if isinstance(move.get("MoveID"), int)
-        and int(move["MoveID"]) not in executed_ids
+        and float(move.get("StartTime") or 0.0)
+        >= float(requested_time) - TIME_TOLERANCE
     ]
     return update
 
@@ -992,6 +1229,78 @@ def _required_recovery_ids(
     return required
 
 
+def advance_to_algorithm_update(
+    runtime: StandardAlgorithmRuntime,
+    cutoff: float,
+    recorded_events: Optional[List[Dict[str, Any]]] = None,
+) -> None:
+    """只回放到外部算法的原始重算时刻，不执行任何后续安全收尾。
+
+    ``StartTime < cutoff`` 的动作会收到 Running；其中在 cutoff 前结束的动作
+    同时收到 Done。仍在运行的动作保留在运行态，供投影快照计算资源剩余时间。
+    ``StartTime >= cutoff`` 的动作完全不执行，随后统一进入 RemoveList。
+    """
+    cutoff = max(float(cutoff), runtime.state_time)
+    planned_by_id = {
+        int(move["MoveID"]): move
+        for move in runtime.current_plan
+    }
+    started: set[int] = set()
+    finished: set[int] = set()
+
+    def apply_notification(notification: Mapping[str, Any]) -> None:
+        """应用请求时刻前的一条真实通知，并按需写入复现日志。"""
+        applied = dict(notification)
+        move_id = int(applied["MoveID"])
+        planned_move = planned_by_id[move_id]
+        if (
+            applied.get("MoveState") == MoveStateReplay.RUNNING
+            and planned_move.get("MoveType") == PRE_TRANS_MOVE
+            and not _move_material_ids(planned_move)
+        ):
+            robot_name = str(
+                planned_move.get("Robot")
+                or planned_move.get("ModuleName")
+                or ""
+            )
+            robot_position = runtime.robot_position(robot_name)
+            if robot_position:
+                applied["SrcStationList"] = [robot_position]
+        runtime.update_move_state(
+            applied,
+            snapshot=False,
+            track_reservations=False,
+        )
+        if applied.get("MoveState") == MoveStateReplay.RUNNING:
+            started.add(move_id)
+        else:
+            finished.add(move_id)
+        if recorded_events is not None:
+            recorded_events.append(deepcopy(applied))
+
+    for group in _planned_event_groups(runtime.current_plan):
+        for event_time, notification in group["priorFinishes"]:
+            move_id = int(notification["MoveID"])
+            if (
+                event_time <= cutoff + TIME_TOLERANCE
+                and move_id in started
+                and move_id not in finished
+            ):
+                apply_notification(notification)
+        for event_time, notification in group["starts"]:
+            move_id = int(notification["MoveID"])
+            if event_time < cutoff - TIME_TOLERANCE and move_id not in started:
+                apply_notification(notification)
+        for event_time, notification in group["sameFinishes"]:
+            move_id = int(notification["MoveID"])
+            if (
+                event_time <= cutoff + TIME_TOLERANCE
+                and move_id in started
+                and move_id not in finished
+            ):
+                apply_notification(notification)
+
+
 def advance_to_recompute(
     scheduler: RealtimeRescheduler,
     cutoff: float,
@@ -1228,14 +1537,16 @@ def _execute_standard_algorithm(
         for index, round_config in enumerate(rounds[1:], start=2):
             requested_time = float(times[index - 1])
             notifications: List[Dict[str, Any]] = []
-            recovery = advance_to_recompute(
+            advance_to_algorithm_update(
                 runtime,
                 requested_time,
                 notifications,
-                include_loadlock_environment=True,
             )
-            effective_time = float(recovery.recovery_end)
             released_ids, empty_ports = _release_finished_load_ports(runtime, build_state)
+            projected_state, committed_moves = runtime.project_started_moves(
+                requested_time,
+                released_ids,
+            )
             for notification in notifications:
                 event_time = (
                     notification.get("EndTime")
@@ -1252,7 +1563,7 @@ def _execute_standard_algorithm(
                 "ControlInfo": {"Round": index},
                 "RecomputeInfo": {
                     "CurrentTime": requested_time,
-                    "EffectiveTime": effective_time,
+                    "EffectiveTime": requested_time,
                     "Reason": reason,
                 },
             }, requested_time)
@@ -1260,13 +1571,14 @@ def _execute_standard_algorithm(
             new_round_update = build_round_update(
                 plan,
                 round_config,
-                effective_time,
+                requested_time,
                 build_state,
             )
             update = _build_algorithm_recompute_update(
                 runtime,
                 new_round_update,
-                effective_time,
+                requested_time,
+                projected_state,
             )
             update_snapshots.append(deepcopy(update))
             reproduction.add(
@@ -1283,17 +1595,19 @@ def _execute_standard_algorithm(
                 update,
                 output,
                 requested_time,
-                effective_time,
+                requested_time,
                 reason,
+                initial_state=projected_state,
+                committed_moves=committed_moves,
             )
-            reproduction.add("AlgOutput", output, effective_time)
+            reproduction.add("AlgOutput", output, requested_time)
             summaries.append({
                 "index": index,
                 "kind": "recompute",
                 "requestedTime": requested_time,
-                "effectiveTime": effective_time,
-                "scheduleStartTime": effective_time,
-                "recoveryEndTime": effective_time,
+                "effectiveTime": requested_time,
+                "scheduleStartTime": requested_time,
+                "recoveryEndTime": requested_time,
                 "jobCount": _round_pjob_count(round_config),
                 "elapsedMs": elapsed_ms,
                 "segmentEnd": _segment_end(output["MoveList"]),
@@ -1306,15 +1620,9 @@ def _execute_standard_algorithm(
                     "stateSource": "src.validation.state.MachineState",
                 },
             })
-            suffix = (
-                f"，安全收尾至 {effective_time:.2f}s"
-                if effective_time > requested_time + TIME_TOLERANCE
-                else ""
-            )
             logs.append(
                 f"[{index}/{round_count}] @{requested_time:.2f}s {display_name} 重算完成："
                 f"{elapsed_ms:.1f} ms，移除 {len(update['RemoveList'])} 个旧 Move"
-                f"{suffix}"
             )
             if released_ids:
                 logs.append(
@@ -1608,11 +1916,24 @@ def execute_plan(raw_plan: Mapping[str, Any]) -> Dict[str, Any]:
     try:
         result = _execute_plan(raw_plan, reproduction)
     except Exception as error:  # noqa: BLE001
-        reproduction.add("AlgOutput", _alg_output_info(feedback=[{
+        feedback = [{
             "Level": "Error",
             "Type": type(error).__name__,
             "Message": str(error),
-        }]))
+        }]
+        if isinstance(error, MoveListValidationError):
+            reproduction.add(
+                "AlgOutput",
+                _alg_output_info(error.algorithm_output, feedback=feedback),
+                error.sim_time,
+            )
+            raise LoggedPlanError(
+                str(error),
+                reproduction.entries,
+                failure_output=error.gantt_output,
+                validation_issues=error.validation_issues,
+            ) from error
+        reproduction.add("AlgOutput", _alg_output_info(feedback=feedback))
         raise LoggedPlanError(str(error), reproduction.entries) from error
     cpu_finished = time.thread_time() if hasattr(time, "thread_time") else time.process_time()
     result["cpuTimeMs"] = max(0.0, (cpu_finished - cpu_started) * 1000.0)
@@ -2302,6 +2623,26 @@ def _log_response_fields(log_id: str) -> Dict[str, str]:
     return {"logUrl": f"/api/logs/{log_id}", "logFileName": filename}
 
 
+def _logged_failure_result_fields(error: LoggedPlanError) -> Dict[str, Any]:
+    """为带失败 MoveList 的异常保存诊断甘特图并生成响应字段。"""
+    if error.failure_output is None:
+        return {}
+    result_id = save_result(error.failure_output)
+    moves = list(error.failure_output.get("MoveList") or [])
+    return {
+        "resultId": result_id,
+        "resultUrl": f"/api/results/{result_id}",
+        "ganttUrl": (
+            "/movelist_gantt_viewer.html?"
+            f"src=/api/results/{result_id}"
+        ),
+        "validation": "failed",
+        "validationIssues": deepcopy(error.validation_issues),
+        "moveCount": len(moves),
+        "makespan": _segment_end(moves),
+    }
+
+
 def _batch_test_routes(
     routes: Sequence[Mapping[str, Any]],
     rounds: Sequence[Mapping[str, Any]],
@@ -2713,6 +3054,7 @@ def _execute_workspace_test_batch(
                 if isinstance(error, LoggedPlanError):
                     log_id = save_reproduction_log(error.reproduction_log)
                     failure.update(_log_response_fields(log_id))
+                    failure.update(_logged_failure_result_fields(error))
                 return failure
             if cancel_event is not None and cancel_event.is_set():
                 return {
@@ -3127,6 +3469,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             if baseline_response is not None:
                 response["baseline"] = baseline_response
             response.update(_log_response_fields(log_id))
+            response.update(_logged_failure_result_fields(error))
             self._send_json(response, HTTPStatus.BAD_REQUEST)
         except Exception as error:  # noqa: BLE001
             reproduction = ReproductionLog()

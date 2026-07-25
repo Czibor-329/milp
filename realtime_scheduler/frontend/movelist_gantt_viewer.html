@@ -790,6 +790,21 @@
       filter: drop-shadow(0 2px 4px rgba(15, 23, 42, 0.22));
     }
 
+    .bar.invalid {
+      stroke: #dc2626 !important;
+      stroke-width: 4;
+      stroke-opacity: 1 !important;
+      filter: drop-shadow(0 0 5px rgba(220, 38, 38, 0.75));
+    }
+
+    .bar-invalid-label {
+      fill: #ffffff;
+      font-size: 11px;
+      font-weight: 900;
+      pointer-events: none;
+      user-select: none;
+    }
+
     .bar-label {
       fill: #0f172a;
       font-size: 10px;
@@ -875,6 +890,18 @@
 
     .kv .v {
       color: #0f172a;
+      overflow-wrap: anywhere;
+    }
+
+    .validation-alert {
+      margin-bottom: 10px;
+      padding: 9px 10px;
+      border: 1px solid #fecaca;
+      border-radius: 7px;
+      background: #fef2f2;
+      color: #b91c1c;
+      font-size: 12px;
+      line-height: 1.45;
       overflow-wrap: anywhere;
     }
 
@@ -1419,7 +1446,11 @@
         module: String(rec.ModuleName ?? ""),
         start,
         end,
-        duration: end - start
+        duration: end - start,
+        invalid: rec.ValidationFailed === true,
+        validationIssues: Array.isArray(rec.ValidationIssues)
+          ? rec.ValidationIssues.map(String)
+          : []
       };
     }
 
@@ -1666,6 +1697,7 @@
         error: "",
         records: [],
         recomputePoints: [],
+        validation: null,
         models: new Map(),
         view: defaultView(),
         stats: null
@@ -1706,6 +1738,9 @@
         const rawRecords = Array.isArray(payload) ? payload : payload && Array.isArray(payload.MoveList) ? payload.MoveList : null;
         if (!rawRecords) throw new Error("Expected a MoveList array or a top-level array.");
         dataset.records = rawRecords.map(normalizeRecord);
+        dataset.validation = payload && !Array.isArray(payload) && payload.Validation
+          ? payload.Validation
+          : null;
         const rawRecomputePoints = payload && !Array.isArray(payload) && Array.isArray(payload.RecomputePoints)
           ? payload.RecomputePoints
           : [];
@@ -1861,6 +1896,11 @@
       }
       setControlsEnabled(true);
       syncControls(dataset);
+      const invalidBar = buildModel(dataset).bars.find((bar) => bar.rec.invalid);
+      if (invalidBar) {
+        selectAndRevealBar(dataset, invalidBar, { zoom: true });
+        return;
+      }
       renderCurrent();
     }
 
@@ -2399,6 +2439,7 @@
         const color = effectiveMoveColor(bar);
         const selected = dataset.view.selected && dataset.view.selected.rawIndex === bar.rec.rawIndex ? " selected" : "";
         const searchHit = searchHitRawIndexes.has(bar.rec.rawIndex) ? " search-hit" : "";
+        const invalid = bar.rec.invalid ? " invalid" : "";
         const text = "";
         const radius = 2;
         const probeHit = probeInView && bar.start <= probeTime && bar.end >= probeTime;
@@ -2407,8 +2448,11 @@
         const probeClass = probeHit ? " probe-hit" : "";
         return `
           <g clip-path="url(#${clipId})">
-            <rect class="bar${searchHit}${selected}${probeClass}" data-bar-index="${index}" x="${x}" y="${y + 2}" width="${w}" height="${Math.max(1, h - 4)}"
+            <rect class="bar${searchHit}${selected}${probeClass}${invalid}" data-bar-index="${index}" x="${x}" y="${y + 2}" width="${w}" height="${Math.max(1, h - 4)}"
               rx="${radius}" ry="${radius}" fill="${color}" fill-opacity="${fillOpacity}" stroke="#0f172a" stroke-opacity="${strokeOpacity}"></rect>
+            ${bar.rec.invalid && w >= 8
+              ? `<text class="bar-invalid-label" x="${x + Math.min(w / 2, 10)}" y="${y + h / 2 + 4}" text-anchor="middle">!</text>`
+              : ""}
             ${text}
           </g>`;
       }).join("");
@@ -2717,9 +2761,13 @@
     function showTooltip(event, bar) {
       const name = effectiveMoveName(bar);
       const raw = bar.rec.raw || {};
+      const validation = bar.rec.invalid
+        ? `<div style="color:#fca5a5;font-weight:700;margin-top:5px">校验失败：${escapeHtml(bar.rec.validationIssues.join("；") || "该 Move 未通过状态校验")}</div>`
+        : "";
       const header = `
         <strong>${escapeHtml(name)}</strong>
         <div class="muted">${escapeHtml(bar.label)} | ${escapeHtml(fmt(bar.start))} - ${escapeHtml(fmt(bar.end))} s (${escapeHtml(fmt(bar.duration))} s)</div>
+        ${validation}
       `;
       const rows = Object.keys(raw).map((key) => {
         const v = formatTooltipValue(raw[key]);
@@ -2846,7 +2894,11 @@
         ["Station", raw.Station],
         ["SlotList", listValue(raw.SlotList || raw.RobotSlotList || raw.SrcSlotList || raw.DestSlotList)]
       ];
+      const validationAlert = bar.rec.invalid
+        ? `<div class="validation-alert"><strong>校验失败</strong><br>${escapeHtml(bar.rec.validationIssues.join("；") || "该 Move 未通过状态校验")}</div>`
+        : "";
       dom.detailBody.innerHTML = `
+        ${validationAlert}
         <div class="detail-title">
           <span class="swatch" style="background:${escapeHtml(color)}"></span>
           <strong>${escapeHtml(name)}</strong>
