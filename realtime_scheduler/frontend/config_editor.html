@@ -16,7 +16,7 @@
     <nav class="tabs" aria-label="主要功能">
       <button class="tab active" data-tab-target="schedule">运行计划</button>
       <button class="tab" data-tab-target="workspace">可视化工作台</button>
-      <button class="tab" data-tab-target="route">Route</button>
+      <button class="tab" data-tab-target="route">路径</button>
       <button class="tab" data-tab-target="clean">Clean</button>
     </nav>
 
@@ -136,7 +136,7 @@
 
         <div class="tab-view" data-tab-view="route">
           <article class="panel">
-            <div class="panel-head route-panel-head"><div><h2>Route</h2><p>按加工工序数量分组，名称由候选腔室、加工时间和清洁配置自动生成。</p></div><div class="row-actions"><button class="btn small" data-action="generate-example-routes">生成 1–3 道示例</button><button class="btn small" data-action="add-route">＋ Route</button></div></div>
+            <div class="panel-head route-panel-head"><div><h2>路径</h2></div><div class="row-actions"><button class="btn small" data-action="add-route">＋ 路径</button></div></div>
             <div class="panel-body"><div class="card-list" id="routeList"></div></div>
           </article>
         </div>
@@ -191,7 +191,7 @@
   </dialog>
 
   <div class="drawer-layer" id="drawerLayer">
-    <aside class="drawer" id="stepDrawer" aria-label="Route Step 详细设置">
+    <aside class="drawer" id="stepDrawer" aria-label="路径 Step 详细设置">
       <header class="drawer-head"><div><h2 id="drawerTitle">Step 详细设置</h2><p id="drawerSubtitle"></p></div><button class="btn icon" id="closeDrawer" aria-label="关闭">✕</button></header>
       <div class="drawer-body" id="drawerBody"></div>
     </aside>

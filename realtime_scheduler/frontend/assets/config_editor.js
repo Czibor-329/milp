@@ -12,7 +12,6 @@ __export(route_editor_logic_exports, {
   cloneVisitParameters: () => cloneVisitParameters,
   compareProfiles: () => compareProfiles,
   differenceFields: () => differenceFields,
-  exampleRouteSpecs: () => exampleRouteSpecs,
   processProfile: () => processProfile,
   processRecipeName: () => processRecipeName,
   replaceCandidates: () => replaceCandidates,
@@ -56,8 +55,9 @@ function processProfile(route) {
     counts,
     candidatePath,
     processTimes,
-    label: processCount === 0 ? "\u65E0\u52A0\u5DE5\u5DE5\u5E8F" : `${processCount}\u9053\u5DE5\u5E8F`,
-    key: String(processCount)
+    processLabel: processCount === 0 ? "\u65E0\u52A0\u5DE5\u5DE5\u5E8F" : `${processCount} \u9053\u5DE5\u5E8F`,
+    label: processCount === 0 ? "(0)" : `(${counts.join(", ")})`,
+    key: processCount === 0 ? "0:none" : `${processCount}:${counts.join(",")}`
   };
 }
 function formatSeconds(value) {
@@ -90,23 +90,6 @@ function automaticRouteName(profile, cleanSignature = "") {
     (path, index) => `${path}(${formatSeconds(profile.processTimes[index])})`
   ).join(" \u2192 ");
   return cleanSignature ? `${processName} \xB7 ${cleanSignature}` : processName;
-}
-var EXAMPLE_ROUTE_SPECS = [
-  ...[["PM1"], ["PM1", "PM2"], ["PM1", "PM2", "PM3"], ["PM1", "PM2", "PM3", "PM4"]].flatMap((candidates) => [40, 80, 120].map((time) => ({ candidates: [candidates], times: [time] }))),
-  { candidates: [["PM1"], ["PM2"]], times: [40, 60] },
-  { candidates: [["PM1", "PM2"], ["PM3", "PM4"]], times: [40, 80] },
-  { candidates: [["PM1", "PM2"], ["PM3", "PM4"]], times: [60, 100] },
-  { candidates: [["PM1", "PM2"], ["PM3", "PM4"]], times: [80, 120] },
-  { candidates: [["PM1"], ["PM2", "PM3", "PM4"]], times: [40, 120] },
-  { candidates: [["PM1", "PM2", "PM3"], ["PM4"]], times: [60, 100] },
-  { candidates: [["PM1"], ["PM2"], ["PM3", "PM4"]], times: [40, 60, 80] },
-  { candidates: [["PM1"], ["PM2"], ["PM3", "PM4"]], times: [60, 80, 100] },
-  { candidates: [["PM1"], ["PM2"], ["PM3", "PM4"]], times: [80, 100, 120] },
-  { candidates: [["PM1", "PM2"], ["PM3"], ["PM4"]], times: [40, 80, 120] },
-  { candidates: [["PM1"], ["PM2", "PM3"], ["PM4"]], times: [40, 100, 120] }
-];
-function exampleRouteSpecs() {
-  return structuredClone(EXAMPLE_ROUTE_SPECS);
 }
 function compareProfiles(left, right) {
   if (left.processCount !== right.processCount) return left.processCount - right.processCount;
@@ -917,6 +900,7 @@ var state = {
   routes: [{ name: "RouteA", group: "RouteA", bufferOption: 0, prePJobCleanRefs: [], postPJobCleanRefs: [], postCJobCleanRefs: [], stages: linkRouteSteps([makeStage("LP1"), makeStage("Robot"), makeStage("PM1,PM2", true, "RouteA_Step2"), makeStage("Robot"), makeStage("LP1")]) }],
   rounds: [makeRound(1, 0, "RouteA", "LP1"), makeRound(2, 70, "RouteA", "LP2")],
   drawer: null,
+  expandedRouteProcessGroups: /* @__PURE__ */ new Set(),
   expandedRouteGroups: /* @__PURE__ */ new Set(),
   expandedRoutes: /* @__PURE__ */ new Set(),
   expandedCleanTypes: /* @__PURE__ */ new Set(),
@@ -947,6 +931,57 @@ function normalizeClean(clean) {
   value.wacRecipeTime = Math.max(0, Number.isFinite(wacRecipeTime) ? wacRecipeTime : 20);
   return value;
 }
+function formatCleanSeconds(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "\u672A\u8BBE\u7F6E";
+  const text = Number.isInteger(number) ? String(number) : number.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
+  return `${text}s`;
+}
+function automaticCleanName(clean) {
+  const value = normalizeClean(clean);
+  const labels = Object.fromEntries(CLEAN_TYPE_DEFINITIONS.map((item) => [item.key, item.label]));
+  const mainDuration = formatCleanSeconds(value.recipeTime);
+  if (value.cleanType === "dummywac") {
+    return `${labels[value.cleanType]} \xB7 \u4E3B\u6E05\u6D01 ${mainDuration} \xB7 WAC ${formatCleanSeconds(value.wacRecipeTime)}`;
+  }
+  return `${labels[value.cleanType]} \xB7 ${mainDuration}`;
+}
+function renameCleanReferences(oldName, newName) {
+  if (!oldName || oldName === newName) return;
+  const rename = (value) => stringList(value).map((name) => name === oldName ? newName : name);
+  state.routes.forEach((route) => {
+    ROUTE_CLEAN_KEYS.forEach((key) => {
+      route[key] = rename(route[key]);
+    });
+    (route.stages || []).forEach((stage) => (stage.visits || []).forEach((visit) => {
+      visit.beforeCleanRefs = rename(visit.beforeCleanRefs);
+      visit.afterCleanRefs = rename(visit.afterCleanRefs);
+    }));
+  });
+}
+function synchronizeCleanNames() {
+  const occurrences = /* @__PURE__ */ new Map();
+  let changed = false;
+  state.cleans = state.cleans.map(normalizeClean);
+  state.cleans.forEach((clean) => {
+    const baseName = automaticCleanName(clean);
+    const occurrence = (occurrences.get(baseName) || 0) + 1;
+    occurrences.set(baseName, occurrence);
+    const generatedName = occurrence === 1 ? baseName : `${baseName} \xB7 #${occurrence}`;
+    const oldName = clean.name;
+    if (oldName !== generatedName) {
+      renameCleanReferences(oldName, generatedName);
+      clean.name = generatedName;
+      changed = true;
+    }
+    const recipeName = `${generatedName}-Recipe`;
+    if (clean.recipeName !== recipeName) {
+      clean.recipeName = recipeName;
+      changed = true;
+    }
+  });
+  return changed;
+}
 function runtimeClean(clean) {
   const value = normalizeClean(clean), type = value.cleanType;
   const taskNames = { preclean: "PreClean", postclean: "PostClean", wacclean: "WacClean", dummy: "PreDummyClean", dummywac: "PreWacClean" };
@@ -966,10 +1001,7 @@ function runtimeClean(clean) {
   };
 }
 function makeClean(cleanType = "preclean") {
-  const occupied = new Set(state.cleans.map((clean) => clean.name));
-  let suffix = state.cleans.length + 1;
-  while (occupied.has(`Clean${suffix}`)) suffix += 1;
-  return normalizeClean({ name: `Clean${suffix}`, cleanType, recipeTime: 20, triggerCount: 5, wacRecipeTime: 20 });
+  return normalizeClean({ name: "", cleanType, recipeTime: 20, triggerCount: 5, wacRecipeTime: 20 });
 }
 function cleanNamesFor(types) {
   const allowed = new Set(types);
@@ -985,35 +1017,6 @@ function removeCleanReferences(cleanName) {
       visit.afterCleanRefs = stringList(visit.afterCleanRefs).filter((name) => name !== cleanName);
     }));
   });
-}
-function makeExampleRoute(spec, catalogIndex) {
-  const prefix = `AutoRoute${catalogIndex + 1}`;
-  const stages = [makeStage(state.loadPorts[0] || "LP1"), makeStage("ATR"), makeStage(["LA", "LB"]), makeStage("VTR")];
-  spec.candidates.forEach((candidates, processIndex) => {
-    const processStage = makeStage(candidates, true, `${prefix}_Step${processIndex + 1}`);
-    processStage.visits.forEach((visit) => {
-      visit.processTime = Number(spec.times[processIndex]);
-      visit.recipeTime = Number(spec.times[processIndex]);
-    });
-    stages.push(processStage, makeStage("VTR"));
-  });
-  stages.push(makeStage(["LA", "LB"]), makeStage("ATR"), makeStage(state.loadPorts[0] || "LP1"));
-  return { name: prefix, group: "\u81EA\u52A8\u793A\u4F8B", bufferOption: 0, prePJobCleanRefs: [], postPJobCleanRefs: [], postCJobCleanRefs: [], stages: linkRouteSteps(stages) };
-}
-function generateExampleRoutes() {
-  const hasPse300Topology = ["PM1", "PM2", "PM3", "PM4"].every((name) => state.processModules.includes(name)) && ["LA", "LB"].every((name) => state.stationNames.includes(name)) && ["ATR", "VTR"].every((name) => state.robotNames.includes(name));
-  if (!hasPse300Topology) return null;
-  const existing = new Set(state.routes.map((route) => generatedRouteName(route)));
-  let added = 0;
-  exampleRouteSpecs().forEach((spec, catalogIndex) => {
-    const route = makeExampleRoute(spec, catalogIndex);
-    const signature = generatedRouteName(route);
-    if (existing.has(signature)) return;
-    existing.add(signature);
-    state.routes.push(route);
-    added += 1;
-  });
-  return added;
 }
 function stageUsesRobot(stage, index) {
   const names = (stage.visits || []).map((visit) => visit.stationName).filter(Boolean);
@@ -1254,6 +1257,7 @@ function applyTestCase(testCase) {
   if (!state.routes.length && Array.isArray(value.routes)) state.routes = value.routes;
   if (!state.cleans.length && Array.isArray(value.cleans)) state.cleans = value.cleans.map(normalizeClean);
   state.routes.forEach(normalizeRoute);
+  state.expandedRouteProcessGroups.clear();
   state.expandedRouteGroups.clear();
   state.expandedRoutes.clear();
   state.rounds = Array.isArray(value.rounds) ? value.rounds : [];
@@ -1268,8 +1272,9 @@ function applyTestCase(testCase) {
   state.times[0] = 0;
   normalizeRounds();
   state.drawer = null;
+  const cleanNamesChanged = synchronizeCleanNames();
   const routeNamesChanged = synchronizeRouteNames();
-  state.dirty = routeNamesChanged;
+  state.dirty = cleanNamesChanged || routeNamesChanged;
   document.getElementById("roundCount").value = state.roundCount;
   document.querySelectorAll('input[name="strategy"]').forEach((input) => {
     input.checked = input.value === state.strategy;
@@ -1284,13 +1289,15 @@ function applyTestCase(testCase) {
   renderAll();
   renderWorkspaceControls();
   resetRunResult();
-  if (routeNamesChanged) {
-    setWorkspaceStatus("\u6B63\u5728\u4FDD\u5B58\u81EA\u52A8\u751F\u6210\u7684 Route \u540D\u79F0\u2026", "dirty");
+  if (state.dirty) {
+    setWorkspaceStatus("\u6B63\u5728\u4FDD\u5B58\u7EDF\u4E00\u751F\u6210\u7684\u8DEF\u5F84\u4E0E Clean \u540D\u79F0\u2026", "dirty");
     scheduleAutoSave();
   } else setWorkspaceStatus(`\u5DF2\u8F7D\u5165\u201C${state.testCaseName}\u201D`, "saved");
 }
 function currentTestSnapshot(name = state.testCaseName) {
   normalizeRounds();
+  synchronizeCleanNames();
+  synchronizeRouteNames();
   return structuredClone({ name, group: state.testCaseGroup, strategy: state.strategy, roundCount: state.roundCount, times: state.times, options: state.options, cleans: state.cleans.map(runtimeClean), routes: state.routes, routeNameChanges: Object.fromEntries(state.routeNameChanges), rounds: state.rounds });
 }
 async function saveCurrentTest(silent = false) {
@@ -1505,7 +1512,7 @@ function renderTimes() {
 }
 function renderCleans() {
   const host = document.getElementById("cleanList");
-  state.cleans = state.cleans.map(normalizeClean);
+  synchronizeCleanNames();
   host.innerHTML = CLEAN_TYPE_DEFINITIONS.map((type) => {
     const rows = state.cleans.map((clean, index) => ({ clean, index })).filter((item) => item.clean.cleanType === type.key);
     const open = state.expandedCleanTypes.has(type.key);
@@ -1582,39 +1589,61 @@ function synchronizeRouteNames() {
 function groupedRoutes() {
   const natural = (left, right) => left.localeCompare(right, void 0, { numeric: true });
   synchronizeRouteNames();
-  const groups = /* @__PURE__ */ new Map();
+  const processGroups = /* @__PURE__ */ new Map();
   state.routes.forEach((route, routeIndex) => {
-    const profile = routeProcessProfile(route), group = groups.get(profile.key) || { ...profile, routes: [] };
-    group.routes.push({ route, routeIndex, profile });
-    groups.set(profile.key, group);
-    if (state.expandedRoutes.has(routeIndex)) state.expandedRouteGroups.add(profile.key);
+    const profile = routeProcessProfile(route);
+    const processKey = String(profile.processCount);
+    const processGroup = processGroups.get(processKey) || {
+      key: processKey,
+      processCount: profile.processCount,
+      label: profile.processLabel,
+      routeCount: 0,
+      structures: /* @__PURE__ */ new Map()
+    };
+    const structure = processGroup.structures.get(profile.key) || { ...profile, routes: [] };
+    structure.routes.push({ route, routeIndex, profile });
+    processGroup.structures.set(profile.key, structure);
+    processGroup.routeCount += 1;
+    processGroups.set(processKey, processGroup);
+    if (state.expandedRoutes.has(routeIndex)) {
+      state.expandedRouteProcessGroups.add(processKey);
+      state.expandedRouteGroups.add(profile.key);
+    }
   });
-  return [...groups.values()].sort(compareProfiles).map((group) => ({
-    ...group,
-    routes: group.routes.sort((left, right) => natural(left.route.name || "", right.route.name || ""))
+  return [...processGroups.values()].sort((left, right) => left.processCount - right.processCount).map((processGroup) => ({
+    ...processGroup,
+    structures: [...processGroup.structures.values()].sort(compareProfiles).map((structure) => ({
+      ...structure,
+      routes: structure.routes.sort((left, right) => natural(left.route.name || "", right.route.name || ""))
+    }))
   }));
 }
 function renderRouteDetails(route, index) {
   const preCleans = cleanNamesFor(["preclean", "dummy", "dummywac"]);
   const postCleans = cleanNamesFor(["postclean"]);
-  return `<div class="route-details"><div class="edit-card-head"><strong>Route \u8BE6\u60C5</strong><div><button class="btn small" data-action="add-stage" data-index="${index}">\uFF0B Step \u7EC4</button> <button class="btn danger small" data-action="remove-route" data-index="${index}">\u5220\u9664</button></div></div>
-    <div class="route-meta"><div class="route-meta-grid"><div class="field"><label>Route \u540D\u79F0\uFF08\u81EA\u52A8\u751F\u6210\uFF09</label><input value="${escapeHtml2(route.name)}" readonly></div><div class="field"><label>Group</label><input data-scope="route" data-index="${index}" data-key="group" value="${escapeHtml2(route.group)}"></div><div class="field"><label>BufferOption</label><input type="number" data-scope="route" data-index="${index}" data-key="bufferOption" value="${Number(route.bufferOption)}"></div></div>
-    <details class="route-clean-details"><summary>Route \u7EA7 Clean \u8BBE\u7F6E</summary><div class="grid"><div class="field span-4"><label>PJob \u524D</label><select data-scope="route" data-index="${index}" data-key="prePJobCleanRefs">${optionsHtml(preCleans, stringList(route.prePJobCleanRefs)[0] || "", "\u4E0D\u9700\u8981\u6E05\u6D01")}</select></div><div class="field span-4"><label>PJob \u540E</label><select data-scope="route" data-index="${index}" data-key="postPJobCleanRefs">${optionsHtml(postCleans, stringList(route.postPJobCleanRefs)[0] || "", "\u4E0D\u9700\u8981\u6E05\u6D01")}</select></div><div class="field span-4"><label>CJob \u540E</label><select data-scope="route" data-index="${index}" data-key="postCJobCleanRefs">${optionsHtml(postCleans, stringList(route.postCJobCleanRefs)[0] || "", "\u4E0D\u9700\u8981\u6E05\u6D01")}</select></div></div></details></div>
+  return `<div class="route-details"><div class="edit-card-head"><strong>\u8DEF\u5F84\u8BE6\u60C5</strong><div><button class="btn small" data-action="add-stage" data-index="${index}">\uFF0B Step \u7EC4</button> <button class="btn danger small" data-action="remove-route" data-index="${index}">\u5220\u9664</button></div></div>
+    <div class="route-meta"><div class="route-meta-grid"><div class="field"><label>\u8DEF\u5F84\u540D\u79F0\uFF08\u81EA\u52A8\u751F\u6210\uFF09</label><input value="${escapeHtml2(route.name)}" readonly></div><div class="field"><label>Group</label><input data-scope="route" data-index="${index}" data-key="group" value="${escapeHtml2(route.group)}"></div><div class="field"><label>BufferOption</label><input type="number" data-scope="route" data-index="${index}" data-key="bufferOption" value="${Number(route.bufferOption)}"></div></div>
+    <details class="route-clean-details"><summary>\u8DEF\u5F84\u7EA7 Clean \u8BBE\u7F6E</summary><div class="grid"><div class="field span-4"><label>PJob \u524D</label><select data-scope="route" data-index="${index}" data-key="prePJobCleanRefs">${optionsHtml(preCleans, stringList(route.prePJobCleanRefs)[0] || "", "\u4E0D\u9700\u8981\u6E05\u6D01")}</select></div><div class="field span-4"><label>PJob \u540E</label><select data-scope="route" data-index="${index}" data-key="postPJobCleanRefs">${optionsHtml(postCleans, stringList(route.postPJobCleanRefs)[0] || "", "\u4E0D\u9700\u8981\u6E05\u6D01")}</select></div><div class="field span-4"><label>CJob \u540E</label><select data-scope="route" data-index="${index}" data-key="postCJobCleanRefs">${optionsHtml(postCleans, stringList(route.postCJobCleanRefs)[0] || "", "\u4E0D\u9700\u8981\u6E05\u6D01")}</select></div></div></details></div>
     <div class="route-table-wrap"><table class="route-table"><thead><tr><th>StepID</th><th>\u7C7B\u578B</th><th>\u53EF\u9009\u8154\u5BA4 / \u673A\u5668\u624B</th><th>PostStepID</th><th>NeedProcess</th><th></th></tr></thead><tbody>${renderSteps(route, index)}</tbody></table></div></div>`;
 }
 function renderRoutes() {
-  const host = document.getElementById("routeList"), groups = groupedRoutes();
-  host.innerHTML = groups.length ? groups.map((group) => {
-    const groupOpen = state.expandedRouteGroups.has(group.key);
-    const routes = group.routes.map(({ route, routeIndex, profile }) => {
-      const routeOpen = state.expandedRoutes.has(routeIndex), processSummary = profile.processCount ? `${profile.processCount} \u9053\u52A0\u5DE5\u5DE5\u5E8F \xB7 ${profile.candidatePath.join(" \u2192 ")}` : "\u65E0\u52A0\u5DE5\u5DE5\u5E8F";
-      return `<article class="route-summary-card"><div class="route-summary-head"><button class="route-summary-toggle" data-action="toggle-route" data-route-index="${routeIndex}">
-        <div class="route-summary-title"><span class="collapse-arrow ${routeOpen ? "open" : ""}">\u25B6</span><strong>${escapeHtml2(route.name || "\u672A\u547D\u540D Route")}</strong></div><div class="route-summary-meta">${escapeHtml2(processSummary)} \xB7 ${route.stages.length} Steps</div></button>
+  const host = document.getElementById("routeList"), processGroups = groupedRoutes();
+  host.innerHTML = processGroups.length ? processGroups.map((processGroup) => {
+    const processOpen = state.expandedRouteProcessGroups.has(processGroup.key);
+    const structures = processGroup.structures.map((structure) => {
+      const structureOpen = state.expandedRouteGroups.has(structure.key);
+      const routes = structure.routes.map(({ route, routeIndex, profile }) => {
+        const routeOpen = state.expandedRoutes.has(routeIndex);
+        const processSummary = profile.processCount ? profile.candidatePath.join(" \u2192 ") : "\u65E0\u52A0\u5DE5\u5DE5\u5E8F";
+        return `<article class="route-summary-card"><div class="route-summary-head"><button class="route-summary-toggle" data-action="toggle-route" data-route-index="${routeIndex}" aria-expanded="${routeOpen}">
+        <div class="route-summary-title"><span class="collapse-arrow ${routeOpen ? "open" : ""}">\u25B6</span><strong>${escapeHtml2(route.name || "\u672A\u547D\u540D\u8DEF\u5F84")}</strong></div><div class="route-summary-meta">${escapeHtml2(processSummary)} \xB7 ${route.stages.length} Steps</div></button>
         <div class="route-summary-actions"><button class="btn small" data-action="edit-route" data-route-index="${routeIndex}">\u7F16\u8F91</button><button class="btn small" data-action="copy-route" data-route-index="${routeIndex}">\u590D\u5236</button><button class="btn danger small" data-action="remove-route" data-index="${routeIndex}">\u5220\u9664</button></div>
       </div>${routeOpen ? renderRouteDetails(route, routeIndex) : ""}</article>`;
+      }).join("");
+      return `<section class="route-type-group"><button class="route-type-head" data-action="toggle-route-group" data-group-key="${escapeHtml2(structure.key)}" aria-expanded="${structureOpen}"><span class="collapse-arrow ${structureOpen ? "open" : ""}">\u25B6</span><strong>\u5E76\u884C\u673A\u5668\u6570 <span class="route-structure-key">${escapeHtml2(structure.label)}</span></strong><span class="route-count">${structure.routes.length} \u6761\u8DEF\u5F84 \xB7 ${structureOpen ? "\u5DF2\u5C55\u5F00" : "\u5DF2\u6536\u8D77"}</span></button>${structureOpen ? `<div class="route-group-body">${routes}</div>` : ""}</section>`;
     }).join("");
-    return `<section class="route-type-group"><button class="route-type-head" data-action="toggle-route-group" data-group-key="${escapeHtml2(group.key)}"><span class="collapse-arrow ${groupOpen ? "open" : ""}">\u25B6</span><strong>${escapeHtml2(group.label)}</strong><span class="route-count">${group.routes.length} \u6761 Route \xB7 ${groupOpen ? "\u5DF2\u5C55\u5F00" : "\u5DF2\u6536\u8D77"}</span></button>${groupOpen ? `<div class="route-group-body">${routes}</div>` : ""}</section>`;
-  }).join("") : `<div class="empty">\u81F3\u5C11\u521B\u5EFA\u4E00\u6761 Route\uFF0CJob \u624D\u80FD\u5F15\u7528\u3002</div>`;
+    return `<section class="route-process-group"><button class="route-process-head" data-action="toggle-route-process-group" data-process-key="${escapeHtml2(processGroup.key)}" aria-expanded="${processOpen}"><span class="collapse-arrow ${processOpen ? "open" : ""}">\u25B6</span><strong>${escapeHtml2(processGroup.label)}</strong><span class="route-count">${processGroup.routeCount} \u6761\u8DEF\u5F84 \xB7 ${processGroup.structures.length} \u79CD\u5E76\u884C\u7ED3\u6784</span></button>${processOpen ? `<div class="route-process-body">${structures}</div>` : ""}</section>`;
+  }).join("") : `<div class="empty">\u81F3\u5C11\u521B\u5EFA\u4E00\u6761\u8DEF\u5F84\uFF0CJob \u624D\u80FD\u5F15\u7528\u3002</div>`;
 }
 function pjobLoadPortSlots(roundIndex, cjobIndex, pjobIndex) {
   const target = state.rounds[roundIndex].cjobs[cjobIndex].pjobs[pjobIndex];
@@ -1635,16 +1664,16 @@ function pjobLoadPortSlots(roundIndex, cjobIndex, pjobIndex) {
   return [];
 }
 function renderPJobRoutePicker(pjob, roundIndex, cjobIndex, pjobIndex) {
-  const groups = groupedRoutes();
+  const groups = groupedRoutes().flatMap((processGroup) => processGroup.structures);
   const selectedRoute = state.routes.find((route) => route.name === pjob.routeRef);
   const selectedKey = selectedRoute ? routeProcessProfile(selectedRoute).key : groups[0]?.key || "";
   const selectedGroup = groups.find((group) => group.key === selectedKey);
   const common = `data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}"`;
-  const groupOptions = groups.map((group) => `<option value="${escapeHtml2(group.key)}" ${group.key === selectedKey ? "selected" : ""}>${escapeHtml2(group.label)}</option>`).join("");
+  const groupOptions = groups.map((group) => `<option value="${escapeHtml2(group.key)}" ${group.key === selectedKey ? "selected" : ""}>${escapeHtml2(`${group.processLabel} \xB7 ${group.label}`)}</option>`).join("");
   const routeOptions = (selectedGroup?.routes || []).map(({ route }) => `<option value="${escapeHtml2(route.name)}" ${route.name === pjob.routeRef ? "selected" : ""}>${escapeHtml2(route.name)}</option>`).join("");
   return `<div class="pjob-route-picker">
     <select class="pjob-route-process" data-scope="pjob-route-group" ${common}>${groupOptions || `<option value="">\u6682\u65E0\u5DE5\u5E8F</option>`}</select>
-    <select data-scope="pjob" data-key="routeRef" ${common}>${routeOptions ? `<option value="">\u9009\u62E9\u8DEF\u5F84</option>${routeOptions}` : `<option value="">\u8BF7\u5148\u914D\u7F6E Route</option>`}</select>
+    <select data-scope="pjob" data-key="routeRef" ${common}>${routeOptions ? `<option value="">\u9009\u62E9\u8DEF\u5F84</option>${routeOptions}` : `<option value="">\u8BF7\u5148\u914D\u7F6E\u8DEF\u5F84</option>`}</select>
   </div>`;
 }
 function renderRounds() {
@@ -1691,7 +1720,7 @@ function renderStepDrawer() {
     return;
   }
   normalizeRoute(route);
-  document.getElementById("drawerTitle").textContent = `${route.name || "Route"} \xB7 StepID ${stage.stepId}`;
+  document.getElementById("drawerTitle").textContent = `${route.name || "\u8DEF\u5F84"} \xB7 StepID ${stage.stepId}`;
   document.getElementById("drawerSubtitle").textContent = `${stepKind(route, stageIndex)} \xB7 ${stage.visits.length} \u4E2A\u5019\u9009`;
   const first = stage.visits[0] ? normalizeVisit(stage.visits[0]) : null, differences = visitDifferenceFields(stage), candidates = stage.visits.map((visit) => visit.stationName).filter(Boolean);
   const warning = differences.length ? `<div class="visit-warning"><strong>\u5019\u9009\u8154\u5BA4\u53C2\u6570\u4E0D\u4E00\u81F4</strong><p>\u5B58\u5728\u5DEE\u5F02\u7684\u5B57\u6BB5\uFF1A${differences.map(escapeHtml2).join("\u3001")}\u3002\u7EDF\u4E00\u8868\u5355\u6682\u65F6\u663E\u793A\u7B2C\u4E00\u4E2A\u5019\u9009 Visit \u7684\u503C\uFF0C\u5C1A\u672A\u8986\u76D6\u5176\u4ED6\u5019\u9009\u3002</p><button class="btn small" data-action="sync-stage-visits" data-route-index="${routeIndex}" data-stage-index="${stageIndex}">\u6309\u5F53\u524D\u8868\u5355\u540C\u6B65\u5168\u90E8\u5019\u9009</button></div>` : "";
@@ -1711,13 +1740,15 @@ function renderStepDrawer() {
       ${renderVisitField("Before Clean", "beforeCleanRefs", first.beforeCleanRefs, routeIndex, stageIndex, { multiple: true, values: cleanNamesFor(["preclean", "dummy", "dummywac"]), wide: true })}
       ${renderVisitField("After Clean", "afterCleanRefs", first.afterCleanRefs, routeIndex, stageIndex, { multiple: true, values: cleanNamesFor(["postclean", "wacclean"]), wide: true })}
     </div></section>
-  </div></div>` : `<div class="empty">\u672A\u9009\u62E9\u5019\u9009\u8BBE\u5907\uFF0C\u8BF7\u5148\u5728 Route \u5217\u8868\u4E2D\u9009\u62E9\u3002</div>`;
+  </div></div>` : `<div class="empty">\u672A\u9009\u62E9\u5019\u9009\u8BBE\u5907\uFF0C\u8BF7\u5148\u5728\u8DEF\u5F84\u5217\u8868\u4E2D\u9009\u62E9\u3002</div>`;
   document.getElementById("drawerBody").innerHTML = `<section class="drawer-section"><h3>Step \u6982\u8981</h3><div class="step-summary"><div class="step-summary-item"><span>StepID</span><strong>${stage.stepId}</strong></div><div class="step-summary-item"><span>PostStepID</span><strong>${stage.postStepIds?.length ? stage.postStepIds.join(", ") : "\u7ED3\u675F"}</strong></div><div class="step-summary-item"><span>NeedProcess</span><strong>${stage.needProcess ? "true" : "false"}</strong></div><div class="step-summary-item"><span>\u5019\u9009\u6570\u91CF</span><strong>${stage.visits.length}</strong></div></div></section><section class="drawer-section"><h3>\u5019\u9009\u8154\u5BA4</h3><div class="candidate-chip-list">${candidates.length ? candidates.map((name) => `<span class="chip">${escapeHtml2(name)}</span>`).join("") : `<span class="candidate-picker-empty">\u672A\u9009\u62E9</span>`}</div></section>${warning}<section class="drawer-section">${form}</section>`;
 }
 function openStepDrawer(routeIndex, stageIndex) {
+  const profile = routeProcessProfile(state.routes[routeIndex]);
   state.drawer = { routeIndex, stageIndex };
   state.expandedRoutes.add(routeIndex);
-  state.expandedRouteGroups.add(routeProcessProfile(state.routes[routeIndex]).key);
+  state.expandedRouteProcessGroups.add(String(profile.processCount));
+  state.expandedRouteGroups.add(profile.key);
   renderRoutes();
   renderStepDrawer();
   document.getElementById("drawerLayer").classList.add("open");
@@ -1809,6 +1840,13 @@ function handleAction(button) {
     renderRoutes();
     return;
   }
+  if (action === "toggle-route-process-group") {
+    const key = button.dataset.processKey;
+    if (state.expandedRouteProcessGroups.has(key)) state.expandedRouteProcessGroups.delete(key);
+    else state.expandedRouteProcessGroups.add(key);
+    renderRoutes();
+    return;
+  }
   if (action === "toggle-clean-type") {
     const cleanType = button.dataset.cleanType;
     if (state.expandedCleanTypes.has(cleanType)) state.expandedCleanTypes.delete(cleanType);
@@ -1819,7 +1857,9 @@ function handleAction(button) {
   if (action === "toggle-route" || action === "edit-route") {
     if (action === "toggle-route" && state.expandedRoutes.has(routeIndex)) state.expandedRoutes.delete(routeIndex);
     else state.expandedRoutes.add(routeIndex);
-    state.expandedRouteGroups.add(routeProcessProfile(state.routes[routeIndex]).key);
+    const profile = routeProcessProfile(state.routes[routeIndex]);
+    state.expandedRouteProcessGroups.add(String(profile.processCount));
+    state.expandedRouteGroups.add(profile.key);
     renderRoutes();
     return;
   }
@@ -1841,24 +1881,10 @@ function handleAction(button) {
   if (action === "add-route") {
     const name = `Route${state.routes.length + 1}`, route = { name, group: name, bufferOption: 0, prePJobCleanRefs: [], postPJobCleanRefs: [], postCJobCleanRefs: [], stages: state.device ? defaultRouteStages(name) : linkRouteSteps([makeStage(""), makeStage(""), makeStage("", true, `${name}_Step2`), makeStage(""), makeStage("")]) };
     state.routes.push(route);
-    const newIndex = state.routes.length - 1;
+    const newIndex = state.routes.length - 1, profile = routeProcessProfile(route);
     state.expandedRoutes.add(newIndex);
-    state.expandedRouteGroups.add(routeProcessProfile(route).key);
-  }
-  if (action === "generate-example-routes") {
-    const added = generateExampleRoutes();
-    if (added === null) {
-      writeTerminal("$ \u5F53\u524D\u8BBE\u5907\u4E0D\u662F\u5B8C\u6574\u7684 PSE300 \u62D3\u6251\uFF0C\u4E0D\u80FD\u751F\u6210\u8FD9\u7EC4\u793A\u4F8B Route", true);
-      return;
-    }
-    if (!added) {
-      writeTerminal("$ \u793A\u4F8B Route \u5DF2\u7ECF\u9F50\u5168\uFF0C\u6CA1\u6709\u91CD\u590D\u6DFB\u52A0", false);
-      return;
-    }
-    state.expandedRoutes.clear();
-    state.expandedRouteGroups.clear();
-    writeTerminal(`$ \u5DF2\u65B0\u589E ${added} \u6761 PSE300 \u793A\u4F8B Route
-  \u8986\u76D6 1\u20133 \u9053\u5DE5\u5E8F\u300140\u2013120 \u79D2\uFF0C\u771F\u7A7A\u9501\u5019\u9009\u4E3A LA/LB`, false);
+    state.expandedRouteProcessGroups.add(String(profile.processCount));
+    state.expandedRouteGroups.add(profile.key);
   }
   if (action === "copy-route") {
     const source = state.routes[routeIndex], base = `${source.name || "Route"} \u526F\u672C`, occupied = new Set(state.routes.map((route) => route.name));
@@ -1867,13 +1893,15 @@ function handleAction(button) {
     const copy = structuredClone(source);
     copy.name = name;
     state.routes.push(copy);
-    const newIndex = state.routes.length - 1;
+    const newIndex = state.routes.length - 1, profile = routeProcessProfile(copy);
     state.expandedRoutes.add(newIndex);
-    state.expandedRouteGroups.add(routeProcessProfile(copy).key);
+    state.expandedRouteProcessGroups.add(String(profile.processCount));
+    state.expandedRouteGroups.add(profile.key);
   }
   if (action === "remove-route") {
     state.routes.splice(index, 1);
     state.expandedRoutes.clear();
+    state.expandedRouteProcessGroups.clear();
     state.expandedRouteGroups.clear();
     if (state.drawer?.routeIndex === index) closeStepDrawer();
   }
@@ -2427,7 +2455,7 @@ document.addEventListener("input", (event) => {
 document.addEventListener("change", (event) => {
   if (event.target.matches("[data-scope], [data-option], [data-time-index], [data-round-time-index]")) {
     updateStateFromControl(event.target);
-    if (["name", "cleanType", "jobType", "waferCount", ...ROUTE_CLEAN_KEYS].includes(event.target.dataset.key) || event.target.dataset.timeIndex !== void 0 || event.target.dataset.roundTimeIndex !== void 0 || ["stage-candidates", "stage-candidate-toggle", "cjob", "pjob", "pjob-route-group"].includes(event.target.dataset.scope)) renderAll();
+    if (["name", "cleanType", "recipeTime", "wacRecipeTime", "jobType", "waferCount", ...ROUTE_CLEAN_KEYS].includes(event.target.dataset.key) || event.target.dataset.timeIndex !== void 0 || event.target.dataset.roundTimeIndex !== void 0 || ["stage-candidates", "stage-candidate-toggle", "cjob", "pjob", "pjob-route-group"].includes(event.target.dataset.scope)) renderAll();
     else if (state.drawer) {
       renderRoutes();
       renderStepDrawer();

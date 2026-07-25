@@ -41,13 +41,9 @@ export interface RouteProcessProfile {
   counts: number[];
   candidatePath: string[];
   processTimes: number[];
+  processLabel: string;
   label: string;
   key: string;
-}
-
-export interface ExampleRouteSpec {
-  candidates: string[][];
-  times: number[];
 }
 
 export const VISIT_SHARED_FIELDS = [
@@ -70,7 +66,7 @@ export function cloneVisitParameters(visit?: RouteVisit): Partial<RouteVisit> {
   ) as Partial<RouteVisit>;
 }
 
-/** 汇总 Route 的加工工序数量、候选腔室路径与加工时间。 */
+/** 汇总 Route 的加工工序数量、并行机器结构、候选腔室路径与加工时间。 */
 export function processProfile(route: RouteDefinition): RouteProcessProfile {
   const processStages = (route.stages || []).filter((stage) => stage.needProcess);
   const counts = processStages.map(
@@ -89,8 +85,9 @@ export function processProfile(route: RouteDefinition): RouteProcessProfile {
     counts,
     candidatePath,
     processTimes,
-    label: processCount === 0 ? "无加工工序" : `${processCount}道工序`,
-    key: String(processCount),
+    processLabel: processCount === 0 ? "无加工工序" : `${processCount} 道工序`,
+    label: processCount === 0 ? "(0)" : `(${counts.join(", ")})`,
+    key: processCount === 0 ? "0:none" : `${processCount}:${counts.join(",")}`,
   };
 }
 
@@ -136,28 +133,7 @@ export function automaticRouteName(profile: RouteProcessProfile, cleanSignature 
   return cleanSignature ? `${processName} · ${cleanSignature}` : processName;
 }
 
-const EXAMPLE_ROUTE_SPECS: ExampleRouteSpec[] = [
-  ...[["PM1"], ["PM1", "PM2"], ["PM1", "PM2", "PM3"], ["PM1", "PM2", "PM3", "PM4"]]
-    .flatMap((candidates) => [40, 80, 120].map((time) => ({ candidates: [candidates], times: [time] }))),
-  { candidates: [["PM1"], ["PM2"]], times: [40, 60] },
-  { candidates: [["PM1", "PM2"], ["PM3", "PM4"]], times: [40, 80] },
-  { candidates: [["PM1", "PM2"], ["PM3", "PM4"]], times: [60, 100] },
-  { candidates: [["PM1", "PM2"], ["PM3", "PM4"]], times: [80, 120] },
-  { candidates: [["PM1"], ["PM2", "PM3", "PM4"]], times: [40, 120] },
-  { candidates: [["PM1", "PM2", "PM3"], ["PM4"]], times: [60, 100] },
-  { candidates: [["PM1"], ["PM2"], ["PM3", "PM4"]], times: [40, 60, 80] },
-  { candidates: [["PM1"], ["PM2"], ["PM3", "PM4"]], times: [60, 80, 100] },
-  { candidates: [["PM1"], ["PM2"], ["PM3", "PM4"]], times: [80, 100, 120] },
-  { candidates: [["PM1", "PM2"], ["PM3"], ["PM4"]], times: [40, 80, 120] },
-  { candidates: [["PM1"], ["PM2", "PM3"], ["PM4"]], times: [40, 100, 120] },
-];
-
-/** 返回内置示例 Route 规格的独立副本。 */
-export function exampleRouteSpecs(): ExampleRouteSpec[] {
-  return structuredClone(EXAMPLE_ROUTE_SPECS);
-}
-
-/** 按工序数量及各工序候选数排序 Route 工艺结构。 */
+/** 按工序数量及各工序并行机器数排序 Route 工艺结构。 */
 export function compareProfiles(left: RouteProcessProfile, right: RouteProcessProfile): number {
   if (left.processCount !== right.processCount) return left.processCount - right.processCount;
   for (let index = 0; index < Math.max(left.counts.length, right.counts.length); index += 1) {

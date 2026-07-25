@@ -24,7 +24,6 @@ __export(route_editor_logic_exports, {
   cloneVisitParameters: () => cloneVisitParameters,
   compareProfiles: () => compareProfiles,
   differenceFields: () => differenceFields,
-  exampleRouteSpecs: () => exampleRouteSpecs,
   processProfile: () => processProfile,
   processRecipeName: () => processRecipeName,
   replaceCandidates: () => replaceCandidates,
@@ -69,8 +68,9 @@ function processProfile(route) {
     counts,
     candidatePath,
     processTimes,
-    label: processCount === 0 ? "\u65E0\u52A0\u5DE5\u5DE5\u5E8F" : `${processCount}\u9053\u5DE5\u5E8F`,
-    key: String(processCount)
+    processLabel: processCount === 0 ? "\u65E0\u52A0\u5DE5\u5DE5\u5E8F" : `${processCount} \u9053\u5DE5\u5E8F`,
+    label: processCount === 0 ? "(0)" : `(${counts.join(", ")})`,
+    key: processCount === 0 ? "0:none" : `${processCount}:${counts.join(",")}`
   };
 }
 function formatSeconds(value) {
@@ -103,23 +103,6 @@ function automaticRouteName(profile, cleanSignature = "") {
     (path, index) => `${path}(${formatSeconds(profile.processTimes[index])})`
   ).join(" \u2192 ");
   return cleanSignature ? `${processName} \xB7 ${cleanSignature}` : processName;
-}
-var EXAMPLE_ROUTE_SPECS = [
-  ...[["PM1"], ["PM1", "PM2"], ["PM1", "PM2", "PM3"], ["PM1", "PM2", "PM3", "PM4"]].flatMap((candidates) => [40, 80, 120].map((time) => ({ candidates: [candidates], times: [time] }))),
-  { candidates: [["PM1"], ["PM2"]], times: [40, 60] },
-  { candidates: [["PM1", "PM2"], ["PM3", "PM4"]], times: [40, 80] },
-  { candidates: [["PM1", "PM2"], ["PM3", "PM4"]], times: [60, 100] },
-  { candidates: [["PM1", "PM2"], ["PM3", "PM4"]], times: [80, 120] },
-  { candidates: [["PM1"], ["PM2", "PM3", "PM4"]], times: [40, 120] },
-  { candidates: [["PM1", "PM2", "PM3"], ["PM4"]], times: [60, 100] },
-  { candidates: [["PM1"], ["PM2"], ["PM3", "PM4"]], times: [40, 60, 80] },
-  { candidates: [["PM1"], ["PM2"], ["PM3", "PM4"]], times: [60, 80, 100] },
-  { candidates: [["PM1"], ["PM2"], ["PM3", "PM4"]], times: [80, 100, 120] },
-  { candidates: [["PM1", "PM2"], ["PM3"], ["PM4"]], times: [40, 80, 120] },
-  { candidates: [["PM1"], ["PM2", "PM3"], ["PM4"]], times: [40, 100, 120] }
-];
-function exampleRouteSpecs() {
-  return structuredClone(EXAMPLE_ROUTE_SPECS);
 }
 function compareProfiles(left, right) {
   if (left.processCount !== right.processCount) return left.processCount - right.processCount;
@@ -165,7 +148,6 @@ function processRecipeName(value, fallback) {
   cloneVisitParameters,
   compareProfiles,
   differenceFields,
-  exampleRouteSpecs,
   processProfile,
   processRecipeName,
   replaceCandidates,

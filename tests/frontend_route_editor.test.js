@@ -16,11 +16,24 @@ function route(...candidateGroups) {
   return { stages: candidateGroups.map(names => ({ needProcess: true, visits: names.map(name => visit(name)) })) };
 }
 
-test("Route 只按加工工序数分组", () => {
-  assert.equal(logic.processProfile(route(["PM1"])).label, "1道工序");
-  assert.equal(logic.processProfile(route(["PM1", "PM2"])).label, "1道工序");
-  assert.equal(logic.processProfile(route(["PM1", "PM2"], ["PM1", "PM2", "PM3"])).label, "2道工序");
-  assert.equal(logic.processProfile({ stages: [{ needProcess: false, visits: [visit("ATR")] }] }).label, "无加工工序");
+test("Route 按工序数与各工序并行机器数形成两级分组", () => {
+  assert.deepEqual(
+    logic.processProfile(route(["PM1"])),
+    {
+      processCount: 1,
+      counts: [1],
+      candidatePath: ["PM1"],
+      processTimes: [20],
+      processLabel: "1 道工序",
+      label: "(1)",
+      key: "1:1",
+    },
+  );
+  assert.equal(logic.processProfile(route(["PM1", "PM2"])).label, "(2)");
+  assert.equal(logic.processProfile(route(["PM1", "PM2"], ["PM1", "PM2", "PM3"])).label, "(2, 3)");
+  const empty = logic.processProfile({ stages: [{ needProcess: false, visits: [visit("ATR")] }] });
+  assert.equal(empty.processLabel, "无加工工序");
+  assert.equal(empty.label, "(0)");
 });
 
 test("Route 名称由腔室种类和加工时间自动生成且不带工序数前缀", () => {
@@ -53,19 +66,10 @@ test("加工 Step Clean 也进入 Route 名称", () => {
   assert.equal(logic.routeCleanSignature(value), "S1前:DummyA · S2后:WacA");
 });
 
-test("示例 Route 覆盖 1–3 道工序且加工时间均为 40–120 秒", () => {
-  const specs = logic.exampleRouteSpecs();
-  assert.deepEqual([...new Set(specs.map(spec => spec.candidates.length))], [1, 2, 3]);
-  assert.ok(specs.length >= 20);
-  assert.ok(specs.every(spec => spec.times.length === spec.candidates.length));
-  assert.ok(specs.flatMap(spec => spec.times).every(time => time >= 40 && time <= 120));
-  assert.deepEqual(specs.slice(0, 4).map(spec => spec.candidates[0].length), [1, 1, 1, 2]);
-});
-
 test("Route 分组按工序数和候选数量序列排序", () => {
   const profiles = [route(["PM1", "PM2"], ["PM1"]), route(["PM1", "PM2"]), route(["PM1"])]
     .map(logic.processProfile).sort(logic.compareProfiles);
-  assert.deepEqual(profiles.map(item => item.key), ["1", "1", "2"]);
+  assert.deepEqual(profiles.map(item => item.key), ["1:1", "1:2", "2:2,1"]);
 });
 
 test("运行时只提交测试任务实际引用的共享 Route", () => {
