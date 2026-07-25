@@ -1033,7 +1033,10 @@ function normalizeRoute(route) {
     stage.kind = stageUsesRobot(stage, index) ? "robot" : "station";
     stage.needProcess = stage.kind === "station" && stage.visits.some((visit) => state.processModules.includes(visit.stationName));
     const recipeName = stage.needProcess ? `${route.group || route.name || "Route"}_Step${stage.stepId}` : "";
-    stage.visits.forEach((visit) => normalizeVisit(visit, recipeName));
+    stage.visits.forEach((visit) => {
+      normalizeVisit(visit, recipeName);
+      if (stage.needProcess) visit.recipeTime = Number(visit.processTime);
+    });
   });
   return route;
 }
@@ -1041,7 +1044,16 @@ function visitDifferenceFields(stage) {
   return differenceFields(stage, normalizeVisit);
 }
 function synchronizeStageVisits(stage) {
-  synchronizeVisits(stage, normalizeVisit);
+  if (!(stage.visits || []).length) return;
+  const first = normalizeVisit(stage.visits[0]);
+  const editableValues = {
+    processTime: Number(first.processTime),
+    recipeTime: Number(first.processTime),
+    qTimeLimit: Number(first.qTimeLimit),
+    residencyConstraint: Number(first.residencyConstraint),
+    afterCleanRefs: structuredClone(stringList(first.afterCleanRefs))
+  };
+  stage.visits.forEach((visit) => Object.assign(visit, structuredClone(editableValues)));
 }
 function setStageCandidates(routeIndex, stageIndex, names) {
   const route = state.routes[routeIndex], stage = route.stages[stageIndex];
@@ -1059,12 +1071,15 @@ function normalizeRounds() {
 function escapeHtml2(value) {
   return String(value ?? "").replace(/[&<>"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[char]);
 }
+function readonlyText(value) {
+  if (value === void 0 || value === null || value === "") return "\u2014";
+  return typeof value === "string" ? value : JSON.stringify(value);
+}
+function renderReadonlyField(label, value, wide = false) {
+  return `<div class="readonly-field ${wide ? "wide" : ""}"><span>${escapeHtml2(label)}</span><strong>${escapeHtml2(readonlyText(value))}</strong></div>`;
+}
 function optionsHtml(values, selected, emptyLabel = "\u8BF7\u9009\u62E9") {
   return `<option value="">${escapeHtml2(emptyLabel)}</option>` + values.map((value) => `<option value="${escapeHtml2(value)}" ${value === selected ? "selected" : ""}>${escapeHtml2(value)}</option>`).join("");
-}
-function multiOptionsHtml(values, selected) {
-  const chosen = new Set(stringList(selected));
-  return values.map((value) => `<option value="${escapeHtml2(value)}" ${chosen.has(value) ? "selected" : ""}>${escapeHtml2(value)}</option>`).join("");
 }
 function unwrapDevice(raw) {
   let value = raw;
@@ -1706,11 +1721,32 @@ function renderRounds() {
     return `<section class="round-card"><header class="round-head"><div class="round-title"><div class="round-number">${roundIndex + 1}</div><div><strong>${roundTitle}</strong><span class="readonly-pill">@ ${Number(round.currentTime)}s</span></div></div><div class="round-time-editor field"><label>${roundIndex ? "\u91CD\u7B97\u65F6\u95F4" : "\u6392\u7A0B\u65F6\u95F4"}</label><div><input type="number" min="0" step="0.1" data-round-time-index="${roundIndex}" value="${Number(round.currentTime)}" ${roundIndex ? "" : "disabled"}><span>s</span></div></div><button class="btn small" data-action="add-cjob" data-round-index="${roundIndex}">\uFF0B CJob</button></header><div class="cjob-list">${cjobs}</div></section>`;
   }).join("");
 }
-function renderVisitField(label, key, value, routeIndex, stageIndex, options = {}) {
-  const common = `data-scope="visit-shared" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-key="${key}"`;
-  if (options.multiple) return `<div class="unified-field ${options.wide ? "wide" : ""}"><label>${label}</label><select multiple ${common}>${multiOptionsHtml(options.values || [], value)}</select></div>`;
-  const type = options.number ? "number" : "text", step = options.number ? ` step="${options.step || "0.1"}"` : "";
-  return `<div class="unified-field ${options.wide ? "wide" : ""}"><label>${label}</label><input type="${type}"${step} ${common} value="${escapeHtml2(value)}"></div>`;
+function renderStepNumberField(label, key, value, routeIndex, stageIndex, options = {}) {
+  const inputId = `step-${routeIndex}-${stageIndex}-${key}`;
+  const helper = options.helper ? `<small class="field-help">${escapeHtml2(options.helper)}</small>` : "";
+  const minimum = options.minimum === void 0 ? "" : ` min="${options.minimum}"`;
+  return `<div class="step-edit-field">
+    <label for="${inputId}">${escapeHtml2(label)}</label>
+    <div class="step-number-control">
+      <input id="${inputId}" type="number" inputmode="decimal" step="${options.step || "0.1"}"${minimum} data-scope="visit-shared" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-key="${key}" value="${escapeHtml2(value)}">
+      <span aria-hidden="true">s</span>
+    </div>
+    ${helper}
+  </div>`;
+}
+function renderAfterCleanChoices(first, routeIndex, stageIndex) {
+  const selected = new Set(stringList(first.afterCleanRefs));
+  const choices = cleanNamesFor(["postclean", "wacclean"]);
+  const noCleanActive = selected.size === 0;
+  const cleanButtons = choices.map((name) => `<button type="button" class="clean-choice ${selected.has(name) ? "active" : ""}" data-action="toggle-after-clean" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-clean-name="${escapeHtml2(name)}" aria-pressed="${selected.has(name)}"><span class="clean-choice-indicator" aria-hidden="true">\u2713</span><span>${escapeHtml2(name)}</span></button>`).join("");
+  return `<fieldset class="step-edit-field after-clean-field">
+    <legend>After Clean</legend>
+    <div class="clean-choice-list">
+      <button type="button" class="clean-choice no-clean ${noCleanActive ? "active" : ""}" data-action="toggle-after-clean" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-clean-name="" aria-pressed="${noCleanActive}"><span class="clean-choice-indicator" aria-hidden="true">\u2713</span><span>No Clean</span></button>
+      ${cleanButtons || `<span class="clean-choice-empty">\u6682\u65E0\u53EF\u7528\u7684 PostClean / WAC Clean</span>`}
+    </div>
+    <small class="field-help">\u53EF\u9009\u62E9\u591A\u4E2A\u6E05\u6D01\uFF1B\u9009\u62E9 No Clean \u5C06\u6E05\u7A7A\u5F53\u524D\u9009\u62E9\u3002</small>
+  </fieldset>`;
 }
 function renderStepDrawer() {
   if (!state.drawer) return;
@@ -1720,28 +1756,46 @@ function renderStepDrawer() {
     return;
   }
   normalizeRoute(route);
-  document.getElementById("drawerTitle").textContent = `${route.name || "\u8DEF\u5F84"} \xB7 StepID ${stage.stepId}`;
+  document.getElementById("drawerTitle").textContent = `Step ${stage.stepId} \u914D\u7F6E`;
   document.getElementById("drawerSubtitle").textContent = `${stepKind(route, stageIndex)} \xB7 ${stage.visits.length} \u4E2A\u5019\u9009`;
-  const first = stage.visits[0] ? normalizeVisit(stage.visits[0]) : null, differences = visitDifferenceFields(stage), candidates = stage.visits.map((visit) => visit.stationName).filter(Boolean);
-  const warning = differences.length ? `<div class="visit-warning"><strong>\u5019\u9009\u8154\u5BA4\u53C2\u6570\u4E0D\u4E00\u81F4</strong><p>\u5B58\u5728\u5DEE\u5F02\u7684\u5B57\u6BB5\uFF1A${differences.map(escapeHtml2).join("\u3001")}\u3002\u7EDF\u4E00\u8868\u5355\u6682\u65F6\u663E\u793A\u7B2C\u4E00\u4E2A\u5019\u9009 Visit \u7684\u503C\uFF0C\u5C1A\u672A\u8986\u76D6\u5176\u4ED6\u5019\u9009\u3002</p><button class="btn small" data-action="sync-stage-visits" data-route-index="${routeIndex}" data-stage-index="${stageIndex}">\u6309\u5F53\u524D\u8868\u5355\u540C\u6B65\u5168\u90E8\u5019\u9009</button></div>` : "";
-  const form = first ? `<div class="unified-visit-form"><header class="unified-visit-head"><strong>\u7EDF\u4E00\u53C2\u6570</strong><span>\u4FEE\u6539\u4EFB\u4E00\u5B57\u6BB5\u540E\u540C\u6B65\u5230 ${stage.visits.length} \u4E2A\u5019\u9009</span></header><div class="visit-groups">
-    <section class="visit-group"><h4>\u5DE5\u827A\u4FE1\u606F</h4><div class="visit-fields">
-      ${renderVisitField("ProcessTime", "processTime", first.processTime, routeIndex, stageIndex, { number: true })}
-      ${renderVisitField("RecipeTime", "recipeTime", first.recipeTime, routeIndex, stageIndex, { number: true })}
-      ${renderVisitField("ProcessRecipe", "processRecipe", first.processRecipe, routeIndex, stageIndex)}
-      ${renderVisitField("ProcessType", "processType", first.processType, routeIndex, stageIndex)}
-      ${renderVisitField("Weight", "weight", typeof first.weight === "string" ? first.weight : JSON.stringify(first.weight), routeIndex, stageIndex)}
-      ${renderVisitField("MoveTimeOffset", "moveTimeOffset", typeof first.moveTimeOffset === "string" ? first.moveTimeOffset : JSON.stringify(first.moveTimeOffset), routeIndex, stageIndex, { wide: true })}
-    </div></section>
-    <section class="visit-group"><h4>\u7EA6\u675F\u4FE1\u606F</h4><div class="visit-fields constraints">
-      ${renderVisitField("SlotIDs", "slotIds", first.slotIds, routeIndex, stageIndex)}
-      ${renderVisitField("QTime", "qTimeLimit", first.qTimeLimit, routeIndex, stageIndex, { number: true })}
-      ${renderVisitField("Residency", "residencyConstraint", first.residencyConstraint, routeIndex, stageIndex, { number: true })}
-      ${renderVisitField("Before Clean", "beforeCleanRefs", first.beforeCleanRefs, routeIndex, stageIndex, { multiple: true, values: cleanNamesFor(["preclean", "dummy", "dummywac"]), wide: true })}
-      ${renderVisitField("After Clean", "afterCleanRefs", first.afterCleanRefs, routeIndex, stageIndex, { multiple: true, values: cleanNamesFor(["postclean", "wacclean"]), wide: true })}
-    </div></section>
-  </div></div>` : `<div class="empty">\u672A\u9009\u62E9\u5019\u9009\u8BBE\u5907\uFF0C\u8BF7\u5148\u5728\u8DEF\u5F84\u5217\u8868\u4E2D\u9009\u62E9\u3002</div>`;
-  document.getElementById("drawerBody").innerHTML = `<section class="drawer-section"><h3>Step \u6982\u8981</h3><div class="step-summary"><div class="step-summary-item"><span>StepID</span><strong>${stage.stepId}</strong></div><div class="step-summary-item"><span>PostStepID</span><strong>${stage.postStepIds?.length ? stage.postStepIds.join(", ") : "\u7ED3\u675F"}</strong></div><div class="step-summary-item"><span>NeedProcess</span><strong>${stage.needProcess ? "true" : "false"}</strong></div><div class="step-summary-item"><span>\u5019\u9009\u6570\u91CF</span><strong>${stage.visits.length}</strong></div></div></section><section class="drawer-section"><h3>\u5019\u9009\u8154\u5BA4</h3><div class="candidate-chip-list">${candidates.length ? candidates.map((name) => `<span class="chip">${escapeHtml2(name)}</span>`).join("") : `<span class="candidate-picker-empty">\u672A\u9009\u62E9</span>`}</div></section>${warning}<section class="drawer-section">${form}</section>`;
+  const first = stage.visits[0] ? normalizeVisit(stage.visits[0]) : null;
+  const editableFieldLabels = { processTime: "Process Time", qTimeLimit: "QTime", residencyConstraint: "Residency", afterCleanRefs: "After Clean" };
+  const differences = visitDifferenceFields(stage).filter((field) => editableFieldLabels[field]);
+  const candidates = [...new Set(stage.visits.map((visit) => visit.stationName).filter(Boolean))];
+  const differenceNames = differences.map((field) => editableFieldLabels[field] || field);
+  const warning = differences.length ? `<div class="visit-warning" role="status"><strong>\u5019\u9009\u8154\u5BA4\u7684\u53EF\u7F16\u8F91\u53C2\u6570\u4E0D\u4E00\u81F4</strong><p>\u5DEE\u5F02\u9879\uFF1A${differenceNames.map(escapeHtml2).join("\u3001")}\u3002\u5F53\u524D\u663E\u793A\u9996\u4E2A\u5019\u9009\u7684\u503C\u3002</p><button class="btn small" data-action="sync-stage-visits" data-route-index="${routeIndex}" data-stage-index="${stageIndex}">\u540C\u6B65\u5230\u5168\u90E8\u5019\u9009</button></div>` : "";
+  const editor = first ? `<section class="step-editor-card" aria-labelledby="stepEditorHeading">
+    <header class="step-editor-head"><div><h3 id="stepEditorHeading">\u53EF\u7F16\u8F91\u53C2\u6570</h3><p>\u4FEE\u6539\u540E\u81EA\u52A8\u540C\u6B65\u5230 ${stage.visits.length} \u4E2A\u5019\u9009\u8154\u5BA4</p></div><span class="editable-badge">4 \u9879</span></header>
+    <div class="step-edit-grid">
+      ${renderStepNumberField("Process Time", "processTime", first.processTime, routeIndex, stageIndex, { minimum: 0, helper: "Recipe Time \u5C06\u81EA\u52A8\u4FDD\u6301\u4E00\u81F4" })}
+      ${renderStepNumberField("QTime", "qTimeLimit", first.qTimeLimit, routeIndex, stageIndex)}
+      ${renderStepNumberField("Residency", "residencyConstraint", first.residencyConstraint, routeIndex, stageIndex)}
+      ${renderAfterCleanChoices(first, routeIndex, stageIndex)}
+    </div>
+  </section>
+  <details class="step-system-details">
+    <summary><span><strong>\u7CFB\u7EDF\u53C2\u6570</strong><small>\u7531\u8DEF\u5F84\u6216\u7CFB\u7EDF\u7EF4\u62A4\uFF0C\u4EC5\u4F9B\u67E5\u770B</small></span><span class="details-chevron" aria-hidden="true">\u2304</span></summary>
+    <div class="step-system-grid">
+      ${renderReadonlyField("Recipe Time", first.processTime)}
+      ${renderReadonlyField("Process Recipe", first.processRecipe)}
+      ${renderReadonlyField("Process Type", first.processType)}
+      ${renderReadonlyField("Slot IDs", first.slotIds)}
+      ${renderReadonlyField("Weight", first.weight)}
+      ${renderReadonlyField("Move Time Offset", first.moveTimeOffset, true)}
+    </div>
+    <p class="system-note">Before Clean \u7531\u7CFB\u7EDF\u7BA1\u7406\uFF0C\u4E0D\u5728 RouteStep \u4E2D\u914D\u7F6E\u3002</p>
+  </details>` : `<div class="empty">\u672A\u9009\u62E9\u5019\u9009\u8BBE\u5907\uFF0C\u8BF7\u5148\u5728\u8DEF\u5F84\u5217\u8868\u4E2D\u9009\u62E9\u3002</div>`;
+  const routeName = escapeHtml2(route.name || "\u672A\u547D\u540D\u8DEF\u5F84");
+  document.getElementById("drawerBody").innerHTML = `<section class="step-overview-card">
+    <div class="step-route-context"><span>\u6240\u5C5E\u8DEF\u5F84</span><strong title="${routeName}">${routeName}</strong></div>
+    <dl class="step-meta-list">
+      <div><dt>Step</dt><dd>#${stage.stepId}</dd></div>
+      <div><dt>Next</dt><dd>${stage.postStepIds?.length ? stage.postStepIds.map((id) => `#${id}`).join(", ") : "End"}</dd></div>
+      <div><dt>Processing</dt><dd>${stage.needProcess ? "Yes" : "No"}</dd></div>
+      <div><dt>Candidates</dt><dd>${stage.visits.length}</dd></div>
+    </dl>
+    <div class="step-candidates"><span>\u5019\u9009\u8154\u5BA4</span><div class="candidate-chip-list">${candidates.length ? candidates.map((name) => `<span class="chip">${escapeHtml2(name)}</span>`).join("") : `<span class="candidate-picker-empty">\u672A\u9009\u62E9</span>`}</div></div>
+  </section>${warning}${editor}`;
 }
 function openStepDrawer(routeIndex, stageIndex) {
   const profile = routeProcessProfile(state.routes[routeIndex]);
@@ -1810,6 +1864,7 @@ function updateStateFromControl(control) {
     const stage = state.routes[Number(control.dataset.routeIndex)].stages[Number(control.dataset.stageIndex)];
     if (!stage.visits.length) return;
     stage.visits[0][key] = structuredClone(value);
+    if (key === "processTime") stage.visits[0].recipeTime = Number(value);
     synchronizeStageVisits(stage);
   }
   if (scope === "cjob") {
@@ -1866,6 +1921,21 @@ function handleAction(button) {
   if (action === "sync-stage-visits") {
     synchronizeStageVisits(state.routes[routeIndex].stages[stageIndex]);
     markTestDirty();
+    renderStepDrawer();
+    return;
+  }
+  if (action === "toggle-after-clean") {
+    const stage = state.routes[routeIndex]?.stages[stageIndex];
+    if (!stage?.visits?.length) return;
+    const cleanName = button.dataset.cleanName || "";
+    const selected = new Set(stringList(stage.visits[0].afterCleanRefs));
+    if (!cleanName) selected.clear();
+    else if (selected.has(cleanName)) selected.delete(cleanName);
+    else selected.add(cleanName);
+    stage.visits[0].afterCleanRefs = [...selected];
+    synchronizeStageVisits(stage);
+    markTestDirty();
+    renderRoutes();
     renderStepDrawer();
     return;
   }

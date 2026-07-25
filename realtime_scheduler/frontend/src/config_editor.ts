@@ -200,7 +200,10 @@ function normalizeRoute(route) {
     stage.kind = stageUsesRobot(stage, index) ? "robot" : "station";
     stage.needProcess = stage.kind === "station" && stage.visits.some(visit => state.processModules.includes(visit.stationName));
     const recipeName = stage.needProcess ? `${route.group || route.name || "Route"}_Step${stage.stepId}` : "";
-    stage.visits.forEach(visit => normalizeVisit(visit, recipeName));
+    stage.visits.forEach(visit => {
+      normalizeVisit(visit, recipeName);
+      if (stage.needProcess) visit.recipeTime = Number(visit.processTime);
+    });
   });
   return route;
 }
@@ -210,9 +213,18 @@ function visitDifferenceFields(stage) {
   return RouteEditorLogic.differenceFields(stage, normalizeVisit);
 }
 
-/** 将第一个候选的公共参数深拷贝到全部 Visit。 */
+/** 把允许编辑的 Step 参数同步到全部候选，并强制 Recipe Time 跟随 Process Time。 */
 function synchronizeStageVisits(stage) {
-  RouteEditorLogic.synchronizeVisits(stage, normalizeVisit);
+  if (!(stage.visits || []).length) return;
+  const first = normalizeVisit(stage.visits[0]);
+  const editableValues = {
+    processTime: Number(first.processTime),
+    recipeTime: Number(first.processTime),
+    qTimeLimit: Number(first.qTimeLimit),
+    residencyConstraint: Number(first.residencyConstraint),
+    afterCleanRefs: structuredClone(stringList(first.afterCleanRefs)),
+  };
+  stage.visits.forEach(visit => Object.assign(visit, structuredClone(editableValues)));
 }
 
 /** 将列表中选择的候选设备同步为一组 Visit；新增项继承第一个候选的公共参数。 */
@@ -886,42 +898,83 @@ function renderRounds() {
   }).join("");
 }
 
-/** 绘制统一 Visit 参数输入框。 */
-function renderVisitField(label, key, value, routeIndex, stageIndex, options = {}) {
-  const common = `data-scope="visit-shared" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-key="${key}"`;
-  if (options.multiple) return `<div class="unified-field ${options.wide ? "wide" : ""}"><label>${label}</label><select multiple ${common}>${multiOptionsHtml(options.values || [], value)}</select></div>`;
-  const type = options.number ? "number" : "text", step = options.number ? ` step="${options.step || "0.1"}"` : "";
-  return `<div class="unified-field ${options.wide ? "wide" : ""}"><label>${label}</label><input type="${type}"${step} ${common} value="${escapeHtml(value)}"></div>`;
+/** 绘制 Step 中允许修改的数值参数。 */
+function renderStepNumberField(label, key, value, routeIndex, stageIndex, options = {}) {
+  const inputId = `step-${routeIndex}-${stageIndex}-${key}`;
+  const helper = options.helper ? `<small class="field-help">${escapeHtml(options.helper)}</small>` : "";
+  const minimum = options.minimum === undefined ? "" : ` min="${options.minimum}"`;
+  return `<div class="step-edit-field">
+    <label for="${inputId}">${escapeHtml(label)}</label>
+    <div class="step-number-control">
+      <input id="${inputId}" type="number" inputmode="decimal" step="${options.step || "0.1"}"${minimum} data-scope="visit-shared" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-key="${key}" value="${escapeHtml(value)}">
+      <span aria-hidden="true">s</span>
+    </div>
+    ${helper}
+  </div>`;
 }
 
-/** 绘制当前 Step 的统一参数详情；候选设备仍只在 Route 列表区域维护。 */
+/** 绘制 After Clean 选择器；No Clean 与清洁项目互斥，清洁项目之间支持多选。 */
+function renderAfterCleanChoices(first, routeIndex, stageIndex) {
+  const selected = new Set(stringList(first.afterCleanRefs));
+  const choices = cleanNamesFor(["postclean", "wacclean"]);
+  const noCleanActive = selected.size === 0;
+  const cleanButtons = choices.map(name => `<button type="button" class="clean-choice ${selected.has(name) ? "active" : ""}" data-action="toggle-after-clean" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-clean-name="${escapeHtml(name)}" aria-pressed="${selected.has(name)}"><span class="clean-choice-indicator" aria-hidden="true">✓</span><span>${escapeHtml(name)}</span></button>`).join("");
+  return `<fieldset class="step-edit-field after-clean-field">
+    <legend>After Clean</legend>
+    <div class="clean-choice-list">
+      <button type="button" class="clean-choice no-clean ${noCleanActive ? "active" : ""}" data-action="toggle-after-clean" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-clean-name="" aria-pressed="${noCleanActive}"><span class="clean-choice-indicator" aria-hidden="true">✓</span><span>No Clean</span></button>
+      ${cleanButtons || `<span class="clean-choice-empty">暂无可用的 PostClean / WAC Clean</span>`}
+    </div>
+    <small class="field-help">可选择多个清洁；选择 No Clean 将清空当前选择。</small>
+  </fieldset>`;
+}
+
+/** 绘制当前 Step 的配置详情；主区域只暴露业务允许修改的四项参数。 */
 function renderStepDrawer() {
   if (!state.drawer) return;
   const { routeIndex, stageIndex } = state.drawer, route = state.routes[routeIndex], stage = route?.stages[stageIndex];
   if (!stage) { closeStepDrawer(); return; }
   normalizeRoute(route);
-  document.getElementById("drawerTitle").textContent = `${route.name || "路径"} · StepID ${stage.stepId}`;
+  document.getElementById("drawerTitle").textContent = `Step ${stage.stepId} 配置`;
   document.getElementById("drawerSubtitle").textContent = `${stepKind(route, stageIndex)} · ${stage.visits.length} 个候选`;
-  const first = stage.visits[0] ? normalizeVisit(stage.visits[0]) : null, differences = visitDifferenceFields(stage), candidates = stage.visits.map(visit => visit.stationName).filter(Boolean);
-  const warning = differences.length ? `<div class="visit-warning"><strong>候选腔室参数不一致</strong><p>存在差异的字段：${differences.map(escapeHtml).join("、")}。统一表单暂时显示第一个候选 Visit 的值，尚未覆盖其他候选。</p><button class="btn small" data-action="sync-stage-visits" data-route-index="${routeIndex}" data-stage-index="${stageIndex}">按当前表单同步全部候选</button></div>` : "";
-  const form = first ? `<div class="unified-visit-form"><header class="unified-visit-head"><strong>统一参数</strong><span>修改任一字段后同步到 ${stage.visits.length} 个候选</span></header><div class="visit-groups">
-    <section class="visit-group"><h4>工艺信息</h4><div class="visit-fields">
-      ${renderVisitField("ProcessTime", "processTime", first.processTime, routeIndex, stageIndex, { number: true })}
-      ${renderVisitField("RecipeTime", "recipeTime", first.recipeTime, routeIndex, stageIndex, { number: true })}
-      ${renderVisitField("ProcessRecipe", "processRecipe", first.processRecipe, routeIndex, stageIndex)}
-      ${renderVisitField("ProcessType", "processType", first.processType, routeIndex, stageIndex)}
-      ${renderVisitField("Weight", "weight", typeof first.weight === "string" ? first.weight : JSON.stringify(first.weight), routeIndex, stageIndex)}
-      ${renderVisitField("MoveTimeOffset", "moveTimeOffset", typeof first.moveTimeOffset === "string" ? first.moveTimeOffset : JSON.stringify(first.moveTimeOffset), routeIndex, stageIndex, { wide: true })}
-    </div></section>
-    <section class="visit-group"><h4>约束信息</h4><div class="visit-fields constraints">
-      ${renderVisitField("SlotIDs", "slotIds", first.slotIds, routeIndex, stageIndex)}
-      ${renderVisitField("QTime", "qTimeLimit", first.qTimeLimit, routeIndex, stageIndex, { number: true })}
-      ${renderVisitField("Residency", "residencyConstraint", first.residencyConstraint, routeIndex, stageIndex, { number: true })}
-      ${renderVisitField("Before Clean", "beforeCleanRefs", first.beforeCleanRefs, routeIndex, stageIndex, { multiple: true, values: cleanNamesFor(["preclean", "dummy", "dummywac"]), wide: true })}
-      ${renderVisitField("After Clean", "afterCleanRefs", first.afterCleanRefs, routeIndex, stageIndex, { multiple: true, values: cleanNamesFor(["postclean", "wacclean"]), wide: true })}
-    </div></section>
-  </div></div>` : `<div class="empty">未选择候选设备，请先在路径列表中选择。</div>`;
-  document.getElementById("drawerBody").innerHTML = `<section class="drawer-section"><h3>Step 概要</h3><div class="step-summary"><div class="step-summary-item"><span>StepID</span><strong>${stage.stepId}</strong></div><div class="step-summary-item"><span>PostStepID</span><strong>${stage.postStepIds?.length ? stage.postStepIds.join(", ") : "结束"}</strong></div><div class="step-summary-item"><span>NeedProcess</span><strong>${stage.needProcess ? "true" : "false"}</strong></div><div class="step-summary-item"><span>候选数量</span><strong>${stage.visits.length}</strong></div></div></section><section class="drawer-section"><h3>候选腔室</h3><div class="candidate-chip-list">${candidates.length ? candidates.map(name => `<span class="chip">${escapeHtml(name)}</span>`).join("") : `<span class="candidate-picker-empty">未选择</span>`}</div></section>${warning}<section class="drawer-section">${form}</section>`;
+  const first = stage.visits[0] ? normalizeVisit(stage.visits[0]) : null;
+  const editableFieldLabels = { processTime: "Process Time", qTimeLimit: "QTime", residencyConstraint: "Residency", afterCleanRefs: "After Clean" };
+  const differences = visitDifferenceFields(stage).filter(field => editableFieldLabels[field]);
+  const candidates = [...new Set(stage.visits.map(visit => visit.stationName).filter(Boolean))];
+  const differenceNames = differences.map(field => editableFieldLabels[field] || field);
+  const warning = differences.length ? `<div class="visit-warning" role="status"><strong>候选腔室的可编辑参数不一致</strong><p>差异项：${differenceNames.map(escapeHtml).join("、")}。当前显示首个候选的值。</p><button class="btn small" data-action="sync-stage-visits" data-route-index="${routeIndex}" data-stage-index="${stageIndex}">同步到全部候选</button></div>` : "";
+  const editor = first ? `<section class="step-editor-card" aria-labelledby="stepEditorHeading">
+    <header class="step-editor-head"><div><h3 id="stepEditorHeading">可编辑参数</h3><p>修改后自动同步到 ${stage.visits.length} 个候选腔室</p></div><span class="editable-badge">4 项</span></header>
+    <div class="step-edit-grid">
+      ${renderStepNumberField("Process Time", "processTime", first.processTime, routeIndex, stageIndex, { minimum: 0, helper: "Recipe Time 将自动保持一致" })}
+      ${renderStepNumberField("QTime", "qTimeLimit", first.qTimeLimit, routeIndex, stageIndex)}
+      ${renderStepNumberField("Residency", "residencyConstraint", first.residencyConstraint, routeIndex, stageIndex)}
+      ${renderAfterCleanChoices(first, routeIndex, stageIndex)}
+    </div>
+  </section>
+  <details class="step-system-details">
+    <summary><span><strong>系统参数</strong><small>由路径或系统维护，仅供查看</small></span><span class="details-chevron" aria-hidden="true">⌄</span></summary>
+    <div class="step-system-grid">
+      ${renderReadonlyField("Recipe Time", first.processTime)}
+      ${renderReadonlyField("Process Recipe", first.processRecipe)}
+      ${renderReadonlyField("Process Type", first.processType)}
+      ${renderReadonlyField("Slot IDs", first.slotIds)}
+      ${renderReadonlyField("Weight", first.weight)}
+      ${renderReadonlyField("Move Time Offset", first.moveTimeOffset, true)}
+    </div>
+    <p class="system-note">Before Clean 由系统管理，不在 RouteStep 中配置。</p>
+  </details>` : `<div class="empty">未选择候选设备，请先在路径列表中选择。</div>`;
+  const routeName = escapeHtml(route.name || "未命名路径");
+  document.getElementById("drawerBody").innerHTML = `<section class="step-overview-card">
+    <div class="step-route-context"><span>所属路径</span><strong title="${routeName}">${routeName}</strong></div>
+    <dl class="step-meta-list">
+      <div><dt>Step</dt><dd>#${stage.stepId}</dd></div>
+      <div><dt>Next</dt><dd>${stage.postStepIds?.length ? stage.postStepIds.map(id => `#${id}`).join(", ") : "End"}</dd></div>
+      <div><dt>Processing</dt><dd>${stage.needProcess ? "Yes" : "No"}</dd></div>
+      <div><dt>Candidates</dt><dd>${stage.visits.length}</dd></div>
+    </dl>
+    <div class="step-candidates"><span>候选腔室</span><div class="candidate-chip-list">${candidates.length ? candidates.map(name => `<span class="chip">${escapeHtml(name)}</span>`).join("") : `<span class="candidate-picker-empty">未选择</span>`}</div></div>
+  </section>${warning}${editor}`;
 }
 
 /** 打开指定 Step 的右侧抽屉，并展开它所在的全部路径分组。 */
@@ -982,6 +1035,7 @@ function updateStateFromControl(control) {
     const stage = state.routes[Number(control.dataset.routeIndex)].stages[Number(control.dataset.stageIndex)];
     if (!stage.visits.length) return;
     stage.visits[0][key] = structuredClone(value);
+    if (key === "processTime") stage.visits[0].recipeTime = Number(value);
     synchronizeStageVisits(stage);
   }
   if (scope === "cjob") {
@@ -1032,6 +1086,21 @@ function handleAction(button) {
   if (action === "sync-stage-visits") {
     synchronizeStageVisits(state.routes[routeIndex].stages[stageIndex]);
     markTestDirty(); renderStepDrawer(); return;
+  }
+  if (action === "toggle-after-clean") {
+    const stage = state.routes[routeIndex]?.stages[stageIndex];
+    if (!stage?.visits?.length) return;
+    const cleanName = button.dataset.cleanName || "";
+    const selected = new Set(stringList(stage.visits[0].afterCleanRefs));
+    if (!cleanName) selected.clear();
+    else if (selected.has(cleanName)) selected.delete(cleanName);
+    else selected.add(cleanName);
+    stage.visits[0].afterCleanRefs = [...selected];
+    synchronizeStageVisits(stage);
+    markTestDirty();
+    renderRoutes();
+    renderStepDrawer();
+    return;
   }
   if (action === "add-clean") {
     const clean = makeClean("preclean");

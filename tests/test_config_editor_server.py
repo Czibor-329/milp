@@ -960,8 +960,10 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertGreater(result["makespan"], 0)
 
     def test_editor_uses_persistent_route_table_and_step_drawer(self) -> None:
-        """Route 应按工艺结构折叠，抽屉使用统一候选参数表单。"""
+        """路径按工艺结构折叠，Step 抽屉只开放四项业务参数。"""
         html = _editor_source()
+        drawer_editor = html.split("function renderStepDrawer()", 1)[1]
+        drawer_editor = drawer_editor.split("/** 打开指定 Step", 1)[0]
         self.assertIn('data-tab-target="schedule"', html)
         self.assertIn('data-tab-target="route"', html)
         self.assertIn('data-tab-target="clean"', html)
@@ -971,13 +973,24 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn('id="stepDrawer"', html)
         self.assertIn('class="route-table"', html)
         self.assertIn('data-scope="stage-candidate-toggle"', html)
-        self.assertIn('class="visit-groups"', html)
-        self.assertIn("Step 概要", html)
-        self.assertIn("工艺信息", html)
-        self.assertIn("约束信息", html)
-        for field in ("ProcessTime", "Recipe", "ProcessType", "Weight", "MoveTimeOffset", "SlotID", "QTime", "Residency"):
-            self.assertIn(field, html)
-        self.assertIn("width: clamp(720px, 66vw, 980px)", html)
+        self.assertIn('class="step-overview-card"', html)
+        self.assertIn('class="step-edit-grid"', html)
+        self.assertIn('class="clean-choice-list"', html)
+        self.assertIn('class="step-system-details"', html)
+        self.assertIn('data-action="toggle-after-clean"', html)
+        self.assertIn("No Clean", html)
+        for label, field in (
+            ("Process Time", "processTime"),
+            ("QTime", "qTimeLimit"),
+            ("Residency", "residencyConstraint"),
+        ):
+            self.assertIn(f'renderStepNumberField("{label}", "{field}"', drawer_editor)
+        self.assertNotIn('data-key="recipeTime"', drawer_editor)
+        self.assertNotIn('data-key="beforeCleanRefs"', drawer_editor)
+        for field in ("Recipe Time", "Process Recipe", "Process Type", "Slot IDs", "Weight", "Move Time Offset"):
+            self.assertIn(field, drawer_editor)
+        self.assertIn('if (key === "processTime") stage.visits[0].recipeTime = Number(value);', html)
+        self.assertIn("width: min(760px, 100vw)", html)
 
     def test_clean_editor_is_grouped_and_only_exposes_category_parameters(self) -> None:
         """Clean 页面应按五类折叠，且不再编辑腔室和底层条件字段。"""
@@ -1020,7 +1033,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("并行机器数", html)
         self.assertIn('data-action="toggle-route"', html)
         self.assertIn('data-action="copy-route"', html)
-        self.assertIn("候选腔室参数不一致", html)
+        self.assertIn("候选腔室的可编辑参数不一致", html)
         self.assertIn("sync-stage-visits", html)
         self.assertIn("state.stationNames", html)
         self.assertIn('id="autoExportLog"', html)
