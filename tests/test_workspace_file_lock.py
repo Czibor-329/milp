@@ -12,7 +12,7 @@ from realtime_scheduler import server
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PSE300_PATH = ROOT / "src" / "input_data" / "PSE300.json"
+PSE300_PATH = ROOT / "alg" / "src" / "input_data" / "PSE300.json"
 
 
 def _create_test_after_signal(

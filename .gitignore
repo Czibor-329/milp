@@ -11,13 +11,6 @@ venv/
 .venv/
 env/
 
-# 求解输出
-results/
-*.lp
-*.mps
-*.sol
-gurobi.log
-
 # IDE / OS
 .idea/
 .vscode/
@@ -27,7 +20,6 @@ Thumbs.db
 /timing_data_structures.xlsx
 src_data_structures.xlsx
 /log/
-/other_alg
-*.npz
+/alg/
 /.codex
 /design-system

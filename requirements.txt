@@ -1,2 +1,2 @@
-gurobipy==13.0.2
-numpy==2.5.0
+# 前端仓库的 Python 服务层只使用标准库。
+# 算法依赖请在独立算法仓库中安装：alg/requirements.txt

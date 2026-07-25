@@ -1,4 +1,4 @@
-"""本仓库 ``other_alg`` 标准算法包的发现与 ``init/update`` 调用边界。
+"""独立算法仓库中 ``other_alg`` 标准算法包的发现与 ``init/update`` 调用边界。
 
 算法包既可以保留交付目录中的 ``CT/infer`` 层，也可以把 ``infer``、
 ``ropn_sa`` 和 ``config`` 直接放在算法目录下。所有调用都在独占会话中
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import re
 import sys
 import threading
@@ -22,7 +23,10 @@ JsonObject = Dict[str, Any]
 EXTERNAL_ENTRY_RELATIVE_PATH = Path("CT") / "infer" / "scheduler.py"
 PACKAGED_ENTRY_RELATIVE_PATH = Path("infer") / "scheduler.py"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-OTHER_ALGORITHM_ROOT = PROJECT_ROOT / "other_alg"
+ALGORITHM_ROOT = Path(
+    os.environ.get("CT_ALGORITHM_ROOT", str(PROJECT_ROOT / "alg"))
+).expanduser().resolve()
+OTHER_ALGORITHM_ROOT = ALGORITHM_ROOT / "other_alg"
 OTHER_ALGORITHM_STRATEGY_PREFIX = "other_alg:"
 ALGORITHM_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 

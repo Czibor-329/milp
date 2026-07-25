@@ -34,8 +34,9 @@ from scripts.replay_config_log import load_plan_from_log
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEVICE_PATH = ROOT / "src" / "input_data" / "s1-1c2p-reschedule.json"
-PSE300_PATH = ROOT / "src" / "input_data" / "PSE300.json"
+ALGORITHM_ROOT = ROOT / "alg"
+DEVICE_PATH = ALGORITHM_ROOT / "src" / "input_data" / "s1-1c2p-reschedule.json"
+PSE300_PATH = ALGORITHM_ROOT / "src" / "input_data" / "PSE300.json"
 EDITOR_PATH = ROOT / "realtime_scheduler" / "frontend" / "config_editor.html"
 EDITOR_STYLE_PATH = ROOT / "realtime_scheduler" / "frontend" / "assets" / "config_editor.css"
 EDITOR_SCRIPT_PATH = ROOT / "realtime_scheduler" / "frontend" / "src" / "config_editor.ts"
@@ -289,9 +290,8 @@ class ConfigEditorServerTests(unittest.TestCase):
         }
         policy = load_neural_policy(DEFAULT_MODEL_PATH)
 
-        with patch.object(
-            config_server,
-            "_load_neural_inference_policy",
+        with patch(
+            "infer.function._load_policy",
             return_value=policy,
         ) as loader, patch(
             "src.schedule.realtime.start_schedule",
@@ -302,7 +302,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         ):
             result = execute_plan(plan)
 
-        loader.assert_called_once_with()
+        loader.assert_called_once_with("neural")
         self.assertTrue(result["ok"])
         self.assertEqual("neural", result["strategy"])
         self.assertEqual("passed", result["validation"])
@@ -386,9 +386,8 @@ class ConfigEditorServerTests(unittest.TestCase):
         }
         policy = load_neural_policy(DEFAULT_MODEL_PATH)
 
-        with patch.object(
-            config_server,
-            "_load_neural_inference_policy",
+        with patch(
+            "infer.function._load_policy",
             return_value=policy,
         ):
             result = execute_plan(plan)
@@ -437,9 +436,8 @@ class ConfigEditorServerTests(unittest.TestCase):
         }
         policy = load_neural_policy(DEFAULT_MODEL_PATH)
 
-        with patch.object(
-            config_server,
-            "_load_neural_inference_policy",
+        with patch(
+            "infer.function._load_policy",
             return_value=policy,
         ):
             result = execute_plan(plan)
@@ -802,8 +800,12 @@ class ConfigEditorServerTests(unittest.TestCase):
         ]
 
         self.assertEqual(5, len(schedules))
-        self.assertEqual("LP1", schedules[-1]["Materials"][0]["CurrentModuleName"])
-        self.assertEqual(1, schedules[-1]["Materials"][0]["SlotID"])
+        latest_material = max(
+            schedules[-1]["Materials"],
+            key=lambda material: int(material["ID"]),
+        )
+        self.assertEqual("LP1", latest_material["CurrentModuleName"])
+        self.assertEqual(1, latest_material["SlotID"])
         self.assertTrue(any("清空 LoadPort" in line for line in result["logs"]))
 
     def test_route_step_and_visit_fields_are_preserved(self) -> None:

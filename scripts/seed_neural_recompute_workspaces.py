@@ -22,7 +22,7 @@ from realtime_scheduler import server as scheduler_server
 from scripts.benchmark_neural_route_decomposition import six_pm_device
 
 
-PSE300_PATH = ROOT / "src" / "input_data" / "PSE300.json"
+PSE300_PATH = ROOT / "alg" / "src" / "input_data" / "PSE300.json"
 RECOMPUTE_GRIDS = (50, 100, 150, 250, 300)
 WAFER_COUNTS = (10, 15)
 SIX_PM_LONG_ROUNDS = 5

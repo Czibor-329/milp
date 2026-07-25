@@ -3,6 +3,9 @@
 此目录集中保存实时调度前端及其本地数据：
 
 - `server.py`：本地调度服务、工作区接口与静态资源入口，不再承载前端实现。
+- 内置 `heuristic/neural/rl/milp`：统一调用独立算法仓库
+  `alg/infer/scheduler.py` 的 `init/update`，`update` 的可选 `algorithm`
+  参数决定算法。
 - `batch_service.py`：批量运行、Heuristic Baseline、并发进度与取消状态。
 - `plan_builder.py`：设备归一化、Route/Recipe 和各轮 CJob/PJob 请求建模。
 - `frontend/config_editor.html`：只保存配置终端的页面骨架。
@@ -15,7 +18,10 @@
 - `exports/logs/`：每次运行生成的 input_data 复现日志。
 - `exports/results/`：每次运行生成的统一 MoveList 与重算点。
 
-启动：`python realtime_scheduler/server.py --port 8765 --open`
+默认把算法仓库检出到父仓库的 `alg/`；也可用 `CT_ALGORITHM_ROOT`
+指向其他位置。启动：
+
+`alg\.venv\Scripts\python.exe realtime_scheduler/server.py --port 8765 --open`
 
 旧命令 `python scripts/config_editor_server.py` 仍可使用。
 
@@ -45,11 +51,22 @@ npm run build
 - `LoadLock 管理器`：Heuristic 与 RL 默认共用 Petri-ETA 管理器；上层策略只决定发哪片和工艺顺序，管理器在 Petri 安全候选内按动态完成时刻绑定 LA/LB。现有深层神经 checkpoint 暂以 `joint` 为默认，仍可显式切到 manager 供下一阶段重训与 A/B。
 - `RL 搜索`：使用已有的行为克隆/RL模型做限时搜索。
 - `MILP 最优求解`：独立调用 Gurobi，只允许首次排程且所有 PJob 产品晶圆总数不超过12片；页面显示是否已证明最优和最终 gap。
-- `other_alg 标准算法`：自动扫描仓库 `other_alg/<算法名>`，通过包内正式 `CT.infer.scheduler.init/update` 入口运行。每次重算前使用 `src/validation/state.py` 回放当前 MoveList，生成全量物料、机台、机器人快照以及 `RemoveList`，支持连续多轮重算；结果中的 `updates` 保留每次实际发送的数据。
+- `other_alg 标准算法`：自动扫描算法仓库 `alg/other_alg/<算法名>`，通过包内正式 `CT.infer.scheduler.init/update` 入口运行。每次重算前使用算法仓库的状态回放能力生成全量物料、机台、机器人快照以及 `RemoveList`，支持连续多轮重算；结果中的 `updates` 保留每次实际发送的数据。
+
+内置算法与 `other_alg` 现在共用同一套标准 update 数据流。内置入口示例：
+
+```python
+from infer.scheduler import init, update
+
+init(topo_data_json)
+output_json = update(tool_json, algorithm="neural")
+```
+
+同一次 `init` 后不能在连续 update 之间切换算法；切换前需重新初始化设备。
 
 标准算法目录可保留打包后的 `CT/infer/scheduler.py` 结构，也可以直接包含
 `infer/scheduler.py`、`ropn_sa/` 和 `config/`。前端健康检查会动态返回所有有效算法包，
-无需配置仓库外路径或环境变量。
+默认无需额外配置；算法仓库不在 `alg/` 时设置 `CT_ALGORITHM_ROOT`。
 
 测试组别作为设备下的独立数据保存，允许先创建空组，再在当前组内新建或复制测试；旧测试会自动归入“未分组”，无需手工迁移。
 

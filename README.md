@@ -1,87 +1,64 @@
-# CT MILP Oracle
+# CT 实时调度前端
 
-Cluster Tool（多腔晶圆制造设备）排程的 **MILP 最优求解器**，从 `CT` 主仓库抽取的自包含子集。
-解析（`parse_task`）直接把 raw 接口产出求解器要的 `Problem`（拓扑 + 已展开晶圆 + 前/后清洗），
-用 Gurobi 求 makespan 最优排程，并能导出可校验的 MoveList。
+本仓库只保存调度控制台、HTTP 服务适配层、工作区数据和前端测试。
+调度算法是独立仓库，开发时默认检出到本仓库的 `alg/` 目录；该目录已被
+父仓库 Git 忽略。
 
-> RL 只负责顶层顺序策略，底层仍由轻量 `timing` 差分约束引擎精确定时。训练需 PyTorch；
-> 推理可自动回退到受限 checkpoint 解析 + NumPy MLP。Petri 网执行器不在本仓库内。
+## 目录
 
-## 依赖
-
-- Python 3.10+
-- [Gurobi](https://www.gurobi.com/)（需 license，学术版免费）+ `gurobipy`
-- `numpy`
-- `torch`（仅神经网络策略训练需要）
-
-```bash
-pip install -r requirements.txt
-```
-
-## 用法
-
-```bash
-# 数据集批量评测（默认全子集，仅 heuristic），三策略对比：random / bc / heuristic
-python scripts/run.py --strategy heuristic bc random --subsets train/2job --limit 3
-
-# 真实配置场景（src/input_data/*.json）跑 MILP oracle 并导出 MoveList（旧 run_milp）
-python scripts/run.py --strategy milp --input s1-1c1p-preclean --export --tl 120
-
-# 导出各策略 MoveList + 写汇总 JSON
-python scripts/run.py --strategy heuristic --export --out eval.json
-
-# RL 顶层搜索：4 秒预算；把样例扩成 25 片验证 5→25 外推
-python scripts/run.py --strategy rl --subsets train/1stage --limit 1 \
-  --wafer-count 25 --rl-search-seconds 4.0
-
-# 默认把任务缩成 5 片训练，并在结束时用少量 25 片任务验证
-python scripts/train_rl.py --train-wafers 5 --eval-wafers 25
-```
-
-统一入口 `scripts/run.py` 支持多种策略（`--strategy`，可多选）：
-`heuristic`（快速启发式定序）、`neural`（深层集合注意力 NumPy 推理 + 有预算物理修复）、
-`random`（启发式基底叠随机 rollout）、`bc`（模仿学习策略）、
-`rl`（RL 策略限时采样顶层顺序，默认 4 秒且硬限制 4.5 秒）、`milp`（Gurobi oracle）。
-数据集模式与 `result.makespan`（MILP 标签）比 gap%；`--input` 单场景模式
-自检 + 导出。`--export` 把排程铺成 MoveList 写到 `results/output/<strategy>/<子集>/inst_XXXX.json`。
-`--wafer-count N` 可在解析前保持 PJob 比例地重建 N 片任务；缩放后原 MILP 标签自动视为不可用。
-
-六腔共享路线拆成三条双腔路线的 75 片严格 A/B 可直接复现：
-
-```bash
-python scripts/benchmark_neural_route_decomposition.py
-```
-
-该实验同时比较原六腔 Neural reference、拆分 Neural 和拆分 Heuristic，并输出 makespan、
-PM 负载、推理来源和端到端速度；设计与长期质量对照见
-[深层神经派工文档](docs/scheduling/neural-dispatch.md)。
-其中也说明了 Heuristic、Neural、BC 与 RL 共用的 Petri-ETA LoadLock manager、
-接口边界和启发式 A/B 结果。
-
-## 目录结构
-
-```
-src/
-  parse/              # JSON 解析、工作数据类、清洗条件、双腔视图和输入生成
-  timing/             # 固定资源顺序的差分约束图与精确定时
-  schedule/           # 深层神经、启发式、RL、MILP 和实时重排
-  export/             # MoveList 导出
-  validation/         # MoveList 状态回放与验证
-  paths.py            # 路径常量
-  log_setup.py        # 日志
-  input_data/*.json   # 样例场景
+```text
+realtime_scheduler/
+  frontend/               # 页面、样式和 TypeScript/JavaScript
+  server.py               # 本地 HTTP 服务与算法接口适配
+  algorithm_interface.py  # 外部候选算法发现与标准 init/update 调用
+  plan_builder.py         # 把页面配置转换为标准接口数据
+  batch_service.py        # 前端批量运行任务
+  data/                   # 本地工作区
+  exports/                # 页面导出的结果与日志
 scripts/
-  run.py              # 统一入口：多策略 × 模式(数据集批量 / 单场景) → 评测/自检/导出
-  train_neural.py     # 强教师轨迹蒸馏 → 安全 NumPy checkpoint
-  gen_test.py         # 数据集生成（YAML 案例清单 → MILP 标注，swap 关）
-  extract_labels.py / train_bc.py       # BC 标签抽取 / 训练
-  train_rl.py         # 5片 self-critical RL 微调；结束时做 25 片规模外推验证
-  dataset/cases/*.yaml  # 生成用案例清单（逐工序腔数 × proc）
-milp_design.md        # 建模设计文档
-milp_handoff.md       # 交接说明
+  config_editor_server.py # 兼容启动入口
+  replay_config_log.py    # 回放页面导出的请求日志
+  seed_neural_recompute_workspaces.py
+tests/                    # 前端与服务适配层测试
+alg/                      # 独立算法仓库，不由父仓库追踪
 ```
 
-## 设计文档
+## 准备算法仓库
 
-建模细节（路径先后 P / 驻留 D / 腔互斥 C / 机器手互斥 R / LoadLock 状态 setup / 双臂换料 swap /
-Big-M 收紧等）见 [`milp_design.md`](milp_design.md) 与 [`milp_handoff.md`](milp_handoff.md)。
+把算法仓库检出到：
+
+```text
+<本仓库>/alg
+```
+
+也可以通过环境变量指向其他位置：
+
+```powershell
+$env:CT_ALGORITHM_ROOT = "D:\path\to\algorithm-repo"
+```
+
+算法仓库必须提供：
+
+```text
+infer/scheduler.py
+src/
+```
+
+## 启动
+
+先在算法仓库环境中安装算法依赖，再从本仓库启动服务：
+
+```powershell
+alg\.venv\Scripts\python.exe realtime_scheduler\server.py --open
+```
+
+也可使用兼容入口：
+
+```powershell
+alg\.venv\Scripts\python.exe scripts\config_editor_server.py --open
+```
+
+默认地址为 `http://127.0.0.1:8765/config_editor.html`。
+
+父仓库不会直接维护算法实现、模型、训练脚本或算法测试；这些内容都在
+独立的 `alg` 仓库中管理。

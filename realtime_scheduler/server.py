@@ -41,6 +41,26 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+# 算法实现位于独立仓库。开发环境默认放在父仓库的 alg/，部署时可通过
+# CT_ALGORITHM_ROOT 指向任意独立检出的算法仓库。
+ALGORITHM_ROOT = Path(
+    os.environ.get("CT_ALGORITHM_ROOT", str(ROOT / "alg"))
+).expanduser().resolve()
+if not (ALGORITHM_ROOT / "infer" / "scheduler.py").is_file():
+    raise RuntimeError(
+        "找不到算法仓库，请把算法仓库放到 "
+        f"{ROOT / 'alg'}，或设置 CT_ALGORITHM_ROOT。"
+    )
+if str(ALGORITHM_ROOT) not in sys.path:
+    # 保留父仓库自身 tests/scripts 等包的解析优先级，算法仓库只提供
+    # 父仓库中不存在的 infer/src 命名空间。
+    sys.path.append(str(ALGORITHM_ROOT))
+
+from infer import scheduler as builtin_algorithm_scheduler
+from infer.function import (
+    get_last_strategy_diagnostics as builtin_strategy_diagnostics,
+    session as builtin_algorithm_session,
+)
 from src.parse import parse_task
 from src.paths import MODELS_DIR
 from src.schedule.realtime import (
@@ -110,9 +130,9 @@ VIEWER_PATH = FRONTEND_DIR / "movelist_gantt_viewer.html"
 ROUTE_EDITOR_LOGIC_PATH = FRONTEND_DIR / "route_editor_logic.js"
 FRONTEND_ASSET_DIR = FRONTEND_DIR / "assets"
 RL_MODEL_PATH = MODELS_DIR / "bc_policy_rl.pt"
-NEURAL_MODEL_PATH = ROOT / "src" / "schedule" / "neural_policy.npz"
+NEURAL_MODEL_PATH = ALGORITHM_ROOT / "src" / "schedule" / "neural_policy.npz"
 WORKSPACE_STORE_PATH = DATA_DIR / "workspaces.json"
-LEGACY_WORKSPACE_STORE_PATH = ROOT / "results" / "config_editor_workspaces.json"
+LEGACY_WORKSPACE_STORE_PATH = ALGORITHM_ROOT / "results" / "config_editor_workspaces.json"
 DEVICE_INIT_DIR = DATA_DIR / "devices"
 RESULT_EXPORT_DIR = EXPORT_DIR / "results"
 LOG_EXPORT_DIR = EXPORT_DIR / "logs"
@@ -124,11 +144,6 @@ _WORKSPACE_STORE_LOCK = threading.RLock()
 _BATCH_RUNS: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
 _BATCH_RUNS_LOCK = threading.RLock()
 _BATCH_CANCEL_EVENTS: Dict[str, threading.Event] = {}
-_RL_POLICY: Any = None
-_RL_POLICY_LOCK = threading.Lock()
-_NEURAL_POLICY: Any = None
-_NEURAL_POLICY_SIGNATURE: Optional[Tuple[str, int, int]] = None
-_NEURAL_POLICY_LOCK = threading.Lock()
 
 
 @contextmanager
@@ -739,6 +754,29 @@ def _add_new_materials_to_machine_state(
         known_material_ids.add(material_id)
 
 
+def _release_reused_source_slots(
+    state: MachineState,
+    new_round_update: Mapping[str, Any],
+) -> set[Any]:
+    """新片复用同一 LoadPort 槽位时，从投影状态卸载上一片成品。"""
+    released_ids: set[Any] = set()
+    for material in new_round_update.get("Materials") or []:
+        if not isinstance(material, Mapping):
+            continue
+        station_name = str(material.get("CurrentModuleName") or "")
+        slot_id = material.get("SlotID")
+        if not station_name or not isinstance(slot_id, int):
+            continue
+        station = state.stations.get(station_name)
+        slot = station.slots.get(slot_id) if station is not None else None
+        if slot is None or slot.material is None:
+            continue
+        released_ids.add(slot.material.material_id)
+        slot.phase = SlotPhase.EMPTY
+        slot.material = None
+    return released_ids
+
+
 def _merge_algorithm_update(
     previous_update: Mapping[str, Any],
     new_round_update: Mapping[str, Any],
@@ -884,11 +922,15 @@ def _build_algorithm_recompute_update(
     new_round_update: Mapping[str, Any],
     requested_time: float,
     projected_state: MachineState,
+    move_states: Sequence[Mapping[str, Any]] = (),
 ) -> Dict[str, Any]:
-    """按原始重算时刻生成外部算法 update，不替算法执行任何收尾动作。"""
+    """按原始重算时刻生成标准 update，并携带真实 Move 状态通知。"""
     update = _merge_algorithm_update(runtime.current_update, new_round_update)
     _apply_machine_state_to_update(update, projected_state, requested_time)
-    update["MoveStates"] = []
+    update["MoveStates"] = [
+        deepcopy(dict(notification))
+        for notification in move_states
+    ]
     update["RemoveList"] = [
         int(move["MoveID"])
         for move in runtime.current_plan
@@ -1425,44 +1467,6 @@ def advance_to_recompute(
     return RecoveryProjection(recovery_end, material_ready_times)
 
 
-def _load_neural_inference_policy() -> Any:
-    """按需加载纯 NumPy 神经模型，并在离线训练覆盖文件后自动刷新。"""
-    global _NEURAL_POLICY, _NEURAL_POLICY_SIGNATURE
-    with _NEURAL_POLICY_LOCK:
-        if not NEURAL_MODEL_PATH.is_file():
-            raise ValueError(
-                f"深层神经派工模型不存在：{NEURAL_MODEL_PATH}；"
-                "请先运行 python scripts/train_neural.py"
-            )
-        stat = NEURAL_MODEL_PATH.stat()
-        signature = (
-            str(NEURAL_MODEL_PATH.resolve()),
-            stat.st_mtime_ns,
-            stat.st_size,
-        )
-        if _NEURAL_POLICY is not None and _NEURAL_POLICY_SIGNATURE == signature:
-            return _NEURAL_POLICY
-        from src.schedule.neural import load_neural_policy
-
-        _NEURAL_POLICY = load_neural_policy(NEURAL_MODEL_PATH)
-        _NEURAL_POLICY_SIGNATURE = signature
-        return _NEURAL_POLICY
-
-
-def _load_rl_policy() -> Any:
-    """按需加载并缓存 RL 模型，文件缺失时给出可操作错误。"""
-    global _RL_POLICY
-    with _RL_POLICY_LOCK:
-        if _RL_POLICY is not None:
-            return _RL_POLICY
-        if not RL_MODEL_PATH.exists():
-            raise ValueError(f"RL 模型不存在：{RL_MODEL_PATH}")
-        from src.schedule.policy import load_policy
-
-        _RL_POLICY = load_policy(RL_MODEL_PATH)
-        return _RL_POLICY
-
-
 def _segment_end(moves: Iterable[Mapping[str, Any]]) -> float:
     """返回一组 Move 的最大结束时刻。"""
     return max((float(move.get("EndTime") or 0.0) for move in moves), default=0.0)
@@ -1489,27 +1493,76 @@ def _execute_standard_algorithm(
     build_state: BuildState,
     reproduction: ReproductionLog,
     started: float,
-    algorithm_id: str,
+    algorithm_id: Optional[str] = None,
+    *,
+    builtin_strategy: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """通过同一次标准 ``init/update`` 会话执行首排和多次实时重算。"""
+    """通过同一次标准 ``init/update`` 会话执行首排和多次实时重算。
+
+    ``algorithm_id`` 选择 ``other_alg`` 包；``builtin_strategy`` 选择当前
+    仓库内置算法。两者互斥，但共用完全相同的企业接口数据流。
+    """
+    if (algorithm_id is None) == (builtin_strategy is None):
+        raise ValueError("标准算法执行必须且只能选择一种算法来源")
     round_count = len(rounds)
-    strategy = f"other_alg:{algorithm_id}"
-    backend = f"other_alg/{algorithm_id}"
-    display_name = algorithm_id
+    if builtin_strategy is not None:
+        strategy = builtin_strategy
+        backend = "infer.scheduler"
+        display_name = builtin_strategy
+        entry_name = "infer.scheduler.init/update"
+        session_context = builtin_algorithm_session()
+
+        def initialize(payload: Mapping[str, Any]) -> None:
+            """通过公开 JSON 入口初始化内置算法。"""
+            builtin_algorithm_scheduler.init(
+                json.dumps(dict(payload), ensure_ascii=False)
+            )
+
+        def run_update(payload: Mapping[str, Any]) -> Dict[str, Any]:
+            """通过公开 JSON 入口执行内置算法并解析标准输出。"""
+            raw_output = builtin_algorithm_scheduler.update(
+                json.dumps(dict(payload), ensure_ascii=False),
+                builtin_strategy,
+            )
+            parsed = json.loads(raw_output)
+            if not isinstance(parsed, dict):
+                raise RuntimeError("内置算法 update 返回值不是 JSON 对象")
+            if isinstance(parsed.get("Info"), dict):
+                parsed = dict(parsed["Info"])
+            return dict(parsed)
+
+        prepared_first_update = deepcopy(dict(first_update))
+        options = plan.get("options")
+        if isinstance(options, Mapping):
+            prepared_first_update["AlgorithmOptions"] = deepcopy(dict(options))
+    else:
+        strategy = f"other_alg:{algorithm_id}"
+        backend = f"other_alg/{algorithm_id}"
+        display_name = str(algorithm_id)
+        entry_name = "CT.infer.scheduler.init/update"
+        session_context = algorithm_session(str(algorithm_id))
+        initialize = algorithm_init
+        run_update = algorithm_update
+        prepared_first_update = deepcopy(dict(first_update))
+
     summaries: List[Dict[str, Any]] = []
-    update_snapshots: List[Dict[str, Any]] = [deepcopy(dict(first_update))]
+    update_snapshots: List[Dict[str, Any]] = [deepcopy(prepared_first_update)]
     logs = [
         f"设备：{plan.get('deviceName') or 'selected init'}",
-        f"策略：{strategy}；调用：CT.infer.scheduler.init/update；总轮数：{round_count}",
+        f"策略：{strategy}；调用：{entry_name}；总轮数：{round_count}",
     ]
-    with algorithm_session(algorithm_id):
+    with session_context:
         round_started = time.perf_counter()
-        algorithm_init(plan["device"])
-        raw_output = algorithm_update(first_update)
+        initialize(plan["device"])
+        raw_output = run_update(prepared_first_update)
         elapsed_ms = (time.perf_counter() - round_started) * 1000.0
         output = _alg_output_info(raw_output)
-        _ensure_algorithm_output(output, first_update)
-        runtime = StandardAlgorithmRuntime(plan["device"], first_update, output)
+        _ensure_algorithm_output(output, prepared_first_update)
+        runtime = StandardAlgorithmRuntime(
+            plan["device"],
+            prepared_first_update,
+            output,
+        )
         reproduction.add("AlgOutput", output)
         summaries.append({
             "index": 1,
@@ -1523,10 +1576,15 @@ def _execute_standard_algorithm(
             "segmentEnd": _segment_end(output["MoveList"]),
             "strategyDiagnostics": {
                 "backend": backend,
-                "entry": "CT.infer.scheduler.init/update",
+                "entry": entry_name,
                 "feedbackCount": len(output["Feedback"]),
                 "removedMoveCount": 0,
                 "stateSource": "src.validation.state.MachineState",
+                **(
+                    builtin_strategy_diagnostics()
+                    if builtin_strategy is not None
+                    else {}
+                ),
             },
         })
         logs.append(
@@ -1574,11 +1632,22 @@ def _execute_standard_algorithm(
                 requested_time,
                 build_state,
             )
+            reused_slot_material_ids = _release_reused_source_slots(
+                projected_state,
+                new_round_update,
+            )
+            if reused_slot_material_ids:
+                released_ids.update(reused_slot_material_ids)
+                _remove_released_materials_from_update(
+                    runtime.current_update,
+                    reused_slot_material_ids,
+                )
             update = _build_algorithm_recompute_update(
                 runtime,
                 new_round_update,
                 requested_time,
                 projected_state,
+                notifications,
             )
             update_snapshots.append(deepcopy(update))
             reproduction.add(
@@ -1587,7 +1656,7 @@ def _execute_standard_algorithm(
                 requested_time,
             )
             round_started = time.perf_counter()
-            raw_output = algorithm_update(update)
+            raw_output = run_update(update)
             elapsed_ms = (time.perf_counter() - round_started) * 1000.0
             output = _alg_output_info(raw_output)
             _ensure_algorithm_output(output, update)
@@ -1613,11 +1682,16 @@ def _execute_standard_algorithm(
                 "segmentEnd": _segment_end(output["MoveList"]),
                 "strategyDiagnostics": {
                     "backend": backend,
-                    "entry": "CT.infer.scheduler.init/update",
+                    "entry": entry_name,
                     "feedbackCount": len(output["Feedback"]),
                     "removedMoveCount": len(update["RemoveList"]),
                     "moveStateCount": len(update["MoveStates"]),
                     "stateSource": "src.validation.state.MachineState",
+                    **(
+                        builtin_strategy_diagnostics()
+                        if builtin_strategy is not None
+                        else {}
+                    ),
                 },
             })
             logs.append(
@@ -1708,12 +1782,6 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
     if any(right <= left + TIME_TOLERANCE for left, right in zip(times, times[1:])):
         raise ValueError("各轮重算时间必须严格递增")
 
-    if strategy == "neural":
-        policy = _load_neural_inference_policy()
-    elif strategy == "rl":
-        policy = _load_rl_policy()
-    else:
-        policy = None
     options = plan.get("options") if isinstance(plan.get("options"), Mapping) else {}
     default_loadlock_manager_mode = (
         "joint" if strategy == "neural" else "petri-look"
@@ -1743,11 +1811,6 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
             "LoadLock exchange 只支持 auto、enabled 或 disabled"
         )
     build_state = BuildState()
-    logs: List[str] = [
-        f"设备：{plan.get('deviceName') or 'selected init'}",
-        f"策略：{strategy}；总轮数：{round_count}",
-    ]
-    summaries: List[Dict[str, Any]] = []
 
     first_update = build_round_update(plan, rounds[0], 0.0, build_state)
     if strategy == "milp":
@@ -1771,144 +1834,16 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
             started,
             other_algorithm_id,
         )
-    round_started = time.perf_counter()
-    scheduler = RealtimeRescheduler(
-        plan["device"],
+    return _execute_standard_algorithm(
+        plan,
         first_update,
-        first_update,
-        strategy=strategy,
-        policy=policy,
-        loadlock_manager_mode=loadlock_manager_mode,
-        loadlock_exchange_mode=loadlock_exchange_mode,
-        rl_search_seconds=_finite_number(options.get("rlSearchSeconds"), 4.0),
-        rl_rollouts=max(0, int(_finite_number(options.get("rlRollouts"), 256))),
-        rl_temperature=max(0.01, _finite_number(options.get("rlTemperature"), 0.7)),
-        milp_time_limit=max(
-            0.1,
-            _finite_number(options.get("milpTimeLimit"), DEFAULT_MILP_TIME_LIMIT_SECONDS),
-        ),
-        seed=int(_finite_number(options.get("seed"), 0)),
+        rounds,
+        times,
+        build_state,
+        reproduction,
+        started,
+        builtin_strategy=strategy,
     )
-    elapsed_ms = (time.perf_counter() - round_started) * 1000.0
-    first_diagnostics = scheduler.last_strategy_diagnostics
-    summaries.append({
-        "index": 1,
-        "kind": "initial",
-        "requestedTime": 0.0,
-        "effectiveTime": 0.0,
-        "scheduleStartTime": 0.0,
-        "recoveryEndTime": 0.0,
-        "jobCount": _round_pjob_count(rounds[0]),
-        "elapsedMs": elapsed_ms,
-        "segmentEnd": _segment_end(scheduler.current_plan),
-        "strategyDiagnostics": first_diagnostics,
-    })
-    logs.append(f"[1/{round_count}] 首次排程完成：{elapsed_ms:.1f} ms，{len(scheduler.current_plan)} Moves")
-    if strategy == "milp":
-        proof = "已证明最优" if first_diagnostics.get("optimal") else "达到时限，返回当前最优可行解"
-        logs.append(
-            f"  MILP：{proof}；gap={float(first_diagnostics.get('gap', 0.0)) * 100:.3f}%；"
-            f"求解 {float(first_diagnostics.get('runtimeSeconds', 0.0)):.2f}s"
-        )
-    elif strategy == "neural":
-        wavefront_summary = (
-            f"；同步波前={int(first_diagnostics.get('wavefrontFamilies') or 0)} 路线族"
-            if first_diagnostics.get("inductiveBias")
-            == "balanced-disjoint-route-wavefront"
-            else ""
-        )
-        logs.append(
-            "  Neural："
-            f"{first_diagnostics.get('architecture', 'unknown')}；"
-            f"{int(first_diagnostics.get('parameterCount') or 0)} 参数；"
-            f"{int(first_diagnostics.get('forwardPasses') or 0)} 次候选集合前向；"
-            f"结果来源={first_diagnostics.get('selectedSource', 'unknown')}"
-            f"；LoadLock={first_diagnostics.get('loadLockManager', 'joint-network')}"
-            f"{wavefront_summary}"
-        )
-    reproduction.add("AlgOutput", _alg_output_info(scheduler.combined_output()))
-
-    for index, round_config in enumerate(rounds[1:], start=2):
-        requested_time = times[index - 1]
-        notifications: List[Dict[str, Any]] = []
-        # 本地 Machine 重算只回放到原始请求时刻：已经 Running 的原子 Move
-        # 留给 RealtimeRescheduler 投影完成，未开始后继直接取消，不再执行
-        # “关门、空手”的最小稳定收尾链。
-        advance_to_algorithm_update(scheduler, requested_time, notifications)
-        effective_time = requested_time
-        released_ids, empty_ports = _release_finished_load_ports(scheduler, build_state)
-        for notification in notifications:
-            event_time = (
-                notification.get("EndTime")
-                if notification.get("MoveState") == MoveStateReplay.DONE
-                else notification.get("StartTime")
-            )
-            reproduction.add("AlgUpdateMove", notification, _finite_number(event_time, requested_time))
-        reproduction.add("RecomputeControl", {
-            "ControlInfo": {"Round": index},
-            "RecomputeInfo": {
-                "CurrentTime": requested_time,
-                "EffectiveTime": effective_time,
-                "Reason": f"第 {index} 轮新增 Job",
-            },
-        }, requested_time)
-        update = build_round_update(plan, round_config, requested_time, build_state)
-        reproduction.add("AlgSchedule", _schedule_log_info(plan["device"], update), requested_time)
-        round_started = time.perf_counter()
-        try:
-            scheduler.recompute(
-                update,
-                requested_time,
-                cutoff_time=requested_time,
-                schedule_start_time=requested_time,
-                material_ready_times={},
-                reason=f"第 {index} 轮新增 Job",
-            )
-        except Exception as error:
-            raise RuntimeError(f"第 {index} 轮重算失败：{error}") from error
-        elapsed_ms = (time.perf_counter() - round_started) * 1000.0
-        summaries.append({
-            "index": index,
-            "kind": "recompute",
-            "requestedTime": requested_time,
-            "effectiveTime": effective_time,
-            "scheduleStartTime": requested_time,
-            "recoveryEndTime": effective_time,
-            "jobCount": _round_pjob_count(round_config),
-            "elapsedMs": elapsed_ms,
-            "segmentEnd": _segment_end(scheduler.current_plan),
-            "strategyDiagnostics": scheduler.last_strategy_diagnostics,
-        })
-        suffix = (
-            f"，固定旧动作最晚执行至 {effective_time:.2f}s；新计划从请求时刻并行开始"
-            if effective_time > requested_time + TIME_TOLERANCE else ""
-        )
-        logs.append(
-            f"[{index}/{round_count}] @{requested_time:.2f}s 重算完成：{elapsed_ms:.1f} ms，"
-            f"新增 {_round_pjob_count(round_config)} PJobs{suffix}"
-        )
-        if released_ids:
-            logs.append(
-                f"  已卸载 {len(released_ids)} 片成品；"
-                f"清空 LoadPort={','.join(sorted(empty_ports)) or '无'}"
-            )
-        reproduction.add("AlgOutput", _alg_output_info(scheduler.combined_output()), effective_time)
-
-    output = scheduler.combined_output()
-    total_ms = (time.perf_counter() - started) * 1000.0
-    makespan = _segment_end(output["MoveList"])
-    logs.append(f"完成：总耗时 {total_ms:.1f} ms，makespan={makespan:.2f}s，Move={len(output['MoveList'])}")
-    return {
-        "ok": True,
-        "strategy": strategy,
-        "rounds": summaries,
-        "totalElapsedMs": total_ms,
-        "makespan": makespan,
-        "moveCount": len(output["MoveList"]),
-        "validation": "passed",
-        "logs": logs,
-        "output": output,
-    }
 
 
 def execute_plan(raw_plan: Mapping[str, Any]) -> Dict[str, Any]:
