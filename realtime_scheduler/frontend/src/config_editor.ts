@@ -9,6 +9,7 @@
 // @ts-nocheck
 import * as RouteEditorLogic from "./route_editor_logic";
 import { requestJson } from "./api_client";
+import { createVisualizationWorkspace } from "./workspace_visualizer";
 import {
   CJOB_TYPES,
   TASK_MODES,
@@ -24,6 +25,7 @@ import {
 } from "./editor_models";
 
 const { VISIT_SHARED_FIELDS, selectReferencedRoutes } = RouteEditorLogic;
+const visualizationWorkspace = createVisualizationWorkspace();
 
 const EXPECTED_API_SCHEMA = "cjob-pjob-v3";
 
@@ -266,6 +268,7 @@ function applyDeviceTopology(device, deviceName) {
   state.processModules = stations.filter(([, item]) => String(item.Type || "").toLowerCase() === "processchamber").map(([name]) => name).sort(natural);
   state.robotNames = Object.keys(device.Robots).sort(natural);
   state.robotScopes = Object.fromEntries(Object.entries(device.Robots).map(([name, robot]) => [name, [...new Set(Object.values(robot.ArmInfo || {}).flatMap(arm => arm.AccessibleStations || []))]]));
+  visualizationWorkspace.setDevice(state.device);
   if (!state.loadPorts.length || !state.processModules.length) throw new Error("设备必须包含 LoadPort 和 ProcessChamber");
 }
 
@@ -385,6 +388,7 @@ function markTestDirty() {
 
 /** 清理上一测试集的运行指标和结果链接，避免把旧结果误认为当前结果。 */
 function resetRunResult() {
+  visualizationWorkspace.clear();
   ["metricTime", "metricMakespan", "metricMoves", "metricValidation"].forEach(id => { document.getElementById(id).textContent = "—"; });
   document.getElementById("metricTimeLabel").textContent = "总耗时";
   document.getElementById("metricMakespanLabel").textContent = "Makespan";
@@ -1090,6 +1094,13 @@ function prepareGanttView(result) {
   return true;
 }
 
+/** 把本次结果加载进内嵌工作台，并启用直接查看入口。 */
+async function prepareWorkspaceView(result) {
+  if (!result?.resultId) return false;
+  await visualizationWorkspace.loadResult(result.resultId, state.testCaseName || "当前运行结果");
+  return true;
+}
+
 /** 调用本地服务运行排程。 */
 async function runPlan() {
   const button = document.getElementById("runButton");
@@ -1116,6 +1127,10 @@ async function runPlan() {
     catch { throw new Error(responseText.trim().slice(0, 240) || `服务返回 ${response.status}`); }
     logReady = prepareLogDownload(runResult);
     ganttReady = prepareGanttView(runResult);
+    if (runResult?.resultId) {
+      try { await prepareWorkspaceView(runResult); }
+      catch (workspaceError) { writeTerminal(`$ 工作台加载失败\n  ${workspaceError.message || "未知错误"}`, true); }
+    }
     if (!response.ok || !runResult.ok) throw new Error(runResult.error || `服务返回 ${response.status}`); showResult(runResult);
   } catch (error) {
     const baselineError = runResult?.baseline?.status === "failed" ? `\n  Baseline 失败：${runResult.baseline.error || "未知原因"}` : "";
@@ -1275,7 +1290,8 @@ function renderBatchItems(items) {
           <span class="batch-status">${statusLabels[item.status] || "等待中"}</span>
           <div class="batch-result-actions">
             ${item.logUrl ? `<a class="btn" href="${escapeHtml(item.logUrl)}" download>日志</a>` : `<span class="btn" aria-disabled="true">日志</span>`}
-            ${item.ganttUrl ? `<a class="btn primary" href="${escapeHtml(item.ganttUrl)}" target="_blank">甘特图</a>` : `<span class="btn" aria-disabled="true">甘特图</span>`}
+            ${item.resultUrl ? `<button class="btn primary" type="button" data-workspace-result="${escapeHtml(item.resultUrl)}" data-workspace-name="${escapeHtml(item.testName || `测试 ${index + 1}`)}">工作台</button>` : `<span class="btn" aria-disabled="true">工作台</span>`}
+            ${item.ganttUrl ? `<a class="btn" href="${escapeHtml(item.ganttUrl)}" target="_blank">甘特图</a>` : `<span class="btn" aria-disabled="true">甘特图</span>`}
           </div>
         </div>
         <div class="batch-result-summary">
@@ -1445,6 +1461,13 @@ document.addEventListener("change", event => {
 });
 document.addEventListener("click", event => {
   const tab = event.target.closest("[data-tab-target]"); if (tab) switchTab(tab.dataset.tabTarget);
+  const workspaceResult = event.target.closest("[data-workspace-result]");
+  if (workspaceResult) {
+    visualizationWorkspace.loadResult(workspaceResult.dataset.workspaceResult, workspaceResult.dataset.workspaceName)
+      .then(() => visualizationWorkspace.show())
+      .catch(error => writeTerminal(`$ 工作台加载失败\n  ${error.message || "未知错误"}`, true));
+    return;
+  }
   const button = event.target.closest("[data-action]"); if (button && !button.disabled) { handleAction(button); return; }
   const card = event.target.closest("[data-step-card]"); if (card) openStepDrawer(Number(card.dataset.routeIndex), Number(card.dataset.stageIndex));
 });

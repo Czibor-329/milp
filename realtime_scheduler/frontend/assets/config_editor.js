@@ -156,6 +156,582 @@ async function requestJson(url, options = {}) {
   return result;
 }
 
+// src/workspace_visualizer.ts
+var PICK_MOVE_TYPES = /* @__PURE__ */ new Set([0, 2]);
+var PLACE_MOVE_TYPES = /* @__PURE__ */ new Set([1, 3]);
+var SWAP_MOVE = 4;
+var PREPARE_MOVE = 6;
+var COMPLETE_MOVE = 7;
+var PROCESS_MOVE = 9;
+var PRE_PREPARE_MOVE = 10;
+var CLEAN_MOVE = 14;
+var PLAYBACK_FRAME_INTERVAL_MS = 80;
+var DEFAULT_PLAYBACK_SPEED = 4;
+var MOVE_NAMES = {
+  0: "\u53D6\u7247",
+  1: "\u653E\u7247",
+  2: "\u591A\u7247\u53D6\u7247",
+  3: "\u591A\u7247\u653E\u7247",
+  4: "\u6362\u7247",
+  5: "\u673A\u68B0\u624B\u8F6C\u4F4D",
+  6: "\u5F00\u95E8",
+  7: "\u5173\u95E8",
+  8: "\u540E\u7F6E\u5B8C\u6210",
+  9: "\u52A0\u5DE5",
+  10: "\u73AF\u5883\u5207\u6362",
+  11: "\u5BF9\u51C6",
+  12: "\u62BD\u771F\u7A7A",
+  13: "\u5145\u6C14",
+  14: "\u6E05\u6D01"
+};
+var STATUS_LABELS = {
+  idle: "\u7A7A\u95F2",
+  occupied: "\u5DF2\u8F7D\u7247",
+  door: "\u95E8\u52A8\u4F5C",
+  transfer: "\u4F20\u8F93\u4E2D",
+  processing: "\u52A0\u5DE5\u4E2D",
+  cleaning: "\u6E05\u6D01\u4E2D",
+  environment: "\u73AF\u5883\u5207\u6362"
+};
+var DOOR_LABELS = {
+  closed: "\u95E8\u5DF2\u5173\u95ED",
+  opening: "\u6B63\u5728\u5F00\u95E8",
+  open: "\u95E8\u5DF2\u6253\u5F00",
+  closing: "\u6B63\u5728\u5173\u95E8",
+  doorless: "\u65E0\u95E8\u7ED3\u6784"
+};
+function finiteNumber(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+function listValue(value) {
+  return Array.isArray(value) ? value : [];
+}
+function naturalCompare(left, right) {
+  return left.localeCompare(right, void 0, { numeric: true, sensitivity: "base" });
+}
+function escapeHtml(value) {
+  return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+function formatSeconds2(value) {
+  return Number.isFinite(value) ? value.toFixed(1) : "0.0";
+}
+function materialIds(move, field = "MatIDList") {
+  return listValue(move[field]).map(String).filter(Boolean);
+}
+function firstStation(move, field) {
+  return String(listValue(move[field])[0] ?? "");
+}
+function isRobotName(name) {
+  return /^(ATR|VTR|TM\d*|ROBOT)/i.test(name);
+}
+function isLoadPortName(name, type = "") {
+  return type.toLowerCase() === "loadport" || /^(LP\d*|P\d+|.*PORT)$/i.test(name);
+}
+function isLoadLockName(name, type = "") {
+  return type.toLowerCase() === "loadlock" || /^LL?[A-Z]$/i.test(name) || /^BUF_/i.test(name);
+}
+function isDoorlessModule(name, type = "") {
+  return /^cool(er)?$/i.test(name) || type.toLowerCase() === "cooler";
+}
+function normalizeMovePayload(payload) {
+  const records = Array.isArray(payload) ? payload : payload && typeof payload === "object" && Array.isArray(payload.MoveList) ? payload.MoveList : null;
+  if (!records) throw new Error("\u6587\u4EF6\u5FC5\u987B\u662F MoveList \u6570\u7EC4\uFF0C\u6216\u5305\u542B MoveList \u5B57\u6BB5\u7684 JSON \u5BF9\u8C61");
+  return records.filter((record) => Boolean(record) && typeof record === "object" && !Array.isArray(record)).map((record) => ({ ...record }));
+}
+function normalizeMoves(moves) {
+  return moves.map((move, index) => {
+    const startTime = finiteNumber(move.StartTime);
+    const endTime = Math.max(startTime, finiteNumber(move.EndTime, startTime));
+    return {
+      ...move,
+      MoveID: finiteNumber(move.MoveID, index + 1),
+      MoveType: finiteNumber(move.MoveType, -1),
+      ModuleName: String(move.ModuleName ?? ""),
+      StartTime: startTime,
+      EndTime: endTime
+    };
+  }).sort((left, right) => left.StartTime - right.StartTime || left.EndTime - right.EndTime || left.MoveID - right.MoveID);
+}
+function collectModuleDefinitions(moves, device) {
+  const modules = /* @__PURE__ */ new Map();
+  for (const [name, definition] of Object.entries(device?.Stations ?? {})) {
+    modules.set(name, { type: String(definition.Type ?? "") });
+  }
+  for (const move of moves) {
+    const candidates = [
+      move.ModuleName,
+      ...listValue(move.SrcStationList),
+      ...listValue(move.DestStationList),
+      ...listValue(move.StationList)
+    ].map(String).filter(Boolean);
+    for (const name of candidates) {
+      if (!isRobotName(name) && !modules.has(name)) modules.set(name, { type: "" });
+    }
+  }
+  return modules;
+}
+function collectRobotNames(moves, device) {
+  const names = new Set(Object.keys(device?.Robots ?? {}));
+  for (const move of moves) {
+    if (isRobotName(move.ModuleName)) names.add(move.ModuleName);
+    const robot = String(move.Robot ?? "");
+    if (robot) names.add(robot);
+  }
+  return [...names].sort(naturalCompare);
+}
+function initialMaterialLocations(moves) {
+  const locations = /* @__PURE__ */ new Map();
+  for (const move of moves) {
+    if (move.MoveType === SWAP_MOVE) {
+      const station = String(listValue(move.StationList)[0] ?? "");
+      for (const material of materialIds(move, "RecvMatList")) {
+        if (!locations.has(material)) locations.set(material, move.ModuleName);
+      }
+      for (const material of materialIds(move, "SendMatList")) {
+        if (!locations.has(material)) locations.set(material, station);
+      }
+      continue;
+    }
+    const source = firstStation(move, "SrcStationList");
+    const destination = firstStation(move, "DestStationList");
+    const fallback = source || (PICK_MOVE_TYPES.has(move.MoveType) ? move.ModuleName : "") || (PLACE_MOVE_TYPES.has(move.MoveType) ? move.ModuleName : "") || destination || move.ModuleName;
+    for (const material of materialIds(move)) {
+      if (!locations.has(material) && fallback) locations.set(material, fallback);
+    }
+  }
+  return locations;
+}
+function applyCompletedTransfer(move, locations) {
+  if (PICK_MOVE_TYPES.has(move.MoveType)) {
+    for (const material of materialIds(move)) locations.set(material, move.ModuleName);
+    return;
+  }
+  if (PLACE_MOVE_TYPES.has(move.MoveType)) {
+    const destination = firstStation(move, "DestStationList");
+    if (destination) {
+      for (const material of materialIds(move)) locations.set(material, destination);
+    }
+    return;
+  }
+  if (move.MoveType === SWAP_MOVE) {
+    const station = String(listValue(move.StationList)[0] ?? "");
+    for (const material of materialIds(move, "RecvMatList")) locations.set(material, station);
+    for (const material of materialIds(move, "SendMatList")) locations.set(material, move.ModuleName);
+  }
+}
+function moveProgress(move, time) {
+  const duration = move.EndTime - move.StartTime;
+  if (duration <= 0) return time >= move.EndTime ? 1 : 0;
+  return Math.max(0, Math.min(1, (time - move.StartTime) / duration));
+}
+function activeTarget(move) {
+  return firstStation(move, "DestStationList") || firstStation(move, "SrcStationList") || String(listValue(move.StationList)[0] ?? "") || (!isRobotName(move.ModuleName) ? move.ModuleName : "");
+}
+function buildWorkspaceSnapshot(moves, device, requestedTime) {
+  const records = normalizeMoves(moves);
+  const endTime = records.reduce((maximum, move) => Math.max(maximum, move.EndTime), 0);
+  const time = Math.max(0, Math.min(finiteNumber(requestedTime), endTime));
+  const definitions = collectModuleDefinitions(records, device);
+  const robotNames = collectRobotNames(records, device);
+  const locations = initialMaterialLocations(records);
+  const doorStates = /* @__PURE__ */ new Map();
+  const environments = /* @__PURE__ */ new Map();
+  const activeMoves = [];
+  let completedMoves = 0;
+  for (const [name, definition] of definitions) {
+    doorStates.set(name, isDoorlessModule(name, definition.type) ? "doorless" : "closed");
+  }
+  for (const move of records) {
+    const active = move.StartTime <= time && time < move.EndTime;
+    const completed = move.EndTime <= time;
+    if (active) activeMoves.push(move);
+    if (completed) {
+      completedMoves += 1;
+      applyCompletedTransfer(move, locations);
+    }
+    if (move.MoveType === PREPARE_MOVE) {
+      if (active) doorStates.set(move.ModuleName, "opening");
+      else if (completed) doorStates.set(move.ModuleName, "open");
+    } else if (move.MoveType === COMPLETE_MOVE) {
+      if (active) doorStates.set(move.ModuleName, "closing");
+      else if (completed) doorStates.set(move.ModuleName, "closed");
+    } else if (move.MoveType === PRE_PREPARE_MOVE && (active || completed)) {
+      const currentState = String(move.CurState ?? "");
+      const environment = /VTR|VAC/i.test(currentState) ? "\u771F\u7A7A" : /ATR|ATM/i.test(currentState) ? "\u5927\u6C14" : currentState;
+      if (environment) environments.set(move.ModuleName, active ? `${environment}\u5207\u6362\u4E2D` : environment);
+    }
+  }
+  const robotTargets = /* @__PURE__ */ new Map();
+  for (const move of activeMoves) {
+    if (isRobotName(move.ModuleName)) robotTargets.set(move.ModuleName, activeTarget(move));
+  }
+  const wafersByLocation = /* @__PURE__ */ new Map();
+  for (const [material, location] of locations) {
+    if (!location) continue;
+    const wafers = wafersByLocation.get(location) ?? [];
+    wafers.push(material);
+    wafersByLocation.set(location, wafers);
+  }
+  for (const wafers of wafersByLocation.values()) wafers.sort(naturalCompare);
+  const modules = [...definitions.entries()].map(([name, definition]) => {
+    const moduleMoves = activeMoves.filter((move) => move.ModuleName === name || firstStation(move, "SrcStationList") === name || firstStation(move, "DestStationList") === name || listValue(move.StationList).map(String).includes(name));
+    const primaryMove = moduleMoves.find((move) => move.MoveType === CLEAN_MOVE) ?? moduleMoves.find((move) => move.MoveType === PROCESS_MOVE) ?? moduleMoves.find((move) => move.MoveType === PRE_PREPARE_MOVE) ?? moduleMoves.find((move) => [PREPARE_MOVE, COMPLETE_MOVE].includes(move.MoveType)) ?? moduleMoves[0];
+    let status = (wafersByLocation.get(name)?.length ?? 0) > 0 ? "occupied" : "idle";
+    if (primaryMove?.MoveType === CLEAN_MOVE) status = "cleaning";
+    else if (primaryMove?.MoveType === PROCESS_MOVE) status = "processing";
+    else if (primaryMove?.MoveType === PRE_PREPARE_MOVE) status = "environment";
+    else if (primaryMove && [PREPARE_MOVE, COMPLETE_MOVE].includes(primaryMove.MoveType)) status = "door";
+    else if (primaryMove) status = "transfer";
+    return {
+      name,
+      type: definition.type,
+      status,
+      door: doorStates.get(name) ?? "closed",
+      wafers: wafersByLocation.get(name) ?? [],
+      activeMoveName: primaryMove ? MOVE_NAMES[primaryMove.MoveType] ?? `\u52A8\u4F5C ${primaryMove.MoveType}` : "",
+      progress: primaryMove ? moveProgress(primaryMove, time) : 0,
+      environment: environments.get(name) ?? "",
+      isRobotTarget: [...robotTargets.values()].includes(name)
+    };
+  }).sort((left, right) => naturalCompare(left.name, right.name));
+  const robots = robotNames.map((name) => {
+    const move = activeMoves.find((record) => record.ModuleName === name);
+    return {
+      name,
+      wafers: wafersByLocation.get(name) ?? [],
+      busy: Boolean(move),
+      target: robotTargets.get(name) ?? "",
+      activeMoveName: move ? MOVE_NAMES[move.MoveType] ?? `\u52A8\u4F5C ${move.MoveType}` : ""
+    };
+  });
+  return {
+    time,
+    endTime,
+    completedMoves,
+    totalMoves: records.length,
+    activeMoves,
+    modules,
+    robots,
+    waferCount: new Set(records.flatMap((move) => materialIds(move))).size
+  };
+}
+function collectElements(root) {
+  const required = (id) => {
+    const element = root.getElementById(id);
+    if (!element) throw new Error(`\u53EF\u89C6\u5316\u5DE5\u4F5C\u53F0\u7F3A\u5C11\u9875\u9762\u8282\u70B9\uFF1A${id}`);
+    return element;
+  };
+  return {
+    empty: required("visualEmpty"),
+    content: required("visualContent"),
+    stage: required("visualDeviceStage"),
+    activeMoves: required("visualActiveMoves"),
+    source: required("visualSource"),
+    currentTime: required("visualCurrentTime"),
+    totalTime: required("visualTotalTime"),
+    progressText: required("visualProgressText"),
+    moveText: required("visualMoveText"),
+    waferText: required("visualWaferText"),
+    range: required("visualTimeline"),
+    playButton: required("visualPlayButton"),
+    speed: required("visualSpeed"),
+    fileInput: required("visualFileInput"),
+    openGantt: required("visualOpenGantt"),
+    resultButton: required("workspaceResultButton")
+  };
+}
+function icon(name) {
+  const paths = {
+    play: '<path d="M8 5v14l11-7z"/>',
+    pause: '<path d="M7 5h4v14H7zM15 5h4v14h-4z"/>',
+    robot: '<rect x="5" y="7" width="14" height="11" rx="3"/><path d="M12 3v4M8 12h.01M16 12h.01M9 18v3M15 18v3"/>',
+    upload: '<path d="M12 16V4m0 0L7 9m5-5 5 5M5 15v5h14v-5"/>'
+  };
+  return `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">${paths[name]}</svg>`;
+}
+function moduleGroups(modules) {
+  const groups = [
+    {
+      key: "process",
+      title: "\u5DE5\u827A\u4E0E\u8F85\u52A9\u8154\u5BA4",
+      modules: modules.filter((module) => !isLoadPortName(module.name, module.type) && !isLoadLockName(module.name, module.type))
+    },
+    {
+      key: "lock",
+      title: "\u771F\u7A7A\u8FC7\u6E21\u8154",
+      modules: modules.filter((module) => isLoadLockName(module.name, module.type))
+    },
+    {
+      key: "port",
+      title: "\u88C5\u8F7D\u7AEF\u53E3",
+      modules: modules.filter((module) => isLoadPortName(module.name, module.type))
+    }
+  ];
+  return groups.filter((group) => group.modules.length > 0);
+}
+function renderModule(module) {
+  const waferLimit = 6;
+  const wafers = module.wafers.slice(0, waferLimit).map((wafer) => `<span class="wafer-token" title="\u6676\u5706 ${escapeHtml(wafer)}">${escapeHtml(wafer)}</span>`).join("");
+  const overflow = module.wafers.length > waferLimit ? `<span class="wafer-more">+${module.wafers.length - waferLimit}</span>` : "";
+  const progress = Math.round(module.progress * 100);
+  return `
+    <article class="equipment-card status-${module.status} door-${module.door} ${module.isRobotTarget ? "is-target" : ""}">
+      <div class="equipment-door" aria-hidden="true"><span></span></div>
+      <div class="equipment-head">
+        <div><strong>${escapeHtml(module.name)}</strong><span>${escapeHtml(STATUS_LABELS[module.status])}</span></div>
+        <span class="door-state"><i></i>${escapeHtml(DOOR_LABELS[module.door])}</span>
+      </div>
+      <div class="equipment-body">
+        <div class="wafer-stack">${wafers || '<span class="wafer-empty">\u7A7A\u8154</span>'}${overflow}</div>
+        ${module.environment ? `<span class="environment-state">${escapeHtml(module.environment)}</span>` : ""}
+      </div>
+      <div class="equipment-foot">
+        <span>${escapeHtml(module.activeMoveName || "\u7B49\u5F85\u4EFB\u52A1")}</span>
+        ${module.activeMoveName ? `<span>${progress}%</span>` : ""}
+      </div>
+      <div class="equipment-progress"><span style="transform:scaleX(${module.activeMoveName ? module.progress : 0})"></span></div>
+    </article>`;
+}
+function renderRobot(robot) {
+  return `
+    <article class="robot-card ${robot.busy ? "is-busy" : ""}">
+      <div class="robot-icon">${icon("robot")}</div>
+      <div class="robot-copy">
+        <strong>${escapeHtml(robot.name)}</strong>
+        <span>${escapeHtml(robot.busy ? robot.activeMoveName : "\u5F85\u547D")}</span>
+      </div>
+      <div class="robot-target">
+        <span>${robot.target ? "\u76EE\u6807\u8154\u5BA4" : "\u5F53\u524D\u4F4D\u7F6E"}</span>
+        <strong>${escapeHtml(robot.target || "\u2014")}</strong>
+      </div>
+      <div class="robot-wafers">${robot.wafers.map((wafer) => `<span class="wafer-token">${escapeHtml(wafer)}</span>`).join("")}</div>
+    </article>`;
+}
+var VisualizationWorkspace = class {
+  root;
+  elements;
+  device = null;
+  moves = [];
+  sourceName = "";
+  resultUrl = "";
+  time = 0;
+  playing = false;
+  playbackSpeed = DEFAULT_PLAYBACK_SPEED;
+  animationFrame = 0;
+  previousFrameTime = 0;
+  previousRenderTime = 0;
+  /** 绑定页面事件并初始化空状态。 */
+  constructor(root) {
+    this.root = root;
+    this.elements = collectElements(root);
+    this.bindEvents();
+    this.updatePlayButton();
+  }
+  /** 更新当前设备拓扑；已有 MoveList 会立即按新拓扑重绘。 */
+  setDevice(device) {
+    this.device = device ? structuredClone(device) : null;
+    if (this.moves.length) this.render();
+  }
+  /** 加载浏览器中选择的 MoveList 文件。 */
+  async loadFile(file) {
+    const payload = JSON.parse(await file.text());
+    this.loadMoves(normalizeMovePayload(payload), file.name, "");
+  }
+  /** 从后端保存的运行结果加载 MoveList。 */
+  async loadResult(resultIdOrUrl, sourceName = "\u5F53\u524D\u8FD0\u884C\u7ED3\u679C") {
+    const resultUrl = resultIdOrUrl.startsWith("/") ? resultIdOrUrl : `/api/results/${encodeURIComponent(resultIdOrUrl)}`;
+    this.setLoading(true, "\u6B63\u5728\u52A0\u8F7D\u8FD0\u884C\u7ED3\u679C\u2026");
+    try {
+      const response = await fetch(resultUrl, { cache: "no-store" });
+      const payload = await response.json();
+      if (!response.ok) {
+        const message = payload && typeof payload === "object" ? String(payload.error ?? "") : "";
+        throw new Error(message || `\u670D\u52A1\u8FD4\u56DE ${response.status}`);
+      }
+      this.loadMoves(normalizeMovePayload(payload), sourceName, resultUrl);
+    } catch (error) {
+      this.showError(error instanceof Error ? error.message : String(error));
+      throw error;
+    }
+  }
+  /** 切换到工作台标签。 */
+  show() {
+    const tab = this.root.querySelector('[data-tab-target="workspace"]');
+    tab?.click();
+    this.elements.range.focus({ preventScroll: true });
+  }
+  /** 停止播放并释放动画帧。 */
+  destroy() {
+    this.pause();
+  }
+  /** 清除旧测试结果，避免切换测试后继续误看上一份 MoveList。 */
+  clear() {
+    this.pause();
+    this.moves = [];
+    this.sourceName = "";
+    this.resultUrl = "";
+    this.time = 0;
+    this.elements.resultButton.disabled = true;
+    this.elements.openGantt.href = "#";
+    this.elements.openGantt.setAttribute("aria-disabled", "true");
+    this.elements.content.hidden = true;
+    this.elements.empty.hidden = false;
+    this.elements.empty.classList.remove("is-loading", "is-error");
+    this.elements.empty.innerHTML = `
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="3"/><path d="M8 9h8M8 13h5"/></svg>
+      <strong>\u7B49\u5F85 MoveList</strong>
+      <span>\u8FD0\u884C\u4E00\u6B21\u8BA1\u5212\uFF0C\u6216\u5BFC\u5165\u5DF2\u6709\u7684 MoveList JSON \u6587\u4EF6\u540E\u5F00\u59CB\u56DE\u653E\u3002</span>`;
+  }
+  /** 接收规范化后的 MoveList 并重置时间轴。 */
+  loadMoves(moves, sourceName, resultUrl) {
+    if (!moves.length) throw new Error("MoveList \u4E3A\u7A7A\uFF0C\u65E0\u6CD5\u5EFA\u7ACB\u53EF\u89C6\u5316\u56DE\u653E");
+    this.pause();
+    this.moves = moves;
+    this.sourceName = sourceName;
+    this.resultUrl = resultUrl;
+    const snapshot = buildWorkspaceSnapshot(this.moves, this.device, 0);
+    this.time = 0;
+    this.elements.range.min = "0";
+    this.elements.range.max = String(snapshot.endTime);
+    this.elements.range.step = snapshot.endTime > 1e4 ? "1" : "0.1";
+    this.elements.range.value = "0";
+    this.elements.openGantt.href = resultUrl ? `/movelist_gantt_viewer.html?src=${encodeURIComponent(resultUrl)}` : "#";
+    this.elements.openGantt.setAttribute("aria-disabled", resultUrl ? "false" : "true");
+    this.elements.resultButton.disabled = false;
+    this.elements.empty.hidden = true;
+    this.elements.content.hidden = false;
+    this.render(snapshot);
+  }
+  /** 绑定文件、时间轴、播放和快捷控制事件。 */
+  bindEvents() {
+    this.elements.fileInput.addEventListener("change", () => {
+      const file = this.elements.fileInput.files?.item(0);
+      if (!file) return;
+      this.loadFile(file).catch((error) => this.showError(error instanceof Error ? error.message : String(error))).finally(() => {
+        this.elements.fileInput.value = "";
+      });
+    });
+    this.elements.range.addEventListener("input", () => {
+      this.time = finiteNumber(this.elements.range.value);
+      this.render();
+    });
+    this.elements.playButton.addEventListener("click", () => {
+      if (this.playing) this.pause();
+      else this.play();
+    });
+    this.elements.speed.addEventListener("change", () => {
+      this.playbackSpeed = Math.max(0.25, finiteNumber(this.elements.speed.value, DEFAULT_PLAYBACK_SPEED));
+    });
+    this.elements.resultButton.addEventListener("click", () => this.show());
+    this.elements.openGantt.addEventListener("click", (event) => {
+      if (this.elements.openGantt.getAttribute("aria-disabled") === "true") event.preventDefault();
+    });
+  }
+  /** 从当前时间开始播放；到达末尾时自动回到起点。 */
+  play() {
+    if (!this.moves.length || this.playing) return;
+    const endTime = finiteNumber(this.elements.range.max);
+    if (this.time >= endTime) {
+      this.time = 0;
+      this.elements.range.value = "0";
+    }
+    this.playing = true;
+    this.previousFrameTime = performance.now();
+    this.previousRenderTime = 0;
+    this.updatePlayButton();
+    this.animationFrame = requestAnimationFrame((timestamp) => this.tick(timestamp));
+  }
+  /** 暂停回放并保留当前时间。 */
+  pause() {
+    this.playing = false;
+    if (this.animationFrame) cancelAnimationFrame(this.animationFrame);
+    this.animationFrame = 0;
+    this.updatePlayButton();
+  }
+  /** 推进播放时钟，并按固定上限刷新 DOM。 */
+  tick(timestamp) {
+    if (!this.playing) return;
+    const elapsedSeconds = Math.max(0, timestamp - this.previousFrameTime) / 1e3;
+    this.previousFrameTime = timestamp;
+    const endTime = finiteNumber(this.elements.range.max);
+    this.time = Math.min(endTime, this.time + elapsedSeconds * this.playbackSpeed);
+    this.elements.range.value = String(this.time);
+    if (timestamp - this.previousRenderTime >= PLAYBACK_FRAME_INTERVAL_MS || this.time >= endTime) {
+      this.previousRenderTime = timestamp;
+      this.render();
+    }
+    if (this.time >= endTime) {
+      this.pause();
+      return;
+    }
+    this.animationFrame = requestAnimationFrame((nextTimestamp) => this.tick(nextTimestamp));
+  }
+  /** 同步播放按钮的图标和无障碍文本。 */
+  updatePlayButton() {
+    this.elements.playButton.innerHTML = this.playing ? `${icon("pause")}<span>\u6682\u505C</span>` : `${icon("play")}<span>\u64AD\u653E</span>`;
+    this.elements.playButton.setAttribute("aria-label", this.playing ? "\u6682\u505C\u56DE\u653E" : "\u64AD\u653E\u56DE\u653E");
+    this.elements.playButton.classList.toggle("is-playing", this.playing);
+  }
+  /** 绘制当前时间对应的设备快照。 */
+  render(prebuiltSnapshot) {
+    if (!this.moves.length) return;
+    const snapshot = prebuiltSnapshot ?? buildWorkspaceSnapshot(this.moves, this.device, this.time);
+    this.time = snapshot.time;
+    this.elements.source.textContent = this.sourceName;
+    this.elements.currentTime.textContent = formatSeconds2(snapshot.time);
+    this.elements.totalTime.textContent = formatSeconds2(snapshot.endTime);
+    this.elements.progressText.textContent = snapshot.endTime > 0 ? `${Math.round(snapshot.time / snapshot.endTime * 100)}%` : "0%";
+    this.elements.moveText.textContent = `${snapshot.completedMoves} / ${snapshot.totalMoves}`;
+    this.elements.waferText.textContent = String(snapshot.waferCount);
+    this.elements.range.value = String(snapshot.time);
+    const groups = moduleGroups(snapshot.modules);
+    const robotHtml = snapshot.robots.length ? `<section class="device-zone robot-zone"><div class="device-zone-head"><span>\u673A\u68B0\u624B</span><small>\u5B9E\u65F6\u76EE\u6807\u4E0E\u8F7D\u7247</small></div><div class="robot-grid">${snapshot.robots.map(renderRobot).join("")}</div></section>` : "";
+    this.elements.stage.innerHTML = `
+      ${groups.map((group) => `
+        <section class="device-zone ${group.key}-zone">
+          <div class="device-zone-head"><span>${escapeHtml(group.title)}</span><small>${group.modules.length} \u4E2A\u6A21\u5757</small></div>
+          <div class="equipment-grid">${group.modules.map(renderModule).join("")}</div>
+        </section>
+      `).join("")}
+      ${robotHtml}`;
+    this.elements.activeMoves.innerHTML = snapshot.activeMoves.length ? snapshot.activeMoves.map((move) => `
+        <li>
+          <span class="active-move-id">#${finiteNumber(move.MoveID)}</span>
+          <strong>${escapeHtml(MOVE_NAMES[finiteNumber(move.MoveType, -1)] ?? `\u52A8\u4F5C ${move.MoveType}`)}</strong>
+          <span>${escapeHtml(move.ModuleName || activeTarget(move) || "\u2014")}</span>
+          <time>${formatSeconds2(finiteNumber(move.StartTime))}\u2013${formatSeconds2(finiteNumber(move.EndTime))} s</time>
+        </li>`).join("") : '<li class="active-move-empty">\u5F53\u524D\u65F6\u523B\u6CA1\u6709\u6267\u884C\u4E2D\u7684\u52A8\u4F5C</li>';
+  }
+  /** 显示加载状态并保留明确的系统反馈。 */
+  setLoading(loading, message) {
+    this.elements.empty.hidden = false;
+    this.elements.empty.classList.toggle("is-loading", loading);
+    this.elements.empty.classList.remove("is-error");
+    this.elements.empty.innerHTML = loading ? `<span class="visual-loader" aria-hidden="true"></span><strong>${escapeHtml(message)}</strong>` : `<strong>${escapeHtml(message)}</strong>`;
+  }
+  /** 在工作台空状态中显示可恢复的错误。 */
+  showError(message) {
+    this.pause();
+    this.elements.content.hidden = true;
+    this.elements.empty.hidden = false;
+    this.elements.empty.classList.remove("is-loading");
+    this.elements.empty.classList.add("is-error");
+    this.elements.empty.innerHTML = `
+      <strong>\u65E0\u6CD5\u52A0\u8F7D MoveList</strong>
+      <span>${escapeHtml(message)}</span>
+      <label class="btn visual-import-button">${icon("upload")}\u91CD\u65B0\u9009\u62E9\u6587\u4EF6<input type="file" accept=".json,application/json" data-visual-retry></label>`;
+    const retryInput = this.elements.empty.querySelector("[data-visual-retry]");
+    retryInput?.addEventListener("change", () => {
+      const file = retryInput.files?.item(0);
+      if (file) this.loadFile(file).catch((error) => this.showError(error instanceof Error ? error.message : String(error)));
+    });
+  }
+};
+function createVisualizationWorkspace(root = document) {
+  return new VisualizationWorkspace(root);
+}
+
 // src/editor_models.ts
 var CJOB_TYPES = ["NormalLot", "HighestLot", "HigherLot"];
 var TASK_MODES = ["Smart", "Pipeline", "Sequential", "Concurrent"];
@@ -301,6 +877,7 @@ function normalizeRound(raw, roundIndex, fallbackTime) {
 
 // src/config_editor.ts
 var { VISIT_SHARED_FIELDS: VISIT_SHARED_FIELDS2, selectReferencedRoutes: selectReferencedRoutes2 } = route_editor_logic_exports;
+var visualizationWorkspace = createVisualizationWorkspace();
 var EXPECTED_API_SCHEMA = "cjob-pjob-v3";
 var CLEAN_TYPE_DEFINITIONS = [
   { key: "preclean", label: "PreClean" },
@@ -476,15 +1053,15 @@ function normalizeRounds() {
   })));
   state.times = state.rounds.map((round) => Number(round.currentTime));
 }
-function escapeHtml(value) {
+function escapeHtml2(value) {
   return String(value ?? "").replace(/[&<>"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[char]);
 }
 function optionsHtml(values, selected, emptyLabel = "\u8BF7\u9009\u62E9") {
-  return `<option value="">${escapeHtml(emptyLabel)}</option>` + values.map((value) => `<option value="${escapeHtml(value)}" ${value === selected ? "selected" : ""}>${escapeHtml(value)}</option>`).join("");
+  return `<option value="">${escapeHtml2(emptyLabel)}</option>` + values.map((value) => `<option value="${escapeHtml2(value)}" ${value === selected ? "selected" : ""}>${escapeHtml2(value)}</option>`).join("");
 }
 function multiOptionsHtml(values, selected) {
   const chosen = new Set(stringList(selected));
-  return values.map((value) => `<option value="${escapeHtml(value)}" ${chosen.has(value) ? "selected" : ""}>${escapeHtml(value)}</option>`).join("");
+  return values.map((value) => `<option value="${escapeHtml2(value)}" ${chosen.has(value) ? "selected" : ""}>${escapeHtml2(value)}</option>`).join("");
 }
 function unwrapDevice(raw) {
   let value = raw;
@@ -522,6 +1099,7 @@ function applyDeviceTopology(device, deviceName) {
   state.processModules = stations.filter(([, item]) => String(item.Type || "").toLowerCase() === "processchamber").map(([name]) => name).sort(natural);
   state.robotNames = Object.keys(device.Robots).sort(natural);
   state.robotScopes = Object.fromEntries(Object.entries(device.Robots).map(([name, robot]) => [name, [...new Set(Object.values(robot.ArmInfo || {}).flatMap((arm) => arm.AccessibleStations || []))]]));
+  visualizationWorkspace.setDevice(state.device);
   if (!state.loadPorts.length || !state.processModules.length) throw new Error("\u8BBE\u5907\u5FC5\u987B\u5305\u542B LoadPort \u548C ProcessChamber");
 }
 function shortestDevicePath(source, destination) {
@@ -587,17 +1165,17 @@ function showWorkspaceDialog({ title, message, value = "", needsInput = false, d
 function renderWorkspaceControls() {
   const deviceSelect = document.getElementById("deviceSelect"), tests = state.workspaceDevice?.tests || [];
   const displayDeviceName = (name) => String(name || "\u672A\u547D\u540D\u8BBE\u5907").replace(/\.json$/i, "");
-  deviceSelect.innerHTML = state.workspaceDevices.length ? state.workspaceDevices.map((device) => `<option value="${escapeHtml(device.id)}" ${device.id === state.workspaceDeviceId ? "selected" : ""}>${escapeHtml(displayDeviceName(device.name))}</option>`).join("") : `<option value="">\u5C1A\u672A\u5BFC\u5165\u8BBE\u5907</option>`;
+  deviceSelect.innerHTML = state.workspaceDevices.length ? state.workspaceDevices.map((device) => `<option value="${escapeHtml2(device.id)}" ${device.id === state.workspaceDeviceId ? "selected" : ""}>${escapeHtml2(displayDeviceName(device.name))}</option>`).join("") : `<option value="">\u5C1A\u672A\u5BFC\u5165\u8BBE\u5907</option>`;
   const natural = (left, right) => left.localeCompare(right, void 0, { numeric: true });
   const groups = [.../* @__PURE__ */ new Set(["", ...state.workspaceDevice?.testGroups || [], ...tests.map((test) => String(test.group || "").trim())])].sort((left, right) => !left - !right || natural(left, right));
   const selectedGroup = groups.includes(state.activeTestGroup) ? state.activeTestGroup : groups[0] || "";
   const groupSelect = document.getElementById("testGroupSelect");
-  groupSelect.innerHTML = groups.length ? groups.map((group) => `<option value="${escapeHtml(group)}" title="${escapeHtml(group || "\u672A\u5206\u7EC4")}" ${group === selectedGroup ? "selected" : ""}>${escapeHtml(group || "\u672A\u5206\u7EC4")}</option>`).join("") : `<option value="">\u672A\u5206\u7EC4</option>`;
+  groupSelect.innerHTML = groups.length ? groups.map((group) => `<option value="${escapeHtml2(group)}" title="${escapeHtml2(group || "\u672A\u5206\u7EC4")}" ${group === selectedGroup ? "selected" : ""}>${escapeHtml2(group || "\u672A\u5206\u7EC4")}</option>`).join("") : `<option value="">\u672A\u5206\u7EC4</option>`;
   groupSelect.title = selectedGroup || "\u672A\u5206\u7EC4";
   groupSelect.disabled = !state.workspaceDeviceId;
   const testSelect = document.getElementById("testCaseSelect");
   const visibleTests = tests.filter((test) => String(test.group || "").trim() === selectedGroup).sort((left, right) => natural(left.name, right.name));
-  testSelect.innerHTML = visibleTests.length ? visibleTests.map((test) => `<option value="${escapeHtml(test.id)}" title="${escapeHtml(test.name)}" ${test.id === state.testCaseId ? "selected" : ""}>${escapeHtml(test.name)}</option>`).join("") : `<option value="">\u8BE5\u7EC4\u6682\u65E0\u6D4B\u8BD5</option>`;
+  testSelect.innerHTML = visibleTests.length ? visibleTests.map((test) => `<option value="${escapeHtml2(test.id)}" title="${escapeHtml2(test.name)}" ${test.id === state.testCaseId ? "selected" : ""}>${escapeHtml2(test.name)}</option>`).join("") : `<option value="">\u8BE5\u7EC4\u6682\u65E0\u6D4B\u8BD5</option>`;
   testSelect.title = visibleTests.find((test) => test.id === state.testCaseId)?.name || "\u8BE5\u7EC4\u6682\u65E0\u6D4B\u8BD5";
   testSelect.disabled = !visibleTests.length;
   const hasTest = Boolean(state.testCaseId);
@@ -621,7 +1199,7 @@ function renderWorkspaceControls() {
   emptyHint.classList.toggle("visible", Boolean(state.workspaceDeviceId) && !visibleTests.length);
   document.getElementById("emptyGroupNewTestButton").disabled = !state.workspaceDeviceId;
   const deviceType = /PSE300/i.test(state.deviceName) ? "\u5355\u8154\u975E\u7EA7\u8054" : String(state.workspaceDevice?.deviceType || "\u5355\u8154\u975E\u7EA7\u8054");
-  document.getElementById("deviceSummary").innerHTML = state.device ? `<span class="chip good">${escapeHtml(deviceType)}</span>` : `<span class="chip">\u5C1A\u672A\u9009\u62E9\u8BBE\u5907</span>`;
+  document.getElementById("deviceSummary").innerHTML = state.device ? `<span class="chip good">${escapeHtml2(deviceType)}</span>` : `<span class="chip">\u5C1A\u672A\u9009\u62E9\u8BBE\u5907</span>`;
 }
 function setWorkspaceStatus(message, kind = "") {
   const status = document.getElementById("workspaceStatus");
@@ -642,6 +1220,7 @@ function markTestDirty() {
   scheduleAutoSave();
 }
 function resetRunResult() {
+  visualizationWorkspace.clear();
   ["metricTime", "metricMakespan", "metricMoves", "metricValidation"].forEach((id) => {
     document.getElementById(id).textContent = "\u2014";
   });
@@ -932,13 +1511,13 @@ function renderCleans() {
     const open = state.expandedCleanTypes.has(type.key);
     const cards = rows.map(({ clean, index }) => {
       const conditional = clean.cleanType === "wacclean" ? `<div class="field"><label>\u89E6\u53D1\u6B21\u6570</label><input type="number" min="1" step="1" data-scope="clean" data-index="${index}" data-key="triggerCount" value="${Number(clean.triggerCount)}"></div>` : clean.cleanType === "dummywac" ? `<div class="field"><label>WAC \u6E05\u6D01\u957F\u5EA6\uFF08\u79D2\uFF09</label><input type="number" min="0" step="0.1" data-scope="clean" data-index="${index}" data-key="wacRecipeTime" value="${Number(clean.wacRecipeTime)}"></div>` : "";
-      return `<article class="clean-card"><div class="clean-card-title"><strong>${escapeHtml(clean.name)}</strong><button class="btn danger small" data-action="remove-clean" data-index="${index}">\u5220\u9664</button></div><div class="clean-fields">
-        <div class="field"><label>\u6E05\u6D01\u7C7B\u522B</label><select data-scope="clean" data-index="${index}" data-key="cleanType">${CLEAN_TYPE_DEFINITIONS.map((option) => `<option value="${option.key}" ${option.key === clean.cleanType ? "selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}</select></div>
+      return `<article class="clean-card"><div class="clean-card-title"><strong>${escapeHtml2(clean.name)}</strong><button class="btn danger small" data-action="remove-clean" data-index="${index}">\u5220\u9664</button></div><div class="clean-fields">
+        <div class="field"><label>\u6E05\u6D01\u7C7B\u522B</label><select data-scope="clean" data-index="${index}" data-key="cleanType">${CLEAN_TYPE_DEFINITIONS.map((option) => `<option value="${option.key}" ${option.key === clean.cleanType ? "selected" : ""}>${escapeHtml2(option.label)}</option>`).join("")}</select></div>
         <div class="field"><label>\u6E05\u6D01\u65F6\u95F4\uFF08\u79D2\uFF09</label><input type="number" min="0" step="0.1" data-scope="clean" data-index="${index}" data-key="recipeTime" value="${Number(clean.recipeTime)}"></div>
         ${conditional}
       </div></article>`;
     }).join("");
-    return `<section class="clean-type-group"><button class="clean-type-head" data-action="toggle-clean-type" data-clean-type="${type.key}"><span class="collapse-arrow ${open ? "open" : ""}">\u25B6</span><strong>${escapeHtml(type.label)}</strong><span class="route-count">${rows.length} \u4E2A \xB7 ${open ? "\u5DF2\u5C55\u5F00" : "\u5DF2\u6536\u8D77"}</span></button>${open ? `<div class="clean-type-body">${cards || `<div class="clean-type-empty">\u6682\u65E0 ${escapeHtml(type.label)}</div>`}</div>` : ""}</section>`;
+    return `<section class="clean-type-group"><button class="clean-type-head" data-action="toggle-clean-type" data-clean-type="${type.key}"><span class="collapse-arrow ${open ? "open" : ""}">\u25B6</span><strong>${escapeHtml2(type.label)}</strong><span class="route-count">${rows.length} \u4E2A \xB7 ${open ? "\u5DF2\u5C55\u5F00" : "\u5DF2\u6536\u8D77"}</span></button>${open ? `<div class="clean-type-body">${cards || `<div class="clean-type-empty">\u6682\u65E0 ${escapeHtml2(type.label)}</div>`}</div>` : ""}</section>`;
   }).join("");
 }
 function stepKind(route, index) {
@@ -946,8 +1525,8 @@ function stepKind(route, index) {
 }
 function renderCandidatePicker(routeIndex, stageIndex, allowed, candidates) {
   const selected = new Set(candidates);
-  const summary = candidates.length ? candidates.map((name) => `<span class="chip">${escapeHtml(name)}</span>`).join("") : `<span class="candidate-picker-empty">\u9009\u62E9\u8BBE\u5907</span>`;
-  return `<details class="candidate-picker" onclick="event.stopPropagation()"><summary>${summary}</summary><div class="candidate-picker-menu">${allowed.map((name) => `<label class="candidate-option"><input type="checkbox" data-scope="stage-candidate-toggle" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-candidate="${escapeHtml(name)}" ${selected.has(name) ? "checked" : ""}><span>${escapeHtml(name)}</span></label>`).join("")}</div></details>`;
+  const summary = candidates.length ? candidates.map((name) => `<span class="chip">${escapeHtml2(name)}</span>`).join("") : `<span class="candidate-picker-empty">\u9009\u62E9\u8BBE\u5907</span>`;
+  return `<details class="candidate-picker" onclick="event.stopPropagation()"><summary>${summary}</summary><div class="candidate-picker-menu">${allowed.map((name) => `<label class="candidate-option"><input type="checkbox" data-scope="stage-candidate-toggle" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-candidate="${escapeHtml2(name)}" ${selected.has(name) ? "checked" : ""}><span>${escapeHtml2(name)}</span></label>`).join("")}</div></details>`;
 }
 function renderSteps(route, routeIndex) {
   return route.stages.map((stage, stageIndex) => {
@@ -1019,7 +1598,7 @@ function renderRouteDetails(route, index) {
   const preCleans = cleanNamesFor(["preclean", "dummy", "dummywac"]);
   const postCleans = cleanNamesFor(["postclean"]);
   return `<div class="route-details"><div class="edit-card-head"><strong>Route \u8BE6\u60C5</strong><div><button class="btn small" data-action="add-stage" data-index="${index}">\uFF0B Step \u7EC4</button> <button class="btn danger small" data-action="remove-route" data-index="${index}">\u5220\u9664</button></div></div>
-    <div class="route-meta"><div class="route-meta-grid"><div class="field"><label>Route \u540D\u79F0\uFF08\u81EA\u52A8\u751F\u6210\uFF09</label><input value="${escapeHtml(route.name)}" readonly></div><div class="field"><label>Group</label><input data-scope="route" data-index="${index}" data-key="group" value="${escapeHtml(route.group)}"></div><div class="field"><label>BufferOption</label><input type="number" data-scope="route" data-index="${index}" data-key="bufferOption" value="${Number(route.bufferOption)}"></div></div>
+    <div class="route-meta"><div class="route-meta-grid"><div class="field"><label>Route \u540D\u79F0\uFF08\u81EA\u52A8\u751F\u6210\uFF09</label><input value="${escapeHtml2(route.name)}" readonly></div><div class="field"><label>Group</label><input data-scope="route" data-index="${index}" data-key="group" value="${escapeHtml2(route.group)}"></div><div class="field"><label>BufferOption</label><input type="number" data-scope="route" data-index="${index}" data-key="bufferOption" value="${Number(route.bufferOption)}"></div></div>
     <details class="route-clean-details"><summary>Route \u7EA7 Clean \u8BBE\u7F6E</summary><div class="grid"><div class="field span-4"><label>PJob \u524D</label><select data-scope="route" data-index="${index}" data-key="prePJobCleanRefs">${optionsHtml(preCleans, stringList(route.prePJobCleanRefs)[0] || "", "\u4E0D\u9700\u8981\u6E05\u6D01")}</select></div><div class="field span-4"><label>PJob \u540E</label><select data-scope="route" data-index="${index}" data-key="postPJobCleanRefs">${optionsHtml(postCleans, stringList(route.postPJobCleanRefs)[0] || "", "\u4E0D\u9700\u8981\u6E05\u6D01")}</select></div><div class="field span-4"><label>CJob \u540E</label><select data-scope="route" data-index="${index}" data-key="postCJobCleanRefs">${optionsHtml(postCleans, stringList(route.postCJobCleanRefs)[0] || "", "\u4E0D\u9700\u8981\u6E05\u6D01")}</select></div></div></details></div>
     <div class="route-table-wrap"><table class="route-table"><thead><tr><th>StepID</th><th>\u7C7B\u578B</th><th>\u53EF\u9009\u8154\u5BA4 / \u673A\u5668\u624B</th><th>PostStepID</th><th>NeedProcess</th><th></th></tr></thead><tbody>${renderSteps(route, index)}</tbody></table></div></div>`;
 }
@@ -1030,11 +1609,11 @@ function renderRoutes() {
     const routes = group.routes.map(({ route, routeIndex, profile }) => {
       const routeOpen = state.expandedRoutes.has(routeIndex), processSummary = profile.processCount ? `${profile.processCount} \u9053\u52A0\u5DE5\u5DE5\u5E8F \xB7 ${profile.candidatePath.join(" \u2192 ")}` : "\u65E0\u52A0\u5DE5\u5DE5\u5E8F";
       return `<article class="route-summary-card"><div class="route-summary-head"><button class="route-summary-toggle" data-action="toggle-route" data-route-index="${routeIndex}">
-        <div class="route-summary-title"><span class="collapse-arrow ${routeOpen ? "open" : ""}">\u25B6</span><strong>${escapeHtml(route.name || "\u672A\u547D\u540D Route")}</strong></div><div class="route-summary-meta">${escapeHtml(processSummary)} \xB7 ${route.stages.length} Steps</div></button>
+        <div class="route-summary-title"><span class="collapse-arrow ${routeOpen ? "open" : ""}">\u25B6</span><strong>${escapeHtml2(route.name || "\u672A\u547D\u540D Route")}</strong></div><div class="route-summary-meta">${escapeHtml2(processSummary)} \xB7 ${route.stages.length} Steps</div></button>
         <div class="route-summary-actions"><button class="btn small" data-action="edit-route" data-route-index="${routeIndex}">\u7F16\u8F91</button><button class="btn small" data-action="copy-route" data-route-index="${routeIndex}">\u590D\u5236</button><button class="btn danger small" data-action="remove-route" data-index="${routeIndex}">\u5220\u9664</button></div>
       </div>${routeOpen ? renderRouteDetails(route, routeIndex) : ""}</article>`;
     }).join("");
-    return `<section class="route-type-group"><button class="route-type-head" data-action="toggle-route-group" data-group-key="${escapeHtml(group.key)}"><span class="collapse-arrow ${groupOpen ? "open" : ""}">\u25B6</span><strong>${escapeHtml(group.label)}</strong><span class="route-count">${group.routes.length} \u6761 Route \xB7 ${groupOpen ? "\u5DF2\u5C55\u5F00" : "\u5DF2\u6536\u8D77"}</span></button>${groupOpen ? `<div class="route-group-body">${routes}</div>` : ""}</section>`;
+    return `<section class="route-type-group"><button class="route-type-head" data-action="toggle-route-group" data-group-key="${escapeHtml2(group.key)}"><span class="collapse-arrow ${groupOpen ? "open" : ""}">\u25B6</span><strong>${escapeHtml2(group.label)}</strong><span class="route-count">${group.routes.length} \u6761 Route \xB7 ${groupOpen ? "\u5DF2\u5C55\u5F00" : "\u5DF2\u6536\u8D77"}</span></button>${groupOpen ? `<div class="route-group-body">${routes}</div>` : ""}</section>`;
   }).join("") : `<div class="empty">\u81F3\u5C11\u521B\u5EFA\u4E00\u6761 Route\uFF0CJob \u624D\u80FD\u5F15\u7528\u3002</div>`;
 }
 function pjobLoadPortSlots(roundIndex, cjobIndex, pjobIndex) {
@@ -1061,8 +1640,8 @@ function renderPJobRoutePicker(pjob, roundIndex, cjobIndex, pjobIndex) {
   const selectedKey = selectedRoute ? routeProcessProfile(selectedRoute).key : groups[0]?.key || "";
   const selectedGroup = groups.find((group) => group.key === selectedKey);
   const common = `data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}"`;
-  const groupOptions = groups.map((group) => `<option value="${escapeHtml(group.key)}" ${group.key === selectedKey ? "selected" : ""}>${escapeHtml(group.label)}</option>`).join("");
-  const routeOptions = (selectedGroup?.routes || []).map(({ route }) => `<option value="${escapeHtml(route.name)}" ${route.name === pjob.routeRef ? "selected" : ""}>${escapeHtml(route.name)}</option>`).join("");
+  const groupOptions = groups.map((group) => `<option value="${escapeHtml2(group.key)}" ${group.key === selectedKey ? "selected" : ""}>${escapeHtml2(group.label)}</option>`).join("");
+  const routeOptions = (selectedGroup?.routes || []).map(({ route }) => `<option value="${escapeHtml2(route.name)}" ${route.name === pjob.routeRef ? "selected" : ""}>${escapeHtml2(route.name)}</option>`).join("");
   return `<div class="pjob-route-picker">
     <select class="pjob-route-process" data-scope="pjob-route-group" ${common}>${groupOptions || `<option value="">\u6682\u65E0\u5DE5\u5E8F</option>`}</select>
     <select data-scope="pjob" data-key="routeRef" ${common}>${routeOptions ? `<option value="">\u9009\u62E9\u8DEF\u5F84</option>${routeOptions}` : `<option value="">\u8BF7\u5148\u914D\u7F6E Route</option>`}</select>
@@ -1076,21 +1655,21 @@ function renderRounds() {
     const cjobs = round.cjobs.map((cjob, cjobIndex) => {
       const normalLot = cjob.jobType === "NormalLot";
       const pjobRows = cjob.pjobs.map((pjob, pjobIndex) => `<tr>
-        <td><span class="readonly-pill">${escapeHtml(pjob.jobName)}</span></td>
+        <td><span class="readonly-pill">${escapeHtml2(pjob.jobName)}</span></td>
         <td><input class="pjob-number" type="number" min="1" max="${state.strategy === "milp" ? 12 : 25}" data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="waferCount" value="${Number(pjob.waferCount)}"><small class="mat-list-preview">\u69FD\u4F4D [${pjobLoadPortSlots(roundIndex, cjobIndex, pjobIndex).join(", ")}]</small></td>
         <td>${renderPJobRoutePicker(pjob, roundIndex, cjobIndex, pjobIndex)}</td>
-        <td><span class="readonly-pill">${escapeHtml(pjob.taskId)}</span></td>
+        <td><span class="readonly-pill">${escapeHtml2(pjob.taskId)}</span></td>
         <td><input class="pjob-number" type="number" min="1" data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="priority" value="${Number(pjob.priority)}"></td>
         <td><select data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="loadPort">${optionsHtml(state.loadPorts, pjob.loadPort, state.loadPorts.length ? "\u9009\u62E9\u7AEF\u53E3" : "\u65E0\u7AEF\u53E3")}</select></td>
-        <td><button class="btn danger icon small" aria-label="\u5220\u9664 ${escapeHtml(pjob.jobName)}" data-action="remove-pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" ${cjob.pjobs.length <= 1 ? "disabled" : ""}>\xD7</button></td>
+        <td><button class="btn danger icon small" aria-label="\u5220\u9664 ${escapeHtml2(pjob.jobName)}" data-action="remove-pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" ${cjob.pjobs.length <= 1 ? "disabled" : ""}>\xD7</button></td>
       </tr>`).join("");
       return `<section class="cjob-card">
-        <header class="cjob-head"><div class="cjob-title"><strong>CJob ${cjobIndex + 1}</strong><span class="readonly-pill">TaskID ${escapeHtml(cjob.taskId)}</span></div><div class="round-actions"><button class="btn small" data-action="add-pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}">\uFF0B PJob</button><button class="btn danger small" data-action="remove-cjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" ${round.cjobs.length <= 1 ? "disabled" : ""}>\u5220\u9664 CJob</button></div></header>
+        <header class="cjob-head"><div class="cjob-title"><strong>CJob ${cjobIndex + 1}</strong><span class="readonly-pill">TaskID ${escapeHtml2(cjob.taskId)}</span></div><div class="round-actions"><button class="btn small" data-action="add-pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}">\uFF0B PJob</button><button class="btn danger small" data-action="remove-cjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" ${round.cjobs.length <= 1 ? "disabled" : ""}>\u5220\u9664 CJob</button></div></header>
         <div class="cjob-controls">
           <div class="field"><label>JobType</label><select data-scope="cjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-key="jobType">${CJOB_TYPES.map((value) => `<option ${value === cjob.jobType ? "selected" : ""}>${value}</option>`).join("")}</select></div>
           <div class="field ${normalLot ? "" : "disabled-field"}"><label>Priority</label><input type="number" min="1" data-scope="cjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-key="priority" value="${Number(cjob.priority)}" ${normalLot ? "" : "disabled"}></div>
           <div class="field"><label>TaskMode</label><select data-scope="cjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-key="taskMode">${TASK_MODES.map((value) => `<option ${value === cjob.taskMode ? "selected" : ""}>${value}</option>`).join("")}</select></div>
-          <div class="field"><label>PJobNameList</label><div class="pjob-name-list">${cjob.pJobNameList.map((name) => `<span>${escapeHtml(name)}</span>`).join("")}</div></div>
+          <div class="field"><label>PJobNameList</label><div class="pjob-name-list">${cjob.pJobNameList.map((name) => `<span>${escapeHtml2(name)}</span>`).join("")}</div></div>
         </div>
         <div class="pjob-table-wrap"><table class="pjob-table"><thead><tr><th>JobName</th><th>\u6676\u5706\u6570\u91CF / LoadPort \u69FD\u4F4D</th><th>OriginRoute</th><th>TaskID</th><th>Priority</th><th>LoadPort</th><th></th></tr></thead><tbody>${pjobRows}</tbody></table></div>
       </section>`;
@@ -1102,7 +1681,7 @@ function renderVisitField(label, key, value, routeIndex, stageIndex, options = {
   const common = `data-scope="visit-shared" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-key="${key}"`;
   if (options.multiple) return `<div class="unified-field ${options.wide ? "wide" : ""}"><label>${label}</label><select multiple ${common}>${multiOptionsHtml(options.values || [], value)}</select></div>`;
   const type = options.number ? "number" : "text", step = options.number ? ` step="${options.step || "0.1"}"` : "";
-  return `<div class="unified-field ${options.wide ? "wide" : ""}"><label>${label}</label><input type="${type}"${step} ${common} value="${escapeHtml(value)}"></div>`;
+  return `<div class="unified-field ${options.wide ? "wide" : ""}"><label>${label}</label><input type="${type}"${step} ${common} value="${escapeHtml2(value)}"></div>`;
 }
 function renderStepDrawer() {
   if (!state.drawer) return;
@@ -1115,7 +1694,7 @@ function renderStepDrawer() {
   document.getElementById("drawerTitle").textContent = `${route.name || "Route"} \xB7 StepID ${stage.stepId}`;
   document.getElementById("drawerSubtitle").textContent = `${stepKind(route, stageIndex)} \xB7 ${stage.visits.length} \u4E2A\u5019\u9009`;
   const first = stage.visits[0] ? normalizeVisit(stage.visits[0]) : null, differences = visitDifferenceFields(stage), candidates = stage.visits.map((visit) => visit.stationName).filter(Boolean);
-  const warning = differences.length ? `<div class="visit-warning"><strong>\u5019\u9009\u8154\u5BA4\u53C2\u6570\u4E0D\u4E00\u81F4</strong><p>\u5B58\u5728\u5DEE\u5F02\u7684\u5B57\u6BB5\uFF1A${differences.map(escapeHtml).join("\u3001")}\u3002\u7EDF\u4E00\u8868\u5355\u6682\u65F6\u663E\u793A\u7B2C\u4E00\u4E2A\u5019\u9009 Visit \u7684\u503C\uFF0C\u5C1A\u672A\u8986\u76D6\u5176\u4ED6\u5019\u9009\u3002</p><button class="btn small" data-action="sync-stage-visits" data-route-index="${routeIndex}" data-stage-index="${stageIndex}">\u6309\u5F53\u524D\u8868\u5355\u540C\u6B65\u5168\u90E8\u5019\u9009</button></div>` : "";
+  const warning = differences.length ? `<div class="visit-warning"><strong>\u5019\u9009\u8154\u5BA4\u53C2\u6570\u4E0D\u4E00\u81F4</strong><p>\u5B58\u5728\u5DEE\u5F02\u7684\u5B57\u6BB5\uFF1A${differences.map(escapeHtml2).join("\u3001")}\u3002\u7EDF\u4E00\u8868\u5355\u6682\u65F6\u663E\u793A\u7B2C\u4E00\u4E2A\u5019\u9009 Visit \u7684\u503C\uFF0C\u5C1A\u672A\u8986\u76D6\u5176\u4ED6\u5019\u9009\u3002</p><button class="btn small" data-action="sync-stage-visits" data-route-index="${routeIndex}" data-stage-index="${stageIndex}">\u6309\u5F53\u524D\u8868\u5355\u540C\u6B65\u5168\u90E8\u5019\u9009</button></div>` : "";
   const form = first ? `<div class="unified-visit-form"><header class="unified-visit-head"><strong>\u7EDF\u4E00\u53C2\u6570</strong><span>\u4FEE\u6539\u4EFB\u4E00\u5B57\u6BB5\u540E\u540C\u6B65\u5230 ${stage.visits.length} \u4E2A\u5019\u9009</span></header><div class="visit-groups">
     <section class="visit-group"><h4>\u5DE5\u827A\u4FE1\u606F</h4><div class="visit-fields">
       ${renderVisitField("ProcessTime", "processTime", first.processTime, routeIndex, stageIndex, { number: true })}
@@ -1133,7 +1712,7 @@ function renderStepDrawer() {
       ${renderVisitField("After Clean", "afterCleanRefs", first.afterCleanRefs, routeIndex, stageIndex, { multiple: true, values: cleanNamesFor(["postclean", "wacclean"]), wide: true })}
     </div></section>
   </div></div>` : `<div class="empty">\u672A\u9009\u62E9\u5019\u9009\u8BBE\u5907\uFF0C\u8BF7\u5148\u5728 Route \u5217\u8868\u4E2D\u9009\u62E9\u3002</div>`;
-  document.getElementById("drawerBody").innerHTML = `<section class="drawer-section"><h3>Step \u6982\u8981</h3><div class="step-summary"><div class="step-summary-item"><span>StepID</span><strong>${stage.stepId}</strong></div><div class="step-summary-item"><span>PostStepID</span><strong>${stage.postStepIds?.length ? stage.postStepIds.join(", ") : "\u7ED3\u675F"}</strong></div><div class="step-summary-item"><span>NeedProcess</span><strong>${stage.needProcess ? "true" : "false"}</strong></div><div class="step-summary-item"><span>\u5019\u9009\u6570\u91CF</span><strong>${stage.visits.length}</strong></div></div></section><section class="drawer-section"><h3>\u5019\u9009\u8154\u5BA4</h3><div class="candidate-chip-list">${candidates.length ? candidates.map((name) => `<span class="chip">${escapeHtml(name)}</span>`).join("") : `<span class="candidate-picker-empty">\u672A\u9009\u62E9</span>`}</div></section>${warning}<section class="drawer-section">${form}</section>`;
+  document.getElementById("drawerBody").innerHTML = `<section class="drawer-section"><h3>Step \u6982\u8981</h3><div class="step-summary"><div class="step-summary-item"><span>StepID</span><strong>${stage.stepId}</strong></div><div class="step-summary-item"><span>PostStepID</span><strong>${stage.postStepIds?.length ? stage.postStepIds.join(", ") : "\u7ED3\u675F"}</strong></div><div class="step-summary-item"><span>NeedProcess</span><strong>${stage.needProcess ? "true" : "false"}</strong></div><div class="step-summary-item"><span>\u5019\u9009\u6570\u91CF</span><strong>${stage.visits.length}</strong></div></div></section><section class="drawer-section"><h3>\u5019\u9009\u8154\u5BA4</h3><div class="candidate-chip-list">${candidates.length ? candidates.map((name) => `<span class="chip">${escapeHtml2(name)}</span>`).join("") : `<span class="candidate-picker-empty">\u672A\u9009\u62E9</span>`}</div></section>${warning}<section class="drawer-section">${form}</section>`;
 }
 function openStepDrawer(routeIndex, stageIndex) {
   state.drawer = { routeIndex, stageIndex };
@@ -1391,9 +1970,9 @@ function renderOtherAlgorithmOptions(algorithms) {
   state.availableOtherAlgorithms = Array.isArray(algorithms) ? algorithms : [];
   const container = document.getElementById("otherAlgorithmOptions");
   container.innerHTML = state.availableOtherAlgorithms.map((algorithm) => `
-    <label class="strategy-card" title="${escapeHtml(algorithm.path || "")}">
-      <input type="radio" name="strategy" value="${escapeHtml(algorithm.strategy)}" ${algorithm.strategy === state.strategy ? "checked" : ""}>
-      <b>${escapeHtml(algorithm.name)}</b>
+    <label class="strategy-card" title="${escapeHtml2(algorithm.path || "")}">
+      <input type="radio" name="strategy" value="${escapeHtml2(algorithm.strategy)}" ${algorithm.strategy === state.strategy ? "checked" : ""}>
+      <b>${escapeHtml2(algorithm.name)}</b>
     </label>
   `).join("");
 }
@@ -1419,6 +1998,11 @@ function prepareGanttView(result) {
   const link = document.getElementById("ganttButton");
   link.href = result.ganttUrl;
   link.removeAttribute("aria-disabled");
+  return true;
+}
+async function prepareWorkspaceView(result) {
+  if (!result?.resultId) return false;
+  await visualizationWorkspace.loadResult(result.resultId, state.testCaseName || "\u5F53\u524D\u8FD0\u884C\u7ED3\u679C");
   return true;
 }
 async function runPlan() {
@@ -1455,6 +2039,14 @@ async function runPlan() {
     }
     logReady = prepareLogDownload(runResult);
     ganttReady = prepareGanttView(runResult);
+    if (runResult?.resultId) {
+      try {
+        await prepareWorkspaceView(runResult);
+      } catch (workspaceError) {
+        writeTerminal(`$ \u5DE5\u4F5C\u53F0\u52A0\u8F7D\u5931\u8D25
+  ${workspaceError.message || "\u672A\u77E5\u9519\u8BEF"}`, true);
+      }
+    }
     if (!response.ok || !runResult.ok) throw new Error(runResult.error || `\u670D\u52A1\u8FD4\u56DE ${response.status}`);
     showResult(runResult);
   } catch (error) {
@@ -1618,17 +2210,18 @@ function renderBatchItems(items) {
     const summaryError = baseline.status === "failed" ? baselineReason : item.status === "failed" ? `\u8FD0\u884C\u5931\u8D25\uFF1A${item.error || "\u672A\u77E5\u9519\u8BEF"}` : item.status === "cancelled" ? "\u8C03\u5EA6\u5DF2\u7EC8\u6B62" : baselineReason;
     const displayId = `t${index + 1}`;
     return `
-      <div class="batch-result ${escapeHtml(item.status || "queued")}">
+      <div class="batch-result ${escapeHtml2(item.status || "queued")}">
         <div class="batch-result-head">
-          <div class="batch-result-title"><strong title="${escapeHtml(`${item.testId || ""} \xB7 ${item.testName || ""}`)}">${escapeHtml(displayId)}</strong></div>
+          <div class="batch-result-title"><strong title="${escapeHtml2(`${item.testId || ""} \xB7 ${item.testName || ""}`)}">${escapeHtml2(displayId)}</strong></div>
           <span class="batch-status">${statusLabels[item.status] || "\u7B49\u5F85\u4E2D"}</span>
           <div class="batch-result-actions">
-            ${item.logUrl ? `<a class="btn" href="${escapeHtml(item.logUrl)}" download>\u65E5\u5FD7</a>` : `<span class="btn" aria-disabled="true">\u65E5\u5FD7</span>`}
-            ${item.ganttUrl ? `<a class="btn primary" href="${escapeHtml(item.ganttUrl)}" target="_blank">\u7518\u7279\u56FE</a>` : `<span class="btn" aria-disabled="true">\u7518\u7279\u56FE</span>`}
+            ${item.logUrl ? `<a class="btn" href="${escapeHtml2(item.logUrl)}" download>\u65E5\u5FD7</a>` : `<span class="btn" aria-disabled="true">\u65E5\u5FD7</span>`}
+            ${item.resultUrl ? `<button class="btn primary" type="button" data-workspace-result="${escapeHtml2(item.resultUrl)}" data-workspace-name="${escapeHtml2(item.testName || `\u6D4B\u8BD5 ${index + 1}`)}">\u5DE5\u4F5C\u53F0</button>` : `<span class="btn" aria-disabled="true">\u5DE5\u4F5C\u53F0</span>`}
+            ${item.ganttUrl ? `<a class="btn" href="${escapeHtml2(item.ganttUrl)}" target="_blank">\u7518\u7279\u56FE</a>` : `<span class="btn" aria-disabled="true">\u7518\u7279\u56FE</span>`}
           </div>
         </div>
         <div class="batch-result-summary">
-          ${summaryError ? `<span class="summary-error" title="${escapeHtml(summaryError)}">${escapeHtml(summaryError)}</span>` : `
+          ${summaryError ? `<span class="summary-error" title="${escapeHtml2(summaryError)}">${escapeHtml2(summaryError)}</span>` : `
             <span title="Makespan \u5F53\u524D\u503C / Heuristic Baseline"><b>${finished ? `${Number(item.makespan).toFixed(2)} s` : "\u2014"}</b> / <b>${baselineReady ? `${Number(baseline.makespan).toFixed(2)} s` : "\u2014"}</b>${improvementBadge ? ` ${improvementBadge}` : ""}\uFF1BCpu time <b>${finished && Number.isFinite(cpuTime) ? `${cpuTime.toFixed(1)} ms` : "\u2014"}</b></span>
           `}
         </div>
@@ -1859,6 +2452,12 @@ document.addEventListener("change", (event) => {
 document.addEventListener("click", (event) => {
   const tab = event.target.closest("[data-tab-target]");
   if (tab) switchTab(tab.dataset.tabTarget);
+  const workspaceResult = event.target.closest("[data-workspace-result]");
+  if (workspaceResult) {
+    visualizationWorkspace.loadResult(workspaceResult.dataset.workspaceResult, workspaceResult.dataset.workspaceName).then(() => visualizationWorkspace.show()).catch((error) => writeTerminal(`$ \u5DE5\u4F5C\u53F0\u52A0\u8F7D\u5931\u8D25
+  ${error.message || "\u672A\u77E5\u9519\u8BEF"}`, true));
+    return;
+  }
   const button = event.target.closest("[data-action]");
   if (button && !button.disabled) {
     handleAction(button);
