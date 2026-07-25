@@ -1,8 +1,9 @@
-"""MoveList 回放使用的设备当前状态。
+"""整机状态模型和面向调度策略的 ``Machine`` 公共入口。
 
-本模块只保存已经完成的 Move 带来的稳定状态，以及开始后尚未结束动作占用的资源时间。
-时间线推进和 MoveType 字段解释由 ``src.validation.move_replay`` 负责；这里不读取
-MoveList，也不承载动作编排逻辑。
+本文件定义 MoveList 回放使用的可变物理状态，并在末尾导出统一 Machine
+门面。Machine 的运行时实现位于同包 ``machine`` 模块，负责搬运候选、增量
+定时、状态回放和 MoveList；heuristic、neural、rl 只消费不可变状态与
+``RobotAction``，不直接解释门、压力或设备动作。
 """
 
 from __future__ import annotations
@@ -344,3 +345,40 @@ def _initial_materials(task: Problem, payload: Mapping[str, Any]) -> Iterable[tu
         for stages in [list(getattr(wafer, "stages", []) or [])]
         if stages and getattr(wafer, "mat_id", None) is not None and getattr(stages[0], "chamber", "")
     ]
+
+
+# ``Machine`` 在本文件完成基础状态类型定义后导入，避免运行时核心与数据模型
+# 之间形成模块初始化环。对外调用方始终从 ``src.validation.state`` 获取门面。
+from src.validation.machine import (  # noqa: E402
+    Machine,
+    MachineDeadlockError,
+    MachineRunResult,
+    MachineSelector,
+    MachineSnapshot,
+    RobotAction,
+    StaleRobotActionError,
+    UnknownRobotActionError,
+)
+
+
+__all__ = [
+    "ATMOSPHERE",
+    "VACUUM",
+    "DoorState",
+    "LoadLockState",
+    "Machine",
+    "MachineDeadlockError",
+    "MachineRunResult",
+    "MachineSelector",
+    "MachineSnapshot",
+    "MachineState",
+    "MaterialState",
+    "RobotAction",
+    "RobotState",
+    "SlotPhase",
+    "SlotState",
+    "StaleRobotActionError",
+    "StationState",
+    "UnknownRobotActionError",
+    "is_doorless_station",
+]

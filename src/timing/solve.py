@@ -14,7 +14,12 @@ from .spans import _hop_span, _ll_reuse_setup, _robot_switch_gap, _stage_dwell
 
 @dataclass
 class SolveResult:
-    """四种调度策略共享的定时结果。"""
+    """四种调度策略共享的定时结果。
+
+    ``machine_result`` 和 ``machine_moves`` 由新的 ``Machine`` 调度路径直接
+    生成；``machine`` 保留可继续接收实时通知的实例。字段为 ``None`` 时继续
+    使用原有 schedule→MoveList 导出流程，因此 MILP 与旧结果完全兼容。
+    """
 
     status: int
     makespan: float
@@ -22,6 +27,9 @@ class SolveResult:
     releases: List[Tuple[float, str, int]] = field(default_factory=list)
     gap: float = 0.0
     runtime: float = 0.0
+    machine_moves: Optional[List[Dict[str, Any]]] = None
+    machine_result: Optional[Any] = None
+    machine: Optional[Any] = None
 
 
 def _promote_process_chamber_swaps(ir: Problem, wafers, orders):

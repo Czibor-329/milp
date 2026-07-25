@@ -1,7 +1,8 @@
-"""实时重算：投影在途动作状态，从请求时刻并行生成带资源释放下界的续排。
+"""实时重算：保留 Running 原子 Move，从任意物理状态直接续排。
 
-重算保留已经运行的 Move 和必要搬运收尾链，投影到门关闭、Robot 空手的状态；新计划仍从
-原请求时刻开始，受旧动作影响的站点、槽位、Robot 和晶圆分别等待各自的释放时刻。
+未开始的旧 Move 在切点取消；Running Move 只投影自身完成效果。新的 Machine
+从原请求时刻生成搬运意图，并按门、Robot、槽位和压力资源的实际释放时间自动
+补充物理动作，不再把切点推到关门、空手的稳定状态。
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from src.validation.state import (
     VACUUM,
     DoorState,
     LoadLockState,
+    Machine,
     MachineState,
     MaterialState,
     SlotPhase,
@@ -123,6 +125,7 @@ class RealtimeRescheduler:
         self._history: List[dict] = []
         self._points: List[RecomputePoint] = []
         self._committed_recovery_end = start_time
+        self._machine: Optional[Machine] = None
         self._current_plan = self._schedule_segment(self.problem, initial_state, start_time)
         self._next_move_id = max((int(move["MoveID"]) for move in self._current_plan), default=0) + 1
         self._tracker = MoveStateReplay(self.problem, self._current_plan, initial_state)
@@ -155,17 +158,8 @@ class RealtimeRescheduler:
 
     @property
     def can_recompute(self) -> bool:
-        """返回当前状态是否满足无运行 Move、门全关且 Robot 空手。"""
-        if self._tracker.running_move_ids:
-            return False
-        if any(station.door is not DoorState.CLOSED for station in self._tracker.state.stations.values()):
-            return False
-        robots_empty = all(
-            material is None
-            for robot in self._tracker.state.robots.values()
-            for material in robot.hands.values()
-        )
-        return robots_empty
+        """本地 Machine 支持从运行、开门或持片状态直接重算。"""
+        return True
 
     @property
     def last_strategy_diagnostics(self) -> Dict[str, Any]:
@@ -201,11 +195,14 @@ class RealtimeRescheduler:
         track_reservations: bool = True,
     ) -> Optional[MachineState]:
         """接收外部 Move 开始/结束通知并更新 ``src.validation.state`` 状态。"""
-        return self._tracker.update_move_state(
+        updated_state = self._tracker.update_move_state(
             notification,
             snapshot=snapshot,
             track_reservations=track_reservations,
         )
+        if self._machine is not None:
+            self._machine.update_move_state(notification, snapshot=False)
+        return updated_state
 
     def robot_position(self, robot_name: str) -> Optional[str]:
         """只读返回 Robot 当前指向，避免高频回放为查询一个字段复制整机状态。"""
@@ -222,23 +219,39 @@ class RealtimeRescheduler:
         schedule_start_time: Optional[float] = None,
         material_ready_times: Optional[Mapping[int, float]] = None,
     ) -> Dict[str, Any]:
-        """在投影稳定状态加入新任务，并从请求时刻带资源释放下界续排。
+        """从任意物理状态重算，不再要求关门、空手或等待搬运链收尾。
 
-        ``cutoff_time`` 是外部请求重算的时刻；调用方必须继续执行旧计划，直到
-        ``current_time`` 所指的收尾完成时刻。``schedule_start_time`` 是新计划时间原点，
-        通常等于请求时刻；受收尾动作影响的资源和物料由运行时下界推迟，其余资源可在
-        请求时刻后立即工作。甘特图重算线仍画在原始请求时刻。
+        切点上已经 Running 的原子 Move 会投影到自身完成态，并通过资源绝对
+        释放时间约束新计划；未开始的旧 Move 全部取消。新一代 Machine 仍以
+        原始 ``cutoff_time`` 为时间原点，因此无关 Robot 可以立即并行工作。
         """
         if self.strategy == "milp":
             raise ValueError("MILP 策略只支持首次排程，不能执行实时重算")
-        timestamp = float(current_time)
-        cutoff = timestamp if cutoff_time is None else float(cutoff_time)
-        schedule_start = timestamp if schedule_start_time is None else float(schedule_start_time)
-        if cutoff > timestamp + TIME_TOLERANCE:
-            raise ValueError("重算触发时间不能晚于状态稳定时间")
-        if schedule_start < cutoff - TIME_TOLERANCE or schedule_start > timestamp + TIME_TOLERANCE:
-            raise ValueError("新计划起点必须位于重算触发时间与收尾完成时间之间")
-        self._ensure_safe_cut(timestamp, cutoff)
+        cutoff = float(current_time) if cutoff_time is None else float(cutoff_time)
+        schedule_start = cutoff if schedule_start_time is None else float(schedule_start_time)
+        if abs(schedule_start - cutoff) > TIME_TOLERANCE:
+            raise ValueError("Machine 重算的新计划起点必须等于原始请求时刻")
+        self._ensure_safe_cut(cutoff, cutoff)
+
+        # 已启动动作是不可取消的物理事实，但只承诺该原子 Move 本身。将它们
+        # 投影到计划完成态，使门、Robot 持片和资源释放时间进入 Machine 初态；
+        # 不执行任何尚未开始的关门、放片或压力转换后继。
+        planned_by_id = {
+            int(move["MoveID"]): move
+            for move in self._tracker.materialized_plan
+            if isinstance(move.get("MoveID"), int)
+        }
+        running_ids = sorted(self._tracker.running_move_ids)
+        for move_id in running_ids:
+            move = planned_by_id[move_id]
+            self._tracker.update_move_state(
+                {
+                    "MoveID": move_id,
+                    "MoveState": MoveStateReplay.DONE,
+                    "EndTime": float(move.get("EndTime") or cutoff),
+                },
+                snapshot=False,
+            )
         snapshot = self._tracker.state.clone()
         # “上一次环境转换为空片”只用于拒绝同一计划内无意义的往返抽充气，
         # 不是设备的物理状态。重算时，旧计划可能有一条在 cutoff 前已经启动、
@@ -252,23 +265,28 @@ class RealtimeRescheduler:
         combined_problem, next_state = _build_recompute_problem(self.problem, new_problem, snapshot)
         combined_problem.runtime_availability = _runtime_availability(
             next_state,
-            schedule_start,
+            cutoff,
             material_ready_times or {},
         )
 
         self._history.extend(self._tracker.executed_moves)
-        self._points.append(RecomputePoint(cutoff, timestamp, len(self._points) + 1, reason))
-        new_segment = self._schedule_segment(combined_problem, next_state, schedule_start)
+        self._points.append(RecomputePoint(cutoff, cutoff, len(self._points) + 1, reason))
+        new_segment = self._schedule_segment(
+            combined_problem,
+            next_state,
+            cutoff,
+            reuse_machine=True,
+        )
         new_segment, self._next_move_id = _renumber_segment(new_segment, self._next_move_id)
 
         self.problem = combined_problem
         self._committed_recovery_end = max(
             self._committed_recovery_end,
-            timestamp,
+            cutoff,
         )
         self._current_plan = new_segment
         self._tracker = MoveStateReplay(combined_problem, new_segment, next_state)
-        self._tracker.current_time = schedule_start
+        self._tracker.current_time = cutoff
         return self.combined_output()
 
     def combined_output(self) -> Dict[str, Any]:
@@ -284,31 +302,106 @@ class RealtimeRescheduler:
         }
 
     def _ensure_safe_cut(self, timestamp: float, execution_cutoff: float) -> None:
-        """确认触发点前通知完整，且稳定时刻可直接作为 timing 新起点。"""
-        if self._tracker.running_move_ids:
-            running = sorted(self._tracker.running_move_ids)
-            raise ValueError(f"重算点仍有运行中 Move：{running}；请先发送结束通知")
+        """确认切点前所有应启动 Move 已收到通知，允许非稳定物理状态。"""
         if timestamp + TIME_TOLERANCE < self._tracker.current_time:
             raise ValueError("重算时间不能早于最后一条 Move 通知")
         executed_ids = {int(done["MoveID"]) for done in self._tracker.executed_moves}
+        running_ids = set(self._tracker.running_move_ids)
         missing = [
             int(move["MoveID"])
             for move in self._current_plan
             if float(move.get("StartTime") or 0.0) < execution_cutoff - TIME_TOLERANCE
             and int(move.get("MoveID", -1)) not in executed_ids
+            and int(move.get("MoveID", -1)) not in running_ids
         ]
         if missing:
             raise ValueError(f"重算点之前存在未上报 Move：{missing[:8]}")
-        open_doors = [name for name, station in self._tracker.state.stations.items()
-                      if station.door is not DoorState.CLOSED]
-        held = [f"{robot.name}#{slot_id}" for robot in self._tracker.state.robots.values()
-                for slot_id, material in robot.hands.items() if material is not None]
-        if open_doors or held:
-            raise ValueError(f"重算点不是稳定状态：开门={open_doors}，机械手持片={held}")
 
-    def _schedule_segment(self, problem: Problem, state: MachineState, offset: float) -> List[dict]:
-        """用所选顶层策略和 timing 定时生成一段绝对时间计划。"""
+    def _schedule_segment(
+        self,
+        problem: Problem,
+        state: MachineState,
+        offset: float,
+        *,
+        reuse_machine: bool = False,
+    ) -> List[dict]:
+        """用所选顶层策略生成一段绝对时间计划。
+
+        普通本地策略在首次排程时创建 Machine，重算时沿用同一实例。旧物理
+        MoveID 会被过滤到历史区，返回值只包含本代新生成的可执行 Move。
+        """
         self._last_strategy_diagnostics = {}
+        if self.strategy in {
+            "heuristic",
+            "neural",
+            "rl",
+        }:
+            from src.schedule.machine_policy import (
+                HeuristicMachineSelector,
+                NeuralMachineSelector,
+                RlMachineSelector,
+                schedule_with_machine,
+            )
+
+            if self.strategy == "neural":
+                selector = NeuralMachineSelector(problem, self.policy)
+            elif self.strategy == "rl":
+                selector = RlMachineSelector(problem, self.policy)
+            else:
+                selector = HeuristicMachineSelector()
+            if reuse_machine and self._machine is not None:
+                old_move_ids = {
+                    int(move["MoveID"])
+                    for move in self._machine.export_movelist()
+                    if isinstance(move.get("MoveID"), int)
+                }
+                run_result = self._machine.recompute(
+                    problem,
+                    offset,
+                    selector,
+                    initial_state=state,
+                )
+                moves = [
+                    dict(move)
+                    for move in run_result.moves
+                    if int(move.get("MoveID") or -1) not in old_move_ids
+                ]
+                machine = self._machine
+            else:
+                result = schedule_with_machine(
+                    problem,
+                    selector,
+                    initial_state=state,
+                    current_time=offset,
+                )
+                moves = list(result.machine_moves or [])
+                machine = getattr(result, "machine", None)
+                if isinstance(machine, Machine):
+                    self._machine = machine
+            issues = validate_move_list(problem, moves, state)
+            if issues:
+                raise RuntimeError(f"Machine MoveList 状态校验失败：{issues[0]}")
+            self._last_strategy_diagnostics = {
+                "schedulerBoundary": "src.validation.state.Machine",
+                "actionCount": int(machine.action_count if machine is not None else 0),
+                "loadLockManagerRequested": self.loadlock_manager_mode,
+                "loadLockSelectedPath": "machine",
+                "loadLockExchangeRequested": self.loadlock_exchange_mode,
+                "loadLockExchangeSelected": "disabled",
+            }
+            if self.strategy == "neural":
+                self._last_strategy_diagnostics.update({
+                    "architecture": getattr(
+                        self.policy,
+                        "metadata",
+                        {},
+                    ).get("schema", "deep-set-dispatch-v2"),
+                    "parameterCount": getattr(self.policy, "parameter_count", 0),
+                    "forwardPasses": getattr(selector, "decision_count", 0),
+                    "selectedSource": "neural-machine",
+                })
+            return moves
+
         has_resumed_wafers = any(
             wafer.already_released
             for wafer in problem.wafers
@@ -483,9 +576,32 @@ def _build_recompute_problem(
     incoming: Problem,
     state: MachineState,
 ) -> Tuple[Problem, MachineState]:
-    """从稳定状态裁剪旧晶圆前缀，并与新任务合成下一轮 Problem。"""
+    """从任意投影状态裁剪旧晶圆前缀，并与新任务合成下一轮 Problem。"""
     next_state = state.clone()
     locations = _material_locations(next_state)
+    # 非稳定重算允许 Robot 持片。持片仍属于被取出前所在的当前 stage；
+    # 用一个仅供 Problem 裁剪的虚拟槽位描述该逻辑位置，物理物料继续保留
+    # 在 ``next_state.robots`` 中交给 Machine 生成 held_place 候选。
+    wafer_by_material = {wafer.mat_id: wafer for wafer in previous.wafers}
+    for robot in next_state.robots.values():
+        for material in robot.hands.values():
+            if material is None or material.material_id in locations:
+                continue
+            wafer = wafer_by_material.get(material.material_id)
+            if wafer is None:
+                continue
+            step_index = (
+                int(material.step_id)
+                if isinstance(material.step_id, int)
+                and 0 <= int(material.step_id) < len(wafer.stages)
+                else 0
+            )
+            stage = wafer.stages[step_index]
+            locations[material.material_id] = (
+                stage.chamber,
+                int(stage.slot) + FIRST_SLOT_ID,
+                SlotState(SlotPhase.COMPLETED, material),
+            )
     residual: List[Wafer] = []
     started_cjobs = set()
     old_locations = []
@@ -511,6 +627,13 @@ def _build_recompute_problem(
         )
         if slot.material is not None:
             slot.material.step_id = 0
+        for robot in next_state.robots.values():
+            for held_material in robot.hands.values():
+                if (
+                    held_material is not None
+                    and held_material.material_id == wafer.mat_id
+                ):
+                    held_material.step_id = 0
 
     incoming_wafers = [deepcopy(wafer) for wafer in incoming.wafers]
     highest_ids = {
@@ -633,11 +756,8 @@ def _apply_material_start_slots(problem: Problem, update_params: Mapping[str, An
 
 
 def _material_locations(state: MachineState) -> Dict[Any, Tuple[str, int, SlotState]]:
-    """建立稳定状态中的 MatID 到站点槽位索引，并拒绝机械手持片切点。"""
+    """建立站点中 MatID 到槽位的索引；Robot 持片由重算构造器单独补入。"""
     locations: Dict[Any, Tuple[str, int, SlotState]] = {}
-    for robot in state.robots.values():
-        if any(material is not None for material in robot.hands.values()):
-            raise ValueError(f"{robot.name} 仍持片，不能直接构造续排 Problem")
     for station_name, station in state.stations.items():
         for slot_id, slot in station.slots.items():
             if slot.material is None:

@@ -4,5 +4,12 @@
 """
 
 from src.validation.replay import MoveStateReplay, validate_move_list
+from src.validation.state import Machine, MachineSnapshot, RobotAction
 
-__all__ = ["MoveStateReplay", "validate_move_list"]
+__all__ = [
+    "Machine",
+    "MachineSnapshot",
+    "MoveStateReplay",
+    "RobotAction",
+    "validate_move_list",
+]

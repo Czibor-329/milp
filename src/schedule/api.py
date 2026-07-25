@@ -1,6 +1,7 @@
-"""启发式策略入口及 RL 训练使用的 BC 兼容评估函数。
+"""Machine 启发式入口及 RL 训练使用的旧 BC 兼容评估函数。
 
-生产 RL 搜索位于 ``rl.py``；定序、评估内核和 chooser 位于 ``heuristic.py``。
+真实 ``Problem`` 统一走 Machine；文件后半的 Petri/timing 代码仅供历史训练
+和轻量 mock 测试使用。
 """
 
 from __future__ import annotations
@@ -33,22 +34,37 @@ def start_schedule(ir: Problem, *, verbose: bool = True, seed: int = 0,
                    loadlock_exchange: str | bool | None = "auto",
                    enforce_resumed_route_fifo: bool | None = None,
                    ) -> SolveResult:
-    """快速启发式定序 to solve_timing；可选 milp.check_solution 复核。
+    """用启发式 ``MachineSelector`` 生成完整 MoveList。
 
-    heuristic：单 job 喂片优先(让 LL 常装未加工片、填满并行 PM)；2+ job 在几种
-    交替发片配比里小规模搜索；含清洁例改排空优先(避免 LL 满死锁)。加工腔沿用 round-robin 固定分配，
-    启发式只决定顺序，且每候选另试 LL swap 变体取优（单调不劣）。不做全局组合寻优 ⇒ 快。
-
-    random_orders：随机定序策略的 rollout 次数。每次在同一腔分配基底上按随机顺序派工——每步
-    从 Petri 安全候选里均匀随机选；解出的整序
-    经 solve_timing 精确评估，仅当可行且 makespan 更优才替换启发式结果（单调不劣）。0=关（默认）。
-
-    search_seconds：2-job 结构化搜索的墙钟预算。搜索两条 route 的 FIFO 发片交织，精确定时取优，
-    并按驻留违例定向修复；0=关闭（保持原快速启发式行为），推荐限时模式传 7.0。
-
-    快序（吞吐优先）因驻留(qtime)排不出时回退驻留预留定序（reserve=True）。"""
+    策略只选择搬运意图，Robot 转位、门动作、压力转换、加工和清洗均由
+    Machine 自动安排。``random_orders``、``search_seconds`` 和旧 LoadLock
+    manager 参数保留在签名中以兼容调用方；真实 ``Problem`` 不再调用全局
+    ``solve_timing``。
+    """
     manager = resolve_loadlock_manager(loadlock_manager)
     exchange_mode = resolve_loadlock_exchange_mode(loadlock_exchange)
+    if isinstance(ir, Problem):
+        from src.schedule.machine_policy import (
+            HeuristicMachineSelector,
+            schedule_with_machine,
+        )
+
+        machine_result = schedule_with_machine(
+            ir,
+            HeuristicMachineSelector(),
+        )
+        machine_result.loadlock_manager_requested = (  # type: ignore[attr-defined]
+            manager.name if manager is not None else "none"
+        )
+        machine_result.loadlock_manager_selected = "machine"  # type: ignore[attr-defined]
+        machine_result.loadlock_exchange_requested = exchange_mode  # type: ignore[attr-defined]
+        machine_result.loadlock_exchange_selected = "disabled"  # type: ignore[attr-defined]
+        machine_result.check_issues = check_solution(  # type: ignore[attr-defined]
+            ir,
+            machine_result,
+        )
+        return machine_result
+
     durations = Durations(ir)
     wafers = ir.wafers
     res = _heuristic_schedule(

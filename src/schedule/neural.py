@@ -1,10 +1,10 @@
 """深层集合注意力神经派工策略。
 
 每个调度事件只需要回答“当前候选中下一步搬哪片、送往哪个 LoadLock”。本模块先把
-联合候选编码成无量纲物理特征，再用不带位置编码的集合注意力网络比较候选；完整轨迹、
-小规模 Petri 重试和有预算物理修复分层保证离散可达性，``solve_timing`` 负责精确定时
-和驻留约束。训练阶段可长时间使用多场景教师搜索，生产端只加载纯 NumPy checkpoint，
-不依赖 Torch，也不做无界在线搜索。
+联合候选编码成无量纲物理特征，再用不带位置编码的集合注意力网络比较候选。普通本地
+排程由 ``Machine`` 生成物理动作并增量定时；旧 Petri/``solve_timing`` 代码只供历史
+训练与非 ``Problem`` 测试适配使用。生产端只加载纯 NumPy checkpoint，不依赖 Torch，
+也不做无界在线搜索。
 """
 
 from __future__ import annotations
@@ -1059,6 +1059,44 @@ def start_schedule_neural(
     network = policy or SetAttentionNetwork()
     loadlock_manager = resolve_loadlock_manager(loadlock_manager_mode)
     exchange_mode = resolve_loadlock_exchange_mode(loadlock_exchange_mode)
+    if isinstance(problem, Problem):
+        from src.schedule.machine_policy import (
+            NeuralMachineSelector,
+            schedule_with_machine,
+        )
+
+        selector = NeuralMachineSelector(problem, network)
+        machine_result = schedule_with_machine(problem, selector)
+        metadata = dict(network.metadata)
+        machine_result.neural_diagnostics = {  # type: ignore[attr-defined]
+            "architecture": MODEL_SCHEMA_VERSION,
+            "parameterCount": network.parameter_count,
+            "forwardPasses": selector.decision_count,
+            "actionMask": "machine-physical-actions",
+            "selectedSource": "neural-machine",
+            "fallbackReason": "",
+            "portfolioObservations": [],
+            "modelPath": metadata.get("path", ""),
+            "trainingInstances": metadata.get("trainingInstances"),
+            "trainingSteps": metadata.get("trainingSteps"),
+            "validationAccuracy": metadata.get("validationAccuracy"),
+            "teacher": metadata.get("teacher", "physics-initialized"),
+            "inferenceMode": "machine-greedy-action",
+            "inductiveBias": "general-set-attention",
+            "wavefrontFamilies": 0,
+            "loadLockManagerRequested": (
+                loadlock_manager_mode
+                if isinstance(loadlock_manager_mode, str)
+                else loadlock_manager.name
+                if loadlock_manager is not None
+                else "joint"
+            ),
+            "loadLockSelectedPath": "machine",
+            "loadLockExchangeRequested": exchange_mode,
+            "loadLockExchangeSelected": "disabled",
+        }
+        return machine_result
+
     if isinstance(loadlock_manager_mode, str):
         requested_loadlock_manager = loadlock_manager_mode
     elif loadlock_manager_mode is None:

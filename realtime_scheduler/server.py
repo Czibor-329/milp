@@ -1831,8 +1831,11 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
     for index, round_config in enumerate(rounds[1:], start=2):
         requested_time = times[index - 1]
         notifications: List[Dict[str, Any]] = []
-        recovery = advance_to_recompute(scheduler, requested_time, notifications)
-        effective_time = recovery.recovery_end
+        # 本地 Machine 重算只回放到原始请求时刻：已经 Running 的原子 Move
+        # 留给 RealtimeRescheduler 投影完成，未开始后继直接取消，不再执行
+        # “关门、空手”的最小稳定收尾链。
+        advance_to_algorithm_update(scheduler, requested_time, notifications)
+        effective_time = requested_time
         released_ids, empty_ports = _release_finished_load_ports(scheduler, build_state)
         for notification in notifications:
             event_time = (
@@ -1855,10 +1858,10 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
         try:
             scheduler.recompute(
                 update,
-                effective_time,
+                requested_time,
                 cutoff_time=requested_time,
                 schedule_start_time=requested_time,
-                material_ready_times=recovery.material_ready_times,
+                material_ready_times={},
                 reason=f"第 {index} 轮新增 Job",
             )
         except Exception as error:

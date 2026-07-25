@@ -32,6 +32,14 @@ def export_movelist(
     每个 stage 另铺 加工(9) / loadlock 抽充气(10)。窗口与 solve_milp 的时长口径一致，
     腔/机器手不重叠由 MILP 保证，故子动作天然串行、门成对。
     """
+    machine_moves = getattr(res, "machine_moves", None)
+    if machine_moves is not None:
+        moves = [dict(move) for move in machine_moves]
+        issues = validate_move_list(task, moves, init_data)
+        if issues:
+            raise ValueError(f"Machine MoveList 状态校验失败：{issues[0]}")
+        return moves
+
     tm = Durations(task)
     initial_state = MachineState.from_sources(task, init_data)
     wafers = {w.wid: w for w in task.wafers}
@@ -534,6 +542,10 @@ def _assign_robot_slots(moves: List[dict], initial_state: MachineState) -> None:
 
 def check_solution(task: Problem, res: SolveResult) -> List[str]:
     """独立复核：把解代回各约束，含双臂 PM 重叠换片的合法例外。"""
+    machine_moves = getattr(res, "machine_moves", None)
+    if machine_moves is not None:
+        return validate_move_list(task, list(machine_moves))
+
     tm = Durations(task)
     wafers = {w.wid: w for w in task.wafers}
     sched = res.schedule

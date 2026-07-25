@@ -1,7 +1,8 @@
 """RL 顶层顺序搜索策略。
 
-策略网络只对 Petri 安全候选排序；每条完整候选顺序统一交给 ``solve_timing`` 精确定时，
-并在固定墙钟预算内保留 makespan 最小的可行结果。
+普通本地排程中，策略网络只对 ``Machine`` 暴露的安全搬运候选排序；每个 rollout
+均在独立 Machine 分支上运行，并保留导出 MoveList makespan 最小的结果。旧
+Petri/``solve_timing`` 代码只供非 ``Problem`` 测试适配使用。
 """
 
 from __future__ import annotations
@@ -43,7 +44,7 @@ def start_schedule_by_rl(
     loadlock_manager: LoadLockDispatchManager | str | None = "petri-eta",
     loadlock_exchange: str | bool | None = "auto",
 ) -> SolveResult:
-    """在限时采样中搜索顶层资源顺序，并用定时器评估完整候选。"""
+    """在限时 Machine 分支中搜索搬运顺序，并按真实 MoveList makespan 选优。"""
     if search_seconds < 0:
         raise ValueError("search_seconds 不能为负数")
     if max_rollouts < 0:
@@ -61,6 +62,63 @@ def start_schedule_by_rl(
     durations = Durations(ir)
     wafers = ir.wafers
     rng = np.random.default_rng(seed)
+    if isinstance(ir, Problem):
+        from src.schedule.machine_policy import (
+            HeuristicMachineSelector,
+            RlMachineSelector,
+            schedule_with_machine,
+        )
+        from src.validation.state import MachineDeadlockError
+
+        machine_best = None
+        if fallback:
+            machine_best = schedule_with_machine(
+                ir,
+                HeuristicMachineSelector(),
+            )
+        rollout_count = 0
+        improvement_count = 0
+        selectors = [RlMachineSelector(ir, policy)]
+        selectors.extend(
+            RlMachineSelector(
+                ir,
+                policy,
+                rng=rng,
+                temperature=temp,
+            )
+            for _ in range(max_rollouts)
+        )
+        for selector in selectors:
+            if budget <= 0 or time.perf_counter() >= deadline:
+                break
+            try:
+                candidate = schedule_with_machine(ir, selector)
+            except (MachineDeadlockError, ValueError):
+                rollout_count += 1
+                continue
+            rollout_count += 1
+            if (
+                machine_best is None
+                or candidate.makespan < machine_best.makespan
+            ):
+                machine_best = candidate
+                improvement_count += 1
+        if machine_best is None:
+            raise RuntimeError("RL Machine rollout 未找到可行计划")
+        runtime = time.perf_counter() - search_start
+        machine_best.rl_search_runtime = runtime  # type: ignore[attr-defined]
+        machine_best.rl_search_budget = budget  # type: ignore[attr-defined]
+        machine_best.rl_rollouts = rollout_count  # type: ignore[attr-defined]
+        machine_best.rl_improvements = improvement_count  # type: ignore[attr-defined]
+        machine_best.loadlock_manager_requested = (  # type: ignore[attr-defined]
+            manager.name if manager is not None else "none"
+        )
+        machine_best.loadlock_manager_selected = "machine"  # type: ignore[attr-defined]
+        machine_best.loadlock_exchange_requested = exchange_mode  # type: ignore[attr-defined]
+        machine_best.loadlock_exchange_selected = "disabled"  # type: ignore[attr-defined]
+        machine_best.check_issues = check_solution(ir, machine_best)  # type: ignore[attr-defined]
+        return machine_best
+
     best = (
         start_schedule(
             ir,

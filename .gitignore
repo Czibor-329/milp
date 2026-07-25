@@ -29,3 +29,5 @@ src_data_structures.xlsx
 /log/
 /other_alg
 *.npz
+/.codex
+/design-system
