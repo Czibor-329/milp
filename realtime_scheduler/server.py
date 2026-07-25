@@ -47,7 +47,7 @@ from src.schedule.realtime import (
     TIME_TOLERANCE,
     release_completed_load_port_materials,
 )
-from src.validation import MoveStateReplay
+from src.validation import MoveStateReplay, validate_move_list
 from src.validation.move_fields import (
     COMPLETE_MOVE, PICK_MOVE, PLACE_MOVE, PREPARE_MOVE, PRE_PREPARE_MOVE,
     PRE_TRANS_MOVE, SWAP_MOVE,
@@ -250,14 +250,28 @@ class StandardAlgorithmRuntime:
         self.current_update = deepcopy(dict(update_params))
         self.problem = parse_task(self.tool_topo, self.current_update)
         initial_state = MachineState.from_sources(self.problem, self.current_update)
+        initial_moves = list(output.get("MoveList") or [])
+        validation_issues = validate_move_list(
+            self.problem,
+            initial_moves,
+            initial_state,
+        )
+        if validation_issues:
+            raise RuntimeError(
+                "标准算法首次排程 MoveList 状态校验失败："
+                f"{validation_issues[0]}"
+            )
         self._tracker = MoveStateReplay(
             self.problem,
-            list(output.get("MoveList") or []),
+            initial_moves,
             initial_state,
         )
         self._tracker.current_time = float(self.current_update.get("CurrentTime") or 0.0)
         self._history: List[dict] = []
         self._recompute_points: List[Dict[str, Any]] = []
+        self._committed_recovery_end = float(
+            self.current_update.get("CurrentTime") or 0.0
+        )
         self._latest_output = _alg_output_info(output)
 
     @property
@@ -274,6 +288,11 @@ class StandardAlgorithmRuntime:
     def state_time(self) -> float:
         """返回已经回放到的绝对时间。"""
         return float(self._tracker.current_time)
+
+    @property
+    def committed_recovery_end(self) -> float:
+        """返回此前重算已承诺、不能再被后续重算取消的最晚结束时刻。"""
+        return float(self._committed_recovery_end)
 
     @property
     def running_move_ids(self) -> frozenset[int]:
@@ -353,15 +372,32 @@ class StandardAlgorithmRuntime:
         """保存已执行历史，以当前稳定状态和新增物料装载下一代计划。"""
         next_state = self._tracker.state.clone()
         _add_new_materials_to_machine_state(next_state, update_params)
-        self._history.extend(self._tracker.executed_moves)
-        self.current_update = deepcopy(dict(update_params))
-        self.problem = parse_task(self.tool_topo, self.current_update)
-        self._tracker = MoveStateReplay(
-            self.problem,
-            list(output.get("MoveList") or []),
+        next_update = deepcopy(dict(update_params))
+        next_problem = parse_task(self.tool_topo, next_update)
+        next_moves = list(output.get("MoveList") or [])
+        validation_issues = validate_move_list(
+            next_problem,
+            next_moves,
             next_state,
         )
+        if validation_issues:
+            raise RuntimeError(
+                f"{reason} MoveList 状态校验失败：{validation_issues[0]}"
+            )
+        next_tracker = MoveStateReplay(
+            next_problem,
+            next_moves,
+            next_state,
+        )
+        self._history.extend(self._tracker.executed_moves)
+        self.current_update = next_update
+        self.problem = next_problem
+        self._tracker = next_tracker
         self._tracker.current_time = float(effective_time)
+        self._committed_recovery_end = max(
+            self._committed_recovery_end,
+            float(effective_time),
+        )
         self._latest_output = _alg_output_info(output)
         self._recompute_points.append({
             "Time": float(requested_time),
@@ -1398,15 +1434,6 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
         raise ValueError(
             "LoadLock exchange 只支持 auto、enabled 或 disabled"
         )
-    contains_multi_process_route = any(
-        sum(
-            bool(stage.get("needProcess"))
-            for stage in (route.get("stages") or [])
-            if isinstance(stage, Mapping)
-        ) > 1
-        for route in (plan.get("routes") or [])
-        if isinstance(route, Mapping)
-    )
     build_state = BuildState()
     logs: List[str] = [
         f"设备：{plan.get('deviceName') or 'selected init'}",
@@ -1445,7 +1472,6 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
         policy=policy,
         loadlock_manager_mode=loadlock_manager_mode,
         loadlock_exchange_mode=loadlock_exchange_mode,
-        neural_force_quality_floor=contains_multi_process_route,
         rl_search_seconds=_finite_number(options.get("rlSearchSeconds"), 4.0),
         rl_rollouts=max(0, int(_finite_number(options.get("rlRollouts"), 256))),
         rl_temperature=max(0.01, _finite_number(options.get("rlTemperature"), 0.7)),

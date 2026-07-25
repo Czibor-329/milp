@@ -17,10 +17,6 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Dict, List, Mapping, Optional
 
-from src.log_setup import get_logger
-
-log = get_logger(__name__)
-
 _DUAL_PM_TYPE = "multiprocesschamber"
 
 
@@ -230,8 +226,4 @@ def apply_dual_view(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "cooler_names": list(cooler_names),
     }
     payload["_DualView"] = dual_view
-    log.info(
-        "apply_dual_view: 双腔成对建模 merged_ll=%s pairs=%d",
-        groups, len(pair_members),
-    )
     return dual_view

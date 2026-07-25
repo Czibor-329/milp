@@ -26,10 +26,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from src.parse.clean import resolve_route_clean, synthesize_dummy_routes, _wac_from_afterout
 from src.parse.dual import apply_dual_view
-from src.log_setup import get_logger
 from src.parse.model import Chamber, CleanSpec, Durations, Problem, Robot, Stage, Wafer
-
-log = get_logger(__name__)
 
 
 # --------------------------------------------------------------------------- #

@@ -39,7 +39,6 @@ FIRST_SLOT_ID = 1
 DEFAULT_MILP_TIME_LIMIT_SECONDS = 120.0
 GUROBI_OPTIMAL_STATUS = 2
 MAX_MILP_TOTAL_WAFERS = 12
-NEURAL_REALIZED_MINIMUM_GAIN = 0.01
 
 
 @dataclass(frozen=True)
@@ -76,7 +75,6 @@ class RealtimeRescheduler:
         policy: Any = None,
         loadlock_manager_mode: Optional[str] = None,
         loadlock_exchange_mode: str = "auto",
-        neural_force_quality_floor: bool = False,
         rl_search_seconds: float = 4.0,
         rl_rollouts: int = 256,
         rl_temperature: float = 0.7,
@@ -98,7 +96,6 @@ class RealtimeRescheduler:
             or ("joint" if strategy == "neural" else "petri-look")
         )
         self.loadlock_exchange_mode = str(loadlock_exchange_mode or "auto")
-        self.neural_force_quality_floor = bool(neural_force_quality_floor)
         self.rl_search_seconds = float(rl_search_seconds)
         self.rl_rollouts = int(rl_rollouts)
         self.rl_temperature = float(rl_temperature)
@@ -312,14 +309,19 @@ class RealtimeRescheduler:
     def _schedule_segment(self, problem: Problem, state: MachineState, offset: float) -> List[dict]:
         """用所选顶层策略和 timing 定时生成一段绝对时间计划。"""
         self._last_strategy_diagnostics = {}
+        has_resumed_wafers = any(
+            wafer.already_released
+            for wafer in problem.wafers
+        )
         if self.strategy == "neural":
             result = start_schedule_neural(
                 problem,
                 policy=self.policy,
-                fallback_on_failure=True,
+                fallback_on_failure=False,
                 loadlock_manager_mode=self.loadlock_manager_mode,
                 loadlock_exchange_mode=self.loadlock_exchange_mode,
-                force_quality_floor=self.neural_force_quality_floor,
+                force_quality_floor=False,
+                strict_network_output=True,
             )
             self._last_strategy_diagnostics = dict(
                 getattr(result, "neural_diagnostics", {}) or {}
@@ -359,6 +361,11 @@ class RealtimeRescheduler:
                 verbose=False,
                 loadlock_manager=self.loadlock_manager_mode,
                 loadlock_exchange=self.loadlock_exchange_mode,
+                enforce_resumed_route_fifo=(
+                    True
+                    if has_resumed_wafers
+                    else None
+                ),
             )
         if self.strategy in {"heuristic", "rl"}:
             self._last_strategy_diagnostics.update({
@@ -425,67 +432,50 @@ class RealtimeRescheduler:
             materialize_strategy = "heuristic"
         try:
             candidate_moves = materialize(result, materialize_strategy)
-            if self.strategy == "neural" and self.neural_force_quality_floor:
-                # timing makespan 不含从真实 Robot/LoadLock 初态兑现时追加的全部恢复
-                # 动作。对已知分布外的多工序计划，在 MoveList 层再比较一次实际段终点，
-                # 只有至少 1% 的明确收益才接受 Neural 轨迹，避免微小抽象优势换来下一
-                # 轮更差的压力相位。
-                floor_result = start_schedule(
+            if self.strategy == "heuristic" and has_resumed_wafers:
+                # timing 的抽象环境边不足以准确估计真实初态中的 LL 充抽气代价。
+                # 因此保留旧 FIFO 轨迹作稳定基线，再把解除伪 FIFO 的轨迹兑现成
+                # MoveList 后比较；只在真实段终点更早时采用，保证不回退。
+                relaxed_result = start_schedule(
                     problem,
                     verbose=False,
                     loadlock_manager=self.loadlock_manager_mode,
                     loadlock_exchange=self.loadlock_exchange_mode,
+                    enforce_resumed_route_fifo=False,
                 )
-                if getattr(floor_result, "feasible", False):
-                    floor_moves = materialize(
-                        floor_result,
+                if getattr(relaxed_result, "feasible", False):
+                    relaxed_moves = materialize(
+                        relaxed_result,
                         "heuristic",
                     )
                     candidate_end = max(
-                        (float(move.get("EndTime") or 0.0) for move in candidate_moves),
+                        (
+                            float(move.get("EndTime") or 0.0)
+                            for move in candidate_moves
+                        ),
                         default=offset,
                     )
-                    floor_end = max(
-                        (float(move.get("EndTime") or 0.0) for move in floor_moves),
+                    relaxed_end = max(
+                        (
+                            float(move.get("EndTime") or 0.0)
+                            for move in relaxed_moves
+                        ),
                         default=offset,
                     )
-                    floor_duration = max(floor_end - offset, TIME_TOLERANCE)
-                    realized_gain = (
-                        floor_end - candidate_end
-                    ) / floor_duration
-                    if realized_gain < NEURAL_REALIZED_MINIMUM_GAIN:
-                        self._last_strategy_diagnostics.update({
-                            "selectedSource": "quality-floor-fallback",
-                            "actionMask": "baseline-fallback",
-                            "decisionSpace": "baseline-fallback",
-                            "realizedMoveListGain": float(realized_gain),
-                        })
-                        return floor_moves
-                    self._last_strategy_diagnostics["realizedMoveListGain"] = float(
-                        realized_gain
-                    )
+                    if relaxed_end < candidate_end - TIME_TOLERANCE:
+                        candidate_moves = relaxed_moves
+                        self._last_strategy_diagnostics[
+                            "resumedRouteFifoSelected"
+                        ] = "relaxed"
+                    else:
+                        self._last_strategy_diagnostics[
+                            "resumedRouteFifoSelected"
+                        ] = "preserved"
             return candidate_moves
-        except RuntimeError as neural_state_error:
-            if self.strategy != "neural":
-                raise
-            # timing/Petri 检查只覆盖抽象资源序；真实初态还含门、压力和槽位相位。
-            # Neural 兑现失败时用已验证的启发式轨迹恢复，而不是把非法 MoveList
-            # 交给设备。诊断明确记录这条状态级安全地板。
-            fallback = start_schedule(
-                problem,
-                verbose=False,
-                loadlock_manager=self.loadlock_manager_mode,
-                loadlock_exchange=self.loadlock_exchange_mode,
-            )
-            if not getattr(fallback, "feasible", False):
-                raise neural_state_error
-            self._last_strategy_diagnostics.update({
-                "selectedSource": "state-validation-fallback",
-                "actionMask": "baseline-fallback",
-                "decisionSpace": "baseline-fallback",
-                "stateValidationFailure": str(neural_state_error),
-            })
-            return materialize(fallback, "heuristic")
+        except RuntimeError:
+            # 神经策略必须保持来源纯净；网络轨迹无法兑现时直接失败，
+            # 不把其他策略的计划伪装成 Neural 输出。
+            raise
 
 
 def _build_recompute_problem(

@@ -31,6 +31,7 @@ def start_schedule(ir: Problem, *, verbose: bool = True, seed: int = 0,
                    random_orders: int = 0, search_seconds: float = 0.0,
                    loadlock_manager: LoadLockDispatchManager | str | None = "petri-eta",
                    loadlock_exchange: str | bool | None = "auto",
+                   enforce_resumed_route_fifo: bool | None = None,
                    ) -> SolveResult:
     """快速启发式定序 to solve_timing；可选 milp.check_solution 复核。
 
@@ -57,6 +58,7 @@ def start_schedule(ir: Problem, *, verbose: bool = True, seed: int = 0,
         verbose,
         loadlock_manager=manager,
         loadlock_exchange_mode=exchange_mode,
+        enforce_resumed_route_fifo=enforce_resumed_route_fifo,
     )
 
     # 启发式不可行（多为超驻留 qtime 排不出）→ 回退驻留预留定序（reserve=True，牺牲吞吐换可行）
@@ -69,6 +71,11 @@ def start_schedule(ir: Problem, *, verbose: bool = True, seed: int = 0,
             wafers,
             reserve=True,
             swap=exchange_mode != EXCHANGE_DISABLED,
+            enforce_resumed_route_fifo=(
+                bool(enforce_resumed_route_fifo)
+                if enforce_resumed_route_fifo is not None
+                else False
+            ),
         )
         fb = solve_timing(ir, wafers, orders=orders)
         fb.loadlock_exchange = (  # type: ignore[attr-defined]

@@ -1038,17 +1038,20 @@ def start_schedule_neural(
     loadlock_manager_mode: LoadLockDispatchManager | str | None = "joint",
     loadlock_exchange_mode: str | bool | None = "auto",
     force_quality_floor: bool = False,
+    strict_network_output: bool = False,
 ) -> SolveResult:
     """用训练好的深层集合网络做贪心解码，并在失败时执行有预算物理修复。
 
     参数：
         problem: 已解析并展开晶圆的调度问题。
         policy: 已加载的纯 NumPy checkpoint；缺省使用确定性初始化网络。
-        fallback_on_failure: 网络序列不可行时是否调用 Heuristic 故障兜底。
+        fallback_on_failure: 网络序列不可行时是否允许最终 Heuristic 故障兜底。
         loadlock_manager_mode: manager 实例或公共配置名。当前 checkpoint 缺省保留
             ``joint`` 联合选锁；传入 ``petri-eta`` 可把 LA/LB 交给公共 manager。
         force_quality_floor: 已知整个多轮计划含分布外多工序 Route 时，从首段起
             启用快速 heuristic 质量地板。
+        strict_network_output: 为 ``True`` 时只允许网络打分轨迹及同一网络的
+            Petri 安全重试；关闭等配额专家、物理修复和所有 Heuristic 保底。
 
     返回：
         带 ``neural_diagnostics`` 的已验证可行 ``SolveResult``。
@@ -1464,7 +1467,7 @@ def start_schedule_neural(
         ):
             candidate = window_candidate
             selected_wavefront_path = "capacity-window"
-    if sparse_feed_startup:
+    if sparse_feed_startup and not strict_network_output:
         startup_candidate, startup_failure = attempt_equal_feed_expert()
         if startup_failure:
             portfolio_observations.append(
@@ -1479,7 +1482,7 @@ def start_schedule_neural(
         candidate, safe_failure = attempt(trust_preferred_path=False)
         if safe_failure:
             failure_reasons.append(safe_failure)
-    if candidate is None:
+    if candidate is None and not strict_network_output:
         used_physics_repair = True
         candidate, repair_failure = attempt_physics_repair()
         if repair_failure:
@@ -1526,6 +1529,7 @@ def start_schedule_neural(
     if (
         selected is None
         and fallback_on_failure
+        and not strict_network_output
         and len(problem.wafers) <= STRUCTURED_PETRI_REPAIR_MAX_WAFERS
     ):
         from src.schedule.api import start_schedule
@@ -1545,6 +1549,7 @@ def start_schedule_neural(
             or force_quality_floor
         )
         and fallback_on_failure
+        and not strict_network_output
         and len(problem.wafers) <= STRUCTURED_PETRI_REPAIR_MAX_WAFERS
     ):
         # 有界规模的分布外问题可以负担一次显式质量地板：物理修复或当前尚未

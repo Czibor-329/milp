@@ -185,13 +185,11 @@ Neural 对 Heuristic”的完整 makespan A/B 发布门槛，所以没有替换�
 3. 若识别到等负载、单工序且 PM 池两两不相交的路线族，动作掩码同步推进各族第 k 片，
    网络在该吞吐波前内选择等负载 PM；共享 PM、多工序、清洁和不平衡负载不启用；
 4. 轨迹走到终态即为逐步可达证书；`solve_timing` 再检查时间、驻留和资源环；
-5. ≤24 片失败轨迹可做完整 Petri 重试；更大批量跳过昂贵的全状态搜索；
-6. 失败时运行固定数量的动态选腔、下游排空和多路线配额修复；大批量解码使用事件
-   前沿，避免每个动作扫描全部待加工晶圆；
-7. MoveList 状态机复核清洁、LoadLock、FIFO、Residency/QTime 和实时资源释放下界；
-8. ≤24 片的物理修复会显式计算一次 Heuristic 质量地板，若更好则标为
-   `quality-floor-fallback`；全部路径失败则标为 `failure-fallback`。大批量不计算
-   baseline，不会把它伪装成网络结果。
+5. ≤24 片失败轨迹可用同一网络做完整 Petri 安全重试；更大批量跳过昂贵的全状态搜索；
+6. 实时控制台启用严格网络输出，不运行动态物理专家、配额专家、Heuristic
+   质量地板或故障兜底；网络轨迹全部失败时明确返回错误；
+7. MoveList 状态机复核清洁、LoadLock、FIFO、Residency/QTime 和实时资源释放下界，
+   兑现失败同样直接报错。
 
 命令行评测：
 
@@ -261,5 +259,5 @@ python scripts/benchmark_neural_route_decomposition.py
 `joint` 联合选锁，也可显式交给公共 Petri-ETA manager。对称独立路线族另有
 同步波前归纳偏置；它是有明确充分条件的动作掩码，不用于共享 PM、多工序、清洁或明显
 不平衡负载。离散轨迹安全、时间可行与设备动作可执行性分别由终态证书/Petri、
-`solve_timing` 和 MoveList 状态机确认。网络或物理修复失败时才触发显式故障兜底，
-不以偷偷重跑 Baseline 的方式制造质量数字。
+`solve_timing` 和 MoveList 状态机确认。实时控制台输出严格来自网络；Petri 安全重试
+仍使用同一网络打分，不能生成可执行轨迹时直接失败，不调用其他策略代替。

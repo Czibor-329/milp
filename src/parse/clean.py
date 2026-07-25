@@ -16,11 +16,6 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from src.log_setup import get_logger
-
-log = get_logger(__name__)
-
-
 # --------------------------------------------------------------------------- #
 # 清洁条件解析（接口 CleanCondition 条件树）
 # --------------------------------------------------------------------------- #

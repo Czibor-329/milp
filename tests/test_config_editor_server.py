@@ -293,7 +293,13 @@ class ConfigEditorServerTests(unittest.TestCase):
             config_server,
             "_load_neural_inference_policy",
             return_value=policy,
-        ) as loader:
+        ) as loader, patch(
+            "src.schedule.realtime.start_schedule",
+            side_effect=AssertionError("Neural 实时路径不得调用 Heuristic"),
+        ), patch(
+            "src.schedule.api.start_schedule",
+            side_effect=AssertionError("Neural 推理不得调用 Heuristic"),
+        ):
             result = execute_plan(plan)
 
         loader.assert_called_once_with()
@@ -314,6 +320,7 @@ class ConfigEditorServerTests(unittest.TestCase):
                     "structural-physics-shield",
                     "failure-fallback",
                     "quality-floor-fallback",
+                    "baseline-fallback",
                 },
             )
             self.assertIn(
@@ -323,6 +330,11 @@ class ConfigEditorServerTests(unittest.TestCase):
                     "hop-and-loadlock-physics-repair",
                     "baseline-fallback",
                 },
+            )
+        for round_result in result["rounds"]:
+            self.assertIn(
+                round_result["strategyDiagnostics"]["selectedSource"],
+                {"neural", "neural-safe-retry"},
             )
 
     def test_neural_recompute_allows_required_cross_plan_empty_pressure_reversal(self) -> None:
@@ -1747,6 +1759,61 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual("PM1", last_initial["ModuleName"])
         self.assertEqual("PM2", first_added["ModuleName"])
         self.assertEqual({"LA", "LB"}, added_loadlocks)
+
+    def test_recompute_selects_relaxed_wip_fifo_by_real_movelist_makespan(self) -> None:
+        """同 Route 续排应比较保留/解除在机片伪 FIFO，并按真实 MoveList 选择。"""
+        pse300 = json.loads(PSE300_PATH.read_text(encoding="utf-8"))
+        plan = {
+            "deviceName": PSE300_PATH.name,
+            "device": pse300,
+            "strategy": "heuristic",
+            "roundCount": 2,
+            "options": {},
+            "recipes": [{
+                "name": "CadenceRecipe",
+                "time": 40,
+                "modules": ["PM1"],
+                "weight": {},
+            }],
+            "cleans": [],
+            "routes": [_route("CadenceRoute", "PM1", "CadenceRecipe")],
+            "rounds": [
+                {
+                    "currentTime": 0,
+                    "jobs": [{
+                        **_job("CadenceJob1", "CadenceRoute", "LP1"),
+                        "waferCount": 6,
+                    }],
+                },
+                {
+                    "currentTime": 300,
+                    "jobs": [{
+                        **_job("CadenceJob2", "CadenceRoute", "LP2"),
+                        "waferCount": 6,
+                    }],
+                },
+            ],
+        }
+
+        result = execute_plan(plan)
+        diagnostics = result["rounds"][1]["strategyDiagnostics"]
+        process_moves = sorted(
+            (
+                move
+                for move in result["output"]["MoveList"]
+                if move.get("MoveType") == 9
+                and move.get("ModuleName") == "PM1"
+            ),
+            key=lambda move: float(move["StartTime"]),
+        )
+        maximum_process_gap = max(
+            float(current["StartTime"]) - float(previous["EndTime"])
+            for previous, current in zip(process_moves, process_moves[1:])
+        )
+
+        self.assertEqual("relaxed", diagnostics["resumedRouteFifoSelected"])
+        self.assertLess(maximum_process_gap, 100.0)
+        self.assertLess(result["makespan"], 861.0)
 
     def test_equal_normal_lots_run_concurrently_with_complete_pm_rotation(self) -> None:
         """同优 NormalLot 应并发，并按物料顺序完整轮转各自的加工腔池。"""

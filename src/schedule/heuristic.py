@@ -60,7 +60,8 @@ def _pick_best(a: Optional[SolveResult], b: Optional[SolveResult]) -> Optional[S
 def _decode_eval(ir: Problem, durations: Durations, wafers, *, swap: bool = False,
                  chooser: Optional[_Chooser] = None,
                  first_safe_by_preference: bool = False,
-                 trust_preferred_path: bool = False) -> Optional[SolveResult]:
+                 trust_preferred_path: bool = False,
+                 enforce_resumed_route_fifo: bool = True) -> Optional[SolveResult]:
     """一次「解码 → solve_timing 精确评估」：可行返回结果，解码死锁/排不出返回 None。"""
     try:
         orders = decode_orders(
@@ -71,6 +72,7 @@ def _decode_eval(ir: Problem, durations: Durations, wafers, *, swap: bool = Fals
             swap=swap,
             first_safe_by_preference=first_safe_by_preference,
             trust_preferred_path=trust_preferred_path,
+            enforce_resumed_route_fifo=enforce_resumed_route_fifo,
         )
     except (RuntimeError, _DecodeDeadlock):
         return None
@@ -142,43 +144,62 @@ def _eval_chooser(
     prev: Optional[SolveResult],
     loadlock_manager: Optional[LoadLockDispatchManager] = None,
     loadlock_exchange_mode: str = EXCHANGE_AUTO,
+    enforce_resumed_route_fifo: Optional[bool] = None,
 ) -> Optional[SolveResult]:
     """按交换配置评估固定锁与 manager 轨迹并取优。
 
     ``loadlock_manager=None`` 是显式的旧基线，供 A/B 和故障隔离使用。
     """
     r: Optional[SolveResult] = None
-    if loadlock_exchange_mode in {EXCHANGE_AUTO, EXCHANGE_DISABLED}:
-        no_swap = _decode_eval(
-            ir,
-            durations,
-            wafers,
-            swap=False,
-            chooser=chooser,
-            first_safe_by_preference=True,
+    # 重算把每片当前所在站裁成局部 stage 0。旧 FIFO 候选有时利于排空，
+    # 但也可能让出站 LL 的早号片阻塞已可送入 PM 的后号片。两种口径都精确定时，
+    # 只采用 makespan 更小者，既保留旧节拍也允许打破这种“伪发片 FIFO”。
+    has_resumed_wafers = any(wafer.already_released for wafer in wafers)
+    resumed_fifo_modes = (
+        (True, False)
+        if has_resumed_wafers and enforce_resumed_route_fifo is None
+        else (
+            (bool(enforce_resumed_route_fifo),)
+            if has_resumed_wafers
+            else (True,)
         )
-        r = _pick_best(r, no_swap)
+    )
+    if loadlock_exchange_mode in {EXCHANGE_AUTO, EXCHANGE_DISABLED}:
+        for enforce_resumed_route_fifo in resumed_fifo_modes:
+            no_swap = _decode_eval(
+                ir,
+                durations,
+                wafers,
+                swap=False,
+                chooser=chooser,
+                first_safe_by_preference=True,
+                enforce_resumed_route_fifo=enforce_resumed_route_fifo,
+            )
+            r = _pick_best(r, no_swap)
     # swap 的双槽资源口径通常能让喂片偏好直接走到终态。先尝试首选路径；
     # 若中途死锁，再回退完整 Petri 安全检查，结果与原逻辑保持一致。
     if loadlock_exchange_mode in {EXCHANGE_AUTO, EXCHANGE_ENABLED}:
-        swap_result = _decode_eval(
-            ir,
-            durations,
-            wafers,
-            swap=True,
-            chooser=chooser,
-            trust_preferred_path=True,
-        )
-        if swap_result is None:
+        for enforce_resumed_route_fifo in resumed_fifo_modes:
             swap_result = _decode_eval(
                 ir,
                 durations,
                 wafers,
                 swap=True,
                 chooser=chooser,
-                first_safe_by_preference=True,
+                trust_preferred_path=True,
+                enforce_resumed_route_fifo=enforce_resumed_route_fifo,
             )
-        r = _pick_best(r, swap_result)
+            if swap_result is None:
+                swap_result = _decode_eval(
+                    ir,
+                    durations,
+                    wafers,
+                    swap=True,
+                    chooser=chooser,
+                    first_safe_by_preference=True,
+                    enforce_resumed_route_fifo=enforce_resumed_route_fifo,
+                )
+            r = _pick_best(r, swap_result)
     if loadlock_manager is not None and _has_dynamic_loadlock_choice(ir, wafers):
         # manager 不再只是固定选锁失败后的恢复路径；每个逻辑启发式都生成一条动态绑定
         # 候选，经同一 solve_timing 精确评估后仅在更优时采用。
@@ -305,6 +326,7 @@ def _heuristic_schedule(
     verbose: bool,
     loadlock_manager: Optional[LoadLockDispatchManager] = None,
     loadlock_exchange_mode: str = EXCHANGE_AUTO,
+    enforce_resumed_route_fifo: Optional[bool] = None,
 ) -> Optional[SolveResult]:
     """快速启发式定序（取代原固定 backward 定序）。不做组合寻优的全局搜索：
       · 含清洁(wac/dummy-wac)：排空优先(backward)——不追求 LL 常满，避免换出加工腔的片无处落脚死锁。
@@ -327,6 +349,7 @@ def _heuristic_schedule(
             None,
             loadlock_manager,
             loadlock_exchange_mode,
+            enforce_resumed_route_fifo,
         )
 
     has_cjob_policy = any(w.cjob_id for w in wafers)
@@ -343,6 +366,7 @@ def _heuristic_schedule(
             None,
             loadlock_manager,
             loadlock_exchange_mode,
+            enforce_resumed_route_fifo,
         )
     )
     has_resumed = any(wafer.already_released for wafer in wafers)
@@ -375,6 +399,7 @@ def _heuristic_schedule(
                 result,
                 loadlock_manager,
                 loadlock_exchange_mode,
+                enforce_resumed_route_fifo,
             )
         return result or _eval_chooser(
             ir,
@@ -384,6 +409,7 @@ def _heuristic_schedule(
             None,
             loadlock_manager,
             loadlock_exchange_mode,
+            enforce_resumed_route_fifo,
         )
 
     # 2+ job：在若干交替发片配比里搜索（非全局）。前两条 route 取配比，其余按权重 1 均分。
@@ -405,6 +431,7 @@ def _heuristic_schedule(
                 best,
                 loadlock_manager,
                 loadlock_exchange_mode,
+                enforce_resumed_route_fifo,
             )
     if best is None:
         best = _eval_chooser(
@@ -415,6 +442,7 @@ def _heuristic_schedule(
             None,
             loadlock_manager,
             loadlock_exchange_mode,
+            enforce_resumed_route_fifo,
         )
     if verbose:
         mk = best.makespan if best is not None and getattr(best, "feasible", False) else float("nan")
