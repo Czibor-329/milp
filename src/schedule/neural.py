@@ -1066,7 +1066,11 @@ def start_schedule_neural(
         )
 
         selector = NeuralMachineSelector(problem, network)
-        machine_result = schedule_with_machine(problem, selector)
+        machine_result = schedule_with_machine(
+            problem,
+            selector,
+            allow_loadlock_exchange=exchange_mode != EXCHANGE_DISABLED,
+        )
         metadata = dict(network.metadata)
         machine_result.neural_diagnostics = {  # type: ignore[attr-defined]
             "architecture": MODEL_SCHEMA_VERSION,

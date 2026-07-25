@@ -13,7 +13,15 @@ from src.schedule.machine_policy import (
 )
 from src.schedule.realtime import _build_recompute_problem
 from src.validation import validate_move_list
-from src.validation.move_fields import PREPARE_MOVE, PRE_PREPARE_MOVE, PRE_TRANS_MOVE
+from src.validation.move_fields import (
+    COMPLETE_MOVE,
+    PICK_MOVE,
+    PLACE_MOVE,
+    PREPARE_MOVE,
+    PRE_PREPARE_MOVE,
+    PRE_TRANS_MOVE,
+    SWAP_MOVE,
+)
 from src.validation.state import (
     DoorState,
     LoadLockState,
@@ -76,6 +84,51 @@ def _wafer(
         ],
         [robot, robot],
         f"P{wid}",
+    )
+
+
+def _loadlock_wafer(
+    wid: int,
+    material_id: int,
+    *,
+    source_slot: int = 0,
+    residency: float = -1.0,
+) -> Wafer:
+    """构造经双槽 LoadLock 进出真空区的单工序晶圆。"""
+    return Wafer(
+        wid,
+        material_id,
+        "shared-loadlock-route",
+        wid,
+        [
+            Stage(0, "LP", "source", 0.0, "", "ATR", -1.0, slot=source_slot),
+            Stage(1, "LL", "loadlock", 3.0, "ATR", "VTR", -1.0, "entry", 0),
+            Stage(2, "PM", "process", 5.0, "VTR", "VTR", residency),
+            Stage(3, "LL", "loadlock", 4.0, "VTR", "ATR", -1.0, "exit", 1),
+            Stage(4, "LP", "sink", 0.0, "ATR", "", -1.0, slot=source_slot),
+        ],
+        ["ATR", "VTR", "VTR", "ATR"],
+        "P",
+    )
+
+
+def _loadlock_problem(wafers: list[Wafer]) -> Problem:
+    """构造双槽 LoadLock、单臂 ATR/VTR 的测试设备。"""
+    load_port = _chamber("LP", "LoadPort")
+    load_port.capacity = 2
+    load_lock = _chamber("LL", "LoadLock")
+    load_lock.capacity = 2
+    return Problem(
+        {
+            "LP": load_port,
+            "LL": load_lock,
+            "PM": _chamber("PM", "ProcessChamber"),
+        },
+        {
+            "ATR": _robot("ATR", ["LP", "LL"]),
+            "VTR": _robot("VTR", ["LL", "PM"]),
+        },
+        wafers,
     )
 
 
@@ -215,6 +268,177 @@ class MachineTests(unittest.TestCase):
         self.assertIn(
             PRE_PREPARE_MOVE,
             [move["MoveType"] for move in action.move_preview],
+        )
+
+    def test_atmosphere_loadlock_exchange_is_a_policy_candidate(self) -> None:
+        """ATR 应能在一次开门内先放生片再取熟片，且保留单向候选。"""
+        incoming = _loadlock_wafer(0, 1, source_slot=0)
+        outgoing = _loadlock_wafer(1, 2, source_slot=1)
+        problem = _loadlock_problem([incoming, outgoing])
+        initial = MachineState.from_sources(problem, None)
+        initial.stations["LP"].slots[2] = SlotState()
+        initial.stations["LL"].slots[2] = SlotState(
+            SlotPhase.COMPLETED,
+            MaterialState(2, "P", 3),
+        )
+        initial.stations["LL"].environment = "ATM"  # type: ignore[union-attr]
+        machine = Machine(problem, initial)
+
+        actions = machine.get_robot_actions()
+        incoming_actions = [
+            action for action in actions if action.material_ids[0] == 1
+        ]
+        selected_id = HeuristicMachineSelector(problem).choose(
+            machine.get_state(),
+            actions,
+        )
+        selected = next(action for action in actions if action.action_id == selected_id)
+
+        self.assertEqual({"transfer", "ll_exchange"}, {a.kind for a in incoming_actions})
+        disabled_actions = Machine(
+            problem,
+            initial,
+            allow_loadlock_exchange=False,
+        ).get_robot_actions()
+        self.assertNotIn("ll_exchange", {action.kind for action in disabled_actions})
+        self.assertEqual("ll_exchange", selected.kind)
+        self.assertEqual("atmosphere_exchange", selected.flow_kind)
+        ll_moves = [
+            move
+            for move in selected.move_preview
+            if move["MoveType"] != PRE_TRANS_MOVE
+            and (
+                move.get("Station") == "LL"
+                or "LL" in (move.get("SrcStationList") or ())
+                or "LL" in (move.get("DestStationList") or ())
+            )
+        ]
+        self.assertEqual(
+            [PREPARE_MOVE, 1, 0, 7, PRE_PREPARE_MOVE],
+            [move["MoveType"] for move in ll_moves],
+        )
+
+        machine.apply_robot_action(selected.action_id)
+        self.assertEqual(1, machine.state.stations["LL"].slots[1].material.material_id)
+        self.assertIsNone(machine.state.stations["LL"].slots[2].material)
+        self.assertEqual(2, machine.state.robots["ATR"].hands[1].material_id)
+
+    def test_vacuum_loadlock_exchange_is_a_policy_candidate(self) -> None:
+        """VTR 应能在一次开门内先放熟片再取生片。"""
+        outgoing = _loadlock_wafer(0, 1, source_slot=0)
+        incoming = _loadlock_wafer(1, 2, source_slot=1)
+        problem = _loadlock_problem([outgoing, incoming])
+        initial = MachineState.from_sources(problem, None)
+        initial.stations["LP"].slots[1] = SlotState()
+        initial.stations["LP"].slots[2] = SlotState()
+        initial.stations["LL"].slots[1] = SlotState(
+            SlotPhase.COMPLETED,
+            MaterialState(2, "P", 1),
+        )
+        initial.stations["PM"].slots[1] = SlotState(
+            SlotPhase.COMPLETED,
+            MaterialState(1, "P", 2),
+            busy_until=5.0,
+        )
+        initial.stations["LL"].environment = "VAC"  # type: ignore[union-attr]
+        machine = Machine(problem, initial)
+
+        actions = machine.get_robot_actions()
+        exchange = next(action for action in actions if action.kind == "ll_exchange")
+
+        self.assertEqual("vacuum_exchange", exchange.flow_kind)
+        machine.apply_robot_action(exchange.action_id)
+        self.assertEqual(1, machine.state.stations["LL"].slots[2].material.material_id)
+        self.assertIsNone(machine.state.stations["LL"].slots[1].material)
+        self.assertEqual(2, machine.state.robots["VTR"].hands[1].material_id)
+
+    def test_dual_arm_vtr_loadlock_exchange_is_atomic_swap(self) -> None:
+        """双臂 VTR 的 LoadLock 交换必须导出单个 Swap，而非连续 Place/Pick。"""
+        outgoing = _loadlock_wafer(0, 1, source_slot=0)
+        incoming = _loadlock_wafer(1, 2, source_slot=1)
+        problem = _loadlock_problem([outgoing, incoming])
+        problem.robots["VTR"].capacity = 2
+        problem.robots["VTR"].can_swap = True
+        initial = MachineState.from_sources(problem, None)
+        initial.stations["LP"].slots[1] = SlotState()
+        initial.stations["LP"].slots[2] = SlotState()
+        initial.stations["LL"].slots[1] = SlotState(
+            SlotPhase.COMPLETED,
+            MaterialState(2, "P", 1),
+        )
+        initial.stations["PM"].slots[1] = SlotState(
+            SlotPhase.COMPLETED,
+            MaterialState(1, "P", 2),
+            busy_until=5.0,
+        )
+        initial.stations["LL"].environment = "VAC"  # type: ignore[union-attr]
+        machine = Machine(problem, initial)
+
+        exchange = next(
+            action
+            for action in machine.get_robot_actions()
+            if action.kind == "ll_exchange"
+        )
+        ll_moves = [
+            move
+            for move in exchange.move_preview
+            if move["MoveType"] != PRE_TRANS_MOVE
+            and (
+                move.get("Station") == "LL"
+                or "LL" in (move.get("StationList") or ())
+            )
+        ]
+
+        self.assertEqual(
+            [PREPARE_MOVE, SWAP_MOVE, COMPLETE_MOVE, PRE_PREPARE_MOVE],
+            [move["MoveType"] for move in ll_moves],
+        )
+        self.assertNotIn(PLACE_MOVE, [move["MoveType"] for move in ll_moves])
+        self.assertNotIn(PICK_MOVE, [move["MoveType"] for move in ll_moves])
+        swap = next(move for move in ll_moves if move["MoveType"] == SWAP_MOVE)
+        self.assertEqual((2,), swap["StnRecvSlotList"])
+        self.assertEqual((1,), swap["StnSendSlotList"])
+        self.assertEqual((2,), swap["RecvMatList"])
+        self.assertEqual((1,), swap["SendMatList"])
+        machine.apply_robot_action(exchange.action_id)
+        self.assertEqual(
+            [],
+            validate_move_list(problem, machine.export_movelist(), initial),
+        )
+        self.assertEqual(1, machine.state.stations["LL"].slots[2].material.material_id)
+        self.assertIsNone(machine.state.stations["LL"].slots[1].material)
+        self.assertIsNone(machine.state.robots["VTR"].hands[1])
+        self.assertEqual(2, machine.state.robots["VTR"].hands[2].material_id)
+
+    def test_short_process_output_can_delay_a_risky_feed(self) -> None:
+        """送片会跨过 PM 完工时刻时，策略应先预留出片窗口。"""
+        incoming = _loadlock_wafer(0, 1, source_slot=0)
+        outgoing = _loadlock_wafer(1, 2, source_slot=1, residency=8.0)
+        problem = _loadlock_problem([incoming, outgoing])
+        initial = MachineState.from_sources(problem, None)
+        initial.stations["LP"].slots[2] = SlotState()
+        initial.stations["PM"].slots[1] = SlotState(
+            SlotPhase.COMPLETED,
+            MaterialState(2, "P", 2),
+            busy_until=5.0,
+        )
+        machine = Machine(problem, initial)
+        actions = machine.get_robot_actions()
+        feed = next(action for action in actions if action.flow_kind == "feed")
+        process_departure = next(
+            action
+            for action in actions
+            if action.material_ids[0] == 2
+        )
+
+        self.assertLess(feed.earliest_start, process_departure.earliest_start)
+        self.assertGreaterEqual(
+            feed.projected_ready_time,
+            process_departure.earliest_start,
+        )
+        self.assertEqual(
+            process_departure.action_id,
+            HeuristicMachineSelector(problem).choose(machine.get_state(), actions),
         )
 
     def test_held_material_can_build_recompute_problem_and_place(self) -> None:

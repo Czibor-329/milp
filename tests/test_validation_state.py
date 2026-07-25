@@ -6,6 +6,7 @@ from src.parse.model import Chamber, Problem, Robot, Stage, Wafer
 from src.timing import SolveResult
 from src.export.export import export_movelist
 from src.validation import validate_move_list
+from src.validation.state import DoorState, MachineState, MaterialState, SlotPhase
 
 
 def _stage(index: int, station: str, slot: int = 0) -> Stage:
@@ -251,6 +252,51 @@ class ValidationStateTests(unittest.TestCase):
 
         disabled_hand = [_move(1, 5, 0, 1, Robot="R", RobotSlotList=[2], SrcStationList=["LP"], DestStationList=["PM1"])]
         self.assertIn("未启用手槽", validate_move_list(_problem(), disabled_hand)[0])
+
+    def test_consecutive_places_from_two_held_wafers_are_rejected(self) -> None:
+        """双臂同时持有独立晶圆时，连续 Place 必须被校验器拒绝。"""
+        wafers = [
+            Wafer(0, 1, "route", 0, [_stage(0, "LP", 0)], [], "P"),
+            Wafer(1, 2, "route", 1, [_stage(0, "LP", 1)], [], "P"),
+        ]
+        problem = _problem(robot_capacity=2, wafers=wafers, pm_capacity=2)
+        initial = MachineState.from_sources(problem, None)
+        for station in initial.stations.values():
+            for slot in station.slots.values():
+                slot.phase = SlotPhase.EMPTY
+                slot.material = None
+        initial.robots["R"].position = "PM1"
+        initial.robots["R"].hands[1] = MaterialState(1, "P", 0)
+        initial.robots["R"].hands[2] = MaterialState(2, "P", 0)
+        initial.stations["PM1"].door = DoorState.OPEN
+        moves = [
+            _move(
+                1,
+                1,
+                0,
+                1,
+                Robot="R",
+                RobotSlotList=[1],
+                DestStationList=["PM1"],
+                DestSlotList=[1],
+                MatIDList=[1],
+            ),
+            _move(
+                2,
+                1,
+                1,
+                2,
+                Robot="R",
+                RobotSlotList=[2],
+                DestStationList=["PM1"],
+                DestSlotList=[2],
+                MatIDList=[2],
+            ),
+        ]
+
+        issues = validate_move_list(problem, moves, initial)
+
+        self.assertTrue(any("连续 PlaceMove" in issue for issue in issues), issues)
 
     def test_processing_can_run_on_multiple_slots_in_parallel(self) -> None:
         """多槽腔室在门关闭时允许不同槽位并行加工。"""

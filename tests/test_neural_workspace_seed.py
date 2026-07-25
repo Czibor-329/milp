@@ -9,6 +9,7 @@ from pathlib import Path
 from realtime_scheduler import server as scheduler_server
 from scripts.seed_neural_recompute_workspaces import (
     LONG_QUALITY_GROUP,
+    LOADLOCK_CADENCE_GROUP,
     R2_THREE_JOB_GROUP,
     RECOMPUTE_GRIDS,
     ROUTE_DECOMPOSITION_GROUP,
@@ -164,12 +165,14 @@ class NeuralWorkspaceSeedTests(unittest.TestCase):
                 for group in (
                     ROUTE_DECOMPOSITION_GROUP,
                     LONG_QUALITY_GROUP,
+                    LOADLOCK_CADENCE_GROUP,
                 )
             }
             self.assertEqual(
                 {
                     ROUTE_DECOMPOSITION_GROUP: 2,
                     LONG_QUALITY_GROUP: 2,
+                    LOADLOCK_CADENCE_GROUP: 1,
                 },
                 six_group_counts,
             )

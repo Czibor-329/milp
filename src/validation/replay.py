@@ -471,6 +471,19 @@ def _start_pick(
         return _issue(move, f"{station.name}#{slot_id} 正在{slot.busy_action}")
     if robot.hands.get(robot_slot) is not None:
         return _issue(move, f"{robot.name}#{robot_slot} 不是空手")
+    occupied_other_slots = [
+        hand_slot
+        for hand_slot, held_material in robot.hands.items()
+        if hand_slot != robot_slot and held_material is not None
+    ]
+    if occupied_other_slots:
+        return _issue(
+            move,
+            (
+                f"{robot.name} 已在手槽 {occupied_other_slots} 持片，"
+                "不能再执行独立 PickMove；应先放片或使用 SwapMove"
+            ),
+        )
     material_id = _first_value(move, "MatIDList")
     if slot.phase is not SlotPhase.COMPLETED or not _material_matches(slot.material, material_id):
         return _issue(move, f"{station.name}#{slot_id} 没有匹配的已完成物料")
@@ -532,6 +545,19 @@ def _start_place(
     material = robot.hands.get(robot_slot)
     if material is None or not _material_matches(material, _first_value(move, "MatIDList")):
         return _issue(move, f"{robot.name}#{robot_slot} 没有匹配物料")
+    occupied_other_slots = [
+        hand_slot
+        for hand_slot, held_material in robot.hands.items()
+        if hand_slot != robot_slot and held_material is not None
+    ]
+    if occupied_other_slots:
+        return _issue(
+            move,
+            (
+                f"{robot.name} 同时在手槽 {occupied_other_slots} 持有其他物料，"
+                "不能形成连续 PlaceMove；应使用 SwapMove"
+            ),
+        )
     if robot.position is not None and robot.position != station_name:
         return _issue(move, f"{robot.name} 当前指向 {robot.position}，不是 {station_name}")
 

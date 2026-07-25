@@ -120,25 +120,103 @@ def _policy_inputs(
 
 
 class HeuristicMachineSelector:
-    """按最早窗口、排空深度和业务顺序选择搬运意图。"""
+    """按节拍、驻留风险和交换收益选择搬运意图。
+
+    ``Machine`` 同时保留单向送片与 LoadLock 交换候选。本策略决定是否继续
+    投料：若一条送片事务结束前已经有 PM 晶圆需要离腔，则先安排出片，避免
+    短加工、多并行腔室场景把真空区堆满后触发驻留超时。
+    """
+
+    def __init__(self, problem: Problem | None = None) -> None:
+        self.problem = problem
+        self._wafer_by_id = (
+            {int(wafer.wid): wafer for wafer in problem.wafers}
+            if problem is not None
+            else {}
+        )
 
     def choose(
         self,
         state: MachineSnapshot,
         actions: Sequence[RobotAction],
     ) -> str:
-        """返回确定性的启发式首选动作。"""
-        selected = min(
-            actions,
-            key=lambda action: (
+        """返回确定性的节拍感知首选动作。"""
+        residency_limited_departures = [
+            action
+            for action in actions
+            if self._current_stage_type(action) == "process"
+            and action.residency_deadline is not None
+        ]
+        earliest_process_departure = min(
+            (
+                action.earliest_start
+                for action in residency_limited_departures
+            ),
+            default=float("inf"),
+        )
+
+        def priority(action: RobotAction) -> tuple:
+            """计算一个候选的驻留风险、流向收益和稳定业务顺序。"""
+            current_type = self._current_stage_type(action)
+            following_type = self._following_stage_type(action)
+            is_process_departure = current_type == "process"
+            blocks_ready_output = (
+                action.flow_kind == "feed"
+                and earliest_process_departure
+                <= action.projected_ready_time
+            )
+            residency_slack = (
+                float(action.residency_deadline) - action.earliest_start
+                if action.residency_deadline is not None
+                else float("inf")
+            )
+            flow_priority = (
+                0
+                if action.kind == "ll_exchange"
+                else 1
+                if is_process_departure
+                else 2
+                if following_type == "process"
+                else 3
+                if action.flow_kind == "drain"
+                else 4
+                if following_type == "sink"
+                else 6
+                if action.flow_kind == "feed"
+                else 5
+            )
+            return (
+                1 if blocks_ready_output else 0,
+                min(residency_slack, 0.0),
                 action.earliest_start,
-                -action.stage_index,
+                flow_priority,
+                residency_slack,
                 action.finish_time,
+                -action.stage_index,
                 action.wafer_id,
                 action.destination_station,
-            ),
+            )
+
+        selected = min(
+            actions,
+            key=priority,
         )
         return selected.action_id
+
+    def _current_stage_type(self, action: RobotAction) -> str:
+        """返回候选主晶圆当前工序类型。"""
+        wafer = self._wafer_by_id.get(int(action.wafer_id))
+        if wafer is None or action.stage_index >= len(wafer.stages):
+            return ""
+        return str(wafer.stages[action.stage_index].stage_type)
+
+    def _following_stage_type(self, action: RobotAction) -> str:
+        """返回候选主晶圆下一工序类型。"""
+        wafer = self._wafer_by_id.get(int(action.wafer_id))
+        next_index = action.stage_index + 1
+        if wafer is None or next_index >= len(wafer.stages):
+            return ""
+        return str(wafer.stages[next_index].stage_type)
 
 
 class NeuralMachineSelector:
@@ -290,13 +368,19 @@ def schedule_with_machine(
     initial_state: "MachineState | Mapping[str, Any] | None" = None,
     current_time: float = 0.0,
     initial_move_id: int = 0,
+    allow_loadlock_exchange: bool = True,
 ) -> SolveResult:
-    """运行 Machine 并返回保持旧接口兼容的 ``SolveResult``。"""
+    """运行 Machine 并返回保持旧接口兼容的 ``SolveResult``。
+
+    ``allow_loadlock_exchange`` 只控制候选是否可见；是否实际选择交换仍由
+    ``selector`` 决定。
+    """
     machine = Machine(
         problem,
         initial_state,
         current_time=current_time,
         initial_move_id=initial_move_id,
+        allow_loadlock_exchange=allow_loadlock_exchange,
     )
     run_result = machine.run(selector)
     moves = [dict(move) for move in run_result.moves]

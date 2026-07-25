@@ -51,14 +51,17 @@ def start_schedule(ir: Problem, *, verbose: bool = True, seed: int = 0,
 
         machine_result = schedule_with_machine(
             ir,
-            HeuristicMachineSelector(),
+            HeuristicMachineSelector(ir),
+            allow_loadlock_exchange=exchange_mode != EXCHANGE_DISABLED,
         )
         machine_result.loadlock_manager_requested = (  # type: ignore[attr-defined]
             manager.name if manager is not None else "none"
         )
         machine_result.loadlock_manager_selected = "machine"  # type: ignore[attr-defined]
         machine_result.loadlock_exchange_requested = exchange_mode  # type: ignore[attr-defined]
-        machine_result.loadlock_exchange_selected = "disabled"  # type: ignore[attr-defined]
+        machine_result.loadlock_exchange_selected = (  # type: ignore[attr-defined]
+            "enabled" if exchange_mode != EXCHANGE_DISABLED else EXCHANGE_DISABLED
+        )
         machine_result.check_issues = check_solution(  # type: ignore[attr-defined]
             ir,
             machine_result,

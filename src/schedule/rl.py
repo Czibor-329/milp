@@ -74,7 +74,8 @@ def start_schedule_by_rl(
         if fallback:
             machine_best = schedule_with_machine(
                 ir,
-                HeuristicMachineSelector(),
+                HeuristicMachineSelector(ir),
+                allow_loadlock_exchange=exchange_mode != EXCHANGE_DISABLED,
             )
         rollout_count = 0
         improvement_count = 0
@@ -92,7 +93,11 @@ def start_schedule_by_rl(
             if budget <= 0 or time.perf_counter() >= deadline:
                 break
             try:
-                candidate = schedule_with_machine(ir, selector)
+                candidate = schedule_with_machine(
+                    ir,
+                    selector,
+                    allow_loadlock_exchange=exchange_mode != EXCHANGE_DISABLED,
+                )
             except (MachineDeadlockError, ValueError):
                 rollout_count += 1
                 continue
@@ -115,7 +120,9 @@ def start_schedule_by_rl(
         )
         machine_best.loadlock_manager_selected = "machine"  # type: ignore[attr-defined]
         machine_best.loadlock_exchange_requested = exchange_mode  # type: ignore[attr-defined]
-        machine_best.loadlock_exchange_selected = "disabled"  # type: ignore[attr-defined]
+        machine_best.loadlock_exchange_selected = (  # type: ignore[attr-defined]
+            "enabled" if exchange_mode != EXCHANGE_DISABLED else EXCHANGE_DISABLED
+        )
         machine_best.check_issues = check_solution(ir, machine_best)  # type: ignore[attr-defined]
         return machine_best
 

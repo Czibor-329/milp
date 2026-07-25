@@ -348,7 +348,7 @@ class RealtimeRescheduler:
             elif self.strategy == "rl":
                 selector = RlMachineSelector(problem, self.policy)
             else:
-                selector = HeuristicMachineSelector()
+                selector = HeuristicMachineSelector(problem)
             if reuse_machine and self._machine is not None:
                 old_move_ids = {
                     int(move["MoveID"])
@@ -373,6 +373,9 @@ class RealtimeRescheduler:
                     selector,
                     initial_state=state,
                     current_time=offset,
+                    allow_loadlock_exchange=(
+                        self.loadlock_exchange_mode != "disabled"
+                    ),
                 )
                 moves = list(result.machine_moves or [])
                 machine = getattr(result, "machine", None)
@@ -387,7 +390,11 @@ class RealtimeRescheduler:
                 "loadLockManagerRequested": self.loadlock_manager_mode,
                 "loadLockSelectedPath": "machine",
                 "loadLockExchangeRequested": self.loadlock_exchange_mode,
-                "loadLockExchangeSelected": "disabled",
+                "loadLockExchangeSelected": (
+                    "enabled"
+                    if self.loadlock_exchange_mode != "disabled"
+                    else "disabled"
+                ),
             }
             if self.strategy == "neural":
                 self._last_strategy_diagnostics.update({

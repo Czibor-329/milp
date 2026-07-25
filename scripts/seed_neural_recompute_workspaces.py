@@ -37,8 +37,10 @@ LEGACY_R2_GROUP = "R2-历史案例"
 LEGACY_LONG_GROUP = "R10-历史案例"
 ROUTE_DECOMPOSITION_GROUP = "六腔路线分解-验收"
 LONG_QUALITY_GROUP = "六腔长途质量A/B"
+LOADLOCK_CADENCE_GROUP = "LoadLock交换与短工艺-回归"
 
 ROUTE_PM12 = "1道工序 · PM1/PM2(120s)"
+ROUTE_PM123 = "PM1/PM2/PM3(120s)"
 ROUTE_PM34 = "1道工序 · PM3/PM4(120s)"
 ROUTE_PM1 = "1道工序 · PM1(40s)"
 ROUTE_ALL4 = "1道工序 · PM1/PM2/PM3/PM4(120s)"
@@ -55,6 +57,8 @@ ROUTE_FULL6 = "1道工序 · PM1/PM2/PM3/PM4/PM5/PM6(300s)"
 ROUTE_PAIR12 = "1道工序 · PM1/PM2(300s)"
 ROUTE_PAIR34 = "1道工序 · PM3/PM4(300s)"
 ROUTE_PAIR56 = "1道工序 · PM5/PM6(300s)"
+ROUTE_SHORT6 = "PM1/PM2/PM3/PM4/PM5/PM6(5s,Residency30s)"
+LOADLOCK_CADENCE_TEST = "6PM-5s-双相同Job-驻留30s"
 
 
 def _visit(
@@ -62,6 +66,7 @@ def _visit(
     *,
     recipe_name: str = "",
     process_time: float = 20.0,
+    residency: float = -1.0,
     after_clean_refs: Sequence[str] = (),
 ) -> Dict[str, Any]:
     """创建前端 Route 编辑器可直接展示的 IVisit。"""
@@ -75,7 +80,7 @@ def _visit(
         "weight": "{}",
         "moveTimeOffset": "{}",
         "qTimeLimit": -1,
-        "residencyConstraint": -1,
+        "residencyConstraint": float(residency),
         "beforeCleanRefs": [],
         "afterCleanRefs": list(after_clean_refs),
     }
@@ -87,6 +92,7 @@ def _stage(
     *,
     recipe_name: str = "",
     process_time: float = 20.0,
+    residency: float = -1.0,
     after_clean_refs: Sequence[str] = (),
 ) -> Dict[str, Any]:
     """创建一个候选站点共享 Recipe 参数的线性 Route Step。"""
@@ -99,6 +105,7 @@ def _stage(
                 station,
                 recipe_name=recipe_name,
                 process_time=process_time,
+                residency=residency,
                 after_clean_refs=after_clean_refs,
             )
             for station in stations
@@ -113,6 +120,7 @@ def _route(
     *,
     pre_clean_refs: Sequence[str] = (),
     periodic_clean_ref: str = "",
+    residency: float = -1.0,
 ) -> Dict[str, Any]:
     """构造 LP—双 LoadLock—若干 PM—双 LoadLock—LP 的完整路线。"""
     stages: List[Dict[str, Any]] = [
@@ -131,6 +139,7 @@ def _route(
             modules,
             recipe_name=recipe_name,
             process_time=process_time,
+            residency=residency,
             after_clean_refs=(
                 (periodic_clean_ref,)
                 if periodic_clean_ref and process_index == 1
@@ -327,6 +336,7 @@ def _four_pm_assets() -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """返回四腔矩阵新增 Route 与 Clean 模板。"""
     routes = [
         _route(ROUTE_PM12, [(("PM1", "PM2"), 120)]),
+        _route(ROUTE_PM123, [(("PM1", "PM2", "PM3"), 120)]),
         _route(ROUTE_PM34, [(("PM3", "PM4"), 120)]),
         _route(ROUTE_PM1, [(("PM1",), 40)]),
         _route(ROUTE_ALL4, [(("PM1", "PM2", "PM3", "PM4"), 120)]),
@@ -385,22 +395,35 @@ def _single_two_job_tests() -> List[Dict[str, Any]]:
         ("异构无公共腔", ROUTE_PM1, ROUTE_PM3_PM4),
         ("异构共享PM3", ROUTE_PM1_PM3, ROUTE_PM2_PM3),
     )
-    return [
-        _test(
-            f"S2-{label}-N{wafer_count}",
-            SINGLE_TWO_JOB_GROUP,
-            [_round(
-                0,
-                (
-                    _pjob(left_route, "LP1", wafer_count),
-                    _pjob(right_route, "LP2", wafer_count),
-                ),
-                separate_cjobs=True,
-            )],
-        )
-        for label, left_route, right_route in categories
-        for wafer_count in WAFER_COUNTS
-    ]
+    tests: List[Dict[str, Any]] = []
+    for label, left_route, right_route in categories:
+        for wafer_count in WAFER_COUNTS:
+            if label == "同Job" and wafer_count == 15:
+                tests.append(_test(
+                    "t1",
+                    SINGLE_TWO_JOB_GROUP,
+                    [_round(
+                        0,
+                        (
+                            _pjob(ROUTE_PM123, "LP1", 12),
+                            _pjob(ROUTE_PM123, "LP1", 12),
+                        ),
+                    )],
+                ))
+                continue
+            tests.append(_test(
+                f"S2-{label}-N{wafer_count}",
+                SINGLE_TWO_JOB_GROUP,
+                [_round(
+                    0,
+                    (
+                        _pjob(left_route, "LP1", wafer_count),
+                        _pjob(right_route, "LP2", wafer_count),
+                    ),
+                    separate_cjobs=True,
+                )],
+            ))
+    return tests
 
 
 def _r2_three_job_tests() -> List[Dict[str, Any]]:
@@ -484,7 +507,7 @@ def _r10_stability_test() -> Dict[str, Any]:
 
 
 def _six_pm_assets() -> List[Dict[str, Any]]:
-    """返回独立六腔设备使用的完整路线和三条双腔路线。"""
+    """返回六腔设备的长工艺路线、拆分路线和短工艺驻留路线。"""
     return [
         _route(
             ROUTE_FULL6,
@@ -493,6 +516,14 @@ def _six_pm_assets() -> List[Dict[str, Any]]:
         _route(ROUTE_PAIR12, [(("PM1", "PM2"), 300)]),
         _route(ROUTE_PAIR34, [(("PM3", "PM4"), 300)]),
         _route(ROUTE_PAIR56, [(("PM5", "PM6"), 300)]),
+        {
+            **_route(
+                ROUTE_SHORT6,
+                [(("PM1", "PM2", "PM3", "PM4", "PM5", "PM6"), 5)],
+                residency=30,
+            ),
+            "group": LOADLOCK_CADENCE_GROUP,
+        },
     ]
 
 
@@ -551,6 +582,24 @@ def _six_pm_tests() -> List[Dict[str, Any]]:
             LONG_QUALITY_GROUP,
             rounds,
         ))
+    cadence_test = _test(
+        LOADLOCK_CADENCE_TEST,
+        LOADLOCK_CADENCE_GROUP,
+        [_round(
+            0,
+            (
+                _pjob(ROUTE_SHORT6, "LP1", 12),
+                _pjob(ROUTE_SHORT6, "LP2", 12),
+            ),
+            separate_cjobs=True,
+        )],
+    )
+    cadence_test["strategy"] = "heuristic"
+    cadence_test["options"] = {
+        "loadLockManager": "exchange-look",
+        "loadLockExchange": "enabled",
+    }
+    tests.append(cadence_test)
     return tests
 
 
@@ -647,7 +696,11 @@ def seed_workspace_matrix(
     six_device_id = str(six_device["id"])
     _ensure_groups(
         six_device_id,
-        (ROUTE_DECOMPOSITION_GROUP, LONG_QUALITY_GROUP),
+        (
+            ROUTE_DECOMPOSITION_GROUP,
+            LONG_QUALITY_GROUP,
+            LOADLOCK_CADENCE_GROUP,
+        ),
         store_path,
     )
     refreshed_six = scheduler_server.get_workspace_device(

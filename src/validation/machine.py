@@ -139,6 +139,9 @@ class RobotAction:
     move_preview: Tuple[Mapping[str, Any], ...]
     wafer_id: int
     stage_index: int
+    flow_kind: str = "internal"
+    residency_deadline: Optional[float] = None
+    projected_ready_time: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -182,6 +185,7 @@ class Machine:
         init_data: 初始接口快照或现有 ``MachineState``。
         current_time: 本轮排程的绝对起点。
         initial_move_id: 新生成 MoveID 的前一个值。
+        allow_loadlock_exchange: 是否向策略暴露同门反向交换候选。
 
     调度策略不应修改 ``state``，也不应自行生成门、压力或加工 Move。
     """
@@ -193,6 +197,7 @@ class Machine:
         *,
         current_time: float = 0.0,
         initial_move_id: int = 0,
+        allow_loadlock_exchange: bool = True,
     ) -> None:
         self.task = task
         self.state = MachineState.from_sources(task, init_data)
@@ -209,6 +214,7 @@ class Machine:
         self._replay: Any = None
         self._process_visits: Dict[tuple[str, int], int] = {}
         self._post_clean_scheduled = False
+        self._allow_loadlock_exchange = bool(allow_loadlock_exchange)
         self._apply_runtime_availability()
         self._schedule_pre_cleaning()
         self._schedule_pending_services()
@@ -333,6 +339,16 @@ class Machine:
                 continue
             if location_kind == "robot" and owner_name != robot.name:
                 continue
+            if (
+                location_kind == "station"
+                and any(
+                    held_material is not None
+                    for held_material in robot.hands.values()
+                )
+            ):
+                # 双臂只用于原子换片，不允许把两个独立搬运事务同时缓存到手上。
+                # 否则策略可能连续 Pick 两片，再连续 Place 两片，绕开 SwapMove。
+                continue
             source_station = (
                 owner_name if location_kind == "station" else robot.position
             )
@@ -406,9 +422,64 @@ class Machine:
                     already_held=location_kind == "robot",
                     swap_material=swap_material,
                     receive_robot_slot=receive_robot_slot,
+                    exchange_material=None,
+                    exchange_slot=None,
                 )
                 if action is not None:
                     actions.append(action)
+                if swap_material is not None:
+                    continue
+                exchange_partner = (
+                    self._loadlock_exchange_partner(
+                        wafer=wafer,
+                        stage_index=stage_index,
+                        robot_name=robot.name,
+                        destination=target,
+                        destination_slot=target_slot_id,
+                    )
+                    if self._allow_loadlock_exchange
+                    else None
+                )
+                if exchange_partner is None:
+                    continue
+                exchange_slot, exchange_material = exchange_partner
+                exchange_receive_robot_slot = (
+                    next(
+                        (
+                            hand_slot
+                            for hand_slot, hand_material in sorted(
+                                robot.hands.items()
+                            )
+                            if (
+                                hand_slot != int(robot_slot)
+                                and hand_material is None
+                            )
+                        ),
+                        None,
+                    )
+                    if robot.can_swap
+                    else None
+                )
+                if robot.can_swap and exchange_receive_robot_slot is None:
+                    continue
+                exchange_action = self._preview_transfer(
+                    wafer=wafer,
+                    stage_index=stage_index,
+                    robot_name=robot.name,
+                    robot_slot=int(robot_slot),
+                    material=material,
+                    source_station=source_station,
+                    source_slot=source_slot,
+                    destination_station=str(destination),
+                    destination_slot=target_slot_id,
+                    already_held=location_kind == "robot",
+                    swap_material=None,
+                    receive_robot_slot=exchange_receive_robot_slot,
+                    exchange_material=exchange_material,
+                    exchange_slot=exchange_slot,
+                )
+                if exchange_action is not None:
+                    actions.append(exchange_action)
         actions.sort(
             key=lambda action: (
                 action.earliest_start,
@@ -645,6 +716,7 @@ class Machine:
         cloned._replay = None
         cloned._process_visits = deepcopy(self._process_visits)
         cloned._post_clean_scheduled = self._post_clean_scheduled
+        cloned._allow_loadlock_exchange = self._allow_loadlock_exchange
         return cloned
 
     def replace_problem(self, task: Problem, *, current_time: float) -> None:
@@ -841,6 +913,8 @@ class Machine:
         already_held: bool,
         swap_material: Optional[MaterialState],
         receive_robot_slot: Optional[int],
+        exchange_material: Optional[MaterialState],
+        exchange_slot: Optional[int],
     ) -> Optional[RobotAction]:
         """在隔离资源日历上计算一个搬运意图的完整 Move 预览。"""
         robot = self.state.resolve_robot(robot_name)
@@ -965,6 +1039,11 @@ class Machine:
             float(destination.transfer_busy_until),
             float(destination.environment_busy_until),
             float(destination.slots[destination_slot].busy_until),
+            (
+                float(destination.slots[exchange_slot].busy_until)
+                if exchange_slot is not None
+                else 0.0
+            ),
         )
         if robot_position and robot_position != destination_station:
             duration = self._durations.move(robot_name)
@@ -1013,13 +1092,21 @@ class Machine:
                 PJobName=[material.pjob_name],
                 RelatedActionType=(
                     RELATED_ACTION_SWAP
-                    if swap_material is not None
+                    if (
+                        swap_material is not None
+                        or (
+                            exchange_material is not None
+                            and receive_robot_slot is not None
+                        )
+                    )
                     else RELATED_ACTION_PLACE
                 ),
                 RelatedRobotType=self._related_robot_type(robot_name),
             )
             cursor += duration
-        if swap_material is None:
+        if swap_material is None and (
+            exchange_material is None or receive_robot_slot is None
+        ):
             duration = self._durations.place_t(robot_name, destination_station)
             emit(
                 PLACE_MOVE,
@@ -1035,8 +1122,39 @@ class Machine:
                 PJobName=[material.pjob_name],
                 StepID=stage_index + 1,
             )
+            cursor += duration
+            if exchange_material is not None:
+                if exchange_slot is None:
+                    return None
+                duration = self._durations.pick_t(robot_name, destination_station)
+                emit(
+                    PICK_MOVE,
+                    cursor,
+                    cursor + duration,
+                    ModuleName=robot_name,
+                    Robot=robot_name,
+                    RobotSlotList=[robot_slot],
+                    SlotList=[exchange_slot],
+                    SrcStationList=[destination_station],
+                    SrcSlotList=[exchange_slot],
+                    MatIDList=[exchange_material.material_id],
+                    PJobName=[exchange_material.pjob_name],
+                )
+                cursor += duration
         else:
             if receive_robot_slot is None:
+                return None
+            station_send_slot = (
+                exchange_slot
+                if exchange_material is not None
+                else destination_slot
+            )
+            station_send_material = (
+                exchange_material
+                if exchange_material is not None
+                else swap_material
+            )
+            if station_send_slot is None or station_send_material is None:
                 return None
             duration = (
                 self._durations.place_t(robot_name, destination_station)
@@ -1048,23 +1166,29 @@ class Machine:
                 cursor + duration,
                 ModuleName=robot_name,
                 Robot=robot_name,
-                SlotList=[destination_slot],
-                MatIDList=[swap_material.material_id, material.material_id],
-                PJobName=[swap_material.pjob_name, material.pjob_name],
+                SlotList=[destination_slot, station_send_slot],
+                MatIDList=[
+                    station_send_material.material_id,
+                    material.material_id,
+                ],
+                PJobName=[
+                    station_send_material.pjob_name,
+                    material.pjob_name,
+                ],
                 StepIDList=[
-                    swap_material.step_id,
+                    station_send_material.step_id,
                     stage_index + 1,
                 ],
                 StationList=[destination_station, destination_station],
                 StnRecvSlotList=[destination_slot],
-                StnSendSlotList=[destination_slot],
-                RecvMatList=[swap_material.material_id],
+                StnSendSlotList=[station_send_slot],
+                RecvMatList=[station_send_material.material_id],
                 SendMatList=[material.material_id],
                 RecvSlotList=[receive_robot_slot],
                 SendSlotList=[robot_slot],
                 SwapMode=0,
             )
-        cursor += duration
+            cursor += duration
         if not is_doorless_station(destination_station):
             duration = self._durations.place_post(robot_name, destination_station)
             emit(
@@ -1074,8 +1198,16 @@ class Machine:
                 ModuleName=destination_station,
                 Station=destination_station,
                 SlotList=[destination_slot],
-                MatIDList=[material.material_id],
-                PJobName=[material.pjob_name],
+                MatIDList=(
+                    [material.material_id, exchange_material.material_id]
+                    if exchange_material is not None
+                    else [material.material_id]
+                ),
+                PJobName=(
+                    [material.pjob_name, exchange_material.pjob_name]
+                    if exchange_material is not None
+                    else [material.pjob_name]
+                ),
             )
             cursor += duration
         transfer_finish = cursor
@@ -1088,16 +1220,39 @@ class Machine:
             cursor,
             stage_index + 1,
         )
+        projected_ready_time = max(
+            (float(move.get("EndTime") or transfer_finish) for move in moves),
+            default=float(transfer_finish),
+        )
         action_id = (
             f"r{self._revision}:w{wafer.wid}:s{stage_index}:"
             f"{robot_name}:{source_station or 'held'}:{destination_station}:"
             f"{destination_slot}"
+            + (
+                f":exchange:{exchange_material.material_id}"
+                if exchange_material is not None
+                else ""
+            )
         )
+        source_stage = wafer.stages[stage_index]
+        residency_deadline = None
+        if (
+            source_stage.stage_type == "process"
+            and float(source_stage.residency) > 0.0
+            and source_station is not None
+            and source_slot is not None
+        ):
+            residency_deadline = (
+                float(self.state.stations[source_station].slots[source_slot].busy_until)
+                + float(source_stage.residency)
+            )
         return RobotAction(
             revision=self._revision,
             action_id=action_id,
             kind=(
-                "swap"
+                "ll_exchange"
+                if exchange_material is not None
+                else "swap"
                 if swap_material is not None
                 else "held_place"
                 if already_held
@@ -1105,7 +1260,9 @@ class Machine:
             ),
             robot=robot_name,
             material_ids=(
-                (material.material_id, swap_material.material_id)
+                (material.material_id, exchange_material.material_id)
+                if exchange_material is not None
+                else (material.material_id, swap_material.material_id)
                 if swap_material is not None
                 else (material.material_id,)
             ),
@@ -1121,11 +1278,78 @@ class Machine:
             earliest_start=(
                 float(first_start) if first_start is not None else self.current_time
             ),
-            finish_time=float(transfer_finish),
+            finish_time=projected_ready_time,
             move_preview=tuple(_freeze(move) for move in moves),
             wafer_id=int(wafer.wid),
             stage_index=stage_index,
+            flow_kind=self._action_flow_kind(
+                following,
+                exchange=exchange_material is not None,
+            ),
+            residency_deadline=residency_deadline,
+            projected_ready_time=projected_ready_time,
         )
+
+    def _loadlock_exchange_partner(
+        self,
+        *,
+        wafer: Wafer,
+        stage_index: int,
+        robot_name: str,
+        destination: Any,
+        destination_slot: int,
+    ) -> Optional[tuple[int, MaterialState]]:
+        """寻找可在同一次 LoadLock 开门内反向取出的晶圆。
+
+        交换的主晶圆先放入空逻辑槽，反向晶圆再由同一只已经空出的手取走，
+        因此单臂 Robot 也能执行。两片晶圆必须位于相反的 LoadLock 方向，
+        且反向晶圆的下一跳确实由当前 Robot 搬运。
+        """
+        following = wafer.stages[stage_index + 1]
+        if (
+            not isinstance(destination, LoadLockState)
+            or following.stage_type != "loadlock"
+            or following.ll_type not in {"entry", "exit"}
+        ):
+            return None
+        opposite_direction = "exit" if following.ll_type == "entry" else "entry"
+        for slot_id, slot in sorted(destination.slots.items()):
+            partner = slot.material
+            if (
+                slot_id == destination_slot
+                or partner is None
+                or slot.phase is not SlotPhase.COMPLETED
+            ):
+                continue
+            partner_wafer = self._wafer_by_material.get(partner.material_id)
+            if partner_wafer is None:
+                continue
+            partner_stage_index = self._stage_index(
+                partner_wafer,
+                partner,
+                destination.name,
+            )
+            if partner_stage_index >= len(partner_wafer.transports):
+                continue
+            partner_stage = partner_wafer.stages[partner_stage_index]
+            if (
+                partner_stage.stage_type == "loadlock"
+                and partner_stage.ll_type == opposite_direction
+                and str(partner_wafer.transports[partner_stage_index]) == robot_name
+            ):
+                return slot_id, partner
+        return None
+
+    @staticmethod
+    def _action_flow_kind(stage: Stage, *, exchange: bool) -> str:
+        """把 LoadLock 搬运标成策略可直接识别的流向。"""
+        if stage.stage_type != "loadlock":
+            return "internal"
+        if stage.ll_type == "entry":
+            return "atmosphere_exchange" if exchange else "feed"
+        if stage.ll_type == "exit":
+            return "vacuum_exchange" if exchange else "drain"
+        return "internal"
 
     def _append_environment_setup(
         self,
@@ -1261,6 +1485,25 @@ class Machine:
         destination = self.state.stations[action.destination_station]
         target_slot = destination.slots[action.destination_slot]
         outgoing_material = target_slot.material if action.kind == "swap" else None
+        exchange_wafer = (
+            self._wafer_by_material.get(action.material_ids[1])
+            if action.kind == "ll_exchange" and len(action.material_ids) > 1
+            else None
+        )
+        exchanged_state: Optional[MaterialState] = None
+        if exchange_wafer is not None:
+            for slot_id, slot in destination.slots.items():
+                if (
+                    slot_id != action.destination_slot
+                    and slot.material is not None
+                    and slot.material.material_id == action.material_ids[1]
+                ):
+                    exchanged_state = slot.material
+                    slot.material = None
+                    slot.phase = SlotPhase.EMPTY
+                    slot.busy_until = max(slot.busy_until, action.finish_time)
+                    slot.busy_action = ""
+                    break
         target_slot.material = MaterialState(
             material.material_id,
             material.pjob_name,
@@ -1286,6 +1529,15 @@ class Machine:
                 send_slot, receive_slot = action.robot_slots
                 robot.hands[send_slot] = None
                 robot.hands[receive_slot] = outgoing_material
+            elif action.kind == "ll_exchange" and exchanged_state is not None:
+                send_slot = action.robot_slots[0]
+                receive_slot = (
+                    action.robot_slots[1]
+                    if len(action.robot_slots) > 1
+                    else send_slot
+                )
+                robot.hands[send_slot] = None
+                robot.hands[receive_slot] = exchanged_state
             robot.position = action.destination_station
             robot.busy_until = max(
                 robot.busy_until,
@@ -1330,7 +1582,11 @@ class Machine:
                         float(move.get("EndTime") or 0.0)
                         for move in committed_moves
                         if (
-                            move.get("MoveType") in {PICK_MOVE, PLACE_MOVE}
+                            move.get("MoveType") in {
+                                PICK_MOVE,
+                                PLACE_MOVE,
+                                SWAP_MOVE,
+                            }
                             and station_name
                             in {
                                 *(str(value) for value in move.get("SrcStationList") or []),
