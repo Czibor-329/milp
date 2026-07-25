@@ -398,6 +398,13 @@ class Machine:
                         or outgoing_wafer.transports[outgoing_stage] != robot.name
                     ):
                         continue
+                    if self._periodic_clean_due_stage(
+                        target_slot.material,
+                        str(destination),
+                    ) is not None:
+                        # 下一片离腔即触发清洁时禁止补片；先把旧片送往下游，
+                        # 待 PM 空腔清洁完成后再允许新片进入。
+                        continue
                     receive_robot_slot = next(
                         (
                             hand_slot
@@ -443,6 +450,10 @@ class Machine:
                 if exchange_partner is None:
                     continue
                 exchange_slot, exchange_material = exchange_partner
+                if self._material_waits_for_pending_clean(exchange_material):
+                    # 下一目标 PM 即将或正在清洁时，不借 LoadLock exchange
+                    # 把待加工片提前取到 Robot 手上；让它继续停在 LoadLock。
+                    continue
                 exchange_receive_robot_slot = (
                     next(
                         (
@@ -534,7 +545,7 @@ class Machine:
             committed_moves.append(move)
         self._moves.extend(committed_moves)
         self._apply_projected_action(action, committed_moves)
-        self._schedule_periodic_cleaning(action)
+        self._schedule_periodic_cleaning(action, committed_moves)
         self._committed_action_count += 1
         self._revision += 1
         self._current_actions = {}
@@ -1120,7 +1131,7 @@ class Machine:
                 DestSlotList=[destination_slot],
                 MatIDList=[material.material_id],
                 PJobName=[material.pjob_name],
-                StepID=stage_index + 1,
+                StepIDList=[stage_index + 1],
             )
             cursor += duration
             if exchange_material is not None:
@@ -1179,6 +1190,8 @@ class Machine:
                     station_send_material.step_id,
                     stage_index + 1,
                 ],
+                RecvMatStepIDList=[station_send_material.step_id],
+                SendMatStepIDList=[stage_index + 1],
                 StationList=[destination_station, destination_station],
                 StnRecvSlotList=[destination_slot],
                 StnSendSlotList=[station_send_slot],
@@ -1758,8 +1771,111 @@ class Machine:
                     recipe=str(clean.recipe or ""),
                 )
 
-    def _schedule_periodic_cleaning(self, action: RobotAction) -> None:
-        """物料离开触发工序后，自动追加 dummy-WAC 或周期 WAC。"""
+    def _periodic_clean_due_stage(
+        self,
+        material: MaterialState,
+        station_name: str,
+    ) -> Optional[Stage]:
+        """返回物料离开指定 PM 时即将触发的周期清洁工序。"""
+        wafer = self._wafer_by_material.get(material.material_id)
+        if wafer is None:
+            return None
+        stage_index = self._stage_index(wafer, material, station_name)
+        if stage_index >= len(wafer.stages):
+            return None
+        stage = wafer.stages[stage_index]
+        if (
+            stage.stage_type != "process"
+            or float(stage.clean_time) <= TIME_TOLERANCE
+            or int(stage.clean_trigger) <= 0
+        ):
+            return None
+        key = (station_name, int(stage.slot) + FIRST_SLOT_ID)
+        next_visits = self._process_visits.get(key, 0) + 1
+        return (
+            stage
+            if next_visits % int(stage.clean_trigger) == 0
+            else None
+        )
+
+    def _material_waits_for_pending_clean(
+        self,
+        material: MaterialState,
+    ) -> bool:
+        """判断 LoadLock 中的待加工片是否应留置，等待下一目标 PM 清洁。"""
+        wafer = self._wafer_by_material.get(material.material_id)
+        if wafer is None:
+            return False
+        location = self._material_locations().get(material.material_id)
+        if location is None:
+            return False
+        stage_index = self._stage_index(wafer, material, location[1])
+        if stage_index >= len(wafer.stages) - 1:
+            return False
+        following = wafer.stages[stage_index + 1]
+        if following.stage_type != "process":
+            return False
+        station = self.state.stations.get(str(following.chamber))
+        if station is None:
+            return False
+        slot_id = int(following.slot) + FIRST_SLOT_ID
+        slot = station.slots.get(slot_id)
+        if slot is None:
+            return False
+        if slot.material is not None:
+            return (
+                self._periodic_clean_due_stage(
+                    slot.material,
+                    station.name,
+                )
+                is not None
+            )
+        return (
+            slot.phase is SlotPhase.CLEANED
+            and float(slot.busy_until) > self.current_time + TIME_TOLERANCE
+        )
+
+    def _schedule_departure_cleaning(
+        self,
+        wafer: Wafer,
+        stage_index: int,
+        station_name: Optional[str],
+    ) -> None:
+        """记录一次离腔，并在需要时追加 dummy-WAC 或周期 WAC。"""
+        if not station_name or stage_index >= len(wafer.stages):
+            return
+        stage = wafer.stages[stage_index]
+        if wafer.pjob_name in self.task.dummy_owner:
+            for clean in self.task.dummy_wac:
+                if station_name in clean.visits:
+                    self._schedule_empty_clean(
+                        station_name,
+                        float(clean.time),
+                        recipe=str(clean.recipe or ""),
+                    )
+        if (
+            stage.stage_type != "process"
+            or float(stage.clean_time) <= TIME_TOLERANCE
+            or int(stage.clean_trigger) <= 0
+        ):
+            return
+        key = (station_name, int(stage.slot) + FIRST_SLOT_ID)
+        visits = self._process_visits.get(key, 0) + 1
+        self._process_visits[key] = visits
+        if visits % int(stage.clean_trigger) != 0:
+            return
+        self._schedule_empty_clean(
+            station_name,
+            float(stage.clean_time),
+            recipe=str(stage.clean_recipe or ""),
+        )
+
+    def _schedule_periodic_cleaning(
+        self,
+        action: RobotAction,
+        committed_moves: Sequence[Mapping[str, Any]],
+    ) -> None:
+        """统计普通搬运和 Swap 换出片，并安排对应的离腔清洁。"""
         wafer = next(
             (
                 item
@@ -1768,33 +1884,42 @@ class Machine:
             ),
             None,
         )
-        if wafer is None or action.stage_index >= len(wafer.stages):
+        # 只有本动作真实执行了源站 Pick 才计一次离腔。Swap/LoadLock exchange
+        # 换出的物料随后仍在 Robot 手上，后续放片动作不能重复计数。
+        primary_material_id = action.material_ids[0]
+        primary_departed_source = any(
+            move.get("MoveType") == PICK_MOVE
+            and primary_material_id in (move.get("MatIDList") or [])
+            and action.source_station
+            in {
+                str(station)
+                for station in (move.get("SrcStationList") or [])
+            }
+            for move in committed_moves
+        )
+        if wafer is not None and primary_departed_source:
+            self._schedule_departure_cleaning(
+                wafer,
+                action.stage_index,
+                action.source_station,
+            )
+        if action.kind != "swap" or len(action.material_ids) < 2:
             return
-        stage = wafer.stages[action.stage_index]
-        if action.source_station and wafer.pjob_name in self.task.dummy_owner:
-            for clean in self.task.dummy_wac:
-                if action.source_station in clean.visits:
-                    self._schedule_empty_clean(
-                        action.source_station,
-                        float(clean.time),
-                        recipe=str(clean.recipe or ""),
-                    )
-        if (
-            stage.stage_type != "process"
-            or float(stage.clean_time) <= TIME_TOLERANCE
-            or int(stage.clean_trigger) <= 0
-            or not action.source_station
-        ):
+        outgoing_id = action.material_ids[1]
+        outgoing_wafer = self._wafer_by_material.get(outgoing_id)
+        outgoing_location = self._material_locations().get(outgoing_id)
+        if outgoing_wafer is None or outgoing_location is None:
             return
-        key = (action.source_station, int(stage.slot) + FIRST_SLOT_ID)
-        visits = self._process_visits.get(key, 0) + 1
-        self._process_visits[key] = visits
-        if visits % int(stage.clean_trigger) != 0:
-            return
-        self._schedule_empty_clean(
-            action.source_station,
-            float(stage.clean_time),
-            recipe=str(stage.clean_recipe or ""),
+        outgoing_material = outgoing_location[3]
+        outgoing_stage_index = self._stage_index(
+            outgoing_wafer,
+            outgoing_material,
+            action.destination_station,
+        )
+        self._schedule_departure_cleaning(
+            outgoing_wafer,
+            outgoing_stage_index,
+            action.destination_station,
         )
 
     def _related_robot_type(self, robot_name: str) -> int:

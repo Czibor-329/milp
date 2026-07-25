@@ -784,11 +784,29 @@ def _start_swap(
         _reserve_slot(station_send_slot, end_time, "换片")
 
     def complete() -> None:
-        _set_slot(station_receive_slot, SlotPhase.UNPROCESSED, _material_with_move_metadata(robot_send_material, move))
+        send_step_ids = as_list(dict(move), "SendMatStepIDList")
+        receive_step_ids = as_list(dict(move), "RecvMatStepIDList")
+        _set_slot(
+            station_receive_slot,
+            SlotPhase.UNPROCESSED,
+            _material_with_move_metadata(
+                robot_send_material,
+                move,
+                explicit_step_id=send_step_ids[0] if send_step_ids else None,
+            ),
+        )
         if station_send_slot is not station_receive_slot:
             _set_slot(station_send_slot, SlotPhase.EMPTY, None)
         robot.hands[robot_send_slot] = None
-        robot.hands[robot_receive_slot] = station_send_material
+        robot.hands[robot_receive_slot] = _material_with_move_metadata(
+            station_send_material,
+            move,
+            explicit_step_id=(
+                receive_step_ids[0]
+                if receive_step_ids
+                else None
+            ),
+        )
         robot.position = station_name
 
     _schedule(scheduled, move, end_time, complete)
@@ -983,10 +1001,39 @@ def _material_matches(material: Optional[MaterialState], material_id: Any) -> bo
     return material is not None and (material_id is None or material.material_id == material_id)
 
 
-def _material_with_move_metadata(material: MaterialState, move: Mapping[str, Any]) -> MaterialState:
-    """复制转移物料，并在 Move 明示时更新步骤和 PJob 元数据。"""
-    pjob = _first_text(move, "PJobName") or material.pjob_name
-    step_id = _first_value(move, "StepIDList")
+def _material_with_move_metadata(
+    material: MaterialState,
+    move: Mapping[str, Any],
+    *,
+    explicit_step_id: Any = None,
+) -> MaterialState:
+    """按 MatIDList 对齐复制物料元数据，并兼容旧版单值 StepID。"""
+    material_ids = as_list(dict(move), "MatIDList")
+    material_index = next(
+        (
+            index
+            for index, material_id in enumerate(material_ids)
+            if material_id == material.material_id
+        ),
+        0,
+    )
+    pjob_names = as_list(dict(move), "PJobName")
+    pjob = (
+        str(pjob_names[material_index])
+        if material_index < len(pjob_names) and pjob_names[material_index]
+        else material.pjob_name
+    )
+    step_ids = as_list(dict(move), "StepIDList")
+    aligned_step_id = (
+        step_ids[material_index]
+        if material_index < len(step_ids)
+        else move.get("StepID")
+    )
+    step_id = (
+        explicit_step_id
+        if explicit_step_id is not None
+        else aligned_step_id
+    )
     return MaterialState(material.material_id, pjob, material.step_id if step_id is None else step_id)
 
 

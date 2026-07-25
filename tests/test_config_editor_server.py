@@ -1068,6 +1068,17 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("Promise.allSettled", viewer)
         self.assertNotIn('id="recipeList"', html)
 
+    def test_gantt_cleaning_process_uses_sky_blue(self) -> None:
+        """甘特图应把无片或带清洁元数据的 ProcessMove 显示为天蓝色。"""
+        viewer = (
+            ROOT / "realtime_scheduler" / "frontend" / "movelist_gantt_viewer.html"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('const CLEAN_PROCESS_COLOR = "#38BDF8";', viewer)
+        self.assertIn("function isCleaningProcess(raw)", viewer)
+        self.assertIn("explicitlyEmpty || cleanMetadata", viewer)
+        self.assertIn("if (isCleaningProcess(bar.rec.raw))", viewer)
+
     def test_run_results_use_main_area_responsive_grid(self) -> None:
         """运行结果应位于重算任务下方，右栏只保留运行控制。"""
         html = _editor_source()

@@ -1249,6 +1249,7 @@
     const SUBLANE_SUFFIX = "\u0000sub";
     const CL_GROUP_SUB_KEY = "CL" + SUBLANE_SUFFIX;
     const NO_SLOT_SPLIT_MODULES = new Set(["LP", "LP_done"]);
+    const CLEAN_PROCESS_COLOR = "#38BDF8";
 
     const S = {
       MOVETYPE_NAMES: {
@@ -2811,7 +2812,22 @@
       return _ppColorMap.get(key);
     }
 
+    function isCleaningProcess(raw) {
+      if (Number.parseInt(raw && raw.MoveType, 10) !== 9) return false;
+      const materialIds = raw && raw.MatIDList;
+      const explicitlyEmpty = Array.isArray(materialIds) && materialIds.length === 0;
+      const cleanMetadata = [
+        raw && raw.CleanRecipe,
+        raw && raw.CleanTaskName,
+        raw && raw.RecipeName
+      ].some((value) => /clean|wac/i.test(String(value || "")));
+      return explicitlyEmpty || cleanMetadata;
+    }
+
     function effectiveMoveColor(bar) {
+      if (isCleaningProcess(bar.rec.raw)) {
+        return CLEAN_PROCESS_COLOR;
+      }
       if (bar.moveType === 10) {
         return prePrepareColor(bar.rec.raw);
       }

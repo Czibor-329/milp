@@ -277,7 +277,29 @@ class RealtimeRescheduler:
             cutoff,
             reuse_machine=True,
         )
-        new_segment, self._next_move_id = _renumber_segment(new_segment, self._next_move_id)
+        if self._machine is not None:
+            # Machine 会从全部历史及已取消计划的最大 MoveID 后继续编号。
+            # 这里若再次重编号，对外通知的 MoveID 将无法映射回 Machine
+            # 内部计划，下一轮回放会把通知应用到错误动作。
+            new_segment = [
+                {**dict(move), "PreMoveID": []}
+                for move in sorted(new_segment, key=sort_key)
+            ]
+            self._next_move_id = max(
+                self._next_move_id,
+                max(
+                    (
+                        int(move.get("MoveID") or 0)
+                        for move in new_segment
+                    ),
+                    default=self._next_move_id - 1,
+                ) + 1,
+            )
+        else:
+            new_segment, self._next_move_id = _renumber_segment(
+                new_segment,
+                self._next_move_id,
+            )
 
         self.problem = combined_problem
         self._committed_recovery_end = max(

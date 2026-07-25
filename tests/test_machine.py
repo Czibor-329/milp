@@ -13,6 +13,7 @@ from src.schedule.machine_policy import (
 )
 from src.schedule.realtime import _build_recompute_problem
 from src.validation import validate_move_list
+from src.validation.replay import MoveStateReplay
 from src.validation.move_fields import (
     COMPLETE_MOVE,
     PICK_MOVE,
@@ -352,6 +353,42 @@ class MachineTests(unittest.TestCase):
         self.assertIsNone(machine.state.stations["LL"].slots[1].material)
         self.assertEqual(2, machine.state.robots["VTR"].hands[1].material_id)
 
+    def test_pending_periodic_clean_keeps_incoming_wafer_in_loadlock(self) -> None:
+        """PM 下一片出腔触发清洁时，LoadLock exchange 不应提前取走待加工片。"""
+        outgoing = _loadlock_wafer(0, 1, source_slot=0)
+        incoming = _loadlock_wafer(1, 2, source_slot=1)
+        outgoing.stages[2].clean_time = 2.0
+        outgoing.stages[2].clean_trigger = 3
+        outgoing.stages[2].clean_recipe = "Periodic"
+        problem = _loadlock_problem([outgoing, incoming])
+        initial = MachineState.from_sources(problem, None)
+        initial.stations["LP"].slots[1] = SlotState()
+        initial.stations["LP"].slots[2] = SlotState()
+        initial.stations["LL"].slots[1] = SlotState(
+            SlotPhase.COMPLETED,
+            MaterialState(2, "P", 1),
+        )
+        initial.stations["PM"].slots[1] = SlotState(
+            SlotPhase.COMPLETED,
+            MaterialState(1, "P", 2),
+            busy_until=5.0,
+        )
+        initial.stations["LL"].environment = "VAC"  # type: ignore[union-attr]
+        machine = Machine(problem, initial)
+        machine._process_visits[("PM", 1)] = 2
+
+        outgoing_actions = [
+            action
+            for action in machine.get_robot_actions()
+            if action.material_ids[0] == 1
+        ]
+
+        self.assertEqual(["transfer"], [action.kind for action in outgoing_actions])
+        self.assertEqual(
+            2,
+            machine.state.stations["LL"].slots[1].material.material_id,
+        )
+
     def test_dual_arm_vtr_loadlock_exchange_is_atomic_swap(self) -> None:
         """双臂 VTR 的 LoadLock 交换必须导出单个 Swap，而非连续 Place/Pick。"""
         outgoing = _loadlock_wafer(0, 1, source_slot=0)
@@ -536,7 +573,163 @@ class MachineTests(unittest.TestCase):
         moves = [dict(move) for move in result.moves]
 
         self.assertIn(4, [move["MoveType"] for move in moves])
+        self.assertTrue(all(
+            move.get("StepIDList")
+            for move in moves
+            if move.get("MoveType") == PLACE_MOVE
+            and move.get("MatIDList")
+        ))
         self.assertEqual([], validate_move_list(problem, moves))
+
+    def test_periodic_clean_counts_swap_departures_and_cleans_before_place(self) -> None:
+        """Swap 换出片应参与 WAC 计数，触发时必须先空腔清洁再放下一片。"""
+        wafers = [
+            Wafer(
+                index,
+                index + 1,
+                "periodic-clean-swap",
+                index,
+                [
+                    Stage(
+                        0,
+                        "LP",
+                        "source",
+                        0.0,
+                        "",
+                        "R",
+                        -1.0,
+                        slot=index,
+                    ),
+                    Stage(
+                        1,
+                        "PM",
+                        "process",
+                        5.0,
+                        "R",
+                        "R",
+                        -1.0,
+                        clean_time=2.0,
+                        clean_trigger=2,
+                        clean_recipe="Periodic",
+                    ),
+                    Stage(
+                        2,
+                        "LP",
+                        "sink",
+                        0.0,
+                        "R",
+                        "",
+                        -1.0,
+                        slot=index,
+                    ),
+                ],
+                ["R", "R"],
+                "Product",
+            )
+            for index in range(4)
+        ]
+        robot = _robot("R", ["LP", "PM"])
+        robot.capacity = 2
+        robot.can_swap = True
+        problem = Problem(
+            {
+                "LP": Chamber(
+                    **{
+                        **_chamber("LP", "LoadPort").__dict__,
+                        "capacity": 4,
+                    }
+                ),
+                "PM": _chamber("PM", "ProcessChamber"),
+            },
+            {"R": robot},
+            wafers,
+        )
+
+        moves = [
+            dict(move)
+            for move in Machine(problem).run(HeuristicMachineSelector()).moves
+        ]
+        periodic_cleans = [
+            move
+            for move in moves
+            if move["MoveType"] == 9
+            and not move.get("MatIDList")
+            and move.get("RecipeName") == "Periodic"
+        ]
+
+        self.assertEqual(2, len(periodic_cleans))
+        self.assertEqual([], validate_move_list(problem, moves))
+
+    def test_swap_replay_preserves_aligned_material_metadata(self) -> None:
+        """Swap 回放应分别更新换入、换出物料的 StepID 和 PJobName。"""
+        wafers = [
+            _wafer(0, 1, "LP", "PM", "R"),
+            _wafer(1, 2, "LP", "PM", "R"),
+        ]
+        robot = _robot("R", ["LP", "PM"])
+        robot.capacity = 2
+        robot.can_swap = True
+        problem = Problem(
+            {
+                "LP": Chamber(
+                    **{
+                        **_chamber("LP", "LoadPort").__dict__,
+                        "capacity": 2,
+                    }
+                ),
+                "PM": _chamber("PM", "ProcessChamber"),
+            },
+            {"R": robot},
+            wafers,
+        )
+        initial = MachineState.from_sources(problem, None)
+        initial.stations["LP"].slots[1] = SlotState()
+        initial.stations["PM"].door = DoorState.OPEN
+        initial.stations["PM"].slots[1] = SlotState(
+            SlotPhase.COMPLETED,
+            MaterialState(2, "P-out", 1),
+        )
+        initial.robots["R"].position = "PM"
+        initial.robots["R"].hands[1] = MaterialState(1, "P-in", 0)
+        initial.robots["R"].hands[2] = None
+        swap = {
+            "MoveID": 1,
+            "MoveType": SWAP_MOVE,
+            "StartTime": 0.0,
+            "EndTime": 1.0,
+            "ModuleName": "R",
+            "Robot": "R",
+            "StationList": ["PM", "PM"],
+            "StnRecvSlotList": [1],
+            "StnSendSlotList": [1],
+            "RecvSlotList": [2],
+            "SendSlotList": [1],
+            "MatIDList": [2, 1],
+            "PJobName": ["P-out", "P-in"],
+            "StepIDList": [1, 2],
+            "RecvMatList": [2],
+            "SendMatList": [1],
+            "RecvMatStepIDList": [1],
+            "SendMatStepIDList": [2],
+            "SwapMode": 0,
+        }
+        replay = MoveStateReplay(problem, [swap], initial)
+
+        replay.update_move_state({"MoveID": 1, "MoveState": 0})
+        replay.update_move_state({"MoveID": 1, "MoveState": 1})
+
+        placed = replay.state.stations["PM"].slots[1].material
+        received = replay.state.robots["R"].hands[2]
+        self.assertEqual((1, "P-in", 2), (
+            placed.material_id,
+            placed.pjob_name,
+            placed.step_id,
+        ))
+        self.assertEqual((2, "P-out", 1), (
+            received.material_id,
+            received.pjob_name,
+            received.step_id,
+        ))
 
     def test_recompute_keeps_only_running_open_and_reuses_open_door(self) -> None:
         """开门 Move 运行中重算时，不补旧搬运链也不重复打开同一扇门。"""
