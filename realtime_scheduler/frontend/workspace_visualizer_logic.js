@@ -28,14 +28,11 @@ __export(workspace_visualizer_exports, {
   summarizeBottleneckUtilization: () => summarizeBottleneckUtilization
 });
 module.exports = __toCommonJS(workspace_visualizer_exports);
-function summarizeBottleneckUtilization(performance2) {
-  if (!performance2.bottleneck) return null;
-  return {
-    resourceName: performance2.bottleneck.name,
-    utilization: performance2.bottleneck.utilization,
-    windowLabel: performance2.window.label
-  };
-}
+
+// ../analysis/movelist_performance.ts
+var PERFORMANCE_TIME_TOLERANCE = 1e-6;
+var MIDDLE_WINDOW_TRIM_RATIO = 0.1;
+var MINIMUM_STEADY_WAFERS = 4;
 var PICK_MOVE_TYPES = /* @__PURE__ */ new Set([0, 2]);
 var PLACE_MOVE_TYPES = /* @__PURE__ */ new Set([1, 3]);
 var SWAP_MOVE = 4;
@@ -44,18 +41,6 @@ var COMPLETE_MOVE = 7;
 var PROCESS_MOVE = 9;
 var PRE_PREPARE_MOVE = 10;
 var CLEAN_MOVE = 14;
-var PLAYBACK_FRAME_INTERVAL_MS = 80;
-var DEFAULT_PLAYBACK_SPEED = 4;
-var PROCESS_ARC_START_DEGREES = 200;
-var PROCESS_ARC_END_DEGREES = 340;
-var PROCESS_ARC_CENTER_X_PERCENT = 50;
-var PROCESS_ARC_CENTER_Y_PIXELS = 214;
-var PROCESS_ARC_RADIUS_X_PERCENT = 38;
-var PROCESS_ARC_RADIUS_Y_PIXELS = 156;
-var PERFORMANCE_TIME_TOLERANCE = 1e-6;
-var MIDDLE_WINDOW_TRIM_RATIO = 0.1;
-var MINIMUM_STEADY_WAFERS = 4;
-var MAXIMUM_VISIBLE_QUEUE_ITEMS = 32;
 var ACTIVITY_CATEGORIES = [
   "process",
   "clean",
@@ -64,47 +49,6 @@ var ACTIVITY_CATEGORIES = [
   "environment",
   "other"
 ];
-var ACTIVITY_CATEGORY_LABELS = {
-  process: "\u52A0\u5DE5",
-  clean: "\u6E05\u6D01",
-  door: "\u5F00\u5173\u95E8",
-  transfer: "\u53D6\u653E / \u642C\u8FD0",
-  environment: "\u62BD\u5145\u6C14",
-  other: "\u5176\u4ED6"
-};
-var MOVE_NAMES = {
-  0: "\u53D6\u7247",
-  1: "\u653E\u7247",
-  2: "\u591A\u7247\u53D6\u7247",
-  3: "\u591A\u7247\u653E\u7247",
-  4: "\u6362\u7247",
-  5: "\u673A\u68B0\u624B\u8F6C\u4F4D",
-  6: "\u5F00\u95E8",
-  7: "\u5173\u95E8",
-  8: "\u540E\u7F6E\u5B8C\u6210",
-  9: "\u52A0\u5DE5",
-  10: "\u73AF\u5883\u5207\u6362",
-  11: "\u5BF9\u51C6",
-  12: "\u62BD\u771F\u7A7A",
-  13: "\u5145\u6C14",
-  14: "\u6E05\u6D01"
-};
-var STATUS_LABELS = {
-  idle: "\u7A7A\u95F2",
-  occupied: "\u5DF2\u8F7D\u7247",
-  door: "\u95E8\u52A8\u4F5C",
-  transfer: "\u4F20\u8F93\u4E2D",
-  processing: "\u52A0\u5DE5\u4E2D",
-  cleaning: "\u6E05\u6D01\u4E2D",
-  environment: "\u73AF\u5883\u5207\u6362"
-};
-var DOOR_LABELS = {
-  closed: "\u95E8\u5DF2\u5173\u95ED",
-  opening: "\u6B63\u5728\u5F00\u95E8",
-  open: "\u95E8\u5DF2\u6253\u5F00",
-  closing: "\u6B63\u5728\u5173\u95E8",
-  doorless: "\u65E0\u95E8\u7ED3\u6784"
-};
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
@@ -114,12 +58,6 @@ function listValue(value) {
 }
 function naturalCompare(left, right) {
   return left.localeCompare(right, void 0, { numeric: true, sensitivity: "base" });
-}
-function escapeHtml(value) {
-  return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-}
-function formatSeconds(value) {
-  return Number.isFinite(value) ? value.toFixed(1) : "0.0";
 }
 function materialIds(move, field = "MatIDList") {
   return listValue(move[field]).map(String).filter(Boolean);
@@ -138,9 +76,6 @@ function isLoadPortName(name, type = "") {
 }
 function isLoadLockName(name, type = "") {
   return type.toLowerCase() === "loadlock" || /^LL?[A-Z]$/i.test(name) || /^BUF_/i.test(name);
-}
-function isDoorlessModule(name, type = "") {
-  return /^cool(er)?$/i.test(name) || type.toLowerCase() === "cooler" || isDummyPortName(name);
 }
 function isProcessModule(name, type = "") {
   const normalizedType = type.toLowerCase();
@@ -482,18 +417,154 @@ function analyzeSchedulePerformance(moves, device, mode = "steady") {
     vacuumQueueLongestRun: queuePattern.longestRun
   };
 }
+function summarizeBottleneckUtilization(performance2) {
+  if (!performance2.bottleneck) return null;
+  return {
+    resourceName: performance2.bottleneck.name,
+    utilization: performance2.bottleneck.utilization,
+    windowLabel: performance2.window.label
+  };
+}
+function displayedPerformanceResources(performance2) {
+  return performance2.resources.filter(
+    (resource) => resource.busyTime > PERFORMANCE_TIME_TOLERANCE
+  );
+}
+
+// src/workspace_visualizer.ts
+var PICK_MOVE_TYPES2 = /* @__PURE__ */ new Set([0, 2]);
+var PLACE_MOVE_TYPES2 = /* @__PURE__ */ new Set([1, 3]);
+var SWAP_MOVE2 = 4;
+var PREPARE_MOVE2 = 6;
+var COMPLETE_MOVE2 = 7;
+var PROCESS_MOVE2 = 9;
+var PRE_PREPARE_MOVE2 = 10;
+var CLEAN_MOVE2 = 14;
+var PLAYBACK_FRAME_INTERVAL_MS = 80;
+var DEFAULT_PLAYBACK_SPEED = 4;
+var PROCESS_ARC_START_DEGREES = 200;
+var PROCESS_ARC_END_DEGREES = 340;
+var PROCESS_ARC_CENTER_X_PERCENT = 50;
+var PROCESS_ARC_CENTER_Y_PIXELS = 214;
+var PROCESS_ARC_RADIUS_X_PERCENT = 38;
+var PROCESS_ARC_RADIUS_Y_PIXELS = 156;
+var MAXIMUM_VISIBLE_QUEUE_ITEMS = 32;
+var ACTIVITY_CATEGORIES2 = [
+  "process",
+  "clean",
+  "door",
+  "transfer",
+  "environment",
+  "other"
+];
+var ACTIVITY_CATEGORY_LABELS = {
+  process: "\u52A0\u5DE5",
+  clean: "\u6E05\u6D01",
+  door: "\u5F00\u5173\u95E8",
+  transfer: "\u53D6\u653E / \u642C\u8FD0",
+  environment: "\u62BD\u5145\u6C14",
+  other: "\u5176\u4ED6"
+};
+var MOVE_NAMES = {
+  0: "\u53D6\u7247",
+  1: "\u653E\u7247",
+  2: "\u591A\u7247\u53D6\u7247",
+  3: "\u591A\u7247\u653E\u7247",
+  4: "\u6362\u7247",
+  5: "\u673A\u68B0\u624B\u8F6C\u4F4D",
+  6: "\u5F00\u95E8",
+  7: "\u5173\u95E8",
+  8: "\u540E\u7F6E\u5B8C\u6210",
+  9: "\u52A0\u5DE5",
+  10: "\u73AF\u5883\u5207\u6362",
+  11: "\u5BF9\u51C6",
+  12: "\u62BD\u771F\u7A7A",
+  13: "\u5145\u6C14",
+  14: "\u6E05\u6D01"
+};
+var STATUS_LABELS = {
+  idle: "\u7A7A\u95F2",
+  occupied: "\u5DF2\u8F7D\u7247",
+  door: "\u95E8\u52A8\u4F5C",
+  transfer: "\u4F20\u8F93\u4E2D",
+  processing: "\u52A0\u5DE5\u4E2D",
+  cleaning: "\u6E05\u6D01\u4E2D",
+  environment: "\u73AF\u5883\u5207\u6362"
+};
+var DOOR_LABELS = {
+  closed: "\u95E8\u5DF2\u5173\u95ED",
+  opening: "\u6B63\u5728\u5F00\u95E8",
+  open: "\u95E8\u5DF2\u6253\u5F00",
+  closing: "\u6B63\u5728\u5173\u95E8",
+  doorless: "\u65E0\u95E8\u7ED3\u6784"
+};
+function finiteNumber2(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+function listValue2(value) {
+  return Array.isArray(value) ? value : [];
+}
+function naturalCompare2(left, right) {
+  return left.localeCompare(right, void 0, { numeric: true, sensitivity: "base" });
+}
+function escapeHtml(value) {
+  return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+function formatSeconds(value) {
+  return Number.isFinite(value) ? value.toFixed(1) : "0.0";
+}
+function materialIds2(move, field = "MatIDList") {
+  return listValue2(move[field]).map(String).filter(Boolean);
+}
+function firstStation2(move, field) {
+  return String(listValue2(move[field])[0] ?? "");
+}
+function isRobotName2(name) {
+  return /^(ATR|VTR|TM\d*|ROBOT)/i.test(name);
+}
+function isDummyPortName2(name) {
+  return /DUMMY/i.test(name) && /PORT/i.test(name);
+}
+function isLoadPortName2(name, type = "") {
+  return !isDummyPortName2(name) && (type.toLowerCase() === "loadport" || /^(LP\d*|P\d+|.*PORT)$/i.test(name));
+}
+function isLoadLockName2(name, type = "") {
+  return type.toLowerCase() === "loadlock" || /^LL?[A-Z]$/i.test(name) || /^BUF_/i.test(name);
+}
+function isDoorlessModule(name, type = "") {
+  return /^cool(er)?$/i.test(name) || type.toLowerCase() === "cooler" || isDummyPortName2(name);
+}
+function isProcessModule2(name, type = "") {
+  const normalizedType = type.toLowerCase();
+  return /process|chamber/.test(normalizedType) || /^(PM|CH)\w*/i.test(name);
+}
+function normalizeMoves2(moves) {
+  return moves.map((move, index) => {
+    const startTime = finiteNumber2(move.StartTime);
+    const endTime = Math.max(startTime, finiteNumber2(move.EndTime, startTime));
+    return {
+      ...move,
+      MoveID: finiteNumber2(move.MoveID, index + 1),
+      MoveType: finiteNumber2(move.MoveType, -1),
+      ModuleName: String(move.ModuleName ?? ""),
+      StartTime: startTime,
+      EndTime: endTime
+    };
+  }).sort((left, right) => left.StartTime - right.StartTime || left.EndTime - right.EndTime || left.MoveID - right.MoveID);
+}
 function collectModuleDefinitions(moves, device) {
   const modules = /* @__PURE__ */ new Map();
   const stationDefinitions = device?.Stations ?? {};
   for (const move of moves) {
     const candidates = [
       move.ModuleName,
-      ...listValue(move.SrcStationList),
-      ...listValue(move.DestStationList),
-      ...listValue(move.StationList)
+      ...listValue2(move.SrcStationList),
+      ...listValue2(move.DestStationList),
+      ...listValue2(move.StationList)
     ].map(String).filter(Boolean);
     for (const name of candidates) {
-      if (!isRobotName(name) && !modules.has(name)) {
+      if (!isRobotName2(name) && !modules.has(name)) {
         modules.set(name, { type: String(stationDefinitions[name]?.Type ?? "") });
       }
     }
@@ -503,50 +574,50 @@ function collectModuleDefinitions(moves, device) {
 function collectRobotNames(moves, device) {
   const names = new Set(Object.keys(device?.Robots ?? {}));
   for (const move of moves) {
-    if (isRobotName(move.ModuleName)) names.add(move.ModuleName);
+    if (isRobotName2(move.ModuleName)) names.add(move.ModuleName);
     const robot = String(move.Robot ?? "");
     if (robot) names.add(robot);
   }
-  return [...names].sort(naturalCompare);
+  return [...names].sort(naturalCompare2);
 }
 function initialMaterialLocations(moves) {
   const locations = /* @__PURE__ */ new Map();
   for (const move of moves) {
-    if (move.MoveType === SWAP_MOVE) {
-      const station = String(listValue(move.StationList)[0] ?? "");
-      for (const material of materialIds(move, "RecvMatList")) {
+    if (move.MoveType === SWAP_MOVE2) {
+      const station = String(listValue2(move.StationList)[0] ?? "");
+      for (const material of materialIds2(move, "RecvMatList")) {
         if (!locations.has(material)) locations.set(material, move.ModuleName);
       }
-      for (const material of materialIds(move, "SendMatList")) {
+      for (const material of materialIds2(move, "SendMatList")) {
         if (!locations.has(material)) locations.set(material, station);
       }
       continue;
     }
-    const source = firstStation(move, "SrcStationList");
-    const destination = firstStation(move, "DestStationList");
-    const fallback = source || (PICK_MOVE_TYPES.has(move.MoveType) ? move.ModuleName : "") || (PLACE_MOVE_TYPES.has(move.MoveType) ? move.ModuleName : "") || destination || move.ModuleName;
-    for (const material of materialIds(move)) {
+    const source = firstStation2(move, "SrcStationList");
+    const destination = firstStation2(move, "DestStationList");
+    const fallback = source || (PICK_MOVE_TYPES2.has(move.MoveType) ? move.ModuleName : "") || (PLACE_MOVE_TYPES2.has(move.MoveType) ? move.ModuleName : "") || destination || move.ModuleName;
+    for (const material of materialIds2(move)) {
       if (!locations.has(material) && fallback) locations.set(material, fallback);
     }
   }
   return locations;
 }
 function applyCompletedTransfer(move, locations) {
-  if (PICK_MOVE_TYPES.has(move.MoveType)) {
-    for (const material of materialIds(move)) locations.set(material, move.ModuleName);
+  if (PICK_MOVE_TYPES2.has(move.MoveType)) {
+    for (const material of materialIds2(move)) locations.set(material, move.ModuleName);
     return;
   }
-  if (PLACE_MOVE_TYPES.has(move.MoveType)) {
-    const destination = firstStation(move, "DestStationList");
+  if (PLACE_MOVE_TYPES2.has(move.MoveType)) {
+    const destination = firstStation2(move, "DestStationList");
     if (destination) {
-      for (const material of materialIds(move)) locations.set(material, destination);
+      for (const material of materialIds2(move)) locations.set(material, destination);
     }
     return;
   }
-  if (move.MoveType === SWAP_MOVE) {
-    const station = String(listValue(move.StationList)[0] ?? "");
-    for (const material of materialIds(move, "RecvMatList")) locations.set(material, station);
-    for (const material of materialIds(move, "SendMatList")) locations.set(material, move.ModuleName);
+  if (move.MoveType === SWAP_MOVE2) {
+    const station = String(listValue2(move.StationList)[0] ?? "");
+    for (const material of materialIds2(move, "RecvMatList")) locations.set(material, station);
+    for (const material of materialIds2(move, "SendMatList")) locations.set(material, move.ModuleName);
   }
 }
 function moveProgress(move, time) {
@@ -555,12 +626,12 @@ function moveProgress(move, time) {
   return Math.max(0, Math.min(1, (time - move.StartTime) / duration));
 }
 function activeTarget(move) {
-  return firstStation(move, "DestStationList") || firstStation(move, "SrcStationList") || String(listValue(move.StationList)[0] ?? "") || (!isRobotName(move.ModuleName) ? move.ModuleName : "");
+  return firstStation2(move, "DestStationList") || firstStation2(move, "SrcStationList") || String(listValue2(move.StationList)[0] ?? "") || (!isRobotName2(move.ModuleName) ? move.ModuleName : "");
 }
 function buildWorkspaceSnapshot(moves, device, requestedTime) {
-  const records = normalizeMoves(moves);
+  const records = normalizeMoves2(moves);
   const endTime = records.reduce((maximum, move) => Math.max(maximum, move.EndTime), 0);
-  const time = Math.max(0, Math.min(finiteNumber(requestedTime), endTime));
+  const time = Math.max(0, Math.min(finiteNumber2(requestedTime), endTime));
   const definitions = collectModuleDefinitions(records, device);
   const robotNames = collectRobotNames(records, device);
   const locations = initialMaterialLocations(records);
@@ -579,13 +650,13 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
       completedMoves += 1;
       applyCompletedTransfer(move, locations);
     }
-    if (move.MoveType === PREPARE_MOVE) {
+    if (move.MoveType === PREPARE_MOVE2) {
       if (active) doorStates.set(move.ModuleName, "opening");
       else if (completed) doorStates.set(move.ModuleName, "open");
-    } else if (move.MoveType === COMPLETE_MOVE) {
+    } else if (move.MoveType === COMPLETE_MOVE2) {
       if (active) doorStates.set(move.ModuleName, "closing");
       else if (completed) doorStates.set(move.ModuleName, "closed");
-    } else if (move.MoveType === PRE_PREPARE_MOVE && (active || completed)) {
+    } else if (move.MoveType === PRE_PREPARE_MOVE2 && (active || completed)) {
       const currentState = String(move.CurState ?? "");
       const environment = /VTR|VAC/i.test(currentState) ? "\u771F\u7A7A" : /ATR|ATM/i.test(currentState) ? "\u5927\u6C14" : currentState;
       if (environment) environments.set(move.ModuleName, active ? `${environment}\u5207\u6362\u4E2D` : environment);
@@ -593,7 +664,7 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
   }
   const robotTargets = /* @__PURE__ */ new Map();
   for (const move of activeMoves) {
-    if (isRobotName(move.ModuleName)) robotTargets.set(move.ModuleName, activeTarget(move));
+    if (isRobotName2(move.ModuleName)) robotTargets.set(move.ModuleName, activeTarget(move));
   }
   const wafersByLocation = /* @__PURE__ */ new Map();
   for (const [material, location] of locations) {
@@ -602,15 +673,15 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
     wafers.push(material);
     wafersByLocation.set(location, wafers);
   }
-  for (const wafers of wafersByLocation.values()) wafers.sort(naturalCompare);
+  for (const wafers of wafersByLocation.values()) wafers.sort(naturalCompare2);
   const modules = [...definitions.entries()].map(([name, definition]) => {
-    const moduleMoves = activeMoves.filter((move) => move.ModuleName === name || firstStation(move, "SrcStationList") === name || firstStation(move, "DestStationList") === name || listValue(move.StationList).map(String).includes(name));
-    const primaryMove = moduleMoves.find((move) => move.MoveType === CLEAN_MOVE) ?? moduleMoves.find((move) => move.MoveType === PROCESS_MOVE) ?? moduleMoves.find((move) => move.MoveType === PRE_PREPARE_MOVE) ?? moduleMoves.find((move) => [PREPARE_MOVE, COMPLETE_MOVE].includes(move.MoveType)) ?? moduleMoves[0];
+    const moduleMoves = activeMoves.filter((move) => move.ModuleName === name || firstStation2(move, "SrcStationList") === name || firstStation2(move, "DestStationList") === name || listValue2(move.StationList).map(String).includes(name));
+    const primaryMove = moduleMoves.find((move) => move.MoveType === CLEAN_MOVE2) ?? moduleMoves.find((move) => move.MoveType === PROCESS_MOVE2) ?? moduleMoves.find((move) => move.MoveType === PRE_PREPARE_MOVE2) ?? moduleMoves.find((move) => [PREPARE_MOVE2, COMPLETE_MOVE2].includes(move.MoveType)) ?? moduleMoves[0];
     let status = (wafersByLocation.get(name)?.length ?? 0) > 0 ? "occupied" : "idle";
-    if (primaryMove?.MoveType === CLEAN_MOVE) status = "cleaning";
-    else if (primaryMove?.MoveType === PROCESS_MOVE) status = "processing";
-    else if (primaryMove?.MoveType === PRE_PREPARE_MOVE) status = "environment";
-    else if (primaryMove && [PREPARE_MOVE, COMPLETE_MOVE].includes(primaryMove.MoveType)) status = "door";
+    if (primaryMove?.MoveType === CLEAN_MOVE2) status = "cleaning";
+    else if (primaryMove?.MoveType === PROCESS_MOVE2) status = "processing";
+    else if (primaryMove?.MoveType === PRE_PREPARE_MOVE2) status = "environment";
+    else if (primaryMove && [PREPARE_MOVE2, COMPLETE_MOVE2].includes(primaryMove.MoveType)) status = "door";
     else if (primaryMove) status = "transfer";
     return {
       name,
@@ -623,7 +694,7 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
       environment: environments.get(name) ?? "",
       isRobotTarget: [...robotTargets.values()].includes(name)
     };
-  }).sort((left, right) => naturalCompare(left.name, right.name));
+  }).sort((left, right) => naturalCompare2(left.name, right.name));
   const robots = robotNames.map((name) => {
     const move = activeMoves.find((record) => record.ModuleName === name);
     return {
@@ -642,7 +713,7 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
     activeMoves,
     modules,
     robots,
-    waferCount: new Set(records.flatMap((move) => materialIds(move))).size
+    waferCount: new Set(records.flatMap((move) => materialIds2(move))).size
   };
 }
 function collectElements(root) {
@@ -682,9 +753,9 @@ function icon(name) {
   return `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">${paths[name]}</svg>`;
 }
 function topologyGroups(modules) {
-  const loadLocks = modules.filter((module2) => isLoadLockName(module2.name, module2.type));
-  const loadPorts = modules.filter((module2) => isLoadPortName(module2.name, module2.type));
-  const processModules = modules.filter((module2) => isProcessModule(module2.name, module2.type));
+  const loadLocks = modules.filter((module2) => isLoadLockName2(module2.name, module2.type));
+  const loadPorts = modules.filter((module2) => isLoadPortName2(module2.name, module2.type));
+  const processModules = modules.filter((module2) => isProcessModule2(module2.name, module2.type));
   const assignedNames = new Set([...loadLocks, ...loadPorts, ...processModules].map((module2) => module2.name));
   return {
     processModules,
@@ -779,11 +850,6 @@ function shortPJobName(value) {
 function formatPercent(value) {
   return `${(Math.max(0, value) * 100).toFixed(1)}%`;
 }
-function displayedPerformanceResources(performance2) {
-  return performance2.resources.filter(
-    (resource) => resource.busyTime > PERFORMANCE_TIME_TOLERANCE
-  );
-}
 function renderSchedulePerformance(performance2) {
   const window = performance2.window;
   const bottleneck = performance2.bottleneck;
@@ -795,9 +861,9 @@ function renderSchedulePerformance(performance2) {
     loadport: "LoadPort",
     auxiliary: "\u8F85\u52A9\u6A21\u5757"
   };
-  const legend = ACTIVITY_CATEGORIES.map((category) => `<span><i class="performance-swatch category-${category}"></i>${ACTIVITY_CATEGORY_LABELS[category]}</span>`).join("");
+  const legend = ACTIVITY_CATEGORIES2.map((category) => `<span><i class="performance-swatch category-${category}"></i>${ACTIVITY_CATEGORY_LABELS[category]}</span>`).join("");
   const resourceRows = displayedResources.map((resource) => {
-    const categoryBars = ACTIVITY_CATEGORIES.map((category) => {
+    const categoryBars = ACTIVITY_CATEGORIES2.map((category) => {
       const duration = resource.categoryTimes[category];
       if (duration <= PERFORMANCE_TIME_TOLERANCE || window.duration <= PERFORMANCE_TIME_TOLERANCE) return "";
       const width = Math.min(duration / window.duration * 100, 100);
@@ -994,7 +1060,7 @@ var VisualizationWorkspace = class {
       });
     });
     this.elements.range.addEventListener("input", () => {
-      this.time = finiteNumber(this.elements.range.value);
+      this.time = finiteNumber2(this.elements.range.value);
       this.render();
     });
     this.elements.playButton.addEventListener("click", () => {
@@ -1002,7 +1068,7 @@ var VisualizationWorkspace = class {
       else this.play();
     });
     this.elements.speed.addEventListener("change", () => {
-      this.playbackSpeed = Math.max(0.25, finiteNumber(this.elements.speed.value, DEFAULT_PLAYBACK_SPEED));
+      this.playbackSpeed = Math.max(0.25, finiteNumber2(this.elements.speed.value, DEFAULT_PLAYBACK_SPEED));
     });
     this.elements.performanceWindow.addEventListener("change", () => {
       this.performanceWindowMode = this.elements.performanceWindow.value === "full" ? "full" : "steady";
@@ -1016,7 +1082,7 @@ var VisualizationWorkspace = class {
   /** 从当前时间开始播放；到达末尾时自动回到起点。 */
   play() {
     if (!this.moves.length || this.playing) return;
-    const endTime = finiteNumber(this.elements.range.max);
+    const endTime = finiteNumber2(this.elements.range.max);
     if (this.time >= endTime) {
       this.time = 0;
       this.elements.range.value = "0";
@@ -1039,7 +1105,7 @@ var VisualizationWorkspace = class {
     if (!this.playing) return;
     const elapsedSeconds = Math.max(0, timestamp - this.previousFrameTime) / 1e3;
     this.previousFrameTime = timestamp;
-    const endTime = finiteNumber(this.elements.range.max);
+    const endTime = finiteNumber2(this.elements.range.max);
     this.time = Math.min(endTime, this.time + elapsedSeconds * this.playbackSpeed);
     this.elements.range.value = String(this.time);
     if (timestamp - this.previousRenderTime >= PLAYBACK_FRAME_INTERVAL_MS || this.time >= endTime) {
@@ -1073,10 +1139,10 @@ var VisualizationWorkspace = class {
     this.elements.stage.innerHTML = renderEquipmentTopology(snapshot);
     this.elements.activeMoves.innerHTML = snapshot.activeMoves.length ? snapshot.activeMoves.map((move) => `
         <li>
-          <span class="active-move-id">#${finiteNumber(move.MoveID)}</span>
-          <strong>${escapeHtml(MOVE_NAMES[finiteNumber(move.MoveType, -1)] ?? `\u52A8\u4F5C ${move.MoveType}`)}</strong>
+          <span class="active-move-id">#${finiteNumber2(move.MoveID)}</span>
+          <strong>${escapeHtml(MOVE_NAMES[finiteNumber2(move.MoveType, -1)] ?? `\u52A8\u4F5C ${move.MoveType}`)}</strong>
           <span>${escapeHtml(move.ModuleName || activeTarget(move) || "\u2014")}</span>
-          <time>${formatSeconds(finiteNumber(move.StartTime))}\u2013${formatSeconds(finiteNumber(move.EndTime))} s</time>
+          <time>${formatSeconds(finiteNumber2(move.StartTime))}\u2013${formatSeconds(finiteNumber2(move.EndTime))} s</time>
         </li>`).join("") : '<li class="active-move-empty">\u5F53\u524D\u65F6\u523B\u6CA1\u6709\u6267\u884C\u4E2D\u7684\u52A8\u4F5C</li>';
   }
   /** 重算并绘制与播放时刻无关的整段排程性能诊断。 */

@@ -1053,7 +1053,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn('data-tab-target="route">路径配置</button>', html)
         self.assertIn('data-tab-target="clean">清洁配置</button>', html)
         self.assertIn('<h1>调度平台</h1>', html)
-        self.assertIn('class="frontend-version">前端 v1.0.4</span>', html)
+        self.assertIn('class="frontend-version">前端 v1.0.5</span>', html)
         self.assertIn('<span id="metricMovesLabel">瓶颈利用率</span>', html)
         self.assertNotIn('<span id="metricMovesLabel">Move 数</span>', html)
         self.assertNotIn("renderDatasetCatalog", html)
@@ -1199,24 +1199,27 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("explicitlyEmpty || cleanMetadata", viewer)
         self.assertIn("if (isCleaningProcess(bar.rec.raw))", viewer)
 
-    def test_run_results_use_main_area_responsive_grid(self) -> None:
-        """运行结果应位于重算任务下方，右栏只保留运行控制。"""
+    def test_result_preview_and_group_analysis_use_main_area(self) -> None:
+        """结果预览应保持简洁，并提供独立的测试组分析入口。"""
         html = _editor_source()
         schedule = html.split('<div class="tab-view active" data-tab-view="schedule">', 1)[1]
         schedule = schedule.split('<div class="tab-view" data-tab-view="route">', 1)[0]
         sidebar = html.split('<aside class="side" id="scheduleSide">', 1)[1]
         sidebar = sidebar.split("</aside>", 1)[0]
 
-        self.assertLess(schedule.index("重算任务"), schedule.index("运行结果"))
+        self.assertLess(schedule.index("重算任务"), schedule.index("结果预览"))
         self.assertIn('class="panel result-panel"', schedule)
         self.assertIn("运行策略", sidebar)
-        self.assertNotIn("运行结果", sidebar)
+        self.assertNotIn("结果预览", sidebar)
         self.assertIn("container-name: result-area", html)
         self.assertIn(".batch-results { display: grid; grid-template-columns: repeat(4", html)
         self.assertIn("@container result-area (max-width: 1100px)", html)
         self.assertIn("@container result-area (max-width: 720px)", html)
         self.assertIn("@container result-area (max-width: 520px)", html)
-        self.assertIn(".terminal { height: 150px;", html)
+        self.assertNotIn('class="terminal-section"', html)
+        self.assertNotIn('id="clearButton"', html)
+        self.assertIn('id="resultErrorPanel" role="alert" hidden', html)
+        self.assertIn("只有错误才显示", html)
         self.assertIn('class="batch-result-summary"', html)
         self.assertIn('class="batch-metric-tags"', html)
         self.assertIn("batch-metric-tag cpu", html)
@@ -1224,6 +1227,10 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn('const displayId = `t${index + 1}`', html)
         self.assertIn("CPU Time ${finished", html)
         self.assertIn('id="batchOverviewButton"', html)
+        self.assertIn('id="testGroupAnalysisButton"', html)
+        self.assertIn('id="testGroupAnalysisPanel"', html)
+        self.assertIn("renderTestGroupAnalysis", html)
+        self.assertIn("analyzeTestGroupPerformance", html)
         self.assertIn('data-batch-item-index="${index}"', html)
         self.assertIn("loadBatchItemBottleneck", html)
         self.assertIn("正在计算稳态瓶颈", html)
@@ -1235,6 +1242,30 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("item.testId", html)
         for label in ("测试名称", "等待中", "运行中", "成功", "失败", "Makespan", "Move", "耗时"):
             self.assertIn(label, html)
+
+    def test_schedule_analysis_is_reusable_without_frontend_dependencies(self) -> None:
+        """MoveList 与测试组统计应位于无 DOM、无网络依赖的公共分析层。"""
+        analysis_root = ROOT / "realtime_scheduler" / "analysis"
+        movelist_source = (analysis_root / "movelist_performance.ts").read_text(
+            encoding="utf-8",
+        )
+        group_source = (analysis_root / "group_performance.ts").read_text(
+            encoding="utf-8",
+        )
+        workspace_source = (
+            ROOT
+            / "realtime_scheduler"
+            / "frontend"
+            / "src"
+            / "workspace_visualizer.ts"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("../../analysis/movelist_performance", workspace_source)
+        self.assertIn("analyzeSchedulePerformance", movelist_source)
+        self.assertIn("analyzeTestGroupPerformance", group_source)
+        for browser_dependency in ("document.", "globalThis.window", "fetch("):
+            self.assertNotIn(browser_dependency, movelist_source)
+            self.assertNotIn(browser_dependency, group_source)
 
     def test_device_workspace_persists_independent_test_cases(self) -> None:
         """同一设备的多套 Route/Clean/重算配置应独立保存并可复制、修改、删除。"""

@@ -10,7 +10,7 @@
   <main class="shell">
     <header class="hero">
       <h1>调度平台</h1>
-      <div class="hero-meta"><span class="frontend-version">前端 v1.0.4</span><div class="service-pill" id="serviceState">本地服务</div></div>
+      <div class="hero-meta"><span class="frontend-version">前端 v1.0.5</span><div class="service-pill" id="serviceState">本地服务</div></div>
     </header>
 
     <nav class="tabs" aria-label="主要功能">
@@ -44,8 +44,8 @@
           </article>
           <article class="panel result-panel">
             <div class="panel-head">
-              <div><h2>运行结果</h2><p class="result-context" id="metricContext">运行总览</p></div>
-              <div class="result-head-actions"><button class="btn" id="batchOverviewButton" type="button" hidden>返回批量总览</button><a class="btn primary" id="batchGanttButton" href="#" target="_blank" aria-disabled="true">全部甘特图</a></div>
+              <div><h2>结果预览</h2><p class="result-context" id="metricContext" hidden></p></div>
+              <div class="result-head-actions"><button class="btn" id="batchOverviewButton" type="button" hidden>返回批量总览</button><button class="btn analysis" id="testGroupAnalysisButton" type="button" hidden>测试组结果分析</button><a class="btn primary" id="batchGanttButton" href="#" target="_blank" aria-disabled="true">全部甘特图</a></div>
             </div>
             <div class="panel-body">
               <div class="result-metrics">
@@ -56,11 +56,8 @@
               </div>
               <div class="batch-progress" id="batchProgress" role="progressbar" aria-label="批量运行进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="batch-progress-track" aria-hidden="true"><div class="batch-progress-bar" id="batchProgressBar" style="width:0%"></div></div><span class="batch-progress-percent" id="batchProgressCount">0%</span></div>
               <div class="batch-results" id="batchResults"></div>
-              <div class="terminal-section">
-                <div class="terminal-section-head"><strong>运行日志</strong><span>内容较多时可在区域内滚动</span></div>
-                <pre class="terminal" id="terminal">$ 等待运行…</pre>
-                <div class="result-actions"><button class="btn" id="clearButton">清空终端</button><a class="btn" id="logButton" href="#" download aria-disabled="true">导出复现日志</a><button class="btn primary" id="workspaceResultButton" type="button" disabled>在结果分析中查看</button><a class="btn" id="ganttButton" href="#" target="_blank" aria-disabled="true">打开甘特图</a></div>
-              </div>
+              <div class="result-error-panel" id="resultErrorPanel" role="alert" hidden><strong>运行错误</strong><pre id="terminal"></pre></div>
+              <div class="result-actions"><a class="btn" id="logButton" href="#" download aria-disabled="true">导出复现日志</a><button class="btn primary" id="workspaceResultButton" type="button" disabled>在结果分析中查看</button><a class="btn" id="ganttButton" href="#" target="_blank" aria-disabled="true">打开甘特图</a></div>
             </div>
           </article>
         </div>
@@ -82,6 +79,8 @@
                 <a class="btn" id="visualOpenGantt" href="#" target="_blank" aria-disabled="true">打开甘特图</a>
               </div>
             </div>
+
+            <section class="test-group-analysis" id="testGroupAnalysisPanel" hidden aria-live="polite"></section>
 
             <div class="visual-empty" id="visualEmpty">
               <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="3"/><path d="M8 9h8M8 13h5"/></svg>
@@ -250,6 +249,6 @@
     </aside>
   </div>
 
-  <script type="module" src="/assets/config_editor.js?v=1.0.4"></script>
+  <script type="module" src="/assets/config_editor.js?v=1.0.5"></script>
 </body>
 </html>

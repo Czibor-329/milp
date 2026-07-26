@@ -1,0 +1,172 @@
+import type {
+  TestGroupCasePerformance,
+  TestGroupPerformanceSummary,
+} from "../../analysis/group_performance";
+
+function escapeHtml(value: unknown): string {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function finiteText(
+  value: number | null,
+  digits: number,
+  suffix = "",
+): string {
+  return value === null || !Number.isFinite(value)
+    ? "—"
+    : `${value.toFixed(digits)}${suffix}`;
+}
+
+function percentText(value: number | null, fromRatio = false): string {
+  const normalized = value === null ? null : value * (fromRatio ? 100 : 1);
+  return finiteText(normalized, 2, "%");
+}
+
+function durationText(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) return "—";
+  return value >= 1000
+    ? `${(value / 1000).toFixed(2)} s`
+    : `${value.toFixed(1)} ms`;
+}
+
+function caseLabel(item: TestGroupCasePerformance, index: number): string {
+  return item.name || `t${index + 1}`;
+}
+
+function improvementChart(summary: TestGroupPerformanceSummary): string {
+  const cases = summary.cases.filter(item => item.improvementPercent !== null);
+  const scale = Math.max(
+    1,
+    ...cases.map(item => Math.abs(item.improvementPercent ?? 0)),
+  );
+  return cases.map((item, index) => {
+    const value = item.improvementPercent ?? 0;
+    const width = Math.min(Math.abs(value) / scale * 50, 50);
+    const status = value < 0 ? "loss" : value > 0 ? "gain" : "tie";
+    return `<div class="group-chart-row">
+      <span class="group-chart-label" title="${escapeHtml(item.name)}">${escapeHtml(caseLabel(item, index))}</span>
+      <div class="group-diverging-track" role="img" aria-label="${escapeHtml(caseLabel(item, index))} 相对基线 ${value >= 0 ? "提升" : "退化"} ${Math.abs(value).toFixed(2)}%">
+        <i class="${status}" style="--bar-width:${width}%"></i>
+      </div>
+      <strong class="${status}">${value > 0 ? "+" : ""}${value.toFixed(2)}%</strong>
+    </div>`;
+  }).join("") || '<p class="group-analysis-empty">没有可比较的 Baseline。</p>';
+}
+
+function utilizationChart(summary: TestGroupPerformanceSummary): string {
+  const cases = summary.cases.filter(item => item.bottleneckUtilization !== null);
+  return cases.map((item, index) => {
+    const utilization = Math.max(0, Math.min(item.bottleneckUtilization ?? 0, 1));
+    return `<div class="group-chart-row">
+      <span class="group-chart-label" title="${escapeHtml(item.name)}">${escapeHtml(caseLabel(item, index))}</span>
+      <div class="group-linear-track" role="img" aria-label="${escapeHtml(caseLabel(item, index))} 瓶颈 ${escapeHtml(item.bottleneckResource)}，利用率 ${(utilization * 100).toFixed(1)}%">
+        <i class="utilization" style="width:${(utilization * 100).toFixed(2)}%"></i>
+      </div>
+      <strong>${(utilization * 100).toFixed(1)}%</strong>
+      <small title="${escapeHtml(item.bottleneckResource)}">${escapeHtml(item.bottleneckResource || "—")}</small>
+    </div>`;
+  }).join("") || '<p class="group-analysis-empty">没有可分析的瓶颈资源。</p>';
+}
+
+function cpuChart(summary: TestGroupPerformanceSummary): string {
+  const cases = summary.cases.filter(item => item.cpuTimeMs !== null);
+  const scale = Math.max(1, ...cases.map(item => item.cpuTimeMs ?? 0));
+  return cases.map((item, index) => {
+    const cpu = Math.max(item.cpuTimeMs ?? 0, 0);
+    return `<div class="group-chart-row">
+      <span class="group-chart-label" title="${escapeHtml(item.name)}">${escapeHtml(caseLabel(item, index))}</span>
+      <div class="group-linear-track" role="img" aria-label="${escapeHtml(caseLabel(item, index))} CPU Time ${durationText(cpu)}">
+        <i class="cpu" style="width:${Math.min(cpu / scale * 100, 100).toFixed(2)}%"></i>
+      </div>
+      <strong>${escapeHtml(durationText(cpu))}</strong>
+    </div>`;
+  }).join("") || '<p class="group-analysis-empty">没有 CPU Time 数据。</p>';
+}
+
+function frequencyTags(summary: TestGroupPerformanceSummary): string {
+  return summary.bottleneckFrequencies.map(item => (
+    `<span class="group-frequency-tag"><b>${escapeHtml(item.resourceName)}</b>`
+    + `${item.count} 次 · 中位 ${(item.medianUtilization * 100).toFixed(1)}%</span>`
+  )).join("") || '<span class="group-analysis-empty">没有瓶颈频次数据。</span>';
+}
+
+function resultTable(summary: TestGroupPerformanceSummary): string {
+  return summary.cases.map((item, index) => `
+    <tr>
+      <th scope="row">${escapeHtml(caseLabel(item, index))}</th>
+      <td>${finiteText(item.makespan, 2, " s")}</td>
+      <td>${finiteText(item.baselineMakespan, 2, " s")}</td>
+      <td class="${(item.improvementPercent ?? 0) < 0 ? "loss" : "gain"}">${item.improvementPercent === null ? "—" : `${item.improvementPercent > 0 ? "+" : ""}${item.improvementPercent.toFixed(2)}%`}</td>
+      <td>${escapeHtml(item.bottleneckResource || "—")}</td>
+      <td>${percentText(item.bottleneckUtilization, true)}</td>
+      <td>${durationText(item.cpuTimeMs)}</td>
+      <td>${finiteText(item.throughputPerHour, 1, " 片/h")}</td>
+      <td>${finiteText(item.departureIntervalCv, 2)}</td>
+      <td>${item.validationPassed ? '<span class="group-pass">通过</span>' : `<span class="group-fail">${escapeHtml(item.validation || item.status)}</span>`}</td>
+    </tr>`).join("");
+}
+
+/** 绘制测试组的多维结果分析，不生成跨量纲综合分数。 */
+export function renderTestGroupAnalysis(
+  summary: TestGroupPerformanceSummary,
+  groupName: string,
+  strategy: string,
+): string {
+  const weighted = summary.weightedImprovementPercent;
+  const medianImprovement = summary.medianImprovementPercent;
+  const windowApproximationCount = summary.windowMethodCounts["middle-approximation"] ?? 0;
+  return `
+    <div class="group-analysis-head">
+      <div>
+        <span class="eyebrow">测试组结果分析</span>
+        <h2>${escapeHtml(groupName || "当前测试组")}</h2>
+        <p>${escapeHtml(strategy || "当前策略")} · ${summary.succeededCount}/${summary.totalCount} 个测试有有效结果</p>
+      </div>
+      <span class="group-analysis-badge">逐例对比 · 不做综合打分</span>
+    </div>
+    <div class="group-kpi-grid">
+      <article><span>校验通过率</span><strong>${(summary.validationPassRate * 100).toFixed(1)}%</strong><small>${summary.validationPassedCount}/${summary.succeededCount} 个有效结果</small></article>
+      <article><span>加权总体改善</span><strong class="${(weighted ?? 0) < 0 ? "loss" : "gain"}">${weighted === null ? "—" : `${weighted > 0 ? "+" : ""}${weighted.toFixed(2)}%`}</strong><small>按各测试 Baseline makespan 加权</small></article>
+      <article><span>逐例中位改善</span><strong class="${(medianImprovement ?? 0) < 0 ? "loss" : "gain"}">${medianImprovement === null ? "—" : `${medianImprovement > 0 ? "+" : ""}${medianImprovement.toFixed(2)}%`}</strong><small>${summary.winCount} 胜 · ${summary.tieCount} 平 · ${summary.regressionCount} 退化</small></article>
+      <article><span>CPU Time</span><strong>${durationText(summary.medianCpuTimeMs)}</strong><small>P90 ${durationText(summary.p90CpuTimeMs)} · 总计 ${durationText(summary.totalCpuTimeMs)}</small></article>
+      <article><span>瓶颈利用率中位数</span><strong>${percentText(summary.medianBottleneckUtilization, true)}</strong><small>物理占用时间并集</small></article>
+      <article><span>出站表现中位数</span><strong>${finiteText(summary.medianThroughputPerHour, 1, " 片/h")}</strong><small>间隔波动 CV ${finiteText(summary.medianDepartureIntervalCv, 2)}</small></article>
+    </div>
+    <div class="group-chart-grid">
+      <article class="group-chart-card">
+        <header><div><h3>相对 Baseline</h3><p>正值为 makespan 改善，负值为退化</p></div></header>
+        <div class="group-chart-body">${improvementChart(summary)}</div>
+      </article>
+      <article class="group-chart-card">
+        <header><div><h3>所有瓶颈利用率</h3><p>每个测试的稳态瓶颈候选与物理占用</p></div></header>
+        <div class="group-chart-body">${utilizationChart(summary)}</div>
+      </article>
+      <article class="group-chart-card">
+        <header><div><h3>计算时间</h3><p>各测试算法 CPU Time，按组内最大值缩放</p></div></header>
+        <div class="group-chart-body">${cpuChart(summary)}</div>
+      </article>
+    </div>
+    <article class="group-frequency-card">
+      <div><h3>瓶颈资源出现频次</h3><p>识别跨测试反复出现的结构性约束</p></div>
+      <div class="group-frequency-tags">${frequencyTags(summary)}</div>
+    </article>
+    <details class="group-analysis-table-wrap">
+      <summary>查看逐测试完整指标</summary>
+      <div class="group-analysis-table-scroll">
+        <table class="group-analysis-table">
+          <thead><tr><th>测试</th><th>Makespan</th><th>Baseline</th><th>改善</th><th>瓶颈</th><th>利用率</th><th>CPU Time</th><th>吞吐</th><th>出站 CV</th><th>校验</th></tr></thead>
+          <tbody>${resultTable(summary)}</tbody>
+        </table>
+      </div>
+    </details>
+    <aside class="group-method-note">
+      <strong>如何解读</strong>
+      <p>瓶颈按平均连续忙碌期（Active Period）排序，利用率用于同级判别；它是诊断候选，不等同于完整 SEMI E10 OEE。组级同时报告加权总体改善、逐例中位数和胜/平/退化，避免少数长用例掩盖局部退化。${windowApproximationCount ? ` 有 ${windowApproximationCount} 个测试因样本不足使用中段近似窗。` : ""}</p>
+    </aside>`;
+}
+

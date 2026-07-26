@@ -123,7 +123,37 @@ ProcessMove 会高估可用产能，也无法解释“腔室空闲但系统仍�
 空闲”时才错峰。前端新增的入队等待、目标 PM 忙闲、出站间隔 CV、机器人
 Active Period 和最长空闲可以直接用于这类触发条件与 A/B 验证。
 
-## 5. 文献依据
+## 5. 测试组评估口径
+
+测试组分析不把 makespan、计算时间和设备利用率加权成一个综合分数，因为这些
+指标量纲不同，任意权重会隐藏实际取舍。组级页面按四类分别报告：
+
+| 维度 | 组级指标 | 逐测试信息 |
+| --- | --- | --- |
+| 有效性 | 成功数、MoveList 校验通过率 | 失败原因、校验状态 |
+| 排程质量 | 总 makespan 加权改善、逐例中位改善、胜/平/退化数、最差退化 | makespan、Baseline、相对改善和 performance ratio |
+| 计算成本 | CPU Time 中位数、P90、总计 | 每例 CPU Time |
+| 设备与流动 | 瓶颈利用率中位数、瓶颈资源频次、吞吐和出站 CV 中位数 | 每例瓶颈候选、利用率、吞吐、CV、统计窗口方法 |
+
+总 makespan 改善按各测试 Baseline makespan 加权，便于衡量测试组整体节省；
+中位改善和胜/平/退化数则防止少数长用例掩盖多数短用例的退化。逐例图和完整表
+始终保留，不只显示汇总数。这与 Dolan–Moré performance profile 的核心原则
+一致：算法比较应基于逐问题相对表现分布，而不是只用一个总平均。
+
+SEMI E10/E79 把设备状态、利用率、生产率和吞吐区分为不同度量。因此页面将
+“物理占用率”明确限定为 MoveList 统计窗口内的活动时间并集，不把它标成完整
+OEE；吞吐、波动和校验另行展示。计算时间使用中位数与 P90，同时保留逐例值，
+以暴露搜索预算是否带来长尾延迟。
+
+实现边界也已拆分：
+
+- `realtime_scheduler/analysis/movelist_performance.ts`：无 DOM 的 MoveList
+  占用、Active Period、吞吐、波动与队列计算；
+- `realtime_scheduler/analysis/group_performance.ts`：无 DOM 的测试组聚合；
+- `alg/src/validation`：MoveList 状态和物理合法性的唯一 Python 校验实现；
+- 前端只负责加载结果和绘图，不复制上述业务规则。
+
+## 6. 文献依据
 
 - Kim 与 Lee 的 Cluster Tool 周期调度研究同时计算工艺步骤和机器人工作量，
   并用两者最大值作为周期下界：
@@ -148,3 +178,15 @@ Active Period 和最长空闲可以直接用于这类触发条件与 A/B 验证�
 - Robinson 的稳态仿真研究说明初始瞬态会造成估计偏差，支持删除 warm-up 数据；
   当前“首片完工—末片投料”是面向有限批次的透明启发式窗口，并不冒充统计检验：
   <https://doi.org/10.1016/j.ejor.2005.08.048>
+- SEMI E10 提供设备可靠性、可用性、可维护性与利用率的统一状态度量，并覆盖
+  多路径 cluster tool 的模块级信息：
+  <https://store-us.semi.org/products/e01000-semi-e10-specification-for-definition-and-measurement-of-equipment-reliability-availability-and-maintainability-ram-and-utilization>
+- SEMI 官方 E10/E79 指标概览将利用率与生产率、OEE、吞吐区分开，支持本页面
+  分维度展示而非合成单分：
+  <https://www.semi.org/en/products-services/standards/step/equipment-performance-metrics>
+- Dolan 与 Moré 的 performance profile 用逐问题性能比的累积分布比较求解器，
+  支持保留逐例对比和胜/平/退化，而非只报告总体平均：
+  <https://arxiv.org/abs/cs/0102001>
+- Optimization Benchmarking Survey 强调基准目标、问题集、性能度量、
+  可复现性和完整报告应共同设计：
+  <https://arxiv.org/abs/2007.03488>

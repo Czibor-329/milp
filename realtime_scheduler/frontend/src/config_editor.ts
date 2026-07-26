@@ -11,6 +11,13 @@ import * as RouteEditorLogic from "./route_editor_logic";
 import { requestJson } from "./api_client";
 import { createVisualizationWorkspace } from "./workspace_visualizer";
 import {
+  analyzeSchedulePerformance,
+  normalizeMovePayload,
+  summarizeBottleneckUtilization,
+} from "../../analysis/movelist_performance";
+import { analyzeTestGroupPerformance } from "../../analysis/group_performance";
+import { renderTestGroupAnalysis } from "./group_analysis_view";
+import {
   CJOB_TYPES,
   TASK_MODES,
   linkRouteSteps,
@@ -26,10 +33,10 @@ import {
 
 const { VISIT_SHARED_FIELDS, selectReferencedRoutes } = RouteEditorLogic;
 const visualizationWorkspace = createVisualizationWorkspace();
+const batchPerformanceAnalyses = new Map();
 const batchBottleneckSummaries = new Map();
 const batchBottleneckRequests = new Map();
 const batchBottleneckErrors = new Map();
-let batchBottleneckLoadQueue = Promise.resolve();
 
 const EXPECTED_API_SCHEMA = "cjob-pjob-v3";
 
@@ -428,6 +435,7 @@ function markTestDirty() {
 function resetRunResult() {
   visualizationWorkspace.clear();
   state.batchResult = null; state.selectedBatchTestId = "";
+  batchPerformanceAnalyses.clear();
   batchBottleneckSummaries.clear();
   batchBottleneckRequests.clear();
   batchBottleneckErrors.clear();
@@ -435,6 +443,9 @@ function resetRunResult() {
   ["metricTimeDetail", "metricMakespanDetail", "metricMovesDetail", "metricValidationDetail"].forEach(id => { document.getElementById(id).textContent = ""; });
   document.getElementById("metricContext").textContent = "运行总览";
   document.getElementById("batchOverviewButton").hidden = true;
+  document.getElementById("testGroupAnalysisButton").hidden = true;
+  document.getElementById("testGroupAnalysisPanel").hidden = true;
+  document.getElementById("testGroupAnalysisPanel").innerHTML = "";
   document.getElementById("metricTimeLabel").textContent = "总耗时";
   document.getElementById("metricMakespanLabel").textContent = "Makespan";
   setBottleneckMetric(null);
@@ -1483,9 +1494,13 @@ async function runCurrentTestGroup() {
     const tests = (state.workspaceDevice?.tests || []).filter(test => String(test.group || "").trim() === state.activeTestGroup);
     if (!tests.length) throw new Error("当前测试组没有可运行测试");
     state.batchRunning = true; state.activeBatchId = ""; state.batchCancelRequested = false; state.batchCancelSent = false; state.batchResult = null; state.selectedBatchTestId = "";
+    batchPerformanceAnalyses.clear();
     batchBottleneckSummaries.clear();
     batchBottleneckRequests.clear();
     batchBottleneckErrors.clear();
+    document.getElementById("testGroupAnalysisButton").hidden = true;
+    document.getElementById("testGroupAnalysisPanel").hidden = true;
+    document.getElementById("testGroupAnalysisPanel").innerHTML = "";
     document.getElementById("batchOverviewButton").hidden = true;
     button.disabled = false; runButton.disabled = true; button.classList.add("cancel"); button.textContent = "■ 终止调度";
     document.getElementById("batchResults").innerHTML = "";
@@ -1623,32 +1638,48 @@ function showBatchItemOverview(item, index) {
   setResultMetric("Validation", "校验", validationText, item.error || "");
 }
 
-/** 加载批量单项的 MoveList，并缓存与结果分析页一致的稳态瓶颈摘要。 */
-async function loadBatchItemBottleneck(item, index) {
+/** 加载批量单项的 MoveList，并在独立分析层计算完整稳态性能。 */
+async function loadBatchItemPerformance(item, index) {
   const resultUrl = String(item?.resultUrl || "");
-  if (!resultUrl || item.status !== "succeeded" || batchBottleneckSummaries.has(resultUrl) || batchBottleneckErrors.has(resultUrl)) return;
+  if (!resultUrl || item.status !== "succeeded") return null;
+  if (batchPerformanceAnalyses.has(resultUrl)) {
+    return batchPerformanceAnalyses.get(resultUrl);
+  }
+  if (batchBottleneckErrors.has(resultUrl)) return null;
   let request = batchBottleneckRequests.get(resultUrl);
   if (!request) {
-    request = batchBottleneckLoadQueue.then(async () => {
-      await visualizationWorkspace.loadResult(resultUrl, item.testName || `测试 ${index + 1}`);
-      const summary = visualizationWorkspace.getBottleneckUtilization();
+    request = (async () => {
+      const response = await fetch(resultUrl, { cache: "no-store" });
+      if (!response.ok) throw new Error(`结果加载失败（HTTP ${response.status}）`);
+      const payload = await response.json();
+      const performance = analyzeSchedulePerformance(
+        normalizeMovePayload(payload),
+        state.device,
+        "steady",
+      );
+      const summary = summarizeBottleneckUtilization(performance);
+      batchPerformanceAnalyses.set(resultUrl, performance);
       batchBottleneckSummaries.set(resultUrl, summary);
-      return summary;
-    });
-    batchBottleneckLoadQueue = request.catch(() => null);
+      return performance;
+    })();
     batchBottleneckRequests.set(resultUrl, request);
   }
   try {
-    await request;
+    return await request;
   } catch (error) {
     batchBottleneckErrors.set(resultUrl, error.message || "未知错误");
     if (state.selectedBatchTestId === String(item.testId || `index-${index}`)) {
       setBottleneckMetric(null, `瓶颈计算失败：${error.message || "未知错误"}`);
     }
-    return;
+    return null;
   } finally {
     batchBottleneckRequests.delete(resultUrl);
   }
+}
+
+/** 为所选测试异步补齐瓶颈利用率，然后刷新顶部预览。 */
+async function loadBatchItemBottleneck(item, index) {
+  await loadBatchItemPerformance(item, index);
   const currentIndex = (state.batchResult?.items || []).findIndex(
     (candidate, candidateIndex) => String(candidate.testId || `index-${candidateIndex}`) === state.selectedBatchTestId,
   );
@@ -1673,11 +1704,65 @@ function showCurrentBatchOverview() {
   showBatchOverviewMetrics(state.batchResult);
 }
 
+/** 评估当前测试组，并把多维图表绘制到结果分析工作台。 */
+async function showTestGroupAnalysis() {
+  const result = state.batchResult;
+  if (!result?.items?.length) return;
+  const button = document.getElementById("testGroupAnalysisButton");
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = "正在分析…";
+  try {
+  const successful = result.items
+    .map((item, index) => ({ item, index }))
+    .filter(entry => entry.item.status === "succeeded" && entry.item.resultUrl);
+  let cursor = 0;
+  const workerCount = Math.min(4, successful.length);
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (cursor < successful.length) {
+      const current = successful[cursor];
+      cursor += 1;
+      await loadBatchItemPerformance(current.item, current.index);
+    }
+  }));
+  const summary = analyzeTestGroupPerformance(result.items.map((item, index) => ({
+    id: String(item.testId || `index-${index}`),
+    name: `t${index + 1}`,
+    status: String(item.status || "unknown"),
+    validation: String(item.validation || "unknown"),
+    makespan: item.makespan,
+    baselineMakespan: item.baseline?.status === "succeeded"
+      ? item.baseline.makespan
+      : null,
+    cpuTimeMs: item.cpuTimeMs ?? item.totalElapsedMs,
+    elapsedTimeMs: item.totalElapsedMs,
+    error: item.error || item.baseline?.error || "",
+    performance: item.resultUrl
+      ? batchPerformanceAnalyses.get(String(item.resultUrl)) ?? null
+      : null,
+  })));
+  const panel = document.getElementById("testGroupAnalysisPanel");
+  panel.innerHTML = renderTestGroupAnalysis(
+    summary,
+    result.group || state.activeTestGroup || "当前测试组",
+    result.strategy || state.strategy,
+  );
+  panel.hidden = false;
+  document.getElementById("visualEmpty").hidden = true;
+  switchTab("workspace");
+  panel.scrollIntoView({ behavior: "smooth", block: "start" });
+  } finally {
+    button.disabled = false;
+    button.textContent = originalText;
+  }
+}
+
 /** 实时绘制总体进度和每个测试的排队、运行、成功、失败状态。 */
 function showBatchProgress(result) {
   const completed = Number(result.completed || 0), total = Number(result.testCount || result.items?.length || 0);
   const percent = total ? Math.round(completed / total * 100) : 0;
   const progress = document.getElementById("batchProgress");
+  document.getElementById("testGroupAnalysisButton").hidden = !["completed", "cancelled"].includes(result.status);
   progress.classList.add("visible");
   progress.setAttribute("aria-valuenow", String(percent));
   document.getElementById("batchProgressCount").textContent = `${percent}%`;
@@ -1750,24 +1835,19 @@ function batchGanttUrl(items) {
 
 /** 汇总批量运行指标，并为每个测试保留甘特图和复现日志入口。 */
 function showBatchResult(result) {
-  const successful = result.items.filter(item => item.status === "succeeded");
-  const comparable = successful.filter(item => item.baseline?.status === "succeeded");
-  const totalMakespan = comparable.reduce((sum, item) => sum + Number(item.makespan), 0);
-  const totalBaseline = comparable.reduce((sum, item) => sum + Number(item.baseline.makespan), 0);
-  const aggregateImprovement = totalBaseline > 0 ? (totalBaseline - totalMakespan) / totalBaseline * 100 : NaN;
   state.batchResult = result;
+  document.getElementById("testGroupAnalysisButton").hidden = false;
   if (!state.selectedBatchTestId) showBatchOverviewMetrics(result);
-  writeTerminal([
-    "$ 批量运行完成",
-    `  组别: ${result.group || "未分组"} · 策略: ${result.strategy}`,
-    `  成功: ${result.succeeded} · 失败: ${result.failed} · 并行数: ${result.workerCount}`,
-    `  总耗时: ${(Number(result.totalElapsedMs) / 1000).toFixed(2)} s`,
-    ...(comparable.length ? [`  组级 Makespan: ${totalMakespan.toFixed(2)} / Baseline ${totalBaseline.toFixed(2)} s · ${aggregateImprovement >= 0 ? "提升" : "退化"} ${Math.abs(aggregateImprovement).toFixed(2)}%`] : []),
-    "",
-    ...result.items.map((item, index) => item.ok
-      ? `  #${index + 1} ${item.testName} | makespan=${Number(item.makespan).toFixed(2)}s | improvement=${Number.isFinite(Number(item.improvementPercent)) ? `${Number(item.improvementPercent).toFixed(2)}%` : "—"} | ${Number(item.totalElapsedMs).toFixed(1)}ms`
-      : `  #${index + 1} ${item.testName} | 失败: ${item.error}`),
-  ].join("\n"), result.failed > 0);
+  const resultErrors = result.items.flatMap((item, index) => {
+    if (item.status === "failed") {
+      return [`t${index + 1} ${item.testName || ""}：${item.error || "运行失败"}`];
+    }
+    if (item.status === "succeeded" && item.validation && item.validation !== "passed") {
+      return [`t${index + 1} ${item.testName || ""}：MoveList 校验 ${item.validation}${item.error ? `；${item.error}` : ""}`];
+    }
+    return [];
+  });
+  writeTerminal(resultErrors.join("\n"), resultErrors.length > 0);
   renderBatchItems(result.items);
   const selectedIndex = result.items.findIndex((item, index) => String(item.testId || `index-${index}`) === state.selectedBatchTestId);
   if (selectedIndex >= 0) {
@@ -1791,6 +1871,8 @@ function showBatchResult(result) {
 /** 显示运行指标和逐轮日志。 */
 function showResult(result) {
   state.batchResult = null; state.selectedBatchTestId = "";
+  document.getElementById("testGroupAnalysisButton").hidden = true;
+  document.getElementById("testGroupAnalysisPanel").hidden = true;
   document.getElementById("batchProgress").classList.remove("visible");
   document.getElementById("batchResults").innerHTML = "";
   const allGantt = document.getElementById("batchGanttButton"); allGantt.href = "#"; allGantt.setAttribute("aria-disabled", "true");
@@ -1818,8 +1900,18 @@ function showResult(result) {
   const gantt = document.getElementById("ganttButton"); gantt.href = result.ganttUrl; gantt.removeAttribute("aria-disabled");
 }
 
-/** 写入终端。 */
-function writeTerminal(message, error = false) { const terminal = document.getElementById("terminal"); terminal.textContent = message; terminal.classList.toggle("error", error); }
+/** 正常过程保持界面安静；只有错误才显示可复制的详细信息。 */
+function writeTerminal(message, error = false) {
+  const panel = document.getElementById("resultErrorPanel");
+  const terminal = document.getElementById("terminal");
+  if (!error) {
+    terminal.textContent = "";
+    panel.hidden = true;
+    return;
+  }
+  terminal.textContent = String(message || "未知错误").replace(/^\$\s*/, "");
+  panel.hidden = false;
+}
 
 /** 检查本地服务以及内置策略模型可用性。 */
 async function checkService() {
@@ -1876,7 +1968,9 @@ document.getElementById("roundCount").addEventListener("input", event => { resiz
 document.getElementById("runButton").addEventListener("click", runPlan);
 document.getElementById("batchRunButton").addEventListener("click", runCurrentTestGroup);
 document.getElementById("batchOverviewButton").addEventListener("click", showCurrentBatchOverview);
-document.getElementById("clearButton").addEventListener("click", () => { state.batchResult = null; state.selectedBatchTestId = ""; document.getElementById("batchOverviewButton").hidden = true; writeTerminal("$ 等待运行…"); document.getElementById("batchProgress").classList.remove("visible"); document.getElementById("batchResults").innerHTML = ""; });
+document.getElementById("testGroupAnalysisButton").addEventListener("click", () => {
+  showTestGroupAnalysis().catch(error => writeTerminal(`$ 测试组结果分析失败\n  ${error.message || "未知错误"}`, true));
+});
 document.getElementById("logButton").addEventListener("click", event => { if (event.currentTarget.getAttribute("aria-disabled") === "true") event.preventDefault(); });
 document.getElementById("ganttButton").addEventListener("click", event => { if (event.currentTarget.getAttribute("aria-disabled") === "true") event.preventDefault(); });
 document.getElementById("batchGanttButton").addEventListener("click", event => { if (event.currentTarget.getAttribute("aria-disabled") === "true") event.preventDefault(); });

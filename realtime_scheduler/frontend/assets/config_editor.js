@@ -139,15 +139,10 @@ async function requestJson(url, options = {}) {
   return result;
 }
 
-// src/workspace_visualizer.ts
-function summarizeBottleneckUtilization(performance2) {
-  if (!performance2.bottleneck) return null;
-  return {
-    resourceName: performance2.bottleneck.name,
-    utilization: performance2.bottleneck.utilization,
-    windowLabel: performance2.window.label
-  };
-}
+// ../analysis/movelist_performance.ts
+var PERFORMANCE_TIME_TOLERANCE = 1e-6;
+var MIDDLE_WINDOW_TRIM_RATIO = 0.1;
+var MINIMUM_STEADY_WAFERS = 4;
 var PICK_MOVE_TYPES = /* @__PURE__ */ new Set([0, 2]);
 var PLACE_MOVE_TYPES = /* @__PURE__ */ new Set([1, 3]);
 var SWAP_MOVE = 4;
@@ -156,18 +151,6 @@ var COMPLETE_MOVE = 7;
 var PROCESS_MOVE = 9;
 var PRE_PREPARE_MOVE = 10;
 var CLEAN_MOVE = 14;
-var PLAYBACK_FRAME_INTERVAL_MS = 80;
-var DEFAULT_PLAYBACK_SPEED = 4;
-var PROCESS_ARC_START_DEGREES = 200;
-var PROCESS_ARC_END_DEGREES = 340;
-var PROCESS_ARC_CENTER_X_PERCENT = 50;
-var PROCESS_ARC_CENTER_Y_PIXELS = 214;
-var PROCESS_ARC_RADIUS_X_PERCENT = 38;
-var PROCESS_ARC_RADIUS_Y_PIXELS = 156;
-var PERFORMANCE_TIME_TOLERANCE = 1e-6;
-var MIDDLE_WINDOW_TRIM_RATIO = 0.1;
-var MINIMUM_STEADY_WAFERS = 4;
-var MAXIMUM_VISIBLE_QUEUE_ITEMS = 32;
 var ACTIVITY_CATEGORIES = [
   "process",
   "clean",
@@ -176,47 +159,6 @@ var ACTIVITY_CATEGORIES = [
   "environment",
   "other"
 ];
-var ACTIVITY_CATEGORY_LABELS = {
-  process: "\u52A0\u5DE5",
-  clean: "\u6E05\u6D01",
-  door: "\u5F00\u5173\u95E8",
-  transfer: "\u53D6\u653E / \u642C\u8FD0",
-  environment: "\u62BD\u5145\u6C14",
-  other: "\u5176\u4ED6"
-};
-var MOVE_NAMES = {
-  0: "\u53D6\u7247",
-  1: "\u653E\u7247",
-  2: "\u591A\u7247\u53D6\u7247",
-  3: "\u591A\u7247\u653E\u7247",
-  4: "\u6362\u7247",
-  5: "\u673A\u68B0\u624B\u8F6C\u4F4D",
-  6: "\u5F00\u95E8",
-  7: "\u5173\u95E8",
-  8: "\u540E\u7F6E\u5B8C\u6210",
-  9: "\u52A0\u5DE5",
-  10: "\u73AF\u5883\u5207\u6362",
-  11: "\u5BF9\u51C6",
-  12: "\u62BD\u771F\u7A7A",
-  13: "\u5145\u6C14",
-  14: "\u6E05\u6D01"
-};
-var STATUS_LABELS = {
-  idle: "\u7A7A\u95F2",
-  occupied: "\u5DF2\u8F7D\u7247",
-  door: "\u95E8\u52A8\u4F5C",
-  transfer: "\u4F20\u8F93\u4E2D",
-  processing: "\u52A0\u5DE5\u4E2D",
-  cleaning: "\u6E05\u6D01\u4E2D",
-  environment: "\u73AF\u5883\u5207\u6362"
-};
-var DOOR_LABELS = {
-  closed: "\u95E8\u5DF2\u5173\u95ED",
-  opening: "\u6B63\u5728\u5F00\u95E8",
-  open: "\u95E8\u5DF2\u6253\u5F00",
-  closing: "\u6B63\u5728\u5173\u95E8",
-  doorless: "\u65E0\u95E8\u7ED3\u6784"
-};
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
@@ -226,12 +168,6 @@ function listValue(value) {
 }
 function naturalCompare(left, right) {
   return left.localeCompare(right, void 0, { numeric: true, sensitivity: "base" });
-}
-function escapeHtml(value) {
-  return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-}
-function formatSeconds2(value) {
-  return Number.isFinite(value) ? value.toFixed(1) : "0.0";
 }
 function materialIds(move, field = "MatIDList") {
   return listValue(move[field]).map(String).filter(Boolean);
@@ -250,9 +186,6 @@ function isLoadPortName(name, type = "") {
 }
 function isLoadLockName(name, type = "") {
   return type.toLowerCase() === "loadlock" || /^LL?[A-Z]$/i.test(name) || /^BUF_/i.test(name);
-}
-function isDoorlessModule(name, type = "") {
-  return /^cool(er)?$/i.test(name) || type.toLowerCase() === "cooler" || isDummyPortName(name);
 }
 function isProcessModule(name, type = "") {
   const normalizedType = type.toLowerCase();
@@ -594,18 +527,154 @@ function analyzeSchedulePerformance(moves, device, mode = "steady") {
     vacuumQueueLongestRun: queuePattern.longestRun
   };
 }
+function summarizeBottleneckUtilization(performance2) {
+  if (!performance2.bottleneck) return null;
+  return {
+    resourceName: performance2.bottleneck.name,
+    utilization: performance2.bottleneck.utilization,
+    windowLabel: performance2.window.label
+  };
+}
+function displayedPerformanceResources(performance2) {
+  return performance2.resources.filter(
+    (resource) => resource.busyTime > PERFORMANCE_TIME_TOLERANCE
+  );
+}
+
+// src/workspace_visualizer.ts
+var PICK_MOVE_TYPES2 = /* @__PURE__ */ new Set([0, 2]);
+var PLACE_MOVE_TYPES2 = /* @__PURE__ */ new Set([1, 3]);
+var SWAP_MOVE2 = 4;
+var PREPARE_MOVE2 = 6;
+var COMPLETE_MOVE2 = 7;
+var PROCESS_MOVE2 = 9;
+var PRE_PREPARE_MOVE2 = 10;
+var CLEAN_MOVE2 = 14;
+var PLAYBACK_FRAME_INTERVAL_MS = 80;
+var DEFAULT_PLAYBACK_SPEED = 4;
+var PROCESS_ARC_START_DEGREES = 200;
+var PROCESS_ARC_END_DEGREES = 340;
+var PROCESS_ARC_CENTER_X_PERCENT = 50;
+var PROCESS_ARC_CENTER_Y_PIXELS = 214;
+var PROCESS_ARC_RADIUS_X_PERCENT = 38;
+var PROCESS_ARC_RADIUS_Y_PIXELS = 156;
+var MAXIMUM_VISIBLE_QUEUE_ITEMS = 32;
+var ACTIVITY_CATEGORIES2 = [
+  "process",
+  "clean",
+  "door",
+  "transfer",
+  "environment",
+  "other"
+];
+var ACTIVITY_CATEGORY_LABELS = {
+  process: "\u52A0\u5DE5",
+  clean: "\u6E05\u6D01",
+  door: "\u5F00\u5173\u95E8",
+  transfer: "\u53D6\u653E / \u642C\u8FD0",
+  environment: "\u62BD\u5145\u6C14",
+  other: "\u5176\u4ED6"
+};
+var MOVE_NAMES = {
+  0: "\u53D6\u7247",
+  1: "\u653E\u7247",
+  2: "\u591A\u7247\u53D6\u7247",
+  3: "\u591A\u7247\u653E\u7247",
+  4: "\u6362\u7247",
+  5: "\u673A\u68B0\u624B\u8F6C\u4F4D",
+  6: "\u5F00\u95E8",
+  7: "\u5173\u95E8",
+  8: "\u540E\u7F6E\u5B8C\u6210",
+  9: "\u52A0\u5DE5",
+  10: "\u73AF\u5883\u5207\u6362",
+  11: "\u5BF9\u51C6",
+  12: "\u62BD\u771F\u7A7A",
+  13: "\u5145\u6C14",
+  14: "\u6E05\u6D01"
+};
+var STATUS_LABELS = {
+  idle: "\u7A7A\u95F2",
+  occupied: "\u5DF2\u8F7D\u7247",
+  door: "\u95E8\u52A8\u4F5C",
+  transfer: "\u4F20\u8F93\u4E2D",
+  processing: "\u52A0\u5DE5\u4E2D",
+  cleaning: "\u6E05\u6D01\u4E2D",
+  environment: "\u73AF\u5883\u5207\u6362"
+};
+var DOOR_LABELS = {
+  closed: "\u95E8\u5DF2\u5173\u95ED",
+  opening: "\u6B63\u5728\u5F00\u95E8",
+  open: "\u95E8\u5DF2\u6253\u5F00",
+  closing: "\u6B63\u5728\u5173\u95E8",
+  doorless: "\u65E0\u95E8\u7ED3\u6784"
+};
+function finiteNumber2(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+function listValue2(value) {
+  return Array.isArray(value) ? value : [];
+}
+function naturalCompare2(left, right) {
+  return left.localeCompare(right, void 0, { numeric: true, sensitivity: "base" });
+}
+function escapeHtml(value) {
+  return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+function formatSeconds2(value) {
+  return Number.isFinite(value) ? value.toFixed(1) : "0.0";
+}
+function materialIds2(move, field = "MatIDList") {
+  return listValue2(move[field]).map(String).filter(Boolean);
+}
+function firstStation2(move, field) {
+  return String(listValue2(move[field])[0] ?? "");
+}
+function isRobotName2(name) {
+  return /^(ATR|VTR|TM\d*|ROBOT)/i.test(name);
+}
+function isDummyPortName2(name) {
+  return /DUMMY/i.test(name) && /PORT/i.test(name);
+}
+function isLoadPortName2(name, type = "") {
+  return !isDummyPortName2(name) && (type.toLowerCase() === "loadport" || /^(LP\d*|P\d+|.*PORT)$/i.test(name));
+}
+function isLoadLockName2(name, type = "") {
+  return type.toLowerCase() === "loadlock" || /^LL?[A-Z]$/i.test(name) || /^BUF_/i.test(name);
+}
+function isDoorlessModule(name, type = "") {
+  return /^cool(er)?$/i.test(name) || type.toLowerCase() === "cooler" || isDummyPortName2(name);
+}
+function isProcessModule2(name, type = "") {
+  const normalizedType = type.toLowerCase();
+  return /process|chamber/.test(normalizedType) || /^(PM|CH)\w*/i.test(name);
+}
+function normalizeMoves2(moves) {
+  return moves.map((move, index) => {
+    const startTime = finiteNumber2(move.StartTime);
+    const endTime = Math.max(startTime, finiteNumber2(move.EndTime, startTime));
+    return {
+      ...move,
+      MoveID: finiteNumber2(move.MoveID, index + 1),
+      MoveType: finiteNumber2(move.MoveType, -1),
+      ModuleName: String(move.ModuleName ?? ""),
+      StartTime: startTime,
+      EndTime: endTime
+    };
+  }).sort((left, right) => left.StartTime - right.StartTime || left.EndTime - right.EndTime || left.MoveID - right.MoveID);
+}
 function collectModuleDefinitions(moves, device) {
   const modules = /* @__PURE__ */ new Map();
   const stationDefinitions = device?.Stations ?? {};
   for (const move of moves) {
     const candidates = [
       move.ModuleName,
-      ...listValue(move.SrcStationList),
-      ...listValue(move.DestStationList),
-      ...listValue(move.StationList)
+      ...listValue2(move.SrcStationList),
+      ...listValue2(move.DestStationList),
+      ...listValue2(move.StationList)
     ].map(String).filter(Boolean);
     for (const name of candidates) {
-      if (!isRobotName(name) && !modules.has(name)) {
+      if (!isRobotName2(name) && !modules.has(name)) {
         modules.set(name, { type: String(stationDefinitions[name]?.Type ?? "") });
       }
     }
@@ -615,50 +684,50 @@ function collectModuleDefinitions(moves, device) {
 function collectRobotNames(moves, device) {
   const names = new Set(Object.keys(device?.Robots ?? {}));
   for (const move of moves) {
-    if (isRobotName(move.ModuleName)) names.add(move.ModuleName);
+    if (isRobotName2(move.ModuleName)) names.add(move.ModuleName);
     const robot = String(move.Robot ?? "");
     if (robot) names.add(robot);
   }
-  return [...names].sort(naturalCompare);
+  return [...names].sort(naturalCompare2);
 }
 function initialMaterialLocations(moves) {
   const locations = /* @__PURE__ */ new Map();
   for (const move of moves) {
-    if (move.MoveType === SWAP_MOVE) {
-      const station = String(listValue(move.StationList)[0] ?? "");
-      for (const material of materialIds(move, "RecvMatList")) {
+    if (move.MoveType === SWAP_MOVE2) {
+      const station = String(listValue2(move.StationList)[0] ?? "");
+      for (const material of materialIds2(move, "RecvMatList")) {
         if (!locations.has(material)) locations.set(material, move.ModuleName);
       }
-      for (const material of materialIds(move, "SendMatList")) {
+      for (const material of materialIds2(move, "SendMatList")) {
         if (!locations.has(material)) locations.set(material, station);
       }
       continue;
     }
-    const source = firstStation(move, "SrcStationList");
-    const destination = firstStation(move, "DestStationList");
-    const fallback = source || (PICK_MOVE_TYPES.has(move.MoveType) ? move.ModuleName : "") || (PLACE_MOVE_TYPES.has(move.MoveType) ? move.ModuleName : "") || destination || move.ModuleName;
-    for (const material of materialIds(move)) {
+    const source = firstStation2(move, "SrcStationList");
+    const destination = firstStation2(move, "DestStationList");
+    const fallback = source || (PICK_MOVE_TYPES2.has(move.MoveType) ? move.ModuleName : "") || (PLACE_MOVE_TYPES2.has(move.MoveType) ? move.ModuleName : "") || destination || move.ModuleName;
+    for (const material of materialIds2(move)) {
       if (!locations.has(material) && fallback) locations.set(material, fallback);
     }
   }
   return locations;
 }
 function applyCompletedTransfer(move, locations) {
-  if (PICK_MOVE_TYPES.has(move.MoveType)) {
-    for (const material of materialIds(move)) locations.set(material, move.ModuleName);
+  if (PICK_MOVE_TYPES2.has(move.MoveType)) {
+    for (const material of materialIds2(move)) locations.set(material, move.ModuleName);
     return;
   }
-  if (PLACE_MOVE_TYPES.has(move.MoveType)) {
-    const destination = firstStation(move, "DestStationList");
+  if (PLACE_MOVE_TYPES2.has(move.MoveType)) {
+    const destination = firstStation2(move, "DestStationList");
     if (destination) {
-      for (const material of materialIds(move)) locations.set(material, destination);
+      for (const material of materialIds2(move)) locations.set(material, destination);
     }
     return;
   }
-  if (move.MoveType === SWAP_MOVE) {
-    const station = String(listValue(move.StationList)[0] ?? "");
-    for (const material of materialIds(move, "RecvMatList")) locations.set(material, station);
-    for (const material of materialIds(move, "SendMatList")) locations.set(material, move.ModuleName);
+  if (move.MoveType === SWAP_MOVE2) {
+    const station = String(listValue2(move.StationList)[0] ?? "");
+    for (const material of materialIds2(move, "RecvMatList")) locations.set(material, station);
+    for (const material of materialIds2(move, "SendMatList")) locations.set(material, move.ModuleName);
   }
 }
 function moveProgress(move, time) {
@@ -667,12 +736,12 @@ function moveProgress(move, time) {
   return Math.max(0, Math.min(1, (time - move.StartTime) / duration));
 }
 function activeTarget(move) {
-  return firstStation(move, "DestStationList") || firstStation(move, "SrcStationList") || String(listValue(move.StationList)[0] ?? "") || (!isRobotName(move.ModuleName) ? move.ModuleName : "");
+  return firstStation2(move, "DestStationList") || firstStation2(move, "SrcStationList") || String(listValue2(move.StationList)[0] ?? "") || (!isRobotName2(move.ModuleName) ? move.ModuleName : "");
 }
 function buildWorkspaceSnapshot(moves, device, requestedTime) {
-  const records = normalizeMoves(moves);
+  const records = normalizeMoves2(moves);
   const endTime = records.reduce((maximum, move) => Math.max(maximum, move.EndTime), 0);
-  const time = Math.max(0, Math.min(finiteNumber(requestedTime), endTime));
+  const time = Math.max(0, Math.min(finiteNumber2(requestedTime), endTime));
   const definitions = collectModuleDefinitions(records, device);
   const robotNames = collectRobotNames(records, device);
   const locations = initialMaterialLocations(records);
@@ -691,13 +760,13 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
       completedMoves += 1;
       applyCompletedTransfer(move, locations);
     }
-    if (move.MoveType === PREPARE_MOVE) {
+    if (move.MoveType === PREPARE_MOVE2) {
       if (active) doorStates.set(move.ModuleName, "opening");
       else if (completed) doorStates.set(move.ModuleName, "open");
-    } else if (move.MoveType === COMPLETE_MOVE) {
+    } else if (move.MoveType === COMPLETE_MOVE2) {
       if (active) doorStates.set(move.ModuleName, "closing");
       else if (completed) doorStates.set(move.ModuleName, "closed");
-    } else if (move.MoveType === PRE_PREPARE_MOVE && (active || completed)) {
+    } else if (move.MoveType === PRE_PREPARE_MOVE2 && (active || completed)) {
       const currentState = String(move.CurState ?? "");
       const environment = /VTR|VAC/i.test(currentState) ? "\u771F\u7A7A" : /ATR|ATM/i.test(currentState) ? "\u5927\u6C14" : currentState;
       if (environment) environments.set(move.ModuleName, active ? `${environment}\u5207\u6362\u4E2D` : environment);
@@ -705,7 +774,7 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
   }
   const robotTargets = /* @__PURE__ */ new Map();
   for (const move of activeMoves) {
-    if (isRobotName(move.ModuleName)) robotTargets.set(move.ModuleName, activeTarget(move));
+    if (isRobotName2(move.ModuleName)) robotTargets.set(move.ModuleName, activeTarget(move));
   }
   const wafersByLocation = /* @__PURE__ */ new Map();
   for (const [material, location] of locations) {
@@ -714,15 +783,15 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
     wafers.push(material);
     wafersByLocation.set(location, wafers);
   }
-  for (const wafers of wafersByLocation.values()) wafers.sort(naturalCompare);
+  for (const wafers of wafersByLocation.values()) wafers.sort(naturalCompare2);
   const modules = [...definitions.entries()].map(([name, definition]) => {
-    const moduleMoves = activeMoves.filter((move) => move.ModuleName === name || firstStation(move, "SrcStationList") === name || firstStation(move, "DestStationList") === name || listValue(move.StationList).map(String).includes(name));
-    const primaryMove = moduleMoves.find((move) => move.MoveType === CLEAN_MOVE) ?? moduleMoves.find((move) => move.MoveType === PROCESS_MOVE) ?? moduleMoves.find((move) => move.MoveType === PRE_PREPARE_MOVE) ?? moduleMoves.find((move) => [PREPARE_MOVE, COMPLETE_MOVE].includes(move.MoveType)) ?? moduleMoves[0];
+    const moduleMoves = activeMoves.filter((move) => move.ModuleName === name || firstStation2(move, "SrcStationList") === name || firstStation2(move, "DestStationList") === name || listValue2(move.StationList).map(String).includes(name));
+    const primaryMove = moduleMoves.find((move) => move.MoveType === CLEAN_MOVE2) ?? moduleMoves.find((move) => move.MoveType === PROCESS_MOVE2) ?? moduleMoves.find((move) => move.MoveType === PRE_PREPARE_MOVE2) ?? moduleMoves.find((move) => [PREPARE_MOVE2, COMPLETE_MOVE2].includes(move.MoveType)) ?? moduleMoves[0];
     let status = (wafersByLocation.get(name)?.length ?? 0) > 0 ? "occupied" : "idle";
-    if (primaryMove?.MoveType === CLEAN_MOVE) status = "cleaning";
-    else if (primaryMove?.MoveType === PROCESS_MOVE) status = "processing";
-    else if (primaryMove?.MoveType === PRE_PREPARE_MOVE) status = "environment";
-    else if (primaryMove && [PREPARE_MOVE, COMPLETE_MOVE].includes(primaryMove.MoveType)) status = "door";
+    if (primaryMove?.MoveType === CLEAN_MOVE2) status = "cleaning";
+    else if (primaryMove?.MoveType === PROCESS_MOVE2) status = "processing";
+    else if (primaryMove?.MoveType === PRE_PREPARE_MOVE2) status = "environment";
+    else if (primaryMove && [PREPARE_MOVE2, COMPLETE_MOVE2].includes(primaryMove.MoveType)) status = "door";
     else if (primaryMove) status = "transfer";
     return {
       name,
@@ -735,7 +804,7 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
       environment: environments.get(name) ?? "",
       isRobotTarget: [...robotTargets.values()].includes(name)
     };
-  }).sort((left, right) => naturalCompare(left.name, right.name));
+  }).sort((left, right) => naturalCompare2(left.name, right.name));
   const robots = robotNames.map((name) => {
     const move = activeMoves.find((record) => record.ModuleName === name);
     return {
@@ -754,7 +823,7 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
     activeMoves,
     modules,
     robots,
-    waferCount: new Set(records.flatMap((move) => materialIds(move))).size
+    waferCount: new Set(records.flatMap((move) => materialIds2(move))).size
   };
 }
 function collectElements(root) {
@@ -794,9 +863,9 @@ function icon(name) {
   return `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">${paths[name]}</svg>`;
 }
 function topologyGroups(modules) {
-  const loadLocks = modules.filter((module) => isLoadLockName(module.name, module.type));
-  const loadPorts = modules.filter((module) => isLoadPortName(module.name, module.type));
-  const processModules = modules.filter((module) => isProcessModule(module.name, module.type));
+  const loadLocks = modules.filter((module) => isLoadLockName2(module.name, module.type));
+  const loadPorts = modules.filter((module) => isLoadPortName2(module.name, module.type));
+  const processModules = modules.filter((module) => isProcessModule2(module.name, module.type));
   const assignedNames = new Set([...loadLocks, ...loadPorts, ...processModules].map((module) => module.name));
   return {
     processModules,
@@ -891,11 +960,6 @@ function shortPJobName(value) {
 function formatPercent(value) {
   return `${(Math.max(0, value) * 100).toFixed(1)}%`;
 }
-function displayedPerformanceResources(performance2) {
-  return performance2.resources.filter(
-    (resource) => resource.busyTime > PERFORMANCE_TIME_TOLERANCE
-  );
-}
 function renderSchedulePerformance(performance2) {
   const window2 = performance2.window;
   const bottleneck = performance2.bottleneck;
@@ -907,9 +971,9 @@ function renderSchedulePerformance(performance2) {
     loadport: "LoadPort",
     auxiliary: "\u8F85\u52A9\u6A21\u5757"
   };
-  const legend = ACTIVITY_CATEGORIES.map((category) => `<span><i class="performance-swatch category-${category}"></i>${ACTIVITY_CATEGORY_LABELS[category]}</span>`).join("");
+  const legend = ACTIVITY_CATEGORIES2.map((category) => `<span><i class="performance-swatch category-${category}"></i>${ACTIVITY_CATEGORY_LABELS[category]}</span>`).join("");
   const resourceRows = displayedResources.map((resource) => {
-    const categoryBars = ACTIVITY_CATEGORIES.map((category) => {
+    const categoryBars = ACTIVITY_CATEGORIES2.map((category) => {
       const duration = resource.categoryTimes[category];
       if (duration <= PERFORMANCE_TIME_TOLERANCE || window2.duration <= PERFORMANCE_TIME_TOLERANCE) return "";
       const width = Math.min(duration / window2.duration * 100, 100);
@@ -1106,7 +1170,7 @@ var VisualizationWorkspace = class {
       });
     });
     this.elements.range.addEventListener("input", () => {
-      this.time = finiteNumber(this.elements.range.value);
+      this.time = finiteNumber2(this.elements.range.value);
       this.render();
     });
     this.elements.playButton.addEventListener("click", () => {
@@ -1114,7 +1178,7 @@ var VisualizationWorkspace = class {
       else this.play();
     });
     this.elements.speed.addEventListener("change", () => {
-      this.playbackSpeed = Math.max(0.25, finiteNumber(this.elements.speed.value, DEFAULT_PLAYBACK_SPEED));
+      this.playbackSpeed = Math.max(0.25, finiteNumber2(this.elements.speed.value, DEFAULT_PLAYBACK_SPEED));
     });
     this.elements.performanceWindow.addEventListener("change", () => {
       this.performanceWindowMode = this.elements.performanceWindow.value === "full" ? "full" : "steady";
@@ -1128,7 +1192,7 @@ var VisualizationWorkspace = class {
   /** 从当前时间开始播放；到达末尾时自动回到起点。 */
   play() {
     if (!this.moves.length || this.playing) return;
-    const endTime = finiteNumber(this.elements.range.max);
+    const endTime = finiteNumber2(this.elements.range.max);
     if (this.time >= endTime) {
       this.time = 0;
       this.elements.range.value = "0";
@@ -1151,7 +1215,7 @@ var VisualizationWorkspace = class {
     if (!this.playing) return;
     const elapsedSeconds = Math.max(0, timestamp - this.previousFrameTime) / 1e3;
     this.previousFrameTime = timestamp;
-    const endTime = finiteNumber(this.elements.range.max);
+    const endTime = finiteNumber2(this.elements.range.max);
     this.time = Math.min(endTime, this.time + elapsedSeconds * this.playbackSpeed);
     this.elements.range.value = String(this.time);
     if (timestamp - this.previousRenderTime >= PLAYBACK_FRAME_INTERVAL_MS || this.time >= endTime) {
@@ -1185,10 +1249,10 @@ var VisualizationWorkspace = class {
     this.elements.stage.innerHTML = renderEquipmentTopology(snapshot);
     this.elements.activeMoves.innerHTML = snapshot.activeMoves.length ? snapshot.activeMoves.map((move) => `
         <li>
-          <span class="active-move-id">#${finiteNumber(move.MoveID)}</span>
-          <strong>${escapeHtml(MOVE_NAMES[finiteNumber(move.MoveType, -1)] ?? `\u52A8\u4F5C ${move.MoveType}`)}</strong>
+          <span class="active-move-id">#${finiteNumber2(move.MoveID)}</span>
+          <strong>${escapeHtml(MOVE_NAMES[finiteNumber2(move.MoveType, -1)] ?? `\u52A8\u4F5C ${move.MoveType}`)}</strong>
           <span>${escapeHtml(move.ModuleName || activeTarget(move) || "\u2014")}</span>
-          <time>${formatSeconds2(finiteNumber(move.StartTime))}\u2013${formatSeconds2(finiteNumber(move.EndTime))} s</time>
+          <time>${formatSeconds2(finiteNumber2(move.StartTime))}\u2013${formatSeconds2(finiteNumber2(move.EndTime))} s</time>
         </li>`).join("") : '<li class="active-move-empty">\u5F53\u524D\u65F6\u523B\u6CA1\u6709\u6267\u884C\u4E2D\u7684\u52A8\u4F5C</li>';
   }
   /** 重算并绘制与播放时刻无关的整段排程性能诊断。 */
@@ -1228,6 +1292,254 @@ var VisualizationWorkspace = class {
 };
 function createVisualizationWorkspace(root = document) {
   return new VisualizationWorkspace(root);
+}
+
+// ../analysis/group_performance.ts
+var COMPARISON_TOLERANCE_PERCENT = 1e-6;
+function finiteOrNull(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+function percentile(values, probability) {
+  if (!values.length) return null;
+  const sorted = [...values].sort((left, right) => left - right);
+  const position = Math.max(0, Math.min(1, probability)) * (sorted.length - 1);
+  const lower = Math.floor(position);
+  const upper = Math.ceil(position);
+  if (lower === upper) return sorted[lower];
+  return sorted[lower] + (sorted[upper] - sorted[lower]) * (position - lower);
+}
+function median(values) {
+  return percentile(values, 0.5);
+}
+function normalizeCase(input) {
+  const makespan = finiteOrNull(input.makespan);
+  const baselineMakespan = finiteOrNull(input.baselineMakespan);
+  const comparable = input.status === "succeeded" && makespan !== null && baselineMakespan !== null && baselineMakespan > 0;
+  const improvementPercent = comparable ? (baselineMakespan - makespan) / baselineMakespan * 100 : null;
+  const bottleneck = input.performance?.bottleneck ?? null;
+  return {
+    id: String(input.id),
+    name: String(input.name),
+    status: String(input.status || "unknown"),
+    validation: String(input.validation || "unknown"),
+    validationPassed: input.validation === "passed",
+    makespan,
+    baselineMakespan,
+    comparable,
+    improvementPercent,
+    performanceRatio: comparable ? makespan / baselineMakespan : null,
+    cpuTimeMs: finiteOrNull(input.cpuTimeMs),
+    elapsedTimeMs: finiteOrNull(input.elapsedTimeMs),
+    bottleneckResource: bottleneck?.name ?? "",
+    bottleneckUtilization: bottleneck ? bottleneck.utilization : null,
+    throughputPerHour: input.performance ? finiteOrNull(input.performance.throughputPerHour) : null,
+    departureIntervalCv: input.performance ? finiteOrNull(input.performance.departureIntervalCv) : null,
+    windowMethod: input.performance?.window.method ?? "",
+    error: String(input.error || "")
+  };
+}
+function analyzeTestGroupPerformance(inputs) {
+  const cases = inputs.map(normalizeCase);
+  const succeeded = cases.filter((item) => item.status === "succeeded");
+  const comparable = cases.filter((item) => item.comparable);
+  const improvements = comparable.map((item) => item.improvementPercent).filter((value) => value !== null);
+  const totalMakespan = comparable.reduce(
+    (sum, item) => sum + (item.makespan ?? 0),
+    0
+  );
+  const totalBaseline = comparable.reduce(
+    (sum, item) => sum + (item.baselineMakespan ?? 0),
+    0
+  );
+  const cpuTimes = succeeded.map((item) => item.cpuTimeMs).filter((value) => value !== null && value >= 0);
+  const bottleneckUtilizations = succeeded.map((item) => item.bottleneckUtilization).filter((value) => value !== null);
+  const throughputs = succeeded.map((item) => item.throughputPerHour).filter((value) => value !== null && value > 0);
+  const departureCvs = succeeded.map((item) => item.departureIntervalCv).filter((value) => value !== null);
+  const frequencyMap = /* @__PURE__ */ new Map();
+  const windowMethodCounts = {};
+  for (const item of succeeded) {
+    if (item.bottleneckResource && item.bottleneckUtilization !== null) {
+      const values = frequencyMap.get(item.bottleneckResource) ?? [];
+      values.push(item.bottleneckUtilization);
+      frequencyMap.set(item.bottleneckResource, values);
+    }
+    if (item.windowMethod) {
+      windowMethodCounts[item.windowMethod] = (windowMethodCounts[item.windowMethod] ?? 0) + 1;
+    }
+  }
+  const bottleneckFrequencies = [...frequencyMap.entries()].map(([resourceName, values]) => ({
+    resourceName,
+    count: values.length,
+    share: succeeded.length ? values.length / succeeded.length : 0,
+    medianUtilization: median(values) ?? 0
+  })).sort((left, right) => right.count - left.count || right.medianUtilization - left.medianUtilization || left.resourceName.localeCompare(right.resourceName, void 0, {
+    numeric: true
+  }));
+  return {
+    cases,
+    totalCount: cases.length,
+    succeededCount: succeeded.length,
+    failedCount: cases.length - succeeded.length,
+    validationPassedCount: succeeded.filter((item) => item.validationPassed).length,
+    validationPassRate: succeeded.length ? succeeded.filter((item) => item.validationPassed).length / succeeded.length : 0,
+    comparableCount: comparable.length,
+    winCount: improvements.filter((value) => value > COMPARISON_TOLERANCE_PERCENT).length,
+    tieCount: improvements.filter(
+      (value) => Math.abs(value) <= COMPARISON_TOLERANCE_PERCENT
+    ).length,
+    regressionCount: improvements.filter(
+      (value) => value < -COMPARISON_TOLERANCE_PERCENT
+    ).length,
+    weightedImprovementPercent: totalBaseline > 0 ? (totalBaseline - totalMakespan) / totalBaseline * 100 : null,
+    medianImprovementPercent: median(improvements),
+    worstRegressionPercent: improvements.some((value) => value < 0) ? Math.min(...improvements) : null,
+    medianCpuTimeMs: median(cpuTimes),
+    p90CpuTimeMs: percentile(cpuTimes, 0.9),
+    totalCpuTimeMs: cpuTimes.reduce((sum, value) => sum + value, 0),
+    medianBottleneckUtilization: median(bottleneckUtilizations),
+    medianThroughputPerHour: median(throughputs),
+    medianDepartureIntervalCv: median(departureCvs),
+    bottleneckFrequencies,
+    windowMethodCounts
+  };
+}
+
+// src/group_analysis_view.ts
+function escapeHtml2(value) {
+  return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+function finiteText(value, digits, suffix = "") {
+  return value === null || !Number.isFinite(value) ? "\u2014" : `${value.toFixed(digits)}${suffix}`;
+}
+function percentText(value, fromRatio = false) {
+  const normalized = value === null ? null : value * (fromRatio ? 100 : 1);
+  return finiteText(normalized, 2, "%");
+}
+function durationText(value) {
+  if (value === null || !Number.isFinite(value)) return "\u2014";
+  return value >= 1e3 ? `${(value / 1e3).toFixed(2)} s` : `${value.toFixed(1)} ms`;
+}
+function caseLabel(item, index) {
+  return item.name || `t${index + 1}`;
+}
+function improvementChart(summary) {
+  const cases = summary.cases.filter((item) => item.improvementPercent !== null);
+  const scale = Math.max(
+    1,
+    ...cases.map((item) => Math.abs(item.improvementPercent ?? 0))
+  );
+  return cases.map((item, index) => {
+    const value = item.improvementPercent ?? 0;
+    const width = Math.min(Math.abs(value) / scale * 50, 50);
+    const status = value < 0 ? "loss" : value > 0 ? "gain" : "tie";
+    return `<div class="group-chart-row">
+      <span class="group-chart-label" title="${escapeHtml2(item.name)}">${escapeHtml2(caseLabel(item, index))}</span>
+      <div class="group-diverging-track" role="img" aria-label="${escapeHtml2(caseLabel(item, index))} \u76F8\u5BF9\u57FA\u7EBF ${value >= 0 ? "\u63D0\u5347" : "\u9000\u5316"} ${Math.abs(value).toFixed(2)}%">
+        <i class="${status}" style="--bar-width:${width}%"></i>
+      </div>
+      <strong class="${status}">${value > 0 ? "+" : ""}${value.toFixed(2)}%</strong>
+    </div>`;
+  }).join("") || '<p class="group-analysis-empty">\u6CA1\u6709\u53EF\u6BD4\u8F83\u7684 Baseline\u3002</p>';
+}
+function utilizationChart(summary) {
+  const cases = summary.cases.filter((item) => item.bottleneckUtilization !== null);
+  return cases.map((item, index) => {
+    const utilization = Math.max(0, Math.min(item.bottleneckUtilization ?? 0, 1));
+    return `<div class="group-chart-row">
+      <span class="group-chart-label" title="${escapeHtml2(item.name)}">${escapeHtml2(caseLabel(item, index))}</span>
+      <div class="group-linear-track" role="img" aria-label="${escapeHtml2(caseLabel(item, index))} \u74F6\u9888 ${escapeHtml2(item.bottleneckResource)}\uFF0C\u5229\u7528\u7387 ${(utilization * 100).toFixed(1)}%">
+        <i class="utilization" style="width:${(utilization * 100).toFixed(2)}%"></i>
+      </div>
+      <strong>${(utilization * 100).toFixed(1)}%</strong>
+      <small title="${escapeHtml2(item.bottleneckResource)}">${escapeHtml2(item.bottleneckResource || "\u2014")}</small>
+    </div>`;
+  }).join("") || '<p class="group-analysis-empty">\u6CA1\u6709\u53EF\u5206\u6790\u7684\u74F6\u9888\u8D44\u6E90\u3002</p>';
+}
+function cpuChart(summary) {
+  const cases = summary.cases.filter((item) => item.cpuTimeMs !== null);
+  const scale = Math.max(1, ...cases.map((item) => item.cpuTimeMs ?? 0));
+  return cases.map((item, index) => {
+    const cpu = Math.max(item.cpuTimeMs ?? 0, 0);
+    return `<div class="group-chart-row">
+      <span class="group-chart-label" title="${escapeHtml2(item.name)}">${escapeHtml2(caseLabel(item, index))}</span>
+      <div class="group-linear-track" role="img" aria-label="${escapeHtml2(caseLabel(item, index))} CPU Time ${durationText(cpu)}">
+        <i class="cpu" style="width:${Math.min(cpu / scale * 100, 100).toFixed(2)}%"></i>
+      </div>
+      <strong>${escapeHtml2(durationText(cpu))}</strong>
+    </div>`;
+  }).join("") || '<p class="group-analysis-empty">\u6CA1\u6709 CPU Time \u6570\u636E\u3002</p>';
+}
+function frequencyTags(summary) {
+  return summary.bottleneckFrequencies.map((item) => `<span class="group-frequency-tag"><b>${escapeHtml2(item.resourceName)}</b>${item.count} \u6B21 \xB7 \u4E2D\u4F4D ${(item.medianUtilization * 100).toFixed(1)}%</span>`).join("") || '<span class="group-analysis-empty">\u6CA1\u6709\u74F6\u9888\u9891\u6B21\u6570\u636E\u3002</span>';
+}
+function resultTable(summary) {
+  return summary.cases.map((item, index) => `
+    <tr>
+      <th scope="row">${escapeHtml2(caseLabel(item, index))}</th>
+      <td>${finiteText(item.makespan, 2, " s")}</td>
+      <td>${finiteText(item.baselineMakespan, 2, " s")}</td>
+      <td class="${(item.improvementPercent ?? 0) < 0 ? "loss" : "gain"}">${item.improvementPercent === null ? "\u2014" : `${item.improvementPercent > 0 ? "+" : ""}${item.improvementPercent.toFixed(2)}%`}</td>
+      <td>${escapeHtml2(item.bottleneckResource || "\u2014")}</td>
+      <td>${percentText(item.bottleneckUtilization, true)}</td>
+      <td>${durationText(item.cpuTimeMs)}</td>
+      <td>${finiteText(item.throughputPerHour, 1, " \u7247/h")}</td>
+      <td>${finiteText(item.departureIntervalCv, 2)}</td>
+      <td>${item.validationPassed ? '<span class="group-pass">\u901A\u8FC7</span>' : `<span class="group-fail">${escapeHtml2(item.validation || item.status)}</span>`}</td>
+    </tr>`).join("");
+}
+function renderTestGroupAnalysis(summary, groupName, strategy) {
+  const weighted = summary.weightedImprovementPercent;
+  const medianImprovement = summary.medianImprovementPercent;
+  const windowApproximationCount = summary.windowMethodCounts["middle-approximation"] ?? 0;
+  return `
+    <div class="group-analysis-head">
+      <div>
+        <span class="eyebrow">\u6D4B\u8BD5\u7EC4\u7ED3\u679C\u5206\u6790</span>
+        <h2>${escapeHtml2(groupName || "\u5F53\u524D\u6D4B\u8BD5\u7EC4")}</h2>
+        <p>${escapeHtml2(strategy || "\u5F53\u524D\u7B56\u7565")} \xB7 ${summary.succeededCount}/${summary.totalCount} \u4E2A\u6D4B\u8BD5\u6709\u6709\u6548\u7ED3\u679C</p>
+      </div>
+      <span class="group-analysis-badge">\u9010\u4F8B\u5BF9\u6BD4 \xB7 \u4E0D\u505A\u7EFC\u5408\u6253\u5206</span>
+    </div>
+    <div class="group-kpi-grid">
+      <article><span>\u6821\u9A8C\u901A\u8FC7\u7387</span><strong>${(summary.validationPassRate * 100).toFixed(1)}%</strong><small>${summary.validationPassedCount}/${summary.succeededCount} \u4E2A\u6709\u6548\u7ED3\u679C</small></article>
+      <article><span>\u52A0\u6743\u603B\u4F53\u6539\u5584</span><strong class="${(weighted ?? 0) < 0 ? "loss" : "gain"}">${weighted === null ? "\u2014" : `${weighted > 0 ? "+" : ""}${weighted.toFixed(2)}%`}</strong><small>\u6309\u5404\u6D4B\u8BD5 Baseline makespan \u52A0\u6743</small></article>
+      <article><span>\u9010\u4F8B\u4E2D\u4F4D\u6539\u5584</span><strong class="${(medianImprovement ?? 0) < 0 ? "loss" : "gain"}">${medianImprovement === null ? "\u2014" : `${medianImprovement > 0 ? "+" : ""}${medianImprovement.toFixed(2)}%`}</strong><small>${summary.winCount} \u80DC \xB7 ${summary.tieCount} \u5E73 \xB7 ${summary.regressionCount} \u9000\u5316</small></article>
+      <article><span>CPU Time</span><strong>${durationText(summary.medianCpuTimeMs)}</strong><small>P90 ${durationText(summary.p90CpuTimeMs)} \xB7 \u603B\u8BA1 ${durationText(summary.totalCpuTimeMs)}</small></article>
+      <article><span>\u74F6\u9888\u5229\u7528\u7387\u4E2D\u4F4D\u6570</span><strong>${percentText(summary.medianBottleneckUtilization, true)}</strong><small>\u7269\u7406\u5360\u7528\u65F6\u95F4\u5E76\u96C6</small></article>
+      <article><span>\u51FA\u7AD9\u8868\u73B0\u4E2D\u4F4D\u6570</span><strong>${finiteText(summary.medianThroughputPerHour, 1, " \u7247/h")}</strong><small>\u95F4\u9694\u6CE2\u52A8 CV ${finiteText(summary.medianDepartureIntervalCv, 2)}</small></article>
+    </div>
+    <div class="group-chart-grid">
+      <article class="group-chart-card">
+        <header><div><h3>\u76F8\u5BF9 Baseline</h3><p>\u6B63\u503C\u4E3A makespan \u6539\u5584\uFF0C\u8D1F\u503C\u4E3A\u9000\u5316</p></div></header>
+        <div class="group-chart-body">${improvementChart(summary)}</div>
+      </article>
+      <article class="group-chart-card">
+        <header><div><h3>\u6240\u6709\u74F6\u9888\u5229\u7528\u7387</h3><p>\u6BCF\u4E2A\u6D4B\u8BD5\u7684\u7A33\u6001\u74F6\u9888\u5019\u9009\u4E0E\u7269\u7406\u5360\u7528</p></div></header>
+        <div class="group-chart-body">${utilizationChart(summary)}</div>
+      </article>
+      <article class="group-chart-card">
+        <header><div><h3>\u8BA1\u7B97\u65F6\u95F4</h3><p>\u5404\u6D4B\u8BD5\u7B97\u6CD5 CPU Time\uFF0C\u6309\u7EC4\u5185\u6700\u5927\u503C\u7F29\u653E</p></div></header>
+        <div class="group-chart-body">${cpuChart(summary)}</div>
+      </article>
+    </div>
+    <article class="group-frequency-card">
+      <div><h3>\u74F6\u9888\u8D44\u6E90\u51FA\u73B0\u9891\u6B21</h3><p>\u8BC6\u522B\u8DE8\u6D4B\u8BD5\u53CD\u590D\u51FA\u73B0\u7684\u7ED3\u6784\u6027\u7EA6\u675F</p></div>
+      <div class="group-frequency-tags">${frequencyTags(summary)}</div>
+    </article>
+    <details class="group-analysis-table-wrap">
+      <summary>\u67E5\u770B\u9010\u6D4B\u8BD5\u5B8C\u6574\u6307\u6807</summary>
+      <div class="group-analysis-table-scroll">
+        <table class="group-analysis-table">
+          <thead><tr><th>\u6D4B\u8BD5</th><th>Makespan</th><th>Baseline</th><th>\u6539\u5584</th><th>\u74F6\u9888</th><th>\u5229\u7528\u7387</th><th>CPU Time</th><th>\u541E\u5410</th><th>\u51FA\u7AD9 CV</th><th>\u6821\u9A8C</th></tr></thead>
+          <tbody>${resultTable(summary)}</tbody>
+        </table>
+      </div>
+    </details>
+    <aside class="group-method-note">
+      <strong>\u5982\u4F55\u89E3\u8BFB</strong>
+      <p>\u74F6\u9888\u6309\u5E73\u5747\u8FDE\u7EED\u5FD9\u788C\u671F\uFF08Active Period\uFF09\u6392\u5E8F\uFF0C\u5229\u7528\u7387\u7528\u4E8E\u540C\u7EA7\u5224\u522B\uFF1B\u5B83\u662F\u8BCA\u65AD\u5019\u9009\uFF0C\u4E0D\u7B49\u540C\u4E8E\u5B8C\u6574 SEMI E10 OEE\u3002\u7EC4\u7EA7\u540C\u65F6\u62A5\u544A\u52A0\u6743\u603B\u4F53\u6539\u5584\u3001\u9010\u4F8B\u4E2D\u4F4D\u6570\u548C\u80DC/\u5E73/\u9000\u5316\uFF0C\u907F\u514D\u5C11\u6570\u957F\u7528\u4F8B\u63A9\u76D6\u5C40\u90E8\u9000\u5316\u3002${windowApproximationCount ? ` \u6709 ${windowApproximationCount} \u4E2A\u6D4B\u8BD5\u56E0\u6837\u672C\u4E0D\u8DB3\u4F7F\u7528\u4E2D\u6BB5\u8FD1\u4F3C\u7A97\u3002` : ""}</p>
+    </aside>`;
 }
 
 // src/editor_models.ts
@@ -1376,10 +1688,10 @@ function normalizeRound(raw, roundIndex, fallbackTime) {
 // src/config_editor.ts
 var { VISIT_SHARED_FIELDS: VISIT_SHARED_FIELDS2, selectReferencedRoutes: selectReferencedRoutes2 } = route_editor_logic_exports;
 var visualizationWorkspace = createVisualizationWorkspace();
+var batchPerformanceAnalyses = /* @__PURE__ */ new Map();
 var batchBottleneckSummaries = /* @__PURE__ */ new Map();
 var batchBottleneckRequests = /* @__PURE__ */ new Map();
 var batchBottleneckErrors = /* @__PURE__ */ new Map();
-var batchBottleneckLoadQueue = Promise.resolve();
 var EXPECTED_API_SCHEMA = "cjob-pjob-v3";
 var CLEAN_TYPE_DEFINITIONS = [
   { key: "preclean", label: "PreClean" },
@@ -1591,7 +1903,7 @@ function normalizeRounds() {
   })));
   state.times = state.rounds.map((round) => Number(round.currentTime));
 }
-function escapeHtml2(value) {
+function escapeHtml3(value) {
   return String(value ?? "").replace(/[&<>"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[char]);
 }
 function readonlyText(value) {
@@ -1599,10 +1911,10 @@ function readonlyText(value) {
   return typeof value === "string" ? value : JSON.stringify(value);
 }
 function renderReadonlyField(label, value, wide = false) {
-  return `<div class="readonly-field ${wide ? "wide" : ""}"><span>${escapeHtml2(label)}</span><strong>${escapeHtml2(readonlyText(value))}</strong></div>`;
+  return `<div class="readonly-field ${wide ? "wide" : ""}"><span>${escapeHtml3(label)}</span><strong>${escapeHtml3(readonlyText(value))}</strong></div>`;
 }
 function optionsHtml(values, selected, emptyLabel = "\u8BF7\u9009\u62E9") {
-  return `<option value="">${escapeHtml2(emptyLabel)}</option>` + values.map((value) => `<option value="${escapeHtml2(value)}" ${value === selected ? "selected" : ""}>${escapeHtml2(value)}</option>`).join("");
+  return `<option value="">${escapeHtml3(emptyLabel)}</option>` + values.map((value) => `<option value="${escapeHtml3(value)}" ${value === selected ? "selected" : ""}>${escapeHtml3(value)}</option>`).join("");
 }
 function unwrapDevice(raw) {
   let value = raw;
@@ -1706,17 +2018,17 @@ function showWorkspaceDialog({ title, message, value = "", needsInput = false, d
 function renderWorkspaceControls() {
   const deviceSelect = document.getElementById("deviceSelect"), tests = state.workspaceDevice?.tests || [];
   const displayDeviceName = (name) => String(name || "\u672A\u547D\u540D\u8BBE\u5907").replace(/\.json$/i, "");
-  deviceSelect.innerHTML = state.workspaceDevices.length ? state.workspaceDevices.map((device) => `<option value="${escapeHtml2(device.id)}" ${device.id === state.workspaceDeviceId ? "selected" : ""}>${escapeHtml2(displayDeviceName(device.name))}</option>`).join("") : `<option value="">\u5C1A\u672A\u5BFC\u5165\u8BBE\u5907</option>`;
+  deviceSelect.innerHTML = state.workspaceDevices.length ? state.workspaceDevices.map((device) => `<option value="${escapeHtml3(device.id)}" ${device.id === state.workspaceDeviceId ? "selected" : ""}>${escapeHtml3(displayDeviceName(device.name))}</option>`).join("") : `<option value="">\u5C1A\u672A\u5BFC\u5165\u8BBE\u5907</option>`;
   const natural = (left, right) => left.localeCompare(right, void 0, { numeric: true });
   const groups = [.../* @__PURE__ */ new Set(["", ...state.workspaceDevice?.testGroups || [], ...tests.map((test) => String(test.group || "").trim())])].sort((left, right) => !left - !right || natural(left, right));
   const selectedGroup = groups.includes(state.activeTestGroup) ? state.activeTestGroup : groups[0] || "";
   const groupSelect = document.getElementById("testGroupSelect");
-  groupSelect.innerHTML = groups.length ? groups.map((group) => `<option value="${escapeHtml2(group)}" title="${escapeHtml2(group || "\u672A\u5206\u7EC4")}" ${group === selectedGroup ? "selected" : ""}>${escapeHtml2(group || "\u672A\u5206\u7EC4")}</option>`).join("") : `<option value="">\u672A\u5206\u7EC4</option>`;
+  groupSelect.innerHTML = groups.length ? groups.map((group) => `<option value="${escapeHtml3(group)}" title="${escapeHtml3(group || "\u672A\u5206\u7EC4")}" ${group === selectedGroup ? "selected" : ""}>${escapeHtml3(group || "\u672A\u5206\u7EC4")}</option>`).join("") : `<option value="">\u672A\u5206\u7EC4</option>`;
   groupSelect.title = selectedGroup || "\u672A\u5206\u7EC4";
   groupSelect.disabled = !state.workspaceDeviceId;
   const testSelect = document.getElementById("testCaseSelect");
   const visibleTests = tests.filter((test) => String(test.group || "").trim() === selectedGroup).sort((left, right) => natural(left.name, right.name));
-  testSelect.innerHTML = visibleTests.length ? visibleTests.map((test) => `<option value="${escapeHtml2(test.id)}" title="${escapeHtml2(test.name)}" ${test.id === state.testCaseId ? "selected" : ""}>${escapeHtml2(test.name)}</option>`).join("") : `<option value="">\u8BE5\u7EC4\u6682\u65E0\u6D4B\u8BD5</option>`;
+  testSelect.innerHTML = visibleTests.length ? visibleTests.map((test) => `<option value="${escapeHtml3(test.id)}" title="${escapeHtml3(test.name)}" ${test.id === state.testCaseId ? "selected" : ""}>${escapeHtml3(test.name)}</option>`).join("") : `<option value="">\u8BE5\u7EC4\u6682\u65E0\u6D4B\u8BD5</option>`;
   testSelect.title = visibleTests.find((test) => test.id === state.testCaseId)?.name || "\u8BE5\u7EC4\u6682\u65E0\u6D4B\u8BD5";
   testSelect.disabled = !visibleTests.length;
   const hasTest = Boolean(state.testCaseId);
@@ -1740,7 +2052,7 @@ function renderWorkspaceControls() {
   emptyHint.classList.toggle("visible", Boolean(state.workspaceDeviceId) && !visibleTests.length);
   document.getElementById("emptyGroupNewTestButton").disabled = !state.workspaceDeviceId;
   const deviceType = /PSE300/i.test(state.deviceName) ? "\u5355\u8154\u975E\u7EA7\u8054" : String(state.workspaceDevice?.deviceType || "\u5355\u8154\u975E\u7EA7\u8054");
-  document.getElementById("deviceSummary").innerHTML = state.device ? `<span class="chip good">${escapeHtml2(deviceType)}</span>` : `<span class="chip">\u5C1A\u672A\u9009\u62E9\u8BBE\u5907</span>`;
+  document.getElementById("deviceSummary").innerHTML = state.device ? `<span class="chip good">${escapeHtml3(deviceType)}</span>` : `<span class="chip">\u5C1A\u672A\u9009\u62E9\u8BBE\u5907</span>`;
 }
 function setWorkspaceStatus(message, kind = "") {
   const status = document.getElementById("workspaceStatus");
@@ -1764,6 +2076,7 @@ function resetRunResult() {
   visualizationWorkspace.clear();
   state.batchResult = null;
   state.selectedBatchTestId = "";
+  batchPerformanceAnalyses.clear();
   batchBottleneckSummaries.clear();
   batchBottleneckRequests.clear();
   batchBottleneckErrors.clear();
@@ -1775,6 +2088,9 @@ function resetRunResult() {
   });
   document.getElementById("metricContext").textContent = "\u8FD0\u884C\u603B\u89C8";
   document.getElementById("batchOverviewButton").hidden = true;
+  document.getElementById("testGroupAnalysisButton").hidden = true;
+  document.getElementById("testGroupAnalysisPanel").hidden = true;
+  document.getElementById("testGroupAnalysisPanel").innerHTML = "";
   document.getElementById("metricTimeLabel").textContent = "\u603B\u8017\u65F6";
   document.getElementById("metricMakespanLabel").textContent = "Makespan";
   setBottleneckMetric(null);
@@ -2076,13 +2392,13 @@ function renderCleans() {
     const open = state.expandedCleanTypes.has(type.key);
     const cards = rows.map(({ clean, index }) => {
       const conditional = clean.cleanType === "wacclean" ? `<div class="field"><label>\u89E6\u53D1\u6B21\u6570</label><input type="number" min="1" step="1" data-scope="clean" data-index="${index}" data-key="triggerCount" value="${Number(clean.triggerCount)}"></div>` : clean.cleanType === "dummywac" ? `<div class="field"><label>WAC \u6E05\u6D01\u957F\u5EA6\uFF08\u79D2\uFF09</label><input type="number" min="0" step="0.1" data-scope="clean" data-index="${index}" data-key="wacRecipeTime" value="${Number(clean.wacRecipeTime)}"></div>` : "";
-      return `<article class="clean-card"><div class="clean-card-title"><strong>${escapeHtml2(clean.name)}</strong><button class="btn danger small" data-action="remove-clean" data-index="${index}">\u5220\u9664</button></div><div class="clean-fields">
-        <div class="field"><label>\u6E05\u6D01\u7C7B\u522B</label><select data-scope="clean" data-index="${index}" data-key="cleanType">${CLEAN_TYPE_DEFINITIONS.map((option) => `<option value="${option.key}" ${option.key === clean.cleanType ? "selected" : ""}>${escapeHtml2(option.label)}</option>`).join("")}</select></div>
+      return `<article class="clean-card"><div class="clean-card-title"><strong>${escapeHtml3(clean.name)}</strong><button class="btn danger small" data-action="remove-clean" data-index="${index}">\u5220\u9664</button></div><div class="clean-fields">
+        <div class="field"><label>\u6E05\u6D01\u7C7B\u522B</label><select data-scope="clean" data-index="${index}" data-key="cleanType">${CLEAN_TYPE_DEFINITIONS.map((option) => `<option value="${option.key}" ${option.key === clean.cleanType ? "selected" : ""}>${escapeHtml3(option.label)}</option>`).join("")}</select></div>
         <div class="field"><label>\u6E05\u6D01\u65F6\u95F4\uFF08\u79D2\uFF09</label><input type="number" min="0" step="0.1" data-scope="clean" data-index="${index}" data-key="recipeTime" value="${Number(clean.recipeTime)}"></div>
         ${conditional}
       </div></article>`;
     }).join("");
-    return `<section class="clean-type-group"><button class="clean-type-head" data-action="toggle-clean-type" data-clean-type="${type.key}"><span class="collapse-arrow ${open ? "open" : ""}">\u25B6</span><strong>${escapeHtml2(type.label)}</strong><span class="route-count">${rows.length} \u4E2A \xB7 ${open ? "\u5DF2\u5C55\u5F00" : "\u5DF2\u6536\u8D77"}</span></button>${open ? `<div class="clean-type-body">${cards || `<div class="clean-type-empty">\u6682\u65E0 ${escapeHtml2(type.label)}</div>`}</div>` : ""}</section>`;
+    return `<section class="clean-type-group"><button class="clean-type-head" data-action="toggle-clean-type" data-clean-type="${type.key}"><span class="collapse-arrow ${open ? "open" : ""}">\u25B6</span><strong>${escapeHtml3(type.label)}</strong><span class="route-count">${rows.length} \u4E2A \xB7 ${open ? "\u5DF2\u5C55\u5F00" : "\u5DF2\u6536\u8D77"}</span></button>${open ? `<div class="clean-type-body">${cards || `<div class="clean-type-empty">\u6682\u65E0 ${escapeHtml3(type.label)}</div>`}</div>` : ""}</section>`;
   }).join("");
 }
 function stepKind(route, index) {
@@ -2090,8 +2406,8 @@ function stepKind(route, index) {
 }
 function renderCandidatePicker(routeIndex, stageIndex, allowed, candidates) {
   const selected = new Set(candidates);
-  const summary = candidates.length ? candidates.map((name) => `<span class="chip">${escapeHtml2(name)}</span>`).join("") : `<span class="candidate-picker-empty">\u9009\u62E9\u8BBE\u5907</span>`;
-  return `<details class="candidate-picker" onclick="event.stopPropagation()"><summary>${summary}</summary><div class="candidate-picker-menu">${allowed.map((name) => `<label class="candidate-option"><input type="checkbox" data-scope="stage-candidate-toggle" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-candidate="${escapeHtml2(name)}" ${selected.has(name) ? "checked" : ""}><span>${escapeHtml2(name)}</span></label>`).join("")}</div></details>`;
+  const summary = candidates.length ? candidates.map((name) => `<span class="chip">${escapeHtml3(name)}</span>`).join("") : `<span class="candidate-picker-empty">\u9009\u62E9\u8BBE\u5907</span>`;
+  return `<details class="candidate-picker" onclick="event.stopPropagation()"><summary>${summary}</summary><div class="candidate-picker-menu">${allowed.map((name) => `<label class="candidate-option"><input type="checkbox" data-scope="stage-candidate-toggle" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-candidate="${escapeHtml3(name)}" ${selected.has(name) ? "checked" : ""}><span>${escapeHtml3(name)}</span></label>`).join("")}</div></details>`;
 }
 function renderSteps(route, routeIndex) {
   return route.stages.map((stage, stageIndex) => {
@@ -2180,7 +2496,7 @@ function renderRouteDetails(route, index) {
   const preCleans = cleanNamesFor(["preclean", "dummy", "dummywac"]);
   const postCleans = cleanNamesFor(["postclean"]);
   return `<div class="route-details"><div class="edit-card-head"><strong>\u8DEF\u5F84\u8BE6\u60C5</strong><div><button class="btn small" data-action="add-stage" data-index="${index}">\uFF0B Step \u7EC4</button> <button class="btn danger small" data-action="remove-route" data-index="${index}">\u5220\u9664</button></div></div>
-    <div class="route-meta"><div class="route-meta-grid"><div class="field"><label>\u8DEF\u5F84\u540D\u79F0\uFF08\u81EA\u52A8\u751F\u6210\uFF09</label><input value="${escapeHtml2(route.name)}" readonly></div><div class="field"><label>Group</label><input data-scope="route" data-index="${index}" data-key="group" value="${escapeHtml2(route.group)}"></div><div class="field"><label>BufferOption</label><input type="number" data-scope="route" data-index="${index}" data-key="bufferOption" value="${Number(route.bufferOption)}"></div></div>
+    <div class="route-meta"><div class="route-meta-grid"><div class="field"><label>\u8DEF\u5F84\u540D\u79F0\uFF08\u81EA\u52A8\u751F\u6210\uFF09</label><input value="${escapeHtml3(route.name)}" readonly></div><div class="field"><label>Group</label><input data-scope="route" data-index="${index}" data-key="group" value="${escapeHtml3(route.group)}"></div><div class="field"><label>BufferOption</label><input type="number" data-scope="route" data-index="${index}" data-key="bufferOption" value="${Number(route.bufferOption)}"></div></div>
     <details class="route-clean-details"><summary>\u8DEF\u5F84\u7EA7 Clean \u8BBE\u7F6E</summary><div class="grid"><div class="field span-4"><label>PJob \u524D</label><select data-scope="route" data-index="${index}" data-key="prePJobCleanRefs">${optionsHtml(preCleans, stringList(route.prePJobCleanRefs)[0] || "", "\u4E0D\u9700\u8981\u6E05\u6D01")}</select></div><div class="field span-4"><label>PJob \u540E</label><select data-scope="route" data-index="${index}" data-key="postPJobCleanRefs">${optionsHtml(postCleans, stringList(route.postPJobCleanRefs)[0] || "", "\u4E0D\u9700\u8981\u6E05\u6D01")}</select></div><div class="field span-4"><label>CJob \u540E</label><select data-scope="route" data-index="${index}" data-key="postCJobCleanRefs">${optionsHtml(postCleans, stringList(route.postCJobCleanRefs)[0] || "", "\u4E0D\u9700\u8981\u6E05\u6D01")}</select></div></div></details></div>
     <div class="route-table-wrap"><table class="route-table"><thead><tr><th>StepID</th><th>\u7C7B\u578B</th><th>\u53EF\u9009\u8154\u5BA4 / \u673A\u5668\u624B</th><th>PostStepID</th><th>NeedProcess</th><th></th></tr></thead><tbody>${renderSteps(route, index)}</tbody></table></div></div>`;
 }
@@ -2194,13 +2510,13 @@ function renderRoutes() {
         const routeOpen = state.expandedRoutes.has(routeIndex);
         const processSummary = profile.processCount ? profile.candidatePath.join(" \u2192 ") : "\u65E0\u52A0\u5DE5\u5DE5\u5E8F";
         return `<article class="route-summary-card"><div class="route-summary-head"><button class="route-summary-toggle" data-action="toggle-route" data-route-index="${routeIndex}" aria-expanded="${routeOpen}">
-        <div class="route-summary-title"><span class="collapse-arrow ${routeOpen ? "open" : ""}">\u25B6</span><strong>${escapeHtml2(route.name || "\u672A\u547D\u540D\u8DEF\u5F84")}</strong></div><div class="route-summary-meta">${escapeHtml2(processSummary)} \xB7 ${route.stages.length} Steps</div></button>
+        <div class="route-summary-title"><span class="collapse-arrow ${routeOpen ? "open" : ""}">\u25B6</span><strong>${escapeHtml3(route.name || "\u672A\u547D\u540D\u8DEF\u5F84")}</strong></div><div class="route-summary-meta">${escapeHtml3(processSummary)} \xB7 ${route.stages.length} Steps</div></button>
         <div class="route-summary-actions"><button class="btn small" data-action="edit-route" data-route-index="${routeIndex}">\u7F16\u8F91</button><button class="btn small" data-action="copy-route" data-route-index="${routeIndex}">\u590D\u5236</button><button class="btn danger small" data-action="remove-route" data-index="${routeIndex}">\u5220\u9664</button></div>
       </div>${routeOpen ? renderRouteDetails(route, routeIndex) : ""}</article>`;
       }).join("");
-      return `<section class="route-type-group"><button class="route-type-head" data-action="toggle-route-group" data-group-key="${escapeHtml2(structure.key)}" aria-expanded="${structureOpen}"><span class="collapse-arrow ${structureOpen ? "open" : ""}">\u25B6</span><strong>\u5E76\u884C\u673A\u5668\u6570 <span class="route-structure-key">${escapeHtml2(structure.label)}</span></strong><span class="route-count">${structure.routes.length} \u6761\u8DEF\u5F84 \xB7 ${structureOpen ? "\u5DF2\u5C55\u5F00" : "\u5DF2\u6536\u8D77"}</span></button>${structureOpen ? `<div class="route-group-body">${routes}</div>` : ""}</section>`;
+      return `<section class="route-type-group"><button class="route-type-head" data-action="toggle-route-group" data-group-key="${escapeHtml3(structure.key)}" aria-expanded="${structureOpen}"><span class="collapse-arrow ${structureOpen ? "open" : ""}">\u25B6</span><strong>\u5E76\u884C\u673A\u5668\u6570 <span class="route-structure-key">${escapeHtml3(structure.label)}</span></strong><span class="route-count">${structure.routes.length} \u6761\u8DEF\u5F84 \xB7 ${structureOpen ? "\u5DF2\u5C55\u5F00" : "\u5DF2\u6536\u8D77"}</span></button>${structureOpen ? `<div class="route-group-body">${routes}</div>` : ""}</section>`;
     }).join("");
-    return `<section class="route-process-group"><button class="route-process-head" data-action="toggle-route-process-group" data-process-key="${escapeHtml2(processGroup.key)}" aria-expanded="${processOpen}"><span class="collapse-arrow ${processOpen ? "open" : ""}">\u25B6</span><strong>${escapeHtml2(processGroup.label)}</strong><span class="route-count">${processGroup.routeCount} \u6761\u8DEF\u5F84 \xB7 ${processGroup.structures.length} \u79CD\u5E76\u884C\u7ED3\u6784</span></button>${processOpen ? `<div class="route-process-body">${structures}</div>` : ""}</section>`;
+    return `<section class="route-process-group"><button class="route-process-head" data-action="toggle-route-process-group" data-process-key="${escapeHtml3(processGroup.key)}" aria-expanded="${processOpen}"><span class="collapse-arrow ${processOpen ? "open" : ""}">\u25B6</span><strong>${escapeHtml3(processGroup.label)}</strong><span class="route-count">${processGroup.routeCount} \u6761\u8DEF\u5F84 \xB7 ${processGroup.structures.length} \u79CD\u5E76\u884C\u7ED3\u6784</span></button>${processOpen ? `<div class="route-process-body">${structures}</div>` : ""}</section>`;
   }).join("") : `<div class="empty">\u81F3\u5C11\u521B\u5EFA\u4E00\u6761\u8DEF\u5F84\uFF0CJob \u624D\u80FD\u5F15\u7528\u3002</div>`;
 }
 function pjobLoadPortSlots(roundIndex, cjobIndex, pjobIndex) {
@@ -2227,8 +2543,8 @@ function renderPJobRoutePicker(pjob, roundIndex, cjobIndex, pjobIndex) {
   const selectedKey = selectedRoute ? routeProcessProfile(selectedRoute).key : groups[0]?.key || "";
   const selectedGroup = groups.find((group) => group.key === selectedKey);
   const common = `data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}"`;
-  const groupOptions = groups.map((group) => `<option value="${escapeHtml2(group.key)}" ${group.key === selectedKey ? "selected" : ""}>${escapeHtml2(`${group.processLabel} \xB7 ${group.label}`)}</option>`).join("");
-  const routeOptions = (selectedGroup?.routes || []).map(({ route }) => `<option value="${escapeHtml2(route.name)}" ${route.name === pjob.routeRef ? "selected" : ""}>${escapeHtml2(route.name)}</option>`).join("");
+  const groupOptions = groups.map((group) => `<option value="${escapeHtml3(group.key)}" ${group.key === selectedKey ? "selected" : ""}>${escapeHtml3(`${group.processLabel} \xB7 ${group.label}`)}</option>`).join("");
+  const routeOptions = (selectedGroup?.routes || []).map(({ route }) => `<option value="${escapeHtml3(route.name)}" ${route.name === pjob.routeRef ? "selected" : ""}>${escapeHtml3(route.name)}</option>`).join("");
   return `<div class="pjob-route-picker">
     <select class="pjob-route-process" data-scope="pjob-route-group" ${common}>${groupOptions || `<option value="">\u6682\u65E0\u5DE5\u5E8F</option>`}</select>
     <select data-scope="pjob" data-key="routeRef" ${common}>${routeOptions ? `<option value="">\u9009\u62E9\u8DEF\u5F84</option>${routeOptions}` : `<option value="">\u8BF7\u5148\u914D\u7F6E\u8DEF\u5F84</option>`}</select>
@@ -2242,21 +2558,21 @@ function renderRounds() {
     const cjobs = round.cjobs.map((cjob, cjobIndex) => {
       const normalLot = cjob.jobType === "NormalLot";
       const pjobRows = cjob.pjobs.map((pjob, pjobIndex) => `<tr>
-        <td><span class="readonly-pill">${escapeHtml2(pjob.jobName)}</span></td>
+        <td><span class="readonly-pill">${escapeHtml3(pjob.jobName)}</span></td>
         <td><input class="pjob-number" type="number" min="1" max="${state.strategy === "milp" ? 12 : 25}" data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="waferCount" value="${Number(pjob.waferCount)}"><small class="mat-list-preview">\u69FD\u4F4D [${pjobLoadPortSlots(roundIndex, cjobIndex, pjobIndex).join(", ")}]</small></td>
         <td>${renderPJobRoutePicker(pjob, roundIndex, cjobIndex, pjobIndex)}</td>
-        <td><span class="readonly-pill">${escapeHtml2(pjob.taskId)}</span></td>
+        <td><span class="readonly-pill">${escapeHtml3(pjob.taskId)}</span></td>
         <td><input class="pjob-number" type="number" min="1" data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="priority" value="${Number(pjob.priority)}"></td>
         <td><select data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="loadPort">${optionsHtml(state.loadPorts, pjob.loadPort, state.loadPorts.length ? "\u9009\u62E9\u7AEF\u53E3" : "\u65E0\u7AEF\u53E3")}</select></td>
-        <td><button class="btn danger icon small" aria-label="\u5220\u9664 ${escapeHtml2(pjob.jobName)}" data-action="remove-pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" ${cjob.pjobs.length <= 1 ? "disabled" : ""}>\xD7</button></td>
+        <td><button class="btn danger icon small" aria-label="\u5220\u9664 ${escapeHtml3(pjob.jobName)}" data-action="remove-pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" ${cjob.pjobs.length <= 1 ? "disabled" : ""}>\xD7</button></td>
       </tr>`).join("");
       return `<section class="cjob-card">
-        <header class="cjob-head"><div class="cjob-title"><strong>CJob ${cjobIndex + 1}</strong><span class="readonly-pill">TaskID ${escapeHtml2(cjob.taskId)}</span></div><div class="round-actions"><button class="btn small" data-action="add-pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}">\uFF0B PJob</button><button class="btn danger small" data-action="remove-cjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" ${round.cjobs.length <= 1 ? "disabled" : ""}>\u5220\u9664 CJob</button></div></header>
+        <header class="cjob-head"><div class="cjob-title"><strong>CJob ${cjobIndex + 1}</strong><span class="readonly-pill">TaskID ${escapeHtml3(cjob.taskId)}</span></div><div class="round-actions"><button class="btn small" data-action="add-pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}">\uFF0B PJob</button><button class="btn danger small" data-action="remove-cjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" ${round.cjobs.length <= 1 ? "disabled" : ""}>\u5220\u9664 CJob</button></div></header>
         <div class="cjob-controls">
           <div class="field"><label>JobType</label><select data-scope="cjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-key="jobType">${CJOB_TYPES.map((value) => `<option ${value === cjob.jobType ? "selected" : ""}>${value}</option>`).join("")}</select></div>
           <div class="field ${normalLot ? "" : "disabled-field"}"><label>Priority</label><input type="number" min="1" data-scope="cjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-key="priority" value="${Number(cjob.priority)}" ${normalLot ? "" : "disabled"}></div>
           <div class="field"><label>TaskMode</label><select data-scope="cjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-key="taskMode">${TASK_MODES.map((value) => `<option ${value === cjob.taskMode ? "selected" : ""}>${value}</option>`).join("")}</select></div>
-          <div class="field"><label>PJobNameList</label><div class="pjob-name-list">${cjob.pJobNameList.map((name) => `<span>${escapeHtml2(name)}</span>`).join("")}</div></div>
+          <div class="field"><label>PJobNameList</label><div class="pjob-name-list">${cjob.pJobNameList.map((name) => `<span>${escapeHtml3(name)}</span>`).join("")}</div></div>
         </div>
         <div class="pjob-table-wrap"><table class="pjob-table"><thead><tr><th>JobName</th><th>\u6676\u5706\u6570\u91CF / LoadPort \u69FD\u4F4D</th><th>OriginRoute</th><th>TaskID</th><th>Priority</th><th>LoadPort</th><th></th></tr></thead><tbody>${pjobRows}</tbody></table></div>
       </section>`;
@@ -2266,12 +2582,12 @@ function renderRounds() {
 }
 function renderStepNumberField(label, key, value, routeIndex, stageIndex, options = {}) {
   const inputId = `step-${routeIndex}-${stageIndex}-${key}`;
-  const helper = options.helper ? `<small class="field-help">${escapeHtml2(options.helper)}</small>` : "";
+  const helper = options.helper ? `<small class="field-help">${escapeHtml3(options.helper)}</small>` : "";
   const minimum = options.minimum === void 0 ? "" : ` min="${options.minimum}"`;
   return `<div class="step-edit-field">
-    <label for="${inputId}">${escapeHtml2(label)}</label>
+    <label for="${inputId}">${escapeHtml3(label)}</label>
     <div class="step-number-control">
-      <input id="${inputId}" type="number" inputmode="decimal" step="${options.step || "0.1"}"${minimum} data-scope="visit-shared" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-key="${key}" value="${escapeHtml2(value)}">
+      <input id="${inputId}" type="number" inputmode="decimal" step="${options.step || "0.1"}"${minimum} data-scope="visit-shared" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-key="${key}" value="${escapeHtml3(value)}">
       <span aria-hidden="true">s</span>
     </div>
     ${helper}
@@ -2281,7 +2597,7 @@ function renderAfterCleanChoices(first, routeIndex, stageIndex) {
   const selected = new Set(stringList(first.afterCleanRefs));
   const choices = cleanNamesFor(["postclean", "wacclean"]);
   const noCleanActive = selected.size === 0;
-  const cleanButtons = choices.map((name) => `<button type="button" class="clean-choice ${selected.has(name) ? "active" : ""}" data-action="toggle-after-clean" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-clean-name="${escapeHtml2(name)}" aria-pressed="${selected.has(name)}"><span class="clean-choice-indicator" aria-hidden="true">\u2713</span><span>${escapeHtml2(name)}</span></button>`).join("");
+  const cleanButtons = choices.map((name) => `<button type="button" class="clean-choice ${selected.has(name) ? "active" : ""}" data-action="toggle-after-clean" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-clean-name="${escapeHtml3(name)}" aria-pressed="${selected.has(name)}"><span class="clean-choice-indicator" aria-hidden="true">\u2713</span><span>${escapeHtml3(name)}</span></button>`).join("");
   return `<fieldset class="step-edit-field after-clean-field">
     <legend>After Clean</legend>
     <div class="clean-choice-list">
@@ -2306,7 +2622,7 @@ function renderStepDrawer() {
   const differences = visitDifferenceFields(stage).filter((field) => editableFieldLabels[field]);
   const candidates = [...new Set(stage.visits.map((visit) => visit.stationName).filter(Boolean))];
   const differenceNames = differences.map((field) => editableFieldLabels[field] || field);
-  const warning = differences.length ? `<div class="visit-warning" role="status"><strong>\u5019\u9009\u8154\u5BA4\u7684\u53EF\u7F16\u8F91\u53C2\u6570\u4E0D\u4E00\u81F4</strong><p>\u5DEE\u5F02\u9879\uFF1A${differenceNames.map(escapeHtml2).join("\u3001")}\u3002\u5F53\u524D\u663E\u793A\u9996\u4E2A\u5019\u9009\u7684\u503C\u3002</p><button class="btn small" data-action="sync-stage-visits" data-route-index="${routeIndex}" data-stage-index="${stageIndex}">\u540C\u6B65\u5230\u5168\u90E8\u5019\u9009</button></div>` : "";
+  const warning = differences.length ? `<div class="visit-warning" role="status"><strong>\u5019\u9009\u8154\u5BA4\u7684\u53EF\u7F16\u8F91\u53C2\u6570\u4E0D\u4E00\u81F4</strong><p>\u5DEE\u5F02\u9879\uFF1A${differenceNames.map(escapeHtml3).join("\u3001")}\u3002\u5F53\u524D\u663E\u793A\u9996\u4E2A\u5019\u9009\u7684\u503C\u3002</p><button class="btn small" data-action="sync-stage-visits" data-route-index="${routeIndex}" data-stage-index="${stageIndex}">\u540C\u6B65\u5230\u5168\u90E8\u5019\u9009</button></div>` : "";
   const editor = first ? `<section class="step-editor-card" aria-labelledby="stepEditorHeading">
     <header class="step-editor-head"><div><h3 id="stepEditorHeading">\u53EF\u7F16\u8F91\u53C2\u6570</h3><p>\u4FEE\u6539\u540E\u81EA\u52A8\u540C\u6B65\u5230 ${stage.visits.length} \u4E2A\u5019\u9009\u8154\u5BA4</p></div><span class="editable-badge">4 \u9879</span></header>
     <div class="step-edit-grid">
@@ -2328,7 +2644,7 @@ function renderStepDrawer() {
     </div>
     <p class="system-note">Before Clean \u7531\u7CFB\u7EDF\u7BA1\u7406\uFF0C\u4E0D\u5728 RouteStep \u4E2D\u914D\u7F6E\u3002</p>
   </details>` : `<div class="empty">\u672A\u9009\u62E9\u5019\u9009\u8BBE\u5907\uFF0C\u8BF7\u5148\u5728\u8DEF\u5F84\u5217\u8868\u4E2D\u9009\u62E9\u3002</div>`;
-  const routeName = escapeHtml2(route.name || "\u672A\u547D\u540D\u8DEF\u5F84");
+  const routeName = escapeHtml3(route.name || "\u672A\u547D\u540D\u8DEF\u5F84");
   document.getElementById("drawerBody").innerHTML = `<section class="step-overview-card">
     <div class="step-route-context"><span>\u6240\u5C5E\u8DEF\u5F84</span><strong title="${routeName}">${routeName}</strong></div>
     <dl class="step-meta-list">
@@ -2337,7 +2653,7 @@ function renderStepDrawer() {
       <div><dt>Processing</dt><dd>${stage.needProcess ? "Yes" : "No"}</dd></div>
       <div><dt>Candidates</dt><dd>${stage.visits.length}</dd></div>
     </dl>
-    <div class="step-candidates"><span>\u5019\u9009\u8154\u5BA4</span><div class="candidate-chip-list">${candidates.length ? candidates.map((name) => `<span class="chip">${escapeHtml2(name)}</span>`).join("") : `<span class="candidate-picker-empty">\u672A\u9009\u62E9</span>`}</div></div>
+    <div class="step-candidates"><span>\u5019\u9009\u8154\u5BA4</span><div class="candidate-chip-list">${candidates.length ? candidates.map((name) => `<span class="chip">${escapeHtml3(name)}</span>`).join("") : `<span class="candidate-picker-empty">\u672A\u9009\u62E9</span>`}</div></div>
   </section>${warning}${editor}`;
 }
 function openStepDrawer(routeIndex, stageIndex) {
@@ -2629,9 +2945,9 @@ function renderOtherAlgorithmOptions(algorithms) {
   state.availableOtherAlgorithms = Array.isArray(algorithms) ? algorithms : [];
   const container = document.getElementById("otherAlgorithmOptions");
   container.innerHTML = state.availableOtherAlgorithms.map((algorithm) => `
-    <label class="strategy-card" data-strategy-card="${escapeHtml2(algorithm.strategy)}">
-      <input type="radio" name="strategy" value="${escapeHtml2(algorithm.strategy)}" ${algorithm.strategy === state.strategy ? "checked" : ""}>
-      <b>${escapeHtml2(algorithm.name)}</b>
+    <label class="strategy-card" data-strategy-card="${escapeHtml3(algorithm.strategy)}">
+      <input type="radio" name="strategy" value="${escapeHtml3(algorithm.strategy)}" ${algorithm.strategy === state.strategy ? "checked" : ""}>
+      <b>${escapeHtml3(algorithm.name)}</b>
     </label>
   `).join("");
   renderAlgorithmMetadata();
@@ -2640,9 +2956,9 @@ function showAlgorithmDetails(strategy) {
   const metadata = state.algorithmMetadata[strategy] || {};
   const cardName = document.querySelector(`[data-strategy-card="${CSS.escape(strategy)}"] b`)?.textContent;
   document.getElementById("algorithmHoverInfo").innerHTML = `
-    <span class="algorithm-hover-info-name">${escapeHtml2(metadata.name || cardName || strategy)}</span>
-    <span class="algorithm-hover-info-description">${escapeHtml2(metadata.description || "\u6682\u65E0\u7B97\u6CD5\u63CF\u8FF0")}</span>
-    <span class="algorithm-hover-info-meta"><span>\u7248\u672C ${escapeHtml2(metadata.version || "\u672A\u8BB0\u5F55")}</span><span>\u66F4\u65B0 ${escapeHtml2(metadata.updatedAt || "\u672A\u8BB0\u5F55")}</span></span>
+    <span class="algorithm-hover-info-name">${escapeHtml3(metadata.name || cardName || strategy)}</span>
+    <span class="algorithm-hover-info-description">${escapeHtml3(metadata.description || "\u6682\u65E0\u7B97\u6CD5\u63CF\u8FF0")}</span>
+    <span class="algorithm-hover-info-meta"><span>\u7248\u672C ${escapeHtml3(metadata.version || "\u672A\u8BB0\u5F55")}</span><span>\u66F4\u65B0 ${escapeHtml3(metadata.updatedAt || "\u672A\u8BB0\u5F55")}</span></span>
   `;
 }
 function renderAlgorithmMetadata() {
@@ -2661,7 +2977,7 @@ function renderAlgorithmMetadata() {
   const strategies = [...document.querySelectorAll('input[name="strategy"]')].map((input) => input.value);
   strategySelect.innerHTML = strategies.map((strategy) => {
     const name = state.algorithmMetadata[strategy]?.name || document.querySelector(`[data-strategy-card="${CSS.escape(strategy)}"] b`)?.textContent || strategy;
-    return `<option value="${escapeHtml2(strategy)}">${escapeHtml2(name)}</option>`;
+    return `<option value="${escapeHtml3(strategy)}">${escapeHtml3(name)}</option>`;
   }).join("");
 }
 function algorithmChangeLabels(entry, previous) {
@@ -2685,14 +3001,14 @@ function renderAlgorithmHistory() {
     })).reverse();
     const timeline = entries.length ? `<div class="algorithm-timeline">${entries.map(({ entry, changes }) => `
       <article class="algorithm-version-entry">
-        <div class="algorithm-version-label"><strong>v${escapeHtml2(entry.version || "\u672A\u8BB0\u5F55")}</strong><span>\u66F4\u65B0 ${escapeHtml2(entry.updatedAt || "\u672A\u8BB0\u5F55")}</span><span>\u8BB0\u5F55 ${escapeHtml2(String(entry.recordedAt || "\u672A\u8BB0\u5F55").replace("T", " "))}</span></div>
-        <div class="algorithm-version-content"><p>${escapeHtml2(entry.description || "\u6682\u65E0\u7B97\u6CD5\u63CF\u8FF0")}</p><div class="algorithm-change-tags">${changes.map((label) => `<span>${escapeHtml2(label)}</span>`).join("")}</div></div>
+        <div class="algorithm-version-label"><strong>v${escapeHtml3(entry.version || "\u672A\u8BB0\u5F55")}</strong><span>\u66F4\u65B0 ${escapeHtml3(entry.updatedAt || "\u672A\u8BB0\u5F55")}</span><span>\u8BB0\u5F55 ${escapeHtml3(String(entry.recordedAt || "\u672A\u8BB0\u5F55").replace("T", " "))}</span></div>
+        <div class="algorithm-version-content"><p>${escapeHtml3(entry.description || "\u6682\u65E0\u7B97\u6CD5\u63CF\u8FF0")}</p><div class="algorithm-change-tags">${changes.map((label) => `<span>${escapeHtml3(label)}</span>`).join("")}</div></div>
       </article>
     `).join("")}</div>` : `<div class="algorithm-history-empty">\u5C1A\u65E0\u7248\u672C\u8BB0\u5F55\u3002\u70B9\u51FB\u201C\u65B0\u589E\u8BB0\u5F55\u201D\u4FDD\u5B58\u7B2C\u4E00\u4E2A\u7248\u672C\u3002</div>`;
     return `<section class="algorithm-history-card">
       <header class="algorithm-history-head">
-        <div class="algorithm-history-title"><h3>${escapeHtml2(metadata.name || cardName || strategy)}</h3><p>${escapeHtml2(strategy)} \xB7 ${history.length} \u6761\u7248\u672C\u8BB0\u5F55</p></div>
-        <div class="algorithm-history-actions"><span class="algorithm-current-version">\u5F53\u524D ${escapeHtml2(metadata.version || "\u672A\u8BB0\u5F55")}</span><button class="btn small" type="button" data-edit-algorithm="${escapeHtml2(strategy)}">${history.length ? "\u65B0\u589E\u7248\u672C" : "\u65B0\u589E\u8BB0\u5F55"}</button></div>
+        <div class="algorithm-history-title"><h3>${escapeHtml3(metadata.name || cardName || strategy)}</h3><p>${escapeHtml3(strategy)} \xB7 ${history.length} \u6761\u7248\u672C\u8BB0\u5F55</p></div>
+        <div class="algorithm-history-actions"><span class="algorithm-current-version">\u5F53\u524D ${escapeHtml3(metadata.version || "\u672A\u8BB0\u5F55")}</span><button class="btn small" type="button" data-edit-algorithm="${escapeHtml3(strategy)}">${history.length ? "\u65B0\u589E\u7248\u672C" : "\u65B0\u589E\u8BB0\u5F55"}</button></div>
       </header>
       ${timeline}
     </section>`;
@@ -2866,9 +3182,13 @@ async function runCurrentTestGroup() {
     state.batchCancelSent = false;
     state.batchResult = null;
     state.selectedBatchTestId = "";
+    batchPerformanceAnalyses.clear();
     batchBottleneckSummaries.clear();
     batchBottleneckRequests.clear();
     batchBottleneckErrors.clear();
+    document.getElementById("testGroupAnalysisButton").hidden = true;
+    document.getElementById("testGroupAnalysisPanel").hidden = true;
+    document.getElementById("testGroupAnalysisPanel").innerHTML = "";
     document.getElementById("batchOverviewButton").hidden = true;
     button.disabled = false;
     runButton.disabled = true;
@@ -2995,31 +3315,45 @@ function showBatchItemOverview(item, index) {
   );
   setResultMetric("Validation", "\u6821\u9A8C", validationText, item.error || "");
 }
-async function loadBatchItemBottleneck(item, index) {
+async function loadBatchItemPerformance(item, index) {
   const resultUrl = String(item?.resultUrl || "");
-  if (!resultUrl || item.status !== "succeeded" || batchBottleneckSummaries.has(resultUrl) || batchBottleneckErrors.has(resultUrl)) return;
+  if (!resultUrl || item.status !== "succeeded") return null;
+  if (batchPerformanceAnalyses.has(resultUrl)) {
+    return batchPerformanceAnalyses.get(resultUrl);
+  }
+  if (batchBottleneckErrors.has(resultUrl)) return null;
   let request = batchBottleneckRequests.get(resultUrl);
   if (!request) {
-    request = batchBottleneckLoadQueue.then(async () => {
-      await visualizationWorkspace.loadResult(resultUrl, item.testName || `\u6D4B\u8BD5 ${index + 1}`);
-      const summary = visualizationWorkspace.getBottleneckUtilization();
+    request = (async () => {
+      const response = await fetch(resultUrl, { cache: "no-store" });
+      if (!response.ok) throw new Error(`\u7ED3\u679C\u52A0\u8F7D\u5931\u8D25\uFF08HTTP ${response.status}\uFF09`);
+      const payload = await response.json();
+      const performance2 = analyzeSchedulePerformance(
+        normalizeMovePayload(payload),
+        state.device,
+        "steady"
+      );
+      const summary = summarizeBottleneckUtilization(performance2);
+      batchPerformanceAnalyses.set(resultUrl, performance2);
       batchBottleneckSummaries.set(resultUrl, summary);
-      return summary;
-    });
-    batchBottleneckLoadQueue = request.catch(() => null);
+      return performance2;
+    })();
     batchBottleneckRequests.set(resultUrl, request);
   }
   try {
-    await request;
+    return await request;
   } catch (error) {
     batchBottleneckErrors.set(resultUrl, error.message || "\u672A\u77E5\u9519\u8BEF");
     if (state.selectedBatchTestId === String(item.testId || `index-${index}`)) {
       setBottleneckMetric(null, `\u74F6\u9888\u8BA1\u7B97\u5931\u8D25\uFF1A${error.message || "\u672A\u77E5\u9519\u8BEF"}`);
     }
-    return;
+    return null;
   } finally {
     batchBottleneckRequests.delete(resultUrl);
   }
+}
+async function loadBatchItemBottleneck(item, index) {
+  await loadBatchItemPerformance(item, index);
   const currentIndex = (state.batchResult?.items || []).findIndex(
     (candidate, candidateIndex) => String(candidate.testId || `index-${candidateIndex}`) === state.selectedBatchTestId
   );
@@ -3039,10 +3373,56 @@ function showCurrentBatchOverview() {
   renderBatchItems(state.batchResult.items || []);
   showBatchOverviewMetrics(state.batchResult);
 }
+async function showTestGroupAnalysis() {
+  const result = state.batchResult;
+  if (!result?.items?.length) return;
+  const button = document.getElementById("testGroupAnalysisButton");
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = "\u6B63\u5728\u5206\u6790\u2026";
+  try {
+    const successful = result.items.map((item, index) => ({ item, index })).filter((entry) => entry.item.status === "succeeded" && entry.item.resultUrl);
+    let cursor = 0;
+    const workerCount = Math.min(4, successful.length);
+    await Promise.all(Array.from({ length: workerCount }, async () => {
+      while (cursor < successful.length) {
+        const current = successful[cursor];
+        cursor += 1;
+        await loadBatchItemPerformance(current.item, current.index);
+      }
+    }));
+    const summary = analyzeTestGroupPerformance(result.items.map((item, index) => ({
+      id: String(item.testId || `index-${index}`),
+      name: `t${index + 1}`,
+      status: String(item.status || "unknown"),
+      validation: String(item.validation || "unknown"),
+      makespan: item.makespan,
+      baselineMakespan: item.baseline?.status === "succeeded" ? item.baseline.makespan : null,
+      cpuTimeMs: item.cpuTimeMs ?? item.totalElapsedMs,
+      elapsedTimeMs: item.totalElapsedMs,
+      error: item.error || item.baseline?.error || "",
+      performance: item.resultUrl ? batchPerformanceAnalyses.get(String(item.resultUrl)) ?? null : null
+    })));
+    const panel = document.getElementById("testGroupAnalysisPanel");
+    panel.innerHTML = renderTestGroupAnalysis(
+      summary,
+      result.group || state.activeTestGroup || "\u5F53\u524D\u6D4B\u8BD5\u7EC4",
+      result.strategy || state.strategy
+    );
+    panel.hidden = false;
+    document.getElementById("visualEmpty").hidden = true;
+    switchTab("workspace");
+    panel.scrollIntoView({ behavior: "smooth", block: "start" });
+  } finally {
+    button.disabled = false;
+    button.textContent = originalText;
+  }
+}
 function showBatchProgress(result) {
   const completed = Number(result.completed || 0), total = Number(result.testCount || result.items?.length || 0);
   const percent = total ? Math.round(completed / total * 100) : 0;
   const progress = document.getElementById("batchProgress");
+  document.getElementById("testGroupAnalysisButton").hidden = !["completed", "cancelled"].includes(result.status);
   progress.classList.add("visible");
   progress.setAttribute("aria-valuenow", String(percent));
   document.getElementById("batchProgressCount").textContent = `${percent}%`;
@@ -3076,23 +3456,23 @@ function renderBatchItems(items) {
     const itemSelectionId = String(item.testId || `index-${index}`);
     const selected = itemSelectionId === state.selectedBatchTestId;
     return `
-      <div class="batch-result ${escapeHtml2(item.status || "queued")}${selected ? " selected" : ""}" data-batch-item-index="${index}">
+      <div class="batch-result ${escapeHtml3(item.status || "queued")}${selected ? " selected" : ""}" data-batch-item-index="${index}">
         <div class="batch-result-head">
-          <button class="batch-result-title" type="button" aria-pressed="${selected}" aria-label="\u67E5\u770B ${escapeHtml2(displayId)} ${escapeHtml2(item.testName || "")} \u7684\u8BE6\u7EC6\u6307\u6807"><strong title="${escapeHtml2(`${item.testId || ""} \xB7 ${item.testName || ""}`)}">${escapeHtml2(displayId)}</strong></button>
+          <button class="batch-result-title" type="button" aria-pressed="${selected}" aria-label="\u67E5\u770B ${escapeHtml3(displayId)} ${escapeHtml3(item.testName || "")} \u7684\u8BE6\u7EC6\u6307\u6807"><strong title="${escapeHtml3(`${item.testId || ""} \xB7 ${item.testName || ""}`)}">${escapeHtml3(displayId)}</strong></button>
           <span class="batch-status">${statusLabels[item.status] || "\u7B49\u5F85\u4E2D"}</span>
           <div class="batch-result-actions">
-            ${item.logUrl ? `<a class="btn" href="${escapeHtml2(item.logUrl)}" download>\u65E5\u5FD7</a>` : `<span class="btn" aria-disabled="true">\u65E5\u5FD7</span>`}
-            ${item.resultUrl ? `<button class="btn primary" type="button" data-workspace-result="${escapeHtml2(item.resultUrl)}" data-workspace-name="${escapeHtml2(item.testName || `\u6D4B\u8BD5 ${index + 1}`)}">\u5DE5\u4F5C\u53F0</button>` : `<span class="btn" aria-disabled="true">\u5DE5\u4F5C\u53F0</span>`}
-            ${item.ganttUrl ? `<a class="btn" href="${escapeHtml2(item.ganttUrl)}" target="_blank">\u7518\u7279\u56FE</a>` : `<span class="btn" aria-disabled="true">\u7518\u7279\u56FE</span>`}
+            ${item.logUrl ? `<a class="btn" href="${escapeHtml3(item.logUrl)}" download>\u65E5\u5FD7</a>` : `<span class="btn" aria-disabled="true">\u65E5\u5FD7</span>`}
+            ${item.resultUrl ? `<button class="btn primary" type="button" data-workspace-result="${escapeHtml3(item.resultUrl)}" data-workspace-name="${escapeHtml3(item.testName || `\u6D4B\u8BD5 ${index + 1}`)}">\u5DE5\u4F5C\u53F0</button>` : `<span class="btn" aria-disabled="true">\u5DE5\u4F5C\u53F0</span>`}
+            ${item.ganttUrl ? `<a class="btn" href="${escapeHtml3(item.ganttUrl)}" target="_blank">\u7518\u7279\u56FE</a>` : `<span class="btn" aria-disabled="true">\u7518\u7279\u56FE</span>`}
           </div>
         </div>
         <div class="batch-result-summary">
           <div class="batch-metric-tags" aria-label="\u4E3B\u8981\u6307\u6807">
             <span class="batch-metric-tag makespan" title="Makespan${baselineReady ? `\uFF1BBaseline ${Number(baseline.makespan).toFixed(2)} s` : ""}">${finished ? `${Number(item.makespan).toFixed(2)} s` : "\u2014 s"}</span>
-            <span class="batch-metric-tag ${improvement < 0 ? "loss" : "gain"}">${escapeHtml2(improvementText)}</span>
+            <span class="batch-metric-tag ${improvement < 0 ? "loss" : "gain"}">${escapeHtml3(improvementText)}</span>
             <span class="batch-metric-tag cpu">CPU Time ${finished && Number.isFinite(cpuTime) ? `${cpuTime.toFixed(1)} ms` : "\u2014"}</span>
           </div>
-          ${summaryError ? `<span class="summary-error" title="${escapeHtml2(summaryError)}">${escapeHtml2(summaryError)}</span>` : ""}
+          ${summaryError ? `<span class="summary-error" title="${escapeHtml3(summaryError)}">${escapeHtml3(summaryError)}</span>` : ""}
         </div>
       </div>`;
   }).join("");
@@ -3106,22 +3486,19 @@ function batchGanttUrl(items) {
   return params.size ? `/movelist_gantt_viewer.html?${params.toString()}` : "";
 }
 function showBatchResult(result) {
-  const successful = result.items.filter((item) => item.status === "succeeded");
-  const comparable = successful.filter((item) => item.baseline?.status === "succeeded");
-  const totalMakespan = comparable.reduce((sum, item) => sum + Number(item.makespan), 0);
-  const totalBaseline = comparable.reduce((sum, item) => sum + Number(item.baseline.makespan), 0);
-  const aggregateImprovement = totalBaseline > 0 ? (totalBaseline - totalMakespan) / totalBaseline * 100 : NaN;
   state.batchResult = result;
+  document.getElementById("testGroupAnalysisButton").hidden = false;
   if (!state.selectedBatchTestId) showBatchOverviewMetrics(result);
-  writeTerminal([
-    "$ \u6279\u91CF\u8FD0\u884C\u5B8C\u6210",
-    `  \u7EC4\u522B: ${result.group || "\u672A\u5206\u7EC4"} \xB7 \u7B56\u7565: ${result.strategy}`,
-    `  \u6210\u529F: ${result.succeeded} \xB7 \u5931\u8D25: ${result.failed} \xB7 \u5E76\u884C\u6570: ${result.workerCount}`,
-    `  \u603B\u8017\u65F6: ${(Number(result.totalElapsedMs) / 1e3).toFixed(2)} s`,
-    ...comparable.length ? [`  \u7EC4\u7EA7 Makespan: ${totalMakespan.toFixed(2)} / Baseline ${totalBaseline.toFixed(2)} s \xB7 ${aggregateImprovement >= 0 ? "\u63D0\u5347" : "\u9000\u5316"} ${Math.abs(aggregateImprovement).toFixed(2)}%`] : [],
-    "",
-    ...result.items.map((item, index) => item.ok ? `  #${index + 1} ${item.testName} | makespan=${Number(item.makespan).toFixed(2)}s | improvement=${Number.isFinite(Number(item.improvementPercent)) ? `${Number(item.improvementPercent).toFixed(2)}%` : "\u2014"} | ${Number(item.totalElapsedMs).toFixed(1)}ms` : `  #${index + 1} ${item.testName} | \u5931\u8D25: ${item.error}`)
-  ].join("\n"), result.failed > 0);
+  const resultErrors = result.items.flatMap((item, index) => {
+    if (item.status === "failed") {
+      return [`t${index + 1} ${item.testName || ""}\uFF1A${item.error || "\u8FD0\u884C\u5931\u8D25"}`];
+    }
+    if (item.status === "succeeded" && item.validation && item.validation !== "passed") {
+      return [`t${index + 1} ${item.testName || ""}\uFF1AMoveList \u6821\u9A8C ${item.validation}${item.error ? `\uFF1B${item.error}` : ""}`];
+    }
+    return [];
+  });
+  writeTerminal(resultErrors.join("\n"), resultErrors.length > 0);
   renderBatchItems(result.items);
   const selectedIndex = result.items.findIndex((item, index) => String(item.testId || `index-${index}`) === state.selectedBatchTestId);
   if (selectedIndex >= 0) {
@@ -3152,6 +3529,8 @@ function showBatchResult(result) {
 function showResult(result) {
   state.batchResult = null;
   state.selectedBatchTestId = "";
+  document.getElementById("testGroupAnalysisButton").hidden = true;
+  document.getElementById("testGroupAnalysisPanel").hidden = true;
   document.getElementById("batchProgress").classList.remove("visible");
   document.getElementById("batchResults").innerHTML = "";
   const allGantt = document.getElementById("batchGanttButton");
@@ -3183,9 +3562,15 @@ function showResult(result) {
   gantt.removeAttribute("aria-disabled");
 }
 function writeTerminal(message, error = false) {
+  const panel = document.getElementById("resultErrorPanel");
   const terminal = document.getElementById("terminal");
-  terminal.textContent = message;
-  terminal.classList.toggle("error", error);
+  if (!error) {
+    terminal.textContent = "";
+    panel.hidden = true;
+    return;
+  }
+  terminal.textContent = String(message || "\u672A\u77E5\u9519\u8BEF").replace(/^\$\s*/, "");
+  panel.hidden = false;
 }
 async function checkService() {
   const pill = document.getElementById("serviceState");
@@ -3279,13 +3664,9 @@ document.getElementById("roundCount").addEventListener("input", (event) => {
 document.getElementById("runButton").addEventListener("click", runPlan);
 document.getElementById("batchRunButton").addEventListener("click", runCurrentTestGroup);
 document.getElementById("batchOverviewButton").addEventListener("click", showCurrentBatchOverview);
-document.getElementById("clearButton").addEventListener("click", () => {
-  state.batchResult = null;
-  state.selectedBatchTestId = "";
-  document.getElementById("batchOverviewButton").hidden = true;
-  writeTerminal("$ \u7B49\u5F85\u8FD0\u884C\u2026");
-  document.getElementById("batchProgress").classList.remove("visible");
-  document.getElementById("batchResults").innerHTML = "";
+document.getElementById("testGroupAnalysisButton").addEventListener("click", () => {
+  showTestGroupAnalysis().catch((error) => writeTerminal(`$ \u6D4B\u8BD5\u7EC4\u7ED3\u679C\u5206\u6790\u5931\u8D25
+  ${error.message || "\u672A\u77E5\u9519\u8BEF"}`, true));
 });
 document.getElementById("logButton").addEventListener("click", (event) => {
   if (event.currentTarget.getAttribute("aria-disabled") === "true") event.preventDefault();
