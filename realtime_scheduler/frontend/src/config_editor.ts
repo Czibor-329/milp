@@ -40,9 +40,10 @@ const ROUTE_CLEAN_KEYS = ["prePJobCleanRefs", "postPJobCleanRefs", "postCJobClea
 
 const state = {
   workspaceDevices: [], workspaceDevice: null, workspaceDeviceId: "", testCaseId: "", testCaseName: "", testCaseGroup: "", activeTestGroup: "", serviceCompatible: false, dirty: false,
+  datasetGroups: [], datasetGroupId: "", datasetCaseId: "", datasetRunning: false,
   activeBatchId: "", batchRunning: false, batchCancelRequested: false, batchCancelSent: false, batchResult: null, selectedBatchTestId: "",
   deviceName: "", device: null, stationNames: [], loadPorts: [], processModules: [], robotNames: [], robotScopes: {},
-  strategy: "heuristic", availableOtherAlgorithms: [], algorithmMetadata: {}, algorithmHistory: {}, roundCount: 2, times: [0, 70], options: { loadLockManager: "petri-look", loadLockExchange: "auto", rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
+  strategy: "heuristic", availableOtherAlgorithms: [], algorithmMetadata: {}, algorithmHistory: {}, roundCount: 2, times: [0, 70], options: { loadLockManager: "petri-look", loadLockExchange: "auto", neuralUCBTopK: 2, neuralUCBExploration: 5, rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
   cleans: [],
   routes: [{ name: "RouteA", group: "RouteA", bufferOption: 0, prePJobCleanRefs: [], postPJobCleanRefs: [], postCJobCleanRefs: [], stages: linkRouteSteps([makeStage("LP1"), makeStage("Robot"), makeStage("PM1,PM2", true, "RouteA_Step2"), makeStage("Robot"), makeStage("LP1")]) }],
   rounds: [makeRound(1, 0, "RouteA", "LP1"), makeRound(2, 70, "RouteA", "LP2")],
@@ -446,9 +447,11 @@ function applyTestCase(testCase) {
   state.routeNameChanges.clear();
   state.testCaseId = value.id; state.testCaseName = value.name; state.testCaseGroup = String(value.group || ""); state.activeTestGroup = state.testCaseGroup; state.strategy = value.strategy || "heuristic";
   state.roundCount = Math.max(1, Number(value.roundCount) || 1); state.times = Array.isArray(value.times) ? value.times : [0];
-  state.options = value.options || { loadLockManager: "petri-look", loadLockExchange: "auto", rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 };
+  state.options = value.options || { loadLockManager: "petri-look", loadLockExchange: "auto", neuralUCBTopK: 2, neuralUCBExploration: 5, rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 };
   state.options.loadLockManager = state.options.loadLockManager || "petri-look";
   state.options.loadLockExchange = state.options.loadLockExchange || "auto";
+  state.options.neuralUCBTopK = Number(state.options.neuralUCBTopK) || 2;
+  state.options.neuralUCBExploration = Number.isFinite(Number(state.options.neuralUCBExploration)) ? Number(state.options.neuralUCBExploration) : 5;
   state.options.milpTimeLimit = Number(state.options.milpTimeLimit) || 120;
   // v2：Route/Clean 来自设备共享库；仅在加载尚未迁移的旧数据时使用测试集副本兜底。
   if (!state.routes.length && Array.isArray(value.routes)) state.routes = value.routes;
@@ -470,7 +473,8 @@ function applyTestCase(testCase) {
   document.getElementById("roundCount").value = state.roundCount;
   document.querySelectorAll('input[name="strategy"]').forEach(input => { input.checked = input.value === state.strategy; });
   document.querySelectorAll("[data-option]").forEach(input => { input.value = state.options[input.dataset.option] ?? input.value; });
-  document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "setrank", "neural", "rl"].includes(state.strategy));
+  document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "setrank", "neuralucb", "neural", "rl"].includes(state.strategy));
+  document.getElementById("neuralucbOptions").classList.toggle("is-hidden", state.strategy !== "neuralucb");
   document.getElementById("rlOptions").classList.toggle("is-hidden", state.strategy !== "rl");
   document.getElementById("milpOptions").classList.toggle("is-hidden", state.strategy !== "milp");
   document.getElementById("roundCount").disabled = state.strategy === "milp";
@@ -647,6 +651,71 @@ async function loadWorkspaceCatalog(preferredDeviceId = "", preferredTestId = ""
   const result = await requestJson("/api/workspaces"); state.workspaceDevices = result.devices;
   const deviceId = result.devices.some(device => device.id === preferredDeviceId) ? preferredDeviceId : result.devices[0]?.id;
   if (deviceId) await selectWorkspaceDevice(deviceId, preferredTestId); else renderWorkspaceControls();
+}
+
+/** 根据当前 dataset 子集绘制全部只读实例及其关键规模参数。 */
+function renderDatasetCatalog() {
+  const groupSelect = document.getElementById("datasetGroupSelect");
+  const caseSelect = document.getElementById("datasetCaseSelect");
+  const selectedGroup = state.datasetGroups.find(group => group.id === state.datasetGroupId) || state.datasetGroups[0];
+  state.datasetGroupId = selectedGroup?.id || "";
+  groupSelect.innerHTML = state.datasetGroups.length
+    ? state.datasetGroups.map(group => `<option value="${escapeHtml(group.id)}" ${group.id === state.datasetGroupId ? "selected" : ""}>${escapeHtml(group.name)}（${group.caseCount}）</option>`).join("")
+    : '<option value="">没有可用测试集</option>';
+  const cases = selectedGroup?.cases || [];
+  if (!cases.some(testCase => testCase.id === state.datasetCaseId)) state.datasetCaseId = cases[0]?.id || "";
+  caseSelect.innerHTML = cases.length
+    ? cases.map(testCase => `<option value="${escapeHtml(testCase.id)}" ${testCase.id === state.datasetCaseId ? "selected" : ""}>${escapeHtml(testCase.name)}</option>`).join("")
+    : '<option value="">当前子集为空</option>';
+  const selectedCase = cases.find(testCase => testCase.id === state.datasetCaseId);
+  const processTimes = selectedCase?.processTimes?.length ? `${selectedCase.processTimes.join(" / ")} s` : "—";
+  document.getElementById("datasetCaseSummary").textContent = selectedCase
+    ? `${selectedCase.waferCount} 片 · ${selectedCase.stageCount} 道工序 · ${selectedCase.chamberCount} 腔室 · 工艺 ${processTimes}`
+    : "实例参数由仓库文件提供，不会写入工作区。";
+  document.getElementById("datasetCaseCount").textContent = state.datasetGroups.length
+    ? `${state.datasetGroups.reduce((sum, group) => sum + group.caseCount, 0)} 个实例`
+    : "无测试实例";
+  document.getElementById("runDatasetCaseButton").disabled = !state.serviceCompatible || !selectedCase || state.datasetRunning;
+}
+
+/** 从本地服务读取算法仓库中的只读 dataset 测试目录。 */
+async function loadDatasetCatalog() {
+  const result = await requestJson("/api/dataset-tests");
+  state.datasetGroups = Array.isArray(result.groups) ? result.groups : [];
+  renderDatasetCatalog();
+}
+
+/** 使用当前策略运行所选 dataset 实例，并把结果载入统一结果区。 */
+async function runDatasetCase() {
+  const selectedGroup = state.datasetGroups.find(group => group.id === state.datasetGroupId);
+  const selectedCase = selectedGroup?.cases?.find(testCase => testCase.id === state.datasetCaseId);
+  if (!selectedCase) throw new Error("请先选择 dataset 测试实例");
+  const button = document.getElementById("runDatasetCaseButton");
+  let runResult = null;
+  state.datasetRunning = true; button.disabled = true; button.classList.add("running"); button.textContent = "正在运行…";
+  resetRunResult();
+  writeTerminal(`$ 运行 dataset 测试\n  实例: ${selectedCase.id}\n  策略: ${state.strategy}\n  同步计算 heuristic 基线…`);
+  try {
+    const response = await fetch("/api/run-dataset-test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ caseId: selectedCase.id, strategy: state.strategy, options: state.options }),
+    });
+    const responseText = await response.text();
+    try { runResult = JSON.parse(responseText); }
+    catch { throw new Error(responseText.trim().slice(0, 240) || `服务返回 ${response.status}`); }
+    prepareLogDownload(runResult); prepareGanttView(runResult);
+    if (!response.ok || !runResult.ok) throw new Error(runResult.error || `服务返回 ${response.status}`);
+    showResult(runResult);
+    document.getElementById("metricContext").textContent = `Dataset · ${selectedCase.id}`;
+    if (runResult.resultId) await visualizationWorkspace.loadResult(runResult.resultId, `Dataset · ${selectedCase.id}`);
+  } catch (error) {
+    writeTerminal(`$ Dataset 运行失败\n  ${error.message || "未知错误"}`, true);
+    document.getElementById("metricValidation").textContent = "失败";
+  } finally {
+    state.datasetRunning = false; button.classList.remove("running"); button.textContent = "▶ 运行所选实例";
+    renderDatasetCatalog();
+  }
 }
 
 /** 切换主功能标签，并只在运行页显示策略侧栏。 */
@@ -1724,10 +1793,11 @@ async function checkService() {
     if (!response.ok) throw new Error();
     const status = await response.json(), compatible = status.schemaVersion === EXPECTED_API_SCHEMA;
     state.serviceCompatible = compatible;
-    const setrankAvailable = status.strategies?.setrank === true, neuralAvailable = status.strategies?.neural === true, rlAvailable = status.strategies?.rl !== false, milpAvailable = status.strategies?.milp === true;
+    const setrankAvailable = status.strategies?.setrank === true, neuralucbAvailable = status.strategies?.neuralucb === true, neuralAvailable = status.strategies?.neural === true, rlAvailable = status.strategies?.rl !== false, milpAvailable = status.strategies?.milp === true;
     state.algorithmMetadata = status.algorithmMetadata || {};
     state.algorithmHistory = status.algorithmHistory || {};
     document.getElementById("setrankStrategyInput").disabled = !setrankAvailable;
+    document.getElementById("neuralucbStrategyInput").disabled = !neuralucbAvailable;
     document.getElementById("neuralStrategyInput").disabled = !neuralAvailable;
     document.getElementById("rlStrategyInput").disabled = !rlAvailable;
     document.getElementById("milpStrategyInput").disabled = !milpAvailable;
@@ -1735,6 +1805,7 @@ async function checkService() {
     renderAlgorithmHistory();
     runButton.disabled = !compatible;
     batchRunButton.disabled = !compatible;
+    renderDatasetCatalog();
     renderWorkspaceControls();
     pill.textContent = compatible ? "本地服务已连接" : "服务版本过旧";
     if (!compatible) {
@@ -1742,7 +1813,7 @@ async function checkService() {
       writeTerminal("$ 本地服务版本过旧\n  请重启: py scripts/config_editor_server.py", true);
     }
   }
-  catch { state.serviceCompatible = false; runButton.disabled = true; batchRunButton.disabled = true; renderWorkspaceControls(); pill.textContent = "本地服务未连接"; pill.style.color = "var(--red)"; pill.style.background = "var(--red-soft)"; writeTerminal("$ 无法连接本地服务\n  请运行: py scripts/config_editor_server.py", true); }
+  catch { state.serviceCompatible = false; runButton.disabled = true; batchRunButton.disabled = true; renderWorkspaceControls(); renderDatasetCatalog(); pill.textContent = "本地服务未连接"; pill.style.color = "var(--red)"; pill.style.background = "var(--red-soft)"; writeTerminal("$ 无法连接本地服务\n  请运行: py scripts/config_editor_server.py", true); }
 }
 
 document.getElementById("workspaceDialogCancel").addEventListener("click", () => document.getElementById("workspaceDialog").close("cancel"));
@@ -1755,6 +1826,9 @@ document.getElementById("deviceSelect").addEventListener("change", event => (asy
 document.getElementById("testGroupSelect").addEventListener("change", event => selectWorkspaceGroup(event.target.value).catch(error => writeTerminal(`$ 测试组别切换失败\n  ${error.message}`, true)));
 document.getElementById("testCaseSelect").addEventListener("change", event => selectWorkspaceTest(event.target.value).catch(error => writeTerminal(`$ 测试集切换失败\n  ${error.message}`, true)));
 document.getElementById("testCaseName").addEventListener("input", event => { state.testCaseName = event.target.value; markTestDirty(); });
+document.getElementById("datasetGroupSelect").addEventListener("change", event => { state.datasetGroupId = event.target.value; state.datasetCaseId = ""; renderDatasetCatalog(); });
+document.getElementById("datasetCaseSelect").addEventListener("change", event => { state.datasetCaseId = event.target.value; renderDatasetCatalog(); });
+document.getElementById("runDatasetCaseButton").addEventListener("click", () => runDatasetCase().catch(error => writeTerminal(`$ Dataset 运行失败\n  ${error.message}`, true)));
 document.getElementById("newGroupButton").addEventListener("click", () => createTestGroup().catch(error => writeTerminal(`$ 新建测试组别失败\n  ${error.message}`, true)));
 document.getElementById("renameGroupButton").addEventListener("click", () => renameCurrentTestGroup().catch(error => { setWorkspaceStatus(`重命名测试组别失败：${error.message}`, "dirty"); writeTerminal(`$ 重命名测试组别失败\n  ${error.message}`, true); }));
 document.getElementById("deleteGroupButton").addEventListener("click", () => deleteCurrentTestGroup().catch(error => { setWorkspaceStatus(`删除测试组别失败：${error.message}`, "dirty"); writeTerminal(`$ 删除测试组别失败\n  ${error.message}`, true); }));
@@ -1785,10 +1859,11 @@ document.addEventListener("change", event => {
   if (event.target.name === "strategy") {
     state.strategy = event.target.value;
     if (state.strategy === "neural") state.options.loadLockManager = "joint";
-    else if (["heuristic", "setrank", "rl"].includes(state.strategy)) state.options.loadLockManager = "petri-look";
+    else if (["heuristic", "setrank", "neuralucb", "rl"].includes(state.strategy)) state.options.loadLockManager = "petri-look";
     if (state.strategy === "milp") { resizeRounds(1); document.getElementById("roundCount").value = 1; }
     document.getElementById("roundCount").disabled = state.strategy === "milp";
-    document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "setrank", "neural", "rl"].includes(state.strategy));
+    document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "setrank", "neuralucb", "neural", "rl"].includes(state.strategy));
+    document.getElementById("neuralucbOptions").classList.toggle("is-hidden", state.strategy !== "neuralucb");
     document.getElementById("rlOptions").classList.toggle("is-hidden", state.strategy !== "rl");
     document.getElementById("milpOptions").classList.toggle("is-hidden", state.strategy !== "milp");
     showAlgorithmDetails(state.strategy);
@@ -1824,4 +1899,4 @@ window.addEventListener("pagehide", () => {
   }).catch(() => {});
 });
 
-renderAll(); renderWorkspaceControls(); checkService(); loadWorkspaceCatalog().catch(error => setWorkspaceStatus(`测试集读取失败：${error.message}`, "dirty"));
+renderAll(); renderWorkspaceControls(); checkService(); loadWorkspaceCatalog().catch(error => setWorkspaceStatus(`测试集读取失败：${error.message}`, "dirty")); loadDatasetCatalog().catch(error => { document.getElementById("datasetCaseCount").textContent = "读取失败"; document.getElementById("datasetCaseSummary").textContent = error.message; });

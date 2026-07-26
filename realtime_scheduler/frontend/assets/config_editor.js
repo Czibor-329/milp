@@ -4,7 +4,7 @@ var __export = (target, all) => {
     __defProp(target, name, { get: all[name], enumerable: true });
 };
 
-// src/route_editor_logic.ts
+// .codex-neural-ucb-build/realtime_scheduler/frontend/src/route_editor_logic.ts
 var route_editor_logic_exports = {};
 __export(route_editor_logic_exports, {
   VISIT_SHARED_FIELDS: () => VISIT_SHARED_FIELDS,
@@ -129,7 +129,7 @@ function processRecipeName(value, fallback) {
   return explicitName || String(fallback ?? "").trim();
 }
 
-// src/api_client.ts
+// .codex-neural-ucb-build/realtime_scheduler/frontend/src/api_client.ts
 async function requestJson(url, options = {}) {
   const response = await fetch(url, options);
   const result = await response.json();
@@ -139,7 +139,7 @@ async function requestJson(url, options = {}) {
   return result;
 }
 
-// src/workspace_visualizer.ts
+// .codex-neural-ucb-build/realtime_scheduler/frontend/src/workspace_visualizer.ts
 var PICK_MOVE_TYPES = /* @__PURE__ */ new Set([0, 2]);
 var PLACE_MOVE_TYPES = /* @__PURE__ */ new Set([1, 3]);
 var SWAP_MOVE = 4;
@@ -715,7 +715,7 @@ function createVisualizationWorkspace(root = document) {
   return new VisualizationWorkspace(root);
 }
 
-// src/editor_models.ts
+// .codex-neural-ucb-build/realtime_scheduler/frontend/src/editor_models.ts
 var CJOB_TYPES = ["NormalLot", "HighestLot", "HigherLot"];
 var TASK_MODES = ["Smart", "Pipeline", "Sequential", "Concurrent"];
 function stringList(value) {
@@ -858,7 +858,7 @@ function normalizeRound(raw, roundIndex, fallbackTime) {
   };
 }
 
-// src/config_editor.ts
+// .codex-neural-ucb-build/realtime_scheduler/frontend/src/config_editor.ts
 var { VISIT_SHARED_FIELDS: VISIT_SHARED_FIELDS2, selectReferencedRoutes: selectReferencedRoutes2 } = route_editor_logic_exports;
 var visualizationWorkspace = createVisualizationWorkspace();
 var EXPECTED_API_SCHEMA = "cjob-pjob-v3";
@@ -880,6 +880,10 @@ var state = {
   activeTestGroup: "",
   serviceCompatible: false,
   dirty: false,
+  datasetGroups: [],
+  datasetGroupId: "",
+  datasetCaseId: "",
+  datasetRunning: false,
   activeBatchId: "",
   batchRunning: false,
   batchCancelRequested: false,
@@ -899,7 +903,7 @@ var state = {
   algorithmHistory: {},
   roundCount: 2,
   times: [0, 70],
-  options: { loadLockManager: "petri-look", loadLockExchange: "auto", rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
+  options: { loadLockManager: "petri-look", loadLockExchange: "auto", neuralUCBTopK: 2, neuralUCBExploration: 5, rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
   cleans: [],
   routes: [{ name: "RouteA", group: "RouteA", bufferOption: 0, prePJobCleanRefs: [], postPJobCleanRefs: [], postCJobCleanRefs: [], stages: linkRouteSteps([makeStage("LP1"), makeStage("Robot"), makeStage("PM1,PM2", true, "RouteA_Step2"), makeStage("Robot"), makeStage("LP1")]) }],
   rounds: [makeRound(1, 0, "RouteA", "LP1"), makeRound(2, 70, "RouteA", "LP2")],
@@ -1276,9 +1280,11 @@ function applyTestCase(testCase) {
   state.strategy = value.strategy || "heuristic";
   state.roundCount = Math.max(1, Number(value.roundCount) || 1);
   state.times = Array.isArray(value.times) ? value.times : [0];
-  state.options = value.options || { loadLockManager: "petri-look", loadLockExchange: "auto", rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 };
+  state.options = value.options || { loadLockManager: "petri-look", loadLockExchange: "auto", neuralUCBTopK: 2, neuralUCBExploration: 5, rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 };
   state.options.loadLockManager = state.options.loadLockManager || "petri-look";
   state.options.loadLockExchange = state.options.loadLockExchange || "auto";
+  state.options.neuralUCBTopK = Number(state.options.neuralUCBTopK) || 2;
+  state.options.neuralUCBExploration = Number.isFinite(Number(state.options.neuralUCBExploration)) ? Number(state.options.neuralUCBExploration) : 5;
   state.options.milpTimeLimit = Number(state.options.milpTimeLimit) || 120;
   if (!state.routes.length && Array.isArray(value.routes)) state.routes = value.routes;
   if (!state.cleans.length && Array.isArray(value.cleans)) state.cleans = value.cleans.map(normalizeClean);
@@ -1308,7 +1314,8 @@ function applyTestCase(testCase) {
   document.querySelectorAll("[data-option]").forEach((input) => {
     input.value = state.options[input.dataset.option] ?? input.value;
   });
-  document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "setrank", "neural", "rl"].includes(state.strategy));
+  document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "setrank", "neuralucb", "neural", "rl"].includes(state.strategy));
+  document.getElementById("neuralucbOptions").classList.toggle("is-hidden", state.strategy !== "neuralucb");
   document.getElementById("rlOptions").classList.toggle("is-hidden", state.strategy !== "rl");
   document.getElementById("milpOptions").classList.toggle("is-hidden", state.strategy !== "milp");
   document.getElementById("roundCount").disabled = state.strategy === "milp";
@@ -1514,6 +1521,70 @@ async function loadWorkspaceCatalog(preferredDeviceId = "", preferredTestId = ""
   const deviceId = result.devices.some((device) => device.id === preferredDeviceId) ? preferredDeviceId : result.devices[0]?.id;
   if (deviceId) await selectWorkspaceDevice(deviceId, preferredTestId);
   else renderWorkspaceControls();
+}
+function renderDatasetCatalog() {
+  const groupSelect = document.getElementById("datasetGroupSelect");
+  const caseSelect = document.getElementById("datasetCaseSelect");
+  const selectedGroup = state.datasetGroups.find((group) => group.id === state.datasetGroupId) || state.datasetGroups[0];
+  state.datasetGroupId = selectedGroup?.id || "";
+  groupSelect.innerHTML = state.datasetGroups.length ? state.datasetGroups.map((group) => `<option value="${escapeHtml2(group.id)}" ${group.id === state.datasetGroupId ? "selected" : ""}>${escapeHtml2(group.name)}\uFF08${group.caseCount}\uFF09</option>`).join("") : '<option value="">\u6CA1\u6709\u53EF\u7528\u6D4B\u8BD5\u96C6</option>';
+  const cases = selectedGroup?.cases || [];
+  if (!cases.some((testCase) => testCase.id === state.datasetCaseId)) state.datasetCaseId = cases[0]?.id || "";
+  caseSelect.innerHTML = cases.length ? cases.map((testCase) => `<option value="${escapeHtml2(testCase.id)}" ${testCase.id === state.datasetCaseId ? "selected" : ""}>${escapeHtml2(testCase.name)}</option>`).join("") : '<option value="">\u5F53\u524D\u5B50\u96C6\u4E3A\u7A7A</option>';
+  const selectedCase = cases.find((testCase) => testCase.id === state.datasetCaseId);
+  const processTimes = selectedCase?.processTimes?.length ? `${selectedCase.processTimes.join(" / ")} s` : "\u2014";
+  document.getElementById("datasetCaseSummary").textContent = selectedCase ? `${selectedCase.waferCount} \u7247 \xB7 ${selectedCase.stageCount} \u9053\u5DE5\u5E8F \xB7 ${selectedCase.chamberCount} \u8154\u5BA4 \xB7 \u5DE5\u827A ${processTimes}` : "\u5B9E\u4F8B\u53C2\u6570\u7531\u4ED3\u5E93\u6587\u4EF6\u63D0\u4F9B\uFF0C\u4E0D\u4F1A\u5199\u5165\u5DE5\u4F5C\u533A\u3002";
+  document.getElementById("datasetCaseCount").textContent = state.datasetGroups.length ? `${state.datasetGroups.reduce((sum, group) => sum + group.caseCount, 0)} \u4E2A\u5B9E\u4F8B` : "\u65E0\u6D4B\u8BD5\u5B9E\u4F8B";
+  document.getElementById("runDatasetCaseButton").disabled = !state.serviceCompatible || !selectedCase || state.datasetRunning;
+}
+async function loadDatasetCatalog() {
+  const result = await requestJson("/api/dataset-tests");
+  state.datasetGroups = Array.isArray(result.groups) ? result.groups : [];
+  renderDatasetCatalog();
+}
+async function runDatasetCase() {
+  const selectedGroup = state.datasetGroups.find((group) => group.id === state.datasetGroupId);
+  const selectedCase = selectedGroup?.cases?.find((testCase) => testCase.id === state.datasetCaseId);
+  if (!selectedCase) throw new Error("\u8BF7\u5148\u9009\u62E9 dataset \u6D4B\u8BD5\u5B9E\u4F8B");
+  const button = document.getElementById("runDatasetCaseButton");
+  let runResult = null;
+  state.datasetRunning = true;
+  button.disabled = true;
+  button.classList.add("running");
+  button.textContent = "\u6B63\u5728\u8FD0\u884C\u2026";
+  resetRunResult();
+  writeTerminal(`$ \u8FD0\u884C dataset \u6D4B\u8BD5
+  \u5B9E\u4F8B: ${selectedCase.id}
+  \u7B56\u7565: ${state.strategy}
+  \u540C\u6B65\u8BA1\u7B97 heuristic \u57FA\u7EBF\u2026`);
+  try {
+    const response = await fetch("/api/run-dataset-test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ caseId: selectedCase.id, strategy: state.strategy, options: state.options })
+    });
+    const responseText = await response.text();
+    try {
+      runResult = JSON.parse(responseText);
+    } catch {
+      throw new Error(responseText.trim().slice(0, 240) || `\u670D\u52A1\u8FD4\u56DE ${response.status}`);
+    }
+    prepareLogDownload(runResult);
+    prepareGanttView(runResult);
+    if (!response.ok || !runResult.ok) throw new Error(runResult.error || `\u670D\u52A1\u8FD4\u56DE ${response.status}`);
+    showResult(runResult);
+    document.getElementById("metricContext").textContent = `Dataset \xB7 ${selectedCase.id}`;
+    if (runResult.resultId) await visualizationWorkspace.loadResult(runResult.resultId, `Dataset \xB7 ${selectedCase.id}`);
+  } catch (error) {
+    writeTerminal(`$ Dataset \u8FD0\u884C\u5931\u8D25
+  ${error.message || "\u672A\u77E5\u9519\u8BEF"}`, true);
+    document.getElementById("metricValidation").textContent = "\u5931\u8D25";
+  } finally {
+    state.datasetRunning = false;
+    button.classList.remove("running");
+    button.textContent = "\u25B6 \u8FD0\u884C\u6240\u9009\u5B9E\u4F8B";
+    renderDatasetCatalog();
+  }
 }
 function switchTab(name) {
   document.querySelectorAll("[data-tab-target]").forEach((button) => button.classList.toggle("active", button.dataset.tabTarget === name));
@@ -2591,10 +2662,11 @@ async function checkService() {
     if (!response.ok) throw new Error();
     const status = await response.json(), compatible = status.schemaVersion === EXPECTED_API_SCHEMA;
     state.serviceCompatible = compatible;
-    const setrankAvailable = status.strategies?.setrank === true, neuralAvailable = status.strategies?.neural === true, rlAvailable = status.strategies?.rl !== false, milpAvailable = status.strategies?.milp === true;
+    const setrankAvailable = status.strategies?.setrank === true, neuralucbAvailable = status.strategies?.neuralucb === true, neuralAvailable = status.strategies?.neural === true, rlAvailable = status.strategies?.rl !== false, milpAvailable = status.strategies?.milp === true;
     state.algorithmMetadata = status.algorithmMetadata || {};
     state.algorithmHistory = status.algorithmHistory || {};
     document.getElementById("setrankStrategyInput").disabled = !setrankAvailable;
+    document.getElementById("neuralucbStrategyInput").disabled = !neuralucbAvailable;
     document.getElementById("neuralStrategyInput").disabled = !neuralAvailable;
     document.getElementById("rlStrategyInput").disabled = !rlAvailable;
     document.getElementById("milpStrategyInput").disabled = !milpAvailable;
@@ -2602,6 +2674,7 @@ async function checkService() {
     renderAlgorithmHistory();
     runButton.disabled = !compatible;
     batchRunButton.disabled = !compatible;
+    renderDatasetCatalog();
     renderWorkspaceControls();
     pill.textContent = compatible ? "\u672C\u5730\u670D\u52A1\u5DF2\u8FDE\u63A5" : "\u670D\u52A1\u7248\u672C\u8FC7\u65E7";
     if (!compatible) {
@@ -2614,6 +2687,7 @@ async function checkService() {
     runButton.disabled = true;
     batchRunButton.disabled = true;
     renderWorkspaceControls();
+    renderDatasetCatalog();
     pill.textContent = "\u672C\u5730\u670D\u52A1\u672A\u8FDE\u63A5";
     pill.style.color = "var(--red)";
     pill.style.background = "var(--red-soft)";
@@ -2643,6 +2717,17 @@ document.getElementById("testCaseName").addEventListener("input", (event) => {
   state.testCaseName = event.target.value;
   markTestDirty();
 });
+document.getElementById("datasetGroupSelect").addEventListener("change", (event) => {
+  state.datasetGroupId = event.target.value;
+  state.datasetCaseId = "";
+  renderDatasetCatalog();
+});
+document.getElementById("datasetCaseSelect").addEventListener("change", (event) => {
+  state.datasetCaseId = event.target.value;
+  renderDatasetCatalog();
+});
+document.getElementById("runDatasetCaseButton").addEventListener("click", () => runDatasetCase().catch((error) => writeTerminal(`$ Dataset \u8FD0\u884C\u5931\u8D25
+  ${error.message}`, true)));
 document.getElementById("newGroupButton").addEventListener("click", () => createTestGroup().catch((error) => writeTerminal(`$ \u65B0\u5EFA\u6D4B\u8BD5\u7EC4\u522B\u5931\u8D25
   ${error.message}`, true)));
 document.getElementById("renameGroupButton").addEventListener("click", () => renameCurrentTestGroup().catch((error) => {
@@ -2715,13 +2800,14 @@ document.addEventListener("change", (event) => {
   if (event.target.name === "strategy") {
     state.strategy = event.target.value;
     if (state.strategy === "neural") state.options.loadLockManager = "joint";
-    else if (["heuristic", "setrank", "rl"].includes(state.strategy)) state.options.loadLockManager = "petri-look";
+    else if (["heuristic", "setrank", "neuralucb", "rl"].includes(state.strategy)) state.options.loadLockManager = "petri-look";
     if (state.strategy === "milp") {
       resizeRounds(1);
       document.getElementById("roundCount").value = 1;
     }
     document.getElementById("roundCount").disabled = state.strategy === "milp";
-    document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "setrank", "neural", "rl"].includes(state.strategy));
+    document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "setrank", "neuralucb", "neural", "rl"].includes(state.strategy));
+    document.getElementById("neuralucbOptions").classList.toggle("is-hidden", state.strategy !== "neuralucb");
     document.getElementById("rlOptions").classList.toggle("is-hidden", state.strategy !== "rl");
     document.getElementById("milpOptions").classList.toggle("is-hidden", state.strategy !== "milp");
     showAlgorithmDetails(state.strategy);
@@ -2769,3 +2855,7 @@ renderAll();
 renderWorkspaceControls();
 checkService();
 loadWorkspaceCatalog().catch((error) => setWorkspaceStatus(`\u6D4B\u8BD5\u96C6\u8BFB\u53D6\u5931\u8D25\uFF1A${error.message}`, "dirty"));
+loadDatasetCatalog().catch((error) => {
+  document.getElementById("datasetCaseCount").textContent = "\u8BFB\u53D6\u5931\u8D25";
+  document.getElementById("datasetCaseSummary").textContent = error.message;
+});

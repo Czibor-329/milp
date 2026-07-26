@@ -38,6 +38,16 @@
               </div>
             </div>
           </article>
+          <article class="panel dataset-panel">
+            <div class="panel-head"><div><h2>算法仓库 Dataset 测试集</h2><p>只读载入 alg/dataset/test，调度输出与当前所选策略的 heuristic 基线直接对照。</p></div><span class="dataset-count" id="datasetCaseCount">正在读取…</span></div>
+            <div class="panel-body">
+              <div class="grid">
+                <div class="field span-4"><label for="datasetGroupSelect">测试子集</label><select id="datasetGroupSelect"><option value="">正在读取…</option></select></div>
+                <div class="field span-5"><label for="datasetCaseSelect">测试实例</label><select id="datasetCaseSelect"><option value="">请先选择子集</option></select><div class="hint" id="datasetCaseSummary">实例参数由仓库文件提供，不会写入工作区。</div></div>
+                <div class="field span-3"><label>运行</label><button class="btn primary dataset-run-button" id="runDatasetCaseButton" type="button" disabled>▶ 运行所选实例</button></div>
+              </div>
+            </div>
+          </article>
           <article class="panel">
             <div class="panel-head"><div><h2>重算任务</h2></div><div class="field" style="width:140px"><label for="roundCount">总轮数</label><input id="roundCount" type="number" min="1" max="8" value="2"></div></div>
             <div class="panel-body"><div class="card-list" id="roundList"></div></div>
@@ -164,6 +174,7 @@
             <div class="strategy-options">
               <label class="strategy-card" data-strategy-card="heuristic"><input type="radio" name="strategy" value="heuristic" checked><b>启发式</b></label>
               <label class="strategy-card" data-strategy-card="setrank"><input id="setrankStrategyInput" type="radio" name="strategy" value="setrank"><b>SetRank-PIAC</b></label>
+              <label class="strategy-card" data-strategy-card="neuralucb"><input id="neuralucbStrategyInput" type="radio" name="strategy" value="neuralucb"><b>Safe NeuralUCB</b></label>
               <label class="strategy-card" data-strategy-card="neural"><input id="neuralStrategyInput" type="radio" name="strategy" value="neural"><b>深层神经派工</b></label>
               <label class="strategy-card" data-strategy-card="rl"><input id="rlStrategyInput" type="radio" name="strategy" value="rl"><b>RL 搜索</b></label>
               <label class="strategy-card" data-strategy-card="milp"><input id="milpStrategyInput" type="radio" name="strategy" value="milp"><b>MILP 最优求解</b></label>
@@ -179,6 +190,11 @@
               <div class="field span-6"><label>Rollouts</label><input data-option="rlRollouts" type="number" min="1" value="256"></div>
               <div class="field span-6"><label>温度</label><input data-option="rlTemperature" type="number" min="0.01" step="0.05" value="0.7"></div>
               <div class="field span-6"><label>随机种子</label><input data-option="seed" type="number" value="0"></div>
+            </div>
+            <div id="neuralucbOptions" class="grid is-hidden" style="margin-top:14px">
+              <div class="field span-6"><label>精评候选数</label><input data-option="neuralUCBTopK" type="number" min="1" max="13" step="1" value="2"></div>
+              <div class="field span-6"><label>探索系数 α</label><input data-option="neuralUCBExploration" type="number" min="0" step="0.25" value="5"></div>
+              <div class="field span-12"><div class="hint">始终精确运行 legacy 作为质量地板，再按 NeuralUCB 下置信界精评候选，因此 makespan 不会劣于启发式基线。</div></div>
             </div>
             <div id="milpOptions" class="grid is-hidden" style="margin-top:14px">
               <div class="field span-6"><label>求解时限（秒）</label><input data-option="milpTimeLimit" type="number" min="0.1" step="1" value="120"></div>

@@ -61,7 +61,8 @@ from infer.function import (
     get_last_strategy_diagnostics as builtin_strategy_diagnostics,
     session as builtin_algorithm_session,
 )
-from src.parse import parse_task
+from src.parse import load_alg_entries, parse_task
+from src.parse.generator import PM_POOL_6, expand_topo_pms
 from src.paths import MODELS_DIR
 from src.schedule.realtime import (
     RealtimeRescheduler,
@@ -132,6 +133,9 @@ FRONTEND_ASSET_DIR = FRONTEND_DIR / "assets"
 RL_MODEL_PATH = MODELS_DIR / "bc_policy_rl.pt"
 NEURAL_MODEL_PATH = ALGORITHM_ROOT / "src" / "schedule" / "neural_policy.npz"
 SETRANK_MODEL_PATH = ALGORITHM_ROOT / "src" / "schedule" / "heuristic_config_policy.npz"
+NEURAL_UCB_MODEL_PATH = ALGORITHM_ROOT / "src" / "schedule" / "neural_ucb_policy.npz"
+DATASET_TEST_ROOT = ALGORITHM_ROOT / "dataset" / "test"
+DATASET_TOPOLOGY_ROOT = ALGORITHM_ROOT / "dataset" / "input_data"
 WORKSPACE_STORE_PATH = DATA_DIR / "workspaces.json"
 ALGORITHM_METADATA_PATH = DATA_DIR / "algorithm_metadata.json"
 LEGACY_WORKSPACE_STORE_PATH = ALGORITHM_ROOT / "results" / "config_editor_workspaces.json"
@@ -156,6 +160,12 @@ BUILTIN_ALGORITHM_METADATA: Dict[str, Dict[str, str]] = {
     "setrank": {
         "name": "SetRank-PIAC",
         "description": "集合网络按实例推荐启发式参数，并以候选精评和 legacy 质量地板保障结果。",
+        "version": "1.0.0",
+        "updatedAt": "2026-07-26",
+    },
+    "neuralucb": {
+        "name": "Safe NeuralUCB",
+        "description": "神经上下文置信下界在线选择启发式参数，并以 legacy 精确结果作为安全质量地板。",
         "version": "1.0.0",
         "updatedAt": "2026-07-26",
     },
@@ -1790,14 +1800,14 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
         if normalized_strategy.startswith("other_alg:") and ":" in strategy
         else None
     )
-    builtin_strategies = {"heuristic", "setrank", "neural", "rl", "milp"}
+    builtin_strategies = {"heuristic", "setrank", "neuralucb", "neural", "rl", "milp"}
     discovered_ids = {
         str(item["id"])
         for item in discover_other_algorithms()
     }
     if normalized_strategy not in builtin_strategies and other_algorithm_id not in discovered_ids:
         raise ValueError(
-            "策略只支持 heuristic、setrank、neural、rl、milp，"
+            "策略只支持 heuristic、setrank、neuralucb、neural、rl、milp，"
             "或 other_alg 下已发现的标准算法"
         )
     strategy = normalized_strategy if normalized_strategy in builtin_strategies else strategy
@@ -1907,6 +1917,170 @@ def execute_plan(raw_plan: Mapping[str, Any]) -> Dict[str, Any]:
     cpu_finished = time.thread_time() if hasattr(time, "thread_time") else time.process_time()
     result["cpuTimeMs"] = max(0.0, (cpu_finished - cpu_started) * 1000.0)
     result["reproductionLog"] = deepcopy(reproduction.entries)
+    return result
+
+
+def list_dataset_tests(root: Path = DATASET_TEST_ROOT) -> List[Dict[str, Any]]:
+    """列出算法仓库测试集，返回前端展示所需的稳定、有限字段。
+
+    数据集文件保持只读；目录名作为组 ID，实例相对路径作为运行 ID，避免把
+    大体积 ``update_params`` 发送到浏览器，也避免 JSON 中的 NaN 泄漏到 API。
+    """
+    groups: List[Dict[str, Any]] = []
+    if not root.is_dir():
+        return groups
+    for group_path in sorted(path for path in root.iterdir() if path.is_dir()):
+        manifest_path = group_path / "manifest.json"
+        manifest: Mapping[str, Any] = {}
+        if manifest_path.is_file():
+            loaded_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if isinstance(loaded_manifest, Mapping):
+                manifest = loaded_manifest
+        manifest_instances = {
+            str(item.get("file") or ""): item
+            for item in (manifest.get("instances") or [])
+            if isinstance(item, Mapping)
+        }
+        cases: List[Dict[str, Any]] = []
+        for case_path in sorted(group_path.glob("inst_*.json")):
+            relative_id = case_path.relative_to(root).as_posix()
+            metadata = manifest_instances.get(case_path.name, {})
+            cases.append({
+                "id": relative_id,
+                "name": case_path.stem,
+                "waferCount": int(metadata.get("n_wafer") or 0),
+                "stageCount": int(metadata.get("n_stage") or 0),
+                "chamberCount": int(metadata.get("n_chamber") or 0),
+                "processTimes": [
+                    float(value) for value in (metadata.get("proc_times") or [])
+                    if isinstance(value, (int, float)) and math.isfinite(float(value))
+                ],
+            })
+        if cases:
+            groups.append({
+                "id": group_path.name,
+                "name": group_path.name,
+                "baseTopology": str(manifest.get("base_topo") or ""),
+                "caseCount": len(cases),
+                "cases": cases,
+            })
+    return groups
+
+
+def _resolve_dataset_case(case_id: str) -> Tuple[Path, Path, Dict[str, Any]]:
+    """校验测试 ID 并返回实例路径、拓扑路径和实例文档。"""
+    normalized_id = str(case_id or "").strip().replace("\\", "/")
+    case_path = (DATASET_TEST_ROOT / normalized_id).resolve()
+    try:
+        relative_path = case_path.relative_to(DATASET_TEST_ROOT.resolve())
+    except ValueError as error:
+        raise ValueError("dataset 测试 ID 超出允许目录") from error
+    if len(relative_path.parts) != 2 or not re.fullmatch(r"inst_\d+\.json", case_path.name):
+        raise ValueError(f"dataset 测试 ID 无效：{normalized_id}")
+    if not case_path.is_file():
+        raise ValueError(f"dataset 测试不存在：{normalized_id}")
+    manifest_path = case_path.parent / "manifest.json"
+    if not manifest_path.is_file():
+        raise ValueError(f"dataset 测试缺少 manifest：{case_path.parent.name}")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    topology_name = str(manifest.get("base_topo") or "").strip()
+    if not topology_name:
+        raise ValueError(f"dataset manifest 未声明 base_topo：{manifest_path}")
+    if not topology_name.endswith(".json"):
+        topology_name += ".json"
+    topology_path = (DATASET_TOPOLOGY_ROOT / topology_name).resolve()
+    try:
+        topology_path.relative_to(DATASET_TOPOLOGY_ROOT.resolve())
+    except ValueError as error:
+        raise ValueError("dataset 拓扑路径超出允许目录") from error
+    if not topology_path.is_file():
+        raise ValueError(f"dataset 拓扑不存在：{topology_name}")
+    payload = json.loads(case_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or not isinstance(payload.get("update_params"), Mapping):
+        raise ValueError(f"dataset 测试格式无效：{normalized_id}")
+    return case_path, topology_path, payload
+
+
+def _execute_dataset_case_once(
+    case_id: str,
+    strategy: str,
+    options: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """通过正式内置算法接口执行一个原始 dataset 实例。"""
+    case_path, topology_path, payload = _resolve_dataset_case(case_id)
+    topology, _ = load_alg_entries(topology_path)
+    device = expand_topo_pms(topology, PM_POOL_6)
+    first_update = deepcopy(dict(payload["update_params"]))
+    reproduction = ReproductionLog()
+    reproduction.add("Input", [{
+        "datasetCaseId": case_id,
+        "strategy": strategy,
+        "options": deepcopy(dict(options)),
+    }])
+    reproduction.add("AlgInit", device)
+    reproduction.add("AlgSchedule", _schedule_log_info(device, first_update))
+    process_job_count = len(first_update.get("ProcessJobs") or [])
+    synthetic_round = {
+        "cjobs": [{"pjobs": [{} for _ in range(process_job_count)]}],
+    }
+    plan = {
+        "deviceName": f"dataset/{case_path.parent.name}",
+        "device": device,
+        "options": deepcopy(dict(options)),
+    }
+    started = time.perf_counter()
+    cpu_started = time.thread_time() if hasattr(time, "thread_time") else time.process_time()
+    try:
+        result = _execute_standard_algorithm(
+            plan,
+            first_update,
+            [synthetic_round],
+            [0.0],
+            BuildState(),
+            reproduction,
+            started,
+            builtin_strategy=strategy,
+        )
+    except Exception as error:  # noqa: BLE001
+        reproduction.add("AlgOutput", _alg_output_info(feedback=[{
+            "Level": "Error",
+            "Type": type(error).__name__,
+            "Message": str(error),
+        }]))
+        raise LoggedPlanError(str(error), reproduction.entries) from error
+    cpu_finished = time.thread_time() if hasattr(time, "thread_time") else time.process_time()
+    result["cpuTimeMs"] = max(0.0, (cpu_finished - cpu_started) * 1000.0)
+    result["reproductionLog"] = deepcopy(reproduction.entries)
+    result["datasetCase"] = {
+        "id": case_id,
+        "group": case_path.parent.name,
+        "name": case_path.stem,
+        "spec": deepcopy(dict(payload.get("spec") or {})),
+    }
+    return result
+
+
+def execute_dataset_test(
+    case_id: str,
+    strategy: str,
+    options: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """运行一个 dataset 测试，并给非 heuristic 策略附加精确基线对照。"""
+    normalized_strategy = str(strategy or "heuristic").strip().lower()
+    supported_strategies = {"heuristic", "setrank", "neuralucb", "neural", "rl", "milp"}
+    if normalized_strategy not in supported_strategies:
+        raise ValueError("dataset 测试只支持内置策略")
+    result = _execute_dataset_case_once(case_id, normalized_strategy, options)
+    if normalized_strategy == "heuristic":
+        baseline_result = result
+    else:
+        baseline_result = _execute_dataset_case_once(case_id, "heuristic", options)
+    baseline = {
+        "status": "succeeded",
+        "makespan": float(baseline_result["makespan"]),
+        "cpuTimeMs": float(baseline_result.get("cpuTimeMs", baseline_result["totalElapsedMs"])),
+    }
+    result.update(_baseline_comparison(result, baseline))
     return result
 
 
@@ -2821,12 +2995,14 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                 "strategies": {
                     "heuristic": True,
                     "setrank": SETRANK_MODEL_PATH.is_file(),
+                    "neuralucb": NEURAL_UCB_MODEL_PATH.is_file(),
                     "neural": NEURAL_MODEL_PATH.is_file(),
                     "rl": RL_MODEL_PATH.is_file(),
                     "milp": True,
                 },
                 "strategyModels": {
                     "setrank": str(SETRANK_MODEL_PATH) if SETRANK_MODEL_PATH.is_file() else "",
+                    "neuralucb": str(NEURAL_UCB_MODEL_PATH) if NEURAL_UCB_MODEL_PATH.is_file() else "",
                     "neural": str(NEURAL_MODEL_PATH) if NEURAL_MODEL_PATH.is_file() else "",
                 },
                 "strategyErrors": {},
@@ -2834,6 +3010,12 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                 "algorithmHistory": read_algorithm_history(),
                 "otherAlgorithms": other_algorithms,
             })
+            return
+        if path == "/api/dataset-tests":
+            try:
+                self._send_json({"ok": True, "groups": list_dataset_tests()})
+            except Exception as error:  # noqa: BLE001
+                self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
             return
         if path == "/api/workspaces":
             try:
@@ -2893,6 +3075,37 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                     options,
                 )
                 self._send_json(result, HTTPStatus.ACCEPTED)
+            except Exception as error:  # noqa: BLE001
+                self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
+            return
+        if path == "/api/run-dataset-test":
+            try:
+                payload = self._read_json_object()
+                options = payload.get("options")
+                if not isinstance(options, Mapping):
+                    options = {}
+                result = execute_dataset_test(
+                    str(payload.get("caseId") or ""),
+                    str(payload.get("strategy") or "heuristic"),
+                    options,
+                )
+                result_id = save_result(result["output"])
+                log_id = save_reproduction_log(result["reproductionLog"])
+                response = {
+                    key: value
+                    for key, value in result.items()
+                    if key not in {"output", "reproductionLog"}
+                }
+                response["resultId"] = result_id
+                response["ganttUrl"] = f"/movelist_gantt_viewer.html?src=/api/results/{result_id}"
+                response.update(_log_response_fields(log_id))
+                self._send_json(response)
+            except LoggedPlanError as error:
+                log_id = save_reproduction_log(error.reproduction_log)
+                response = {"ok": False, "error": str(error)}
+                response.update(_log_response_fields(log_id))
+                response.update(_logged_failure_result_fields(error))
+                self._send_json(response, HTTPStatus.BAD_REQUEST)
             except Exception as error:  # noqa: BLE001
                 self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
             return
