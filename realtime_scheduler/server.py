@@ -2782,6 +2782,7 @@ _invalidate_stale_device_baselines = _batch_service._invalidate_stale_device_bas
 _successful_baseline = _batch_service._successful_baseline
 _failed_baseline = _batch_service._failed_baseline
 _baseline_comparison = _batch_service._baseline_comparison
+_robot_wafer_dwell_time = _batch_service._robot_wafer_dwell_time
 _execute_workspace_test_with_baseline = _batch_service._execute_workspace_test_with_baseline
 _workspace_group_tests = _batch_service._workspace_group_tests
 _execute_workspace_test_batch = _batch_service._execute_workspace_test_batch

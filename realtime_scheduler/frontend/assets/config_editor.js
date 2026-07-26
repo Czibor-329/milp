@@ -884,6 +884,8 @@ var state = {
   batchRunning: false,
   batchCancelRequested: false,
   batchCancelSent: false,
+  batchResult: null,
+  selectedBatchTestId: "",
   deviceName: "",
   device: null,
   stationNames: [],
@@ -1241,9 +1243,16 @@ function markTestDirty() {
 }
 function resetRunResult() {
   visualizationWorkspace.clear();
+  state.batchResult = null;
+  state.selectedBatchTestId = "";
   ["metricTime", "metricMakespan", "metricMoves", "metricValidation"].forEach((id) => {
     document.getElementById(id).textContent = "\u2014";
   });
+  ["metricTimeDetail", "metricMakespanDetail", "metricMovesDetail", "metricValidationDetail"].forEach((id) => {
+    document.getElementById(id).textContent = "";
+  });
+  document.getElementById("metricContext").textContent = "\u8FD0\u884C\u603B\u89C8";
+  document.getElementById("batchOverviewButton").hidden = true;
   document.getElementById("metricTimeLabel").textContent = "\u603B\u8017\u65F6";
   document.getElementById("metricMakespanLabel").textContent = "Makespan";
   document.getElementById("metricMovesLabel").textContent = "Move \u6570";
@@ -2306,6 +2315,9 @@ async function runCurrentTestGroup() {
     state.activeBatchId = "";
     state.batchCancelRequested = false;
     state.batchCancelSent = false;
+    state.batchResult = null;
+    state.selectedBatchTestId = "";
+    document.getElementById("batchOverviewButton").hidden = true;
     button.disabled = false;
     runButton.disabled = true;
     button.classList.add("cancel");
@@ -2374,9 +2386,12 @@ async function sendBatchCancellation() {
   if (!response.ok) throw new Error(result.error || `\u7EC8\u6B62\u5931\u8D25\uFF0C\u670D\u52A1\u8FD4\u56DE ${response.status}`);
   showBatchProgress(result);
 }
-function showBatchProgress(result) {
-  const completed = Number(result.completed || 0), total = Number(result.testCount || result.items?.length || 0);
-  const percent = total ? Math.round(completed / total * 100) : 0;
+function setResultMetric(key, label, value, detail = "") {
+  document.getElementById(`metric${key}Label`).textContent = label;
+  document.getElementById(`metric${key}`).textContent = value;
+  document.getElementById(`metric${key}Detail`).textContent = detail;
+}
+function showBatchOverviewMetrics(result) {
   const successful = (result.items || []).filter((item) => item.status === "succeeded");
   const averageMakespan = successful.length ? successful.reduce((sum, item) => sum + Number(item.makespan), 0) / successful.length : 0;
   const comparable = successful.filter((item) => item.baseline?.status === "succeeded");
@@ -2384,21 +2399,62 @@ function showBatchProgress(result) {
   const totalBaseline = comparable.reduce((sum, item) => sum + Number(item.baseline.makespan), 0);
   const aggregateImprovement = totalBaseline > 0 ? (totalBaseline - totalMakespan) / totalBaseline * 100 : NaN;
   const moveCount = successful.reduce((sum, item) => sum + Number(item.moveCount || 0), 0);
+  const timeText = result.status === "completed" ? `${(Number(result.totalElapsedMs) / 1e3).toFixed(2)} s` : result.status === "cancelled" ? "\u5DF2\u7EC8\u6B62" : "\u8FD0\u884C\u4E2D";
+  const makespanText = comparable.length ? `${totalMakespan.toFixed(2)} / ${totalBaseline.toFixed(2)} s` : successful.length ? `${averageMakespan.toFixed(2)} s` : "\u2014";
+  const improvementText = comparable.length && Number.isFinite(aggregateImprovement) ? `${aggregateImprovement >= 0 ? "\u63D0\u5347" : "\u9000\u5316"} ${Math.abs(aggregateImprovement).toFixed(2)}%` : "";
+  document.getElementById("metricContext").textContent = `\u6279\u91CF\u603B\u89C8 \xB7 ${result.group || "\u672A\u5206\u7EC4"}`;
+  document.getElementById("batchOverviewButton").hidden = true;
+  setResultMetric("Time", "\u603B\u8017\u65F6", timeText);
+  setResultMetric("Makespan", comparable.length ? "\u603B Makespan / Baseline" : "\u5E73\u5747 Makespan", makespanText, improvementText);
+  setResultMetric("Moves", "\u603B Move \u6570", moveCount || "\u2014");
+  setResultMetric("Validation", result.cancelled ? "\u6210\u529F / \u5931\u8D25 / \u7EC8\u6B62" : "\u6210\u529F / \u5931\u8D25", result.cancelled ? `${result.succeeded || 0} / ${result.failed || 0} / ${result.cancelled}` : `${result.succeeded || 0} / ${result.failed || 0}`);
+}
+function showBatchItemOverview(item, index) {
+  const succeeded = item.status === "succeeded";
+  const baseline = item.baseline || {};
+  const baselineReady = baseline.status === "succeeded";
+  const cpuTime = Number(item.cpuTimeMs ?? item.totalElapsedMs);
+  const elapsedTime = Number(item.totalElapsedMs);
+  const makespan = Number(item.makespan);
+  const improvement = Number(item.improvementPercent);
+  const dwell = item.robotWaferDwellTime || {};
+  const validationText = item.validation === "passed" ? "\u901A\u8FC7" : succeeded ? String(item.validation || "\u672A\u77E5") : item.status === "failed" ? "\u5931\u8D25" : item.status === "cancelled" ? "\u5DF2\u7EC8\u6B62" : "\u7B49\u5F85\u5B8C\u6210";
+  const comparisonDetail = baselineReady && Number.isFinite(improvement) ? `${improvement >= 0 ? "\u63D0\u5347" : "\u9000\u5316"} ${Math.abs(improvement).toFixed(2)}%` : baseline.status && baseline.status !== "succeeded" ? `Baseline ${baseline.status === "failed" ? "\u5931\u8D25" : "\u5931\u6548"}` : "";
+  const dwellAvailable = succeeded && Number.isFinite(Number(dwell.totalSeconds));
+  document.getElementById("metricContext").textContent = `t${index + 1} \xB7 ${item.testName || `\u6D4B\u8BD5 ${index + 1}`}`;
+  document.getElementById("batchOverviewButton").hidden = false;
+  setResultMetric("Time", "CPU Time / \u8017\u65F6", Number.isFinite(cpuTime) ? `${cpuTime.toFixed(1)} ms` : "\u2014", Number.isFinite(elapsedTime) ? `\u7AEF\u5230\u7AEF\u8017\u65F6 ${elapsedTime.toFixed(1)} ms` : "");
+  setResultMetric("Makespan", "Makespan / Baseline", Number.isFinite(makespan) ? `${makespan.toFixed(2)} / ${baselineReady ? Number(baseline.makespan).toFixed(2) : "\u2014"} s` : "\u2014", comparisonDetail);
+  setResultMetric("Moves", "\u6821\u9A8C", validationText, Number.isFinite(Number(item.moveCount)) ? `Move \u6570 ${Number(item.moveCount)}` : item.error || "");
+  setResultMetric("Validation", "\u673A\u5668\u624B\u6301\u7247\u9A7B\u7559", dwellAvailable ? `\u603B\u548C ${Number(dwell.totalSeconds).toFixed(2)} s` : "\u2014", dwellAvailable ? `\u4E2D\u4F4D\u6570 ${Number(dwell.medianSeconds).toFixed(2)} s \xB7 \u6700\u5927\u503C ${Number(dwell.maxSeconds).toFixed(2)} s \xB7 ${Number(dwell.sampleCount || 0)} \u6B21` : "");
+}
+function selectBatchItem(index) {
+  const item = state.batchResult?.items?.[index];
+  if (!item) return;
+  state.selectedBatchTestId = String(item.testId || `index-${index}`);
+  renderBatchItems(state.batchResult.items || []);
+  showBatchItemOverview(item, index);
+}
+function showCurrentBatchOverview() {
+  if (!state.batchResult) return;
+  state.selectedBatchTestId = "";
+  renderBatchItems(state.batchResult.items || []);
+  showBatchOverviewMetrics(state.batchResult);
+}
+function showBatchProgress(result) {
+  const completed = Number(result.completed || 0), total = Number(result.testCount || result.items?.length || 0);
+  const percent = total ? Math.round(completed / total * 100) : 0;
   const progress = document.getElementById("batchProgress");
   const statusText = result.status === "completed" ? "\u6279\u91CF\u8FD0\u884C\u5B8C\u6210" : result.status === "cancelled" ? "\u6279\u91CF\u8C03\u5EA6\u5DF2\u7EC8\u6B62" : result.status === "failed" ? "\u6279\u91CF\u8FD0\u884C\u5931\u8D25" : "\u6279\u91CF\u8FD0\u884C\u4E2D";
   progress.classList.add("visible");
-  document.getElementById("metricTimeLabel").textContent = "\u603B\u8017\u65F6";
   document.getElementById("batchProgressText").textContent = statusText;
   document.getElementById("batchProgressCount").textContent = `${completed}/${total} \xB7 ${percent}%`;
   document.getElementById("batchProgressBar").style.width = `${percent}%`;
-  document.getElementById("metricTime").textContent = result.status === "completed" ? `${(Number(result.totalElapsedMs) / 1e3).toFixed(2)} s` : result.status === "cancelled" ? "\u5DF2\u7EC8\u6B62" : "\u8FD0\u884C\u4E2D";
-  document.getElementById("metricMakespanLabel").textContent = comparable.length ? "\u603B Makespan / Baseline" : "\u5E73\u5747 Makespan";
-  document.getElementById("metricMakespan").textContent = comparable.length ? `${totalMakespan.toFixed(2)} / ${totalBaseline.toFixed(2)} s \xB7 ${aggregateImprovement >= 0 ? "\u63D0\u5347" : "\u9000\u5316"} ${Math.abs(aggregateImprovement).toFixed(2)}%` : successful.length ? `${averageMakespan.toFixed(2)} s` : "\u2014";
-  document.getElementById("metricMovesLabel").textContent = "\u603B Move \u6570";
-  document.getElementById("metricMoves").textContent = moveCount || "\u2014";
-  document.getElementById("metricValidationLabel").textContent = result.cancelled ? "\u6210\u529F / \u5931\u8D25 / \u7EC8\u6B62" : "\u6210\u529F / \u5931\u8D25";
-  document.getElementById("metricValidation").textContent = result.cancelled ? `${result.succeeded || 0} / ${result.failed || 0} / ${result.cancelled}` : `${result.succeeded || 0} / ${result.failed || 0}`;
+  state.batchResult = result;
+  if (!state.selectedBatchTestId) showBatchOverviewMetrics(result);
   renderBatchItems(result.items || []);
+  const selectedIndex = (result.items || []).findIndex((item, index) => String(item.testId || `index-${index}`) === state.selectedBatchTestId);
+  if (selectedIndex >= 0) showBatchItemOverview(result.items[selectedIndex], selectedIndex);
   writeTerminal([
     "$ \u6279\u91CF\u8FD0\u884C\u5F53\u524D\u6D4B\u8BD5\u7EC4",
     `  \u7EC4\u522B: ${result.group || "\u672A\u5206\u7EC4"} \xB7 \u7B56\u7565: ${result.strategy}`,
@@ -2417,10 +2473,12 @@ function renderBatchItems(items) {
     const baselineReason = baseline.status && baseline.status !== "succeeded" ? `Baseline ${baseline.status === "failed" ? "\u5931\u8D25" : "\u5931\u6548"}\uFF1A${baseline.error || "\u7B49\u5F85\u91CD\u65B0\u8BA1\u7B97"}` : "";
     const summaryError = baseline.status === "failed" ? baselineReason : item.status === "failed" ? `\u8FD0\u884C\u5931\u8D25\uFF1A${item.error || "\u672A\u77E5\u9519\u8BEF"}` : item.status === "cancelled" ? "\u8C03\u5EA6\u5DF2\u7EC8\u6B62" : baselineReason;
     const displayId = `t${index + 1}`;
+    const itemSelectionId = String(item.testId || `index-${index}`);
+    const selected = itemSelectionId === state.selectedBatchTestId;
     return `
-      <div class="batch-result ${escapeHtml2(item.status || "queued")}">
+      <div class="batch-result ${escapeHtml2(item.status || "queued")}${selected ? " selected" : ""}" data-batch-item-index="${index}">
         <div class="batch-result-head">
-          <div class="batch-result-title"><strong title="${escapeHtml2(`${item.testId || ""} \xB7 ${item.testName || ""}`)}">${escapeHtml2(displayId)}</strong></div>
+          <button class="batch-result-title" type="button" aria-pressed="${selected}" aria-label="\u67E5\u770B ${escapeHtml2(displayId)} ${escapeHtml2(item.testName || "")} \u7684\u8BE6\u7EC6\u6307\u6807"><strong title="${escapeHtml2(`${item.testId || ""} \xB7 ${item.testName || ""}`)}">${escapeHtml2(displayId)}</strong></button>
           <span class="batch-status">${statusLabels[item.status] || "\u7B49\u5F85\u4E2D"}</span>
           <div class="batch-result-actions">
             ${item.logUrl ? `<a class="btn" href="${escapeHtml2(item.logUrl)}" download>\u65E5\u5FD7</a>` : `<span class="btn" aria-disabled="true">\u65E5\u5FD7</span>`}
@@ -2446,20 +2504,12 @@ function batchGanttUrl(items) {
 }
 function showBatchResult(result) {
   const successful = result.items.filter((item) => item.status === "succeeded");
-  const averageMakespan = successful.length ? successful.reduce((sum, item) => sum + Number(item.makespan), 0) / successful.length : 0;
   const comparable = successful.filter((item) => item.baseline?.status === "succeeded");
   const totalMakespan = comparable.reduce((sum, item) => sum + Number(item.makespan), 0);
   const totalBaseline = comparable.reduce((sum, item) => sum + Number(item.baseline.makespan), 0);
   const aggregateImprovement = totalBaseline > 0 ? (totalBaseline - totalMakespan) / totalBaseline * 100 : NaN;
-  const moveCount = successful.reduce((sum, item) => sum + Number(item.moveCount || 0), 0);
-  document.getElementById("metricTimeLabel").textContent = "\u603B\u8017\u65F6";
-  document.getElementById("metricTime").textContent = `${(Number(result.totalElapsedMs) / 1e3).toFixed(2)} s`;
-  document.getElementById("metricMakespanLabel").textContent = comparable.length ? "\u603B Makespan / Baseline" : "\u5E73\u5747 Makespan";
-  document.getElementById("metricMakespan").textContent = comparable.length ? `${totalMakespan.toFixed(2)} / ${totalBaseline.toFixed(2)} s \xB7 ${aggregateImprovement >= 0 ? "\u63D0\u5347" : "\u9000\u5316"} ${Math.abs(aggregateImprovement).toFixed(2)}%` : successful.length ? `${averageMakespan.toFixed(2)} s` : "\u2014";
-  document.getElementById("metricMovesLabel").textContent = "\u603B Move \u6570";
-  document.getElementById("metricMoves").textContent = moveCount;
-  document.getElementById("metricValidationLabel").textContent = "\u6210\u529F / \u5931\u8D25";
-  document.getElementById("metricValidation").textContent = `${result.succeeded} / ${result.failed}`;
+  state.batchResult = result;
+  if (!state.selectedBatchTestId) showBatchOverviewMetrics(result);
   writeTerminal([
     "$ \u6279\u91CF\u8FD0\u884C\u5B8C\u6210",
     `  \u7EC4\u522B: ${result.group || "\u672A\u5206\u7EC4"} \xB7 \u7B56\u7565: ${result.strategy}`,
@@ -2470,6 +2520,8 @@ function showBatchResult(result) {
     ...result.items.map((item, index) => item.ok ? `  #${index + 1} ${item.testName} | makespan=${Number(item.makespan).toFixed(2)}s | improvement=${Number.isFinite(Number(item.improvementPercent)) ? `${Number(item.improvementPercent).toFixed(2)}%` : "\u2014"} | ${Number(item.totalElapsedMs).toFixed(1)}ms` : `  #${index + 1} ${item.testName} | \u5931\u8D25: ${item.error}`)
   ].join("\n"), result.failed > 0);
   renderBatchItems(result.items);
+  const selectedIndex = result.items.findIndex((item, index) => String(item.testId || `index-${index}`) === state.selectedBatchTestId);
+  if (selectedIndex >= 0) showBatchItemOverview(result.items[selectedIndex], selectedIndex);
   const first = result.items.find((item) => item.ganttUrl || item.logUrl);
   if (first) {
     if (first.ganttUrl) {
@@ -2492,6 +2544,8 @@ function showBatchResult(result) {
   }
 }
 function showResult(result) {
+  state.batchResult = null;
+  state.selectedBatchTestId = "";
   document.getElementById("batchProgress").classList.remove("visible");
   document.getElementById("batchResults").innerHTML = "";
   const allGantt = document.getElementById("batchGanttButton");
@@ -2499,6 +2553,11 @@ function showResult(result) {
   allGantt.setAttribute("aria-disabled", "true");
   const baseline = result.baseline || {}, baselineReady = baseline.status === "succeeded";
   const cpuTime = Number(result.cpuTimeMs ?? result.totalElapsedMs);
+  document.getElementById("metricContext").textContent = "\u5F53\u524D\u6D4B\u8BD5";
+  document.getElementById("batchOverviewButton").hidden = true;
+  ["metricTimeDetail", "metricMakespanDetail", "metricMovesDetail", "metricValidationDetail"].forEach((id) => {
+    document.getElementById(id).textContent = "";
+  });
   document.getElementById("metricTimeLabel").textContent = "CPU Time";
   document.getElementById("metricMakespanLabel").textContent = "Makespan / Baseline";
   document.getElementById("metricMovesLabel").textContent = "Move \u6570";
@@ -2612,7 +2671,11 @@ document.getElementById("roundCount").addEventListener("input", (event) => {
 });
 document.getElementById("runButton").addEventListener("click", runPlan);
 document.getElementById("batchRunButton").addEventListener("click", runCurrentTestGroup);
+document.getElementById("batchOverviewButton").addEventListener("click", showCurrentBatchOverview);
 document.getElementById("clearButton").addEventListener("click", () => {
+  state.batchResult = null;
+  state.selectedBatchTestId = "";
+  document.getElementById("batchOverviewButton").hidden = true;
   writeTerminal("$ \u7B49\u5F85\u8FD0\u884C\u2026");
   document.getElementById("batchProgress").classList.remove("visible");
   document.getElementById("batchResults").innerHTML = "";
@@ -2669,6 +2732,8 @@ document.addEventListener("change", (event) => {
 document.addEventListener("click", (event) => {
   const tab = event.target.closest("[data-tab-target]");
   if (tab) switchTab(tab.dataset.tabTarget);
+  const batchResultCard = event.target.closest("[data-batch-item-index]");
+  if (batchResultCard && !event.target.closest(".batch-result-actions")) selectBatchItem(Number(batchResultCard.dataset.batchItemIndex));
   const algorithmEdit = event.target.closest("[data-edit-algorithm]");
   if (algorithmEdit) {
     fillAlgorithmDialog(algorithmEdit.dataset.editAlgorithm);

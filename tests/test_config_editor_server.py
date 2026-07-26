@@ -1135,6 +1135,10 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("Makespan 当前值 / Heuristic Baseline", html)
         self.assertIn('const displayId = `t${index + 1}`', html)
         self.assertIn("；Cpu time <b>", html)
+        self.assertIn('id="batchOverviewButton"', html)
+        self.assertIn('data-batch-item-index="${index}"', html)
+        self.assertIn("机器手持片驻留", html)
+        self.assertIn("robotWaferDwellTime", html)
         self.assertIn("overflow-wrap: anywhere", html)
         self.assertNotIn("改善 <b>", html)
         self.assertIn("item.testId", html)
@@ -1423,6 +1427,26 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual(80.0, item["makespan"])
         self.assertEqual(-20.0, item["makespanDelta"])
         self.assertEqual(20.0, item["improvementPercent"])
+        self.assertEqual(0, item["robotWaferDwellTime"]["sampleCount"])
+
+    def test_robot_wafer_dwell_time_tracks_pick_place_and_swap_waits(self) -> None:
+        """机器人持片驻留应统计 Pick/Place 间隙，并正确衔接 Swap 的收发晶圆。"""
+        moves = [
+            {"MoveID": 1, "MoveType": 0, "Robot": "VTR", "MatIDList": [1], "StartTime": 0, "EndTime": 2},
+            {"MoveID": 2, "MoveType": 1, "Robot": "VTR", "MatIDList": [1], "StartTime": 7, "EndTime": 9},
+            {"MoveID": 3, "MoveType": 2, "ModuleName": "ATR", "MatIDList": [2], "StartTime": 8, "EndTime": 10},
+            {"MoveID": 4, "MoveType": 3, "ModuleName": "ATR", "MatIDList": [2], "StartTime": 13, "EndTime": 15},
+            {"MoveID": 5, "MoveType": 0, "Robot": "VTR", "MatIDList": [3], "StartTime": 18, "EndTime": 20},
+            {"MoveID": 6, "MoveType": 4, "Robot": "VTR", "RecvMatList": [3], "SendMatList": [4], "StartTime": 22, "EndTime": 24},
+            {"MoveID": 7, "MoveType": 1, "Robot": "VTR", "MatIDList": [4], "StartTime": 28, "EndTime": 30},
+        ]
+
+        metrics = config_server._robot_wafer_dwell_time(moves)
+
+        self.assertEqual(4, metrics["sampleCount"])
+        self.assertAlmostEqual(14.0, metrics["totalSeconds"])
+        self.assertAlmostEqual(3.5, metrics["medianSeconds"])
+        self.assertAlmostEqual(5.0, metrics["maxSeconds"])
 
     def test_heuristic_refreshes_changed_baseline_result(self) -> None:
         """再次运行 Heuristic 时，应以本次 makespan 和 CPU Time 覆盖旧值。"""

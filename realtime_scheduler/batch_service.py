@@ -28,6 +28,11 @@ from realtime_scheduler.plan_builder import (
 
 _SERVER_SERVICES: Optional[ModuleType] = None
 
+PICK_MOVE_TYPES = frozenset({0, 2})
+PLACE_MOVE_TYPES = frozenset({1, 3})
+SWAP_MOVE_TYPE = 4
+TIME_TOLERANCE_SECONDS = 1e-9
+
 
 def configure_batch_service(services: ModuleType) -> None:
     """绑定兼容门面及其共享缓存、常量和异常类型。"""
@@ -103,6 +108,83 @@ def _workspace_timestamp() -> str:
 def _segment_end(moves: Sequence[Mapping[str, Any]]) -> float:
     """通过门面计算 MoveList 片段结束时间。"""
     return _services()._segment_end(moves)
+
+
+def _move_robot_name(move: Mapping[str, Any]) -> str:
+    """读取传输动作使用的机器人名称，兼容 Robot 和 ModuleName 两种输出。"""
+    return str(move.get("Robot") or move.get("ModuleName") or "").strip()
+
+
+def _move_material_ids(move: Mapping[str, Any], field: str = "MatIDList") -> List[str]:
+    """把 MoveList 的晶圆编号字段规范化为可用于跨动作配对的字符串列表。"""
+    values = move.get(field) or []
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+        return []
+    return [str(value) for value in values]
+
+
+def _median(values: Sequence[float]) -> float:
+    """计算已排序或未排序数值序列的中位数，空序列返回零。"""
+    if not values:
+        return 0.0
+    ordered = sorted(float(value) for value in values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2.0
+
+
+def _robot_wafer_dwell_time(moves: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    """统计晶圆在机器人手上的等待驻留时间。
+
+    Pick 完成后开始计时，Place 开始时停止计时，因此不包含取放动作自身耗时；
+    Swap 开始时结束机器人原持片，Swap 完成时为机器人新接收的晶圆开始计时。
+    返回所有完整驻留区间的总和、中位数、最大值和样本数。
+    """
+    ordered_moves = sorted(
+        (move for move in moves if isinstance(move, Mapping)),
+        key=lambda move: (
+            float(move.get("StartTime") or 0.0),
+            float(move.get("EndTime") or move.get("StartTime") or 0.0),
+            int(move.get("MoveID") or 0),
+        ),
+    )
+    holding_started_at: Dict[Tuple[str, str], float] = {}
+    dwell_times: List[float] = []
+
+    def finish_holding(robot_name: str, material_ids: Sequence[str], finished_at: float) -> None:
+        """结束指定机器人和晶圆的持片区间，并记录非负驻留时长。"""
+        for material_id in material_ids:
+            started_at = holding_started_at.pop((robot_name, material_id), None)
+            if started_at is None:
+                continue
+            duration = finished_at - started_at
+            if duration >= -TIME_TOLERANCE_SECONDS:
+                dwell_times.append(max(0.0, duration))
+
+    for move in ordered_moves:
+        move_type = int(move.get("MoveType") or 0)
+        robot_name = _move_robot_name(move)
+        if not robot_name:
+            continue
+        start_time = float(move.get("StartTime") or 0.0)
+        end_time = float(move.get("EndTime") or start_time)
+        if move_type in PICK_MOVE_TYPES:
+            for material_id in _move_material_ids(move):
+                holding_started_at[(robot_name, material_id)] = end_time
+        elif move_type in PLACE_MOVE_TYPES:
+            finish_holding(robot_name, _move_material_ids(move), start_time)
+        elif move_type == SWAP_MOVE_TYPE:
+            finish_holding(robot_name, _move_material_ids(move, "RecvMatList"), start_time)
+            for material_id in _move_material_ids(move, "SendMatList"):
+                holding_started_at[(robot_name, material_id)] = end_time
+
+    return {
+        "totalSeconds": sum(dwell_times),
+        "medianSeconds": _median(dwell_times),
+        "maxSeconds": max(dwell_times, default=0.0),
+        "sampleCount": len(dwell_times),
+    }
 
 def _log_response_fields(log_id: str) -> Dict[str, str]:
     """生成前端下载日志所需的稳定地址与文件名。"""
@@ -539,6 +621,9 @@ def _execute_workspace_test_batch(
                 }
             result_id = save_result(result["output"])
             log_id = save_reproduction_log(result["reproductionLog"])
+            robot_wafer_dwell_time = _robot_wafer_dwell_time(
+                list(result["output"].get("MoveList") or []),
+            )
             return {
                 "index": index,
                 "ok": True,
@@ -550,6 +635,7 @@ def _execute_workspace_test_batch(
                 "makespan": result["makespan"],
                 "moveCount": result["moveCount"],
                 "validation": result["validation"],
+                "robotWaferDwellTime": robot_wafer_dwell_time,
                 "resultUrl": f"/api/results/{result_id}",
                 "ganttUrl": f"/movelist_gantt_viewer.html?src=/api/results/{result_id}",
                 **_log_response_fields(log_id),

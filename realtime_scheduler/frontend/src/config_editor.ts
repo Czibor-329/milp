@@ -40,7 +40,7 @@ const ROUTE_CLEAN_KEYS = ["prePJobCleanRefs", "postPJobCleanRefs", "postCJobClea
 
 const state = {
   workspaceDevices: [], workspaceDevice: null, workspaceDeviceId: "", testCaseId: "", testCaseName: "", testCaseGroup: "", activeTestGroup: "", serviceCompatible: false, dirty: false,
-  activeBatchId: "", batchRunning: false, batchCancelRequested: false, batchCancelSent: false,
+  activeBatchId: "", batchRunning: false, batchCancelRequested: false, batchCancelSent: false, batchResult: null, selectedBatchTestId: "",
   deviceName: "", device: null, stationNames: [], loadPorts: [], processModules: [], robotNames: [], robotScopes: {},
   strategy: "heuristic", availableOtherAlgorithms: [], algorithmMetadata: {}, algorithmHistory: {}, roundCount: 2, times: [0, 70], options: { loadLockManager: "petri-look", loadLockExchange: "auto", rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
   cleans: [],
@@ -423,7 +423,11 @@ function markTestDirty() {
 /** 清理上一测试集的运行指标和结果链接，避免把旧结果误认为当前结果。 */
 function resetRunResult() {
   visualizationWorkspace.clear();
+  state.batchResult = null; state.selectedBatchTestId = "";
   ["metricTime", "metricMakespan", "metricMoves", "metricValidation"].forEach(id => { document.getElementById(id).textContent = "—"; });
+  ["metricTimeDetail", "metricMakespanDetail", "metricMovesDetail", "metricValidationDetail"].forEach(id => { document.getElementById(id).textContent = ""; });
+  document.getElementById("metricContext").textContent = "运行总览";
+  document.getElementById("batchOverviewButton").hidden = true;
   document.getElementById("metricTimeLabel").textContent = "总耗时";
   document.getElementById("metricMakespanLabel").textContent = "Makespan";
   document.getElementById("metricMovesLabel").textContent = "Move 数";
@@ -1437,7 +1441,8 @@ async function runCurrentTestGroup() {
     if (state.testCaseId) await saveCurrentTest(true);
     const tests = (state.workspaceDevice?.tests || []).filter(test => String(test.group || "").trim() === state.activeTestGroup);
     if (!tests.length) throw new Error("当前测试组没有可运行测试");
-    state.batchRunning = true; state.activeBatchId = ""; state.batchCancelRequested = false; state.batchCancelSent = false;
+    state.batchRunning = true; state.activeBatchId = ""; state.batchCancelRequested = false; state.batchCancelSent = false; state.batchResult = null; state.selectedBatchTestId = "";
+    document.getElementById("batchOverviewButton").hidden = true;
     button.disabled = false; runButton.disabled = true; button.classList.add("cancel"); button.textContent = "■ 终止调度";
     document.getElementById("batchResults").innerHTML = "";
     writeTerminal(`$ 批量运行当前测试组\n  组别: ${state.activeTestGroup || "未分组"}\n  策略: ${state.strategy}\n  测试数: ${tests.length}\n  后端最多并行运行 4 项…`);
@@ -1496,10 +1501,15 @@ async function sendBatchCancellation() {
   showBatchProgress(result);
 }
 
-/** 实时绘制总体进度和每个测试的排队、运行、成功、失败状态。 */
-function showBatchProgress(result) {
-  const completed = Number(result.completed || 0), total = Number(result.testCount || result.items?.length || 0);
-  const percent = total ? Math.round(completed / total * 100) : 0;
+/** 更新一个顶部总览卡片，并统一处理可选的补充说明。 */
+function setResultMetric(key, label, value, detail = "") {
+  document.getElementById(`metric${key}Label`).textContent = label;
+  document.getElementById(`metric${key}`).textContent = value;
+  document.getElementById(`metric${key}Detail`).textContent = detail;
+}
+
+/** 绘制批量任务的组级汇总指标。 */
+function showBatchOverviewMetrics(result) {
   const successful = (result.items || []).filter(item => item.status === "succeeded");
   const averageMakespan = successful.length ? successful.reduce((sum, item) => sum + Number(item.makespan), 0) / successful.length : 0;
   const comparable = successful.filter(item => item.baseline?.status === "succeeded");
@@ -1507,23 +1517,77 @@ function showBatchProgress(result) {
   const totalBaseline = comparable.reduce((sum, item) => sum + Number(item.baseline.makespan), 0);
   const aggregateImprovement = totalBaseline > 0 ? (totalBaseline - totalMakespan) / totalBaseline * 100 : NaN;
   const moveCount = successful.reduce((sum, item) => sum + Number(item.moveCount || 0), 0);
+  const timeText = result.status === "completed" ? `${(Number(result.totalElapsedMs) / 1000).toFixed(2)} s` : result.status === "cancelled" ? "已终止" : "运行中";
+  const makespanText = comparable.length
+    ? `${totalMakespan.toFixed(2)} / ${totalBaseline.toFixed(2)} s`
+    : successful.length ? `${averageMakespan.toFixed(2)} s` : "—";
+  const improvementText = comparable.length && Number.isFinite(aggregateImprovement)
+    ? `${aggregateImprovement >= 0 ? "提升" : "退化"} ${Math.abs(aggregateImprovement).toFixed(2)}%`
+    : "";
+  document.getElementById("metricContext").textContent = `批量总览 · ${result.group || "未分组"}`;
+  document.getElementById("batchOverviewButton").hidden = true;
+  setResultMetric("Time", "总耗时", timeText);
+  setResultMetric("Makespan", comparable.length ? "总 Makespan / Baseline" : "平均 Makespan", makespanText, improvementText);
+  setResultMetric("Moves", "总 Move 数", moveCount || "—");
+  setResultMetric("Validation", result.cancelled ? "成功 / 失败 / 终止" : "成功 / 失败", result.cancelled ? `${result.succeeded || 0} / ${result.failed || 0} / ${result.cancelled}` : `${result.succeeded || 0} / ${result.failed || 0}`);
+}
+
+/** 把所选测试的耗时、基线、校验和机器人持片驻留统计展示在顶部。 */
+function showBatchItemOverview(item, index) {
+  const succeeded = item.status === "succeeded";
+  const baseline = item.baseline || {};
+  const baselineReady = baseline.status === "succeeded";
+  const cpuTime = Number(item.cpuTimeMs ?? item.totalElapsedMs);
+  const elapsedTime = Number(item.totalElapsedMs);
+  const makespan = Number(item.makespan);
+  const improvement = Number(item.improvementPercent);
+  const dwell = item.robotWaferDwellTime || {};
+  const validationText = item.validation === "passed" ? "通过" : succeeded ? String(item.validation || "未知") : item.status === "failed" ? "失败" : item.status === "cancelled" ? "已终止" : "等待完成";
+  const comparisonDetail = baselineReady && Number.isFinite(improvement)
+    ? `${improvement >= 0 ? "提升" : "退化"} ${Math.abs(improvement).toFixed(2)}%`
+    : baseline.status && baseline.status !== "succeeded" ? `Baseline ${baseline.status === "failed" ? "失败" : "失效"}` : "";
+  const dwellAvailable = succeeded && Number.isFinite(Number(dwell.totalSeconds));
+
+  document.getElementById("metricContext").textContent = `t${index + 1} · ${item.testName || `测试 ${index + 1}`}`;
+  document.getElementById("batchOverviewButton").hidden = false;
+  setResultMetric("Time", "CPU Time / 耗时", Number.isFinite(cpuTime) ? `${cpuTime.toFixed(1)} ms` : "—", Number.isFinite(elapsedTime) ? `端到端耗时 ${elapsedTime.toFixed(1)} ms` : "");
+  setResultMetric("Makespan", "Makespan / Baseline", Number.isFinite(makespan) ? `${makespan.toFixed(2)} / ${baselineReady ? Number(baseline.makespan).toFixed(2) : "—"} s` : "—", comparisonDetail);
+  setResultMetric("Moves", "校验", validationText, Number.isFinite(Number(item.moveCount)) ? `Move 数 ${Number(item.moveCount)}` : item.error || "");
+  setResultMetric("Validation", "机器手持片驻留", dwellAvailable ? `总和 ${Number(dwell.totalSeconds).toFixed(2)} s` : "—", dwellAvailable ? `中位数 ${Number(dwell.medianSeconds).toFixed(2)} s · 最大值 ${Number(dwell.maxSeconds).toFixed(2)} s · ${Number(dwell.sampleCount || 0)} 次` : "");
+}
+
+/** 选择批量结果卡片，并在后续轮询中按测试 ID 保持选择。 */
+function selectBatchItem(index) {
+  const item = state.batchResult?.items?.[index];
+  if (!item) return;
+  state.selectedBatchTestId = String(item.testId || `index-${index}`);
+  renderBatchItems(state.batchResult.items || []);
+  showBatchItemOverview(item, index);
+}
+
+/** 清除单项选择并恢复当前批量任务的组级总览。 */
+function showCurrentBatchOverview() {
+  if (!state.batchResult) return;
+  state.selectedBatchTestId = "";
+  renderBatchItems(state.batchResult.items || []);
+  showBatchOverviewMetrics(state.batchResult);
+}
+
+/** 实时绘制总体进度和每个测试的排队、运行、成功、失败状态。 */
+function showBatchProgress(result) {
+  const completed = Number(result.completed || 0), total = Number(result.testCount || result.items?.length || 0);
+  const percent = total ? Math.round(completed / total * 100) : 0;
   const progress = document.getElementById("batchProgress");
   const statusText = result.status === "completed" ? "批量运行完成" : result.status === "cancelled" ? "批量调度已终止" : result.status === "failed" ? "批量运行失败" : "批量运行中";
   progress.classList.add("visible");
-  document.getElementById("metricTimeLabel").textContent = "总耗时";
   document.getElementById("batchProgressText").textContent = statusText;
   document.getElementById("batchProgressCount").textContent = `${completed}/${total} · ${percent}%`;
   document.getElementById("batchProgressBar").style.width = `${percent}%`;
-  document.getElementById("metricTime").textContent = result.status === "completed" ? `${(Number(result.totalElapsedMs) / 1000).toFixed(2)} s` : result.status === "cancelled" ? "已终止" : "运行中";
-  document.getElementById("metricMakespanLabel").textContent = comparable.length ? "总 Makespan / Baseline" : "平均 Makespan";
-  document.getElementById("metricMakespan").textContent = comparable.length
-    ? `${totalMakespan.toFixed(2)} / ${totalBaseline.toFixed(2)} s · ${aggregateImprovement >= 0 ? "提升" : "退化"} ${Math.abs(aggregateImprovement).toFixed(2)}%`
-    : successful.length ? `${averageMakespan.toFixed(2)} s` : "—";
-  document.getElementById("metricMovesLabel").textContent = "总 Move 数";
-  document.getElementById("metricMoves").textContent = moveCount || "—";
-  document.getElementById("metricValidationLabel").textContent = result.cancelled ? "成功 / 失败 / 终止" : "成功 / 失败";
-  document.getElementById("metricValidation").textContent = result.cancelled ? `${result.succeeded || 0} / ${result.failed || 0} / ${result.cancelled}` : `${result.succeeded || 0} / ${result.failed || 0}`;
+  state.batchResult = result;
+  if (!state.selectedBatchTestId) showBatchOverviewMetrics(result);
   renderBatchItems(result.items || []);
+  const selectedIndex = (result.items || []).findIndex((item, index) => String(item.testId || `index-${index}`) === state.selectedBatchTestId);
+  if (selectedIndex >= 0) showBatchItemOverview(result.items[selectedIndex], selectedIndex);
   writeTerminal([
     "$ 批量运行当前测试组",
     `  组别: ${result.group || "未分组"} · 策略: ${result.strategy}`,
@@ -1547,10 +1611,12 @@ function renderBatchItems(items) {
       : "";
     const summaryError = baseline.status === "failed" ? baselineReason : item.status === "failed" ? `运行失败：${item.error || "未知错误"}` : item.status === "cancelled" ? "调度已终止" : baselineReason;
     const displayId = `t${index + 1}`;
+    const itemSelectionId = String(item.testId || `index-${index}`);
+    const selected = itemSelectionId === state.selectedBatchTestId;
     return `
-      <div class="batch-result ${escapeHtml(item.status || "queued")}">
+      <div class="batch-result ${escapeHtml(item.status || "queued")}${selected ? " selected" : ""}" data-batch-item-index="${index}">
         <div class="batch-result-head">
-          <div class="batch-result-title"><strong title="${escapeHtml(`${item.testId || ""} · ${item.testName || ""}`)}">${escapeHtml(displayId)}</strong></div>
+          <button class="batch-result-title" type="button" aria-pressed="${selected}" aria-label="查看 ${escapeHtml(displayId)} ${escapeHtml(item.testName || "")} 的详细指标"><strong title="${escapeHtml(`${item.testId || ""} · ${item.testName || ""}`)}">${escapeHtml(displayId)}</strong></button>
           <span class="batch-status">${statusLabels[item.status] || "等待中"}</span>
           <div class="batch-result-actions">
             ${item.logUrl ? `<a class="btn" href="${escapeHtml(item.logUrl)}" download>日志</a>` : `<span class="btn" aria-disabled="true">日志</span>`}
@@ -1580,22 +1646,12 @@ function batchGanttUrl(items) {
 /** 汇总批量运行指标，并为每个测试保留甘特图和复现日志入口。 */
 function showBatchResult(result) {
   const successful = result.items.filter(item => item.status === "succeeded");
-  const averageMakespan = successful.length ? successful.reduce((sum, item) => sum + Number(item.makespan), 0) / successful.length : 0;
   const comparable = successful.filter(item => item.baseline?.status === "succeeded");
   const totalMakespan = comparable.reduce((sum, item) => sum + Number(item.makespan), 0);
   const totalBaseline = comparable.reduce((sum, item) => sum + Number(item.baseline.makespan), 0);
   const aggregateImprovement = totalBaseline > 0 ? (totalBaseline - totalMakespan) / totalBaseline * 100 : NaN;
-  const moveCount = successful.reduce((sum, item) => sum + Number(item.moveCount || 0), 0);
-  document.getElementById("metricTimeLabel").textContent = "总耗时";
-  document.getElementById("metricTime").textContent = `${(Number(result.totalElapsedMs) / 1000).toFixed(2)} s`;
-  document.getElementById("metricMakespanLabel").textContent = comparable.length ? "总 Makespan / Baseline" : "平均 Makespan";
-  document.getElementById("metricMakespan").textContent = comparable.length
-    ? `${totalMakespan.toFixed(2)} / ${totalBaseline.toFixed(2)} s · ${aggregateImprovement >= 0 ? "提升" : "退化"} ${Math.abs(aggregateImprovement).toFixed(2)}%`
-    : successful.length ? `${averageMakespan.toFixed(2)} s` : "—";
-  document.getElementById("metricMovesLabel").textContent = "总 Move 数";
-  document.getElementById("metricMoves").textContent = moveCount;
-  document.getElementById("metricValidationLabel").textContent = "成功 / 失败";
-  document.getElementById("metricValidation").textContent = `${result.succeeded} / ${result.failed}`;
+  state.batchResult = result;
+  if (!state.selectedBatchTestId) showBatchOverviewMetrics(result);
   writeTerminal([
     "$ 批量运行完成",
     `  组别: ${result.group || "未分组"} · 策略: ${result.strategy}`,
@@ -1608,6 +1664,8 @@ function showBatchResult(result) {
       : `  #${index + 1} ${item.testName} | 失败: ${item.error}`),
   ].join("\n"), result.failed > 0);
   renderBatchItems(result.items);
+  const selectedIndex = result.items.findIndex((item, index) => String(item.testId || `index-${index}`) === state.selectedBatchTestId);
+  if (selectedIndex >= 0) showBatchItemOverview(result.items[selectedIndex], selectedIndex);
   const first = result.items.find(item => item.ganttUrl || item.logUrl);
   if (first) {
     if (first.ganttUrl) {
@@ -1624,11 +1682,15 @@ function showBatchResult(result) {
 
 /** 显示运行指标和逐轮日志。 */
 function showResult(result) {
+  state.batchResult = null; state.selectedBatchTestId = "";
   document.getElementById("batchProgress").classList.remove("visible");
   document.getElementById("batchResults").innerHTML = "";
   const allGantt = document.getElementById("batchGanttButton"); allGantt.href = "#"; allGantt.setAttribute("aria-disabled", "true");
   const baseline = result.baseline || {}, baselineReady = baseline.status === "succeeded";
   const cpuTime = Number(result.cpuTimeMs ?? result.totalElapsedMs);
+  document.getElementById("metricContext").textContent = "当前测试";
+  document.getElementById("batchOverviewButton").hidden = true;
+  ["metricTimeDetail", "metricMakespanDetail", "metricMovesDetail", "metricValidationDetail"].forEach(id => { document.getElementById(id).textContent = ""; });
   document.getElementById("metricTimeLabel").textContent = "CPU Time";
   document.getElementById("metricMakespanLabel").textContent = "Makespan / Baseline";
   document.getElementById("metricMovesLabel").textContent = "Move 数";
@@ -1704,7 +1766,8 @@ document.getElementById("deleteTestButton").addEventListener("click", () => dele
 document.getElementById("roundCount").addEventListener("input", event => { resizeRounds(event.target.value); markTestDirty(); });
 document.getElementById("runButton").addEventListener("click", runPlan);
 document.getElementById("batchRunButton").addEventListener("click", runCurrentTestGroup);
-document.getElementById("clearButton").addEventListener("click", () => { writeTerminal("$ 等待运行…"); document.getElementById("batchProgress").classList.remove("visible"); document.getElementById("batchResults").innerHTML = ""; });
+document.getElementById("batchOverviewButton").addEventListener("click", showCurrentBatchOverview);
+document.getElementById("clearButton").addEventListener("click", () => { state.batchResult = null; state.selectedBatchTestId = ""; document.getElementById("batchOverviewButton").hidden = true; writeTerminal("$ 等待运行…"); document.getElementById("batchProgress").classList.remove("visible"); document.getElementById("batchResults").innerHTML = ""; });
 document.getElementById("logButton").addEventListener("click", event => { if (event.currentTarget.getAttribute("aria-disabled") === "true") event.preventDefault(); });
 document.getElementById("ganttButton").addEventListener("click", event => { if (event.currentTarget.getAttribute("aria-disabled") === "true") event.preventDefault(); });
 document.getElementById("batchGanttButton").addEventListener("click", event => { if (event.currentTarget.getAttribute("aria-disabled") === "true") event.preventDefault(); });
@@ -1734,6 +1797,8 @@ document.addEventListener("change", event => {
 });
 document.addEventListener("click", event => {
   const tab = event.target.closest("[data-tab-target]"); if (tab) switchTab(tab.dataset.tabTarget);
+  const batchResultCard = event.target.closest("[data-batch-item-index]");
+  if (batchResultCard && !event.target.closest(".batch-result-actions")) selectBatchItem(Number(batchResultCard.dataset.batchItemIndex));
   const algorithmEdit = event.target.closest("[data-edit-algorithm]");
   if (algorithmEdit) {
     fillAlgorithmDialog(algorithmEdit.dataset.editAlgorithm);

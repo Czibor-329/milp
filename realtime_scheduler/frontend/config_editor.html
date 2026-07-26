@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>CT 实时调度终端</title>
-  <link rel="stylesheet" href="/assets/config_editor.css?v=20260726-algorithm-history">
+  <link rel="stylesheet" href="/assets/config_editor.css?v=20260726-batch-dwell">
 </head>
 <body>
   <main class="shell">
@@ -44,15 +44,15 @@
           </article>
           <article class="panel result-panel">
             <div class="panel-head">
-              <div><h2>运行结果</h2></div>
-              <a class="btn primary" id="batchGanttButton" href="#" target="_blank" aria-disabled="true">全部甘特图</a>
+              <div><h2>运行结果</h2><p class="result-context" id="metricContext">运行总览</p></div>
+              <div class="result-head-actions"><button class="btn" id="batchOverviewButton" type="button" hidden>返回批量总览</button><a class="btn primary" id="batchGanttButton" href="#" target="_blank" aria-disabled="true">全部甘特图</a></div>
             </div>
             <div class="panel-body">
               <div class="result-metrics">
-                <div class="metric"><span id="metricTimeLabel">总耗时</span><strong id="metricTime">—</strong></div>
-                <div class="metric"><span id="metricMakespanLabel">Makespan</span><strong id="metricMakespan">—</strong></div>
-                <div class="metric"><span id="metricMovesLabel">Move 数</span><strong id="metricMoves">—</strong></div>
-                <div class="metric"><span id="metricValidationLabel">校验</span><strong id="metricValidation">—</strong></div>
+                <div class="metric"><span id="metricTimeLabel">总耗时</span><strong id="metricTime">—</strong><small id="metricTimeDetail"></small></div>
+                <div class="metric"><span id="metricMakespanLabel">Makespan</span><strong id="metricMakespan">—</strong><small id="metricMakespanDetail"></small></div>
+                <div class="metric"><span id="metricMovesLabel">Move 数</span><strong id="metricMoves">—</strong><small id="metricMovesDetail"></small></div>
+                <div class="metric"><span id="metricValidationLabel">校验</span><strong id="metricValidation">—</strong><small id="metricValidationDetail"></small></div>
               </div>
               <div class="batch-progress" id="batchProgress"><div class="batch-progress-head"><span id="batchProgressText">等待开始</span><span id="batchProgressCount">0/0</span></div><div class="batch-progress-track"><div class="batch-progress-bar" id="batchProgressBar" style="width:0%"></div></div></div>
               <div class="batch-results" id="batchResults"></div>
@@ -222,6 +222,6 @@
     </aside>
   </div>
 
-  <script type="module" src="/assets/config_editor.js?v=20260726-algorithm-history"></script>
+  <script type="module" src="/assets/config_editor.js?v=20260726-batch-dwell"></script>
 </body>
 </html>
