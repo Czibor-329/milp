@@ -1225,6 +1225,29 @@ function handleAction(button) {
 /** 收集 Step/Clean 内嵌 Recipe，并合并同名 Recipe 的设备范围。 */
 function collectRecipes(routes = state.routes) {
   const recipes = [];
+  const cleanByName = new Map(state.cleans.map(runtimeClean).map(clean => [clean.name, clean]));
+
+  /** 按公司标准把 CleanCondition 使用的计数器写入产品 Recipe.Weight。 */
+  function standardProcessWeight(visit) {
+    const rawWeight = visit.weight ?? "{}";
+    let weight;
+    try {
+      weight = typeof rawWeight === "string" ? JSON.parse(rawWeight || "{}") : structuredClone(rawWeight || {});
+    } catch (_error) {
+      // 保留非法原值，由后端返回既有的精确校验错误，避免前端静默改写。
+      return rawWeight;
+    }
+    if (!weight || typeof weight !== "object" || Array.isArray(weight)) return rawWeight;
+    [...stringList(visit.beforeCleanRefs), ...stringList(visit.afterCleanRefs)].forEach(cleanName => {
+      const stateVariable = String(cleanByName.get(cleanName)?.stateVariable || "").trim();
+      // IdleTime 是设备空闲时钟；其余 CleanCondition 计数器随产品加工递增。
+      if (stateVariable && stateVariable !== "IdleTime" && weight[stateVariable] === undefined) {
+        weight[stateVariable] = 1;
+      }
+    });
+    return JSON.stringify(weight);
+  }
+
   function add(name, time, modules, processType = "", weightText = "{}") {
     const weight = typeof weightText === "string" ? weightText : JSON.stringify(weightText ?? {}), moduleList = stringList(modules);
     const existing = recipes.find(recipe => recipe.name === name && Number(recipe.time) === Number(time) && recipe.processType === processType && recipe.weight === weight);
@@ -1232,7 +1255,7 @@ function collectRecipes(routes = state.routes) {
       existing.modules = [...new Set([...existing.modules, ...moduleList])];
     } else recipes.push({ name, time: Number(time), modules: moduleList, processType, weight });
   }
-  routes.forEach(route => { normalizeRoute(route); route.stages.forEach(stage => stage.visits.forEach(visit => { if (visit.processRecipe) add(visit.processRecipe, visit.processTime, [visit.stationName], visit.processType, visit.weight); })); });
+  routes.forEach(route => { normalizeRoute(route); route.stages.forEach(stage => stage.visits.forEach(visit => { if (visit.processRecipe) add(visit.processRecipe, visit.processTime, [visit.stationName], visit.processType, standardProcessWeight(visit)); })); });
   const cleanModules = new Map();
   function addCleanModules(names, modules) {
     stringList(names).forEach(name => {

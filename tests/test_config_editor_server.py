@@ -912,6 +912,71 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual(6, dummy_wac["wacRecipeTime"])
         self.assertEqual([], dummy_wac["modules"])
 
+    def test_wac_clean_adds_standard_process_count_recipe_weight(self) -> None:
+        """WAC 条件引用 ProcessCount 时，产品 Recipe 必须按公司标准递增该变量。"""
+        route = _route("WacRoute", "PM1", "ProductRecipe")
+        route["stages"][4]["afterCleanRefs"] = ["Wac"]
+        plan = {
+            "device": self.device,
+            "recipes": [{
+                "name": "ProductRecipe",
+                "time": 40,
+                "modules": ["PM1"],
+                "weight": {},
+            }],
+            "cleans": [{
+                "name": "Wac",
+                "cleanType": "wacclean",
+                "recipeTime": 30,
+                "triggerCount": 2,
+            }],
+            "routes": [route],
+        }
+        update = build_round_update(
+            plan,
+            {"currentTime": 0, "jobs": [_job("J1", "WacRoute", "LP1")]},
+            0.0,
+            BuildState(),
+        )
+
+        product_recipe = next(
+            recipe
+            for recipe in update["ProcessRecipes"]
+            if recipe["Name"] == "ProductRecipe" and recipe["ModuleName"] == "PM1"
+        )
+        self.assertEqual({"ProcessCount": 1}, product_recipe["Weight"])
+
+    def test_standard_clean_weight_preserves_explicit_recipe_value(self) -> None:
+        """自动补齐标准计数器时不得覆盖用户显式配置的 Recipe 权重。"""
+        route = _route("WacRoute", "PM1", "ProductRecipe")
+        route["stages"][4]["afterCleanRefs"] = ["Wac"]
+        plan = {
+            "device": self.device,
+            "recipes": [{
+                "name": "ProductRecipe",
+                "time": 40,
+                "modules": ["PM1"],
+                "weight": {"ProcessCount": 2, "CustomCount": 3},
+            }],
+            "cleans": [{"name": "Wac", "cleanType": "wacclean", "recipeTime": 30}],
+            "routes": [route],
+        }
+        update = build_round_update(
+            plan,
+            {"currentTime": 0, "jobs": [_job("J1", "WacRoute", "LP1")]},
+            0.0,
+            BuildState(),
+        )
+
+        product_recipe = next(
+            recipe for recipe in update["ProcessRecipes"]
+            if recipe["Name"] == "ProductRecipe" and recipe["ModuleName"] == "PM1"
+        )
+        self.assertEqual(
+            {"ProcessCount": 2, "CustomCount": 3},
+            product_recipe["Weight"],
+        )
+
     def test_step_clean_references_bind_to_process_chamber_by_category(self) -> None:
         """Step 引用 Clean 后，应按类别自动挂到该 Step 的 PM，而无需 Clean 选择腔室。"""
         route = _route("CleanRoute", "PM1", "Recipe1")

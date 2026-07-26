@@ -92,6 +92,12 @@ const PRE_PREPARE_MOVE = 10;
 const CLEAN_MOVE = 14;
 const PLAYBACK_FRAME_INTERVAL_MS = 80;
 const DEFAULT_PLAYBACK_SPEED = 4;
+const PROCESS_ARC_START_DEGREES = 200;
+const PROCESS_ARC_END_DEGREES = 340;
+const PROCESS_ARC_CENTER_X_PERCENT = 50;
+const PROCESS_ARC_CENTER_Y_PIXELS = 214;
+const PROCESS_ARC_RADIUS_X_PERCENT = 38;
+const PROCESS_ARC_RADIUS_Y_PIXELS = 156;
 
 const MOVE_NAMES: Record<number, string> = {
   0: "取片", 1: "放片", 2: "多片取片", 3: "多片放片", 4: "换片",
@@ -163,9 +169,15 @@ function isRobotName(name: string): boolean {
   return /^(ATR|VTR|TM\d*|ROBOT)/i.test(name);
 }
 
+/** 判断名称是否代表参考拓扑中的 Dummy Port，而不是正常装载端口。 */
+function isDummyPortName(name: string): boolean {
+  return /DUMMY/i.test(name) && /PORT/i.test(name);
+}
+
 /** 判断名称是否代表装载端口。 */
 function isLoadPortName(name: string, type = ""): boolean {
-  return type.toLowerCase() === "loadport" || /^(LP\d*|P\d+|.*PORT)$/i.test(name);
+  return !isDummyPortName(name)
+    && (type.toLowerCase() === "loadport" || /^(LP\d*|P\d+|.*PORT)$/i.test(name));
 }
 
 /** 判断名称是否代表 LoadLock 或真空缓冲腔。 */
@@ -175,7 +187,13 @@ function isLoadLockName(name: string, type = ""): boolean {
 
 /** 判断硬件是否没有可观察的腔室门。 */
 function isDoorlessModule(name: string, type = ""): boolean {
-  return /^cool(er)?$/i.test(name) || type.toLowerCase() === "cooler";
+  return /^cool(er)?$/i.test(name) || type.toLowerCase() === "cooler" || isDummyPortName(name);
+}
+
+/** 判断模块是否属于围绕 VTR 排列的工艺腔室。 */
+function isProcessModule(name: string, type = ""): boolean {
+  const normalizedType = type.toLowerCase();
+  return /process|chamber/.test(normalizedType) || /^(PM|CH)\w*/i.test(name);
 }
 
 /** 从页面加载的 JSON 中提取 MoveList。 */
@@ -217,9 +235,7 @@ function collectModuleDefinitions(
   device: DeviceDefinition | null,
 ): Map<string, { type: string }> {
   const modules = new Map<string, { type: string }>();
-  for (const [name, definition] of Object.entries(device?.Stations ?? {})) {
-    modules.set(name, { type: String(definition.Type ?? "") });
-  }
+  const stationDefinitions = device?.Stations ?? {};
   for (const move of moves) {
     const candidates = [
       move.ModuleName,
@@ -228,7 +244,9 @@ function collectModuleDefinitions(
       ...listValue(move.StationList),
     ].map(String).filter(Boolean);
     for (const name of candidates) {
-      if (!isRobotName(name) && !modules.has(name)) modules.set(name, { type: "" });
+      if (!isRobotName(name) && !modules.has(name)) {
+        modules.set(name, { type: String(stationDefinitions[name]?.Type ?? "") });
+      }
     }
   }
   return modules;
@@ -457,34 +475,30 @@ function icon(name: "play" | "pause" | "robot" | "upload"): string {
   return `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">${paths[name]}</svg>`;
 }
 
-/** 按设备区域对腔室进行分组。 */
-function moduleGroups(modules: ModuleSnapshot[]): Array<{ key: string; title: string; modules: ModuleSnapshot[] }> {
-  const groups = [
-    {
-      key: "process",
-      title: "工艺与辅助腔室",
-      modules: modules.filter(module => (
-        !isLoadPortName(module.name, module.type)
-        && !isLoadLockName(module.name, module.type)
-      )),
-    },
-    {
-      key: "lock",
-      title: "真空过渡腔",
-      modules: modules.filter(module => isLoadLockName(module.name, module.type)),
-    },
-    {
-      key: "port",
-      title: "装载端口",
-      modules: modules.filter(module => isLoadPortName(module.name, module.type)),
-    },
-  ];
-  return groups.filter(group => group.modules.length > 0);
+interface TopologyGroups {
+  processModules: ModuleSnapshot[];
+  loadLocks: ModuleSnapshot[];
+  loadPorts: ModuleSnapshot[];
+  auxiliaryModules: ModuleSnapshot[];
 }
 
-/** 绘制一个腔室卡片，包括门状态、晶圆和当前动作。 */
-function renderModule(module: ModuleSnapshot): string {
-  const waferLimit = 6;
+/** 按参考设备图的物理区域划分当前 MoveList 真正使用的模块。 */
+function topologyGroups(modules: ModuleSnapshot[]): TopologyGroups {
+  const loadLocks = modules.filter(module => isLoadLockName(module.name, module.type));
+  const loadPorts = modules.filter(module => isLoadPortName(module.name, module.type));
+  const processModules = modules.filter(module => isProcessModule(module.name, module.type));
+  const assignedNames = new Set([...loadLocks, ...loadPorts, ...processModules].map(module => module.name));
+  return {
+    processModules,
+    loadLocks,
+    loadPorts,
+    auxiliaryModules: modules.filter(module => !assignedNames.has(module.name)),
+  };
+}
+
+/** 绘制拓扑中的紧凑腔室，包括门、晶圆、动作和进度状态。 */
+function renderModule(module: ModuleSnapshot, role: "process" | "lock" | "port" | "auxiliary"): string {
+  const waferLimit = 3;
   const wafers = module.wafers.slice(0, waferLimit)
     .map(wafer => `<span class="wafer-token" title="晶圆 ${escapeHtml(wafer)}">${escapeHtml(wafer)}</span>`)
     .join("");
@@ -492,40 +506,86 @@ function renderModule(module: ModuleSnapshot): string {
     ? `<span class="wafer-more">+${module.wafers.length - waferLimit}</span>`
     : "";
   const progress = Math.round(module.progress * 100);
+  const accessibleStatus = `${module.name}，${STATUS_LABELS[module.status]}，${DOOR_LABELS[module.door]}`;
   return `
-    <article class="equipment-card status-${module.status} door-${module.door} ${module.isRobotTarget ? "is-target" : ""}">
-      <div class="equipment-door" aria-hidden="true"><span></span></div>
+    <article class="equipment-card equipment-${role} status-${module.status} door-${module.door} ${module.isRobotTarget ? "is-target" : ""}" aria-label="${escapeHtml(accessibleStatus)}">
+      <div class="equipment-gate" aria-hidden="true"><span></span></div>
       <div class="equipment-head">
-        <div><strong>${escapeHtml(module.name)}</strong><span>${escapeHtml(STATUS_LABELS[module.status])}</span></div>
-        <span class="door-state"><i></i>${escapeHtml(DOOR_LABELS[module.door])}</span>
+        <strong>${escapeHtml(module.name)}</strong>
+        <span class="equipment-status"><i></i>${escapeHtml(STATUS_LABELS[module.status])}</span>
       </div>
       <div class="equipment-body">
         <div class="wafer-stack">${wafers || '<span class="wafer-empty">空腔</span>'}${overflow}</div>
         ${module.environment ? `<span class="environment-state">${escapeHtml(module.environment)}</span>` : ""}
       </div>
       <div class="equipment-foot">
-        <span>${escapeHtml(module.activeMoveName || "等待任务")}</span>
-        ${module.activeMoveName ? `<span>${progress}%</span>` : ""}
+        <span class="door-state"><i></i>${escapeHtml(DOOR_LABELS[module.door])}</span>
+        <span>${escapeHtml(module.activeMoveName || "等待")}${module.activeMoveName ? ` · ${progress}%` : ""}</span>
       </div>
       <div class="equipment-progress"><span style="transform:scaleX(${module.activeMoveName ? module.progress : 0})"></span></div>
     </article>`;
 }
 
-/** 绘制机器人卡片和当前目标。 */
-function renderRobot(robot: RobotSnapshot): string {
+/** 绘制参考图中央的机器人传输区。 */
+function renderRobotHub(robot: RobotSnapshot, environment: "vacuum" | "atmosphere"): string {
   return `
-    <article class="robot-card ${robot.busy ? "is-busy" : ""}">
-      <div class="robot-icon">${icon("robot")}</div>
-      <div class="robot-copy">
-        <strong>${escapeHtml(robot.name)}</strong>
-        <span>${escapeHtml(robot.busy ? robot.activeMoveName : "待命")}</span>
-      </div>
-      <div class="robot-target">
-        <span>${robot.target ? "目标腔室" : "当前位置"}</span>
-        <strong>${escapeHtml(robot.target || "—")}</strong>
-      </div>
+    <article class="robot-hub robot-hub-${environment} ${robot.busy ? "is-busy" : ""}" aria-label="${escapeHtml(robot.name)} ${robot.busy ? "工作中" : "待命"}">
+      <div class="robot-hub-icon">${icon("robot")}</div>
+      <strong>${escapeHtml(robot.name)}</strong>
+      <span>${environment === "vacuum" ? "真空传输区" : "大气传输区"}</span>
+      <small>${escapeHtml(robot.busy ? `${robot.activeMoveName}${robot.target ? ` → ${robot.target}` : ""}` : "待命")}</small>
       <div class="robot-wafers">${robot.wafers.map(wafer => `<span class="wafer-token">${escapeHtml(wafer)}</span>`).join("")}</div>
     </article>`;
+}
+
+/** 计算工艺腔沿 VTR 上半圆排列的位置。 */
+function processModulePosition(index: number, count: number): string {
+  const progress = count <= 1 ? 0.5 : index / (count - 1);
+  const degrees = PROCESS_ARC_START_DEGREES
+    + (PROCESS_ARC_END_DEGREES - PROCESS_ARC_START_DEGREES) * progress;
+  const radians = degrees * Math.PI / 180;
+  const left = PROCESS_ARC_CENTER_X_PERCENT + Math.cos(radians) * PROCESS_ARC_RADIUS_X_PERCENT;
+  const top = PROCESS_ARC_CENTER_Y_PIXELS + Math.sin(radians) * PROCESS_ARC_RADIUS_Y_PIXELS;
+  return `--module-left:${left.toFixed(2)}%;--module-top:${top.toFixed(2)}px;--module-order:${index}`;
+}
+
+/** 按参考图绘制 VTR、ATR、腔室、Load Lock 与装载端口的设备俯视拓扑。 */
+function renderEquipmentTopology(snapshot: WorkspaceSnapshot): string {
+  const groups = topologyGroups(snapshot.modules);
+  const vacuumRobot = snapshot.robots.find(robot => /^(VTR|TM\d*)/i.test(robot.name));
+  const atmosphereRobot = snapshot.robots.find(robot => /^ATR/i.test(robot.name));
+  const assignedRobots = new Set([vacuumRobot?.name, atmosphereRobot?.name].filter(Boolean));
+  const additionalRobots = snapshot.robots.filter(robot => !assignedRobots.has(robot.name));
+  const leftAuxiliary = groups.auxiliaryModules.filter((_, index) => index % 2 === 0);
+  const rightAuxiliary = groups.auxiliaryModules.filter((_, index) => index % 2 === 1);
+  return `
+    <section class="equipment-schematic" aria-label="当前 MoveList 使用的设备拓扑">
+      <div class="schematic-head">
+        <div><strong>设备拓扑</strong><span>仅显示当前 MoveList 使用的模块</span></div>
+        <small>${snapshot.modules.length} 个腔室 · ${snapshot.robots.length} 台机械手</small>
+      </div>
+      <div class="schematic-canvas">
+        <div class="process-ring" aria-label="工艺腔室">
+          ${groups.processModules.map((module, index) => `
+            <div class="process-module-position" style="${processModulePosition(index, groups.processModules.length)}">
+              ${renderModule(module, "process")}
+            </div>`).join("")}
+        </div>
+        ${vacuumRobot ? renderRobotHub(vacuumRobot, "vacuum") : '<div class="topology-junction vacuum-junction"><strong>真空传输区</strong></div>'}
+        <div class="load-lock-bank" aria-label="真空过渡腔">
+          ${groups.loadLocks.map(module => renderModule(module, "lock")).join("")}
+        </div>
+        <div class="atmosphere-deck">
+          <div class="auxiliary-bank auxiliary-left">${leftAuxiliary.map(module => renderModule(module, "auxiliary")).join("")}</div>
+          ${atmosphereRobot ? renderRobotHub(atmosphereRobot, "atmosphere") : '<div class="topology-junction atmosphere-junction"><strong>大气传输区</strong></div>'}
+          <div class="auxiliary-bank auxiliary-right">${rightAuxiliary.map(module => renderModule(module, "auxiliary")).join("")}</div>
+        </div>
+        <div class="load-port-bank" aria-label="装载端口">
+          ${groups.loadPorts.map(module => renderModule(module, "port")).join("")}
+        </div>
+        ${additionalRobots.length ? `<div class="additional-robot-bank">${additionalRobots.map(robot => renderRobotHub(robot, "atmosphere")).join("")}</div>` : ""}
+      </div>
+    </section>`;
 }
 
 /** 创建并管理现有配置终端中的可视化工作台。 */
@@ -731,18 +791,7 @@ export class VisualizationWorkspace {
     this.elements.waferText.textContent = String(snapshot.waferCount);
     this.elements.range.value = String(snapshot.time);
 
-    const groups = moduleGroups(snapshot.modules);
-    const robotHtml = snapshot.robots.length
-      ? `<section class="device-zone robot-zone"><div class="device-zone-head"><span>机械手</span><small>实时目标与载片</small></div><div class="robot-grid">${snapshot.robots.map(renderRobot).join("")}</div></section>`
-      : "";
-    this.elements.stage.innerHTML = `
-      ${groups.map(group => `
-        <section class="device-zone ${group.key}-zone">
-          <div class="device-zone-head"><span>${escapeHtml(group.title)}</span><small>${group.modules.length} 个模块</small></div>
-          <div class="equipment-grid">${group.modules.map(renderModule).join("")}</div>
-        </section>
-      `).join("")}
-      ${robotHtml}`;
+    this.elements.stage.innerHTML = renderEquipmentTopology(snapshot);
 
     this.elements.activeMoves.innerHTML = snapshot.activeMoves.length
       ? snapshot.activeMoves.map(move => `

@@ -675,9 +675,21 @@ def build_route(
 def build_process_recipes(
     recipes: Sequence[Mapping[str, Any]],
     routes: Sequence[Mapping[str, Any]],
+    cleans: Sequence[Mapping[str, Any]] = (),
 ) -> List[Dict[str, Any]]:
-    """把通用 Recipe 按适用模块展开成 IProcessRecipe 列表。"""
+    """把通用 Recipe 按适用模块展开成标准 IProcessRecipe 列表。
+
+    公司标准用 ``ProcessRecipe.Weight`` 更新 CleanCondition 引用的计数器。
+    页面只编辑 Clean 类别，因此这里根据 Route 的 Clean 引用为产品 Recipe
+    补齐相应计数器；用户显式提供的权重优先，绝不覆盖。
+    """
     derived_modules: Dict[str, List[str]] = {}
+    required_weights: Dict[Tuple[str, str], set[str]] = {}
+    clean_by_name = {
+        str(clean.get("name") or "").strip(): _runtime_clean(clean)
+        for clean in cleans
+        if str(clean.get("name") or "").strip()
+    }
     for route in routes:
         for stage in route.get("stages") or []:
             if not isinstance(stage, Mapping):
@@ -693,6 +705,20 @@ def build_process_recipes(
                 derived_modules.setdefault(recipe_name, [])
                 if module not in derived_modules[recipe_name]:
                     derived_modules[recipe_name].append(module)
+                clean_names = [
+                    *_string_list(visit.get("beforeCleanRefs") or visit.get("BeforeInPM")),
+                    *_string_list(visit.get("afterCleanRefs") or visit.get("AfterOutPM")),
+                ]
+                for clean_name in clean_names:
+                    clean = clean_by_name.get(clean_name)
+                    if clean is None:
+                        continue
+                    state_variable = str(clean.get("stateVariable") or "").strip()
+                    # IdleTime 由设备空闲时钟维护，不属于产品 Recipe 的增量。
+                    if state_variable and state_variable != "IdleTime":
+                        required_weights.setdefault((recipe_name, module), set()).add(
+                            state_variable
+                        )
     result: List[Dict[str, Any]] = []
     for recipe in recipes:
         name = str(recipe.get("name") or "").strip()
@@ -708,12 +734,15 @@ def build_process_recipes(
         if not isinstance(weight, Mapping):
             raise ValueError(f"Recipe {name} 的 Weight 必须是对象")
         for module in modules:
+            module_weight = deepcopy(dict(weight))
+            for variable_name in sorted(required_weights.get((name, module), set())):
+                module_weight.setdefault(variable_name, 1)
             result.append({
                 "Time": max(0.0, _finite_number(recipe.get("time"), 0.0)),
                 "ModuleName": module,
                 "Name": name,
                 "ProcessType": str(recipe.get("processType") or ""),
-                "Weight": deepcopy(dict(weight)),
+                "Weight": module_weight,
             })
     return result
 
@@ -920,7 +949,7 @@ def build_round_update(
         build_state.dummy_material_count = round_dummy_material_count
     return {
         "Scenario": 0, "Routes": referenced_routes,
-        "ProcessRecipes": build_process_recipes(recipes, routes),
+        "ProcessRecipes": build_process_recipes(recipes, routes, cleans),
         "Materials": materials, "ProcessJobs": process_jobs, "ControlJobs": control_jobs,
         "RemoveList": [], "MoveStates": [], "CurrentTime": float(current_time),
         # 标准 update 是当前设备快照而不只是新增 Job。首排时动态状态与 init 相同；

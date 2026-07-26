@@ -35,6 +35,12 @@ var PRE_PREPARE_MOVE = 10;
 var CLEAN_MOVE = 14;
 var PLAYBACK_FRAME_INTERVAL_MS = 80;
 var DEFAULT_PLAYBACK_SPEED = 4;
+var PROCESS_ARC_START_DEGREES = 200;
+var PROCESS_ARC_END_DEGREES = 340;
+var PROCESS_ARC_CENTER_X_PERCENT = 50;
+var PROCESS_ARC_CENTER_Y_PIXELS = 214;
+var PROCESS_ARC_RADIUS_X_PERCENT = 38;
+var PROCESS_ARC_RADIUS_Y_PIXELS = 156;
 var MOVE_NAMES = {
   0: "\u53D6\u7247",
   1: "\u653E\u7247",
@@ -93,14 +99,21 @@ function firstStation(move, field) {
 function isRobotName(name) {
   return /^(ATR|VTR|TM\d*|ROBOT)/i.test(name);
 }
+function isDummyPortName(name) {
+  return /DUMMY/i.test(name) && /PORT/i.test(name);
+}
 function isLoadPortName(name, type = "") {
-  return type.toLowerCase() === "loadport" || /^(LP\d*|P\d+|.*PORT)$/i.test(name);
+  return !isDummyPortName(name) && (type.toLowerCase() === "loadport" || /^(LP\d*|P\d+|.*PORT)$/i.test(name));
 }
 function isLoadLockName(name, type = "") {
   return type.toLowerCase() === "loadlock" || /^LL?[A-Z]$/i.test(name) || /^BUF_/i.test(name);
 }
 function isDoorlessModule(name, type = "") {
-  return /^cool(er)?$/i.test(name) || type.toLowerCase() === "cooler";
+  return /^cool(er)?$/i.test(name) || type.toLowerCase() === "cooler" || isDummyPortName(name);
+}
+function isProcessModule(name, type = "") {
+  const normalizedType = type.toLowerCase();
+  return /process|chamber/.test(normalizedType) || /^(PM|CH)\w*/i.test(name);
 }
 function normalizeMovePayload(payload) {
   const records = Array.isArray(payload) ? payload : payload && typeof payload === "object" && Array.isArray(payload.MoveList) ? payload.MoveList : null;
@@ -123,9 +136,7 @@ function normalizeMoves(moves) {
 }
 function collectModuleDefinitions(moves, device) {
   const modules = /* @__PURE__ */ new Map();
-  for (const [name, definition] of Object.entries(device?.Stations ?? {})) {
-    modules.set(name, { type: String(definition.Type ?? "") });
-  }
+  const stationDefinitions = device?.Stations ?? {};
   for (const move of moves) {
     const candidates = [
       move.ModuleName,
@@ -134,7 +145,9 @@ function collectModuleDefinitions(moves, device) {
       ...listValue(move.StationList)
     ].map(String).filter(Boolean);
     for (const name of candidates) {
-      if (!isRobotName(name) && !modules.has(name)) modules.set(name, { type: "" });
+      if (!isRobotName(name) && !modules.has(name)) {
+        modules.set(name, { type: String(stationDefinitions[name]?.Type ?? "") });
+      }
     }
   }
   return modules;
@@ -318,63 +331,96 @@ function icon(name) {
   };
   return `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">${paths[name]}</svg>`;
 }
-function moduleGroups(modules) {
-  const groups = [
-    {
-      key: "process",
-      title: "\u5DE5\u827A\u4E0E\u8F85\u52A9\u8154\u5BA4",
-      modules: modules.filter((module2) => !isLoadPortName(module2.name, module2.type) && !isLoadLockName(module2.name, module2.type))
-    },
-    {
-      key: "lock",
-      title: "\u771F\u7A7A\u8FC7\u6E21\u8154",
-      modules: modules.filter((module2) => isLoadLockName(module2.name, module2.type))
-    },
-    {
-      key: "port",
-      title: "\u88C5\u8F7D\u7AEF\u53E3",
-      modules: modules.filter((module2) => isLoadPortName(module2.name, module2.type))
-    }
-  ];
-  return groups.filter((group) => group.modules.length > 0);
+function topologyGroups(modules) {
+  const loadLocks = modules.filter((module2) => isLoadLockName(module2.name, module2.type));
+  const loadPorts = modules.filter((module2) => isLoadPortName(module2.name, module2.type));
+  const processModules = modules.filter((module2) => isProcessModule(module2.name, module2.type));
+  const assignedNames = new Set([...loadLocks, ...loadPorts, ...processModules].map((module2) => module2.name));
+  return {
+    processModules,
+    loadLocks,
+    loadPorts,
+    auxiliaryModules: modules.filter((module2) => !assignedNames.has(module2.name))
+  };
 }
-function renderModule(module2) {
-  const waferLimit = 6;
+function renderModule(module2, role) {
+  const waferLimit = 3;
   const wafers = module2.wafers.slice(0, waferLimit).map((wafer) => `<span class="wafer-token" title="\u6676\u5706 ${escapeHtml(wafer)}">${escapeHtml(wafer)}</span>`).join("");
   const overflow = module2.wafers.length > waferLimit ? `<span class="wafer-more">+${module2.wafers.length - waferLimit}</span>` : "";
   const progress = Math.round(module2.progress * 100);
+  const accessibleStatus = `${module2.name}\uFF0C${STATUS_LABELS[module2.status]}\uFF0C${DOOR_LABELS[module2.door]}`;
   return `
-    <article class="equipment-card status-${module2.status} door-${module2.door} ${module2.isRobotTarget ? "is-target" : ""}">
-      <div class="equipment-door" aria-hidden="true"><span></span></div>
+    <article class="equipment-card equipment-${role} status-${module2.status} door-${module2.door} ${module2.isRobotTarget ? "is-target" : ""}" aria-label="${escapeHtml(accessibleStatus)}">
+      <div class="equipment-gate" aria-hidden="true"><span></span></div>
       <div class="equipment-head">
-        <div><strong>${escapeHtml(module2.name)}</strong><span>${escapeHtml(STATUS_LABELS[module2.status])}</span></div>
-        <span class="door-state"><i></i>${escapeHtml(DOOR_LABELS[module2.door])}</span>
+        <strong>${escapeHtml(module2.name)}</strong>
+        <span class="equipment-status"><i></i>${escapeHtml(STATUS_LABELS[module2.status])}</span>
       </div>
       <div class="equipment-body">
         <div class="wafer-stack">${wafers || '<span class="wafer-empty">\u7A7A\u8154</span>'}${overflow}</div>
         ${module2.environment ? `<span class="environment-state">${escapeHtml(module2.environment)}</span>` : ""}
       </div>
       <div class="equipment-foot">
-        <span>${escapeHtml(module2.activeMoveName || "\u7B49\u5F85\u4EFB\u52A1")}</span>
-        ${module2.activeMoveName ? `<span>${progress}%</span>` : ""}
+        <span class="door-state"><i></i>${escapeHtml(DOOR_LABELS[module2.door])}</span>
+        <span>${escapeHtml(module2.activeMoveName || "\u7B49\u5F85")}${module2.activeMoveName ? ` \xB7 ${progress}%` : ""}</span>
       </div>
       <div class="equipment-progress"><span style="transform:scaleX(${module2.activeMoveName ? module2.progress : 0})"></span></div>
     </article>`;
 }
-function renderRobot(robot) {
+function renderRobotHub(robot, environment) {
   return `
-    <article class="robot-card ${robot.busy ? "is-busy" : ""}">
-      <div class="robot-icon">${icon("robot")}</div>
-      <div class="robot-copy">
-        <strong>${escapeHtml(robot.name)}</strong>
-        <span>${escapeHtml(robot.busy ? robot.activeMoveName : "\u5F85\u547D")}</span>
-      </div>
-      <div class="robot-target">
-        <span>${robot.target ? "\u76EE\u6807\u8154\u5BA4" : "\u5F53\u524D\u4F4D\u7F6E"}</span>
-        <strong>${escapeHtml(robot.target || "\u2014")}</strong>
-      </div>
+    <article class="robot-hub robot-hub-${environment} ${robot.busy ? "is-busy" : ""}" aria-label="${escapeHtml(robot.name)} ${robot.busy ? "\u5DE5\u4F5C\u4E2D" : "\u5F85\u547D"}">
+      <div class="robot-hub-icon">${icon("robot")}</div>
+      <strong>${escapeHtml(robot.name)}</strong>
+      <span>${environment === "vacuum" ? "\u771F\u7A7A\u4F20\u8F93\u533A" : "\u5927\u6C14\u4F20\u8F93\u533A"}</span>
+      <small>${escapeHtml(robot.busy ? `${robot.activeMoveName}${robot.target ? ` \u2192 ${robot.target}` : ""}` : "\u5F85\u547D")}</small>
       <div class="robot-wafers">${robot.wafers.map((wafer) => `<span class="wafer-token">${escapeHtml(wafer)}</span>`).join("")}</div>
     </article>`;
+}
+function processModulePosition(index, count) {
+  const progress = count <= 1 ? 0.5 : index / (count - 1);
+  const degrees = PROCESS_ARC_START_DEGREES + (PROCESS_ARC_END_DEGREES - PROCESS_ARC_START_DEGREES) * progress;
+  const radians = degrees * Math.PI / 180;
+  const left = PROCESS_ARC_CENTER_X_PERCENT + Math.cos(radians) * PROCESS_ARC_RADIUS_X_PERCENT;
+  const top = PROCESS_ARC_CENTER_Y_PIXELS + Math.sin(radians) * PROCESS_ARC_RADIUS_Y_PIXELS;
+  return `--module-left:${left.toFixed(2)}%;--module-top:${top.toFixed(2)}px;--module-order:${index}`;
+}
+function renderEquipmentTopology(snapshot) {
+  const groups = topologyGroups(snapshot.modules);
+  const vacuumRobot = snapshot.robots.find((robot) => /^(VTR|TM\d*)/i.test(robot.name));
+  const atmosphereRobot = snapshot.robots.find((robot) => /^ATR/i.test(robot.name));
+  const assignedRobots = new Set([vacuumRobot?.name, atmosphereRobot?.name].filter(Boolean));
+  const additionalRobots = snapshot.robots.filter((robot) => !assignedRobots.has(robot.name));
+  const leftAuxiliary = groups.auxiliaryModules.filter((_, index) => index % 2 === 0);
+  const rightAuxiliary = groups.auxiliaryModules.filter((_, index) => index % 2 === 1);
+  return `
+    <section class="equipment-schematic" aria-label="\u5F53\u524D MoveList \u4F7F\u7528\u7684\u8BBE\u5907\u62D3\u6251">
+      <div class="schematic-head">
+        <div><strong>\u8BBE\u5907\u62D3\u6251</strong><span>\u4EC5\u663E\u793A\u5F53\u524D MoveList \u4F7F\u7528\u7684\u6A21\u5757</span></div>
+        <small>${snapshot.modules.length} \u4E2A\u8154\u5BA4 \xB7 ${snapshot.robots.length} \u53F0\u673A\u68B0\u624B</small>
+      </div>
+      <div class="schematic-canvas">
+        <div class="process-ring" aria-label="\u5DE5\u827A\u8154\u5BA4">
+          ${groups.processModules.map((module2, index) => `
+            <div class="process-module-position" style="${processModulePosition(index, groups.processModules.length)}">
+              ${renderModule(module2, "process")}
+            </div>`).join("")}
+        </div>
+        ${vacuumRobot ? renderRobotHub(vacuumRobot, "vacuum") : '<div class="topology-junction vacuum-junction"><strong>\u771F\u7A7A\u4F20\u8F93\u533A</strong></div>'}
+        <div class="load-lock-bank" aria-label="\u771F\u7A7A\u8FC7\u6E21\u8154">
+          ${groups.loadLocks.map((module2) => renderModule(module2, "lock")).join("")}
+        </div>
+        <div class="atmosphere-deck">
+          <div class="auxiliary-bank auxiliary-left">${leftAuxiliary.map((module2) => renderModule(module2, "auxiliary")).join("")}</div>
+          ${atmosphereRobot ? renderRobotHub(atmosphereRobot, "atmosphere") : '<div class="topology-junction atmosphere-junction"><strong>\u5927\u6C14\u4F20\u8F93\u533A</strong></div>'}
+          <div class="auxiliary-bank auxiliary-right">${rightAuxiliary.map((module2) => renderModule(module2, "auxiliary")).join("")}</div>
+        </div>
+        <div class="load-port-bank" aria-label="\u88C5\u8F7D\u7AEF\u53E3">
+          ${groups.loadPorts.map((module2) => renderModule(module2, "port")).join("")}
+        </div>
+        ${additionalRobots.length ? `<div class="additional-robot-bank">${additionalRobots.map((robot) => renderRobotHub(robot, "atmosphere")).join("")}</div>` : ""}
+      </div>
+    </section>`;
 }
 var VisualizationWorkspace = class {
   root;
@@ -553,16 +599,7 @@ var VisualizationWorkspace = class {
     this.elements.moveText.textContent = `${snapshot.completedMoves} / ${snapshot.totalMoves}`;
     this.elements.waferText.textContent = String(snapshot.waferCount);
     this.elements.range.value = String(snapshot.time);
-    const groups = moduleGroups(snapshot.modules);
-    const robotHtml = snapshot.robots.length ? `<section class="device-zone robot-zone"><div class="device-zone-head"><span>\u673A\u68B0\u624B</span><small>\u5B9E\u65F6\u76EE\u6807\u4E0E\u8F7D\u7247</small></div><div class="robot-grid">${snapshot.robots.map(renderRobot).join("")}</div></section>` : "";
-    this.elements.stage.innerHTML = `
-      ${groups.map((group) => `
-        <section class="device-zone ${group.key}-zone">
-          <div class="device-zone-head"><span>${escapeHtml(group.title)}</span><small>${group.modules.length} \u4E2A\u6A21\u5757</small></div>
-          <div class="equipment-grid">${group.modules.map(renderModule).join("")}</div>
-        </section>
-      `).join("")}
-      ${robotHtml}`;
+    this.elements.stage.innerHTML = renderEquipmentTopology(snapshot);
     this.elements.activeMoves.innerHTML = snapshot.activeMoves.length ? snapshot.activeMoves.map((move) => `
         <li>
           <span class="active-move-id">#${finiteNumber(move.MoveID)}</span>

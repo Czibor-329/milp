@@ -68,7 +68,12 @@ test("时间轴准确回放腔室门的开启和关闭过程", () => {
   assert.equal(moduleAt(logic.buildWorkspaceSnapshot(moves, device, 1.5), "PM1").door, "open");
   assert.equal(moduleAt(logic.buildWorkspaceSnapshot(moves, device, 3.5), "PM1").door, "closing");
   assert.equal(moduleAt(logic.buildWorkspaceSnapshot(moves, device, 4), "PM1").door, "closed");
-  assert.equal(moduleAt(logic.buildWorkspaceSnapshot(moves, device, 2), "Cooler").door, "doorless");
+  assert.equal(moduleAt(logic.buildWorkspaceSnapshot(moves, device, 2), "Cooler"), undefined);
+});
+
+test("设备拓扑只包含 MoveList 实际引用的腔室", () => {
+  const snapshot = logic.buildWorkspaceSnapshot(moves, device, 2);
+  assert.deepEqual(snapshot.modules.map(module => module.name), ["LP1", "PM1"]);
 });
 
 test("完成取放动作后晶圆位置与机器人状态一致", () => {

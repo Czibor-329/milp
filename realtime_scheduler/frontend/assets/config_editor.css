@@ -322,29 +322,39 @@
     .timeline-speed { display: flex; align-items: center; gap: 8px; color: #42526b; font-size: 11px; font-weight: 700; white-space: nowrap; }
     .timeline-speed select { min-width: 74px; min-height: 40px; border: 1px solid #cdd6e2; border-radius: 8px; background: #fff; }
     .visual-workspace-layout { display: grid; grid-template-columns: minmax(0, 1fr) 270px; gap: 14px; align-items: start; }
-    .device-stage { display: grid; gap: 10px; min-width: 0; }
-    .device-zone { overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: #fff; }
-    .device-zone-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 12px; border-bottom: 1px solid var(--line); color: #334155; background: #f8fafc; }
-    .device-zone-head span { font-size: 11px; font-weight: 900; }
-    .device-zone-head small { color: var(--muted); font-size: 9px; }
-    .equipment-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(184px, 1fr)); gap: 9px; padding: 10px; }
-    .lock-zone .equipment-grid { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
-    .equipment-card { position: relative; min-width: 0; min-height: 132px; overflow: hidden; border: 1px solid #d8e0ea; border-radius: 10px; background: #fff; transition: border-color .2s ease, box-shadow .2s ease, background-color .2s ease; }
-    .equipment-card.is-target { border-color: #6c8ee3; box-shadow: 0 0 0 3px rgba(36,87,214,.1); }
-    .equipment-card.status-processing, .equipment-card.status-transfer { border-color: #8fb0fa; background: #f6f9ff; }
-    .equipment-card.status-door, .equipment-card.status-environment { border-color: #e6bd6f; background: #fffaf0; }
-    .equipment-card.status-cleaning { border-color: #8fd5bd; background: #f2fbf7; }
-    .equipment-door { position: absolute; inset: 0 auto 0 0; width: 7px; overflow: hidden; background: #d7dee8; }
-    .equipment-door span { position: absolute; inset: 0; background: #64748b; transform-origin: top; transition: transform .2s ease, background-color .2s ease; }
-    .door-open .equipment-door span { background: var(--green); transform: scaleY(.18); }
-    .door-opening .equipment-door span { background: #d28a13; transform: scaleY(.55); }
-    .door-closing .equipment-door span { background: #d28a13; transform: scaleY(.78); }
-    .door-doorless .equipment-door { background: repeating-linear-gradient(135deg, #d7dee8 0 3px, #f4f6f9 3px 6px); }
-    .door-doorless .equipment-door span { display: none; }
-    .equipment-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; padding: 10px 10px 7px 16px; }
-    .equipment-head > div { min-width: 0; }
-    .equipment-head strong { display: block; color: #17233a; font: 800 13px/1.2 "Fira Code", Consolas, monospace; }
-    .equipment-head > div > span { display: block; margin-top: 3px; color: var(--muted); font-size: 9px; }
+    .device-stage { min-width: 0; }
+    .equipment-schematic { overflow: hidden; border: 1px solid #d7e0eb; border-radius: 14px; background: #fff; box-shadow: 0 1px 2px rgba(15,23,42,.04); }
+    .schematic-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 15px; border-bottom: 1px solid #e4eaf1; background: #fbfcfd; }
+    .schematic-head strong, .schematic-head span { display: block; }
+    .schematic-head strong { color: #182336; font-size: 12px; }
+    .schematic-head span, .schematic-head small { margin-top: 2px; color: #64748b; font-size: 9px; }
+    .schematic-canvas { position: relative; min-height: 730px; overflow: hidden; background-color: #f8fafc; background-image: linear-gradient(rgba(148,163,184,.11) 1px, transparent 1px), linear-gradient(90deg, rgba(148,163,184,.11) 1px, transparent 1px); background-size: 24px 24px; }
+    .schematic-canvas::before { position: absolute; top: 22px; bottom: 22px; left: 50%; width: 1px; content: ""; background: linear-gradient(transparent, #d3dce7 12%, #d3dce7 88%, transparent); }
+    .process-ring { position: absolute; inset: 0; }
+    .process-module-position { position: absolute; z-index: 3; left: var(--module-left); top: var(--module-top); width: 152px; transform: translate(-50%, -50%); }
+    .equipment-card { position: relative; min-width: 0; height: 100px; overflow: hidden; border: 1px solid #aeb9c8; border-radius: 7px; color: #26364d; background: rgba(255,255,255,.97); box-shadow: 0 4px 12px rgba(15,23,42,.07); transition: border-color .2s ease, box-shadow .2s ease, background-color .2s ease; }
+    .equipment-process { border-radius: 5px 5px 14px 14px; }
+    .equipment-lock { width: 126px; height: 92px; border-radius: 5px; }
+    .equipment-port { width: 116px; height: 88px; border-radius: 5px 5px 11px 11px; }
+    .equipment-auxiliary { width: 132px; height: 86px; }
+    .equipment-card.is-target { border-color: #315fc2; box-shadow: 0 0 0 3px rgba(49,95,194,.14), 0 6px 16px rgba(15,23,42,.09); }
+    .equipment-card.status-processing, .equipment-card.status-transfer { border-color: #6f91dd; background: #f4f7ff; }
+    .equipment-card.status-door, .equipment-card.status-environment { border-color: #d6a84d; background: #fff9ed; }
+    .equipment-card.status-cleaning { border-color: #64b694; background: #f1faf6; }
+    .equipment-gate { position: absolute; right: 12px; bottom: 0; left: 12px; z-index: 2; height: 5px; overflow: hidden; border-radius: 4px 4px 0 0; background: #d3dae4; }
+    .equipment-gate span { position: absolute; inset: 0; background: #59687b; transform-origin: left; transition: transform .2s ease, background-color .2s ease; }
+    .door-open .equipment-gate span { background: var(--green); transform: scaleX(.18); }
+    .door-opening .equipment-gate span { background: #c47a09; transform: scaleX(.55); }
+    .door-closing .equipment-gate span { background: #c47a09; transform: scaleX(.78); }
+    .door-doorless .equipment-gate { background: repeating-linear-gradient(135deg, #d7dee8 0 3px, #f4f6f9 3px 6px); }
+    .door-doorless .equipment-gate span { display: none; }
+    .equipment-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 9px 9px 4px; }
+    .equipment-head strong { overflow: hidden; color: #17233a; font: 800 12px/1.2 "Fira Code", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+    .equipment-status { display: inline-flex; align-items: center; gap: 4px; color: #64748b; font-size: 8px; font-weight: 800; white-space: nowrap; }
+    .equipment-status i { width: 6px; height: 6px; border-radius: 50%; background: #94a3b8; }
+    .status-processing .equipment-status i, .status-transfer .equipment-status i { background: #315fc2; }
+    .status-door .equipment-status i, .status-environment .equipment-status i { background: #c47a09; }
+    .status-cleaning .equipment-status i { background: #16845f; }
     .door-state { display: inline-flex; align-items: center; gap: 5px; padding: 3px 6px; border-radius: 999px; color: #475569; background: #edf1f6; font-size: 8px; font-weight: 800; white-space: nowrap; }
     .door-state i { width: 6px; height: 6px; border: 1px solid #475569; border-radius: 1px; background: #475569; }
     .door-open .door-state { color: #087f5b; background: var(--green-soft); }
@@ -353,28 +363,41 @@
     .door-opening .door-state i, .door-closing .door-state i { border-color: #c47a09; background: #c47a09; }
     .door-doorless .door-state { color: #64748b; background: #f1f5f9; }
     .door-doorless .door-state i { border-radius: 50%; background: transparent; }
-    .equipment-body { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 49px; padding: 5px 10px 7px 16px; }
-    .wafer-stack, .robot-wafers { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; min-height: 26px; }
-    .wafer-token { display: inline-grid; place-items: center; min-width: 24px; height: 24px; padding: 0 5px; border: 1px solid #7e9de7; border-radius: 50%; color: #1f4bad; background: #eef3ff; font: 800 9px/1 "Fira Code", Consolas, monospace; }
+    .equipment-body { display: flex; align-items: center; justify-content: space-between; gap: 6px; min-height: 29px; padding: 2px 9px 3px; }
+    .wafer-stack, .robot-wafers { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 3px; min-height: 22px; }
+    .wafer-token { display: inline-grid; place-items: center; min-width: 20px; height: 20px; padding: 0 4px; border: 1px solid #6d8ed9; border-radius: 50%; color: #234b9b; background: #edf3ff; font: 800 8px/1 "Fira Code", Consolas, monospace; }
     .wafer-more { color: var(--muted); font-size: 9px; font-weight: 800; }
     .wafer-empty { color: #94a3b8; font-size: 10px; }
     .environment-state { padding: 4px 7px; border-radius: 6px; color: #89530b; background: #fff1cc; font-size: 8px; font-weight: 800; white-space: nowrap; }
-    .equipment-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 10px 8px 16px; color: var(--muted); font-size: 8px; }
-    .equipment-foot span:last-child { color: #334155; font-variant-numeric: tabular-nums; font-weight: 800; }
-    .equipment-progress { position: absolute; right: 0; bottom: 0; left: 7px; height: 3px; overflow: hidden; background: #e7edf5; }
+    .equipment-foot { display: flex; align-items: center; justify-content: space-between; gap: 5px; padding: 2px 9px 8px; color: #64748b; font-size: 7px; }
+    .equipment-foot > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .equipment-progress { position: absolute; right: 0; bottom: 0; left: 0; height: 3px; overflow: hidden; background: #e7edf5; }
     .equipment-progress span { display: block; width: 100%; height: 100%; background: var(--brand); transform-origin: left; transition: transform .08s linear; }
     .status-door .equipment-progress span, .status-environment .equipment-progress span { background: #d28a13; }
     .status-cleaning .equipment-progress span { background: var(--green); }
-    .robot-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 9px; padding: 10px; }
-    .robot-card { display: grid; grid-template-columns: 40px minmax(70px, 1fr) auto; align-items: center; gap: 9px; min-height: 68px; padding: 9px 10px; border: 1px solid #d8e0ea; border-radius: 10px; background: #fff; }
-    .robot-card.is-busy { border-color: #8fb0fa; background: #f6f9ff; }
-    .robot-icon { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 9px; color: #5473c4; background: #edf2ff; }
-    .robot-copy { min-width: 0; }
-    .robot-copy strong { display: block; font: 800 12px/1.2 "Fira Code", Consolas, monospace; }
-    .robot-copy span, .robot-target span { display: block; margin-top: 3px; color: var(--muted); font-size: 8px; }
-    .robot-target { text-align: right; }
-    .robot-target strong { display: block; margin-top: 2px; color: var(--brand); font-size: 11px; }
-    .robot-wafers { grid-column: 2 / -1; min-height: 0; }
+    .robot-hub { z-index: 2; display: grid; place-items: center; align-content: center; color: #334155; background: #edf1f5; box-shadow: inset 0 0 0 1px #9ca9b8, 0 8px 24px rgba(15,23,42,.08); }
+    .robot-hub-vacuum { position: absolute; top: 176px; left: 50%; width: 250px; height: 202px; clip-path: polygon(25% 0, 75% 0, 100% 34%, 86% 100%, 14% 100%, 0 34%); transform: translateX(-50%); }
+    .robot-hub-atmosphere { width: 238px; min-height: 106px; border-radius: 5px; }
+    .robot-hub.is-busy { color: #1f4bad; background: #e9effd; box-shadow: inset 0 0 0 2px #6f91dd, 0 8px 24px rgba(49,95,194,.12); }
+    .robot-hub-icon { display: grid; width: 34px; height: 34px; place-items: center; margin-bottom: 5px; border: 1px solid #bdc8d5; border-radius: 50%; color: #52657d; background: rgba(255,255,255,.72); }
+    .robot-hub-icon svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.7; }
+    .robot-hub strong { color: #17233a; font: 900 15px/1.2 "Fira Code", Consolas, monospace; }
+    .robot-hub > span { margin-top: 3px; color: #64748b; font-size: 8px; font-weight: 800; letter-spacing: .08em; }
+    .robot-hub small { max-width: 190px; margin-top: 7px; overflow: hidden; color: #42526b; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+    .robot-hub .robot-wafers { margin-top: 6px; }
+    .load-lock-bank { position: absolute; z-index: 4; top: 366px; right: 18%; left: 18%; display: flex; align-items: flex-start; justify-content: center; gap: 8px; }
+    .atmosphere-deck { position: absolute; z-index: 3; top: 474px; right: 6%; left: 6%; display: grid; grid-template-columns: minmax(132px, 1fr) 238px minmax(132px, 1fr); align-items: center; gap: 10px; min-height: 108px; padding: 9px 13px; border: 1px solid #9ca9b8; border-radius: 4px; background: rgba(238,242,246,.96); box-shadow: 0 6px 18px rgba(15,23,42,.07); }
+    .atmosphere-deck::before, .robot-hub-vacuum::after { position: absolute; top: -12px; left: 50%; width: 2px; height: 12px; content: ""; background: #9ca9b8; transform: translateX(-50%); }
+    .auxiliary-bank { display: flex; align-items: center; gap: 7px; }
+    .auxiliary-right { justify-content: flex-end; }
+    .load-port-bank { position: absolute; z-index: 3; top: 610px; right: 8%; left: 8%; display: flex; align-items: flex-start; justify-content: center; gap: 8px; }
+    .load-port-bank::before { position: absolute; top: -29px; left: 50%; width: 2px; height: 29px; content: ""; background: #9ca9b8; }
+    .topology-junction { z-index: 2; display: grid; place-items: center; color: #526176; background: #edf1f5; box-shadow: inset 0 0 0 1px #9ca9b8; }
+    .vacuum-junction { position: absolute; top: 176px; left: 50%; width: 250px; height: 202px; clip-path: polygon(25% 0, 75% 0, 100% 34%, 86% 100%, 14% 100%, 0 34%); transform: translateX(-50%); }
+    .atmosphere-junction { min-height: 106px; border-radius: 5px; }
+    .topology-junction strong { font-size: 11px; }
+    .additional-robot-bank { position: absolute; right: 14px; bottom: 14px; display: flex; gap: 8px; }
+    .additional-robot-bank .robot-hub { width: 150px; min-height: 82px; }
     .active-moves-panel { position: sticky; top: 18px; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: #fff; }
     .active-moves-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 11px 12px; border-bottom: 1px solid var(--line); }
     .active-moves-head h3, .visual-legend h3 { margin: 0; font-size: 11px; }
@@ -464,10 +487,24 @@
     .system-note { margin: 0; padding: 0 16px 13px; color: #64748b; font-size: 9px; }
     .switch-line { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
     .switch-line input { width: 18px; height: 18px; }
+    .dataset-panel .panel-head p { margin: 4px 0 0; color: var(--muted); font-size: 10px; }
+    .dataset-count { flex: 0 0 auto; padding: 5px 9px; border-radius: 999px; color: #2754b8; background: #edf3ff; font-size: 10px; font-weight: 800; }
+    .dataset-run-button { width: 100%; min-height: 42px; }
     @media (max-width: 1180px) { .visual-overview { grid-template-columns: repeat(3, minmax(0, 1fr)); } .visual-source { grid-column: span 3; } .visual-stat:nth-child(5) { border-left: 0; } .visual-workspace-layout { grid-template-columns: 1fr; } .active-moves-panel { position: static; } }
     @media (max-width: 1040px) { .layout { grid-template-columns: 1fr; } .side { position: static; grid-row: 1; } .batch-results { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
     @media (max-width: 900px) { .cjob-controls { grid-template-columns: 1fr 1fr; } }
     @media (max-width: 700px) { .shell { padding: 18px 14px 48px; } .hero { align-items: flex-start; flex-direction: column; } .tabs { display: grid; grid-template-columns: 1fr 1fr; width: 100%; } .tab { min-width: 0; } .grid > * { grid-column: span 12 !important; } .route-meta-grid, .cjob-controls, .clean-fields { grid-template-columns: 1fr; } .route-process-head, .route-type-head { align-items: flex-start; flex-wrap: wrap; } .route-count { width: 100%; margin-left: 30px; } .route-summary-head, .route-summary-toggle { grid-template-columns: 1fr; } .route-summary-head { padding: 8px 10px; } .route-summary-actions { justify-content: flex-start; flex-wrap: wrap; padding-left: 13px; } .round-head { align-items: flex-start; flex-direction: column; } .candidate-picker-menu { grid-template-columns: 1fr; } .drawer { width: 100vw; max-width: 100vw; } .drawer-head, .drawer-body { padding-right: 16px; padding-left: 16px; } .step-meta-list { grid-template-columns: 1fr 1fr; row-gap: 12px; } .step-meta-list > div:nth-child(3) { padding-left: 0; border-left: 0; } .step-edit-grid, .step-system-grid, .batch-results { grid-template-columns: 1fr; } .readonly-field.wide { grid-column: auto; } .clean-choice { flex: 1 1 calc(50% - 8px); justify-content: flex-start; } .result-actions { grid-template-columns: 1fr; } .visual-toolbar { align-items: stretch; flex-direction: column; padding: 18px; } .visual-toolbar-actions { justify-content: flex-start; } .visual-overview { grid-template-columns: 1fr 1fr; } .visual-source { grid-column: span 2; } .visual-stat { border-top: 1px solid var(--line); } .visual-stat:nth-child(even) { border-left: 0; } .timeline-console { grid-template-columns: 1fr; } .timeline-play { width: 100%; } .timeline-speed { justify-content: space-between; } .equipment-grid, .lock-zone .equipment-grid, .robot-grid { grid-template-columns: 1fr; } .algorithm-history-head { align-items: flex-start; flex-direction: column; } .algorithm-version-entry { grid-template-columns: 1fr; gap: 7px; } }
-    .dataset-panel .panel-head p { margin: 4px 0 0; color: var(--muted); font-size: 10px; }
-    .dataset-count { flex: 0 0 auto; padding: 5px 9px; border-radius: 999px; color: #2754b8; background: #edf3ff; font-size: 10px; font-weight: 800; }
-    .dataset-run-button { width: 100%; min-height: 42px; }
+    @media (max-width: 780px) {
+      .schematic-head { align-items: flex-start; flex-direction: column; gap: 4px; }
+      .schematic-canvas { display: grid; gap: 12px; min-height: 0; padding: 14px; background-size: 20px 20px; }
+      .schematic-canvas::before, .atmosphere-deck::before, .robot-hub-vacuum::after, .load-port-bank::before { display: none; }
+      .process-ring { position: static; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+      .process-module-position { position: static; width: auto; transform: none; }
+      .equipment-card, .equipment-lock, .equipment-port, .equipment-auxiliary { width: 100%; }
+      .robot-hub-vacuum, .vacuum-junction { position: static; width: 100%; height: 150px; clip-path: polygon(12% 0, 88% 0, 100% 28%, 92% 100%, 8% 100%, 0 28%); transform: none; }
+      .load-lock-bank, .load-port-bank, .additional-robot-bank { position: static; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+      .atmosphere-deck { position: static; display: grid; grid-template-columns: 1fr; gap: 8px; padding: 8px; }
+      .robot-hub-atmosphere { width: 100%; }
+      .auxiliary-bank { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+      .additional-robot-bank .robot-hub { width: 100%; }
+    }
