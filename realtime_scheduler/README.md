@@ -1,4 +1,4 @@
-# CT 实时调度终端
+# 调度平台
 
 此目录集中保存实时调度前端及其本地数据：
 
@@ -8,7 +8,7 @@
   参数决定算法。
 - `batch_service.py`：批量运行、Heuristic Baseline、并发进度与取消状态。
 - `plan_builder.py`：设备归一化、Route/Recipe 和各轮 CJob/PJob 请求建模。
-- `frontend/config_editor.html`：只保存配置终端的页面骨架。
+- `frontend/config_editor.html`：只保存调度平台的页面骨架。
 - `frontend/src/`：TypeScript 前端源码，按 API、数据模型、Route 逻辑和页面入口拆分。
 - `frontend/src/workspace_visualizer.ts`：MoveList 回放、腔室门状态与设备工作台。
 - `frontend/assets/`：可由 Python 服务直接托管的构建产物与样式。
@@ -27,7 +27,7 @@
 
 ## 前端开发
 
-部署和运行仍然只依赖 Python；仓库已经保存构建后的浏览器资源。修改配置终端前端时，
+部署和运行仍然只依赖 Python；仓库已经保存构建后的浏览器资源。修改调度平台前端时，
 在 `realtime_scheduler/frontend` 下执行：
 
 ```powershell
@@ -40,8 +40,11 @@ npm run build
 `assets/config_editor.js`，并生成供 Node 单元测试使用的 `route_editor_logic.js`
 与 `workspace_visualizer_logic.js`。
 
-配置终端中的“可视化工作台”可直接载入当前运行结果、批处理结果或本地 MoveList JSON。
-工作台支持拖动时间轴和按倍率播放，并根据 Prepare/Complete 动作显示腔室门的关闭、
+每次修改前端都必须递增 `frontend/package.json` 和 `package-lock.json` 中的版本号，
+并同步页面右上角显示版本及 CSS/JavaScript 资源查询版本。
+
+调度平台中的“结果分析”可直接载入当前运行结果、批处理结果或本地 MoveList JSON。
+结果分析支持拖动时间轴和按倍率播放，并根据 Prepare/Complete 动作显示腔室门的关闭、
 正在开门、开启与正在关门状态。
 
 ## 运行策略

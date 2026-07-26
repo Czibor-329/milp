@@ -1,9 +1,9 @@
 /**
- * MoveList 可视化工作台。
+ * MoveList 结果分析页面。
  *
  * 本模块负责把调度输出回放成设备、机器人、晶圆和腔室门的可观察状态，并管理
  * 时间轴、播放控制、结果加载和本地文件导入。纯回放函数可在浏览器之外独立测试；
- * DOM 控制器只负责把快照呈现到配置终端的“可视化工作台”页。
+ * DOM 控制器只负责把快照呈现到调度平台的“结果分析”页。
  */
 
 type UnknownRecord = Record<string, unknown>;
@@ -982,7 +982,7 @@ export function buildWorkspaceSnapshot(
 function collectElements(root: Document): WorkspaceElements {
   const required = <ElementType extends HTMLElement>(id: string): ElementType => {
     const element = root.getElementById(id);
-    if (!element) throw new Error(`可视化工作台缺少页面节点：${id}`);
+    if (!element) throw new Error(`结果分析页面缺少页面节点：${id}`);
     return element as ElementType;
   };
   return {
@@ -1234,7 +1234,7 @@ function renderSchedulePerformance(performance: SchedulePerformance): string {
     </div>`;
 }
 
-/** 创建并管理现有配置终端中的可视化工作台。 */
+/** 创建并管理调度平台中的结果分析页面。 */
 export class VisualizationWorkspace {
   private readonly root: Document;
   private readonly elements: WorkspaceElements;

@@ -115,39 +115,10 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("PM1", self.device["Stations"])
         self.assertIn("LP1", self.device["Stations"])
 
-    def test_dataset_catalog_exposes_all_readonly_test_cases(self) -> None:
-        """前端目录应发现测试子集，并只返回有限的实例摘要字段。"""
-        groups = config_server.list_dataset_tests()
-        one_stage = next(group for group in groups if group["id"] == "1stage")
-        self.assertEqual(21, one_stage["caseCount"])
-        self.assertEqual("1stage/inst_0000.json", one_stage["cases"][0]["id"])
-        self.assertNotIn("update_params", one_stage["cases"][0])
-
-    def test_dataset_case_path_rejects_directory_traversal(self) -> None:
-        """dataset 运行入口不能读取测试目录外的任意 JSON。"""
-        with self.assertRaisesRegex(ValueError, "超出允许目录"):
-            config_server._resolve_dataset_case("../input_data/s1-1c1p-preclean.json")
-
-    def test_neuralucb_dataset_case_beats_heuristic_baseline(self) -> None:
-        """正式前端运行路径应在已知独立实例上严格改善 heuristic。"""
-        result = config_server.execute_dataset_test(
-            "1stage/inst_0012.json",
-            "neuralucb",
-            {"neuralUCBTopK": 2, "neuralUCBExploration": 5},
-        )
-        self.assertLess(result["makespan"], result["baseline"]["makespan"])
-        self.assertEqual(
-            "no-exchange-throughput",
-            result["rounds"][0]["strategyDiagnostics"]["selectedConfig"],
-        )
-
-    def test_frontend_contains_dataset_and_search_strategy_controls(self) -> None:
-        """页面应提供 dataset、Safe NeuralUCB 和 LoadLock 宏搜索参数。"""
+    def test_frontend_contains_search_strategy_controls(self) -> None:
+        """页面应提供 Safe NeuralUCB 和 LoadLock 宏搜索参数。"""
         source = _editor_source()
         for marker in (
-            "datasetGroupSelect",
-            "datasetCaseSelect",
-            "runDatasetCaseButton",
             "neuralucbStrategyInput",
             "neuralUCBTopK",
             "neuralUCBExploration",
@@ -156,14 +127,6 @@ class ConfigEditorServerTests(unittest.TestCase):
             "loadLockMacroRollouts",
         ):
             self.assertIn(marker, source)
-        self.assertIn(
-            'path == "/api/run-dataset-test"',
-            inspect.getsource(config_server.ConfigEditorHandler.do_POST),
-        )
-        self.assertNotIn(
-            'path == "/api/run-dataset-test"',
-            inspect.getsource(config_server.ConfigEditorHandler.do_PUT),
-        )
 
     def test_same_recipe_name_supports_module_specific_parameters(self) -> None:
         """同名 Recipe 在不同 PM 上可以使用不同加工时间，且仍由 Route 统一引用。"""
@@ -1084,7 +1047,11 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn('data-tab-target="schedule"', html)
         self.assertIn('data-tab-target="route"', html)
         self.assertIn('data-tab-target="clean"', html)
-        self.assertIn('data-tab-target="route">路径</button>', html)
+        self.assertIn('data-tab-target="workspace">结果分析</button>', html)
+        self.assertIn('data-tab-target="route">路径配置</button>', html)
+        self.assertIn('data-tab-target="clean">清洁配置</button>', html)
+        self.assertIn('<h1>调度平台</h1>', html)
+        self.assertIn('class="frontend-version">前端 v1.0.1</span>', html)
         self.assertNotIn("按加工工序数量分组，名称由候选腔室、加工时间和清洁配置自动生成。", html)
         self.assertNotIn("generate-example-routes", html)
         self.assertIn('id="stepDrawer"', html)

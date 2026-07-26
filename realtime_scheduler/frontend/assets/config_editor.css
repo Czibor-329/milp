@@ -1,5 +1,5 @@
 /**
- * CT 实时调度终端样式。
+ * 调度平台样式。
  * 与 config_editor.html 的结构配套，由独立文件承载以避免页面模板继续膨胀。
  */
     :root {
@@ -15,9 +15,9 @@
     button { cursor: pointer; }
     .shell { max-width: 1440px; margin: 0 auto; padding: 26px 30px 64px; }
     .hero { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-bottom: 18px; }
-    .eyebrow { color: var(--brand); font-size: 11px; font-weight: 800; letter-spacing: .15em; text-transform: uppercase; }
-    h1 { margin: 4px 0 0; font-size: clamp(26px, 3vw, 36px); line-height: 1.12; letter-spacing: -.03em; }
-    .hero p { max-width: 680px; margin: 8px 0 0; color: var(--muted); }
+    h1 { margin: 0; font-size: clamp(26px, 3vw, 36px); line-height: 1.12; letter-spacing: -.03em; }
+    .hero-meta { display: flex; align-items: center; gap: 10px; }
+    .frontend-version { padding: 7px 10px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); background: rgba(255,255,255,.78); font-size: 11px; font-weight: 750; white-space: nowrap; }
     .service-pill { display: flex; align-items: center; gap: 8px; padding: 9px 13px; border: 1px solid #b9e8d4; border-radius: 999px; color: var(--green); background: var(--green-soft); font-weight: 700; white-space: nowrap; }
     .service-pill::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
     .tabs { display: flex; gap: 6px; margin-bottom: 20px; padding: 5px; width: fit-content; border: 1px solid var(--line); border-radius: 12px; background: rgba(255,255,255,.75); }
@@ -286,7 +286,7 @@
     @container result-area (max-width: 1100px) { .batch-results { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
     @container result-area (max-width: 720px) { .batch-results, .result-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
     @container result-area (max-width: 520px) { .batch-results, .result-metrics { grid-template-columns: 1fr; } }
-    /* -------- MoveList 可视化工作台 -------- */
+    /* -------- MoveList 结果分析 -------- */
     .visual-workbench { overflow: visible; }
     .visual-toolbar { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; padding: 22px 24px; border-bottom: 1px solid var(--line); }
     .visual-toolbar h2 { margin: 3px 0 0; font-size: 21px; letter-spacing: -.02em; }
@@ -543,9 +543,6 @@
     .system-note { margin: 0; padding: 0 16px 13px; color: #64748b; font-size: 9px; }
     .switch-line { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
     .switch-line input { width: 18px; height: 18px; }
-    .dataset-panel .panel-head p { margin: 4px 0 0; color: var(--muted); font-size: 10px; }
-    .dataset-count { flex: 0 0 auto; padding: 5px 9px; border-radius: 999px; color: #2754b8; background: #edf3ff; font-size: 10px; font-weight: 800; }
-    .dataset-run-button { width: 100%; min-height: 42px; }
     @media (max-width: 1180px) { .visual-overview { grid-template-columns: repeat(3, minmax(0, 1fr)); } .visual-source { grid-column: span 3; } .visual-stat:nth-child(5) { border-left: 0; } .visual-workspace-layout { grid-template-columns: 1fr; } .active-moves-panel { position: static; } .performance-grid { grid-template-columns: 1fr; } .vacuum-queue-panel { border-top: 1px solid #e7edf4; border-left: 0; } .vacuum-queue-sequence { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
     @media (max-width: 1040px) { .layout { grid-template-columns: 1fr; } .side { position: static; grid-row: 1; } .batch-results { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
     @media (max-width: 900px) { .cjob-controls { grid-template-columns: 1fr 1fr; } }

@@ -638,7 +638,7 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
 function collectElements(root) {
   const required = (id) => {
     const element = root.getElementById(id);
-    if (!element) throw new Error(`\u53EF\u89C6\u5316\u5DE5\u4F5C\u53F0\u7F3A\u5C11\u9875\u9762\u8282\u70B9\uFF1A${id}`);
+    if (!element) throw new Error(`\u7ED3\u679C\u5206\u6790\u9875\u9762\u7F3A\u5C11\u9875\u9762\u8282\u70B9\uFF1A${id}`);
     return element;
   };
   return {
