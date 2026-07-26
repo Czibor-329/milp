@@ -111,6 +111,24 @@ export interface SchedulePerformance {
   vacuumQueueLongestRun: number;
 }
 
+export interface BottleneckUtilizationSummary {
+  resourceName: string;
+  utilization: number;
+  windowLabel: string;
+}
+
+/** 将完整性能诊断压缩为运行结果卡片所需的瓶颈摘要。 */
+export function summarizeBottleneckUtilization(
+  performance: SchedulePerformance,
+): BottleneckUtilizationSummary | null {
+  if (!performance.bottleneck) return null;
+  return {
+    resourceName: performance.bottleneck.name,
+    utilization: performance.bottleneck.utilization,
+    windowLabel: performance.window.label,
+  };
+}
+
 interface NormalizedMove extends MoveRecord {
   MoveID: number;
   MoveType: number;
@@ -1142,10 +1160,20 @@ function formatPercent(value: number): string {
   return `${(Math.max(0, value) * 100).toFixed(1)}%`;
 }
 
+/** 诊断表只展示当前统计窗口内实际发生过物理占用的资源。 */
+export function displayedPerformanceResources(
+  performance: SchedulePerformance,
+): ResourcePerformance[] {
+  return performance.resources.filter(
+    resource => resource.busyTime > PERFORMANCE_TIME_TOLERANCE,
+  );
+}
+
 /** 绘制资源占用表、Active Period 瓶颈和真空端晶圆队列。 */
 function renderSchedulePerformance(performance: SchedulePerformance): string {
   const window = performance.window;
   const bottleneck = performance.bottleneck;
+  const displayedResources = displayedPerformanceResources(performance);
   const resourceKindLabels: Record<ResourceKind, string> = {
     robot: "机械手",
     process: "工艺腔",
@@ -1156,18 +1184,16 @@ function renderSchedulePerformance(performance: SchedulePerformance): string {
   const legend = ACTIVITY_CATEGORIES.map(category => (
     `<span><i class="performance-swatch category-${category}"></i>${ACTIVITY_CATEGORY_LABELS[category]}</span>`
   )).join("");
-  const resourceRows = performance.resources.map(resource => {
+  const resourceRows = displayedResources.map(resource => {
     const categoryBars = ACTIVITY_CATEGORIES.map(category => {
       const duration = resource.categoryTimes[category];
       if (duration <= PERFORMANCE_TIME_TOLERANCE || window.duration <= PERFORMANCE_TIME_TOLERANCE) return "";
       const width = Math.min(duration / window.duration * 100, 100);
       return `<span class="category-${category}" style="width:${width.toFixed(3)}%" title="${ACTIVITY_CATEGORY_LABELS[category]} ${formatSeconds(duration)} s"></span>`;
     }).join("");
-    const status = resource.busyTime <= PERFORMANCE_TIME_TOLERANCE
-      ? '<span class="resource-unused">未使用</span>'
-      : resource.isBottleneck
-        ? '<span class="resource-bottleneck">瓶颈候选</span>'
-        : "";
+    const status = resource.isBottleneck
+      ? '<span class="resource-bottleneck">活跃期最长</span>'
+      : "";
     return `
       <tr class="${resource.isBottleneck ? "is-bottleneck" : ""}">
         <th scope="row">
@@ -1202,36 +1228,45 @@ function renderSchedulePerformance(performance: SchedulePerformance): string {
         <small>剔除开头 ${formatSeconds(window.trimmedStart)} s / 结尾 ${formatSeconds(window.trimmedEnd)} s</small>
       </div>
       <div>
-        <span>连续忙碌瓶颈</span>
+        <span>活跃期瓶颈候选</span>
         <strong>${escapeHtml(bottleneck?.name ?? "—")}</strong>
-        <small>${bottleneck ? `平均连续忙碌 ${formatSeconds(bottleneck.averageActivePeriod)} s · 占用 ${formatPercent(bottleneck.utilization)}` : "没有足够的资源活动"}</small>
+        <small>${bottleneck ? `平均活跃期 ${formatSeconds(bottleneck.averageActivePeriod)} s · 占用率 ${formatPercent(bottleneck.utilization)}` : "没有足够的资源活动"}</small>
       </div>
       <div>
         <span>出站节拍</span>
         <strong>${performance.throughputPerHour > 0 ? `${performance.throughputPerHour.toFixed(1)} 片/h` : "—"}</strong>
-        <small>平均间隔 ${formatSeconds(performance.meanDepartureInterval)} s · 波动 CV ${performance.departureIntervalCv.toFixed(2)}</small>
+        <small>平均间隔 ${formatSeconds(performance.meanDepartureInterval)} s · 间隔 CV ${performance.departureIntervalCv.toFixed(2)} · ${performance.completedWaferCount} 片样本</small>
       </div>
     </div>
     <p class="performance-window-note">${escapeHtml(window.detail)}</p>
     <div class="performance-legend" aria-label="占用组成图例">${legend}</div>
     <div class="performance-grid">
       <div class="performance-table-wrap">
-        <table class="performance-table">
-          <thead><tr><th>资源</th><th>物理占用</th><th>平均连续忙碌</th><th>最长空闲</th></tr></thead>
+        <table class="performance-table" aria-label="当前统计窗口内实际使用资源的占用和活跃期">
+          <caption>仅显示当前统计窗口内有占用的 ${displayedResources.length} 个资源</caption>
+          <thead><tr><th>资源</th><th>资源占用率</th><th>平均活跃期</th><th>最长空闲</th></tr></thead>
           <tbody>${resourceRows}</tbody>
         </table>
       </div>
       <aside class="vacuum-queue-panel">
         <div class="vacuum-queue-head">
           <div><strong>真空端入队序列</strong><span>按晶圆第一次从 LoadLock 被 VTR 取出排序</span></div>
-          <small>Job 切换 ${formatPercent(performance.vacuumQueueJobSwitchRatio)} · 最长连续 ${performance.vacuumQueueLongestRun} 片</small>
+          <small>队列交织度 ${formatPercent(performance.vacuumQueueJobSwitchRatio)}<br>最长同 Job 连续 ${performance.vacuumQueueLongestRun} 片</small>
         </div>
         ${queueMarkup}
         ${performance.vacuumQueue.length > visibleQueue.length
           ? `<div class="vacuum-queue-more">另有 ${performance.vacuumQueue.length - visibleQueue.length} 片未展开</div>`
           : ""}
       </aside>
-    </div>`;
+    </div>
+    <section class="performance-guidance" aria-labelledby="performanceGuidanceTitle">
+      <strong id="performanceGuidanceTitle">指标怎么读</strong>
+      <div>
+        <p><b>瓶颈候选</b><span>平均活跃期用于筛选持续占用资源；应同时核对占用率和最长空闲，不能单项定性。</span></p>
+        <p><b>节拍波动</b><span>出站间隔 CV 越小表示出片越均匀，但它只描述波动，不能单独解释根因。</span></p>
+        <p><b>队列交织</b><span>交织度只描述 Job 顺序，并非越高越好；重点看目标腔忙闲和入队至加工等待。</span></p>
+      </div>
+    </section>`;
 }
 
 /** 创建并管理调度平台中的结果分析页面。 */
@@ -1293,6 +1328,17 @@ export class VisualizationWorkspace {
       this.showError(error instanceof Error ? error.message : String(error));
       throw error;
     }
+  }
+
+  /** 返回与诊断面板一致的稳态瓶颈候选利用率，供运行结果摘要复用。 */
+  getBottleneckUtilization(): BottleneckUtilizationSummary | null {
+    if (!this.moves.length) return null;
+    const performance = analyzeSchedulePerformance(
+      this.moves,
+      this.device,
+      this.performanceWindowMode,
+    );
+    return summarizeBottleneckUtilization(performance);
   }
 
   /** 切换到工作台标签。 */

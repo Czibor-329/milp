@@ -597,7 +597,6 @@ def _six_pm_tests() -> List[Dict[str, Any]]:
     cadence_test["strategy"] = "heuristic"
     cadence_test["options"] = {
         "loadLockManager": "exchange-look",
-        "loadLockExchange": "enabled",
     }
     tests.append(cadence_test)
     return tests

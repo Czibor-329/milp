@@ -26,6 +26,10 @@ import {
 
 const { VISIT_SHARED_FIELDS, selectReferencedRoutes } = RouteEditorLogic;
 const visualizationWorkspace = createVisualizationWorkspace();
+const batchBottleneckSummaries = new Map();
+const batchBottleneckRequests = new Map();
+const batchBottleneckErrors = new Map();
+let batchBottleneckLoadQueue = Promise.resolve();
 
 const EXPECTED_API_SCHEMA = "cjob-pjob-v3";
 
@@ -42,7 +46,7 @@ const state = {
   workspaceDevices: [], workspaceDevice: null, workspaceDeviceId: "", testCaseId: "", testCaseName: "", testCaseGroup: "", activeTestGroup: "", serviceCompatible: false, dirty: false,
   activeBatchId: "", batchRunning: false, batchCancelRequested: false, batchCancelSent: false, batchResult: null, selectedBatchTestId: "",
   deviceName: "", device: null, stationNames: [], loadPorts: [], processModules: [], robotNames: [], robotScopes: {},
-  strategy: "heuristic", availableOtherAlgorithms: [], algorithmMetadata: {}, algorithmHistory: {}, roundCount: 2, times: [0, 70], options: { loadLockManager: "petri-look", loadLockExchange: "auto", loadLockMacroSearchSeconds: 4, loadLockMacroRollouts: 96, neuralUCBTopK: 2, neuralUCBExploration: 5, rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
+  strategy: "heuristic", availableOtherAlgorithms: [], algorithmMetadata: {}, algorithmHistory: {}, roundCount: 2, times: [0, 70], options: { loadLockManager: "petri-look", loadLockMacroSearchSeconds: 4, loadLockMacroRollouts: 96, neuralUCBTopK: 2, neuralUCBExploration: 5, rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
   cleans: [],
   routes: [{ name: "RouteA", group: "RouteA", bufferOption: 0, prePJobCleanRefs: [], postPJobCleanRefs: [], postCJobCleanRefs: [], stages: linkRouteSteps([makeStage("LP1"), makeStage("Robot"), makeStage("PM1,PM2", true, "RouteA_Step2"), makeStage("Robot"), makeStage("LP1")]) }],
   rounds: [makeRound(1, 0, "RouteA", "LP1"), makeRound(2, 70, "RouteA", "LP2")],
@@ -337,7 +341,7 @@ function makeDefaultTestCase(name = "默认测试集") {
   const routeName = state.routes[0]?.name || "";
   return {
     name, group: state.activeTestGroup || "", strategy: "heuristic", roundCount: 2, times: [0, 70],
-    options: { loadLockManager: "petri-look", loadLockExchange: "auto", loadLockMacroSearchSeconds: 4, loadLockMacroRollouts: 96, rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
+    options: { loadLockManager: "petri-look", loadLockMacroSearchSeconds: 4, loadLockMacroRollouts: 96, rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
     cleans: state.cleans, routes: state.routes,
     rounds: [
       makeRound(1, 0, routeName, state.loadPorts[0] || ""),
@@ -424,13 +428,16 @@ function markTestDirty() {
 function resetRunResult() {
   visualizationWorkspace.clear();
   state.batchResult = null; state.selectedBatchTestId = "";
+  batchBottleneckSummaries.clear();
+  batchBottleneckRequests.clear();
+  batchBottleneckErrors.clear();
   ["metricTime", "metricMakespan", "metricMoves", "metricValidation"].forEach(id => { document.getElementById(id).textContent = "—"; });
   ["metricTimeDetail", "metricMakespanDetail", "metricMovesDetail", "metricValidationDetail"].forEach(id => { document.getElementById(id).textContent = ""; });
   document.getElementById("metricContext").textContent = "运行总览";
   document.getElementById("batchOverviewButton").hidden = true;
   document.getElementById("metricTimeLabel").textContent = "总耗时";
   document.getElementById("metricMakespanLabel").textContent = "Makespan";
-  document.getElementById("metricMovesLabel").textContent = "Move 数";
+  setBottleneckMetric(null);
   document.getElementById("metricValidationLabel").textContent = "校验";
   document.getElementById("batchProgress").classList.remove("visible");
   document.getElementById("batchResults").innerHTML = "";
@@ -446,9 +453,9 @@ function applyTestCase(testCase) {
   state.routeNameChanges.clear();
   state.testCaseId = value.id; state.testCaseName = value.name; state.testCaseGroup = String(value.group || ""); state.activeTestGroup = state.testCaseGroup; state.strategy = value.strategy || "heuristic";
   state.roundCount = Math.max(1, Number(value.roundCount) || 1); state.times = Array.isArray(value.times) ? value.times : [0];
-  state.options = value.options || { loadLockManager: "petri-look", loadLockExchange: "auto", loadLockMacroSearchSeconds: 4, loadLockMacroRollouts: 96, neuralUCBTopK: 2, neuralUCBExploration: 5, rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 };
+  state.options = value.options || { loadLockManager: "petri-look", loadLockMacroSearchSeconds: 4, loadLockMacroRollouts: 96, neuralUCBTopK: 2, neuralUCBExploration: 5, rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 };
   state.options.loadLockManager = state.options.loadLockManager || "petri-look";
-  state.options.loadLockExchange = state.options.loadLockExchange || "auto";
+  delete state.options.loadLockExchange;
   const macroSearchSeconds = Number(state.options.loadLockMacroSearchSeconds);
   state.options.loadLockMacroSearchSeconds = Number.isFinite(macroSearchSeconds) && macroSearchSeconds >= 0 ? macroSearchSeconds : 4;
   const macroRollouts = Number(state.options.loadLockMacroRollouts);
@@ -1395,16 +1402,16 @@ function prepareGanttView(result) {
 
 /** 把本次结果加载进内嵌工作台，并启用直接查看入口。 */
 async function prepareWorkspaceView(result) {
-  if (!result?.resultId) return false;
+  if (!result?.resultId) return null;
   await visualizationWorkspace.loadResult(result.resultId, state.testCaseName || "当前运行结果");
-  return true;
+  return visualizationWorkspace.getBottleneckUtilization();
 }
 
 /** 调用本地服务运行排程。 */
 async function runPlan() {
   const button = document.getElementById("runButton");
   const batchButton = document.getElementById("batchRunButton");
-  let logReady = false, ganttReady = false, runResult = null;
+  let logReady = false, ganttReady = false, runResult = null, bottleneckSummary = null;
   try {
     const healthResponse = await fetch("/api/health", { cache: "no-store" }), health = await healthResponse.json();
     if (!healthResponse.ok || health.schemaVersion !== EXPECTED_API_SCHEMA) throw new Error("本地服务版本过旧，请重启 scripts/config_editor_server.py");
@@ -1427,7 +1434,10 @@ async function runPlan() {
     logReady = prepareLogDownload(runResult);
     ganttReady = prepareGanttView(runResult);
     if (runResult?.resultId) {
-      try { await prepareWorkspaceView(runResult); }
+      try {
+        bottleneckSummary = await prepareWorkspaceView(runResult);
+        runResult.bottleneckUtilization = bottleneckSummary;
+      }
       catch (workspaceError) { writeTerminal(`$ 工作台加载失败\n  ${workspaceError.message || "未知错误"}`, true); }
     }
     if (!response.ok || !runResult.ok) throw new Error(runResult.error || `服务返回 ${response.status}`); showResult(runResult);
@@ -1437,7 +1447,7 @@ async function runPlan() {
       ? runResult.validationIssues.map(issue => `  ${issue}`)
       : [];
     if (ganttReady) {
-      document.getElementById("metricMoves").textContent = runResult.moveCount ?? "—";
+      setBottleneckMetric(bottleneckSummary, "没有足够的资源活动");
       document.getElementById("metricMakespan").textContent = Number.isFinite(Number(runResult.makespan))
         ? `${Number(runResult.makespan).toFixed(2)} s`
         : "—";
@@ -1473,6 +1483,9 @@ async function runCurrentTestGroup() {
     const tests = (state.workspaceDevice?.tests || []).filter(test => String(test.group || "").trim() === state.activeTestGroup);
     if (!tests.length) throw new Error("当前测试组没有可运行测试");
     state.batchRunning = true; state.activeBatchId = ""; state.batchCancelRequested = false; state.batchCancelSent = false; state.batchResult = null; state.selectedBatchTestId = "";
+    batchBottleneckSummaries.clear();
+    batchBottleneckRequests.clear();
+    batchBottleneckErrors.clear();
     document.getElementById("batchOverviewButton").hidden = true;
     button.disabled = false; runButton.disabled = true; button.classList.add("cancel"); button.textContent = "■ 终止调度";
     document.getElementById("batchResults").innerHTML = "";
@@ -1539,6 +1552,20 @@ function setResultMetric(key, label, value, detail = "") {
   document.getElementById(`metric${key}Detail`).textContent = detail;
 }
 
+/** 将结果分析中的同一瓶颈口径写入顶部摘要卡片。 */
+function setBottleneckMetric(summary, emptyDetail = "运行后计算稳态瓶颈候选") {
+  const utilization = Number(summary?.utilization);
+  const available = summary && Number.isFinite(utilization);
+  setResultMetric(
+    "Moves",
+    "瓶颈利用率",
+    available ? `${(utilization * 100).toFixed(1)}%` : "—",
+    available
+      ? `${summary.resourceName || "未知资源"} · ${summary.windowLabel || "当前统计窗口"}`
+      : emptyDetail,
+  );
+}
+
 /** 绘制批量任务的组级汇总指标。 */
 function showBatchOverviewMetrics(result) {
   const successful = (result.items || []).filter(item => item.status === "succeeded");
@@ -1563,7 +1590,7 @@ function showBatchOverviewMetrics(result) {
   setResultMetric("Validation", result.cancelled ? "成功 / 失败 / 终止" : "成功 / 失败", result.cancelled ? `${result.succeeded || 0} / ${result.failed || 0} / ${result.cancelled}` : `${result.succeeded || 0} / ${result.failed || 0}`);
 }
 
-/** 把所选测试的耗时、基线、校验和机器人持片驻留统计展示在顶部。 */
+/** 把所选测试的耗时、基线、瓶颈利用率和校验结果展示在顶部。 */
 function showBatchItemOverview(item, index) {
   const succeeded = item.status === "succeeded";
   const baseline = item.baseline || {};
@@ -1572,19 +1599,60 @@ function showBatchItemOverview(item, index) {
   const elapsedTime = Number(item.totalElapsedMs);
   const makespan = Number(item.makespan);
   const improvement = Number(item.improvementPercent);
-  const dwell = item.robotWaferDwellTime || {};
   const validationText = item.validation === "passed" ? "通过" : succeeded ? String(item.validation || "未知") : item.status === "failed" ? "失败" : item.status === "cancelled" ? "已终止" : "等待完成";
   const comparisonDetail = baselineReady && Number.isFinite(improvement)
     ? `${improvement >= 0 ? "提升" : "退化"} ${Math.abs(improvement).toFixed(2)}%`
     : baseline.status && baseline.status !== "succeeded" ? `Baseline ${baseline.status === "failed" ? "失败" : "失效"}` : "";
-  const dwellAvailable = succeeded && Number.isFinite(Number(dwell.totalSeconds));
+  const resultUrl = String(item.resultUrl || "");
+  const bottleneckReady = resultUrl && batchBottleneckSummaries.has(resultUrl);
+  const bottleneckSummary = bottleneckReady ? batchBottleneckSummaries.get(resultUrl) : null;
+  const bottleneckError = resultUrl ? batchBottleneckErrors.get(resultUrl) : "";
 
   document.getElementById("metricContext").textContent = `t${index + 1} · ${item.testName || `测试 ${index + 1}`}`;
   document.getElementById("batchOverviewButton").hidden = false;
   setResultMetric("Time", "CPU Time / 耗时", Number.isFinite(cpuTime) ? `${cpuTime.toFixed(1)} ms` : "—", Number.isFinite(elapsedTime) ? `端到端耗时 ${elapsedTime.toFixed(1)} ms` : "");
   setResultMetric("Makespan", "Makespan / Baseline", Number.isFinite(makespan) ? `${makespan.toFixed(2)} / ${baselineReady ? Number(baseline.makespan).toFixed(2) : "—"} s` : "—", comparisonDetail);
-  setResultMetric("Moves", "校验", validationText, Number.isFinite(Number(item.moveCount)) ? `Move 数 ${Number(item.moveCount)}` : item.error || "");
-  setResultMetric("Validation", "机器手持片驻留", dwellAvailable ? `总和 ${Number(dwell.totalSeconds).toFixed(2)} s` : "—", dwellAvailable ? `中位数 ${Number(dwell.medianSeconds).toFixed(2)} s · 最大值 ${Number(dwell.maxSeconds).toFixed(2)} s · ${Number(dwell.sampleCount || 0)} 次` : "");
+  setBottleneckMetric(
+    bottleneckSummary,
+    succeeded && resultUrl
+      ? bottleneckError
+        ? `瓶颈计算失败：${bottleneckError}`
+        : bottleneckReady ? "没有足够的资源活动" : "正在计算稳态瓶颈…"
+      : "没有可分析的 MoveList",
+  );
+  setResultMetric("Validation", "校验", validationText, item.error || "");
+}
+
+/** 加载批量单项的 MoveList，并缓存与结果分析页一致的稳态瓶颈摘要。 */
+async function loadBatchItemBottleneck(item, index) {
+  const resultUrl = String(item?.resultUrl || "");
+  if (!resultUrl || item.status !== "succeeded" || batchBottleneckSummaries.has(resultUrl) || batchBottleneckErrors.has(resultUrl)) return;
+  let request = batchBottleneckRequests.get(resultUrl);
+  if (!request) {
+    request = batchBottleneckLoadQueue.then(async () => {
+      await visualizationWorkspace.loadResult(resultUrl, item.testName || `测试 ${index + 1}`);
+      const summary = visualizationWorkspace.getBottleneckUtilization();
+      batchBottleneckSummaries.set(resultUrl, summary);
+      return summary;
+    });
+    batchBottleneckLoadQueue = request.catch(() => null);
+    batchBottleneckRequests.set(resultUrl, request);
+  }
+  try {
+    await request;
+  } catch (error) {
+    batchBottleneckErrors.set(resultUrl, error.message || "未知错误");
+    if (state.selectedBatchTestId === String(item.testId || `index-${index}`)) {
+      setBottleneckMetric(null, `瓶颈计算失败：${error.message || "未知错误"}`);
+    }
+    return;
+  } finally {
+    batchBottleneckRequests.delete(resultUrl);
+  }
+  const currentIndex = (state.batchResult?.items || []).findIndex(
+    (candidate, candidateIndex) => String(candidate.testId || `index-${candidateIndex}`) === state.selectedBatchTestId,
+  );
+  if (currentIndex >= 0) showBatchItemOverview(state.batchResult.items[currentIndex], currentIndex);
 }
 
 /** 选择批量结果卡片，并在后续轮询中按测试 ID 保持选择。 */
@@ -1594,6 +1662,7 @@ function selectBatchItem(index) {
   state.selectedBatchTestId = String(item.testId || `index-${index}`);
   renderBatchItems(state.batchResult.items || []);
   showBatchItemOverview(item, index);
+  void loadBatchItemBottleneck(item, index);
 }
 
 /** 清除单项选择并恢复当前批量任务的组级总览。 */
@@ -1609,16 +1678,18 @@ function showBatchProgress(result) {
   const completed = Number(result.completed || 0), total = Number(result.testCount || result.items?.length || 0);
   const percent = total ? Math.round(completed / total * 100) : 0;
   const progress = document.getElementById("batchProgress");
-  const statusText = result.status === "completed" ? "批量运行完成" : result.status === "cancelled" ? "批量调度已终止" : result.status === "failed" ? "批量运行失败" : "批量运行中";
   progress.classList.add("visible");
-  document.getElementById("batchProgressText").textContent = statusText;
-  document.getElementById("batchProgressCount").textContent = `${completed}/${total} · ${percent}%`;
+  progress.setAttribute("aria-valuenow", String(percent));
+  document.getElementById("batchProgressCount").textContent = `${percent}%`;
   document.getElementById("batchProgressBar").style.width = `${percent}%`;
   state.batchResult = result;
   if (!state.selectedBatchTestId) showBatchOverviewMetrics(result);
   renderBatchItems(result.items || []);
   const selectedIndex = (result.items || []).findIndex((item, index) => String(item.testId || `index-${index}`) === state.selectedBatchTestId);
-  if (selectedIndex >= 0) showBatchItemOverview(result.items[selectedIndex], selectedIndex);
+  if (selectedIndex >= 0) {
+    showBatchItemOverview(result.items[selectedIndex], selectedIndex);
+    void loadBatchItemBottleneck(result.items[selectedIndex], selectedIndex);
+  }
   writeTerminal([
     "$ 批量运行当前测试组",
     `  组别: ${result.group || "未分组"} · 策略: ${result.strategy}`,
@@ -1634,9 +1705,9 @@ function renderBatchItems(items) {
     const baseline = item.baseline || {}, baselineReady = baseline.status === "succeeded";
     const cpuTime = Number(item.cpuTimeMs);
     const improvement = Number(item.improvementPercent);
-    const improvementBadge = finished && baselineReady && Number.isFinite(improvement)
-      ? `<b class="${improvement >= 0 ? "summary-gain" : "summary-loss"}">${improvement >= 0 ? "提升" : "退化"} ${Math.abs(improvement).toFixed(2)}%</b>`
-      : "";
+    const improvementText = finished && baselineReady && Number.isFinite(improvement)
+      ? `${improvement >= 0 ? "提升" : "退化"} ${Math.abs(improvement).toFixed(2)}%`
+      : baseline.status && baseline.status !== "succeeded" ? "无有效基线" : "提升 —";
     const baselineReason = baseline.status && baseline.status !== "succeeded"
       ? `Baseline ${baseline.status === "failed" ? "失败" : "失效"}：${baseline.error || "等待重新计算"}`
       : "";
@@ -1656,9 +1727,12 @@ function renderBatchItems(items) {
           </div>
         </div>
         <div class="batch-result-summary">
-          ${summaryError ? `<span class="summary-error" title="${escapeHtml(summaryError)}">${escapeHtml(summaryError)}</span>` : `
-            <span title="Makespan 当前值 / Heuristic Baseline"><b>${finished ? `${Number(item.makespan).toFixed(2)} s` : "—"}</b> / <b>${baselineReady ? `${Number(baseline.makespan).toFixed(2)} s` : "—"}</b>${improvementBadge ? ` ${improvementBadge}` : ""}；Cpu time <b>${finished && Number.isFinite(cpuTime) ? `${cpuTime.toFixed(1)} ms` : "—"}</b></span>
-          `}
+          <div class="batch-metric-tags" aria-label="主要指标">
+            <span class="batch-metric-tag makespan" title="Makespan${baselineReady ? `；Baseline ${Number(baseline.makespan).toFixed(2)} s` : ""}">${finished ? `${Number(item.makespan).toFixed(2)} s` : "— s"}</span>
+            <span class="batch-metric-tag ${improvement < 0 ? "loss" : "gain"}">${escapeHtml(improvementText)}</span>
+            <span class="batch-metric-tag cpu">CPU Time ${finished && Number.isFinite(cpuTime) ? `${cpuTime.toFixed(1)} ms` : "—"}</span>
+          </div>
+          ${summaryError ? `<span class="summary-error" title="${escapeHtml(summaryError)}">${escapeHtml(summaryError)}</span>` : ""}
         </div>
       </div>`;
   }).join("");
@@ -1696,7 +1770,10 @@ function showBatchResult(result) {
   ].join("\n"), result.failed > 0);
   renderBatchItems(result.items);
   const selectedIndex = result.items.findIndex((item, index) => String(item.testId || `index-${index}`) === state.selectedBatchTestId);
-  if (selectedIndex >= 0) showBatchItemOverview(result.items[selectedIndex], selectedIndex);
+  if (selectedIndex >= 0) {
+    showBatchItemOverview(result.items[selectedIndex], selectedIndex);
+    void loadBatchItemBottleneck(result.items[selectedIndex], selectedIndex);
+  }
   const first = result.items.find(item => item.ganttUrl || item.logUrl);
   if (first) {
     if (first.ganttUrl) {
@@ -1724,11 +1801,10 @@ function showResult(result) {
   ["metricTimeDetail", "metricMakespanDetail", "metricMovesDetail", "metricValidationDetail"].forEach(id => { document.getElementById(id).textContent = ""; });
   document.getElementById("metricTimeLabel").textContent = "CPU Time";
   document.getElementById("metricMakespanLabel").textContent = "Makespan / Baseline";
-  document.getElementById("metricMovesLabel").textContent = "Move 数";
+  setBottleneckMetric(result.bottleneckUtilization, "没有足够的资源活动");
   document.getElementById("metricValidationLabel").textContent = "校验";
   document.getElementById("metricTime").textContent = `${cpuTime.toFixed(1)} ms`;
   document.getElementById("metricMakespan").textContent = `${result.makespan.toFixed(2)} / ${baselineReady ? Number(baseline.makespan).toFixed(2) : "—"} s`;
-  document.getElementById("metricMoves").textContent = result.moveCount;
   document.getElementById("metricValidation").textContent = result.validation === "passed" ? "通过" : result.validation;
   writeTerminal(["$ 调度完成", ...result.rounds.map(round => {
     if (round.kind === "initial") return `  #${round.index} 首次 | ${round.elapsedMs.toFixed(1)} ms`;

@@ -178,7 +178,7 @@ test("性能分析用首片完工到末片投料剔除启动与收尾", () => {
   assert.equal(logic.analyzeSchedulePerformance(performanceMoves, device, "full").completedWaferCount, 4);
 });
 
-test("模块物理占用包含开门、取放和加工，未使用并行腔保留", () => {
+test("模块物理占用包含开门、取放和加工，界面隐藏未使用并行腔", () => {
   const performance = logic.analyzeSchedulePerformance(performanceMoves, device, "steady");
   const pm1 = performance.resources.find(resource => resource.name === "PM1");
   const pm2 = performance.resources.find(resource => resource.name === "PM2");
@@ -189,6 +189,15 @@ test("模块物理占用包含开门、取放和加工，未使用并行腔保�
   assert.equal(pm1.categoryTimes.process, 7);
   assert.equal(pm2.busyTime, 0);
   assert.equal(performance.bottleneck.name, "PM1");
+  assert.deepEqual(logic.summarizeBottleneckUtilization(performance), {
+    resourceName: "PM1",
+    utilization: 0.5,
+    windowLabel: "稳态交叠窗",
+  });
+  assert.equal(
+    logic.displayedPerformanceResources(performance).some(resource => resource.name === "PM2"),
+    false,
+  );
 });
 
 test("清洁与门动作重叠时按物理并集计时", () => {

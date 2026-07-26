@@ -23,9 +23,19 @@ __export(workspace_visualizer_exports, {
   analyzeSchedulePerformance: () => analyzeSchedulePerformance,
   buildWorkspaceSnapshot: () => buildWorkspaceSnapshot,
   createVisualizationWorkspace: () => createVisualizationWorkspace,
-  normalizeMovePayload: () => normalizeMovePayload
+  displayedPerformanceResources: () => displayedPerformanceResources,
+  normalizeMovePayload: () => normalizeMovePayload,
+  summarizeBottleneckUtilization: () => summarizeBottleneckUtilization
 });
 module.exports = __toCommonJS(workspace_visualizer_exports);
+function summarizeBottleneckUtilization(performance2) {
+  if (!performance2.bottleneck) return null;
+  return {
+    resourceName: performance2.bottleneck.name,
+    utilization: performance2.bottleneck.utilization,
+    windowLabel: performance2.window.label
+  };
+}
 var PICK_MOVE_TYPES = /* @__PURE__ */ new Set([0, 2]);
 var PLACE_MOVE_TYPES = /* @__PURE__ */ new Set([1, 3]);
 var SWAP_MOVE = 4;
@@ -769,9 +779,15 @@ function shortPJobName(value) {
 function formatPercent(value) {
   return `${(Math.max(0, value) * 100).toFixed(1)}%`;
 }
+function displayedPerformanceResources(performance2) {
+  return performance2.resources.filter(
+    (resource) => resource.busyTime > PERFORMANCE_TIME_TOLERANCE
+  );
+}
 function renderSchedulePerformance(performance2) {
   const window = performance2.window;
   const bottleneck = performance2.bottleneck;
+  const displayedResources = displayedPerformanceResources(performance2);
   const resourceKindLabels = {
     robot: "\u673A\u68B0\u624B",
     process: "\u5DE5\u827A\u8154",
@@ -780,14 +796,14 @@ function renderSchedulePerformance(performance2) {
     auxiliary: "\u8F85\u52A9\u6A21\u5757"
   };
   const legend = ACTIVITY_CATEGORIES.map((category) => `<span><i class="performance-swatch category-${category}"></i>${ACTIVITY_CATEGORY_LABELS[category]}</span>`).join("");
-  const resourceRows = performance2.resources.map((resource) => {
+  const resourceRows = displayedResources.map((resource) => {
     const categoryBars = ACTIVITY_CATEGORIES.map((category) => {
       const duration = resource.categoryTimes[category];
       if (duration <= PERFORMANCE_TIME_TOLERANCE || window.duration <= PERFORMANCE_TIME_TOLERANCE) return "";
       const width = Math.min(duration / window.duration * 100, 100);
       return `<span class="category-${category}" style="width:${width.toFixed(3)}%" title="${ACTIVITY_CATEGORY_LABELS[category]} ${formatSeconds(duration)} s"></span>`;
     }).join("");
-    const status = resource.busyTime <= PERFORMANCE_TIME_TOLERANCE ? '<span class="resource-unused">\u672A\u4F7F\u7528</span>' : resource.isBottleneck ? '<span class="resource-bottleneck">\u74F6\u9888\u5019\u9009</span>' : "";
+    const status = resource.isBottleneck ? '<span class="resource-bottleneck">\u6D3B\u8DC3\u671F\u6700\u957F</span>' : "";
     return `
       <tr class="${resource.isBottleneck ? "is-bottleneck" : ""}">
         <th scope="row">
@@ -820,34 +836,43 @@ function renderSchedulePerformance(performance2) {
         <small>\u5254\u9664\u5F00\u5934 ${formatSeconds(window.trimmedStart)} s / \u7ED3\u5C3E ${formatSeconds(window.trimmedEnd)} s</small>
       </div>
       <div>
-        <span>\u8FDE\u7EED\u5FD9\u788C\u74F6\u9888</span>
+        <span>\u6D3B\u8DC3\u671F\u74F6\u9888\u5019\u9009</span>
         <strong>${escapeHtml(bottleneck?.name ?? "\u2014")}</strong>
-        <small>${bottleneck ? `\u5E73\u5747\u8FDE\u7EED\u5FD9\u788C ${formatSeconds(bottleneck.averageActivePeriod)} s \xB7 \u5360\u7528 ${formatPercent(bottleneck.utilization)}` : "\u6CA1\u6709\u8DB3\u591F\u7684\u8D44\u6E90\u6D3B\u52A8"}</small>
+        <small>${bottleneck ? `\u5E73\u5747\u6D3B\u8DC3\u671F ${formatSeconds(bottleneck.averageActivePeriod)} s \xB7 \u5360\u7528\u7387 ${formatPercent(bottleneck.utilization)}` : "\u6CA1\u6709\u8DB3\u591F\u7684\u8D44\u6E90\u6D3B\u52A8"}</small>
       </div>
       <div>
         <span>\u51FA\u7AD9\u8282\u62CD</span>
         <strong>${performance2.throughputPerHour > 0 ? `${performance2.throughputPerHour.toFixed(1)} \u7247/h` : "\u2014"}</strong>
-        <small>\u5E73\u5747\u95F4\u9694 ${formatSeconds(performance2.meanDepartureInterval)} s \xB7 \u6CE2\u52A8 CV ${performance2.departureIntervalCv.toFixed(2)}</small>
+        <small>\u5E73\u5747\u95F4\u9694 ${formatSeconds(performance2.meanDepartureInterval)} s \xB7 \u95F4\u9694 CV ${performance2.departureIntervalCv.toFixed(2)} \xB7 ${performance2.completedWaferCount} \u7247\u6837\u672C</small>
       </div>
     </div>
     <p class="performance-window-note">${escapeHtml(window.detail)}</p>
     <div class="performance-legend" aria-label="\u5360\u7528\u7EC4\u6210\u56FE\u4F8B">${legend}</div>
     <div class="performance-grid">
       <div class="performance-table-wrap">
-        <table class="performance-table">
-          <thead><tr><th>\u8D44\u6E90</th><th>\u7269\u7406\u5360\u7528</th><th>\u5E73\u5747\u8FDE\u7EED\u5FD9\u788C</th><th>\u6700\u957F\u7A7A\u95F2</th></tr></thead>
+        <table class="performance-table" aria-label="\u5F53\u524D\u7EDF\u8BA1\u7A97\u53E3\u5185\u5B9E\u9645\u4F7F\u7528\u8D44\u6E90\u7684\u5360\u7528\u548C\u6D3B\u8DC3\u671F">
+          <caption>\u4EC5\u663E\u793A\u5F53\u524D\u7EDF\u8BA1\u7A97\u53E3\u5185\u6709\u5360\u7528\u7684 ${displayedResources.length} \u4E2A\u8D44\u6E90</caption>
+          <thead><tr><th>\u8D44\u6E90</th><th>\u8D44\u6E90\u5360\u7528\u7387</th><th>\u5E73\u5747\u6D3B\u8DC3\u671F</th><th>\u6700\u957F\u7A7A\u95F2</th></tr></thead>
           <tbody>${resourceRows}</tbody>
         </table>
       </div>
       <aside class="vacuum-queue-panel">
         <div class="vacuum-queue-head">
           <div><strong>\u771F\u7A7A\u7AEF\u5165\u961F\u5E8F\u5217</strong><span>\u6309\u6676\u5706\u7B2C\u4E00\u6B21\u4ECE LoadLock \u88AB VTR \u53D6\u51FA\u6392\u5E8F</span></div>
-          <small>Job \u5207\u6362 ${formatPercent(performance2.vacuumQueueJobSwitchRatio)} \xB7 \u6700\u957F\u8FDE\u7EED ${performance2.vacuumQueueLongestRun} \u7247</small>
+          <small>\u961F\u5217\u4EA4\u7EC7\u5EA6 ${formatPercent(performance2.vacuumQueueJobSwitchRatio)}<br>\u6700\u957F\u540C Job \u8FDE\u7EED ${performance2.vacuumQueueLongestRun} \u7247</small>
         </div>
         ${queueMarkup}
         ${performance2.vacuumQueue.length > visibleQueue.length ? `<div class="vacuum-queue-more">\u53E6\u6709 ${performance2.vacuumQueue.length - visibleQueue.length} \u7247\u672A\u5C55\u5F00</div>` : ""}
       </aside>
-    </div>`;
+    </div>
+    <section class="performance-guidance" aria-labelledby="performanceGuidanceTitle">
+      <strong id="performanceGuidanceTitle">\u6307\u6807\u600E\u4E48\u8BFB</strong>
+      <div>
+        <p><b>\u74F6\u9888\u5019\u9009</b><span>\u5E73\u5747\u6D3B\u8DC3\u671F\u7528\u4E8E\u7B5B\u9009\u6301\u7EED\u5360\u7528\u8D44\u6E90\uFF1B\u5E94\u540C\u65F6\u6838\u5BF9\u5360\u7528\u7387\u548C\u6700\u957F\u7A7A\u95F2\uFF0C\u4E0D\u80FD\u5355\u9879\u5B9A\u6027\u3002</span></p>
+        <p><b>\u8282\u62CD\u6CE2\u52A8</b><span>\u51FA\u7AD9\u95F4\u9694 CV \u8D8A\u5C0F\u8868\u793A\u51FA\u7247\u8D8A\u5747\u5300\uFF0C\u4F46\u5B83\u53EA\u63CF\u8FF0\u6CE2\u52A8\uFF0C\u4E0D\u80FD\u5355\u72EC\u89E3\u91CA\u6839\u56E0\u3002</span></p>
+        <p><b>\u961F\u5217\u4EA4\u7EC7</b><span>\u4EA4\u7EC7\u5EA6\u53EA\u63CF\u8FF0 Job \u987A\u5E8F\uFF0C\u5E76\u975E\u8D8A\u9AD8\u8D8A\u597D\uFF1B\u91CD\u70B9\u770B\u76EE\u6807\u8154\u5FD9\u95F2\u548C\u5165\u961F\u81F3\u52A0\u5DE5\u7B49\u5F85\u3002</span></p>
+      </div>
+    </section>`;
 }
 var VisualizationWorkspace = class {
   root;
@@ -899,6 +924,16 @@ var VisualizationWorkspace = class {
       this.showError(error instanceof Error ? error.message : String(error));
       throw error;
     }
+  }
+  /** 返回与诊断面板一致的稳态瓶颈候选利用率，供运行结果摘要复用。 */
+  getBottleneckUtilization() {
+    if (!this.moves.length) return null;
+    const performance2 = analyzeSchedulePerformance(
+      this.moves,
+      this.device,
+      this.performanceWindowMode
+    );
+    return summarizeBottleneckUtilization(performance2);
   }
   /** 切换到工作台标签。 */
   show() {
@@ -1088,5 +1123,7 @@ function createVisualizationWorkspace(root = document) {
   analyzeSchedulePerformance,
   buildWorkspaceSnapshot,
   createVisualizationWorkspace,
-  normalizeMovePayload
+  displayedPerformanceResources,
+  normalizeMovePayload,
+  summarizeBottleneckUtilization
 });

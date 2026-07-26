@@ -140,6 +140,14 @@ async function requestJson(url, options = {}) {
 }
 
 // src/workspace_visualizer.ts
+function summarizeBottleneckUtilization(performance2) {
+  if (!performance2.bottleneck) return null;
+  return {
+    resourceName: performance2.bottleneck.name,
+    utilization: performance2.bottleneck.utilization,
+    windowLabel: performance2.window.label
+  };
+}
 var PICK_MOVE_TYPES = /* @__PURE__ */ new Set([0, 2]);
 var PLACE_MOVE_TYPES = /* @__PURE__ */ new Set([1, 3]);
 var SWAP_MOVE = 4;
@@ -883,9 +891,15 @@ function shortPJobName(value) {
 function formatPercent(value) {
   return `${(Math.max(0, value) * 100).toFixed(1)}%`;
 }
+function displayedPerformanceResources(performance2) {
+  return performance2.resources.filter(
+    (resource) => resource.busyTime > PERFORMANCE_TIME_TOLERANCE
+  );
+}
 function renderSchedulePerformance(performance2) {
   const window2 = performance2.window;
   const bottleneck = performance2.bottleneck;
+  const displayedResources = displayedPerformanceResources(performance2);
   const resourceKindLabels = {
     robot: "\u673A\u68B0\u624B",
     process: "\u5DE5\u827A\u8154",
@@ -894,14 +908,14 @@ function renderSchedulePerformance(performance2) {
     auxiliary: "\u8F85\u52A9\u6A21\u5757"
   };
   const legend = ACTIVITY_CATEGORIES.map((category) => `<span><i class="performance-swatch category-${category}"></i>${ACTIVITY_CATEGORY_LABELS[category]}</span>`).join("");
-  const resourceRows = performance2.resources.map((resource) => {
+  const resourceRows = displayedResources.map((resource) => {
     const categoryBars = ACTIVITY_CATEGORIES.map((category) => {
       const duration = resource.categoryTimes[category];
       if (duration <= PERFORMANCE_TIME_TOLERANCE || window2.duration <= PERFORMANCE_TIME_TOLERANCE) return "";
       const width = Math.min(duration / window2.duration * 100, 100);
       return `<span class="category-${category}" style="width:${width.toFixed(3)}%" title="${ACTIVITY_CATEGORY_LABELS[category]} ${formatSeconds2(duration)} s"></span>`;
     }).join("");
-    const status = resource.busyTime <= PERFORMANCE_TIME_TOLERANCE ? '<span class="resource-unused">\u672A\u4F7F\u7528</span>' : resource.isBottleneck ? '<span class="resource-bottleneck">\u74F6\u9888\u5019\u9009</span>' : "";
+    const status = resource.isBottleneck ? '<span class="resource-bottleneck">\u6D3B\u8DC3\u671F\u6700\u957F</span>' : "";
     return `
       <tr class="${resource.isBottleneck ? "is-bottleneck" : ""}">
         <th scope="row">
@@ -934,34 +948,43 @@ function renderSchedulePerformance(performance2) {
         <small>\u5254\u9664\u5F00\u5934 ${formatSeconds2(window2.trimmedStart)} s / \u7ED3\u5C3E ${formatSeconds2(window2.trimmedEnd)} s</small>
       </div>
       <div>
-        <span>\u8FDE\u7EED\u5FD9\u788C\u74F6\u9888</span>
+        <span>\u6D3B\u8DC3\u671F\u74F6\u9888\u5019\u9009</span>
         <strong>${escapeHtml(bottleneck?.name ?? "\u2014")}</strong>
-        <small>${bottleneck ? `\u5E73\u5747\u8FDE\u7EED\u5FD9\u788C ${formatSeconds2(bottleneck.averageActivePeriod)} s \xB7 \u5360\u7528 ${formatPercent(bottleneck.utilization)}` : "\u6CA1\u6709\u8DB3\u591F\u7684\u8D44\u6E90\u6D3B\u52A8"}</small>
+        <small>${bottleneck ? `\u5E73\u5747\u6D3B\u8DC3\u671F ${formatSeconds2(bottleneck.averageActivePeriod)} s \xB7 \u5360\u7528\u7387 ${formatPercent(bottleneck.utilization)}` : "\u6CA1\u6709\u8DB3\u591F\u7684\u8D44\u6E90\u6D3B\u52A8"}</small>
       </div>
       <div>
         <span>\u51FA\u7AD9\u8282\u62CD</span>
         <strong>${performance2.throughputPerHour > 0 ? `${performance2.throughputPerHour.toFixed(1)} \u7247/h` : "\u2014"}</strong>
-        <small>\u5E73\u5747\u95F4\u9694 ${formatSeconds2(performance2.meanDepartureInterval)} s \xB7 \u6CE2\u52A8 CV ${performance2.departureIntervalCv.toFixed(2)}</small>
+        <small>\u5E73\u5747\u95F4\u9694 ${formatSeconds2(performance2.meanDepartureInterval)} s \xB7 \u95F4\u9694 CV ${performance2.departureIntervalCv.toFixed(2)} \xB7 ${performance2.completedWaferCount} \u7247\u6837\u672C</small>
       </div>
     </div>
     <p class="performance-window-note">${escapeHtml(window2.detail)}</p>
     <div class="performance-legend" aria-label="\u5360\u7528\u7EC4\u6210\u56FE\u4F8B">${legend}</div>
     <div class="performance-grid">
       <div class="performance-table-wrap">
-        <table class="performance-table">
-          <thead><tr><th>\u8D44\u6E90</th><th>\u7269\u7406\u5360\u7528</th><th>\u5E73\u5747\u8FDE\u7EED\u5FD9\u788C</th><th>\u6700\u957F\u7A7A\u95F2</th></tr></thead>
+        <table class="performance-table" aria-label="\u5F53\u524D\u7EDF\u8BA1\u7A97\u53E3\u5185\u5B9E\u9645\u4F7F\u7528\u8D44\u6E90\u7684\u5360\u7528\u548C\u6D3B\u8DC3\u671F">
+          <caption>\u4EC5\u663E\u793A\u5F53\u524D\u7EDF\u8BA1\u7A97\u53E3\u5185\u6709\u5360\u7528\u7684 ${displayedResources.length} \u4E2A\u8D44\u6E90</caption>
+          <thead><tr><th>\u8D44\u6E90</th><th>\u8D44\u6E90\u5360\u7528\u7387</th><th>\u5E73\u5747\u6D3B\u8DC3\u671F</th><th>\u6700\u957F\u7A7A\u95F2</th></tr></thead>
           <tbody>${resourceRows}</tbody>
         </table>
       </div>
       <aside class="vacuum-queue-panel">
         <div class="vacuum-queue-head">
           <div><strong>\u771F\u7A7A\u7AEF\u5165\u961F\u5E8F\u5217</strong><span>\u6309\u6676\u5706\u7B2C\u4E00\u6B21\u4ECE LoadLock \u88AB VTR \u53D6\u51FA\u6392\u5E8F</span></div>
-          <small>Job \u5207\u6362 ${formatPercent(performance2.vacuumQueueJobSwitchRatio)} \xB7 \u6700\u957F\u8FDE\u7EED ${performance2.vacuumQueueLongestRun} \u7247</small>
+          <small>\u961F\u5217\u4EA4\u7EC7\u5EA6 ${formatPercent(performance2.vacuumQueueJobSwitchRatio)}<br>\u6700\u957F\u540C Job \u8FDE\u7EED ${performance2.vacuumQueueLongestRun} \u7247</small>
         </div>
         ${queueMarkup}
         ${performance2.vacuumQueue.length > visibleQueue.length ? `<div class="vacuum-queue-more">\u53E6\u6709 ${performance2.vacuumQueue.length - visibleQueue.length} \u7247\u672A\u5C55\u5F00</div>` : ""}
       </aside>
-    </div>`;
+    </div>
+    <section class="performance-guidance" aria-labelledby="performanceGuidanceTitle">
+      <strong id="performanceGuidanceTitle">\u6307\u6807\u600E\u4E48\u8BFB</strong>
+      <div>
+        <p><b>\u74F6\u9888\u5019\u9009</b><span>\u5E73\u5747\u6D3B\u8DC3\u671F\u7528\u4E8E\u7B5B\u9009\u6301\u7EED\u5360\u7528\u8D44\u6E90\uFF1B\u5E94\u540C\u65F6\u6838\u5BF9\u5360\u7528\u7387\u548C\u6700\u957F\u7A7A\u95F2\uFF0C\u4E0D\u80FD\u5355\u9879\u5B9A\u6027\u3002</span></p>
+        <p><b>\u8282\u62CD\u6CE2\u52A8</b><span>\u51FA\u7AD9\u95F4\u9694 CV \u8D8A\u5C0F\u8868\u793A\u51FA\u7247\u8D8A\u5747\u5300\uFF0C\u4F46\u5B83\u53EA\u63CF\u8FF0\u6CE2\u52A8\uFF0C\u4E0D\u80FD\u5355\u72EC\u89E3\u91CA\u6839\u56E0\u3002</span></p>
+        <p><b>\u961F\u5217\u4EA4\u7EC7</b><span>\u4EA4\u7EC7\u5EA6\u53EA\u63CF\u8FF0 Job \u987A\u5E8F\uFF0C\u5E76\u975E\u8D8A\u9AD8\u8D8A\u597D\uFF1B\u91CD\u70B9\u770B\u76EE\u6807\u8154\u5FD9\u95F2\u548C\u5165\u961F\u81F3\u52A0\u5DE5\u7B49\u5F85\u3002</span></p>
+      </div>
+    </section>`;
 }
 var VisualizationWorkspace = class {
   root;
@@ -1013,6 +1036,16 @@ var VisualizationWorkspace = class {
       this.showError(error instanceof Error ? error.message : String(error));
       throw error;
     }
+  }
+  /** 返回与诊断面板一致的稳态瓶颈候选利用率，供运行结果摘要复用。 */
+  getBottleneckUtilization() {
+    if (!this.moves.length) return null;
+    const performance2 = analyzeSchedulePerformance(
+      this.moves,
+      this.device,
+      this.performanceWindowMode
+    );
+    return summarizeBottleneckUtilization(performance2);
   }
   /** 切换到工作台标签。 */
   show() {
@@ -1343,6 +1376,10 @@ function normalizeRound(raw, roundIndex, fallbackTime) {
 // src/config_editor.ts
 var { VISIT_SHARED_FIELDS: VISIT_SHARED_FIELDS2, selectReferencedRoutes: selectReferencedRoutes2 } = route_editor_logic_exports;
 var visualizationWorkspace = createVisualizationWorkspace();
+var batchBottleneckSummaries = /* @__PURE__ */ new Map();
+var batchBottleneckRequests = /* @__PURE__ */ new Map();
+var batchBottleneckErrors = /* @__PURE__ */ new Map();
+var batchBottleneckLoadQueue = Promise.resolve();
 var EXPECTED_API_SCHEMA = "cjob-pjob-v3";
 var CLEAN_TYPE_DEFINITIONS = [
   { key: "preclean", label: "PreClean" },
@@ -1381,7 +1418,7 @@ var state = {
   algorithmHistory: {},
   roundCount: 2,
   times: [0, 70],
-  options: { loadLockManager: "petri-look", loadLockExchange: "auto", loadLockMacroSearchSeconds: 4, loadLockMacroRollouts: 96, neuralUCBTopK: 2, neuralUCBExploration: 5, rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
+  options: { loadLockManager: "petri-look", loadLockMacroSearchSeconds: 4, loadLockMacroRollouts: 96, neuralUCBTopK: 2, neuralUCBExploration: 5, rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
   cleans: [],
   routes: [{ name: "RouteA", group: "RouteA", bufferOption: 0, prePJobCleanRefs: [], postPJobCleanRefs: [], postCJobCleanRefs: [], stages: linkRouteSteps([makeStage("LP1"), makeStage("Robot"), makeStage("PM1,PM2", true, "RouteA_Step2"), makeStage("Robot"), makeStage("LP1")]) }],
   rounds: [makeRound(1, 0, "RouteA", "LP1"), makeRound(2, 70, "RouteA", "LP2")],
@@ -1641,7 +1678,7 @@ function makeDefaultTestCase(name = "\u9ED8\u8BA4\u6D4B\u8BD5\u96C6") {
     strategy: "heuristic",
     roundCount: 2,
     times: [0, 70],
-    options: { loadLockManager: "petri-look", loadLockExchange: "auto", loadLockMacroSearchSeconds: 4, loadLockMacroRollouts: 96, rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
+    options: { loadLockManager: "petri-look", loadLockMacroSearchSeconds: 4, loadLockMacroRollouts: 96, rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
     cleans: state.cleans,
     routes: state.routes,
     rounds: [
@@ -1727,6 +1764,9 @@ function resetRunResult() {
   visualizationWorkspace.clear();
   state.batchResult = null;
   state.selectedBatchTestId = "";
+  batchBottleneckSummaries.clear();
+  batchBottleneckRequests.clear();
+  batchBottleneckErrors.clear();
   ["metricTime", "metricMakespan", "metricMoves", "metricValidation"].forEach((id) => {
     document.getElementById(id).textContent = "\u2014";
   });
@@ -1737,7 +1777,7 @@ function resetRunResult() {
   document.getElementById("batchOverviewButton").hidden = true;
   document.getElementById("metricTimeLabel").textContent = "\u603B\u8017\u65F6";
   document.getElementById("metricMakespanLabel").textContent = "Makespan";
-  document.getElementById("metricMovesLabel").textContent = "Move \u6570";
+  setBottleneckMetric(null);
   document.getElementById("metricValidationLabel").textContent = "\u6821\u9A8C";
   document.getElementById("batchProgress").classList.remove("visible");
   document.getElementById("batchResults").innerHTML = "";
@@ -1758,9 +1798,9 @@ function applyTestCase(testCase) {
   state.strategy = value.strategy || "heuristic";
   state.roundCount = Math.max(1, Number(value.roundCount) || 1);
   state.times = Array.isArray(value.times) ? value.times : [0];
-  state.options = value.options || { loadLockManager: "petri-look", loadLockExchange: "auto", loadLockMacroSearchSeconds: 4, loadLockMacroRollouts: 96, neuralUCBTopK: 2, neuralUCBExploration: 5, rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 };
+  state.options = value.options || { loadLockManager: "petri-look", loadLockMacroSearchSeconds: 4, loadLockMacroRollouts: 96, neuralUCBTopK: 2, neuralUCBExploration: 5, rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 };
   state.options.loadLockManager = state.options.loadLockManager || "petri-look";
-  state.options.loadLockExchange = state.options.loadLockExchange || "auto";
+  delete state.options.loadLockExchange;
   const macroSearchSeconds = Number(state.options.loadLockMacroSearchSeconds);
   state.options.loadLockMacroSearchSeconds = Number.isFinite(macroSearchSeconds) && macroSearchSeconds >= 0 ? macroSearchSeconds : 4;
   const macroRollouts = Number(state.options.loadLockMacroRollouts);
@@ -2726,14 +2766,14 @@ function prepareGanttView(result) {
   return true;
 }
 async function prepareWorkspaceView(result) {
-  if (!result?.resultId) return false;
+  if (!result?.resultId) return null;
   await visualizationWorkspace.loadResult(result.resultId, state.testCaseName || "\u5F53\u524D\u8FD0\u884C\u7ED3\u679C");
-  return true;
+  return visualizationWorkspace.getBottleneckUtilization();
 }
 async function runPlan() {
   const button = document.getElementById("runButton");
   const batchButton = document.getElementById("batchRunButton");
-  let logReady = false, ganttReady = false, runResult = null;
+  let logReady = false, ganttReady = false, runResult = null, bottleneckSummary = null;
   try {
     const healthResponse = await fetch("/api/health", { cache: "no-store" }), health = await healthResponse.json();
     if (!healthResponse.ok || health.schemaVersion !== EXPECTED_API_SCHEMA) throw new Error("\u672C\u5730\u670D\u52A1\u7248\u672C\u8FC7\u65E7\uFF0C\u8BF7\u91CD\u542F scripts/config_editor_server.py");
@@ -2766,7 +2806,8 @@ async function runPlan() {
     ganttReady = prepareGanttView(runResult);
     if (runResult?.resultId) {
       try {
-        await prepareWorkspaceView(runResult);
+        bottleneckSummary = await prepareWorkspaceView(runResult);
+        runResult.bottleneckUtilization = bottleneckSummary;
       } catch (workspaceError) {
         writeTerminal(`$ \u5DE5\u4F5C\u53F0\u52A0\u8F7D\u5931\u8D25
   ${workspaceError.message || "\u672A\u77E5\u9519\u8BEF"}`, true);
@@ -2779,7 +2820,7 @@ async function runPlan() {
   Baseline \u5931\u8D25\uFF1A${runResult.baseline.error || "\u672A\u77E5\u539F\u56E0"}` : "";
     const validationIssues = Array.isArray(runResult?.validationIssues) ? runResult.validationIssues.map((issue) => `  ${issue}`) : [];
     if (ganttReady) {
-      document.getElementById("metricMoves").textContent = runResult.moveCount ?? "\u2014";
+      setBottleneckMetric(bottleneckSummary, "\u6CA1\u6709\u8DB3\u591F\u7684\u8D44\u6E90\u6D3B\u52A8");
       document.getElementById("metricMakespan").textContent = Number.isFinite(Number(runResult.makespan)) ? `${Number(runResult.makespan).toFixed(2)} s` : "\u2014";
     }
     writeTerminal([
@@ -2825,6 +2866,9 @@ async function runCurrentTestGroup() {
     state.batchCancelSent = false;
     state.batchResult = null;
     state.selectedBatchTestId = "";
+    batchBottleneckSummaries.clear();
+    batchBottleneckRequests.clear();
+    batchBottleneckErrors.clear();
     document.getElementById("batchOverviewButton").hidden = true;
     button.disabled = false;
     runButton.disabled = true;
@@ -2899,6 +2943,16 @@ function setResultMetric(key, label, value, detail = "") {
   document.getElementById(`metric${key}`).textContent = value;
   document.getElementById(`metric${key}Detail`).textContent = detail;
 }
+function setBottleneckMetric(summary, emptyDetail = "\u8FD0\u884C\u540E\u8BA1\u7B97\u7A33\u6001\u74F6\u9888\u5019\u9009") {
+  const utilization = Number(summary?.utilization);
+  const available = summary && Number.isFinite(utilization);
+  setResultMetric(
+    "Moves",
+    "\u74F6\u9888\u5229\u7528\u7387",
+    available ? `${(utilization * 100).toFixed(1)}%` : "\u2014",
+    available ? `${summary.resourceName || "\u672A\u77E5\u8D44\u6E90"} \xB7 ${summary.windowLabel || "\u5F53\u524D\u7EDF\u8BA1\u7A97\u53E3"}` : emptyDetail
+  );
+}
 function showBatchOverviewMetrics(result) {
   const successful = (result.items || []).filter((item) => item.status === "succeeded");
   const averageMakespan = successful.length ? successful.reduce((sum, item) => sum + Number(item.makespan), 0) / successful.length : 0;
@@ -2925,16 +2979,51 @@ function showBatchItemOverview(item, index) {
   const elapsedTime = Number(item.totalElapsedMs);
   const makespan = Number(item.makespan);
   const improvement = Number(item.improvementPercent);
-  const dwell = item.robotWaferDwellTime || {};
   const validationText = item.validation === "passed" ? "\u901A\u8FC7" : succeeded ? String(item.validation || "\u672A\u77E5") : item.status === "failed" ? "\u5931\u8D25" : item.status === "cancelled" ? "\u5DF2\u7EC8\u6B62" : "\u7B49\u5F85\u5B8C\u6210";
   const comparisonDetail = baselineReady && Number.isFinite(improvement) ? `${improvement >= 0 ? "\u63D0\u5347" : "\u9000\u5316"} ${Math.abs(improvement).toFixed(2)}%` : baseline.status && baseline.status !== "succeeded" ? `Baseline ${baseline.status === "failed" ? "\u5931\u8D25" : "\u5931\u6548"}` : "";
-  const dwellAvailable = succeeded && Number.isFinite(Number(dwell.totalSeconds));
+  const resultUrl = String(item.resultUrl || "");
+  const bottleneckReady = resultUrl && batchBottleneckSummaries.has(resultUrl);
+  const bottleneckSummary = bottleneckReady ? batchBottleneckSummaries.get(resultUrl) : null;
+  const bottleneckError = resultUrl ? batchBottleneckErrors.get(resultUrl) : "";
   document.getElementById("metricContext").textContent = `t${index + 1} \xB7 ${item.testName || `\u6D4B\u8BD5 ${index + 1}`}`;
   document.getElementById("batchOverviewButton").hidden = false;
   setResultMetric("Time", "CPU Time / \u8017\u65F6", Number.isFinite(cpuTime) ? `${cpuTime.toFixed(1)} ms` : "\u2014", Number.isFinite(elapsedTime) ? `\u7AEF\u5230\u7AEF\u8017\u65F6 ${elapsedTime.toFixed(1)} ms` : "");
   setResultMetric("Makespan", "Makespan / Baseline", Number.isFinite(makespan) ? `${makespan.toFixed(2)} / ${baselineReady ? Number(baseline.makespan).toFixed(2) : "\u2014"} s` : "\u2014", comparisonDetail);
-  setResultMetric("Moves", "\u6821\u9A8C", validationText, Number.isFinite(Number(item.moveCount)) ? `Move \u6570 ${Number(item.moveCount)}` : item.error || "");
-  setResultMetric("Validation", "\u673A\u5668\u624B\u6301\u7247\u9A7B\u7559", dwellAvailable ? `\u603B\u548C ${Number(dwell.totalSeconds).toFixed(2)} s` : "\u2014", dwellAvailable ? `\u4E2D\u4F4D\u6570 ${Number(dwell.medianSeconds).toFixed(2)} s \xB7 \u6700\u5927\u503C ${Number(dwell.maxSeconds).toFixed(2)} s \xB7 ${Number(dwell.sampleCount || 0)} \u6B21` : "");
+  setBottleneckMetric(
+    bottleneckSummary,
+    succeeded && resultUrl ? bottleneckError ? `\u74F6\u9888\u8BA1\u7B97\u5931\u8D25\uFF1A${bottleneckError}` : bottleneckReady ? "\u6CA1\u6709\u8DB3\u591F\u7684\u8D44\u6E90\u6D3B\u52A8" : "\u6B63\u5728\u8BA1\u7B97\u7A33\u6001\u74F6\u9888\u2026" : "\u6CA1\u6709\u53EF\u5206\u6790\u7684 MoveList"
+  );
+  setResultMetric("Validation", "\u6821\u9A8C", validationText, item.error || "");
+}
+async function loadBatchItemBottleneck(item, index) {
+  const resultUrl = String(item?.resultUrl || "");
+  if (!resultUrl || item.status !== "succeeded" || batchBottleneckSummaries.has(resultUrl) || batchBottleneckErrors.has(resultUrl)) return;
+  let request = batchBottleneckRequests.get(resultUrl);
+  if (!request) {
+    request = batchBottleneckLoadQueue.then(async () => {
+      await visualizationWorkspace.loadResult(resultUrl, item.testName || `\u6D4B\u8BD5 ${index + 1}`);
+      const summary = visualizationWorkspace.getBottleneckUtilization();
+      batchBottleneckSummaries.set(resultUrl, summary);
+      return summary;
+    });
+    batchBottleneckLoadQueue = request.catch(() => null);
+    batchBottleneckRequests.set(resultUrl, request);
+  }
+  try {
+    await request;
+  } catch (error) {
+    batchBottleneckErrors.set(resultUrl, error.message || "\u672A\u77E5\u9519\u8BEF");
+    if (state.selectedBatchTestId === String(item.testId || `index-${index}`)) {
+      setBottleneckMetric(null, `\u74F6\u9888\u8BA1\u7B97\u5931\u8D25\uFF1A${error.message || "\u672A\u77E5\u9519\u8BEF"}`);
+    }
+    return;
+  } finally {
+    batchBottleneckRequests.delete(resultUrl);
+  }
+  const currentIndex = (state.batchResult?.items || []).findIndex(
+    (candidate, candidateIndex) => String(candidate.testId || `index-${candidateIndex}`) === state.selectedBatchTestId
+  );
+  if (currentIndex >= 0) showBatchItemOverview(state.batchResult.items[currentIndex], currentIndex);
 }
 function selectBatchItem(index) {
   const item = state.batchResult?.items?.[index];
@@ -2942,6 +3031,7 @@ function selectBatchItem(index) {
   state.selectedBatchTestId = String(item.testId || `index-${index}`);
   renderBatchItems(state.batchResult.items || []);
   showBatchItemOverview(item, index);
+  void loadBatchItemBottleneck(item, index);
 }
 function showCurrentBatchOverview() {
   if (!state.batchResult) return;
@@ -2953,16 +3043,18 @@ function showBatchProgress(result) {
   const completed = Number(result.completed || 0), total = Number(result.testCount || result.items?.length || 0);
   const percent = total ? Math.round(completed / total * 100) : 0;
   const progress = document.getElementById("batchProgress");
-  const statusText = result.status === "completed" ? "\u6279\u91CF\u8FD0\u884C\u5B8C\u6210" : result.status === "cancelled" ? "\u6279\u91CF\u8C03\u5EA6\u5DF2\u7EC8\u6B62" : result.status === "failed" ? "\u6279\u91CF\u8FD0\u884C\u5931\u8D25" : "\u6279\u91CF\u8FD0\u884C\u4E2D";
   progress.classList.add("visible");
-  document.getElementById("batchProgressText").textContent = statusText;
-  document.getElementById("batchProgressCount").textContent = `${completed}/${total} \xB7 ${percent}%`;
+  progress.setAttribute("aria-valuenow", String(percent));
+  document.getElementById("batchProgressCount").textContent = `${percent}%`;
   document.getElementById("batchProgressBar").style.width = `${percent}%`;
   state.batchResult = result;
   if (!state.selectedBatchTestId) showBatchOverviewMetrics(result);
   renderBatchItems(result.items || []);
   const selectedIndex = (result.items || []).findIndex((item, index) => String(item.testId || `index-${index}`) === state.selectedBatchTestId);
-  if (selectedIndex >= 0) showBatchItemOverview(result.items[selectedIndex], selectedIndex);
+  if (selectedIndex >= 0) {
+    showBatchItemOverview(result.items[selectedIndex], selectedIndex);
+    void loadBatchItemBottleneck(result.items[selectedIndex], selectedIndex);
+  }
   writeTerminal([
     "$ \u6279\u91CF\u8FD0\u884C\u5F53\u524D\u6D4B\u8BD5\u7EC4",
     `  \u7EC4\u522B: ${result.group || "\u672A\u5206\u7EC4"} \xB7 \u7B56\u7565: ${result.strategy}`,
@@ -2977,7 +3069,7 @@ function renderBatchItems(items) {
     const baseline = item.baseline || {}, baselineReady = baseline.status === "succeeded";
     const cpuTime = Number(item.cpuTimeMs);
     const improvement = Number(item.improvementPercent);
-    const improvementBadge = finished && baselineReady && Number.isFinite(improvement) ? `<b class="${improvement >= 0 ? "summary-gain" : "summary-loss"}">${improvement >= 0 ? "\u63D0\u5347" : "\u9000\u5316"} ${Math.abs(improvement).toFixed(2)}%</b>` : "";
+    const improvementText = finished && baselineReady && Number.isFinite(improvement) ? `${improvement >= 0 ? "\u63D0\u5347" : "\u9000\u5316"} ${Math.abs(improvement).toFixed(2)}%` : baseline.status && baseline.status !== "succeeded" ? "\u65E0\u6709\u6548\u57FA\u7EBF" : "\u63D0\u5347 \u2014";
     const baselineReason = baseline.status && baseline.status !== "succeeded" ? `Baseline ${baseline.status === "failed" ? "\u5931\u8D25" : "\u5931\u6548"}\uFF1A${baseline.error || "\u7B49\u5F85\u91CD\u65B0\u8BA1\u7B97"}` : "";
     const summaryError = baseline.status === "failed" ? baselineReason : item.status === "failed" ? `\u8FD0\u884C\u5931\u8D25\uFF1A${item.error || "\u672A\u77E5\u9519\u8BEF"}` : item.status === "cancelled" ? "\u8C03\u5EA6\u5DF2\u7EC8\u6B62" : baselineReason;
     const displayId = `t${index + 1}`;
@@ -2995,9 +3087,12 @@ function renderBatchItems(items) {
           </div>
         </div>
         <div class="batch-result-summary">
-          ${summaryError ? `<span class="summary-error" title="${escapeHtml2(summaryError)}">${escapeHtml2(summaryError)}</span>` : `
-            <span title="Makespan \u5F53\u524D\u503C / Heuristic Baseline"><b>${finished ? `${Number(item.makespan).toFixed(2)} s` : "\u2014"}</b> / <b>${baselineReady ? `${Number(baseline.makespan).toFixed(2)} s` : "\u2014"}</b>${improvementBadge ? ` ${improvementBadge}` : ""}\uFF1BCpu time <b>${finished && Number.isFinite(cpuTime) ? `${cpuTime.toFixed(1)} ms` : "\u2014"}</b></span>
-          `}
+          <div class="batch-metric-tags" aria-label="\u4E3B\u8981\u6307\u6807">
+            <span class="batch-metric-tag makespan" title="Makespan${baselineReady ? `\uFF1BBaseline ${Number(baseline.makespan).toFixed(2)} s` : ""}">${finished ? `${Number(item.makespan).toFixed(2)} s` : "\u2014 s"}</span>
+            <span class="batch-metric-tag ${improvement < 0 ? "loss" : "gain"}">${escapeHtml2(improvementText)}</span>
+            <span class="batch-metric-tag cpu">CPU Time ${finished && Number.isFinite(cpuTime) ? `${cpuTime.toFixed(1)} ms` : "\u2014"}</span>
+          </div>
+          ${summaryError ? `<span class="summary-error" title="${escapeHtml2(summaryError)}">${escapeHtml2(summaryError)}</span>` : ""}
         </div>
       </div>`;
   }).join("");
@@ -3029,7 +3124,10 @@ function showBatchResult(result) {
   ].join("\n"), result.failed > 0);
   renderBatchItems(result.items);
   const selectedIndex = result.items.findIndex((item, index) => String(item.testId || `index-${index}`) === state.selectedBatchTestId);
-  if (selectedIndex >= 0) showBatchItemOverview(result.items[selectedIndex], selectedIndex);
+  if (selectedIndex >= 0) {
+    showBatchItemOverview(result.items[selectedIndex], selectedIndex);
+    void loadBatchItemBottleneck(result.items[selectedIndex], selectedIndex);
+  }
   const first = result.items.find((item) => item.ganttUrl || item.logUrl);
   if (first) {
     if (first.ganttUrl) {
@@ -3068,11 +3166,10 @@ function showResult(result) {
   });
   document.getElementById("metricTimeLabel").textContent = "CPU Time";
   document.getElementById("metricMakespanLabel").textContent = "Makespan / Baseline";
-  document.getElementById("metricMovesLabel").textContent = "Move \u6570";
+  setBottleneckMetric(result.bottleneckUtilization, "\u6CA1\u6709\u8DB3\u591F\u7684\u8D44\u6E90\u6D3B\u52A8");
   document.getElementById("metricValidationLabel").textContent = "\u6821\u9A8C";
   document.getElementById("metricTime").textContent = `${cpuTime.toFixed(1)} ms`;
   document.getElementById("metricMakespan").textContent = `${result.makespan.toFixed(2)} / ${baselineReady ? Number(baseline.makespan).toFixed(2) : "\u2014"} s`;
-  document.getElementById("metricMoves").textContent = result.moveCount;
   document.getElementById("metricValidation").textContent = result.validation === "passed" ? "\u901A\u8FC7" : result.validation;
   writeTerminal(["$ \u8C03\u5EA6\u5B8C\u6210", ...result.rounds.map((round) => {
     if (round.kind === "initial") return `  #${round.index} \u9996\u6B21 | ${round.elapsedMs.toFixed(1)} ms`;

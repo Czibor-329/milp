@@ -1856,13 +1856,6 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
             "LoadLock manager 只支持 joint、petri-eta、collective-look、"
             "round-robin、dedicated-direction 或 exchange-look"
         )
-    loadlock_exchange_mode = str(
-        options.get("loadLockExchange") or "auto"
-    ).strip().lower()
-    if loadlock_exchange_mode not in {"auto", "enabled", "disabled"}:
-        raise ValueError(
-            "LoadLock exchange 只支持 auto、enabled 或 disabled"
-        )
     build_state = BuildState()
 
     first_update = build_round_update(plan, rounds[0], 0.0, build_state)
@@ -2016,6 +2009,10 @@ def _migrate_workspace_catalog(catalog: Dict[str, Any]) -> bool:
                 test_groups.append(group)
             if str(test.get("strategy") or "").strip().lower() == "greedy":
                 test["strategy"] = "other_alg:greedy"
+                changed = True
+            options = test.get("options")
+            if isinstance(options, dict) and "loadLockExchange" in options:
+                options.pop("loadLockExchange")
                 changed = True
         if raw_device.get("testGroups") != test_groups:
             raw_device["testGroups"] = test_groups
@@ -2466,6 +2463,9 @@ def _normalize_test_case(raw_test: Mapping[str, Any], test_id: Optional[str] = N
                 pjob["matList"] = list(range(next_material_id, next_material_id + wafer_count))
                 next_material_id += wafer_count
     times = [round_row["currentTime"] for round_row in rounds]
+    options = deepcopy(dict(raw_test.get("options") or {}))
+    # LoadLock 交换候选始终启用；迁移旧测试集时丢弃已经废止的开关。
+    options.pop("loadLockExchange", None)
     normalized = {
         "id": test_id or uuid.uuid4().hex,
         "name": str(raw_test.get("name") or "未命名测试集").strip() or "未命名测试集",
@@ -2477,7 +2477,7 @@ def _normalize_test_case(raw_test: Mapping[str, Any], test_id: Optional[str] = N
         ),
         "roundCount": round_count,
         "times": times,
-        "options": deepcopy(dict(raw_test.get("options") or {})),
+        "options": options,
         "rounds": rounds,
         "createdAt": str(raw_test.get("createdAt") or timestamp),
         "updatedAt": timestamp,

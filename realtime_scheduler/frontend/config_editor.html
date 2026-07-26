@@ -4,13 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>调度平台</title>
-  <link rel="stylesheet" href="/assets/config_editor.css?v=1.0.2">
+  <link rel="stylesheet" href="/assets/config_editor.css?v=1.0.4">
 </head>
 <body>
   <main class="shell">
     <header class="hero">
       <h1>调度平台</h1>
-      <div class="hero-meta"><span class="frontend-version">前端 v1.0.2</span><div class="service-pill" id="serviceState">本地服务</div></div>
+      <div class="hero-meta"><span class="frontend-version">前端 v1.0.4</span><div class="service-pill" id="serviceState">本地服务</div></div>
     </header>
 
     <nav class="tabs" aria-label="主要功能">
@@ -51,10 +51,10 @@
               <div class="result-metrics">
                 <div class="metric"><span id="metricTimeLabel">总耗时</span><strong id="metricTime">—</strong><small id="metricTimeDetail"></small></div>
                 <div class="metric"><span id="metricMakespanLabel">Makespan</span><strong id="metricMakespan">—</strong><small id="metricMakespanDetail"></small></div>
-                <div class="metric"><span id="metricMovesLabel">Move 数</span><strong id="metricMoves">—</strong><small id="metricMovesDetail"></small></div>
+                <div class="metric"><span id="metricMovesLabel">瓶颈利用率</span><strong id="metricMoves">—</strong><small id="metricMovesDetail">运行后计算稳态瓶颈候选</small></div>
                 <div class="metric"><span id="metricValidationLabel">校验</span><strong id="metricValidation">—</strong><small id="metricValidationDetail"></small></div>
               </div>
-              <div class="batch-progress" id="batchProgress"><div class="batch-progress-head"><span id="batchProgressText">等待开始</span><span id="batchProgressCount">0/0</span></div><div class="batch-progress-track"><div class="batch-progress-bar" id="batchProgressBar" style="width:0%"></div></div></div>
+              <div class="batch-progress" id="batchProgress" role="progressbar" aria-label="批量运行进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="batch-progress-track" aria-hidden="true"><div class="batch-progress-bar" id="batchProgressBar" style="width:0%"></div></div><span class="batch-progress-percent" id="batchProgressCount">0%</span></div>
               <div class="batch-results" id="batchResults"></div>
               <div class="terminal-section">
                 <div class="terminal-section-head"><strong>运行日志</strong><span>内容较多时可在区域内滚动</span></div>
@@ -191,7 +191,6 @@
             <div class="algorithm-hover-info" id="algorithmHoverInfo" aria-live="polite"></div>
             <div id="loadlockOptions" class="grid" style="margin-top:14px">
               <div class="field span-12"><label>LoadLock 管理器</label><select data-option="loadLockManager"><option value="petri-look">Petri-ETA 通用管理器（Heuristic 推荐）</option><option value="collective-look">集选 LOOK（压力方向优先）</option><option value="round-robin">轮询（服务次数均衡）</option><option value="dedicated-direction">方向分区（LA 进、LB 出）</option><option value="exchange-look">交换优先 LOOK（成品/生片配对）</option><option value="joint">当前策略联合选择 LA/LB（现有 Neural 默认）</option></select><div class="hint">上层策略决定发哪片；这里可比较 ETA、集选、轮询、方向分区和交换优先。所有 manager 只在 Petri 安全候选内绑定具体锁；双槽交换仍由门、压力和槽位互锁复核。</div></div>
-              <div class="field span-12"><label>LoadLock 双槽交换</label><select data-option="loadLockExchange"><option value="auto">策略选择（推荐）</option><option value="enabled">启用交换候选</option><option value="disabled">禁用交换（旧单向基线）</option></select><div class="hint">启用后，策略会同时看到单向送片和同门交换候选，并根据加工节拍、驻留余量与 LoadLock 周期决定是否交换；Machine 只负责验证物理可行性并展开门、取放和压力动作。</div></div>
             </div>
             <div id="loadlockMacroOptions" class="grid is-hidden" style="margin-top:14px">
               <div class="field span-6"><label>前瞻搜索秒数</label><input data-option="loadLockMacroSearchSeconds" type="number" min="0" max="4.5" step="0.1" value="4"></div>
@@ -251,6 +250,6 @@
     </aside>
   </div>
 
-  <script type="module" src="/assets/config_editor.js?v=1.0.2"></script>
+  <script type="module" src="/assets/config_editor.js?v=1.0.4"></script>
 </body>
 </html>

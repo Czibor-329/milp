@@ -127,6 +127,8 @@ class ConfigEditorServerTests(unittest.TestCase):
             "loadLockMacroRollouts",
         ):
             self.assertIn(marker, source)
+        self.assertNotIn('data-option="loadLockExchange"', source)
+        self.assertNotIn("禁用交换", source)
 
     def test_same_recipe_name_supports_module_specific_parameters(self) -> None:
         """同名 Recipe 在不同 PM 上可以使用不同加工时间，且仍由 Route 统一引用。"""
@@ -1051,7 +1053,9 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn('data-tab-target="route">路径配置</button>', html)
         self.assertIn('data-tab-target="clean">清洁配置</button>', html)
         self.assertIn('<h1>调度平台</h1>', html)
-        self.assertIn('class="frontend-version">前端 v1.0.2</span>', html)
+        self.assertIn('class="frontend-version">前端 v1.0.4</span>', html)
+        self.assertIn('<span id="metricMovesLabel">瓶颈利用率</span>', html)
+        self.assertNotIn('<span id="metricMovesLabel">Move 数</span>', html)
         self.assertNotIn("renderDatasetCatalog", html)
         self.assertNotIn("按加工工序数量分组，名称由候选腔室、加工时间和清洁配置自动生成。", html)
         self.assertNotIn("generate-example-routes", html)
@@ -1214,16 +1218,20 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("@container result-area (max-width: 520px)", html)
         self.assertIn(".terminal { height: 150px;", html)
         self.assertIn('class="batch-result-summary"', html)
+        self.assertIn('class="batch-metric-tags"', html)
+        self.assertIn("batch-metric-tag cpu", html)
         self.assertNotIn('class="batch-result-metrics"', html)
-        self.assertIn("Makespan 当前值 / Heuristic Baseline", html)
         self.assertIn('const displayId = `t${index + 1}`', html)
-        self.assertIn("；Cpu time <b>", html)
+        self.assertIn("CPU Time ${finished", html)
         self.assertIn('id="batchOverviewButton"', html)
         self.assertIn('data-batch-item-index="${index}"', html)
-        self.assertIn("机器手持片驻留", html)
-        self.assertIn("robotWaferDwellTime", html)
+        self.assertIn("loadBatchItemBottleneck", html)
+        self.assertIn("正在计算稳态瓶颈", html)
+        self.assertNotIn("机器手持片驻留", html)
+        self.assertNotIn('id="batchProgressText"', html)
+        self.assertIn('id="batchProgressCount">0%</span>', html)
+        self.assertIn('role="progressbar"', html)
         self.assertIn("overflow-wrap: anywhere", html)
-        self.assertNotIn("改善 <b>", html)
         self.assertIn("item.testId", html)
         for label in ("测试名称", "等待中", "运行中", "成功", "失败", "Makespan", "Move", "耗时"):
             self.assertIn(label, html)
@@ -1244,12 +1252,13 @@ class ConfigEditorServerTests(unittest.TestCase):
                 "strategy": "heuristic",
                 "roundCount": 1,
                 "times": [0],
-                "options": {},
+                "options": {"loadLockExchange": "disabled"},
                 "cleans": [{"name": "CleanA"}],
                 "routes": [{"name": "RouteA"}],
                 "rounds": [{"jobs": [{"name": "Initial"}]}],
             }
             first = create_workspace_test(device["id"], base, store_path)
+            self.assertNotIn("loadLockExchange", first["options"])
             second = create_workspace_test(device["id"], {**base, "name": "复制案例"}, store_path)
             updated_second = update_workspace_test(device["id"], second["id"], {
                 **base,
