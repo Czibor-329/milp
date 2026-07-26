@@ -1,7 +1,7 @@
 {
   "name": "ct-realtime-scheduler-frontend",
   "private": true,
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "调度平台的 TypeScript 前端构建配置",
   "scripts": {
     "build": "esbuild src/config_editor.ts --bundle --format=esm --target=es2022 --outfile=assets/config_editor.js && esbuild src/route_editor_logic.ts --bundle --format=cjs --platform=node --target=node18 --outfile=route_editor_logic.js && esbuild src/workspace_visualizer.ts --bundle --format=cjs --platform=node --target=node18 --outfile=workspace_visualizer_logic.js",

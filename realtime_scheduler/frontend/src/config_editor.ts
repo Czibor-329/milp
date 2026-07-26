@@ -1768,7 +1768,6 @@ async function checkService() {
     renderAlgorithmHistory();
     runButton.disabled = !compatible;
     batchRunButton.disabled = !compatible;
-    renderDatasetCatalog();
     renderWorkspaceControls();
     pill.textContent = compatible ? "本地服务已连接" : "服务版本过旧";
     if (!compatible) {
@@ -1776,7 +1775,7 @@ async function checkService() {
       writeTerminal("$ 本地服务版本过旧\n  请重启: py scripts/config_editor_server.py", true);
     }
   }
-  catch { state.serviceCompatible = false; runButton.disabled = true; batchRunButton.disabled = true; renderWorkspaceControls(); renderDatasetCatalog(); pill.textContent = "本地服务未连接"; pill.style.color = "var(--red)"; pill.style.background = "var(--red-soft)"; writeTerminal("$ 无法连接本地服务\n  请运行: py scripts/config_editor_server.py", true); }
+  catch { state.serviceCompatible = false; runButton.disabled = true; batchRunButton.disabled = true; renderWorkspaceControls(); pill.textContent = "本地服务未连接"; pill.style.color = "var(--red)"; pill.style.background = "var(--red-soft)"; writeTerminal("$ 无法连接本地服务\n  请运行: py scripts/config_editor_server.py", true); }
 }
 
 document.getElementById("workspaceDialogCancel").addEventListener("click", () => document.getElementById("workspaceDialog").close("cancel"));

@@ -3112,7 +3112,6 @@ async function checkService() {
     renderAlgorithmHistory();
     runButton.disabled = !compatible;
     batchRunButton.disabled = !compatible;
-    renderDatasetCatalog();
     renderWorkspaceControls();
     pill.textContent = compatible ? "\u672C\u5730\u670D\u52A1\u5DF2\u8FDE\u63A5" : "\u670D\u52A1\u7248\u672C\u8FC7\u65E7";
     if (!compatible) {
@@ -3125,7 +3124,6 @@ async function checkService() {
     runButton.disabled = true;
     batchRunButton.disabled = true;
     renderWorkspaceControls();
-    renderDatasetCatalog();
     pill.textContent = "\u672C\u5730\u670D\u52A1\u672A\u8FDE\u63A5";
     pill.style.color = "var(--red)";
     pill.style.background = "var(--red-soft)";
