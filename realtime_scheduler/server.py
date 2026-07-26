@@ -131,7 +131,9 @@ ROUTE_EDITOR_LOGIC_PATH = FRONTEND_DIR / "route_editor_logic.js"
 FRONTEND_ASSET_DIR = FRONTEND_DIR / "assets"
 RL_MODEL_PATH = MODELS_DIR / "bc_policy_rl.pt"
 NEURAL_MODEL_PATH = ALGORITHM_ROOT / "src" / "schedule" / "neural_policy.npz"
+SETRANK_MODEL_PATH = ALGORITHM_ROOT / "src" / "schedule" / "heuristic_config_policy.npz"
 WORKSPACE_STORE_PATH = DATA_DIR / "workspaces.json"
+ALGORITHM_METADATA_PATH = DATA_DIR / "algorithm_metadata.json"
 LEGACY_WORKSPACE_STORE_PATH = ALGORITHM_ROOT / "results" / "config_editor_workspaces.json"
 DEVICE_INIT_DIR = DATA_DIR / "devices"
 RESULT_EXPORT_DIR = EXPORT_DIR / "results"
@@ -144,6 +146,35 @@ _WORKSPACE_STORE_LOCK = threading.RLock()
 _BATCH_RUNS: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
 _BATCH_RUNS_LOCK = threading.RLock()
 _BATCH_CANCEL_EVENTS: Dict[str, threading.Event] = {}
+
+BUILTIN_ALGORITHM_METADATA: Dict[str, Dict[str, str]] = {
+    "heuristic": {
+        "name": "启发式",
+        "description": "快速启发式排程，适合低延迟的实时调度与稳定基线。",
+        "version": "未记录",
+    },
+    "setrank": {
+        "name": "SetRank-PIAC",
+        "description": "集合网络按实例推荐启发式参数，并以候选精评和 legacy 质量地板保障结果。",
+        "version": "1.0.0",
+        "updatedAt": "2026-07-26",
+    },
+    "neural": {
+        "name": "深层神经派工",
+        "description": "使用已训练的深层网络进行实时派工决策。",
+        "version": "未记录",
+    },
+    "rl": {
+        "name": "RL 搜索",
+        "description": "在给定时间与 rollout 预算内执行强化学习搜索。",
+        "version": "未记录",
+    },
+    "milp": {
+        "name": "MILP 最优求解",
+        "description": "使用混合整数规划求解小规模首次排程。",
+        "version": "未记录",
+    },
+}
 
 
 @contextmanager
@@ -1759,14 +1790,14 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
         if normalized_strategy.startswith("other_alg:") and ":" in strategy
         else None
     )
-    builtin_strategies = {"heuristic", "neural", "rl", "milp"}
+    builtin_strategies = {"heuristic", "setrank", "neural", "rl", "milp"}
     discovered_ids = {
         str(item["id"])
         for item in discover_other_algorithms()
     }
     if normalized_strategy not in builtin_strategies and other_algorithm_id not in discovered_ids:
         raise ValueError(
-            "策略只支持 heuristic、neural、rl、milp，"
+            "策略只支持 heuristic、setrank、neural、rl、milp，"
             "或 other_alg 下已发现的标准算法"
         )
     strategy = normalized_strategy if normalized_strategy in builtin_strategies else strategy
@@ -2027,6 +2058,164 @@ def _write_json_atomic(path: Path, payload: Any) -> None:
     """把 JSON 原子写入指定文件，避免异常退出留下半份配置。"""
     content = json.dumps(payload, ensure_ascii=False, allow_nan=False, indent=2)
     _write_text_atomic(path, content)
+
+
+def read_algorithm_metadata(
+    path: Path = ALGORITHM_METADATA_PATH,
+) -> Dict[str, Dict[str, str]]:
+    """读取算法展示信息，并把持久化记录覆盖到内置默认值上。"""
+    metadata = deepcopy(BUILTIN_ALGORITHM_METADATA)
+    if not path.is_file():
+        return metadata
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"算法信息存储格式无效：{path}")
+    for strategy, record in raw.items():
+        if not isinstance(record, Mapping):
+            continue
+        normalized_strategy = str(strategy).strip()
+        if not normalized_strategy:
+            continue
+        base = metadata.setdefault(normalized_strategy, {
+            "name": normalized_strategy.removeprefix("other_alg:"),
+            "description": "标准 init/update 接口算法包。",
+            "version": "未记录",
+        })
+        for field_name in ("name", "description", "version", "updatedAt"):
+            value = str(record.get(field_name) or "").strip()
+            if value:
+                base[field_name] = value
+    return metadata
+
+
+def update_algorithm_metadata(
+    strategy: str,
+    payload: Mapping[str, Any],
+    path: Path = ALGORITHM_METADATA_PATH,
+) -> Dict[str, Any]:
+    """校验并保存算法当前信息；内容变化时追加一条不可覆盖的版本记录。"""
+    normalized_strategy = str(strategy or "").strip()
+    discovered_names = {
+        str(item["strategy"]): str(item["name"])
+        for item in discover_other_algorithms()
+    }
+    allowed_strategies = set(BUILTIN_ALGORITHM_METADATA) | set(discovered_names)
+    if normalized_strategy not in allowed_strategies:
+        raise ValueError(f"找不到算法：{normalized_strategy}")
+    version = str(payload.get("version") or "").strip()
+    description = str(payload.get("description") or "").strip()
+    updated_at = str(payload.get("updatedAt") or "").strip()
+    if not version or len(version) > 80:
+        raise ValueError("版本号不能为空且不能超过 80 个字符")
+    if not description or len(description) > 500:
+        raise ValueError("算法描述不能为空且不能超过 500 个字符")
+    try:
+        datetime.strptime(updated_at, "%Y-%m-%d")
+    except ValueError as error:
+        raise ValueError("更新日期必须是 YYYY-MM-DD 格式") from error
+
+    with _workspace_catalog_guard(path):
+        stored: Dict[str, Any] = {}
+        if path.is_file():
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(raw, Mapping):
+                raise ValueError(f"算法信息存储格式无效：{path}")
+            stored = deepcopy(dict(raw))
+        current = read_algorithm_metadata(path).get(normalized_strategy, {})
+        snapshot = {
+            "version": version,
+            "description": description,
+            "updatedAt": updated_at,
+        }
+        stored_record = stored.get(normalized_strategy)
+        history = [
+            deepcopy(dict(item))
+            for item in (
+                stored_record.get("history")
+                if isinstance(stored_record, Mapping) else []
+            ) or []
+            if isinstance(item, Mapping)
+        ]
+        previous_snapshot = {
+            "version": str(current.get("version") or "未记录"),
+            "description": str(current.get("description") or ""),
+            "updatedAt": str(current.get("updatedAt") or ""),
+        }
+        if not history and previous_snapshot["version"] != "未记录" and previous_snapshot != snapshot:
+            history.append({
+                **previous_snapshot,
+                "recordedAt": previous_snapshot["updatedAt"],
+            })
+        latest_snapshot = {
+            field_name: str(history[-1].get(field_name) or "")
+            for field_name in ("version", "description", "updatedAt")
+        } if history else None
+        if latest_snapshot != snapshot:
+            history.append({**snapshot, "recordedAt": _workspace_timestamp()})
+        record: Dict[str, Any] = {
+            "name": str(current.get("name") or discovered_names.get(normalized_strategy) or normalized_strategy),
+            **snapshot,
+            "history": history,
+        }
+        stored[normalized_strategy] = record
+        _write_json_atomic(path, stored)
+    return record
+
+
+def read_algorithm_history(
+    path: Path = ALGORITHM_METADATA_PATH,
+) -> Dict[str, List[Dict[str, str]]]:
+    """读取每个算法的完整版本快照；旧格式记录自动作为第一条历史展示。"""
+    metadata = read_algorithm_metadata(path)
+    for algorithm in discover_other_algorithms():
+        metadata.setdefault(str(algorithm["strategy"]), {
+            "name": str(algorithm["name"]),
+            "description": "other_alg 目录中自动发现的标准 init/update 接口算法包。",
+            "version": "未记录",
+        })
+    stored: Mapping[str, Any] = {}
+    if path.is_file():
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, Mapping):
+            raise ValueError(f"算法信息存储格式无效：{path}")
+        stored = raw
+    histories: Dict[str, List[Dict[str, str]]] = {}
+    for strategy, current in metadata.items():
+        stored_record = stored.get(strategy)
+        raw_history = (
+            stored_record.get("history")
+            if isinstance(stored_record, Mapping) else []
+        ) or []
+        history = [
+            {
+                field_name: str(item.get(field_name) or "")
+                for field_name in ("version", "description", "updatedAt", "recordedAt")
+            }
+            for item in raw_history
+            if isinstance(item, Mapping)
+        ]
+        if not history and str(current.get("version") or "未记录") != "未记录":
+            history.append({
+                "version": str(current.get("version") or ""),
+                "description": str(current.get("description") or ""),
+                "updatedAt": str(current.get("updatedAt") or ""),
+                "recordedAt": str(current.get("updatedAt") or ""),
+            })
+        histories[strategy] = history
+    return histories
+
+
+def algorithm_metadata_for_health() -> Dict[str, Dict[str, str]]:
+    """返回健康检查使用的完整算法元数据，并补齐外部算法默认记录。"""
+    metadata = read_algorithm_metadata()
+    for algorithm in discover_other_algorithms():
+        strategy = str(algorithm["strategy"])
+        metadata.setdefault(strategy, {
+            "name": str(algorithm["name"]),
+            "description": "other_alg 目录中自动发现的标准 init/update 接口算法包。",
+            "version": "未记录",
+        })
+    return metadata
 
 
 def format_reproduction_log(entries: Sequence[Mapping[str, Any]]) -> str:
@@ -2630,14 +2819,18 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                 "schemaVersion": API_SCHEMA_VERSION,
                 "strategies": {
                     "heuristic": True,
+                    "setrank": SETRANK_MODEL_PATH.is_file(),
                     "neural": NEURAL_MODEL_PATH.is_file(),
                     "rl": RL_MODEL_PATH.is_file(),
                     "milp": True,
                 },
                 "strategyModels": {
+                    "setrank": str(SETRANK_MODEL_PATH) if SETRANK_MODEL_PATH.is_file() else "",
                     "neural": str(NEURAL_MODEL_PATH) if NEURAL_MODEL_PATH.is_file() else "",
                 },
                 "strategyErrors": {},
+                "algorithmMetadata": algorithm_metadata_for_health(),
+                "algorithmHistory": read_algorithm_history(),
                 "otherAlgorithms": other_algorithms,
             })
             return
@@ -2805,6 +2998,21 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
     def do_PUT(self) -> None:
         """保存测试集或重命名设备下的测试组别。"""
         path = unquote(urlparse(self.path).path)
+        if path.startswith("/api/algorithm-metadata/"):
+            try:
+                strategy = path.removeprefix("/api/algorithm-metadata/")
+                record = update_algorithm_metadata(strategy, self._read_json_object())
+                self._send_json({
+                    "ok": True,
+                    "strategy": strategy,
+                    "metadata": {
+                        key: value for key, value in record.items() if key != "history"
+                    },
+                    "history": record.get("history") or [],
+                })
+            except Exception as error:  # noqa: BLE001
+                self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
+            return
         parts = [part for part in path.split("/") if part]
         if len(parts) == 4 and parts[:2] == ["api", "workspaces"] and parts[3] == "groups":
             try:

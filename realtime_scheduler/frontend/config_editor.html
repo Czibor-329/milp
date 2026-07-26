@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>CT 实时调度终端</title>
-  <link rel="stylesheet" href="/assets/config_editor.css?v=20260725-workspace">
+  <link rel="stylesheet" href="/assets/config_editor.css?v=20260726-algorithm-history">
 </head>
 <body>
   <main class="shell">
@@ -18,6 +18,7 @@
       <button class="tab" data-tab-target="workspace">可视化工作台</button>
       <button class="tab" data-tab-target="route">路径</button>
       <button class="tab" data-tab-target="clean">Clean</button>
+      <button class="tab" data-tab-target="algorithm-history">算法记录</button>
     </nav>
 
     <div class="layout" id="pageLayout">
@@ -147,19 +148,28 @@
             <div class="panel-body"><div class="card-list" id="cleanList"></div></div>
           </article>
         </div>
+
+        <div class="tab-view" data-tab-view="algorithm-history">
+          <article class="panel algorithm-history-panel">
+            <div class="panel-head"><div><h2>算法变更记录</h2><p>每次保存算法信息都会形成一条版本快照。</p></div></div>
+            <div class="panel-body"><div class="algorithm-history-list" id="algorithmHistoryList"></div></div>
+          </article>
+        </div>
       </section>
 
       <aside class="side" id="scheduleSide">
         <article class="panel">
-          <div class="panel-head"><div><h2>运行策略</h2></div></div>
+          <div class="panel-head"><div><h2>运行策略</h2></div><button class="btn icon algorithm-edit-button" id="editAlgorithmButton" type="button" aria-label="编辑当前算法信息" title="编辑当前算法信息"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4l10.7-10.7a2.1 2.1 0 0 0-3-3L5 17v3Zm10.5-12.5 3 3M13 20h7"/></svg></button></div>
           <div class="panel-body">
             <div class="strategy-options">
-              <label class="strategy-card"><input type="radio" name="strategy" value="heuristic" checked><b>启发式</b></label>
-              <label class="strategy-card"><input id="neuralStrategyInput" type="radio" name="strategy" value="neural"><b>深层神经派工</b></label>
-              <label class="strategy-card"><input id="rlStrategyInput" type="radio" name="strategy" value="rl"><b>RL 搜索</b></label>
-              <label class="strategy-card"><input id="milpStrategyInput" type="radio" name="strategy" value="milp"><b>MILP 最优求解</b></label>
+              <label class="strategy-card" data-strategy-card="heuristic"><input type="radio" name="strategy" value="heuristic" checked><b>启发式</b></label>
+              <label class="strategy-card" data-strategy-card="setrank"><input id="setrankStrategyInput" type="radio" name="strategy" value="setrank"><b>SetRank-PIAC</b></label>
+              <label class="strategy-card" data-strategy-card="neural"><input id="neuralStrategyInput" type="radio" name="strategy" value="neural"><b>深层神经派工</b></label>
+              <label class="strategy-card" data-strategy-card="rl"><input id="rlStrategyInput" type="radio" name="strategy" value="rl"><b>RL 搜索</b></label>
+              <label class="strategy-card" data-strategy-card="milp"><input id="milpStrategyInput" type="radio" name="strategy" value="milp"><b>MILP 最优求解</b></label>
               <div class="other-algorithm-options" id="otherAlgorithmOptions"></div>
             </div>
+            <div class="algorithm-hover-info" id="algorithmHoverInfo" aria-live="polite"></div>
             <div id="loadlockOptions" class="grid" style="margin-top:14px">
               <div class="field span-12"><label>LoadLock 管理器</label><select data-option="loadLockManager"><option value="petri-look">Petri-ETA 通用管理器（Heuristic 推荐）</option><option value="collective-look">集选 LOOK（压力方向优先）</option><option value="round-robin">轮询（服务次数均衡）</option><option value="dedicated-direction">方向分区（LA 进、LB 出）</option><option value="exchange-look">交换优先 LOOK（成品/生片配对）</option><option value="joint">当前策略联合选择 LA/LB（现有 Neural 默认）</option></select><div class="hint">上层策略决定发哪片；这里可比较 ETA、集选、轮询、方向分区和交换优先。所有 manager 只在 Petri 安全候选内绑定具体锁；双槽交换仍由门、压力和槽位互锁复核。</div></div>
               <div class="field span-12"><label>LoadLock 双槽交换</label><select data-option="loadLockExchange"><option value="auto">策略选择（推荐）</option><option value="enabled">启用交换候选</option><option value="disabled">禁用交换（旧单向基线）</option></select><div class="hint">启用后，策略会同时看到单向送片和同门交换候选，并根据加工节拍、驻留余量与 LoadLock 周期决定是否交换；Machine 只负责验证物理可行性并展开门、取放和压力动作。</div></div>
@@ -190,6 +200,21 @@
     </form>
   </dialog>
 
+  <dialog id="algorithmDialog" aria-labelledby="algorithmDialogTitle">
+    <form method="dialog" class="dialog-body algorithm-dialog-body" id="algorithmDialogForm">
+      <h3 id="algorithmDialogTitle">编辑算法记录</h3>
+      <p>版本信息会保存在本地服务中，并显示在算法悬浮卡片里。</p>
+      <div class="algorithm-form-grid">
+        <div class="field"><label for="algorithmDialogStrategy">算法</label><select id="algorithmDialogStrategy"></select></div>
+        <div class="field"><label for="algorithmDialogVersion">版本号</label><input id="algorithmDialogVersion" maxlength="80" placeholder="例如 1.2.0" required></div>
+        <div class="field"><label for="algorithmDialogDate">更新日期</label><input id="algorithmDialogDate" type="date" required></div>
+        <div class="field"><label for="algorithmDialogDescription">算法描述</label><textarea id="algorithmDialogDescription" maxlength="500" rows="4" required></textarea></div>
+      </div>
+      <div class="algorithm-dialog-status" id="algorithmDialogStatus" role="status"></div>
+      <div class="dialog-actions"><button class="btn small" type="button" id="algorithmDialogCancel">取消</button><button class="btn primary small" type="submit" id="algorithmDialogSave">保存记录</button></div>
+    </form>
+  </dialog>
+
   <div class="drawer-layer" id="drawerLayer">
     <aside class="drawer" id="stepDrawer" aria-label="路径 Step 详细设置">
       <header class="drawer-head"><div><h2 id="drawerTitle">Step 详细设置</h2><p id="drawerSubtitle"></p></div><button class="btn icon" id="closeDrawer" aria-label="关闭">✕</button></header>
@@ -197,6 +222,6 @@
     </aside>
   </div>
 
-  <script type="module" src="/assets/config_editor.js?v=20260725-workspace"></script>
+  <script type="module" src="/assets/config_editor.js?v=20260726-algorithm-history"></script>
 </body>
 </html>

@@ -42,7 +42,7 @@ const state = {
   workspaceDevices: [], workspaceDevice: null, workspaceDeviceId: "", testCaseId: "", testCaseName: "", testCaseGroup: "", activeTestGroup: "", serviceCompatible: false, dirty: false,
   activeBatchId: "", batchRunning: false, batchCancelRequested: false, batchCancelSent: false,
   deviceName: "", device: null, stationNames: [], loadPorts: [], processModules: [], robotNames: [], robotScopes: {},
-  strategy: "heuristic", availableOtherAlgorithms: [], roundCount: 2, times: [0, 70], options: { loadLockManager: "petri-look", loadLockExchange: "auto", rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
+  strategy: "heuristic", availableOtherAlgorithms: [], algorithmMetadata: {}, algorithmHistory: {}, roundCount: 2, times: [0, 70], options: { loadLockManager: "petri-look", loadLockExchange: "auto", rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
   cleans: [],
   routes: [{ name: "RouteA", group: "RouteA", bufferOption: 0, prePJobCleanRefs: [], postPJobCleanRefs: [], postCJobCleanRefs: [], stages: linkRouteSteps([makeStage("LP1"), makeStage("Robot"), makeStage("PM1,PM2", true, "RouteA_Step2"), makeStage("Robot"), makeStage("LP1")]) }],
   rounds: [makeRound(1, 0, "RouteA", "LP1"), makeRound(2, 70, "RouteA", "LP2")],
@@ -466,10 +466,11 @@ function applyTestCase(testCase) {
   document.getElementById("roundCount").value = state.roundCount;
   document.querySelectorAll('input[name="strategy"]').forEach(input => { input.checked = input.value === state.strategy; });
   document.querySelectorAll("[data-option]").forEach(input => { input.value = state.options[input.dataset.option] ?? input.value; });
-  document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "neural", "rl"].includes(state.strategy));
+  document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "setrank", "neural", "rl"].includes(state.strategy));
   document.getElementById("rlOptions").classList.toggle("is-hidden", state.strategy !== "rl");
   document.getElementById("milpOptions").classList.toggle("is-hidden", state.strategy !== "milp");
   document.getElementById("roundCount").disabled = state.strategy === "milp";
+  if (Object.keys(state.algorithmMetadata).length) showAlgorithmDetails(state.strategy);
   renderAll(); renderWorkspaceControls(); resetRunResult();
   if (state.dirty) { setWorkspaceStatus("正在保存统一生成的路径与 Clean 名称…", "dirty"); scheduleAutoSave(); }
   else setWorkspaceStatus(`已载入“${state.testCaseName}”`, "saved");
@@ -650,6 +651,7 @@ function switchTab(name) {
   document.querySelectorAll("[data-tab-view]").forEach(view => view.classList.toggle("active", view.dataset.tabView === name));
   document.getElementById("scheduleSide").classList.toggle("is-hidden", name !== "schedule");
   document.getElementById("pageLayout").classList.toggle("editor-mode", name !== "schedule");
+  if (name === "algorithm-history") renderAlgorithmHistory();
   if (name !== "route") closeStepDrawer();
 }
 
@@ -1207,11 +1209,133 @@ function renderOtherAlgorithmOptions(algorithms) {
   state.availableOtherAlgorithms = Array.isArray(algorithms) ? algorithms : [];
   const container = document.getElementById("otherAlgorithmOptions");
   container.innerHTML = state.availableOtherAlgorithms.map(algorithm => `
-    <label class="strategy-card" title="${escapeHtml(algorithm.path || "")}">
+    <label class="strategy-card" data-strategy-card="${escapeHtml(algorithm.strategy)}">
       <input type="radio" name="strategy" value="${escapeHtml(algorithm.strategy)}" ${algorithm.strategy === state.strategy ? "checked" : ""}>
       <b>${escapeHtml(algorithm.name)}</b>
     </label>
   `).join("");
+  renderAlgorithmMetadata();
+}
+
+/** 在列表下方显示指定算法详情，避免浮层遮挡相邻算法。 */
+function showAlgorithmDetails(strategy) {
+  const metadata = state.algorithmMetadata[strategy] || {};
+  const cardName = document.querySelector(`[data-strategy-card="${CSS.escape(strategy)}"] b`)?.textContent;
+  document.getElementById("algorithmHoverInfo").innerHTML = `
+    <span class="algorithm-hover-info-name">${escapeHtml(metadata.name || cardName || strategy)}</span>
+    <span class="algorithm-hover-info-description">${escapeHtml(metadata.description || "暂无算法描述")}</span>
+    <span class="algorithm-hover-info-meta"><span>版本 ${escapeHtml(metadata.version || "未记录")}</span><span>更新 ${escapeHtml(metadata.updatedAt || "未记录")}</span></span>
+  `;
+}
+
+/** 为算法卡片绑定悬浮和键盘详情，并同步编辑对话框的算法清单。 */
+function renderAlgorithmMetadata() {
+  document.querySelectorAll("[data-strategy-card]").forEach(card => {
+    const strategy = card.dataset.strategyCard;
+    card.onmouseenter = () => showAlgorithmDetails(strategy);
+    card.onfocusin = () => showAlgorithmDetails(strategy);
+  });
+  const strategyOptions = document.querySelector(".strategy-options");
+  strategyOptions.onmouseleave = () => showAlgorithmDetails(state.strategy);
+  strategyOptions.onfocusout = event => {
+    if (!strategyOptions.contains(event.relatedTarget)) showAlgorithmDetails(state.strategy);
+  };
+  showAlgorithmDetails(state.strategy);
+  const strategySelect = document.getElementById("algorithmDialogStrategy");
+  const strategies = [...document.querySelectorAll('input[name="strategy"]')].map(input => input.value);
+  strategySelect.innerHTML = strategies.map(strategy => {
+    const name = state.algorithmMetadata[strategy]?.name
+      || document.querySelector(`[data-strategy-card="${CSS.escape(strategy)}"] b`)?.textContent
+      || strategy;
+    return `<option value="${escapeHtml(strategy)}">${escapeHtml(name)}</option>`;
+  }).join("");
+}
+
+/** 比较相邻版本快照并返回供时间线展示的变更摘要。 */
+function algorithmChangeLabels(entry, previous) {
+  if (!previous) return ["初始记录"];
+  const labels = [];
+  if (entry.version !== previous.version) labels.push(`版本 ${previous.version || "未记录"} → ${entry.version || "未记录"}`);
+  if (entry.description !== previous.description) labels.push("算法描述已更新");
+  if (entry.updatedAt !== previous.updatedAt) labels.push("更新日期已调整");
+  return labels.length ? labels : ["重复保存，无字段变化"];
+}
+
+/** 绘制全部算法的版本时间线，最新版本置顶。 */
+function renderAlgorithmHistory() {
+  const container = document.getElementById("algorithmHistoryList");
+  const strategies = [...document.querySelectorAll('input[name="strategy"]')].map(input => input.value);
+  container.innerHTML = strategies.map(strategy => {
+    const metadata = state.algorithmMetadata[strategy] || {};
+    const cardName = document.querySelector(`[data-strategy-card="${CSS.escape(strategy)}"] b`)?.textContent;
+    const history = Array.isArray(state.algorithmHistory[strategy]) ? state.algorithmHistory[strategy] : [];
+    const entries = history.map((entry, index) => ({
+      entry,
+      changes: algorithmChangeLabels(entry, history[index - 1]),
+    })).reverse();
+    const timeline = entries.length ? `<div class="algorithm-timeline">${entries.map(({ entry, changes }) => `
+      <article class="algorithm-version-entry">
+        <div class="algorithm-version-label"><strong>v${escapeHtml(entry.version || "未记录")}</strong><span>更新 ${escapeHtml(entry.updatedAt || "未记录")}</span><span>记录 ${escapeHtml(String(entry.recordedAt || "未记录").replace("T", " "))}</span></div>
+        <div class="algorithm-version-content"><p>${escapeHtml(entry.description || "暂无算法描述")}</p><div class="algorithm-change-tags">${changes.map(label => `<span>${escapeHtml(label)}</span>`).join("")}</div></div>
+      </article>
+    `).join("")}</div>` : `<div class="algorithm-history-empty">尚无版本记录。点击“新增记录”保存第一个版本。</div>`;
+    return `<section class="algorithm-history-card">
+      <header class="algorithm-history-head">
+        <div class="algorithm-history-title"><h3>${escapeHtml(metadata.name || cardName || strategy)}</h3><p>${escapeHtml(strategy)} · ${history.length} 条版本记录</p></div>
+        <div class="algorithm-history-actions"><span class="algorithm-current-version">当前 ${escapeHtml(metadata.version || "未记录")}</span><button class="btn small" type="button" data-edit-algorithm="${escapeHtml(strategy)}">${history.length ? "新增版本" : "新增记录"}</button></div>
+      </header>
+      ${timeline}
+    </section>`;
+  }).join("");
+}
+
+/** 把指定算法的现有记录填入编辑表单。 */
+function fillAlgorithmDialog(strategy) {
+  const metadata = state.algorithmMetadata[strategy] || {};
+  document.getElementById("algorithmDialogStrategy").value = strategy;
+  document.getElementById("algorithmDialogVersion").value = metadata.version === "未记录" ? "" : (metadata.version || "");
+  document.getElementById("algorithmDialogDate").value = metadata.updatedAt || new Date().toLocaleDateString("en-CA");
+  document.getElementById("algorithmDialogDescription").value = metadata.description || "";
+  document.getElementById("algorithmDialogStatus").textContent = "";
+}
+
+/** 打开当前所选算法的版本记录编辑窗口。 */
+function openAlgorithmDialog() {
+  fillAlgorithmDialog(state.strategy);
+  document.getElementById("algorithmDialog").showModal();
+  window.setTimeout(() => document.getElementById("algorithmDialogVersion").focus(), 0);
+}
+
+/** 保存算法元数据，并立即刷新所有悬浮信息。 */
+async function saveAlgorithmMetadata(event) {
+  event.preventDefault();
+  const strategy = document.getElementById("algorithmDialogStrategy").value;
+  const saveButton = document.getElementById("algorithmDialogSave");
+  const status = document.getElementById("algorithmDialogStatus");
+  saveButton.disabled = true;
+  status.textContent = "正在保存…";
+  try {
+    const response = await fetch(`/api/algorithm-metadata/${encodeURIComponent(strategy)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        version: document.getElementById("algorithmDialogVersion").value.trim(),
+        updatedAt: document.getElementById("algorithmDialogDate").value,
+        description: document.getElementById("algorithmDialogDescription").value.trim(),
+      }),
+    });
+    const result = await response.json();
+    if (!response.ok || !result.ok) throw new Error(result.error || "保存失败");
+    state.algorithmMetadata[strategy] = result.metadata;
+    state.algorithmHistory[strategy] = result.history || [];
+    renderAlgorithmMetadata();
+    renderAlgorithmHistory();
+    document.getElementById("algorithmDialog").close();
+  } catch (error) {
+    status.textContent = error.message || "保存失败";
+  } finally {
+    saveButton.disabled = false;
+  }
 }
 
 /** 让本次运行生成的 input_data 日志可下载，并按选项自动导出。 */
@@ -1538,11 +1662,15 @@ async function checkService() {
     if (!response.ok) throw new Error();
     const status = await response.json(), compatible = status.schemaVersion === EXPECTED_API_SCHEMA;
     state.serviceCompatible = compatible;
-    const neuralAvailable = status.strategies?.neural === true, rlAvailable = status.strategies?.rl !== false, milpAvailable = status.strategies?.milp === true;
+    const setrankAvailable = status.strategies?.setrank === true, neuralAvailable = status.strategies?.neural === true, rlAvailable = status.strategies?.rl !== false, milpAvailable = status.strategies?.milp === true;
+    state.algorithmMetadata = status.algorithmMetadata || {};
+    state.algorithmHistory = status.algorithmHistory || {};
+    document.getElementById("setrankStrategyInput").disabled = !setrankAvailable;
     document.getElementById("neuralStrategyInput").disabled = !neuralAvailable;
     document.getElementById("rlStrategyInput").disabled = !rlAvailable;
     document.getElementById("milpStrategyInput").disabled = !milpAvailable;
     renderOtherAlgorithmOptions(status.otherAlgorithms || []);
+    renderAlgorithmHistory();
     runButton.disabled = !compatible;
     batchRunButton.disabled = !compatible;
     renderWorkspaceControls();
@@ -1556,6 +1684,10 @@ async function checkService() {
 }
 
 document.getElementById("workspaceDialogCancel").addEventListener("click", () => document.getElementById("workspaceDialog").close("cancel"));
+document.getElementById("editAlgorithmButton").addEventListener("click", openAlgorithmDialog);
+document.getElementById("algorithmDialogCancel").addEventListener("click", () => document.getElementById("algorithmDialog").close());
+document.getElementById("algorithmDialogStrategy").addEventListener("change", event => fillAlgorithmDialog(event.target.value));
+document.getElementById("algorithmDialogForm").addEventListener("submit", saveAlgorithmMetadata);
 document.getElementById("deviceFile").addEventListener("change", event => loadDevice(event.target.files[0]).catch(error => { event.target.value = ""; writeTerminal(`$ 设备读取失败\n  ${error.message}`, true); }));
 document.getElementById("deviceSelect").addEventListener("change", event => (async () => { if (state.dirty) await saveCurrentTest(true); await selectWorkspaceDevice(event.target.value); })().catch(error => writeTerminal(`$ 设备切换失败\n  ${error.message}`, true)));
 document.getElementById("testGroupSelect").addEventListener("change", event => selectWorkspaceGroup(event.target.value).catch(error => writeTerminal(`$ 测试组别切换失败\n  ${error.message}`, true)));
@@ -1590,17 +1722,25 @@ document.addEventListener("change", event => {
   if (event.target.name === "strategy") {
     state.strategy = event.target.value;
     if (state.strategy === "neural") state.options.loadLockManager = "joint";
-    else if (["heuristic", "rl"].includes(state.strategy)) state.options.loadLockManager = "petri-look";
+    else if (["heuristic", "setrank", "rl"].includes(state.strategy)) state.options.loadLockManager = "petri-look";
     if (state.strategy === "milp") { resizeRounds(1); document.getElementById("roundCount").value = 1; }
     document.getElementById("roundCount").disabled = state.strategy === "milp";
-    document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "neural", "rl"].includes(state.strategy));
+    document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "setrank", "neural", "rl"].includes(state.strategy));
     document.getElementById("rlOptions").classList.toggle("is-hidden", state.strategy !== "rl");
     document.getElementById("milpOptions").classList.toggle("is-hidden", state.strategy !== "milp");
+    showAlgorithmDetails(state.strategy);
     markTestDirty(); renderAll();
   }
 });
 document.addEventListener("click", event => {
   const tab = event.target.closest("[data-tab-target]"); if (tab) switchTab(tab.dataset.tabTarget);
+  const algorithmEdit = event.target.closest("[data-edit-algorithm]");
+  if (algorithmEdit) {
+    fillAlgorithmDialog(algorithmEdit.dataset.editAlgorithm);
+    document.getElementById("algorithmDialog").showModal();
+    window.setTimeout(() => document.getElementById("algorithmDialogVersion").focus(), 0);
+    return;
+  }
   const workspaceResult = event.target.closest("[data-workspace-result]");
   if (workspaceResult) {
     visualizationWorkspace.loadResult(workspaceResult.dataset.workspaceResult, workspaceResult.dataset.workspaceName)
