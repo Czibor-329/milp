@@ -141,8 +141,8 @@ class ConfigEditorServerTests(unittest.TestCase):
             result["rounds"][0]["strategyDiagnostics"]["selectedConfig"],
         )
 
-    def test_frontend_contains_dataset_and_neuralucb_controls(self) -> None:
-        """页面应提供 dataset 选择运行入口及 Safe NeuralUCB 参数。"""
+    def test_frontend_contains_dataset_and_search_strategy_controls(self) -> None:
+        """页面应提供 dataset、Safe NeuralUCB 和 LoadLock 宏搜索参数。"""
         source = _editor_source()
         for marker in (
             "datasetGroupSelect",
@@ -151,6 +151,9 @@ class ConfigEditorServerTests(unittest.TestCase):
             "neuralucbStrategyInput",
             "neuralUCBTopK",
             "neuralUCBExploration",
+            "loadlockMacroStrategyInput",
+            "loadLockMacroSearchSeconds",
+            "loadLockMacroRollouts",
         ):
             self.assertIn(marker, source)
         self.assertIn(

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>CT 实时调度终端</title>
-  <link rel="stylesheet" href="/assets/config_editor.css?v=20260726-topology">
+  <link rel="stylesheet" href="/assets/config_editor.css?v=20260726-performance">
 </head>
 <body>
   <main class="shell">
@@ -126,6 +126,23 @@
                 </label>
               </section>
 
+              <section class="performance-panel" aria-labelledby="performanceTitle">
+                <div class="performance-head">
+                  <div>
+                    <span class="visual-kicker">排程诊断</span>
+                    <h3 id="performanceTitle">资源占用与瓶颈识别</h3>
+                    <p>开关门、取放片、机械手搬运、加工、清洁和抽充气均计入对应物理资源。</p>
+                  </div>
+                  <label>统计口径
+                    <select id="performanceWindow">
+                      <option value="steady" selected>剔除启动 / 收尾</option>
+                      <option value="full">完整周期</option>
+                    </select>
+                  </label>
+                </div>
+                <div id="visualPerformance"></div>
+              </section>
+
               <div class="visual-workspace-layout">
                 <section class="device-stage" id="visualDeviceStage" aria-label="设备拓扑状态"></section>
                 <aside class="active-moves-panel">
@@ -173,6 +190,7 @@
           <div class="panel-body">
             <div class="strategy-options">
               <label class="strategy-card" data-strategy-card="heuristic"><input type="radio" name="strategy" value="heuristic" checked><b>启发式</b></label>
+              <label class="strategy-card" data-strategy-card="loadlock-macro"><input id="loadlockMacroStrategyInput" type="radio" name="strategy" value="loadlock-macro"><b>LoadLock 宏周期</b></label>
               <label class="strategy-card" data-strategy-card="setrank"><input id="setrankStrategyInput" type="radio" name="strategy" value="setrank"><b>SetRank-PIAC</b></label>
               <label class="strategy-card" data-strategy-card="neuralucb"><input id="neuralucbStrategyInput" type="radio" name="strategy" value="neuralucb"><b>Safe NeuralUCB</b></label>
               <label class="strategy-card" data-strategy-card="neural"><input id="neuralStrategyInput" type="radio" name="strategy" value="neural"><b>深层神经派工</b></label>
@@ -184,6 +202,11 @@
             <div id="loadlockOptions" class="grid" style="margin-top:14px">
               <div class="field span-12"><label>LoadLock 管理器</label><select data-option="loadLockManager"><option value="petri-look">Petri-ETA 通用管理器（Heuristic 推荐）</option><option value="collective-look">集选 LOOK（压力方向优先）</option><option value="round-robin">轮询（服务次数均衡）</option><option value="dedicated-direction">方向分区（LA 进、LB 出）</option><option value="exchange-look">交换优先 LOOK（成品/生片配对）</option><option value="joint">当前策略联合选择 LA/LB（现有 Neural 默认）</option></select><div class="hint">上层策略决定发哪片；这里可比较 ETA、集选、轮询、方向分区和交换优先。所有 manager 只在 Petri 安全候选内绑定具体锁；双槽交换仍由门、压力和槽位互锁复核。</div></div>
               <div class="field span-12"><label>LoadLock 双槽交换</label><select data-option="loadLockExchange"><option value="auto">策略选择（推荐）</option><option value="enabled">启用交换候选</option><option value="disabled">禁用交换（旧单向基线）</option></select><div class="hint">启用后，策略会同时看到单向送片和同门交换候选，并根据加工节拍、驻留余量与 LoadLock 周期决定是否交换；Machine 只负责验证物理可行性并展开门、取放和压力动作。</div></div>
+            </div>
+            <div id="loadlockMacroOptions" class="grid is-hidden" style="margin-top:14px">
+              <div class="field span-6"><label>前瞻搜索秒数</label><input data-option="loadLockMacroSearchSeconds" type="number" min="0" max="4.5" step="0.1" value="4"></div>
+              <div class="field span-6"><label>最大完整推演数</label><input data-option="loadLockMacroRollouts" type="number" min="0" max="256" step="1" value="96"></div>
+              <div class="field span-12"><div class="hint">顶层先决定晶圆进入真空端的完整顺序，再由现有 Machine 展开开关门、机器人 Pick/Place、加工和抽充气；启发式精确结果始终作为质量地板。</div></div>
             </div>
             <div id="rlOptions" class="grid is-hidden" style="margin-top:14px">
               <div class="field span-6"><label>搜索秒数</label><input data-option="rlSearchSeconds" type="number" min="0.1" max="4.8" step="0.1" value="4"></div>
@@ -238,6 +261,6 @@
     </aside>
   </div>
 
-  <script type="module" src="/assets/config_editor.js?v=20260726-topology"></script>
+  <script type="module" src="/assets/config_editor.js?v=20260726-performance"></script>
 </body>
 </html>

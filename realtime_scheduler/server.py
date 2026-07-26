@@ -157,6 +157,12 @@ BUILTIN_ALGORITHM_METADATA: Dict[str, Dict[str, str]] = {
         "description": "快速启发式排程，适合低延迟的实时调度与稳定基线。",
         "version": "未记录",
     },
+    "loadlock-macro": {
+        "name": "LoadLock 宏周期",
+        "description": "顶层一次规划抽气/充气携片顺序，底层复用 Machine 安全规则，并以启发式结果作为质量地板。",
+        "version": "1.0.0",
+        "updatedAt": "2026-07-26",
+    },
     "setrank": {
         "name": "SetRank-PIAC",
         "description": "集合网络按实例推荐启发式参数，并以候选精评和 legacy 质量地板保障结果。",
@@ -1800,14 +1806,23 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
         if normalized_strategy.startswith("other_alg:") and ":" in strategy
         else None
     )
-    builtin_strategies = {"heuristic", "setrank", "neuralucb", "neural", "rl", "milp"}
+    builtin_strategies = {
+        "heuristic",
+        "loadlock-macro",
+        "setrank",
+        "neuralucb",
+        "neural",
+        "rl",
+        "milp",
+    }
     discovered_ids = {
         str(item["id"])
         for item in discover_other_algorithms()
     }
     if normalized_strategy not in builtin_strategies and other_algorithm_id not in discovered_ids:
         raise ValueError(
-            "策略只支持 heuristic、setrank、neuralucb、neural、rl、milp，"
+            "策略只支持 heuristic、loadlock-macro、setrank、"
+            "neuralucb、neural、rl、milp，"
             "或 other_alg 下已发现的标准算法"
         )
     strategy = normalized_strategy if normalized_strategy in builtin_strategies else strategy
@@ -2067,7 +2082,15 @@ def execute_dataset_test(
 ) -> Dict[str, Any]:
     """运行一个 dataset 测试，并给非 heuristic 策略附加精确基线对照。"""
     normalized_strategy = str(strategy or "heuristic").strip().lower()
-    supported_strategies = {"heuristic", "setrank", "neuralucb", "neural", "rl", "milp"}
+    supported_strategies = {
+        "heuristic",
+        "loadlock-macro",
+        "setrank",
+        "neuralucb",
+        "neural",
+        "rl",
+        "milp",
+    }
     if normalized_strategy not in supported_strategies:
         raise ValueError("dataset 测试只支持内置策略")
     result = _execute_dataset_case_once(case_id, normalized_strategy, options)
@@ -2994,6 +3017,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                 "schemaVersion": API_SCHEMA_VERSION,
                 "strategies": {
                     "heuristic": True,
+                    "loadlock-macro": True,
                     "setrank": SETRANK_MODEL_PATH.is_file(),
                     "neuralucb": NEURAL_UCB_MODEL_PATH.is_file(),
                     "neural": NEURAL_MODEL_PATH.is_file(),

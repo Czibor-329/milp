@@ -43,7 +43,7 @@ const state = {
   datasetGroups: [], datasetGroupId: "", datasetCaseId: "", datasetRunning: false,
   activeBatchId: "", batchRunning: false, batchCancelRequested: false, batchCancelSent: false, batchResult: null, selectedBatchTestId: "",
   deviceName: "", device: null, stationNames: [], loadPorts: [], processModules: [], robotNames: [], robotScopes: {},
-  strategy: "heuristic", availableOtherAlgorithms: [], algorithmMetadata: {}, algorithmHistory: {}, roundCount: 2, times: [0, 70], options: { loadLockManager: "petri-look", loadLockExchange: "auto", neuralUCBTopK: 2, neuralUCBExploration: 5, rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
+  strategy: "heuristic", availableOtherAlgorithms: [], algorithmMetadata: {}, algorithmHistory: {}, roundCount: 2, times: [0, 70], options: { loadLockManager: "petri-look", loadLockExchange: "auto", loadLockMacroSearchSeconds: 4, loadLockMacroRollouts: 96, neuralUCBTopK: 2, neuralUCBExploration: 5, rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
   cleans: [],
   routes: [{ name: "RouteA", group: "RouteA", bufferOption: 0, prePJobCleanRefs: [], postPJobCleanRefs: [], postCJobCleanRefs: [], stages: linkRouteSteps([makeStage("LP1"), makeStage("Robot"), makeStage("PM1,PM2", true, "RouteA_Step2"), makeStage("Robot"), makeStage("LP1")]) }],
   rounds: [makeRound(1, 0, "RouteA", "LP1"), makeRound(2, 70, "RouteA", "LP2")],
@@ -338,7 +338,7 @@ function makeDefaultTestCase(name = "默认测试集") {
   const routeName = state.routes[0]?.name || "";
   return {
     name, group: state.activeTestGroup || "", strategy: "heuristic", roundCount: 2, times: [0, 70],
-    options: { loadLockManager: "petri-look", loadLockExchange: "auto", rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
+    options: { loadLockManager: "petri-look", loadLockExchange: "auto", loadLockMacroSearchSeconds: 4, loadLockMacroRollouts: 96, rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
     cleans: state.cleans, routes: state.routes,
     rounds: [
       makeRound(1, 0, routeName, state.loadPorts[0] || ""),
@@ -447,9 +447,13 @@ function applyTestCase(testCase) {
   state.routeNameChanges.clear();
   state.testCaseId = value.id; state.testCaseName = value.name; state.testCaseGroup = String(value.group || ""); state.activeTestGroup = state.testCaseGroup; state.strategy = value.strategy || "heuristic";
   state.roundCount = Math.max(1, Number(value.roundCount) || 1); state.times = Array.isArray(value.times) ? value.times : [0];
-  state.options = value.options || { loadLockManager: "petri-look", loadLockExchange: "auto", neuralUCBTopK: 2, neuralUCBExploration: 5, rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 };
+  state.options = value.options || { loadLockManager: "petri-look", loadLockExchange: "auto", loadLockMacroSearchSeconds: 4, loadLockMacroRollouts: 96, neuralUCBTopK: 2, neuralUCBExploration: 5, rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 };
   state.options.loadLockManager = state.options.loadLockManager || "petri-look";
   state.options.loadLockExchange = state.options.loadLockExchange || "auto";
+  const macroSearchSeconds = Number(state.options.loadLockMacroSearchSeconds);
+  state.options.loadLockMacroSearchSeconds = Number.isFinite(macroSearchSeconds) && macroSearchSeconds >= 0 ? macroSearchSeconds : 4;
+  const macroRollouts = Number(state.options.loadLockMacroRollouts);
+  state.options.loadLockMacroRollouts = Number.isFinite(macroRollouts) && macroRollouts >= 0 ? Math.floor(macroRollouts) : 96;
   state.options.neuralUCBTopK = Number(state.options.neuralUCBTopK) || 2;
   state.options.neuralUCBExploration = Number.isFinite(Number(state.options.neuralUCBExploration)) ? Number(state.options.neuralUCBExploration) : 5;
   state.options.milpTimeLimit = Number(state.options.milpTimeLimit) || 120;
@@ -473,7 +477,8 @@ function applyTestCase(testCase) {
   document.getElementById("roundCount").value = state.roundCount;
   document.querySelectorAll('input[name="strategy"]').forEach(input => { input.checked = input.value === state.strategy; });
   document.querySelectorAll("[data-option]").forEach(input => { input.value = state.options[input.dataset.option] ?? input.value; });
-  document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "setrank", "neuralucb", "neural", "rl"].includes(state.strategy));
+  document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro", "setrank", "neuralucb", "neural", "rl"].includes(state.strategy));
+  document.getElementById("loadlockMacroOptions").classList.toggle("is-hidden", state.strategy !== "loadlock-macro");
   document.getElementById("neuralucbOptions").classList.toggle("is-hidden", state.strategy !== "neuralucb");
   document.getElementById("rlOptions").classList.toggle("is-hidden", state.strategy !== "rl");
   document.getElementById("milpOptions").classList.toggle("is-hidden", state.strategy !== "milp");
@@ -1816,9 +1821,10 @@ async function checkService() {
     if (!response.ok) throw new Error();
     const status = await response.json(), compatible = status.schemaVersion === EXPECTED_API_SCHEMA;
     state.serviceCompatible = compatible;
-    const setrankAvailable = status.strategies?.setrank === true, neuralucbAvailable = status.strategies?.neuralucb === true, neuralAvailable = status.strategies?.neural === true, rlAvailable = status.strategies?.rl !== false, milpAvailable = status.strategies?.milp === true;
+    const loadlockMacroAvailable = status.strategies?.["loadlock-macro"] === true, setrankAvailable = status.strategies?.setrank === true, neuralucbAvailable = status.strategies?.neuralucb === true, neuralAvailable = status.strategies?.neural === true, rlAvailable = status.strategies?.rl !== false, milpAvailable = status.strategies?.milp === true;
     state.algorithmMetadata = status.algorithmMetadata || {};
     state.algorithmHistory = status.algorithmHistory || {};
+    document.getElementById("loadlockMacroStrategyInput").disabled = !loadlockMacroAvailable;
     document.getElementById("setrankStrategyInput").disabled = !setrankAvailable;
     document.getElementById("neuralucbStrategyInput").disabled = !neuralucbAvailable;
     document.getElementById("neuralStrategyInput").disabled = !neuralAvailable;
@@ -1882,10 +1888,11 @@ document.addEventListener("change", event => {
   if (event.target.name === "strategy") {
     state.strategy = event.target.value;
     if (state.strategy === "neural") state.options.loadLockManager = "joint";
-    else if (["heuristic", "setrank", "neuralucb", "rl"].includes(state.strategy)) state.options.loadLockManager = "petri-look";
+    else if (["heuristic", "loadlock-macro", "setrank", "neuralucb", "rl"].includes(state.strategy)) state.options.loadLockManager = "petri-look";
     if (state.strategy === "milp") { resizeRounds(1); document.getElementById("roundCount").value = 1; }
     document.getElementById("roundCount").disabled = state.strategy === "milp";
-    document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "setrank", "neuralucb", "neural", "rl"].includes(state.strategy));
+    document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro", "setrank", "neuralucb", "neural", "rl"].includes(state.strategy));
+    document.getElementById("loadlockMacroOptions").classList.toggle("is-hidden", state.strategy !== "loadlock-macro");
     document.getElementById("neuralucbOptions").classList.toggle("is-hidden", state.strategy !== "neuralucb");
     document.getElementById("rlOptions").classList.toggle("is-hidden", state.strategy !== "rl");
     document.getElementById("milpOptions").classList.toggle("is-hidden", state.strategy !== "milp");

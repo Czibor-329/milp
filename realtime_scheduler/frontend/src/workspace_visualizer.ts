@@ -55,6 +55,62 @@ export interface WorkspaceSnapshot {
   waferCount: number;
 }
 
+export type PerformanceWindowMode = "steady" | "full";
+export type ActivityCategory = "process" | "clean" | "door" | "transfer" | "environment" | "other";
+export type ResourceKind = "robot" | "process" | "loadlock" | "loadport" | "auxiliary";
+
+export interface PerformanceWindow {
+  mode: PerformanceWindowMode;
+  method: "steady-overlap" | "middle-approximation" | "full";
+  start: number;
+  end: number;
+  duration: number;
+  scheduleStart: number;
+  scheduleEnd: number;
+  trimmedStart: number;
+  trimmedEnd: number;
+  label: string;
+  detail: string;
+}
+
+export interface ResourcePerformance {
+  name: string;
+  type: string;
+  kind: ResourceKind;
+  utilization: number;
+  busyTime: number;
+  averageActivePeriod: number;
+  longestActivePeriod: number;
+  longestIdlePeriod: number;
+  activePeriodCount: number;
+  categoryTimes: Record<ActivityCategory, number>;
+  isBottleneck: boolean;
+}
+
+export interface VacuumQueueItem {
+  index: number;
+  material: string;
+  pjob: string;
+  loadLock: string;
+  admittedAt: number;
+  targetModule: string;
+  targetWasBusy: boolean;
+  processWait: number;
+}
+
+export interface SchedulePerformance {
+  window: PerformanceWindow;
+  resources: ResourcePerformance[];
+  bottleneck: ResourcePerformance | null;
+  completedWaferCount: number;
+  throughputPerHour: number;
+  meanDepartureInterval: number;
+  departureIntervalCv: number;
+  vacuumQueue: VacuumQueueItem[];
+  vacuumQueueJobSwitchRatio: number;
+  vacuumQueueLongestRun: number;
+}
+
 interface NormalizedMove extends MoveRecord {
   MoveID: number;
   MoveType: number;
@@ -80,6 +136,8 @@ interface WorkspaceElements {
   fileInput: HTMLInputElement;
   openGantt: HTMLAnchorElement;
   resultButton: HTMLButtonElement;
+  performance: HTMLElement;
+  performanceWindow: HTMLSelectElement;
 }
 
 const PICK_MOVE_TYPES = new Set([0, 2]);
@@ -98,6 +156,28 @@ const PROCESS_ARC_CENTER_X_PERCENT = 50;
 const PROCESS_ARC_CENTER_Y_PIXELS = 214;
 const PROCESS_ARC_RADIUS_X_PERCENT = 38;
 const PROCESS_ARC_RADIUS_Y_PIXELS = 156;
+const PERFORMANCE_TIME_TOLERANCE = 1e-6;
+const MIDDLE_WINDOW_TRIM_RATIO = 0.1;
+const MINIMUM_STEADY_WAFERS = 4;
+const MAXIMUM_VISIBLE_QUEUE_ITEMS = 32;
+
+const ACTIVITY_CATEGORIES: ActivityCategory[] = [
+  "process",
+  "clean",
+  "door",
+  "transfer",
+  "environment",
+  "other",
+];
+
+const ACTIVITY_CATEGORY_LABELS: Record<ActivityCategory, string> = {
+  process: "加工",
+  clean: "清洁",
+  door: "开关门",
+  transfer: "取放 / 搬运",
+  environment: "抽充气",
+  other: "其他",
+};
 
 const MOVE_NAMES: Record<number, string> = {
   0: "取片", 1: "放片", 2: "多片取片", 3: "多片放片", 4: "换片",
@@ -227,6 +307,467 @@ function normalizeMoves(moves: MoveRecord[]): NormalizedMove[] {
     || left.EndTime - right.EndTime
     || left.MoveID - right.MoveID
   ));
+}
+
+interface ActivityInterval {
+  start: number;
+  end: number;
+  category: ActivityCategory;
+}
+
+interface IntervalSummary {
+  busyTime: number;
+  averageActivePeriod: number;
+  longestActivePeriod: number;
+  longestIdlePeriod: number;
+  activePeriodCount: number;
+  categoryTimes: Record<ActivityCategory, number>;
+}
+
+/** 创建各动作类型时间均为零的资源占用组成。 */
+function emptyCategoryTimes(): Record<ActivityCategory, number> {
+  return {
+    process: 0,
+    clean: 0,
+    door: 0,
+    transfer: 0,
+    environment: 0,
+    other: 0,
+  };
+}
+
+/** 把 MoveType 映射为性能诊断使用的物理活动类别。 */
+function activityCategory(moveType: number): ActivityCategory {
+  if (moveType === PROCESS_MOVE) return "process";
+  if (moveType === CLEAN_MOVE) return "clean";
+  if ([PREPARE_MOVE, COMPLETE_MOVE].includes(moveType)) return "door";
+  if (moveType === PRE_PREPARE_MOVE || [12, 13].includes(moveType)) return "environment";
+  if (PICK_MOVE_TYPES.has(moveType) || PLACE_MOVE_TYPES.has(moveType) || [SWAP_MOVE, 5].includes(moveType)) {
+    return "transfer";
+  }
+  return "other";
+}
+
+/** 返回一个 Move 实际占用的机械手和腔室资源。 */
+function activityResourceNames(move: NormalizedMove): string[] {
+  const names = new Set<string>();
+  if (move.ModuleName) names.add(move.ModuleName);
+  if (PICK_MOVE_TYPES.has(move.MoveType)) {
+    const source = firstStation(move, "SrcStationList");
+    if (source) names.add(source);
+  } else if (PLACE_MOVE_TYPES.has(move.MoveType)) {
+    const destination = firstStation(move, "DestStationList");
+    if (destination) names.add(destination);
+  } else if (move.MoveType === SWAP_MOVE) {
+    for (const station of listValue(move.StationList).map(String).filter(Boolean)) names.add(station);
+  }
+  return [...names];
+}
+
+/** 返回设备定义中一个站点的类型。 */
+function stationType(device: DeviceDefinition | null, name: string): string {
+  return String(device?.Stations?.[name]?.Type ?? "");
+}
+
+/** 将资源名称归入机械手、工艺腔、LoadLock 等稳定类别。 */
+function resourceKind(name: string, type: string): ResourceKind {
+  if (isRobotName(name)) return "robot";
+  if (isProcessModule(name, type)) return "process";
+  if (isLoadLockName(name, type)) return "loadlock";
+  if (isLoadPortName(name, type)) return "loadport";
+  return "auxiliary";
+}
+
+/** 收集性能表所需资源；工艺腔和 LoadLock 即使未使用也保留。 */
+function performanceResourceDefinitions(
+  moves: NormalizedMove[],
+  device: DeviceDefinition | null,
+): Map<string, { type: string; kind: ResourceKind }> {
+  const referenced = new Set(moves.flatMap(activityResourceNames));
+  const resources = new Map<string, { type: string; kind: ResourceKind }>();
+  for (const [name, definition] of Object.entries(device?.Stations ?? {})) {
+    const type = String(definition.Type ?? "");
+    if (referenced.has(name) || isProcessModule(name, type) || isLoadLockName(name, type)) {
+      resources.set(name, { type, kind: resourceKind(name, type) });
+    }
+  }
+  for (const name of Object.keys(device?.Robots ?? {})) {
+    resources.set(name, { type: "Robot", kind: "robot" });
+  }
+  for (const name of referenced) {
+    if (!resources.has(name)) {
+      const type = stationType(device, name);
+      resources.set(name, { type, kind: resourceKind(name, type) });
+    }
+  }
+  return resources;
+}
+
+/** 按资源建立完整 MoveList 的物理占用区间。 */
+function resourceActivityIntervals(
+  moves: NormalizedMove[],
+  device: DeviceDefinition | null,
+): Map<string, ActivityInterval[]> {
+  const intervals = new Map<string, ActivityInterval[]>();
+  for (const name of performanceResourceDefinitions(moves, device).keys()) intervals.set(name, []);
+  for (const move of moves) {
+    if (move.EndTime <= move.StartTime + PERFORMANCE_TIME_TOLERANCE) continue;
+    const interval = {
+      start: move.StartTime,
+      end: move.EndTime,
+      category: activityCategory(move.MoveType),
+    };
+    for (const name of activityResourceNames(move)) {
+      const resourceIntervals = intervals.get(name) ?? [];
+      resourceIntervals.push(interval);
+      intervals.set(name, resourceIntervals);
+    }
+  }
+  return intervals;
+}
+
+/** 在统计窗口内合并重叠区间，并计算 Active Period 与最长空闲。 */
+function summarizeIntervals(
+  intervals: ActivityInterval[],
+  windowStart: number,
+  windowEnd: number,
+): IntervalSummary {
+  const categoryTimes = emptyCategoryTimes();
+  const clipped = intervals
+    .map(interval => ({
+      ...interval,
+      start: Math.max(windowStart, interval.start),
+      end: Math.min(windowEnd, interval.end),
+    }))
+    .filter(interval => interval.end > interval.start + PERFORMANCE_TIME_TOLERANCE);
+  if (windowEnd <= windowStart + PERFORMANCE_TIME_TOLERANCE) {
+    return {
+      busyTime: 0,
+      averageActivePeriod: 0,
+      longestActivePeriod: 0,
+      longestIdlePeriod: 0,
+      activePeriodCount: 0,
+      categoryTimes,
+    };
+  }
+  const points = [...new Set([
+    windowStart,
+    windowEnd,
+    ...clipped.flatMap(interval => [interval.start, interval.end]),
+  ])].sort((left, right) => left - right);
+  const activePeriods: Array<{ start: number; end: number }> = [];
+  for (let index = 0; index < points.length - 1; index += 1) {
+    const start = points[index];
+    const end = points[index + 1];
+    if (end <= start + PERFORMANCE_TIME_TOLERANCE) continue;
+    const active = clipped.filter(interval => (
+      interval.start < end - PERFORMANCE_TIME_TOLERANCE
+      && interval.end > start + PERFORMANCE_TIME_TOLERANCE
+    ));
+    if (!active.length) continue;
+    const category = ACTIVITY_CATEGORIES.find(candidate => (
+      active.some(interval => interval.category === candidate)
+    )) ?? "other";
+    categoryTimes[category] += end - start;
+    const previous = activePeriods.at(-1);
+    if (previous && start <= previous.end + PERFORMANCE_TIME_TOLERANCE) previous.end = end;
+    else activePeriods.push({ start, end });
+  }
+  const activeDurations = activePeriods.map(period => period.end - period.start);
+  const busyTime = activeDurations.reduce((sum, duration) => sum + duration, 0);
+  const idleDurations: number[] = [];
+  let cursor = windowStart;
+  for (const period of activePeriods) {
+    if (period.start > cursor + PERFORMANCE_TIME_TOLERANCE) idleDurations.push(period.start - cursor);
+    cursor = Math.max(cursor, period.end);
+  }
+  if (cursor < windowEnd - PERFORMANCE_TIME_TOLERANCE) idleDurations.push(windowEnd - cursor);
+  return {
+    busyTime,
+    averageActivePeriod: activeDurations.length ? busyTime / activeDurations.length : 0,
+    longestActivePeriod: Math.max(0, ...activeDurations),
+    longestIdlePeriod: Math.max(0, ...idleDurations),
+    activePeriodCount: activeDurations.length,
+    categoryTimes,
+  };
+}
+
+/** 返回物料在 Move 的并行列表字段中对应的 PJob 名称。 */
+function materialPJob(move: NormalizedMove, material: string): string {
+  const materials = materialIds(move);
+  const jobs = listValue(move.PJobName).map(String);
+  const index = materials.indexOf(material);
+  return jobs[index] ?? jobs[0] ?? "";
+}
+
+/** 收集晶圆从 LoadPort 离开和返回 LoadPort 的时刻。 */
+function waferBoundaryTimes(
+  moves: NormalizedMove[],
+  device: DeviceDefinition | null,
+): { entries: Map<string, number>; completions: Map<string, number> } {
+  const entries = new Map<string, number>();
+  const completions = new Map<string, number>();
+  for (const move of moves) {
+    if (PICK_MOVE_TYPES.has(move.MoveType)) {
+      const source = firstStation(move, "SrcStationList");
+      if (isLoadPortName(source, stationType(device, source))) {
+        for (const material of materialIds(move)) {
+          if (!entries.has(material)) entries.set(material, move.EndTime);
+        }
+      }
+    } else if (PLACE_MOVE_TYPES.has(move.MoveType)) {
+      const destination = firstStation(move, "DestStationList");
+      if (isLoadPortName(destination, stationType(device, destination))) {
+        for (const material of materialIds(move)) completions.set(material, move.EndTime);
+      }
+    }
+  }
+  return { entries, completions };
+}
+
+/** 由首片完工和末片投料自动剔除启动、收尾瞬态。 */
+function performanceWindow(
+  moves: NormalizedMove[],
+  device: DeviceDefinition | null,
+  mode: PerformanceWindowMode,
+): PerformanceWindow {
+  const scheduleStart = moves.length ? Math.min(...moves.map(move => move.StartTime)) : 0;
+  const scheduleEnd = moves.length ? Math.max(...moves.map(move => move.EndTime)) : 0;
+  const scheduleDuration = Math.max(scheduleEnd - scheduleStart, 0);
+  if (mode === "full" || scheduleDuration <= PERFORMANCE_TIME_TOLERANCE) {
+    return {
+      mode,
+      method: "full",
+      start: scheduleStart,
+      end: scheduleEnd,
+      duration: scheduleDuration,
+      scheduleStart,
+      scheduleEnd,
+      trimmedStart: 0,
+      trimmedEnd: 0,
+      label: "完整周期",
+      detail: "从第一条 Move 开始到最后一条 Move 结束，包含启动与收尾阶段。",
+    };
+  }
+  const boundaries = waferBoundaryTimes(moves, device);
+  const entryTimes = [...boundaries.entries.values()];
+  const completionTimes = [...boundaries.completions.values()];
+  const firstCompletion = Math.min(...completionTimes);
+  const lastEntry = Math.max(...entryTimes);
+  const hasSteadyOverlap = (
+    entryTimes.length >= MINIMUM_STEADY_WAFERS
+    && completionTimes.length >= MINIMUM_STEADY_WAFERS
+    && Number.isFinite(firstCompletion)
+    && Number.isFinite(lastEntry)
+    && lastEntry > firstCompletion + PERFORMANCE_TIME_TOLERANCE
+  );
+  const start = hasSteadyOverlap
+    ? firstCompletion
+    : scheduleStart + scheduleDuration * MIDDLE_WINDOW_TRIM_RATIO;
+  const end = hasSteadyOverlap
+    ? lastEntry
+    : scheduleEnd - scheduleDuration * MIDDLE_WINDOW_TRIM_RATIO;
+  return {
+    mode,
+    method: hasSteadyOverlap ? "steady-overlap" : "middle-approximation",
+    start,
+    end,
+    duration: Math.max(end - start, 0),
+    scheduleStart,
+    scheduleEnd,
+    trimmedStart: Math.max(start - scheduleStart, 0),
+    trimmedEnd: Math.max(scheduleEnd - end, 0),
+    label: hasSteadyOverlap ? "稳态交叠窗" : "中段近似窗",
+    detail: hasSteadyOverlap
+      ? "首片返回 LoadPort 后开始、末片离开 LoadPort 时结束，自动排除启动填充和末批排空。"
+      : "样本没有形成可靠的首片完工—末片投料交叠，暂按时间轴两端各剔除 10%。",
+  };
+}
+
+/** 计算一组正间隔的变异系数，衡量出站是否成团。 */
+function intervalCoefficientOfVariation(values: number[]): number {
+  if (values.length < 2) return 0;
+  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+  if (mean <= PERFORMANCE_TIME_TOLERANCE) return 0;
+  const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length;
+  return Math.sqrt(variance) / mean;
+}
+
+/** 构造晶圆第一次从 LoadLock 进入真空机器人的可观察队列。 */
+function buildVacuumQueue(
+  moves: NormalizedMove[],
+  device: DeviceDefinition | null,
+  intervalsByResource: Map<string, ActivityInterval[]>,
+): VacuumQueueItem[] {
+  const admittedMaterials = new Set<string>();
+  const queue: VacuumQueueItem[] = [];
+  for (const move of moves) {
+    if (/^ATR/i.test(move.ModuleName)) continue;
+    const isPick = PICK_MOVE_TYPES.has(move.MoveType);
+    const isLoadLockSwap = move.MoveType === SWAP_MOVE;
+    if (!isPick && !isLoadLockSwap) continue;
+    const source = isLoadLockSwap
+      ? String(listValue(move.StationList)[0] ?? "")
+      : firstStation(move, "SrcStationList");
+    if (!isLoadLockName(source, stationType(device, source))) continue;
+    const admitted = isLoadLockSwap ? materialIds(move, "RecvMatList") : materialIds(move);
+    for (const material of admitted) {
+      if (admittedMaterials.has(material)) continue;
+      admittedMaterials.add(material);
+      const targetPlacement = moves.find(candidate => (
+        candidate.StartTime >= move.EndTime - PERFORMANCE_TIME_TOLERANCE
+        && (
+          (
+            PLACE_MOVE_TYPES.has(candidate.MoveType)
+            && materialIds(candidate).includes(material)
+          )
+          || (
+            candidate.MoveType === SWAP_MOVE
+            && materialIds(candidate, "SendMatList").includes(material)
+          )
+        )
+        && isProcessModule(
+          candidate.MoveType === SWAP_MOVE
+            ? String(listValue(candidate.StationList)[0] ?? "")
+            : firstStation(candidate, "DestStationList"),
+          stationType(
+            device,
+            candidate.MoveType === SWAP_MOVE
+              ? String(listValue(candidate.StationList)[0] ?? "")
+              : firstStation(candidate, "DestStationList"),
+          ),
+        )
+      ));
+      const targetModule = targetPlacement
+        ? targetPlacement.MoveType === SWAP_MOVE
+          ? String(listValue(targetPlacement.StationList)[0] ?? "")
+          : firstStation(targetPlacement, "DestStationList")
+        : "";
+      const processMove = moves.find(candidate => (
+        candidate.StartTime >= move.EndTime - PERFORMANCE_TIME_TOLERANCE
+        && candidate.MoveType === PROCESS_MOVE
+        && candidate.ModuleName === targetModule
+        && materialIds(candidate).includes(material)
+      ));
+      const admittedAt = move.EndTime;
+      const targetWasBusy = Boolean(targetModule && (intervalsByResource.get(targetModule) ?? []).some(interval => (
+        interval.start < admittedAt + PERFORMANCE_TIME_TOLERANCE
+        && interval.end > admittedAt + PERFORMANCE_TIME_TOLERANCE
+      )));
+      queue.push({
+        index: queue.length + 1,
+        material,
+        pjob: materialPJob(move, material),
+        loadLock: source,
+        admittedAt,
+        targetModule,
+        targetWasBusy,
+        processWait: processMove ? Math.max(processMove.StartTime - admittedAt, 0) : 0,
+      });
+    }
+  }
+  return queue;
+}
+
+/** 统计真空端队列中相邻 Job 切换比例和最长连续段。 */
+function vacuumQueuePattern(queue: VacuumQueueItem[]): { switchRatio: number; longestRun: number } {
+  if (!queue.length) return { switchRatio: 0, longestRun: 0 };
+  let switches = 0;
+  let run = 1;
+  let longestRun = 1;
+  for (let index = 1; index < queue.length; index += 1) {
+    if (queue[index].pjob === queue[index - 1].pjob) run += 1;
+    else {
+      switches += 1;
+      run = 1;
+    }
+    longestRun = Math.max(longestRun, run);
+  }
+  return {
+    switchRatio: queue.length > 1 ? switches / (queue.length - 1) : 0,
+    longestRun,
+  };
+}
+
+/** 从完整 MoveList 计算稳态资源占用、Active Period 和真空端队列。 */
+export function analyzeSchedulePerformance(
+  moves: MoveRecord[],
+  device: DeviceDefinition | null,
+  mode: PerformanceWindowMode = "steady",
+): SchedulePerformance {
+  const records = normalizeMoves(moves);
+  const window = performanceWindow(records, device, mode);
+  const definitions = performanceResourceDefinitions(records, device);
+  const intervalsByResource = resourceActivityIntervals(records, device);
+  const resources = [...definitions.entries()].map(([name, definition]): ResourcePerformance => {
+    const summary = summarizeIntervals(
+      intervalsByResource.get(name) ?? [],
+      window.start,
+      window.end,
+    );
+    return {
+      name,
+      type: definition.type,
+      kind: definition.kind,
+      utilization: window.duration > PERFORMANCE_TIME_TOLERANCE
+        ? summary.busyTime / window.duration
+        : 0,
+      ...summary,
+      isBottleneck: false,
+    };
+  });
+  const bottleneckCandidates = resources.filter(resource => (
+    ["robot", "process", "loadlock"].includes(resource.kind)
+    && resource.busyTime > PERFORMANCE_TIME_TOLERANCE
+  ));
+  const bottleneck = [...bottleneckCandidates].sort((left, right) => (
+    right.averageActivePeriod - left.averageActivePeriod
+    || right.utilization - left.utilization
+    || naturalCompare(left.name, right.name)
+  ))[0] ?? null;
+  if (bottleneck) bottleneck.isBottleneck = true;
+  const kindOrder: Record<ResourceKind, number> = {
+    robot: 0,
+    loadlock: 1,
+    process: 2,
+    auxiliary: 3,
+    loadport: 4,
+  };
+  resources.sort((left, right) => (
+    Number(right.isBottleneck) - Number(left.isBottleneck)
+    || kindOrder[left.kind] - kindOrder[right.kind]
+    || right.utilization - left.utilization
+    || naturalCompare(left.name, right.name)
+  ));
+
+  const boundaries = waferBoundaryTimes(records, device);
+  const completionTimes = [...boundaries.completions.values()]
+    .filter(time => (
+      time >= window.start - PERFORMANCE_TIME_TOLERANCE
+      && time <= window.end + PERFORMANCE_TIME_TOLERANCE
+    ))
+    .sort((left, right) => left - right);
+  const departureIntervals = completionTimes.slice(1).map((time, index) => time - completionTimes[index]);
+  const meanDepartureInterval = departureIntervals.length
+    ? departureIntervals.reduce((sum, interval) => sum + interval, 0) / departureIntervals.length
+    : 0;
+  const throughputPerHour = meanDepartureInterval > PERFORMANCE_TIME_TOLERANCE
+    ? 3600 / meanDepartureInterval
+    : 0;
+  const vacuumQueue = buildVacuumQueue(records, device, intervalsByResource);
+  const queuePattern = vacuumQueuePattern(vacuumQueue);
+  return {
+    window,
+    resources,
+    bottleneck,
+    completedWaferCount: completionTimes.length,
+    throughputPerHour,
+    meanDepartureInterval,
+    departureIntervalCv: intervalCoefficientOfVariation(departureIntervals),
+    vacuumQueue,
+    vacuumQueueJobSwitchRatio: queuePattern.switchRatio,
+    vacuumQueueLongestRun: queuePattern.longestRun,
+  };
 }
 
 /** 收集设备定义和 MoveList 中出现过的全部站点。 */
@@ -461,6 +1002,8 @@ function collectElements(root: Document): WorkspaceElements {
     fileInput: required<HTMLInputElement>("visualFileInput"),
     openGantt: required<HTMLAnchorElement>("visualOpenGantt"),
     resultButton: required<HTMLButtonElement>("workspaceResultButton"),
+    performance: required("visualPerformance"),
+    performanceWindow: required<HTMLSelectElement>("performanceWindow"),
   };
 }
 
@@ -588,6 +1131,109 @@ function renderEquipmentTopology(snapshot: WorkspaceSnapshot): string {
     </section>`;
 }
 
+/** 将 PJob 全名压缩为队列中可辨认的末级名称。 */
+function shortPJobName(value: string): string {
+  const parts = String(value || "").split(".").filter(Boolean);
+  return parts.at(-1) ?? "—";
+}
+
+/** 把比例格式化为一位小数百分比。 */
+function formatPercent(value: number): string {
+  return `${(Math.max(0, value) * 100).toFixed(1)}%`;
+}
+
+/** 绘制资源占用表、Active Period 瓶颈和真空端晶圆队列。 */
+function renderSchedulePerformance(performance: SchedulePerformance): string {
+  const window = performance.window;
+  const bottleneck = performance.bottleneck;
+  const resourceKindLabels: Record<ResourceKind, string> = {
+    robot: "机械手",
+    process: "工艺腔",
+    loadlock: "LoadLock",
+    loadport: "LoadPort",
+    auxiliary: "辅助模块",
+  };
+  const legend = ACTIVITY_CATEGORIES.map(category => (
+    `<span><i class="performance-swatch category-${category}"></i>${ACTIVITY_CATEGORY_LABELS[category]}</span>`
+  )).join("");
+  const resourceRows = performance.resources.map(resource => {
+    const categoryBars = ACTIVITY_CATEGORIES.map(category => {
+      const duration = resource.categoryTimes[category];
+      if (duration <= PERFORMANCE_TIME_TOLERANCE || window.duration <= PERFORMANCE_TIME_TOLERANCE) return "";
+      const width = Math.min(duration / window.duration * 100, 100);
+      return `<span class="category-${category}" style="width:${width.toFixed(3)}%" title="${ACTIVITY_CATEGORY_LABELS[category]} ${formatSeconds(duration)} s"></span>`;
+    }).join("");
+    const status = resource.busyTime <= PERFORMANCE_TIME_TOLERANCE
+      ? '<span class="resource-unused">未使用</span>'
+      : resource.isBottleneck
+        ? '<span class="resource-bottleneck">瓶颈候选</span>'
+        : "";
+    return `
+      <tr class="${resource.isBottleneck ? "is-bottleneck" : ""}">
+        <th scope="row">
+          <span class="resource-name">${escapeHtml(resource.name)}</span>
+          <small>${escapeHtml(resourceKindLabels[resource.kind])}</small>
+          ${status}
+        </th>
+        <td>
+          <div class="utilization-value">${formatPercent(resource.utilization)}</div>
+          <div class="utilization-track" aria-label="${escapeHtml(resource.name)} 占用率 ${formatPercent(resource.utilization)}">${categoryBars}</div>
+          <small>${formatSeconds(resource.busyTime)} s</small>
+        </td>
+        <td class="performance-number">${formatSeconds(resource.averageActivePeriod)} s<small>${resource.activePeriodCount} 段</small></td>
+        <td class="performance-number">${formatSeconds(resource.longestIdlePeriod)} s</td>
+      </tr>`;
+  }).join("");
+  const visibleQueue = performance.vacuumQueue.slice(0, MAXIMUM_VISIBLE_QUEUE_ITEMS);
+  const queueMarkup = visibleQueue.length
+    ? `<ol class="vacuum-queue-sequence">${visibleQueue.map(item => `
+        <li class="${item.targetWasBusy ? "target-busy" : "target-idle"}">
+          <span class="queue-index">${item.index}</span>
+          <strong>W${escapeHtml(item.material)}</strong>
+          <span>${escapeHtml(shortPJobName(item.pjob))} · ${escapeHtml(item.loadLock)} → ${escapeHtml(item.targetModule || "PM?")}</span>
+          <small>${formatSeconds(item.admittedAt)} s · 目标腔${item.targetWasBusy ? "忙" : "闲"} · 至加工 ${formatSeconds(item.processWait)} s</small>
+        </li>`).join("")}</ol>`
+    : '<div class="vacuum-queue-empty">MoveList 中没有识别到“LoadLock → 真空机械手”的入队动作。</div>';
+  return `
+    <div class="performance-summary">
+      <div>
+        <span>统计窗口</span>
+        <strong>${escapeHtml(window.label)} · ${formatSeconds(window.duration)} s</strong>
+        <small>剔除开头 ${formatSeconds(window.trimmedStart)} s / 结尾 ${formatSeconds(window.trimmedEnd)} s</small>
+      </div>
+      <div>
+        <span>连续忙碌瓶颈</span>
+        <strong>${escapeHtml(bottleneck?.name ?? "—")}</strong>
+        <small>${bottleneck ? `平均连续忙碌 ${formatSeconds(bottleneck.averageActivePeriod)} s · 占用 ${formatPercent(bottleneck.utilization)}` : "没有足够的资源活动"}</small>
+      </div>
+      <div>
+        <span>出站节拍</span>
+        <strong>${performance.throughputPerHour > 0 ? `${performance.throughputPerHour.toFixed(1)} 片/h` : "—"}</strong>
+        <small>平均间隔 ${formatSeconds(performance.meanDepartureInterval)} s · 波动 CV ${performance.departureIntervalCv.toFixed(2)}</small>
+      </div>
+    </div>
+    <p class="performance-window-note">${escapeHtml(window.detail)}</p>
+    <div class="performance-legend" aria-label="占用组成图例">${legend}</div>
+    <div class="performance-grid">
+      <div class="performance-table-wrap">
+        <table class="performance-table">
+          <thead><tr><th>资源</th><th>物理占用</th><th>平均连续忙碌</th><th>最长空闲</th></tr></thead>
+          <tbody>${resourceRows}</tbody>
+        </table>
+      </div>
+      <aside class="vacuum-queue-panel">
+        <div class="vacuum-queue-head">
+          <div><strong>真空端入队序列</strong><span>按晶圆第一次从 LoadLock 被 VTR 取出排序</span></div>
+          <small>Job 切换 ${formatPercent(performance.vacuumQueueJobSwitchRatio)} · 最长连续 ${performance.vacuumQueueLongestRun} 片</small>
+        </div>
+        ${queueMarkup}
+        ${performance.vacuumQueue.length > visibleQueue.length
+          ? `<div class="vacuum-queue-more">另有 ${performance.vacuumQueue.length - visibleQueue.length} 片未展开</div>`
+          : ""}
+      </aside>
+    </div>`;
+}
+
 /** 创建并管理现有配置终端中的可视化工作台。 */
 export class VisualizationWorkspace {
   private readonly root: Document;
@@ -599,6 +1245,7 @@ export class VisualizationWorkspace {
   private time = 0;
   private playing = false;
   private playbackSpeed = DEFAULT_PLAYBACK_SPEED;
+  private performanceWindowMode: PerformanceWindowMode = "steady";
   private animationFrame = 0;
   private previousFrameTime = 0;
   private previousRenderTime = 0;
@@ -614,7 +1261,10 @@ export class VisualizationWorkspace {
   /** 更新当前设备拓扑；已有 MoveList 会立即按新拓扑重绘。 */
   setDevice(device: DeviceDefinition | null): void {
     this.device = device ? structuredClone(device) : null;
-    if (this.moves.length) this.render();
+    if (this.moves.length) {
+      this.render();
+      this.renderPerformance();
+    }
   }
 
   /** 加载浏览器中选择的 MoveList 文件。 */
@@ -697,6 +1347,7 @@ export class VisualizationWorkspace {
     this.elements.empty.hidden = true;
     this.elements.content.hidden = false;
     this.render(snapshot);
+    this.renderPerformance();
   }
 
   /** 绑定文件、时间轴、播放和快捷控制事件。 */
@@ -718,6 +1369,10 @@ export class VisualizationWorkspace {
     });
     this.elements.speed.addEventListener("change", () => {
       this.playbackSpeed = Math.max(0.25, finiteNumber(this.elements.speed.value, DEFAULT_PLAYBACK_SPEED));
+    });
+    this.elements.performanceWindow.addEventListener("change", () => {
+      this.performanceWindowMode = this.elements.performanceWindow.value === "full" ? "full" : "steady";
+      this.renderPerformance();
     });
     this.elements.resultButton.addEventListener("click", () => this.show());
     this.elements.openGantt.addEventListener("click", event => {
@@ -802,6 +1457,17 @@ export class VisualizationWorkspace {
           <time>${formatSeconds(finiteNumber(move.StartTime))}–${formatSeconds(finiteNumber(move.EndTime))} s</time>
         </li>`).join("")
       : '<li class="active-move-empty">当前时刻没有执行中的动作</li>';
+  }
+
+  /** 重算并绘制与播放时刻无关的整段排程性能诊断。 */
+  private renderPerformance(): void {
+    if (!this.moves.length) return;
+    const performance = analyzeSchedulePerformance(
+      this.moves,
+      this.device,
+      this.performanceWindowMode,
+    );
+    this.elements.performance.innerHTML = renderSchedulePerformance(performance);
   }
 
   /** 显示加载状态并保留明确的系统反馈。 */

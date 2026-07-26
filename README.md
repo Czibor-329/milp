@@ -60,5 +60,10 @@ alg\.venv\Scripts\python.exe scripts\config_editor_server.py --open
 
 默认地址为 `http://127.0.0.1:8765/config_editor.html`。
 
+“可视化工作台”会从 MoveList 计算物理资源占用、Active Period
+瓶颈、出站节拍和真空端入队序列。默认统计窗口剔除启动填充与末批排空，
+也可以切换到完整周期；指标口径与测试集分析见
+[`docs/schedule-performance-analysis.md`](docs/schedule-performance-analysis.md)。
+
 父仓库不会直接维护算法实现、模型、训练脚本或算法测试；这些内容都在
 独立的 `alg` 仓库中管理。
