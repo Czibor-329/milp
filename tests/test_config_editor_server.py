@@ -116,7 +116,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("LP1", self.device["Stations"])
 
     def test_frontend_contains_search_strategy_controls(self) -> None:
-        """页面应提供 Safe NeuralUCB 和 LoadLock 宏搜索参数。"""
+        """页面应提供 NeuralUCB、宏周期与 NN-SAEA 搜索参数。"""
         source = _editor_source()
         for marker in (
             "neuralucbStrategyInput",
@@ -125,6 +125,9 @@ class ConfigEditorServerTests(unittest.TestCase):
             "loadlockMacroStrategyInput",
             "loadLockMacroSearchSeconds",
             "loadLockMacroRollouts",
+            "nnSAEAStrategyInput",
+            "nnSAEASearchSeconds",
+            "nnSAEARollouts",
         ):
             self.assertIn(marker, source)
         self.assertNotIn('data-option="loadLockExchange"', source)

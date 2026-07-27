@@ -162,6 +162,13 @@ BUILTIN_ALGORITHM_METADATA: Dict[str, Dict[str, str]] = {
         "version": "1.0.0",
         "updatedAt": "2026-07-26",
     },
+    "nn-saea": {
+        "name": "NN-SAEA",
+        "introduction": "以完整 LoadLock 宏周期为质量地板，用 PyTorch 神经代理辅助进化发片交织和底层连续参数。",
+        "description": "PyTorch 神经代理辅助进化搜索，所有候选经 Machine 精评，并严格保留宏周期质量地板。",
+        "version": "1.0.0",
+        "updatedAt": "2026-07-27",
+    },
     "setrank": {
         "name": "SetRank-PIAC",
         "introduction": "使用集合网络理解不同规模的晶圆与工艺组合，为每个实例推荐更合适的启发式参数，并通过候选精评保障结果质量。",
@@ -1813,6 +1820,7 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
     builtin_strategies = {
         "heuristic",
         "loadlock-macro",
+        "nn-saea",
         "setrank",
         "neuralucb",
         "neural",
@@ -1825,7 +1833,7 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
     }
     if normalized_strategy not in builtin_strategies and other_algorithm_id not in discovered_ids:
         raise ValueError(
-            "策略只支持 heuristic、loadlock-macro、setrank、"
+            "策略只支持 heuristic、loadlock-macro、nn-saea、setrank、"
             "neuralucb、neural、rl、milp，"
             "或 other_alg 下已发现的标准算法"
         )
@@ -2869,6 +2877,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                 "strategies": {
                     "heuristic": True,
                     "loadlock-macro": True,
+                    "nn-saea": True,
                     "setrank": SETRANK_MODEL_PATH.is_file(),
                     "neuralucb": NEURAL_UCB_MODEL_PATH.is_file(),
                     "neural": NEURAL_MODEL_PATH.is_file(),

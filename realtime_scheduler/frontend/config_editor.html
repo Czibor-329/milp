@@ -233,6 +233,7 @@
             <div class="strategy-options">
               <label class="strategy-card" data-strategy-card="heuristic"><input type="radio" name="strategy" value="heuristic" checked><b>启发式</b></label>
               <label class="strategy-card" data-strategy-card="loadlock-macro"><input id="loadlockMacroStrategyInput" type="radio" name="strategy" value="loadlock-macro"><b>LoadLock 宏周期</b></label>
+              <label class="strategy-card" data-strategy-card="nn-saea"><input id="nnSAEAStrategyInput" type="radio" name="strategy" value="nn-saea"><b>NN-SAEA</b></label>
               <label class="strategy-card" data-strategy-card="setrank"><input id="setrankStrategyInput" type="radio" name="strategy" value="setrank"><b>SetRank-PIAC</b></label>
               <label class="strategy-card" data-strategy-card="neuralucb"><input id="neuralucbStrategyInput" type="radio" name="strategy" value="neuralucb"><b>Safe NeuralUCB</b></label>
               <label class="strategy-card" data-strategy-card="neural"><input id="neuralStrategyInput" type="radio" name="strategy" value="neural"><b>深层神经派工</b></label>
@@ -248,6 +249,11 @@
               <div class="field span-6"><label>前瞻搜索秒数</label><input data-option="loadLockMacroSearchSeconds" type="number" min="0" max="4.5" step="0.1" value="4"></div>
               <div class="field span-6"><label>最大完整推演数</label><input data-option="loadLockMacroRollouts" type="number" min="0" max="256" step="1" value="96"></div>
               <div class="field span-12"><div class="hint">顶层先决定晶圆进入真空端的完整顺序，再由现有 Machine 展开开关门、机器人 Pick/Place、加工和抽充气；启发式精确结果始终作为质量地板。</div></div>
+            </div>
+            <div id="nnSAEAOptions" class="grid is-hidden" style="margin-top:14px">
+              <div class="field span-6"><label>NN-SAEA 搜索秒数</label><input data-option="nnSAEASearchSeconds" type="number" min="0" max="4.5" step="0.1" value="4"></div>
+              <div class="field span-6"><label>额外 Machine 精评数</label><input data-option="nnSAEARollouts" type="number" min="0" max="256" step="1" value="64"></div>
+              <div class="field span-12"><div class="hint">先完整运行 LoadLock 宏周期作为精确质量地板，再由 PyTorch 神经代理辅助进化发片交织、停片偏好和连续启发式参数；只有超过保守收益门槛的真实精评结果才会替换地板。</div></div>
             </div>
             <div id="rlOptions" class="grid is-hidden" style="margin-top:14px">
               <div class="field span-6"><label>搜索秒数</label><input data-option="rlSearchSeconds" type="number" min="0.1" max="4.8" step="0.1" value="4"></div>
