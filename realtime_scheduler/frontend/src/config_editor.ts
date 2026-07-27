@@ -413,7 +413,7 @@ function renderWorkspaceControls() {
 
 /** 显示当前测试集是否已经持久化。 */
 function setWorkspaceStatus(message, kind = "") {
-  const status = document.getElementById("workspaceStatus"); status.textContent = message; status.className = `span-12 workspace-status ${kind}`.trim();
+  const status = document.getElementById("workspaceStatus"); status.textContent = message; status.className = `workspace-status ${kind}`.trim();
 }
 
 /** 延迟自动保存，确保设备共享 Route/Clean 和测试任务均能恢复。 */

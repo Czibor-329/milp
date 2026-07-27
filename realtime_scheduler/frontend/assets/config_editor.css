@@ -53,12 +53,32 @@
     .file-select { position: relative; display: grid; place-items: center; min-height: 88px; padding: 15px; border: 1px dashed #9db0cb; border-radius: 12px; color: #42526b; background: var(--soft); text-align: center; }
     .file-select input { position: absolute; inset: 0; width: 100%; opacity: 0; cursor: pointer; }
     .file-select strong { display: block; color: var(--brand); }
-    .workspace-actions { display: flex; flex-wrap: wrap; gap: 7px; align-items: end; }
-    .workspace-actions .btn { flex: 1 1 auto; }
-    .group-control { display: grid; gap: 7px; }
-    .group-actions { display: flex; flex-wrap: wrap; gap: 7px; }
-    .group-actions .btn { flex: 1 1 auto; }
-    .test-picker { display: grid; grid-template-columns: minmax(120px, .85fr) minmax(140px, 1.15fr); gap: 7px; }
+    .workspace-panel { container-name: workspace-area; container-type: inline-size; }
+    .workspace-panel-head { min-height: 64px; padding-top: 15px; padding-bottom: 15px; }
+    .workspace-panel-body { padding: 20px; }
+    .workspace-device-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 7px; }
+    .workspace-device-row > label { display: block; color: #1f3656; font-size: 12px; font-weight: 800; }
+    .workspace-device-controls { display: grid; grid-template-columns: minmax(180px, 300px) 36px minmax(110px, auto); align-items: center; gap: 8px; }
+    .workspace-device-controls > select { width: 100%; min-height: 40px; padding: 7px 10px; border: 1px solid #c7d5e7; border-radius: 9px; color: var(--ink); background: #fff; outline: none; }
+    .workspace-device-controls > select:focus { border-color: #7396ee; box-shadow: 0 0 0 3px rgba(36,87,214,.11); }
+    .workspace-device-summary { min-width: 0; }
+    .workspace-device-summary .chip { display: inline-flex; align-items: center; min-height: 26px; padding: 4px 10px; border: 1px solid #c8e7d8; }
+    .workspace-divider { height: 1px; margin: 20px 0; background: var(--line); }
+    .workspace-edit-grid { display: grid; grid-template-columns: minmax(270px, .78fr) minmax(480px, 1.25fr); gap: 22px; }
+    .workspace-editor-section > label { margin-bottom: 7px; color: #1f3656; font-size: 12px; font-weight: 800; }
+    .workspace-control-row { display: flex; min-width: 0; align-items: center; gap: 7px; }
+    .workspace-control-row > select { min-width: 0; min-height: 40px; flex: 1 1 auto; padding-top: 7px; padding-bottom: 7px; }
+    .workspace-icon-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; }
+    .workspace-icon-button { width: 36px; min-width: 36px; height: 36px; min-height: 36px; padding: 0; border-radius: 8px; color: #214671; background: #fff; transition: border-color .18s ease, color .18s ease, background .18s ease, box-shadow .18s ease, transform .18s ease; }
+    .workspace-icon-button:hover:not(:disabled) { border-color: #87a4d9; color: var(--brand); background: var(--brand-soft); box-shadow: 0 4px 12px rgba(36,87,214,.10); transform: translateY(-1px); }
+    .workspace-icon-button:active:not(:disabled) { transform: translateY(0); }
+    .workspace-icon-button svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+    .workspace-icon-button.danger { color: var(--red); background: #fffafb; }
+    .workspace-icon-button.danger:hover:not(:disabled) { border-color: #e596a0; color: #b91f34; background: var(--red-soft); }
+    .workspace-save-button { box-shadow: 0 5px 12px rgba(36,87,214,.20); }
+    .workspace-save-button:hover:not(:disabled) { color: #fff; background: var(--brand-dark); box-shadow: 0 7px 16px rgba(36,87,214,.24); }
+    .test-picker { display: grid; min-width: 0; flex: 1 1 360px; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
+    .test-picker > select, .test-picker > input { min-width: 0; min-height: 40px; padding-top: 7px; padding-bottom: 7px; }
     .empty-group-hint { display: none; align-items: center; justify-content: space-between; gap: 8px; margin-top: 7px; padding: 8px 10px; border: 1px dashed #bdc8d8; border-radius: 9px; color: var(--muted); font-size: 11px; }
     .empty-group-hint.visible { display: flex; }
     dialog { width: min(420px, calc(100vw - 32px)); padding: 0; border: 1px solid var(--line); border-radius: 14px; color: var(--ink); box-shadow: 0 20px 60px rgba(15, 23, 42, .22); }
@@ -71,9 +91,25 @@
     .dialog-actions { display: flex; justify-content: flex-end; gap: 7px; margin-top: 16px; }
     .import-device { position: relative; overflow: hidden; }
     .import-device input { position: absolute; inset: 0; width: 100%; opacity: 0; cursor: pointer; }
-    .workspace-status { display: flex; align-items: center; gap: 7px; min-height: 28px; color: var(--muted); font-size: 12px; }
-    .workspace-status.dirty { color: #b45309; }
+    .workspace-status { display: inline-flex; align-items: center; justify-content: flex-end; gap: 8px; min-height: 28px; color: var(--muted); font-size: 11px; font-weight: 750; text-align: right; }
+    .workspace-status::before { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 4px #edf2f7; content: ""; }
+    .workspace-status.dirty { color: #a76008; }
+    .workspace-status.dirty::before { box-shadow: 0 0 0 4px #fff4d6; }
     .workspace-status.saved { color: var(--green); }
+    .workspace-status.saved::before { box-shadow: 0 0 0 4px var(--green-soft); }
+    @container workspace-area (max-width: 860px) {
+      .workspace-edit-grid { grid-template-columns: 1fr; gap: 16px; }
+    }
+    @container workspace-area (max-width: 680px) {
+      .workspace-panel-head { align-items: flex-start; flex-direction: column; gap: 8px; }
+      .workspace-status { justify-content: flex-start; text-align: left; }
+      .workspace-device-row { grid-template-columns: 1fr; gap: 7px; }
+      .workspace-device-controls { grid-template-columns: minmax(0, 1fr) 36px; }
+      .workspace-device-summary { grid-column: 1 / -1; }
+      .workspace-control-row { align-items: stretch; flex-wrap: wrap; }
+      .workspace-control-row > select { flex-basis: calc(100% - 162px); }
+      .workspace-test-row .test-picker { flex-basis: 100%; }
+    }
     .chips { display: flex; flex-wrap: wrap; gap: 6px; }
     .summary-chips { margin-top: 12px; }
     .chip { padding: 4px 9px; border-radius: 999px; color: #42526b; background: #edf2f7; font-size: 11px; font-weight: 700; }

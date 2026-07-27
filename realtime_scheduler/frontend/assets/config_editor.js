@@ -2330,7 +2330,7 @@ function renderWorkspaceControls() {
 function setWorkspaceStatus(message, kind = "") {
   const status = document.getElementById("workspaceStatus");
   status.textContent = message;
-  status.className = `span-12 workspace-status ${kind}`.trim();
+  status.className = `workspace-status ${kind}`.trim();
 }
 var autoSaveTimer = null;
 function scheduleAutoSave() {
