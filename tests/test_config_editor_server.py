@@ -130,8 +130,31 @@ class ConfigEditorServerTests(unittest.TestCase):
             "nnSAEARollouts",
         ):
             self.assertIn(marker, source)
+        macro_input = source.split(
+            'data-option="loadLockMacroSearchSeconds"',
+            1,
+        )[1].split(">", 1)[0]
+        self.assertNotIn('max="4.5"', macro_input)
+        rollout_input = source.split(
+            'data-option="loadLockMacroRollouts"',
+            1,
+        )[1].split(">", 1)[0]
+        self.assertNotIn('max="256"', rollout_input)
+        self.assertIn("兼容参数：旧前瞻秒数", source)
+        self.assertIn("不运行或回退到独立 Heuristic 结果", source)
         self.assertNotIn('data-option="loadLockExchange"', source)
         self.assertNotIn("禁用交换", source)
+
+    def test_frontend_limits_buffer_and_makes_cjob_load_port_read_only(self) -> None:
+        """页面应限制 BufferOption，并只在 CJob 层展示自动分配的 LoadPort。"""
+        source = _editor_source()
+        buffer_input = source.split('data-key="bufferOption"', 1)[0].rsplit("<input", 1)[1]
+        self.assertIn('min="0"', buffer_input)
+        self.assertIn('max="4"', buffer_input)
+        self.assertIn('step="1"', buffer_input)
+        self.assertIn("当前算法不支持 PostCJob Clean", source)
+        self.assertIn("LoadPort（自动）", source)
+        self.assertNotIn('data-scope="pjob" data-key="loadPort"', source)
 
     def test_same_recipe_name_supports_module_specific_parameters(self) -> None:
         """同名 Recipe 在不同 PM 上可以使用不同加工时间，且仍由 Route 统一引用。"""
@@ -709,7 +732,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual("Route12__Incoming", update["ProcessJobs"][0]["OriginRoute"]["Name"])
 
     def test_round_supports_multiple_cjobs_and_pjobs(self) -> None:
-        """同一轮多个 CJob 应共享轮次 TaskID，并正确派生 PJobNameList 和枚举。"""
+        """同一轮多个 CJob 应使用唯一 TaskID、独立 LoadPort 和稳定枚举。"""
         plan = {
             "device": self.device,
             "recipes": [{"name": "R12", "time": 8, "modules": "PM1,PM2", "weight": {}}],
@@ -723,11 +746,11 @@ class ConfigEditorServerTests(unittest.TestCase):
                     "taskId": "2", "jobType": "NormalLot", "priority": 3, "taskMode": "Smart",
                     "pjobs": [
                         {"jobName": "P1", "routeRef": "Route12", "loadPort": "LP1", "waferCount": 2, "priority": 1},
-                        {"jobName": "P2", "routeRef": "Route12", "loadPort": "LP2", "waferCount": 1, "priority": 2},
+                        {"jobName": "P2", "routeRef": "Route12", "loadPort": "LP1", "waferCount": 1, "priority": 2},
                     ],
                 },
                 {
-                    "taskId": "2", "jobType": "HighestLot", "priority": 99, "taskMode": "Concurrent",
+                    "taskId": "3", "jobType": "HighestLot", "priority": 99, "taskMode": "Concurrent",
                     "pjobs": [{"jobName": "P1", "routeRef": "Route12", "loadPort": "LP3", "waferCount": 1}],
                 },
             ],
@@ -735,9 +758,9 @@ class ConfigEditorServerTests(unittest.TestCase):
         update = build_round_update(plan, round_config, 70.0, BuildState())
         self.assertEqual(2, len(update["ControlJobs"]))
         self.assertEqual(3, len(update["ProcessJobs"]))
-        self.assertEqual(["2", "2"], [item["TaskID"] for item in update["ControlJobs"]])
+        self.assertEqual(["2", "3"], [item["TaskID"] for item in update["ControlJobs"]])
         self.assertEqual(["2.C1.P1", "2.C1.P2"], update["ControlJobs"][0]["PJobNameList"])
-        self.assertEqual(["2.C2.P1"], update["ControlJobs"][1]["PJobNameList"])
+        self.assertEqual(["3.C2.P1"], update["ControlJobs"][1]["PJobNameList"])
         self.assertEqual(3, update["ControlJobs"][0]["Priority"])
         self.assertEqual(-1, update["ControlJobs"][1]["Priority"])
         self.assertEqual(2, update["ControlJobs"][1]["JobType"])
@@ -761,31 +784,19 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual(list(range(6, 11)), update["ProcessJobs"][1]["MatList"])
         self.assertEqual(list(range(1, 11)), [material["SlotID"] for material in update["Materials"]])
 
-    def test_different_load_ports_allocate_slots_from_one_independently(self) -> None:
-        """LP1/LP2 的槽位应分别从 1 开始，MatID 仍保持设备内全局唯一。"""
+    def test_same_cjob_rejects_different_load_ports(self) -> None:
+        """同一 CJob 的全部 PJob 必须属于同一个 LoadPort。"""
         plan = {
             "device": self.device,
             "recipes": [{"name": "R12", "time": 8, "modules": "PM1,PM2", "weight": {}}],
             "cleans": [],
             "routes": [_route("Route12", "PM1,PM2", "R12")],
         }
-        update = build_round_update(plan, {"cjobs": [{"taskId": "1", "pjobs": [
-            {"jobName": "P1", "routeRef": "Route12", "loadPort": "LP1", "waferCount": 5},
-            {"jobName": "P2", "routeRef": "Route12", "loadPort": "LP2", "waferCount": 5},
-        ]}]}, 0.0, BuildState())
-
-        self.assertEqual(list(range(1, 11)), [
-            material["ID"] for material in update["Materials"]
-        ])
-        slots_by_port = {
-            load_port: [
-                material["SlotID"]
-                for material in update["Materials"]
-                if material["CurrentModuleName"] == load_port
-            ]
-            for load_port in ("LP1", "LP2")
-        }
-        self.assertEqual({"LP1": [1, 2, 3, 4, 5], "LP2": [1, 2, 3, 4, 5]}, slots_by_port)
+        with self.assertRaisesRegex(ValueError, "必须使用同一个 LoadPort"):
+            build_round_update(plan, {"cjobs": [{"taskId": "1", "pjobs": [
+                {"jobName": "P1", "routeRef": "Route12", "loadPort": "LP1", "waferCount": 5},
+                {"jobName": "P2", "routeRef": "Route12", "loadPort": "LP2", "waferCount": 5},
+            ]}]}, 0.0, BuildState())
 
     def test_fifth_round_reuses_lp1_after_completed_materials_are_unloaded(self) -> None:
         """四端口轮转回 LP1 时，已完成的首轮晶圆应卸载并从 1 号槽重新装片。"""
@@ -1925,7 +1936,15 @@ class ConfigEditorServerTests(unittest.TestCase):
             self.assertEqual(created["id"], loaded["id"])
             second = loaded["rounds"][1]
             self.assertEqual(2, len(second["cjobs"]))
-            self.assertEqual(["2", "2"], [item["taskId"] for item in second["cjobs"]])
+            self.assertEqual(["2", "3"], [item["taskId"] for item in second["cjobs"]])
+            self.assertEqual(["LP1", "LP3"], [
+                item["loadPort"] for item in second["cjobs"]
+            ])
+            self.assertTrue(all(
+                pjob["loadPort"] == cjob["loadPort"]
+                for cjob in second["cjobs"]
+                for pjob in cjob["pjobs"]
+            ))
             self.assertEqual(["P1", "P2"], second["cjobs"][0]["pJobNameList"])
             self.assertEqual([3, 4, 5], second["cjobs"][0]["pjobs"][0]["matList"])
             self.assertEqual([6], second["cjobs"][0]["pjobs"][1]["matList"])
