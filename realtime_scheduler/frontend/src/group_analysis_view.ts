@@ -117,6 +117,10 @@ function resultTable(summary: TestGroupPerformanceSummary): string {
       <td>${durationText(item.cpuTimeMs)}</td>
       <td>${finiteText(item.throughputPerHour, 1, " 片/h")}</td>
       <td>${finiteText(item.departureIntervalCv, 2)}</td>
+      <td>${finiteText(item.processChamberDwellMeanSeconds, 2, " s")}</td>
+      <td>${finiteText(item.robotWaferDwellMeanSeconds, 2, " s")}</td>
+      <td>${finiteText(item.waferSystemResidenceMeanSeconds, 2, " s")}</td>
+      <td>${finiteText(item.waferSystemResidenceCv, 2)}</td>
       <td>${item.validationPassed ? '<span class="group-pass">通过</span>' : `<span class="group-fail">${escapeHtml(item.validation || item.status)}</span>`}</td>
     </tr>`).join("");
 }
@@ -146,6 +150,9 @@ export function renderTestGroupAnalysis(
       <article><span>CPU Time</span><strong>${durationText(summary.medianCpuTimeMs)}</strong><small>P90 ${durationText(summary.p90CpuTimeMs)} · 总计 ${durationText(summary.totalCpuTimeMs)}</small></article>
       <article><span>主要候选利用率中位数</span><strong>${percentText(summary.medianBottleneckUtilization, true)}</strong><small>工序组、机器人或 LoadLock 容量</small></article>
       <article><span>出站表现中位数</span><strong>${finiteText(summary.medianThroughputPerHour, 1, " 片/h")}</strong><small>间隔波动 CV ${finiteText(summary.medianDepartureIntervalCv, 2)}</small></article>
+      <article><span>加工腔驻留均值中位数</span><strong>${finiteText(summary.medianProcessChamberDwellMeanSeconds, 2, " s")}</strong><small>各测试“加工结束 → 完全离腔”均值的中位数</small></article>
+      <article><span>机器手驻留均值中位数</span><strong>${finiteText(summary.medianRobotWaferDwellMeanSeconds, 2, " s")}</strong><small>已剔除显式 PreTrans 运输区间</small></article>
+      <article><span>系统停留均值中位数</span><strong>${finiteText(summary.medianWaferSystemResidenceMeanSeconds, 2, " s")}</strong><small>离开 LP → 返回 LP · CV 中位 ${finiteText(summary.medianWaferSystemResidenceCv, 2)}</small></article>
     </div>
     <div class="group-chart-grid">
       <article class="group-chart-card">
@@ -169,7 +176,7 @@ export function renderTestGroupAnalysis(
       <summary>查看逐测试完整指标</summary>
       <div class="group-analysis-table-scroll">
         <table class="group-analysis-table">
-          <thead><tr><th>测试</th><th>Makespan</th><th>Baseline</th><th>改善</th><th>瓶颈</th><th>利用率</th><th>CPU Time</th><th>吞吐</th><th>出站 CV</th><th>校验</th></tr></thead>
+          <thead><tr><th>测试</th><th>Makespan</th><th>Baseline</th><th>改善</th><th>瓶颈</th><th>利用率</th><th>CPU Time</th><th>吞吐</th><th>出站 CV</th><th>加工腔驻留均值</th><th>机器手驻留均值</th><th>系统停留均值</th><th>系统停留 CV</th><th>校验</th></tr></thead>
           <tbody>${resultTable(summary)}</tbody>
         </table>
       </div>

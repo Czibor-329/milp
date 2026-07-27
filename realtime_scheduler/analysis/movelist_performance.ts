@@ -64,6 +64,14 @@ export interface VacuumQueueItem {
   index: number; material: string; pjob: string; loadLock: string;
   admittedAt: number; targetModule: string; targetWasBusy: boolean; processWait: number;
 }
+export interface DurationMetricSummary {
+  totalSeconds: number;
+  meanSeconds: number;
+  medianSeconds: number;
+  maxSeconds: number;
+  coefficientOfVariation: number;
+  sampleCount: number;
+}
 export interface SchedulePerformance {
   window: PerformanceWindow;
   resources: ResourcePerformance[];
@@ -73,6 +81,9 @@ export interface SchedulePerformance {
   bottleneck: ResourcePerformance | null;
   completedWaferCount: number; throughputPerHour: number;
   meanDepartureInterval: number; departureIntervalCv: number;
+  processChamberDwellTime: DurationMetricSummary;
+  robotWaferDwellTime: DurationMetricSummary;
+  waferSystemResidenceTime: DurationMetricSummary;
   vacuumQueue: VacuumQueueItem[];
   vacuumQueueJobSwitchRatio: number; vacuumQueueLongestRun: number;
 }
@@ -92,6 +103,7 @@ const MINIMUM_STEADY_WAFERS = 4;
 const PICK_MOVE_TYPES = new Set([0, 2]);
 const PLACE_MOVE_TYPES = new Set([1, 3]);
 const SWAP_MOVE = 4;
+const PRE_TRANS_MOVE = 5;
 const PREPARE_MOVE = 6;
 const COMPLETE_MOVE = 7;
 const PROCESS_MOVE = 9;
@@ -125,6 +137,11 @@ function materialIds(move: MoveRecord, field = "MatIDList"): string[] {
 /** 返回动作引用的第一个站点。 */
 function firstStation(move: MoveRecord, field: string): string {
   return String(listValue(move[field])[0] ?? "");
+}
+
+/** 读取传输动作的机器人名称，兼容 Robot 与 ModuleName 两种协议字段。 */
+function moveRobotName(move: MoveRecord): string {
+  return String(move.Robot ?? move.ModuleName ?? "").trim();
 }
 
 /** 判断名称是否代表机器人。 */
@@ -397,6 +414,15 @@ function waferBoundaryTimes(
       if (isLoadPortName(destination, stationType(device, destination))) {
         for (const material of materialIds(move)) completions.set(material, move.EndTime);
       }
+    } else if (move.MoveType === SWAP_MOVE) {
+      const station = firstStation(move, "StationList");
+      if (!isLoadPortName(station, stationType(device, station))) continue;
+      for (const material of materialIds(move, "SendMatList")) {
+        if (!entries.has(material)) entries.set(material, move.EndTime);
+      }
+      for (const material of materialIds(move, "RecvMatList")) {
+        completions.set(material, move.EndTime);
+      }
     }
   }
   return { entries, completions };
@@ -468,6 +494,187 @@ function intervalCoefficientOfVariation(values: number[]): number {
   if (mean <= PERFORMANCE_TIME_TOLERANCE) return 0;
   const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length;
   return Math.sqrt(variance) / mean;
+}
+
+/** 计算一组时长的中位数。 */
+function medianDuration(values: number[]): number {
+  if (!values.length) return 0;
+  const ordered = [...values].sort((left, right) => left - right);
+  const middle = Math.floor(ordered.length / 2);
+  return ordered.length % 2
+    ? ordered[middle]
+    : (ordered[middle - 1] + ordered[middle]) / 2;
+}
+
+/** 汇总时长样本，统一输出均值、极值、CV 与样本数。 */
+function summarizeDurations(values: number[]): DurationMetricSummary {
+  const durations = values.filter(value => (
+    Number.isFinite(value) && value >= -PERFORMANCE_TIME_TOLERANCE
+  )).map(value => Math.max(0, value));
+  const totalSeconds = durations.reduce((sum, value) => sum + value, 0);
+  return {
+    totalSeconds,
+    meanSeconds: durations.length ? totalSeconds / durations.length : 0,
+    medianSeconds: medianDuration(durations),
+    maxSeconds: Math.max(0, ...durations),
+    coefficientOfVariation: intervalCoefficientOfVariation(durations),
+    sampleCount: durations.length,
+  };
+}
+
+/** 判断以结束事件归属统计窗口的时长样本是否应被计入。 */
+function completionInsideWindow(completedAt: number, window: PerformanceWindow): boolean {
+  return (
+    completedAt >= window.start - PERFORMANCE_TIME_TOLERANCE
+    && completedAt <= window.end + PERFORMANCE_TIME_TOLERANCE
+  );
+}
+
+/** 统计加工完成后至晶圆被完全移出加工腔的驻留时间。 */
+function processChamberDwellTime(
+  moves: NormalizedMove[],
+  device: DeviceDefinition | null,
+  window: PerformanceWindow,
+): DurationMetricSummary {
+  const durations: number[] = [];
+  for (const processMove of moves) {
+    const chamber = processMove.ModuleName;
+    if (
+      processMove.MoveType !== PROCESS_MOVE
+      || !isProcessModule(chamber, stationType(device, chamber))
+    ) continue;
+    for (const material of materialIds(processMove)) {
+      const removal = moves.find(candidate => {
+        if (candidate.EndTime < processMove.EndTime - PERFORMANCE_TIME_TOLERANCE) return false;
+        if (
+          PICK_MOVE_TYPES.has(candidate.MoveType)
+          && firstStation(candidate, "SrcStationList") === chamber
+          && materialIds(candidate).includes(material)
+        ) return true;
+        return (
+          candidate.MoveType === SWAP_MOVE
+          && firstStation(candidate, "StationList") === chamber
+          && materialIds(candidate, "SendMatList").includes(material)
+        );
+      });
+      if (!removal || !completionInsideWindow(removal.EndTime, window)) continue;
+      durations.push(removal.EndTime - processMove.EndTime);
+    }
+  }
+  return summarizeDurations(durations);
+}
+
+interface PlainInterval {
+  start: number;
+  end: number;
+}
+
+/** 计算一组区间在指定边界内覆盖的时间并集。 */
+function coveredDuration(
+  intervals: PlainInterval[],
+  boundaryStart: number,
+  boundaryEnd: number,
+): number {
+  const clipped = intervals
+    .map(interval => ({
+      start: Math.max(interval.start, boundaryStart),
+      end: Math.min(interval.end, boundaryEnd),
+    }))
+    .filter(interval => interval.end > interval.start + PERFORMANCE_TIME_TOLERANCE)
+    .sort((left, right) => left.start - right.start || left.end - right.end);
+  let total = 0;
+  let activeStart: number | null = null;
+  let activeEnd = 0;
+  for (const interval of clipped) {
+    if (activeStart === null) {
+      activeStart = interval.start;
+      activeEnd = interval.end;
+    } else if (interval.start <= activeEnd + PERFORMANCE_TIME_TOLERANCE) {
+      activeEnd = Math.max(activeEnd, interval.end);
+    } else {
+      total += activeEnd - activeStart;
+      activeStart = interval.start;
+      activeEnd = interval.end;
+    }
+  }
+  return activeStart === null ? total : total + activeEnd - activeStart;
+}
+
+/** 统计晶圆被机器人持有期间的非运输等待，剔除显式 PreTrans 区间。 */
+function robotWaferDwellTime(
+  moves: NormalizedMove[],
+  window: PerformanceWindow,
+): DurationMetricSummary {
+  const transportByRobot = new Map<string, PlainInterval[]>();
+  for (const move of moves) {
+    if (move.MoveType !== PRE_TRANS_MOVE || move.EndTime <= move.StartTime) continue;
+    const robot = moveRobotName(move);
+    if (!robot) continue;
+    const intervals = transportByRobot.get(robot) ?? [];
+    intervals.push({ start: move.StartTime, end: move.EndTime });
+    transportByRobot.set(robot, intervals);
+  }
+
+  const holdingStartedAt = new Map<string, number>();
+  const durations: number[] = [];
+  const finishHolding = (
+    robot: string,
+    materials: string[],
+    finishedAt: number,
+  ): void => {
+    for (const material of materials) {
+      const key = `${robot}\u0000${material}`;
+      const startedAt = holdingStartedAt.get(key);
+      if (startedAt === undefined) continue;
+      holdingStartedAt.delete(key);
+      if (!completionInsideWindow(finishedAt, window)) continue;
+      const rawDuration = Math.max(finishedAt - startedAt, 0);
+      const transportDuration = coveredDuration(
+        transportByRobot.get(robot) ?? [],
+        startedAt,
+        finishedAt,
+      );
+      durations.push(Math.max(rawDuration - transportDuration, 0));
+    }
+  };
+
+  for (const move of moves) {
+    const robot = moveRobotName(move);
+    if (!robot) continue;
+    if (PICK_MOVE_TYPES.has(move.MoveType)) {
+      for (const material of materialIds(move)) {
+        holdingStartedAt.set(`${robot}\u0000${material}`, move.EndTime);
+      }
+    } else if (PLACE_MOVE_TYPES.has(move.MoveType)) {
+      finishHolding(robot, materialIds(move), move.StartTime);
+    } else if (move.MoveType === SWAP_MOVE) {
+      finishHolding(robot, materialIds(move, "RecvMatList"), move.StartTime);
+      for (const material of materialIds(move, "SendMatList")) {
+        holdingStartedAt.set(`${robot}\u0000${material}`, move.EndTime);
+      }
+    }
+  }
+  return summarizeDurations(durations);
+}
+
+/** 统计晶圆离开 LoadPort 到返回 LoadPort 的单片系统停留时间。 */
+function waferSystemResidenceTime(
+  moves: NormalizedMove[],
+  device: DeviceDefinition | null,
+  window: PerformanceWindow,
+): DurationMetricSummary {
+  const boundaries = waferBoundaryTimes(moves, device);
+  const durations: number[] = [];
+  for (const [material, completedAt] of boundaries.completions) {
+    const enteredAt = boundaries.entries.get(material);
+    if (
+      enteredAt === undefined
+      || completedAt < enteredAt - PERFORMANCE_TIME_TOLERANCE
+      || !completionInsideWindow(completedAt, window)
+    ) continue;
+    durations.push(completedAt - enteredAt);
+  }
+  return summarizeDurations(durations);
 }
 
 /** 构造晶圆第一次从 LoadLock 进入真空机器人的可观察队列。 */
@@ -863,6 +1070,9 @@ export function analyzeSchedulePerformance(
   const throughputPerHour = meanDepartureInterval > PERFORMANCE_TIME_TOLERANCE
     ? 3600 / meanDepartureInterval
     : 0;
+  const chamberDwellTime = processChamberDwellTime(records, device, window);
+  const robotDwellTime = robotWaferDwellTime(records, window);
+  const systemResidenceTime = waferSystemResidenceTime(records, device, window);
   const vacuumQueue = buildVacuumQueue(records, device, intervalsByResource);
   const queuePattern = vacuumQueuePattern(vacuumQueue);
   return {
@@ -875,6 +1085,9 @@ export function analyzeSchedulePerformance(
     throughputPerHour,
     meanDepartureInterval,
     departureIntervalCv: intervalCoefficientOfVariation(departureIntervals),
+    processChamberDwellTime: chamberDwellTime,
+    robotWaferDwellTime: robotDwellTime,
+    waferSystemResidenceTime: systemResidenceTime,
     vacuumQueue,
     vacuumQueueJobSwitchRatio: queuePattern.switchRatio,
     vacuumQueueLongestRun: queuePattern.longestRun,

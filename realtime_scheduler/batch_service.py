@@ -31,6 +31,7 @@ _SERVER_SERVICES: Optional[ModuleType] = None
 PICK_MOVE_TYPES = frozenset({0, 2})
 PLACE_MOVE_TYPES = frozenset({1, 3})
 SWAP_MOVE_TYPE = 4
+PRE_TRANS_MOVE_TYPE = 5
 TIME_TOLERANCE_SECONDS = 1e-9
 
 
@@ -139,7 +140,8 @@ def _robot_wafer_dwell_time(moves: Sequence[Mapping[str, Any]]) -> Dict[str, Any
 
     Pick 完成后开始计时，Place 开始时停止计时，因此不包含取放动作自身耗时；
     Swap 开始时结束机器人原持片，Swap 完成时为机器人新接收的晶圆开始计时。
-    返回所有完整驻留区间的总和、中位数、最大值和样本数。
+    同一持片区间内显式 PreTrans 运输时间按区间并集扣除。返回所有完整驻留
+    区间的总和、中位数、最大值和样本数。
     """
     ordered_moves = sorted(
         (move for move in moves if isinstance(move, Mapping)),
@@ -149,8 +151,41 @@ def _robot_wafer_dwell_time(moves: Sequence[Mapping[str, Any]]) -> Dict[str, Any
             int(move.get("MoveID") or 0),
         ),
     )
+    transport_by_robot: Dict[str, List[Tuple[float, float]]] = {}
+    for move in ordered_moves:
+        if int(move.get("MoveType") or 0) != PRE_TRANS_MOVE_TYPE:
+            continue
+        robot_name = _move_robot_name(move)
+        start_time = float(move.get("StartTime") or 0.0)
+        end_time = float(move.get("EndTime") or start_time)
+        if robot_name and end_time > start_time + TIME_TOLERANCE_SECONDS:
+            transport_by_robot.setdefault(robot_name, []).append((start_time, end_time))
     holding_started_at: Dict[Tuple[str, str], float] = {}
     dwell_times: List[float] = []
+
+    def covered_transport(robot_name: str, started_at: float, finished_at: float) -> float:
+        """计算同一机器人在持片区间内执行的显式运输时间并集。"""
+        clipped = sorted(
+            (
+                max(started_at, start_time),
+                min(finished_at, end_time),
+            )
+            for start_time, end_time in transport_by_robot.get(robot_name, [])
+            if min(finished_at, end_time)
+            > max(started_at, start_time) + TIME_TOLERANCE_SECONDS
+        )
+        total = 0.0
+        active_start: Optional[float] = None
+        active_end = 0.0
+        for start_time, end_time in clipped:
+            if active_start is None:
+                active_start, active_end = start_time, end_time
+            elif start_time <= active_end + TIME_TOLERANCE_SECONDS:
+                active_end = max(active_end, end_time)
+            else:
+                total += active_end - active_start
+                active_start, active_end = start_time, end_time
+        return total if active_start is None else total + active_end - active_start
 
     def finish_holding(robot_name: str, material_ids: Sequence[str], finished_at: float) -> None:
         """结束指定机器人和晶圆的持片区间，并记录非负驻留时长。"""
@@ -158,7 +193,11 @@ def _robot_wafer_dwell_time(moves: Sequence[Mapping[str, Any]]) -> Dict[str, Any
             started_at = holding_started_at.pop((robot_name, material_id), None)
             if started_at is None:
                 continue
-            duration = finished_at - started_at
+            duration = (
+                finished_at
+                - started_at
+                - covered_transport(robot_name, started_at, finished_at)
+            )
             if duration >= -TIME_TOLERANCE_SECONDS:
                 dwell_times.append(max(0.0, duration))
 

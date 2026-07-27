@@ -8,7 +8,8 @@ DOM、不发起网络请求，也不持有前端状态。
 - `movelist_performance.ts`
   - `normalizeMovePayload`：解析 MoveList 数组或带 `MoveList` 字段的结果对象。
   - `analyzeSchedulePerformance`：计算统计窗口、物理资源占用并集、Active Period、
-    吞吐、出站间隔波动和真空端队列。
+    吞吐、出站间隔波动、加工腔晶圆驻留、机器手非运输驻留、晶圆系统停留和
+    真空端队列。
   - `summarizeBottleneckUtilization`：生成结果预览所需的瓶颈摘要。
 - `group_performance.ts`
   - `analyzeTestGroupPerformance`：计算逐测试基线对比、胜/平/退化、CPU Time

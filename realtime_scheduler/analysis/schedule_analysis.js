@@ -36,6 +36,7 @@ var MINIMUM_STEADY_WAFERS = 4;
 var PICK_MOVE_TYPES = /* @__PURE__ */ new Set([0, 2]);
 var PLACE_MOVE_TYPES = /* @__PURE__ */ new Set([1, 3]);
 var SWAP_MOVE = 4;
+var PRE_TRANS_MOVE = 5;
 var PREPARE_MOVE = 6;
 var COMPLETE_MOVE = 7;
 var PROCESS_MOVE = 9;
@@ -64,6 +65,9 @@ function materialIds(move, field = "MatIDList") {
 }
 function firstStation(move, field) {
   return String(listValue(move[field])[0] ?? "");
+}
+function moveRobotName(move) {
+  return String(move.Robot ?? move.ModuleName ?? "").trim();
 }
 function isRobotName(name) {
   return /^(ATR|VTR|TM\d*|ROBOT)/i.test(name);
@@ -257,6 +261,15 @@ function waferBoundaryTimes(moves, device) {
       if (isLoadPortName(destination, stationType(device, destination))) {
         for (const material of materialIds(move)) completions.set(material, move.EndTime);
       }
+    } else if (move.MoveType === SWAP_MOVE) {
+      const station = firstStation(move, "StationList");
+      if (!isLoadPortName(station, stationType(device, station))) continue;
+      for (const material of materialIds(move, "SendMatList")) {
+        if (!entries.has(material)) entries.set(material, move.EndTime);
+      }
+      for (const material of materialIds(move, "RecvMatList")) {
+        completions.set(material, move.EndTime);
+      }
     }
   }
   return { entries, completions };
@@ -308,6 +321,122 @@ function intervalCoefficientOfVariation(values) {
   if (mean <= PERFORMANCE_TIME_TOLERANCE) return 0;
   const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length;
   return Math.sqrt(variance) / mean;
+}
+function medianDuration(values) {
+  if (!values.length) return 0;
+  const ordered = [...values].sort((left, right) => left - right);
+  const middle = Math.floor(ordered.length / 2);
+  return ordered.length % 2 ? ordered[middle] : (ordered[middle - 1] + ordered[middle]) / 2;
+}
+function summarizeDurations(values) {
+  const durations = values.filter((value) => Number.isFinite(value) && value >= -PERFORMANCE_TIME_TOLERANCE).map((value) => Math.max(0, value));
+  const totalSeconds = durations.reduce((sum, value) => sum + value, 0);
+  return {
+    totalSeconds,
+    meanSeconds: durations.length ? totalSeconds / durations.length : 0,
+    medianSeconds: medianDuration(durations),
+    maxSeconds: Math.max(0, ...durations),
+    coefficientOfVariation: intervalCoefficientOfVariation(durations),
+    sampleCount: durations.length
+  };
+}
+function completionInsideWindow(completedAt, window) {
+  return completedAt >= window.start - PERFORMANCE_TIME_TOLERANCE && completedAt <= window.end + PERFORMANCE_TIME_TOLERANCE;
+}
+function processChamberDwellTime(moves, device, window) {
+  const durations = [];
+  for (const processMove of moves) {
+    const chamber = processMove.ModuleName;
+    if (processMove.MoveType !== PROCESS_MOVE || !isProcessModule(chamber, stationType(device, chamber))) continue;
+    for (const material of materialIds(processMove)) {
+      const removal = moves.find((candidate) => {
+        if (candidate.EndTime < processMove.EndTime - PERFORMANCE_TIME_TOLERANCE) return false;
+        if (PICK_MOVE_TYPES.has(candidate.MoveType) && firstStation(candidate, "SrcStationList") === chamber && materialIds(candidate).includes(material)) return true;
+        return candidate.MoveType === SWAP_MOVE && firstStation(candidate, "StationList") === chamber && materialIds(candidate, "SendMatList").includes(material);
+      });
+      if (!removal || !completionInsideWindow(removal.EndTime, window)) continue;
+      durations.push(removal.EndTime - processMove.EndTime);
+    }
+  }
+  return summarizeDurations(durations);
+}
+function coveredDuration(intervals, boundaryStart, boundaryEnd) {
+  const clipped = intervals.map((interval) => ({
+    start: Math.max(interval.start, boundaryStart),
+    end: Math.min(interval.end, boundaryEnd)
+  })).filter((interval) => interval.end > interval.start + PERFORMANCE_TIME_TOLERANCE).sort((left, right) => left.start - right.start || left.end - right.end);
+  let total = 0;
+  let activeStart = null;
+  let activeEnd = 0;
+  for (const interval of clipped) {
+    if (activeStart === null) {
+      activeStart = interval.start;
+      activeEnd = interval.end;
+    } else if (interval.start <= activeEnd + PERFORMANCE_TIME_TOLERANCE) {
+      activeEnd = Math.max(activeEnd, interval.end);
+    } else {
+      total += activeEnd - activeStart;
+      activeStart = interval.start;
+      activeEnd = interval.end;
+    }
+  }
+  return activeStart === null ? total : total + activeEnd - activeStart;
+}
+function robotWaferDwellTime(moves, window) {
+  const transportByRobot = /* @__PURE__ */ new Map();
+  for (const move of moves) {
+    if (move.MoveType !== PRE_TRANS_MOVE || move.EndTime <= move.StartTime) continue;
+    const robot = moveRobotName(move);
+    if (!robot) continue;
+    const intervals = transportByRobot.get(robot) ?? [];
+    intervals.push({ start: move.StartTime, end: move.EndTime });
+    transportByRobot.set(robot, intervals);
+  }
+  const holdingStartedAt = /* @__PURE__ */ new Map();
+  const durations = [];
+  const finishHolding = (robot, materials, finishedAt) => {
+    for (const material of materials) {
+      const key = `${robot}\0${material}`;
+      const startedAt = holdingStartedAt.get(key);
+      if (startedAt === void 0) continue;
+      holdingStartedAt.delete(key);
+      if (!completionInsideWindow(finishedAt, window)) continue;
+      const rawDuration = Math.max(finishedAt - startedAt, 0);
+      const transportDuration = coveredDuration(
+        transportByRobot.get(robot) ?? [],
+        startedAt,
+        finishedAt
+      );
+      durations.push(Math.max(rawDuration - transportDuration, 0));
+    }
+  };
+  for (const move of moves) {
+    const robot = moveRobotName(move);
+    if (!robot) continue;
+    if (PICK_MOVE_TYPES.has(move.MoveType)) {
+      for (const material of materialIds(move)) {
+        holdingStartedAt.set(`${robot}\0${material}`, move.EndTime);
+      }
+    } else if (PLACE_MOVE_TYPES.has(move.MoveType)) {
+      finishHolding(robot, materialIds(move), move.StartTime);
+    } else if (move.MoveType === SWAP_MOVE) {
+      finishHolding(robot, materialIds(move, "RecvMatList"), move.StartTime);
+      for (const material of materialIds(move, "SendMatList")) {
+        holdingStartedAt.set(`${robot}\0${material}`, move.EndTime);
+      }
+    }
+  }
+  return summarizeDurations(durations);
+}
+function waferSystemResidenceTime(moves, device, window) {
+  const boundaries = waferBoundaryTimes(moves, device);
+  const durations = [];
+  for (const [material, completedAt] of boundaries.completions) {
+    const enteredAt = boundaries.entries.get(material);
+    if (enteredAt === void 0 || completedAt < enteredAt - PERFORMANCE_TIME_TOLERANCE || !completionInsideWindow(completedAt, window)) continue;
+    durations.push(completedAt - enteredAt);
+  }
+  return summarizeDurations(durations);
 }
 function buildVacuumQueue(moves, device, intervalsByResource) {
   const admittedMaterials = /* @__PURE__ */ new Set();
@@ -571,6 +700,9 @@ function analyzeSchedulePerformance(moves, device, mode = "steady", context = nu
   const departureIntervals = completionTimes.slice(1).map((time, index) => time - completionTimes[index]);
   const meanDepartureInterval = departureIntervals.length ? departureIntervals.reduce((sum, interval) => sum + interval, 0) / departureIntervals.length : 0;
   const throughputPerHour = meanDepartureInterval > PERFORMANCE_TIME_TOLERANCE ? 3600 / meanDepartureInterval : 0;
+  const chamberDwellTime = processChamberDwellTime(records, device, window);
+  const robotDwellTime = robotWaferDwellTime(records, window);
+  const systemResidenceTime = waferSystemResidenceTime(records, device, window);
   const vacuumQueue = buildVacuumQueue(records, device, intervalsByResource);
   const queuePattern = vacuumQueuePattern(vacuumQueue);
   return {
@@ -583,6 +715,9 @@ function analyzeSchedulePerformance(moves, device, mode = "steady", context = nu
     throughputPerHour,
     meanDepartureInterval,
     departureIntervalCv: intervalCoefficientOfVariation(departureIntervals),
+    processChamberDwellTime: chamberDwellTime,
+    robotWaferDwellTime: robotDwellTime,
+    waferSystemResidenceTime: systemResidenceTime,
     vacuumQueue,
     vacuumQueueJobSwitchRatio: queuePattern.switchRatio,
     vacuumQueueLongestRun: queuePattern.longestRun
@@ -661,6 +796,10 @@ function normalizeCase(input) {
     bottleneckCandidates,
     throughputPerHour: input.performance ? finiteOrNull(input.performance.throughputPerHour) : null,
     departureIntervalCv: input.performance ? finiteOrNull(input.performance.departureIntervalCv) : null,
+    processChamberDwellMeanSeconds: input.performance?.processChamberDwellTime?.sampleCount ? finiteOrNull(input.performance.processChamberDwellTime?.meanSeconds) : null,
+    robotWaferDwellMeanSeconds: input.performance?.robotWaferDwellTime?.sampleCount ? finiteOrNull(input.performance.robotWaferDwellTime?.meanSeconds) : null,
+    waferSystemResidenceMeanSeconds: input.performance?.waferSystemResidenceTime?.sampleCount ? finiteOrNull(input.performance.waferSystemResidenceTime?.meanSeconds) : null,
+    waferSystemResidenceCv: input.performance?.waferSystemResidenceTime?.sampleCount ? finiteOrNull(input.performance.waferSystemResidenceTime?.coefficientOfVariation) : null,
     windowMethod: input.performance?.window.method ?? "",
     error: String(input.error || "")
   };
@@ -682,6 +821,10 @@ function analyzeTestGroupPerformance(inputs) {
   const bottleneckUtilizations = succeeded.map((item) => item.bottleneckUtilization).filter((value) => value !== null);
   const throughputs = succeeded.map((item) => item.throughputPerHour).filter((value) => value !== null && value > 0);
   const departureCvs = succeeded.map((item) => item.departureIntervalCv).filter((value) => value !== null);
+  const chamberDwellMeans = succeeded.map((item) => item.processChamberDwellMeanSeconds).filter((value) => value !== null);
+  const robotDwellMeans = succeeded.map((item) => item.robotWaferDwellMeanSeconds).filter((value) => value !== null);
+  const systemResidenceMeans = succeeded.map((item) => item.waferSystemResidenceMeanSeconds).filter((value) => value !== null);
+  const systemResidenceCvs = succeeded.map((item) => item.waferSystemResidenceCv).filter((value) => value !== null);
   const frequencyMap = /* @__PURE__ */ new Map();
   const windowMethodCounts = {};
   for (const item of succeeded) {
@@ -726,6 +869,10 @@ function analyzeTestGroupPerformance(inputs) {
     medianBottleneckUtilization: median(bottleneckUtilizations),
     medianThroughputPerHour: median(throughputs),
     medianDepartureIntervalCv: median(departureCvs),
+    medianProcessChamberDwellMeanSeconds: median(chamberDwellMeans),
+    medianRobotWaferDwellMeanSeconds: median(robotDwellMeans),
+    medianWaferSystemResidenceMeanSeconds: median(systemResidenceMeans),
+    medianWaferSystemResidenceCv: median(systemResidenceCvs),
     bottleneckFrequencies,
     windowMethodCounts
   };

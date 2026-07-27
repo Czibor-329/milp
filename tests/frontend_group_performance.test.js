@@ -6,12 +6,26 @@ const {
   analyzeTestGroupPerformance,
 } = require("../realtime_scheduler/analysis/schedule_analysis.js");
 
-function performance(resource, utilization, throughput, cv, method = "steady-overlap") {
+function performance(
+  resource,
+  utilization,
+  throughput,
+  cv,
+  method = "steady-overlap",
+  residence = { chamber: 0, robot: 0, system: 0, systemCv: 0 },
+) {
   return {
     window: { method },
     bottleneck: { name: resource, utilization },
     throughputPerHour: throughput,
     departureIntervalCv: cv,
+    processChamberDwellTime: { meanSeconds: residence.chamber, sampleCount: 1 },
+    robotWaferDwellTime: { meanSeconds: residence.robot, sampleCount: 1 },
+    waferSystemResidenceTime: {
+      meanSeconds: residence.system,
+      coefficientOfVariation: residence.systemCv,
+      sampleCount: 1,
+    },
   };
 }
 
@@ -25,7 +39,10 @@ test("测试组分析同时报告加权、逐例和计算成本指标", () => {
       makespan: 80,
       baselineMakespan: 100,
       cpuTimeMs: 100,
-      performance: performance("PM1", 0.8, 30, 0.2),
+      performance: performance(
+        "PM1", 0.8, 30, 0.2, "steady-overlap",
+        { chamber: 4, robot: 2, system: 40, systemCv: 0.1 },
+      ),
     },
     {
       id: "b",
@@ -35,7 +52,10 @@ test("测试组分析同时报告加权、逐例和计算成本指标", () => {
       makespan: 220,
       baselineMakespan: 200,
       cpuTimeMs: 300,
-      performance: performance("PM1", 0.6, 20, 0.4),
+      performance: performance(
+        "PM1", 0.6, 20, 0.4, "steady-overlap",
+        { chamber: 8, robot: 6, system: 80, systemCv: 0.3 },
+      ),
     },
     {
       id: "c",
@@ -56,6 +76,10 @@ test("测试组分析同时报告加权、逐例和计算成本指标", () => {
   assert.equal(result.medianCpuTimeMs, 200);
   assert.equal(result.p90CpuTimeMs, 280);
   assert.equal(result.medianBottleneckUtilization, 0.7);
+  assert.equal(result.medianProcessChamberDwellMeanSeconds, 6);
+  assert.equal(result.medianRobotWaferDwellMeanSeconds, 4);
+  assert.equal(result.medianWaferSystemResidenceMeanSeconds, 60);
+  assert.equal(result.medianWaferSystemResidenceCv, 0.2);
   assert.deepEqual(result.bottleneckFrequencies[0], {
     resourceName: "PM1",
     count: 2,

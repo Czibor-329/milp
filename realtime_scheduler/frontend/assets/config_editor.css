@@ -435,7 +435,8 @@
     .performance-head select:focus-visible { outline: 3px solid var(--accent-ring); outline-offset: 2px; }
     .performance-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-bottom: 1px solid var(--performance-line); background: #fff; }
     .performance-summary > div { min-width: 0; padding: 20px 24px; border-left: 1px solid var(--performance-line); }
-    .performance-summary > div:first-child { border-left: 0; }
+    .performance-summary > div:nth-child(3n + 1) { border-left: 0; }
+    .performance-summary > div:nth-child(n + 4) { border-top: 1px solid var(--performance-line); }
     .performance-summary span, .performance-summary strong, .performance-summary small { display: block; }
     .performance-summary span { color: var(--performance-muted); font-size: 12px; font-weight: 800; letter-spacing: .02em; }
     .performance-summary strong { margin-top: 7px; overflow: hidden; color: var(--performance-text); font-size: 20px; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }

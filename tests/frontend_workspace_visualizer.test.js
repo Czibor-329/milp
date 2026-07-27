@@ -176,7 +176,59 @@ test("性能分析用首片完工到末片投料剔除启动与收尾", () => {
   assert.equal(performance.completedWaferCount, 2);
   assert.equal(performance.throughputPerHour, 240);
   assert.equal(performance.departureIntervalCv, 0);
+  assert.equal(performance.waferSystemResidenceTime.sampleCount, 2);
+  assert.equal(performance.waferSystemResidenceTime.meanSeconds, 31.5);
+  assert.ok(Math.abs(performance.waferSystemResidenceTime.coefficientOfVariation - (1 / 9)) < 1e-9);
   assert.equal(logic.analyzeSchedulePerformance(performanceMoves, device, "full").completedWaferCount, 4);
+});
+
+test("性能分析统计加工腔、机器手非运输驻留和晶圆系统停留", () => {
+  const residenceMoves = [
+    {
+      MoveID: 1, MoveType: 0, ModuleName: "VTR", SrcStationList: ["LP1"],
+      MatIDList: ["W1"], StartTime: 0, EndTime: 1,
+    },
+    {
+      MoveID: 2, MoveType: 1, ModuleName: "VTR", DestStationList: ["PM1"],
+      MatIDList: ["W1"], StartTime: 2, EndTime: 3,
+    },
+    {
+      MoveID: 3, MoveType: 9, ModuleName: "PM1", MatIDList: ["W1"],
+      StartTime: 3, EndTime: 10,
+    },
+    {
+      MoveID: 4, MoveType: 6, ModuleName: "PM1", MatIDList: ["W1"],
+      StartTime: 10, EndTime: 11,
+    },
+    {
+      MoveID: 5, MoveType: 0, ModuleName: "VTR", SrcStationList: ["PM1"],
+      MatIDList: ["W1"], StartTime: 12, EndTime: 14,
+    },
+    {
+      MoveID: 6, MoveType: 5, ModuleName: "VTR",
+      StartTime: 14, EndTime: 16,
+    },
+    {
+      MoveID: 7, MoveType: 1, ModuleName: "VTR", DestStationList: ["LP1"],
+      MatIDList: ["W1"], StartTime: 19, EndTime: 20,
+    },
+  ];
+
+  const performance = logic.analyzeSchedulePerformance(residenceMoves, device, "full");
+
+  assert.deepEqual(performance.processChamberDwellTime, {
+    totalSeconds: 4,
+    meanSeconds: 4,
+    medianSeconds: 4,
+    maxSeconds: 4,
+    coefficientOfVariation: 0,
+    sampleCount: 1,
+  });
+  assert.equal(performance.robotWaferDwellTime.sampleCount, 2);
+  assert.equal(performance.robotWaferDwellTime.totalSeconds, 4);
+  assert.equal(performance.robotWaferDwellTime.maxSeconds, 3);
+  assert.equal(performance.waferSystemResidenceTime.meanSeconds, 19);
+  assert.equal(performance.waferSystemResidenceTime.sampleCount, 1);
 });
 
 test("模块物理占用包含开门、取放和加工，界面隐藏未使用并行腔", () => {

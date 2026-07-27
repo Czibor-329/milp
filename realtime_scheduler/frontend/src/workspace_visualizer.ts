@@ -735,6 +735,21 @@ function renderSchedulePerformance(performance: SchedulePerformance): string {
         <strong>${performance.throughputPerHour > 0 ? `${performance.throughputPerHour.toFixed(1)} 片/h` : "—"}</strong>
         <small>平均间隔 ${formatSeconds(performance.meanDepartureInterval)} s · 间隔 CV ${performance.departureIntervalCv.toFixed(2)} · ${performance.completedWaferCount} 片样本</small>
       </div>
+      <div>
+        <span>晶圆驻留时间 · 加工腔</span>
+        <strong>${performance.processChamberDwellTime.sampleCount ? `${formatSeconds(performance.processChamberDwellTime.meanSeconds)} s` : "—"}</strong>
+        <small>加工结束 → 完全离腔 · 中位 ${formatSeconds(performance.processChamberDwellTime.medianSeconds)} s · 最大 ${formatSeconds(performance.processChamberDwellTime.maxSeconds)} s · ${performance.processChamberDwellTime.sampleCount} 次</small>
+      </div>
+      <div>
+        <span>机器手驻留时间</span>
+        <strong>${performance.robotWaferDwellTime.sampleCount ? `${formatSeconds(performance.robotWaferDwellTime.meanSeconds)} s` : "—"}</strong>
+        <small>Pick 完成 → Place 开始，已扣除 PreTrans 运输 · 最大 ${formatSeconds(performance.robotWaferDwellTime.maxSeconds)} s · ${performance.robotWaferDwellTime.sampleCount} 次</small>
+      </div>
+      <div>
+        <span>晶圆系统停留时间</span>
+        <strong>${performance.waferSystemResidenceTime.sampleCount ? `${formatSeconds(performance.waferSystemResidenceTime.meanSeconds)} s` : "—"}</strong>
+        <small>离开 LP → 返回 LP · CV ${performance.waferSystemResidenceTime.coefficientOfVariation.toFixed(2)} · 最大 ${formatSeconds(performance.waferSystemResidenceTime.maxSeconds)} s · ${performance.waferSystemResidenceTime.sampleCount} 片</small>
+      </div>
     </div>
     ${candidateMarkup}
     <p class="performance-window-note">${escapeHtml(window.detail)}</p>

@@ -1566,6 +1566,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         """机器人持片驻留应统计 Pick/Place 间隙，并正确衔接 Swap 的收发晶圆。"""
         moves = [
             {"MoveID": 1, "MoveType": 0, "Robot": "VTR", "MatIDList": [1], "StartTime": 0, "EndTime": 2},
+            {"MoveID": 8, "MoveType": 5, "Robot": "VTR", "StartTime": 3, "EndTime": 5},
             {"MoveID": 2, "MoveType": 1, "Robot": "VTR", "MatIDList": [1], "StartTime": 7, "EndTime": 9},
             {"MoveID": 3, "MoveType": 2, "ModuleName": "ATR", "MatIDList": [2], "StartTime": 8, "EndTime": 10},
             {"MoveID": 4, "MoveType": 3, "ModuleName": "ATR", "MatIDList": [2], "StartTime": 13, "EndTime": 15},
@@ -1577,9 +1578,9 @@ class ConfigEditorServerTests(unittest.TestCase):
         metrics = config_server._robot_wafer_dwell_time(moves)
 
         self.assertEqual(4, metrics["sampleCount"])
-        self.assertAlmostEqual(14.0, metrics["totalSeconds"])
-        self.assertAlmostEqual(3.5, metrics["medianSeconds"])
-        self.assertAlmostEqual(5.0, metrics["maxSeconds"])
+        self.assertAlmostEqual(12.0, metrics["totalSeconds"])
+        self.assertAlmostEqual(3.0, metrics["medianSeconds"])
+        self.assertAlmostEqual(4.0, metrics["maxSeconds"])
 
     def test_heuristic_refreshes_changed_baseline_result(self) -> None:
         """再次运行 Heuristic 时，应以本次 makespan 和 CPU Time 覆盖旧值。"""

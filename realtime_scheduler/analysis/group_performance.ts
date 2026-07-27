@@ -44,6 +44,10 @@ export interface TestGroupCasePerformance {
   }>;
   throughputPerHour: number | null;
   departureIntervalCv: number | null;
+  processChamberDwellMeanSeconds: number | null;
+  robotWaferDwellMeanSeconds: number | null;
+  waferSystemResidenceMeanSeconds: number | null;
+  waferSystemResidenceCv: number | null;
   windowMethod: string;
   error: string;
 }
@@ -75,6 +79,10 @@ export interface TestGroupPerformanceSummary {
   medianBottleneckUtilization: number | null;
   medianThroughputPerHour: number | null;
   medianDepartureIntervalCv: number | null;
+  medianProcessChamberDwellMeanSeconds: number | null;
+  medianRobotWaferDwellMeanSeconds: number | null;
+  medianWaferSystemResidenceMeanSeconds: number | null;
+  medianWaferSystemResidenceCv: number | null;
   bottleneckFrequencies: BottleneckFrequency[];
   windowMethodCounts: Record<string, number>;
 }
@@ -153,6 +161,18 @@ function normalizeCase(input: TestGroupCaseInput): TestGroupCasePerformance {
     departureIntervalCv: input.performance
       ? finiteOrNull(input.performance.departureIntervalCv)
       : null,
+    processChamberDwellMeanSeconds: input.performance?.processChamberDwellTime?.sampleCount
+      ? finiteOrNull(input.performance.processChamberDwellTime?.meanSeconds)
+      : null,
+    robotWaferDwellMeanSeconds: input.performance?.robotWaferDwellTime?.sampleCount
+      ? finiteOrNull(input.performance.robotWaferDwellTime?.meanSeconds)
+      : null,
+    waferSystemResidenceMeanSeconds: input.performance?.waferSystemResidenceTime?.sampleCount
+      ? finiteOrNull(input.performance.waferSystemResidenceTime?.meanSeconds)
+      : null,
+    waferSystemResidenceCv: input.performance?.waferSystemResidenceTime?.sampleCount
+      ? finiteOrNull(input.performance.waferSystemResidenceTime?.coefficientOfVariation)
+      : null,
     windowMethod: input.performance?.window.method ?? "",
     error: String(input.error || ""),
   };
@@ -187,6 +207,18 @@ export function analyzeTestGroupPerformance(
     .filter((value): value is number => value !== null && value > 0);
   const departureCvs = succeeded
     .map(item => item.departureIntervalCv)
+    .filter((value): value is number => value !== null);
+  const chamberDwellMeans = succeeded
+    .map(item => item.processChamberDwellMeanSeconds)
+    .filter((value): value is number => value !== null);
+  const robotDwellMeans = succeeded
+    .map(item => item.robotWaferDwellMeanSeconds)
+    .filter((value): value is number => value !== null);
+  const systemResidenceMeans = succeeded
+    .map(item => item.waferSystemResidenceMeanSeconds)
+    .filter((value): value is number => value !== null);
+  const systemResidenceCvs = succeeded
+    .map(item => item.waferSystemResidenceCv)
     .filter((value): value is number => value !== null);
 
   const frequencyMap = new Map<string, number[]>();
@@ -248,6 +280,10 @@ export function analyzeTestGroupPerformance(
     medianBottleneckUtilization: median(bottleneckUtilizations),
     medianThroughputPerHour: median(throughputs),
     medianDepartureIntervalCv: median(departureCvs),
+    medianProcessChamberDwellMeanSeconds: median(chamberDwellMeans),
+    medianRobotWaferDwellMeanSeconds: median(robotDwellMeans),
+    medianWaferSystemResidenceMeanSeconds: median(systemResidenceMeans),
+    medianWaferSystemResidenceCv: median(systemResidenceCvs),
     bottleneckFrequencies,
     windowMethodCounts,
   };

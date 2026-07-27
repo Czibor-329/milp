@@ -36,6 +36,7 @@ var MINIMUM_STEADY_WAFERS = 4;
 var PICK_MOVE_TYPES = /* @__PURE__ */ new Set([0, 2]);
 var PLACE_MOVE_TYPES = /* @__PURE__ */ new Set([1, 3]);
 var SWAP_MOVE = 4;
+var PRE_TRANS_MOVE = 5;
 var PREPARE_MOVE = 6;
 var COMPLETE_MOVE = 7;
 var PROCESS_MOVE = 9;
@@ -64,6 +65,9 @@ function materialIds(move, field = "MatIDList") {
 }
 function firstStation(move, field) {
   return String(listValue(move[field])[0] ?? "");
+}
+function moveRobotName(move) {
+  return String(move.Robot ?? move.ModuleName ?? "").trim();
 }
 function isRobotName(name) {
   return /^(ATR|VTR|TM\d*|ROBOT)/i.test(name);
@@ -257,6 +261,15 @@ function waferBoundaryTimes(moves, device) {
       if (isLoadPortName(destination, stationType(device, destination))) {
         for (const material of materialIds(move)) completions.set(material, move.EndTime);
       }
+    } else if (move.MoveType === SWAP_MOVE) {
+      const station = firstStation(move, "StationList");
+      if (!isLoadPortName(station, stationType(device, station))) continue;
+      for (const material of materialIds(move, "SendMatList")) {
+        if (!entries.has(material)) entries.set(material, move.EndTime);
+      }
+      for (const material of materialIds(move, "RecvMatList")) {
+        completions.set(material, move.EndTime);
+      }
     }
   }
   return { entries, completions };
@@ -308,6 +321,122 @@ function intervalCoefficientOfVariation(values) {
   if (mean <= PERFORMANCE_TIME_TOLERANCE) return 0;
   const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length;
   return Math.sqrt(variance) / mean;
+}
+function medianDuration(values) {
+  if (!values.length) return 0;
+  const ordered = [...values].sort((left, right) => left - right);
+  const middle = Math.floor(ordered.length / 2);
+  return ordered.length % 2 ? ordered[middle] : (ordered[middle - 1] + ordered[middle]) / 2;
+}
+function summarizeDurations(values) {
+  const durations = values.filter((value) => Number.isFinite(value) && value >= -PERFORMANCE_TIME_TOLERANCE).map((value) => Math.max(0, value));
+  const totalSeconds = durations.reduce((sum, value) => sum + value, 0);
+  return {
+    totalSeconds,
+    meanSeconds: durations.length ? totalSeconds / durations.length : 0,
+    medianSeconds: medianDuration(durations),
+    maxSeconds: Math.max(0, ...durations),
+    coefficientOfVariation: intervalCoefficientOfVariation(durations),
+    sampleCount: durations.length
+  };
+}
+function completionInsideWindow(completedAt, window) {
+  return completedAt >= window.start - PERFORMANCE_TIME_TOLERANCE && completedAt <= window.end + PERFORMANCE_TIME_TOLERANCE;
+}
+function processChamberDwellTime(moves, device, window) {
+  const durations = [];
+  for (const processMove of moves) {
+    const chamber = processMove.ModuleName;
+    if (processMove.MoveType !== PROCESS_MOVE || !isProcessModule(chamber, stationType(device, chamber))) continue;
+    for (const material of materialIds(processMove)) {
+      const removal = moves.find((candidate) => {
+        if (candidate.EndTime < processMove.EndTime - PERFORMANCE_TIME_TOLERANCE) return false;
+        if (PICK_MOVE_TYPES.has(candidate.MoveType) && firstStation(candidate, "SrcStationList") === chamber && materialIds(candidate).includes(material)) return true;
+        return candidate.MoveType === SWAP_MOVE && firstStation(candidate, "StationList") === chamber && materialIds(candidate, "SendMatList").includes(material);
+      });
+      if (!removal || !completionInsideWindow(removal.EndTime, window)) continue;
+      durations.push(removal.EndTime - processMove.EndTime);
+    }
+  }
+  return summarizeDurations(durations);
+}
+function coveredDuration(intervals, boundaryStart, boundaryEnd) {
+  const clipped = intervals.map((interval) => ({
+    start: Math.max(interval.start, boundaryStart),
+    end: Math.min(interval.end, boundaryEnd)
+  })).filter((interval) => interval.end > interval.start + PERFORMANCE_TIME_TOLERANCE).sort((left, right) => left.start - right.start || left.end - right.end);
+  let total = 0;
+  let activeStart = null;
+  let activeEnd = 0;
+  for (const interval of clipped) {
+    if (activeStart === null) {
+      activeStart = interval.start;
+      activeEnd = interval.end;
+    } else if (interval.start <= activeEnd + PERFORMANCE_TIME_TOLERANCE) {
+      activeEnd = Math.max(activeEnd, interval.end);
+    } else {
+      total += activeEnd - activeStart;
+      activeStart = interval.start;
+      activeEnd = interval.end;
+    }
+  }
+  return activeStart === null ? total : total + activeEnd - activeStart;
+}
+function robotWaferDwellTime(moves, window) {
+  const transportByRobot = /* @__PURE__ */ new Map();
+  for (const move of moves) {
+    if (move.MoveType !== PRE_TRANS_MOVE || move.EndTime <= move.StartTime) continue;
+    const robot = moveRobotName(move);
+    if (!robot) continue;
+    const intervals = transportByRobot.get(robot) ?? [];
+    intervals.push({ start: move.StartTime, end: move.EndTime });
+    transportByRobot.set(robot, intervals);
+  }
+  const holdingStartedAt = /* @__PURE__ */ new Map();
+  const durations = [];
+  const finishHolding = (robot, materials, finishedAt) => {
+    for (const material of materials) {
+      const key = `${robot}\0${material}`;
+      const startedAt = holdingStartedAt.get(key);
+      if (startedAt === void 0) continue;
+      holdingStartedAt.delete(key);
+      if (!completionInsideWindow(finishedAt, window)) continue;
+      const rawDuration = Math.max(finishedAt - startedAt, 0);
+      const transportDuration = coveredDuration(
+        transportByRobot.get(robot) ?? [],
+        startedAt,
+        finishedAt
+      );
+      durations.push(Math.max(rawDuration - transportDuration, 0));
+    }
+  };
+  for (const move of moves) {
+    const robot = moveRobotName(move);
+    if (!robot) continue;
+    if (PICK_MOVE_TYPES.has(move.MoveType)) {
+      for (const material of materialIds(move)) {
+        holdingStartedAt.set(`${robot}\0${material}`, move.EndTime);
+      }
+    } else if (PLACE_MOVE_TYPES.has(move.MoveType)) {
+      finishHolding(robot, materialIds(move), move.StartTime);
+    } else if (move.MoveType === SWAP_MOVE) {
+      finishHolding(robot, materialIds(move, "RecvMatList"), move.StartTime);
+      for (const material of materialIds(move, "SendMatList")) {
+        holdingStartedAt.set(`${robot}\0${material}`, move.EndTime);
+      }
+    }
+  }
+  return summarizeDurations(durations);
+}
+function waferSystemResidenceTime(moves, device, window) {
+  const boundaries = waferBoundaryTimes(moves, device);
+  const durations = [];
+  for (const [material, completedAt] of boundaries.completions) {
+    const enteredAt = boundaries.entries.get(material);
+    if (enteredAt === void 0 || completedAt < enteredAt - PERFORMANCE_TIME_TOLERANCE || !completionInsideWindow(completedAt, window)) continue;
+    durations.push(completedAt - enteredAt);
+  }
+  return summarizeDurations(durations);
 }
 function buildVacuumQueue(moves, device, intervalsByResource) {
   const admittedMaterials = /* @__PURE__ */ new Set();
@@ -571,6 +700,9 @@ function analyzeSchedulePerformance(moves, device, mode = "steady", context = nu
   const departureIntervals = completionTimes.slice(1).map((time, index) => time - completionTimes[index]);
   const meanDepartureInterval = departureIntervals.length ? departureIntervals.reduce((sum, interval) => sum + interval, 0) / departureIntervals.length : 0;
   const throughputPerHour = meanDepartureInterval > PERFORMANCE_TIME_TOLERANCE ? 3600 / meanDepartureInterval : 0;
+  const chamberDwellTime = processChamberDwellTime(records, device, window);
+  const robotDwellTime = robotWaferDwellTime(records, window);
+  const systemResidenceTime = waferSystemResidenceTime(records, device, window);
   const vacuumQueue = buildVacuumQueue(records, device, intervalsByResource);
   const queuePattern = vacuumQueuePattern(vacuumQueue);
   return {
@@ -583,6 +715,9 @@ function analyzeSchedulePerformance(moves, device, mode = "steady", context = nu
     throughputPerHour,
     meanDepartureInterval,
     departureIntervalCv: intervalCoefficientOfVariation(departureIntervals),
+    processChamberDwellTime: chamberDwellTime,
+    robotWaferDwellTime: robotDwellTime,
+    waferSystemResidenceTime: systemResidenceTime,
     vacuumQueue,
     vacuumQueueJobSwitchRatio: queuePattern.switchRatio,
     vacuumQueueLongestRun: queuePattern.longestRun
@@ -1118,6 +1253,21 @@ function renderSchedulePerformance(performance2) {
         <span>\u51FA\u7AD9\u8282\u62CD</span>
         <strong>${performance2.throughputPerHour > 0 ? `${performance2.throughputPerHour.toFixed(1)} \u7247/h` : "\u2014"}</strong>
         <small>\u5E73\u5747\u95F4\u9694 ${formatSeconds(performance2.meanDepartureInterval)} s \xB7 \u95F4\u9694 CV ${performance2.departureIntervalCv.toFixed(2)} \xB7 ${performance2.completedWaferCount} \u7247\u6837\u672C</small>
+      </div>
+      <div>
+        <span>\u6676\u5706\u9A7B\u7559\u65F6\u95F4 \xB7 \u52A0\u5DE5\u8154</span>
+        <strong>${performance2.processChamberDwellTime.sampleCount ? `${formatSeconds(performance2.processChamberDwellTime.meanSeconds)} s` : "\u2014"}</strong>
+        <small>\u52A0\u5DE5\u7ED3\u675F \u2192 \u5B8C\u5168\u79BB\u8154 \xB7 \u4E2D\u4F4D ${formatSeconds(performance2.processChamberDwellTime.medianSeconds)} s \xB7 \u6700\u5927 ${formatSeconds(performance2.processChamberDwellTime.maxSeconds)} s \xB7 ${performance2.processChamberDwellTime.sampleCount} \u6B21</small>
+      </div>
+      <div>
+        <span>\u673A\u5668\u624B\u9A7B\u7559\u65F6\u95F4</span>
+        <strong>${performance2.robotWaferDwellTime.sampleCount ? `${formatSeconds(performance2.robotWaferDwellTime.meanSeconds)} s` : "\u2014"}</strong>
+        <small>Pick \u5B8C\u6210 \u2192 Place \u5F00\u59CB\uFF0C\u5DF2\u6263\u9664 PreTrans \u8FD0\u8F93 \xB7 \u6700\u5927 ${formatSeconds(performance2.robotWaferDwellTime.maxSeconds)} s \xB7 ${performance2.robotWaferDwellTime.sampleCount} \u6B21</small>
+      </div>
+      <div>
+        <span>\u6676\u5706\u7CFB\u7EDF\u505C\u7559\u65F6\u95F4</span>
+        <strong>${performance2.waferSystemResidenceTime.sampleCount ? `${formatSeconds(performance2.waferSystemResidenceTime.meanSeconds)} s` : "\u2014"}</strong>
+        <small>\u79BB\u5F00 LP \u2192 \u8FD4\u56DE LP \xB7 CV ${performance2.waferSystemResidenceTime.coefficientOfVariation.toFixed(2)} \xB7 \u6700\u5927 ${formatSeconds(performance2.waferSystemResidenceTime.maxSeconds)} s \xB7 ${performance2.waferSystemResidenceTime.sampleCount} \u7247</small>
       </div>
     </div>
     ${candidateMarkup}
