@@ -12,6 +12,7 @@ __export(route_editor_logic_exports, {
   cloneVisitParameters: () => cloneVisitParameters,
   compareProfiles: () => compareProfiles,
   differenceFields: () => differenceFields,
+  minimumResidencyConstraint: () => minimumResidencyConstraint,
   processProfile: () => processProfile,
   processRecipeName: () => processRecipeName,
   replaceCandidates: () => replaceCandidates,
@@ -85,11 +86,19 @@ function routeCleanSignature(route) {
   });
   return parts.join(" \xB7 ");
 }
-function automaticRouteName(profile, cleanSignature = "") {
+function minimumResidencyConstraint(route) {
+  const limits = (route.stages || []).filter((stage) => stage.needProcess).flatMap((stage) => stage.visits || []).map((visit) => Number(visit.residencyConstraint)).filter((limit) => Number.isFinite(limit) && limit >= 0);
+  return limits.length ? Math.min(...limits) : null;
+}
+function automaticRouteName(profile, cleanSignature = "", minimumResidency = null) {
   const processName = profile.processCount === 0 ? "\u65E0\u52A0\u5DE5\u5DE5\u5E8F" : profile.candidatePath.map(
     (path, index) => `${path}(${formatSeconds(profile.processTimes[index])})`
   ).join(" \u2192 ");
-  return cleanSignature ? `${processName} \xB7 ${cleanSignature}` : processName;
+  const suffixes = [
+    cleanSignature,
+    minimumResidency === null ? "" : `\u9A7B\u7559 ${formatSeconds(minimumResidency)}`
+  ].filter(Boolean);
+  return suffixes.length ? `${processName} \xB7 ${suffixes.join(" \xB7 ")}` : processName;
 }
 function compareProfiles(left, right) {
   if (left.processCount !== right.processCount) return left.processCount - right.processCount;
@@ -2222,6 +2231,10 @@ function makeRound(roundIndex, currentTime, routeRef = "", loadPort = "") {
     cjobs: [makeCJob(roundIndex, [], routeRef, loadPort)]
   };
 }
+function automaticLoadPort(loadPorts, taskOrdinal) {
+  if (!loadPorts.length) return "";
+  return loadPorts[Math.max(0, taskOrdinal - 1) % loadPorts.length];
+}
 function enumName(value, names, fallback) {
   if (names.includes(String(value))) return String(value);
   const numeric = Number(value);
@@ -2230,7 +2243,7 @@ function enumName(value, names, fallback) {
   }
   return { 0: "Smart", 1: "Pipeline", 2: "Sequential", 3: "Concurrent" }[numeric] || fallback;
 }
-function normalizePJob(raw, index, taskId) {
+function normalizePJob(raw, index, taskId, assignedLoadPort = "") {
   const source = raw || {};
   const originRoute = source.originRoute ?? source.OriginRoute;
   const routeRef = typeof originRoute === "object" ? originRoute?.name || originRoute?.Name || "" : originRoute;
@@ -2244,12 +2257,11 @@ function normalizePJob(raw, index, taskId) {
     waferCount,
     matList: Array.from({ length: waferCount }, (_, item) => item + 1),
     routeRef: source.routeRef || routeRef || "",
-    loadPort: source.loadPort || source.LoadPort || "",
+    loadPort: assignedLoadPort || source.loadPort || source.LoadPort || "",
     priority: Math.max(1, Number(source.priority ?? source.Priority) || 1)
   };
 }
-function normalizeRound(raw, roundIndex, fallbackTime) {
-  const taskId = String(roundIndex);
+function normalizeRound(raw, roundIndex, fallbackTime, firstTaskId = roundIndex, loadPorts = []) {
   const source = raw || {};
   let cjobs = Array.isArray(source.cjobs) ? source.cjobs : null;
   if (!cjobs) {
@@ -2264,17 +2276,27 @@ function normalizeRound(raw, roundIndex, fallbackTime) {
   }
   if (!cjobs.length) cjobs = [{ pjobs: [{}] }];
   const normalizedCJobs = cjobs.map((cjob, cjobIndex) => {
+    const taskId = String(firstTaskId + cjobIndex);
+    const taskMode = enumName(cjob.taskMode, TASK_MODES, "Smart");
     const rawPJobs = Array.isArray(cjob.pjobs) && cjob.pjobs.length ? cjob.pjobs : [{}];
+    const legacyLoadPort = cjob.loadPort || rawPJobs[0]?.loadPort || rawPJobs[0]?.LoadPort || "";
+    const loadPort = automaticLoadPort(loadPorts, firstTaskId + cjobIndex) || legacyLoadPort;
     const pjobs = rawPJobs.map(
-      (pjob, pjobIndex) => normalizePJob(pjob, pjobIndex + 1, taskId)
+      (pjob, pjobIndex) => normalizePJob(
+        pjob,
+        pjobIndex + 1,
+        taskId,
+        loadPort
+      )
     );
     const jobType = enumName(cjob.jobType, CJOB_TYPES, "NormalLot");
     return {
       key: cjob.key || `C${cjobIndex + 1}`,
       taskId,
+      loadPort,
       jobType,
       priority: jobType === "NormalLot" ? Math.max(1, Number(cjob.priority) || 1) : -1,
-      taskMode: enumName(cjob.taskMode, TASK_MODES, "Smart"),
+      taskMode,
       pJobNameList: pjobs.map((pjob) => pjob.jobName),
       pjobs
     };
@@ -2462,6 +2484,8 @@ function normalizeRoute(route) {
   ROUTE_CLEAN_KEYS.forEach((key) => {
     route[key] = stringList(route[key]).slice(0, 1);
   });
+  route.postCJobCleanRefs = [];
+  route.bufferOption = Math.max(0, Math.min(4, Math.trunc(Number(route.bufferOption) || 0)));
   linkRouteSteps(route.stages);
   route.stages.forEach((stage, index) => {
     stage.visits = Array.isArray(stage.visits) ? stage.visits : [];
@@ -2496,7 +2520,18 @@ function setStageCandidates(routeIndex, stageIndex, names) {
   normalizeRoute(route);
 }
 function normalizeRounds() {
-  state.rounds = state.rounds.map((round, index) => normalizeRound(round, index + 1, state.times[index]));
+  let nextTaskId = 1;
+  state.rounds = state.rounds.map((round, index) => {
+    const normalized = normalizeRound(
+      round,
+      index + 1,
+      state.times[index],
+      nextTaskId,
+      state.loadPorts
+    );
+    nextTaskId += normalized.cjobs.length;
+    return normalized;
+  });
   let nextMaterialId = 1;
   state.rounds.forEach((round) => round.cjobs.forEach((cjob) => cjob.pjobs.forEach((pjob) => {
     pjob.matList = Array.from({ length: pjob.waferCount }, () => nextMaterialId++);
@@ -2760,7 +2795,6 @@ function applyTestCase(testCase) {
     input.value = state.options[input.dataset.option] ?? input.value;
   });
   document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro", "nn-saea", "setrank", "neuralucb", "neural", "rl"].includes(state.strategy));
-  document.getElementById("loadlockMacroOptions").classList.toggle("is-hidden", !["loadlock-macro", "nn-saea"].includes(state.strategy));
   document.getElementById("nnSAEAOptions").classList.toggle("is-hidden", state.strategy !== "nn-saea");
   document.getElementById("neuralucbOptions").classList.toggle("is-hidden", state.strategy !== "neuralucb");
   document.getElementById("rlOptions").classList.toggle("is-hidden", state.strategy !== "rl");
@@ -3036,7 +3070,11 @@ function routeProcessProfile(route) {
   return processProfile(route);
 }
 function generatedRouteName(route) {
-  return automaticRouteName(routeProcessProfile(route), routeCleanSignature(route));
+  return automaticRouteName(
+    routeProcessProfile(route),
+    routeCleanSignature(route),
+    minimumResidencyConstraint(route)
+  );
 }
 function recordRouteRename(oldName, newName) {
   if (!oldName || oldName === newName) return;
@@ -3104,8 +3142,8 @@ function renderRouteDetails(route, index) {
   const preCleans = cleanNamesFor(["preclean", "dummy", "dummywac"]);
   const postCleans = cleanNamesFor(["postclean"]);
   return `<div class="route-details"><div class="edit-card-head"><strong>\u8DEF\u5F84\u8BE6\u60C5</strong><div><button class="btn small" data-action="add-stage" data-index="${index}">\uFF0B Step \u7EC4</button> <button class="btn danger small" data-action="remove-route" data-index="${index}">\u5220\u9664</button></div></div>
-    <div class="route-meta"><div class="route-meta-grid"><div class="field"><label>\u8DEF\u5F84\u540D\u79F0\uFF08\u81EA\u52A8\u751F\u6210\uFF09</label><input value="${escapeHtml3(route.name)}" readonly></div><div class="field"><label>Group</label><input data-scope="route" data-index="${index}" data-key="group" value="${escapeHtml3(route.group)}"></div><div class="field"><label>BufferOption</label><input type="number" data-scope="route" data-index="${index}" data-key="bufferOption" value="${Number(route.bufferOption)}"></div></div>
-    <details class="route-clean-details"><summary>\u8DEF\u5F84\u7EA7 Clean \u8BBE\u7F6E</summary><div class="grid"><div class="field span-4"><label>PJob \u524D</label><select data-scope="route" data-index="${index}" data-key="prePJobCleanRefs">${optionsHtml(preCleans, stringList(route.prePJobCleanRefs)[0] || "", "\u4E0D\u9700\u8981\u6E05\u6D01")}</select></div><div class="field span-4"><label>PJob \u540E</label><select data-scope="route" data-index="${index}" data-key="postPJobCleanRefs">${optionsHtml(postCleans, stringList(route.postPJobCleanRefs)[0] || "", "\u4E0D\u9700\u8981\u6E05\u6D01")}</select></div><div class="field span-4"><label>CJob \u540E</label><select data-scope="route" data-index="${index}" data-key="postCJobCleanRefs">${optionsHtml(postCleans, stringList(route.postCJobCleanRefs)[0] || "", "\u4E0D\u9700\u8981\u6E05\u6D01")}</select></div></div></details></div>
+    <div class="route-meta"><div class="route-meta-grid"><div class="field"><label>\u8DEF\u5F84\u540D\u79F0\uFF08\u81EA\u52A8\u751F\u6210\uFF09</label><input value="${escapeHtml3(route.name)}" readonly></div><div class="field"><label>Group</label><input data-scope="route" data-index="${index}" data-key="group" value="${escapeHtml3(route.group)}"></div><div class="field"><label>BufferOption</label><input type="number" min="0" max="4" step="1" data-scope="route" data-index="${index}" data-key="bufferOption" value="${Number(route.bufferOption)}"><small class="field-help">\u4EC5\u9650\u5236\u63A5\u53E3\u679A\u4E3E\u8303\u56F4\uFF0C\u6682\u4E0D\u81EA\u52A8\u4FEE\u6539\u8DEF\u5F84\u3002</small></div></div>
+    <details class="route-clean-details"><summary>\u8DEF\u5F84\u7EA7 Clean \u8BBE\u7F6E</summary><div class="grid"><div class="field span-4"><label>PJob \u524D</label><select data-scope="route" data-index="${index}" data-key="prePJobCleanRefs">${optionsHtml(preCleans, stringList(route.prePJobCleanRefs)[0] || "", "\u4E0D\u9700\u8981\u6E05\u6D01")}</select></div><div class="field span-4"><label>PJob \u540E</label><select data-scope="route" data-index="${index}" data-key="postPJobCleanRefs">${optionsHtml(postCleans, stringList(route.postPJobCleanRefs)[0] || "", "\u4E0D\u9700\u8981\u6E05\u6D01")}</select></div><div class="field span-4 disabled-field"><label>CJob \u540E</label><select disabled><option>\u5F53\u524D\u7B97\u6CD5\u4E0D\u652F\u6301 PostCJob Clean</option></select></div></div></details></div>
     <div class="route-table-wrap"><table class="route-table"><thead><tr><th>StepID</th><th>\u7C7B\u578B</th><th>\u53EF\u9009\u8154\u5BA4 / \u673A\u5668\u624B</th><th>PostStepID</th><th>NeedProcess</th><th></th></tr></thead><tbody>${renderSteps(route, index)}</tbody></table></div></div>`;
 }
 function renderRoutes() {
@@ -3145,6 +3183,7 @@ function renderRounds() {
   const host = document.getElementById("roundList");
   host.innerHTML = state.rounds.map((round, roundIndex) => {
     const roundTitle = roundIndex ? `\u7B2C ${roundIndex + 1} \u8F6E\u91CD\u7B97` : "\u9996\u6B21\u6392\u7A0B";
+    const serialMode = round.cjobs.some((cjob) => ["Pipeline", "Sequential"].includes(cjob.taskMode));
     const cjobs = round.cjobs.map((cjob, cjobIndex) => {
       const normalLot = cjob.jobType === "NormalLot";
       const pjobRows = cjob.pjobs.map((pjob, pjobIndex) => `<tr>
@@ -3152,7 +3191,6 @@ function renderRounds() {
         <td><input class="pjob-number" type="number" min="1" max="${state.strategy === "milp" ? 12 : 25}" data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="waferCount" value="${Number(pjob.waferCount)}"></td>
         <td>${renderPJobRoutePicker(pjob, roundIndex, cjobIndex, pjobIndex)}</td>
         <td><input class="pjob-number" type="number" min="1" data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="priority" value="${Number(pjob.priority)}"></td>
-        <td><select data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="loadPort">${optionsHtml(state.loadPorts, pjob.loadPort, state.loadPorts.length ? "\u9009\u62E9\u7AEF\u53E3" : "\u65E0\u7AEF\u53E3")}</select></td>
         <td><button class="btn danger icon small" aria-label="\u5220\u9664 ${escapeHtml3(pjob.jobName)}" data-action="remove-pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" ${cjob.pjobs.length <= 1 ? "disabled" : ""}>\xD7</button></td>
       </tr>`).join("");
       return `<section class="cjob-card">
@@ -3160,14 +3198,17 @@ function renderRounds() {
         <div class="cjob-controls">
           <div class="field"><label>JobType</label><select data-scope="cjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-key="jobType">${CJOB_TYPES.map((value) => `<option ${value === cjob.jobType ? "selected" : ""}>${value}</option>`).join("")}</select></div>
           <div class="field ${normalLot ? "" : "disabled-field"}"><label>Priority</label><input type="number" min="1" data-scope="cjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-key="priority" value="${Number(cjob.priority)}" ${normalLot ? "" : "disabled"}></div>
-          <div class="field"><label>TaskMode</label><select data-scope="cjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-key="taskMode">${TASK_MODES.map((value) => `<option ${value === cjob.taskMode ? "selected" : ""}>${value}</option>`).join("")}</select></div>
+          <div class="field"><label>TaskMode</label><select data-scope="cjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-key="taskMode">${TASK_MODES.map((value) => `<option ${value === cjob.taskMode ? "selected" : ""} ${round.cjobs.length > 1 && ["Pipeline", "Sequential"].includes(value) ? "disabled" : ""}>${value}</option>`).join("")}</select></div>
           <div class="field"><label>PJobNameList</label><div class="pjob-name-list">${cjob.pJobNameList.map((name) => `<span>${escapeHtml3(name)}</span>`).join("")}</div></div>
         </div>
-        <div class="pjob-table-wrap"><table class="pjob-table"><thead><tr><th>JobName</th><th>Material</th><th>OriginRoute</th><th>Priority</th><th>LoadPort</th><th></th></tr></thead><tbody>${pjobRows}</tbody></table></div>
+        <div class="pjob-table-wrap"><table class="pjob-table"><thead><tr><th>JobName</th><th>Material</th><th>OriginRoute</th><th>Priority</th><th></th></tr></thead><tbody>${pjobRows}</tbody></table></div>
       </section>`;
     }).join("");
     const roundTimeBadge = roundIndex ? `<span class="readonly-pill">@ ${Number(round.currentTime)}s</span>` : "";
-    return `<section class="round-card"><header class="round-head"><div class="round-title"><div class="round-number">${roundIndex + 1}</div><div><strong>${roundTitle}</strong>${roundTimeBadge}</div></div><div class="round-time-editor field"><label>${roundIndex ? "\u91CD\u7B97\u65F6\u95F4" : "\u6392\u7A0B\u65F6\u95F4"}</label><div><input type="number" min="0" step="0.1" data-round-time-index="${roundIndex}" value="${Number(round.currentTime)}" ${roundIndex ? "" : "disabled"}><span>s</span></div></div><button class="btn small" data-action="add-cjob" data-round-index="${roundIndex}">\uFF0B CJob</button></header><div class="cjob-list">${cjobs}</div></section>`;
+    const cjobLimitReached = state.loadPorts.length > 0 && round.cjobs.length >= state.loadPorts.length;
+    const addCJobDisabled = cjobLimitReached || serialMode;
+    const addCJobTitle = serialMode ? "Pipeline/Sequential \u6BCF\u8F6E\u53EA\u80FD\u914D\u7F6E\u4E00\u4E2A CJob" : "\u6BCF\u8F6E CJob \u6570\u4E0D\u80FD\u8D85\u8FC7 LoadPort \u6570";
+    return `<section class="round-card"><header class="round-head"><div class="round-title"><div class="round-number">${roundIndex + 1}</div><div><strong>${roundTitle}</strong>${roundTimeBadge}</div></div><div class="round-time-editor field"><label>${roundIndex ? "\u91CD\u7B97\u65F6\u95F4" : "\u6392\u7A0B\u65F6\u95F4"}</label><div><input type="number" min="0" step="0.1" data-round-time-index="${roundIndex}" value="${Number(round.currentTime)}" ${roundIndex ? "" : "disabled"}><span>s</span></div></div><button class="btn small" data-action="add-cjob" data-round-index="${roundIndex}" ${addCJobDisabled ? `disabled title="${addCJobTitle}"` : ""}>\uFF0B CJob</button></header><div class="cjob-list">${cjobs}</div></section>`;
   }).join("");
 }
 function renderStepNumberField(label, key, value, routeIndex, stageIndex, options = {}) {
@@ -3317,7 +3358,12 @@ function updateStateFromControl(control) {
     synchronizeStageVisits(stage);
   }
   if (scope === "cjob") {
-    const cjob = state.rounds[Number(control.dataset.roundIndex)].cjobs[Number(control.dataset.cjobIndex)];
+    const round = state.rounds[Number(control.dataset.roundIndex)];
+    const cjob = round.cjobs[Number(control.dataset.cjobIndex)];
+    if (key === "taskMode" && ["Pipeline", "Sequential"].includes(String(value)) && round.cjobs.length > 1) {
+      control.value = cjob.taskMode;
+      return;
+    }
     cjob[key] = value;
     if (key === "jobType") cjob.priority = value === "NormalLot" ? cjob.priority > 0 ? cjob.priority : 1 : -1;
     normalizeRounds();
@@ -3443,14 +3489,16 @@ function handleAction(button) {
   }
   if (action === "add-cjob") {
     const roundIndex = Number(button.dataset.roundIndex), round = state.rounds[roundIndex];
-    const cjob = makeCJob(roundIndex + 1, [], state.routes[0]?.name || "", state.loadPorts[roundIndex] || state.loadPorts[0] || "");
+    if (round.cjobs.some((cjob2) => ["Pipeline", "Sequential"].includes(cjob2.taskMode))) return;
+    if (state.loadPorts.length && round.cjobs.length >= state.loadPorts.length) return;
+    const cjob = makeCJob(roundIndex + 1, [], state.routes[0]?.name || "", state.loadPorts[round.cjobs.length] || state.loadPorts[0] || "");
     cjob.key = `C${round.cjobs.length + 1}`;
     round.cjobs.push(cjob);
   }
   if (action === "remove-cjob") state.rounds[Number(button.dataset.roundIndex)].cjobs.splice(Number(button.dataset.cjobIndex), 1);
   if (action === "add-pjob") {
     const roundIndex = Number(button.dataset.roundIndex), cjob = state.rounds[roundIndex].cjobs[Number(button.dataset.cjobIndex)];
-    cjob.pjobs.push(makePJob(cjob.pjobs.length + 1, state.routes[0]?.name || "", state.loadPorts[roundIndex] || state.loadPorts[0] || "", 5));
+    cjob.pjobs.push(makePJob(cjob.pjobs.length + 1, state.routes[0]?.name || "", cjob.loadPort || state.loadPorts[0] || "", 5));
   }
   if (action === "remove-pjob") state.rounds[Number(button.dataset.roundIndex)].cjobs[Number(button.dataset.cjobIndex)].pjobs.splice(Number(button.dataset.pjobIndex), 1);
   normalizeRounds();
@@ -4313,7 +4361,6 @@ document.addEventListener("change", (event) => {
     }
     document.getElementById("roundCount").disabled = state.strategy === "milp";
     document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro", "nn-saea", "setrank", "neuralucb", "neural", "rl"].includes(state.strategy));
-    document.getElementById("loadlockMacroOptions").classList.toggle("is-hidden", !["loadlock-macro", "nn-saea"].includes(state.strategy));
     document.getElementById("nnSAEAOptions").classList.toggle("is-hidden", state.strategy !== "nn-saea");
     document.getElementById("neuralucbOptions").classList.toggle("is-hidden", state.strategy !== "neuralucb");
     document.getElementById("rlOptions").classList.toggle("is-hidden", state.strategy !== "rl");

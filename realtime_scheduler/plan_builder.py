@@ -33,6 +33,7 @@ class BuildState:
     next_material_id: int = 1
     next_slot_by_port: Dict[str, int] = field(default_factory=dict)
     job_names: set[str] = field(default_factory=set)
+    task_ids: set[str] = field(default_factory=set)
     dummy_material_count: int = 0
 
 
@@ -660,10 +661,24 @@ def build_route(
     unknown_posts = sorted({post for step in route_steps for post in step["PostStepID"] if post not in step_ids})
     if unknown_posts:
         raise ValueError(f"Route {route_name} 的 PostStepID 不存在：{unknown_posts}")
+    raw_buffer_option = route.get("bufferOption", 0)
+    try:
+        numeric_buffer_option = float(raw_buffer_option)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"Route {route_name} 的 BufferOption 必须是 0~4 的整数"
+        ) from None
+    buffer_option = int(numeric_buffer_option)
+    if (
+        not math.isfinite(numeric_buffer_option)
+        or numeric_buffer_option != buffer_option
+        or not 0 <= buffer_option <= 4
+    ):
+        raise ValueError(f"Route {route_name} 的 BufferOption 必须是 0~4 的整数")
     return {
         "Name": route_name,
         "RouteSteps": route_steps,
-        "BufferOption": int(_finite_number(route.get("bufferOption"), 0)),
+        "BufferOption": buffer_option,
         "BoundedStepIDs": [],
         "Group": str(route.get("group") or route_name).strip() or route_name,
         "PrePJob": pre_pjob,
@@ -828,14 +843,28 @@ def build_round_update(
     cjobs = _round_cjob_rows(round_config)
     if not cjobs:
         raise ValueError("每一轮至少需要一个 CJob")
+    if len(cjobs) > 1 and any(
+        _enum_value(
+            cjob.get("taskMode", cjob.get("TaskMode")),
+            TASK_MODE_VALUES,
+            "TaskMode",
+            "Smart",
+        ) in {TASK_MODE_VALUES["Pipeline"], TASK_MODE_VALUES["Sequential"]}
+        for cjob in cjobs
+    ):
+        raise ValueError("Pipeline/Sequential 每轮只能配置一个 ControlJob")
 
     materials: List[Dict[str, Any]] = []
     process_jobs: List[Dict[str, Any]] = []
     control_jobs: List[Dict[str, Any]] = []
     referenced_routes: Dict[str, Dict[str, Any]] = {}
     round_dummy_material_count = 0
+    used_control_load_ports: Dict[str, str] = {}
     for cjob_index, cjob in enumerate(cjobs, start=1):
         task_id = str(cjob.get("taskId") or cjob.get("TaskID") or cjob_index).strip()
+        if task_id in build_state.task_ids:
+            raise ValueError(f"ControlJob TaskID 跨轮或同轮重复：{task_id}")
+        build_state.task_ids.add(task_id)
         pjobs = [row for row in (cjob.get("pjobs") or []) if isinstance(row, Mapping)]
         if not pjobs:
             raise ValueError(f"CJob {cjob_index} 至少需要一个 PJob")
@@ -844,6 +873,7 @@ def build_round_update(
         cjob_priority = max(1, int(_finite_number(cjob.get("priority"), 1))) if job_type == 0 else -1
         runtime_pjob_names: List[str] = []
         cjob_material_count = 0
+        cjob_load_port = ""
         legacy_name = str(cjob.get("_legacyName") or "").strip()
 
         for pjob_index, pjob in enumerate(pjobs, start=1):
@@ -863,6 +893,12 @@ def build_round_update(
             load_port = str(pjob.get("loadPort") or "").strip()
             if load_port not in (tool_topo.get("Stations") or {}):
                 raise ValueError(f"PJob {display_name} 的 LoadPort 不存在：{load_port}")
+            if cjob_load_port and load_port != cjob_load_port:
+                raise ValueError(
+                    f"ControlJob TaskID={task_id} 的 PJob 必须使用同一个 LoadPort："
+                    f"{cjob_load_port}、{load_port}"
+                )
+            cjob_load_port = load_port
             wafer_count = int(_finite_number(pjob.get("waferCount"), len(pjob.get("matList") or []) or 1))
             if wafer_count < 1 or wafer_count > MAX_WAFERS_PER_JOB:
                 raise ValueError(f"PJob {display_name} 晶圆数必须为 1~{MAX_WAFERS_PER_JOB}")
@@ -905,6 +941,12 @@ def build_round_update(
             })
             cjob_material_count += wafer_count
 
+        if cjob_load_port in used_control_load_ports:
+            raise ValueError(
+                f"不同 ControlJob 不能使用同一个 LoadPort：{cjob_load_port} "
+                f"(TaskID={used_control_load_ports[cjob_load_port]}、{task_id})"
+            )
+        used_control_load_ports[cjob_load_port] = task_id
         control_jobs.append({
             "TaskID": task_id, "JobType": job_type, "Priority": cjob_priority,
             "TaskMode": task_mode, "PJobNameList": runtime_pjob_names,

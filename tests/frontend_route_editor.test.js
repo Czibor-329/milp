@@ -42,6 +42,19 @@ test("Route 名称由腔室种类和加工时间自动生成且不带工序数�
   assert.equal(logic.automaticRouteName(logic.processProfile(route(["PM1", "PM2"], ["PM3", "PM4"]))), "PM1/PM2(20s) → PM3/PM4(20s)");
 });
 
+test("Route 名称仅追加最小的有效驻留时间", () => {
+  const value = route(["PM1", "PM2"], ["PM3"]);
+  value.stages[0].visits[0].residencyConstraint = 45;
+  value.stages[0].visits[1].residencyConstraint = 30;
+  value.stages[1].visits[0].residencyConstraint = -1;
+  assert.equal(logic.minimumResidencyConstraint(value), 30);
+  assert.equal(
+    logic.automaticRouteName(logic.processProfile(value), "", logic.minimumResidencyConstraint(value)),
+    "PM1/PM2(20s) → PM3(20s) · 驻留 30s",
+  );
+  assert.equal(logic.minimumResidencyConstraint(route(["PM1"])), null);
+});
+
 test("同一加工路径按 Clean 引用生成不同名称", () => {
   const first = route(["PM1", "PM2"]);
   first.prePJobCleanRefs = ["PreA"];

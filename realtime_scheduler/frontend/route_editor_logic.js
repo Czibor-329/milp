@@ -24,6 +24,7 @@ __export(route_editor_logic_exports, {
   cloneVisitParameters: () => cloneVisitParameters,
   compareProfiles: () => compareProfiles,
   differenceFields: () => differenceFields,
+  minimumResidencyConstraint: () => minimumResidencyConstraint,
   processProfile: () => processProfile,
   processRecipeName: () => processRecipeName,
   replaceCandidates: () => replaceCandidates,
@@ -98,11 +99,19 @@ function routeCleanSignature(route) {
   });
   return parts.join(" \xB7 ");
 }
-function automaticRouteName(profile, cleanSignature = "") {
+function minimumResidencyConstraint(route) {
+  const limits = (route.stages || []).filter((stage) => stage.needProcess).flatMap((stage) => stage.visits || []).map((visit) => Number(visit.residencyConstraint)).filter((limit) => Number.isFinite(limit) && limit >= 0);
+  return limits.length ? Math.min(...limits) : null;
+}
+function automaticRouteName(profile, cleanSignature = "", minimumResidency = null) {
   const processName = profile.processCount === 0 ? "\u65E0\u52A0\u5DE5\u5DE5\u5E8F" : profile.candidatePath.map(
     (path, index) => `${path}(${formatSeconds(profile.processTimes[index])})`
   ).join(" \u2192 ");
-  return cleanSignature ? `${processName} \xB7 ${cleanSignature}` : processName;
+  const suffixes = [
+    cleanSignature,
+    minimumResidency === null ? "" : `\u9A7B\u7559 ${formatSeconds(minimumResidency)}`
+  ].filter(Boolean);
+  return suffixes.length ? `${processName} \xB7 ${suffixes.join(" \xB7 ")}` : processName;
 }
 function compareProfiles(left, right) {
   if (left.processCount !== right.processCount) return left.processCount - right.processCount;
@@ -148,6 +157,7 @@ function processRecipeName(value, fallback) {
   cloneVisitParameters,
   compareProfiles,
   differenceFields,
+  minimumResidencyConstraint,
   processProfile,
   processRecipeName,
   replaceCandidates,

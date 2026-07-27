@@ -114,7 +114,7 @@ DEFAULT_PORT = 8765
 MAX_REQUEST_BYTES = 12 * 1024 * 1024
 MAX_SAVED_RESULTS = 8
 MAX_SAVED_BATCH_RUNS = 8
-WORKSPACE_STORE_VERSION = 2
+WORKSPACE_STORE_VERSION = 3
 API_SCHEMA_VERSION = "cjob-pjob-v3"
 HEURISTIC_BASELINE_SCHEMA_VERSION = "petri-look-dynamic-v1"
 MAX_MILP_WAFERS = 12
@@ -2005,6 +2005,145 @@ def _repair_workspace_route_recipes(routes: Sequence[Any]) -> bool:
     return changed
 
 
+def _natural_name_key(value: str) -> Tuple[Any, ...]:
+    """把带数字的设备名称拆成自然排序键，例如 LP2 排在 LP10 前。"""
+    return tuple(
+        int(part) if part.isdigit() else part.lower()
+        for part in re.split(r"(\d+)", value)
+        if part
+    )
+
+
+def _workspace_load_ports(device: Mapping[str, Any]) -> List[str]:
+    """按前端一致的自然顺序返回设备中的 LoadPort 名称。"""
+    topology = device.get("device") if isinstance(device.get("device"), Mapping) else device
+    stations = topology.get("Stations") if isinstance(topology, Mapping) else {}
+    if not isinstance(stations, Mapping):
+        return []
+    return sorted(
+        (
+            str(name)
+            for name, station in stations.items()
+            if isinstance(station, Mapping)
+            and str(station.get("Type") or "").strip().lower() == "loadport"
+        ),
+        key=_natural_name_key,
+    )
+
+
+def _workspace_task_mode_name(raw_value: Any) -> str:
+    """把页面或旧工作区中的 TaskMode 收敛为稳定枚举名称。"""
+    try:
+        value = _enum_value(raw_value, TASK_MODE_VALUES, "TaskMode", "Smart")
+    except ValueError:
+        value = TASK_MODE_VALUES["Smart"]
+    return TASK_MODE_NAMES[value]
+
+
+def _automatic_workspace_load_port(
+    load_ports: Sequence[str],
+    task_ordinal: int,
+) -> str:
+    """按盒子的全局 CJob 顺序轮转源 LoadPort。"""
+    if not load_ports:
+        return ""
+    return str(load_ports[max(0, task_ordinal - 1) % len(load_ports)])
+
+
+def _repair_workspace_job_layout(device: Dict[str, Any]) -> bool:
+    """迁移已有测试的唯一 TaskID，并统一每个 CJob 下所有 PJob 的 LoadPort。"""
+    changed = False
+    load_ports = _workspace_load_ports(device)
+    for test in device.get("tests") or []:
+        if not isinstance(test, dict):
+            continue
+        next_task_id = 1
+        for round_index, round_row in enumerate(test.get("rounds") or [], start=1):
+            if not isinstance(round_row, dict):
+                continue
+            cjobs = [
+                item for item in (round_row.get("cjobs") or [])
+                if isinstance(item, dict)
+            ]
+            for cjob_index, cjob in enumerate(cjobs, start=1):
+                task_id = str(next_task_id)
+                next_task_id += 1
+                task_mode = _workspace_task_mode_name(cjob.get("taskMode", cjob.get("TaskMode")))
+                fallback_load_port = str(cjob.get("loadPort") or "")
+                pjobs = [
+                    item for item in (cjob.get("pjobs") or [])
+                    if isinstance(item, dict)
+                ]
+                if not fallback_load_port and pjobs:
+                    fallback_load_port = str(
+                        pjobs[0].get("loadPort") or pjobs[0].get("LoadPort") or ""
+                    )
+                load_port = _automatic_workspace_load_port(
+                    load_ports,
+                    int(task_id),
+                ) or fallback_load_port
+                normalized_fields = {
+                    "taskId": task_id,
+                    "taskMode": task_mode,
+                    "loadPort": load_port,
+                    "pJobNameList": [f"P{index}" for index in range(1, len(pjobs) + 1)],
+                }
+                for key, value in normalized_fields.items():
+                    if cjob.get(key) != value:
+                        cjob[key] = value
+                        changed = True
+                for pjob_index, pjob in enumerate(pjobs, start=1):
+                    pjob_fields = {
+                        "jobName": f"P{pjob_index}",
+                        "taskId": task_id,
+                        "loadPort": load_port,
+                    }
+                    for key, value in pjob_fields.items():
+                        if pjob.get(key) != value:
+                            pjob[key] = value
+                            changed = True
+    return changed
+
+
+def _repair_workspace_route_contracts(routes: Sequence[Any]) -> bool:
+    """清除不支持的 PostCJob，并把旧 BufferOption 收敛到接口枚举范围。"""
+    changed = False
+    for route in routes:
+        if not isinstance(route, dict):
+            continue
+        if "postCJobCleanRefs" in route and route.get("postCJobCleanRefs"):
+            route["postCJobCleanRefs"] = []
+            changed = True
+        if "bufferOption" in route:
+            raw_option = _finite_number(route.get("bufferOption"), 0)
+            option = max(0, min(4, int(raw_option)))
+            if route.get("bufferOption") != option:
+                route["bufferOption"] = option
+                changed = True
+    return changed
+
+
+def _normalized_workspace_routes(raw_routes: Sequence[Any]) -> List[Any]:
+    """校验页面 Route 的 BufferOption，并清除不可编辑的 PostCJob Clean。"""
+    routes = deepcopy(list(raw_routes))
+    for route in routes:
+        if not isinstance(route, dict):
+            continue
+        if "bufferOption" in route:
+            raw_option = route.get("bufferOption")
+            try:
+                numeric_option = float(raw_option)
+            except (TypeError, ValueError):
+                raise ValueError(f"BufferOption 必须是 0~4 的整数：{raw_option}") from None
+            option = int(numeric_option)
+            if not math.isfinite(numeric_option) or numeric_option != option or not 0 <= option <= 4:
+                raise ValueError(f"BufferOption 必须是 0~4 的整数：{raw_option}")
+            route["bufferOption"] = option
+        if "postCJobCleanRefs" in route:
+            route["postCJobCleanRefs"] = []
+    return routes
+
+
 def _migrate_workspace_catalog(catalog: Dict[str, Any]) -> bool:
     """迁移设备工作区结构，并为已有 PSE300 补齐 LC/LD LoadLock。"""
     changed = int(catalog.get("version") or 0) != WORKSPACE_STORE_VERSION
@@ -2047,6 +2186,10 @@ def _migrate_workspace_catalog(catalog: Dict[str, Any]) -> bool:
                 test.pop("cleans", None)
                 changed = True
         if _repair_workspace_route_recipes(routes):
+            changed = True
+        if _repair_workspace_route_contracts(routes):
+            changed = True
+        if _repair_workspace_job_layout(raw_device):
             changed = True
         if raw_device.get("routes") != routes:
             raw_device["routes"] = routes
@@ -2406,7 +2549,12 @@ def import_workspace_device(
         return deepcopy(device), True
 
 
-def _normalize_workspace_pjob(raw: Mapping[str, Any], index: int, task_id: str) -> Dict[str, Any]:
+def _normalize_workspace_pjob(
+    raw: Mapping[str, Any],
+    index: int,
+    task_id: str,
+    assigned_load_port: str = "",
+) -> Dict[str, Any]:
     """规范化页面 PJob，并生成只读 JobName、TaskID 与 MatList。"""
     wafer_count = max(1, min(MAX_WAFERS_PER_JOB, int(_finite_number(
         raw.get("waferCount"), len(raw.get("matList") or raw.get("MatList") or []) or 1,
@@ -2421,14 +2569,21 @@ def _normalize_workspace_pjob(raw: Mapping[str, Any], index: int, task_id: str) 
         "waferCount": wafer_count,
         "matList": list(range(1, wafer_count + 1)),
         "routeRef": str(raw.get("routeRef") or origin_route or ""),
-        "loadPort": str(raw.get("loadPort") or raw.get("LoadPort") or ""),
+        "loadPort": assigned_load_port or str(
+            raw.get("loadPort") or raw.get("LoadPort") or ""
+        ),
         "priority": max(1, int(_finite_number(raw.get("priority", raw.get("Priority")), 1))),
     }
 
 
-def _normalize_workspace_round(raw: Mapping[str, Any], index: int, current_time: float) -> Dict[str, Any]:
+def _normalize_workspace_round(
+    raw: Mapping[str, Any],
+    index: int,
+    current_time: float,
+    first_task_id: int = 1,
+    load_ports: Sequence[str] = (),
+) -> Dict[str, Any]:
     """规范化一轮 CJob/PJob；旧版 jobs 合并到该轮唯一默认 CJob。"""
-    task_id = str(index)
     raw_cjobs = raw.get("cjobs")
     if isinstance(raw_cjobs, Sequence) and not isinstance(raw_cjobs, (str, bytes)):
         cjob_rows = [row for row in raw_cjobs if isinstance(row, Mapping)]
@@ -2443,25 +2598,50 @@ def _normalize_workspace_round(raw: Mapping[str, Any], index: int, current_time:
         }]
     if not cjob_rows:
         cjob_rows = [{"pjobs": [{}]}]
+    if load_ports and len(cjob_rows) > len(load_ports):
+        raise ValueError(
+            f"第 {index} 轮包含 {len(cjob_rows)} 个 CJob，"
+            f"超过可自动分配的 LoadPort 数量 {len(load_ports)}"
+        )
+    task_modes = [
+        _workspace_task_mode_name(row.get("taskMode", row.get("TaskMode", "Smart")))
+        for row in cjob_rows
+    ]
+    if len(cjob_rows) > 1 and any(
+        task_mode in {"Pipeline", "Sequential"}
+        for task_mode in task_modes
+    ):
+        raise ValueError(
+            f"第 {index} 轮使用 Pipeline/Sequential 时只能配置一个 CJob"
+        )
     cjobs: List[Dict[str, Any]] = []
     for cjob_index, row in enumerate(cjob_rows, start=1):
+        task_id = str(first_task_id + cjob_index - 1)
         raw_job_type = row.get("jobType", row.get("JobType", "NormalLot"))
         try:
             job_type_value = _enum_value(raw_job_type, CJOB_TYPE_VALUES, "JobType", "NormalLot")
         except ValueError:
             job_type_value = CJOB_TYPE_VALUES["NormalLot"]
-        raw_task_mode = row.get("taskMode", row.get("TaskMode", "Smart"))
-        try:
-            task_mode_value = _enum_value(raw_task_mode, TASK_MODE_VALUES, "TaskMode", "Smart")
-        except ValueError:
-            task_mode_value = TASK_MODE_VALUES["Smart"]
+        task_mode_name = task_modes[cjob_index - 1]
+        task_mode_value = TASK_MODE_VALUES[task_mode_name]
         pjob_rows = [item for item in (row.get("pjobs") or []) if isinstance(item, Mapping)] or [{}]
+        fallback_load_port = str(
+            row.get("loadPort")
+            or pjob_rows[0].get("loadPort")
+            or pjob_rows[0].get("LoadPort")
+            or ""
+        )
+        load_port = _automatic_workspace_load_port(
+            load_ports,
+            first_task_id + cjob_index - 1,
+        ) or fallback_load_port
         pjobs = [
-            _normalize_workspace_pjob(item, pjob_index, task_id)
+            _normalize_workspace_pjob(item, pjob_index, task_id, load_port)
             for pjob_index, item in enumerate(pjob_rows, start=1)
         ]
         cjobs.append({
             "taskId": task_id,
+            "loadPort": load_port,
             "jobType": CJOB_TYPE_NAMES[job_type_value],
             "priority": max(1, int(_finite_number(row.get("priority", row.get("Priority")), 1))) if job_type_value == 0 else -1,
             "taskMode": TASK_MODE_NAMES[task_mode_value],
@@ -2472,7 +2652,11 @@ def _normalize_workspace_round(raw: Mapping[str, Any], index: int, current_time:
     return {"currentTime": 0.0 if index == 1 else float(current_time), "cjobs": cjobs}
 
 
-def _normalize_test_case(raw_test: Mapping[str, Any], test_id: Optional[str] = None) -> Dict[str, Any]:
+def _normalize_test_case(
+    raw_test: Mapping[str, Any],
+    test_id: Optional[str] = None,
+    load_ports: Sequence[str] = (),
+) -> Dict[str, Any]:
     """保存只含排程任务的测试集结构，并兼容迁移旧版扁平 Job。"""
     timestamp = _workspace_timestamp()
     raw_rounds = [row for row in (raw_test.get("rounds") or []) if isinstance(row, Mapping)]
@@ -2482,13 +2666,21 @@ def _normalize_test_case(raw_test: Mapping[str, Any], test_id: Optional[str] = N
         raw_rounds.append({})
     while len(times) < round_count:
         times.append((float(times[-1]) if times else 0.0) + 70.0)
-    rounds = [
-        _normalize_workspace_round(
-            raw_rounds[index], index + 1,
-            _finite_number(raw_rounds[index].get("currentTime"), _finite_number(times[index], 0.0)),
+    rounds: List[Dict[str, Any]] = []
+    next_task_id = 1
+    for index in range(round_count):
+        round_row = _normalize_workspace_round(
+            raw_rounds[index],
+            index + 1,
+            _finite_number(
+                raw_rounds[index].get("currentTime"),
+                _finite_number(times[index], 0.0),
+            ),
+            next_task_id,
+            load_ports,
         )
-        for index in range(round_count)
-    ]
+        rounds.append(round_row)
+        next_task_id += len(round_row["cjobs"])
     next_material_id = 1
     for round_row in rounds:
         for cjob in round_row["cjobs"]:
@@ -2540,7 +2732,7 @@ def _apply_device_library(device: Dict[str, Any], payload: Mapping[str, Any]) ->
                         if route_ref in aliases:
                             pjob["routeRef"] = aliases[route_ref]
     if isinstance(payload.get("routes"), list):
-        device["routes"] = deepcopy(payload["routes"])
+        device["routes"] = _normalized_workspace_routes(payload["routes"])
     else:
         device.setdefault("routes", [])
     if isinstance(payload.get("cleans"), list):
@@ -2566,7 +2758,10 @@ def create_workspace_test(
         requested_name = str(raw_test.get("name") or "").strip()
         if not requested_name:
             raise ValueError("测试集名称不能为空")
-        test_case = _normalize_test_case(normalized_input)
+        test_case = _normalize_test_case(
+            normalized_input,
+            load_ports=_workspace_load_ports(device),
+        )
         test_case["name"] = _unique_workspace_name(
             test_case["name"],
             (
@@ -2618,7 +2813,11 @@ def update_workspace_test(
         merged["createdAt"] = tests[index].get("createdAt")
         if isinstance(tests[index].get("baseline"), Mapping):
             merged["baseline"] = deepcopy(tests[index]["baseline"])
-        test_case = _normalize_test_case(merged, test_id)
+        test_case = _normalize_test_case(
+            merged,
+            test_id,
+            _workspace_load_ports(device),
+        )
         if test_case["group"] and test_case["group"] not in device.setdefault("testGroups", []):
             device["testGroups"].append(test_case["group"])
         tests[index] = test_case

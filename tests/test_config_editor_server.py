@@ -116,44 +116,34 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("LP1", self.device["Stations"])
 
     def test_frontend_contains_search_strategy_controls(self) -> None:
-        """页面应提供 NeuralUCB、宏周期与 NN-SAEA 搜索参数。"""
+        """页面应提供算法选择，但不显示宏周期的旧兼容参数。"""
         source = _editor_source()
         for marker in (
             "neuralucbStrategyInput",
             "neuralUCBTopK",
             "neuralUCBExploration",
             "loadlockMacroStrategyInput",
-            "loadLockMacroSearchSeconds",
-            "loadLockMacroRollouts",
             "nnSAEAStrategyInput",
             "nnSAEASearchSeconds",
             "nnSAEARollouts",
         ):
             self.assertIn(marker, source)
-        macro_input = source.split(
-            'data-option="loadLockMacroSearchSeconds"',
-            1,
-        )[1].split(">", 1)[0]
-        self.assertNotIn('max="4.5"', macro_input)
-        rollout_input = source.split(
-            'data-option="loadLockMacroRollouts"',
-            1,
-        )[1].split(">", 1)[0]
-        self.assertNotIn('max="256"', rollout_input)
-        self.assertIn("兼容参数：旧前瞻秒数", source)
-        self.assertIn("不运行或回退到独立 Heuristic 结果", source)
+        self.assertNotIn('data-option="loadLockMacroSearchSeconds"', source)
+        self.assertNotIn('data-option="loadLockMacroRollouts"', source)
+        self.assertNotIn("兼容参数：旧前瞻秒数", source)
         self.assertNotIn('data-option="loadLockExchange"', source)
         self.assertNotIn("禁用交换", source)
 
-    def test_frontend_limits_buffer_and_makes_cjob_load_port_read_only(self) -> None:
-        """页面应限制 BufferOption，并只在 CJob 层展示自动分配的 LoadPort。"""
+    def test_frontend_limits_buffer_and_hides_automatic_load_port(self) -> None:
+        """页面应限制 BufferOption，但不展示由系统自动分配的 LoadPort。"""
         source = _editor_source()
         buffer_input = source.split('data-key="bufferOption"', 1)[0].rsplit("<input", 1)[1]
         self.assertIn('min="0"', buffer_input)
         self.assertIn('max="4"', buffer_input)
         self.assertIn('step="1"', buffer_input)
         self.assertIn("当前算法不支持 PostCJob Clean", source)
-        self.assertIn("LoadPort（自动）", source)
+        self.assertNotIn("LoadPort（自动）", source)
+        self.assertNotIn("LoadPort ${escapeHtml(cjob.loadPort", source)
         self.assertNotIn('data-scope="pjob" data-key="loadPort"', source)
 
     def test_same_recipe_name_supports_module_specific_parameters(self) -> None:
@@ -798,6 +788,63 @@ class ConfigEditorServerTests(unittest.TestCase):
                 {"jobName": "P2", "routeRef": "Route12", "loadPort": "LP2", "waferCount": 5},
             ]}]}, 0.0, BuildState())
 
+    def test_round_rejects_duplicate_task_ids_and_control_job_load_ports(self) -> None:
+        """绕过页面的输入也不能把重复 TaskID 或共用 LoadPort 送入算法。"""
+        plan = {
+            "device": self.device,
+            "recipes": [{"name": "R12", "time": 8, "modules": "PM1,PM2", "weight": {}}],
+            "cleans": [],
+            "routes": [_route("Route12", "PM1,PM2", "R12")],
+        }
+        duplicate_task_ids = {"cjobs": [
+            {"taskId": "1", "pjobs": [
+                {"jobName": "P1", "routeRef": "Route12", "loadPort": "LP1", "waferCount": 1},
+            ]},
+            {"taskId": "1", "pjobs": [
+                {"jobName": "P1", "routeRef": "Route12", "loadPort": "LP2", "waferCount": 1},
+            ]},
+        ]}
+        with self.assertRaisesRegex(ValueError, "TaskID.*重复"):
+            build_round_update(plan, duplicate_task_ids, 0.0, BuildState())
+
+        duplicate_load_ports = {"cjobs": [
+            {"taskId": "1", "pjobs": [
+                {"jobName": "P1", "routeRef": "Route12", "loadPort": "LP1", "waferCount": 1},
+            ]},
+            {"taskId": "2", "pjobs": [
+                {"jobName": "P1", "routeRef": "Route12", "loadPort": "LP1", "waferCount": 1},
+            ]},
+        ]}
+        with self.assertRaisesRegex(ValueError, "不同 ControlJob 不能使用同一个 LoadPort"):
+            build_round_update(plan, duplicate_load_ports, 0.0, BuildState())
+
+        serial_multi_cjob = {"cjobs": [
+            {"taskId": "1", "taskMode": "Pipeline", "pjobs": [
+                {"jobName": "P1", "routeRef": "Route12", "loadPort": "LP1", "waferCount": 1},
+            ]},
+            {"taskId": "2", "taskMode": "Pipeline", "pjobs": [
+                {"jobName": "P1", "routeRef": "Route12", "loadPort": "LP2", "waferCount": 1},
+            ]},
+        ]}
+        with self.assertRaisesRegex(ValueError, "每轮只能配置一个 ControlJob"):
+            build_round_update(plan, serial_multi_cjob, 0.0, BuildState())
+
+    def test_task_ids_are_unique_across_rounds(self) -> None:
+        """TaskID 的唯一性覆盖整个测试，而不是只覆盖单轮。"""
+        plan = {
+            "device": self.device,
+            "recipes": [{"name": "R12", "time": 8, "modules": "PM1,PM2", "weight": {}}],
+            "cleans": [],
+            "routes": [_route("Route12", "PM1,PM2", "R12")],
+        }
+        state = BuildState()
+        one_job = {"cjobs": [{"taskId": "1", "pjobs": [
+            {"jobName": "P1", "routeRef": "Route12", "loadPort": "LP1", "waferCount": 1},
+        ]}]}
+        build_round_update(plan, one_job, 0.0, state)
+        with self.assertRaisesRegex(ValueError, "TaskID.*重复"):
+            build_round_update(plan, one_job, 10.0, state)
+
     def test_fifth_round_reuses_lp1_after_completed_materials_are_unloaded(self) -> None:
         """四端口轮转回 LP1 时，已完成的首轮晶圆应卸载并从 1 号槽重新装片。"""
         route = _route("Route1", "PM1", "Recipe1")
@@ -869,6 +916,20 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual({"2": 1.5}, process_visit["MoveTimeOffset"])
         self.assertEqual(12, process_visit["QTimeLimit"])
         self.assertEqual(34, process_visit["ResidencyConstraint"])
+
+    def test_route_rejects_buffer_option_outside_interface_range(self) -> None:
+        """BufferOption 只接受算法接口定义的 0~4 整数。"""
+        for invalid in (-1, 5, 1.5, "bad"):
+            route = _route("Route12", "PM1,PM2", "R12")
+            route["bufferOption"] = invalid
+            with self.subTest(bufferOption=invalid):
+                with self.assertRaisesRegex(ValueError, "BufferOption.*0~4"):
+                    build_route(
+                        route,
+                        {"R12": {"name": "R12"}},
+                        {},
+                        set(self.device["Robots"]),
+                    )
 
     def test_clean_types_expand_to_scheduler_conditions(self) -> None:
         """五类精简 Clean 应展开为正确任务、触发变量和 Dummy 参数。"""
@@ -1906,7 +1967,7 @@ class ConfigEditorServerTests(unittest.TestCase):
             self.assertEqual(["C1"], [clean["name"] for clean in loaded["cleans"]])
             self.assertTrue(all("routes" not in test and "cleans" not in test for test in loaded["tests"]))
             migrated = json.loads(store_path.read_text(encoding="utf-8"))
-            self.assertEqual(2, migrated["version"])
+            self.assertEqual(3, migrated["version"])
 
     def test_nested_rounds_persist_without_reordering(self) -> None:
         """多轮、多 CJob/PJob 保存后重新读取，应保留时间与归属并重算只读字段。"""
@@ -1923,7 +1984,7 @@ class ConfigEditorServerTests(unittest.TestCase):
                             {"routeRef": "Route12", "loadPort": "LP2", "waferCount": 3},
                             {"routeRef": "Route12", "loadPort": "LP3", "waferCount": 1},
                         ]},
-                        {"jobType": "HigherLot", "priority": 8, "taskMode": "Sequential", "pjobs": [
+                        {"jobType": "HigherLot", "priority": 8, "taskMode": "Concurrent", "pjobs": [
                             {"routeRef": "Route12", "loadPort": "LP4", "waferCount": 4},
                         ]},
                     ]},
@@ -1937,7 +1998,7 @@ class ConfigEditorServerTests(unittest.TestCase):
             second = loaded["rounds"][1]
             self.assertEqual(2, len(second["cjobs"]))
             self.assertEqual(["2", "3"], [item["taskId"] for item in second["cjobs"]])
-            self.assertEqual(["LP1", "LP3"], [
+            self.assertEqual(["LP2", "LP3"], [
                 item["loadPort"] for item in second["cjobs"]
             ])
             self.assertTrue(all(
@@ -1950,7 +2011,56 @@ class ConfigEditorServerTests(unittest.TestCase):
             self.assertEqual([6], second["cjobs"][0]["pjobs"][1]["matList"])
             self.assertEqual([7, 8, 9, 10], second["cjobs"][1]["pjobs"][0]["matList"])
             self.assertEqual(-1, second["cjobs"][1]["priority"])
-            self.assertEqual("Sequential", second["cjobs"][1]["taskMode"])
+            self.assertEqual("Concurrent", second["cjobs"][1]["taskMode"])
+
+    def test_task_modes_automatically_assign_load_ports(self) -> None:
+        """Smart 同轮铺满端口；Pipeline/Sequential 每轮单盒并依次轮转。"""
+        smart = config_server._normalize_test_case({
+            "name": "smart",
+            "roundCount": 2,
+            "rounds": [
+                {"cjobs": [
+                    {"taskMode": "Smart", "pjobs": [{}]},
+                    {"taskMode": "Smart", "pjobs": [{}]},
+                    {"taskMode": "Smart", "pjobs": [{}]},
+                ]},
+                {"currentTime": 10, "cjobs": [
+                    {"taskMode": "Smart", "pjobs": [{}]},
+                ]},
+            ],
+        }, load_ports=["LP1", "LP2", "LP3"])
+        self.assertEqual(
+            ["LP1", "LP2", "LP3", "LP1"],
+            [
+                cjob["loadPort"]
+                for round_row in smart["rounds"]
+                for cjob in round_row["cjobs"]
+            ],
+        )
+
+        for mode in ("Pipeline", "Sequential"):
+            with self.subTest(taskMode=mode):
+                serial = config_server._normalize_test_case({
+                    "name": mode,
+                    "roundCount": 3,
+                    "rounds": [
+                        {"cjobs": [{"taskMode": mode, "pjobs": [{}]}]},
+                        {"currentTime": 10, "cjobs": [{"taskMode": mode, "pjobs": [{}]}]},
+                        {"currentTime": 20, "cjobs": [{"taskMode": mode, "pjobs": [{}]}]},
+                    ],
+                }, load_ports=["LP1", "LP2", "LP3"])
+                self.assertEqual(
+                    ["LP1", "LP2", "LP3"],
+                    [row["cjobs"][0]["loadPort"] for row in serial["rounds"]],
+                )
+                with self.assertRaisesRegex(ValueError, "只能配置一个 CJob"):
+                    config_server._normalize_test_case({
+                        "name": f"invalid-{mode}",
+                        "rounds": [{"cjobs": [
+                            {"taskMode": mode, "pjobs": [{}]},
+                            {"taskMode": mode, "pjobs": [{}]},
+                        ]}],
+                    }, load_ports=["LP1", "LP2", "LP3"])
 
     def test_test3_nested_jobs_run_successfully(self) -> None:
         """test3 形状的两轮、首轮双 PJob 配置应完成真实重算。"""

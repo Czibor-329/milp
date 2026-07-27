@@ -102,6 +102,15 @@ export function makeRound(
   };
 }
 
+/** 按盒子的全局 CJob 顺序轮转源 LoadPort；TaskMode 决定同一轮允许装入的盒数。 */
+export function automaticLoadPort(
+  loadPorts: string[],
+  taskOrdinal: number,
+): string {
+  if (!loadPorts.length) return "";
+  return loadPorts[Math.max(0, taskOrdinal - 1) % loadPorts.length];
+}
+
 /** 把旧枚举数值转换成页面使用的稳定名称。 */
 function enumName(value: unknown, names: readonly string[], fallback: string): string {
   if (names.includes(String(value))) return String(value);
@@ -115,7 +124,12 @@ function enumName(value: unknown, names: readonly string[], fallback: string): s
 }
 
 /** 规范化一个 PJob，并重新计算只读字段。 */
-export function normalizePJob(raw: EditorRecord, index: number, taskId: string): EditorRecord {
+export function normalizePJob(
+  raw: EditorRecord,
+  index: number,
+  taskId: string,
+  assignedLoadPort = "",
+): EditorRecord {
   const source = raw || {};
   const originRoute = source.originRoute ?? source.OriginRoute;
   const routeRef = typeof originRoute === "object"
@@ -131,7 +145,7 @@ export function normalizePJob(raw: EditorRecord, index: number, taskId: string):
     waferCount,
     matList: Array.from({ length: waferCount }, (_, item) => item + 1),
     routeRef: source.routeRef || routeRef || "",
-    loadPort: source.loadPort || source.LoadPort || "",
+    loadPort: assignedLoadPort || source.loadPort || source.LoadPort || "",
     priority: Math.max(1, Number(source.priority ?? source.Priority) || 1),
   };
 }
@@ -141,8 +155,9 @@ export function normalizeRound(
   raw: EditorRecord,
   roundIndex: number,
   fallbackTime: number,
+  firstTaskId = roundIndex,
+  loadPorts: string[] = [],
 ): EditorRecord {
-  const taskId = String(roundIndex);
   const source = raw || {};
   let cjobs = Array.isArray(source.cjobs) ? source.cjobs : null;
   if (!cjobs) {
@@ -157,17 +172,31 @@ export function normalizeRound(
   }
   if (!cjobs.length) cjobs = [{ pjobs: [{}] }];
   const normalizedCJobs = cjobs.map((cjob: EditorRecord, cjobIndex: number) => {
+    const taskId = String(firstTaskId + cjobIndex);
+    const taskMode = enumName(cjob.taskMode, TASK_MODES, "Smart");
     const rawPJobs = Array.isArray(cjob.pjobs) && cjob.pjobs.length ? cjob.pjobs : [{}];
+    const legacyLoadPort = cjob.loadPort
+      || rawPJobs[0]?.loadPort
+      || rawPJobs[0]?.LoadPort
+      || "";
+    const loadPort = automaticLoadPort(loadPorts, firstTaskId + cjobIndex)
+      || legacyLoadPort;
     const pjobs = rawPJobs.map(
-      (pjob: EditorRecord, pjobIndex: number) => normalizePJob(pjob, pjobIndex + 1, taskId),
+      (pjob: EditorRecord, pjobIndex: number) => normalizePJob(
+        pjob,
+        pjobIndex + 1,
+        taskId,
+        loadPort,
+      ),
     );
     const jobType = enumName(cjob.jobType, CJOB_TYPES, "NormalLot");
     return {
       key: cjob.key || `C${cjobIndex + 1}`,
       taskId,
+      loadPort,
       jobType,
       priority: jobType === "NormalLot" ? Math.max(1, Number(cjob.priority) || 1) : -1,
-      taskMode: enumName(cjob.taskMode, TASK_MODES, "Smart"),
+      taskMode,
       pJobNameList: pjobs.map((pjob: EditorRecord) => pjob.jobName),
       pjobs,
     };

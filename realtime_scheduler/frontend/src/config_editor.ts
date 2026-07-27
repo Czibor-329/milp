@@ -206,6 +206,8 @@ function cloneVisitParameters(visit) {
 function normalizeRoute(route) {
   route.stages = Array.isArray(route.stages) ? route.stages : [];
   ROUTE_CLEAN_KEYS.forEach(key => { route[key] = stringList(route[key]).slice(0, 1); });
+  route.postCJobCleanRefs = [];
+  route.bufferOption = Math.max(0, Math.min(4, Math.trunc(Number(route.bufferOption) || 0)));
   linkRouteSteps(route.stages);
   route.stages.forEach((stage, index) => {
     stage.visits = Array.isArray(stage.visits) ? stage.visits : [];
@@ -248,7 +250,18 @@ function setStageCandidates(routeIndex, stageIndex, names) {
 
 /** 对所有轮次重新计算派生字段，并同步兼容的 times 数组。 */
 function normalizeRounds() {
-  state.rounds = state.rounds.map((round, index) => normalizeRound(round, index + 1, state.times[index]));
+  let nextTaskId = 1;
+  state.rounds = state.rounds.map((round, index) => {
+    const normalized = normalizeRound(
+      round,
+      index + 1,
+      state.times[index],
+      nextTaskId,
+      state.loadPorts,
+    );
+    nextTaskId += normalized.cjobs.length;
+    return normalized;
+  });
   let nextMaterialId = 1;
   state.rounds.forEach(round => round.cjobs.forEach(cjob => cjob.pjobs.forEach(pjob => {
     pjob.matList = Array.from({ length: pjob.waferCount }, () => nextMaterialId++);
@@ -503,7 +516,6 @@ function applyTestCase(testCase) {
   document.querySelectorAll('input[name="strategy"]').forEach(input => { input.checked = input.value === state.strategy; });
   document.querySelectorAll("[data-option]").forEach(input => { input.value = state.options[input.dataset.option] ?? input.value; });
   document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro", "nn-saea", "setrank", "neuralucb", "neural", "rl"].includes(state.strategy));
-  document.getElementById("loadlockMacroOptions").classList.toggle("is-hidden", !["loadlock-macro", "nn-saea"].includes(state.strategy));
   document.getElementById("nnSAEAOptions").classList.toggle("is-hidden", state.strategy !== "nn-saea");
   document.getElementById("neuralucbOptions").classList.toggle("is-hidden", state.strategy !== "neuralucb");
   document.getElementById("rlOptions").classList.toggle("is-hidden", state.strategy !== "rl");
@@ -765,9 +777,13 @@ function routeProcessProfile(route) {
   return RouteEditorLogic.processProfile(route);
 }
 
-/** 按加工路径和 Clean 组合生成 Route 名称；Clean 不同的同路径 Route 不会重名。 */
+/** 按加工路径、驻留约束和 Clean 组合生成 Route 名称；配置不同的 Route 不会重名。 */
 function generatedRouteName(route) {
-  return RouteEditorLogic.automaticRouteName(routeProcessProfile(route), RouteEditorLogic.routeCleanSignature(route));
+  return RouteEditorLogic.automaticRouteName(
+    routeProcessProfile(route),
+    RouteEditorLogic.routeCleanSignature(route),
+    RouteEditorLogic.minimumResidencyConstraint(route),
+  );
 }
 
 /** 记录 Route 自动改名链，并同步当前测试中引用该 Route 的 PJob。 */
@@ -840,8 +856,8 @@ function renderRouteDetails(route, index) {
   const preCleans = cleanNamesFor(["preclean", "dummy", "dummywac"]);
   const postCleans = cleanNamesFor(["postclean"]);
   return `<div class="route-details"><div class="edit-card-head"><strong>路径详情</strong><div><button class="btn small" data-action="add-stage" data-index="${index}">＋ Step 组</button> <button class="btn danger small" data-action="remove-route" data-index="${index}">删除</button></div></div>
-    <div class="route-meta"><div class="route-meta-grid"><div class="field"><label>路径名称（自动生成）</label><input value="${escapeHtml(route.name)}" readonly></div><div class="field"><label>Group</label><input data-scope="route" data-index="${index}" data-key="group" value="${escapeHtml(route.group)}"></div><div class="field"><label>BufferOption</label><input type="number" data-scope="route" data-index="${index}" data-key="bufferOption" value="${Number(route.bufferOption)}"></div></div>
-    <details class="route-clean-details"><summary>路径级 Clean 设置</summary><div class="grid"><div class="field span-4"><label>PJob 前</label><select data-scope="route" data-index="${index}" data-key="prePJobCleanRefs">${optionsHtml(preCleans, stringList(route.prePJobCleanRefs)[0] || "", "不需要清洁")}</select></div><div class="field span-4"><label>PJob 后</label><select data-scope="route" data-index="${index}" data-key="postPJobCleanRefs">${optionsHtml(postCleans, stringList(route.postPJobCleanRefs)[0] || "", "不需要清洁")}</select></div><div class="field span-4"><label>CJob 后</label><select data-scope="route" data-index="${index}" data-key="postCJobCleanRefs">${optionsHtml(postCleans, stringList(route.postCJobCleanRefs)[0] || "", "不需要清洁")}</select></div></div></details></div>
+    <div class="route-meta"><div class="route-meta-grid"><div class="field"><label>路径名称（自动生成）</label><input value="${escapeHtml(route.name)}" readonly></div><div class="field"><label>Group</label><input data-scope="route" data-index="${index}" data-key="group" value="${escapeHtml(route.group)}"></div><div class="field"><label>BufferOption</label><input type="number" min="0" max="4" step="1" data-scope="route" data-index="${index}" data-key="bufferOption" value="${Number(route.bufferOption)}"><small class="field-help">仅限制接口枚举范围，暂不自动修改路径。</small></div></div>
+    <details class="route-clean-details"><summary>路径级 Clean 设置</summary><div class="grid"><div class="field span-4"><label>PJob 前</label><select data-scope="route" data-index="${index}" data-key="prePJobCleanRefs">${optionsHtml(preCleans, stringList(route.prePJobCleanRefs)[0] || "", "不需要清洁")}</select></div><div class="field span-4"><label>PJob 后</label><select data-scope="route" data-index="${index}" data-key="postPJobCleanRefs">${optionsHtml(postCleans, stringList(route.postPJobCleanRefs)[0] || "", "不需要清洁")}</select></div><div class="field span-4 disabled-field"><label>CJob 后</label><select disabled><option>当前算法不支持 PostCJob Clean</option></select></div></div></details></div>
     <div class="route-table-wrap"><table class="route-table"><thead><tr><th>StepID</th><th>类型</th><th>可选腔室 / 机器手</th><th>PostStepID</th><th>NeedProcess</th><th></th></tr></thead><tbody>${renderSteps(route, index)}</tbody></table></div></div>`;
 }
 
@@ -893,6 +909,7 @@ function renderRounds() {
   const host = document.getElementById("roundList");
   host.innerHTML = state.rounds.map((round, roundIndex) => {
     const roundTitle = roundIndex ? `第 ${roundIndex + 1} 轮重算` : "首次排程";
+    const serialMode = round.cjobs.some(cjob => ["Pipeline", "Sequential"].includes(cjob.taskMode));
     const cjobs = round.cjobs.map((cjob, cjobIndex) => {
       const normalLot = cjob.jobType === "NormalLot";
       const pjobRows = cjob.pjobs.map((pjob, pjobIndex) => `<tr>
@@ -900,7 +917,6 @@ function renderRounds() {
         <td><input class="pjob-number" type="number" min="1" max="${state.strategy === "milp" ? 12 : 25}" data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="waferCount" value="${Number(pjob.waferCount)}"></td>
         <td>${renderPJobRoutePicker(pjob, roundIndex, cjobIndex, pjobIndex)}</td>
         <td><input class="pjob-number" type="number" min="1" data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="priority" value="${Number(pjob.priority)}"></td>
-        <td><select data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="loadPort">${optionsHtml(state.loadPorts, pjob.loadPort, state.loadPorts.length ? "选择端口" : "无端口")}</select></td>
         <td><button class="btn danger icon small" aria-label="删除 ${escapeHtml(pjob.jobName)}" data-action="remove-pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" ${cjob.pjobs.length <= 1 ? "disabled" : ""}>×</button></td>
       </tr>`).join("");
       return `<section class="cjob-card">
@@ -908,14 +924,19 @@ function renderRounds() {
         <div class="cjob-controls">
           <div class="field"><label>JobType</label><select data-scope="cjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-key="jobType">${CJOB_TYPES.map(value => `<option ${value === cjob.jobType ? "selected" : ""}>${value}</option>`).join("")}</select></div>
           <div class="field ${normalLot ? "" : "disabled-field"}"><label>Priority</label><input type="number" min="1" data-scope="cjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-key="priority" value="${Number(cjob.priority)}" ${normalLot ? "" : "disabled"}></div>
-          <div class="field"><label>TaskMode</label><select data-scope="cjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-key="taskMode">${TASK_MODES.map(value => `<option ${value === cjob.taskMode ? "selected" : ""}>${value}</option>`).join("")}</select></div>
+          <div class="field"><label>TaskMode</label><select data-scope="cjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-key="taskMode">${TASK_MODES.map(value => `<option ${value === cjob.taskMode ? "selected" : ""} ${round.cjobs.length > 1 && ["Pipeline", "Sequential"].includes(value) ? "disabled" : ""}>${value}</option>`).join("")}</select></div>
           <div class="field"><label>PJobNameList</label><div class="pjob-name-list">${cjob.pJobNameList.map(name => `<span>${escapeHtml(name)}</span>`).join("")}</div></div>
         </div>
-        <div class="pjob-table-wrap"><table class="pjob-table"><thead><tr><th>JobName</th><th>Material</th><th>OriginRoute</th><th>Priority</th><th>LoadPort</th><th></th></tr></thead><tbody>${pjobRows}</tbody></table></div>
+        <div class="pjob-table-wrap"><table class="pjob-table"><thead><tr><th>JobName</th><th>Material</th><th>OriginRoute</th><th>Priority</th><th></th></tr></thead><tbody>${pjobRows}</tbody></table></div>
       </section>`;
     }).join("");
     const roundTimeBadge = roundIndex ? `<span class="readonly-pill">@ ${Number(round.currentTime)}s</span>` : "";
-    return `<section class="round-card"><header class="round-head"><div class="round-title"><div class="round-number">${roundIndex + 1}</div><div><strong>${roundTitle}</strong>${roundTimeBadge}</div></div><div class="round-time-editor field"><label>${roundIndex ? "重算时间" : "排程时间"}</label><div><input type="number" min="0" step="0.1" data-round-time-index="${roundIndex}" value="${Number(round.currentTime)}" ${roundIndex ? "" : "disabled"}><span>s</span></div></div><button class="btn small" data-action="add-cjob" data-round-index="${roundIndex}">＋ CJob</button></header><div class="cjob-list">${cjobs}</div></section>`;
+    const cjobLimitReached = state.loadPorts.length > 0 && round.cjobs.length >= state.loadPorts.length;
+    const addCJobDisabled = cjobLimitReached || serialMode;
+    const addCJobTitle = serialMode
+      ? "Pipeline/Sequential 每轮只能配置一个 CJob"
+      : "每轮 CJob 数不能超过 LoadPort 数";
+    return `<section class="round-card"><header class="round-head"><div class="round-title"><div class="round-number">${roundIndex + 1}</div><div><strong>${roundTitle}</strong>${roundTimeBadge}</div></div><div class="round-time-editor field"><label>${roundIndex ? "重算时间" : "排程时间"}</label><div><input type="number" min="0" step="0.1" data-round-time-index="${roundIndex}" value="${Number(round.currentTime)}" ${roundIndex ? "" : "disabled"}><span>s</span></div></div><button class="btn small" data-action="add-cjob" data-round-index="${roundIndex}" ${addCJobDisabled ? `disabled title="${addCJobTitle}"` : ""}>＋ CJob</button></header><div class="cjob-list">${cjobs}</div></section>`;
   }).join("");
 }
 
@@ -1060,7 +1081,12 @@ function updateStateFromControl(control) {
     synchronizeStageVisits(stage);
   }
   if (scope === "cjob") {
-    const cjob = state.rounds[Number(control.dataset.roundIndex)].cjobs[Number(control.dataset.cjobIndex)];
+    const round = state.rounds[Number(control.dataset.roundIndex)];
+    const cjob = round.cjobs[Number(control.dataset.cjobIndex)];
+    if (key === "taskMode" && ["Pipeline", "Sequential"].includes(String(value)) && round.cjobs.length > 1) {
+      control.value = cjob.taskMode;
+      return;
+    }
     cjob[key] = value;
     if (key === "jobType") cjob.priority = value === "NormalLot" ? (cjob.priority > 0 ? cjob.priority : 1) : -1;
     normalizeRounds();
@@ -1155,13 +1181,15 @@ function handleAction(button) {
   if (action === "move-step-down" && stageIndex < state.routes[routeIndex].stages.length - 1) { [state.routes[routeIndex].stages[stageIndex + 1], state.routes[routeIndex].stages[stageIndex]] = [state.routes[routeIndex].stages[stageIndex], state.routes[routeIndex].stages[stageIndex + 1]]; linkRouteSteps(state.routes[routeIndex].stages); }
   if (action === "add-cjob") {
     const roundIndex = Number(button.dataset.roundIndex), round = state.rounds[roundIndex];
-    const cjob = makeCJob(roundIndex + 1, [], state.routes[0]?.name || "", state.loadPorts[roundIndex] || state.loadPorts[0] || "");
+    if (round.cjobs.some(cjob => ["Pipeline", "Sequential"].includes(cjob.taskMode))) return;
+    if (state.loadPorts.length && round.cjobs.length >= state.loadPorts.length) return;
+    const cjob = makeCJob(roundIndex + 1, [], state.routes[0]?.name || "", state.loadPorts[round.cjobs.length] || state.loadPorts[0] || "");
     cjob.key = `C${round.cjobs.length + 1}`; round.cjobs.push(cjob);
   }
   if (action === "remove-cjob") state.rounds[Number(button.dataset.roundIndex)].cjobs.splice(Number(button.dataset.cjobIndex), 1);
   if (action === "add-pjob") {
     const roundIndex = Number(button.dataset.roundIndex), cjob = state.rounds[roundIndex].cjobs[Number(button.dataset.cjobIndex)];
-    cjob.pjobs.push(makePJob(cjob.pjobs.length + 1, state.routes[0]?.name || "", state.loadPorts[roundIndex] || state.loadPorts[0] || "", 5));
+    cjob.pjobs.push(makePJob(cjob.pjobs.length + 1, state.routes[0]?.name || "", cjob.loadPort || state.loadPorts[0] || "", 5));
   }
   if (action === "remove-pjob") state.rounds[Number(button.dataset.roundIndex)].cjobs[Number(button.dataset.cjobIndex)].pjobs.splice(Number(button.dataset.pjobIndex), 1);
   normalizeRounds();
@@ -1996,7 +2024,6 @@ document.addEventListener("change", event => {
     if (state.strategy === "milp") { resizeRounds(1); document.getElementById("roundCount").value = 1; }
     document.getElementById("roundCount").disabled = state.strategy === "milp";
     document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro", "nn-saea", "setrank", "neuralucb", "neural", "rl"].includes(state.strategy));
-    document.getElementById("loadlockMacroOptions").classList.toggle("is-hidden", !["loadlock-macro", "nn-saea"].includes(state.strategy));
     document.getElementById("nnSAEAOptions").classList.toggle("is-hidden", state.strategy !== "nn-saea");
     document.getElementById("neuralucbOptions").classList.toggle("is-hidden", state.strategy !== "neuralucb");
     document.getElementById("rlOptions").classList.toggle("is-hidden", state.strategy !== "rl");

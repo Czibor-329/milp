@@ -123,14 +123,32 @@ export function routeCleanSignature(route: RouteDefinition): string {
   return parts.join(" · ");
 }
 
+/** 返回 Route 中已设置的最小驻留约束；-1 表示不限制，不参与命名。 */
+export function minimumResidencyConstraint(route: RouteDefinition): number | null {
+  const limits = (route.stages || [])
+    .filter((stage) => stage.needProcess)
+    .flatMap((stage) => stage.visits || [])
+    .map((visit) => Number(visit.residencyConstraint))
+    .filter((limit) => Number.isFinite(limit) && limit >= 0);
+  return limits.length ? Math.min(...limits) : null;
+}
+
 /** 根据加工路径、加工时间和 Clean 配置生成稳定、可读的 Route 名称。 */
-export function automaticRouteName(profile: RouteProcessProfile, cleanSignature = ""): string {
+export function automaticRouteName(
+  profile: RouteProcessProfile,
+  cleanSignature = "",
+  minimumResidency: number | null = null,
+): string {
   const processName = profile.processCount === 0
     ? "无加工工序"
     : profile.candidatePath.map(
       (path, index) => `${path}(${formatSeconds(profile.processTimes[index])})`,
     ).join(" → ");
-  return cleanSignature ? `${processName} · ${cleanSignature}` : processName;
+  const suffixes = [
+    cleanSignature,
+    minimumResidency === null ? "" : `驻留 ${formatSeconds(minimumResidency)}`,
+  ].filter(Boolean);
+  return suffixes.length ? `${processName} · ${suffixes.join(" · ")}` : processName;
 }
 
 /** 按工序数量及各工序并行机器数排序 Route 工艺结构。 */
