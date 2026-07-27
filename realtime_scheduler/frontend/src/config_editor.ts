@@ -1526,7 +1526,7 @@ async function runCurrentTestGroup() {
   } finally {
     state.batchRunning = false; state.activeBatchId = ""; state.batchCancelRequested = false; state.batchCancelSent = false;
     button.disabled = !state.serviceCompatible; runButton.disabled = !state.serviceCompatible;
-    button.classList.remove("running", "cancel"); button.textContent = "▦ 批量运行当前组";
+    button.classList.remove("running", "cancel"); button.textContent = "▦ 运行当前测试组";
     renderWorkspaceControls();
   }
 }
@@ -1741,15 +1741,13 @@ async function showTestGroupAnalysis() {
       ? batchPerformanceAnalyses.get(String(item.resultUrl)) ?? null
       : null,
   })));
-  const panel = document.getElementById("testGroupAnalysisPanel");
-  panel.innerHTML = renderTestGroupAnalysis(
+  const panelMarkup = renderTestGroupAnalysis(
     summary,
     result.group || state.activeTestGroup || "当前测试组",
-    result.strategy || state.strategy,
   );
-  panel.hidden = false;
-  document.getElementById("visualEmpty").hidden = true;
+  visualizationWorkspace.showGroupAnalysis(panelMarkup);
   switchTab("workspace");
+  const panel = document.getElementById("testGroupAnalysisPanel");
   panel.scrollIntoView({ behavior: "smooth", block: "start" });
   } finally {
     button.disabled = false;

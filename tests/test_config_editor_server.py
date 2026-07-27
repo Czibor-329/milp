@@ -1053,7 +1053,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn('data-tab-target="route">路径配置</button>', html)
         self.assertIn('data-tab-target="clean">清洁配置</button>', html)
         self.assertIn('<h1>调度平台</h1>', html)
-        self.assertIn('class="frontend-version">前端 v1.0.7</span>', html)
+        self.assertIn('class="frontend-version">前端 v1.0.10</span>', html)
         self.assertIn('<span id="metricMovesLabel">瓶颈利用率</span>', html)
         self.assertNotIn('<span id="metricMovesLabel">Move 数</span>', html)
         self.assertNotIn("renderDatasetCatalog", html)
@@ -1247,6 +1247,49 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("item.testId", html)
         for label in ("测试名称", "等待中", "运行中", "成功", "失败", "Makespan", "Move", "耗时"):
             self.assertIn(label, html)
+
+    def test_result_analysis_modes_are_exclusive_and_topology_is_collapsed(self) -> None:
+        """组级与单例分析应互斥，拓扑、概要和播放控制默认整体折叠。"""
+        page = EDITOR_PATH.read_text(encoding="utf-8")
+        workspace_source = (
+            ROOT
+            / "realtime_scheduler"
+            / "frontend"
+            / "src"
+            / "workspace_visualizer.ts"
+        ).read_text(encoding="utf-8")
+        group_view_source = (
+            ROOT
+            / "realtime_scheduler"
+            / "frontend"
+            / "src"
+            / "group_analysis_view.ts"
+        ).read_text(encoding="utf-8")
+        editor_source = EDITOR_SCRIPT_PATH.read_text(encoding="utf-8")
+
+        self.assertIn('id="visualTopologyToggle"', page)
+        self.assertIn('aria-controls="visualTopologyPlayback"', page)
+        self.assertIn('id="visualTopologyPlayback" hidden', page)
+        topology_playback = page.split('id="visualTopologyPlayback"', 1)[1]
+        self.assertIn('id="visualTimeline"', topology_playback)
+        self.assertIn('id="visualDeviceStage"', topology_playback)
+        self.assertNotIn("调度结果分析", page)
+        self.assertNotIn("按设备俯视拓扑回放晶圆流转", page)
+
+        self.assertIn("showGroupAnalysis(markup: string)", workspace_source)
+        self.assertIn("this.elements.content.hidden = true", workspace_source)
+        self.assertIn("this.elements.groupAnalysis.hidden = false", workspace_source)
+        self.assertIn("private showSingleResult()", workspace_source)
+        self.assertIn("this.elements.groupAnalysis.hidden = true", workspace_source)
+        self.assertIn("visualizationWorkspace.showGroupAnalysis(panelMarkup)", editor_source)
+
+        for removed_content in (
+            "逐例对比 · 不做综合打分",
+            "瓶颈候选出现频次",
+            "如何解读",
+            '<span class="eyebrow">测试组结果分析</span>',
+        ):
+            self.assertNotIn(removed_content, group_view_source)
 
     def test_schedule_analysis_is_reusable_without_frontend_dependencies(self) -> None:
         """MoveList 与测试组统计应位于无 DOM、无网络依赖的公共分析层。"""

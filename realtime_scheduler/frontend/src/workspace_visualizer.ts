@@ -21,6 +21,7 @@ import {
   type ResourceKind,
   type SchedulePerformance,
 } from "../../analysis/movelist_performance";
+import { diagnoseSchedule } from "../../analysis/diagnostic_guidance";
 
 export {
   analyzeSchedulePerformance,
@@ -87,8 +88,12 @@ interface NormalizedMove extends MoveRecord {
 }
 
 interface WorkspaceElements {
+  toolbar: HTMLElement;
+  groupAnalysis: HTMLElement;
   empty: HTMLElement;
   content: HTMLElement;
+  topologyPlayback: HTMLElement;
+  topologyToggle: HTMLButtonElement;
   stage: HTMLElement;
   activeMoves: HTMLElement;
   source: HTMLElement;
@@ -123,7 +128,6 @@ const PROCESS_ARC_CENTER_X_PERCENT = 50;
 const PROCESS_ARC_CENTER_Y_PIXELS = 214;
 const PROCESS_ARC_RADIUS_X_PERCENT = 38;
 const PROCESS_ARC_RADIUS_Y_PIXELS = 156;
-const MAXIMUM_VISIBLE_QUEUE_ITEMS = 32;
 
 const ACTIVITY_CATEGORIES: ActivityCategory[] = [
   "process",
@@ -476,8 +480,12 @@ function collectElements(root: Document): WorkspaceElements {
     return element as ElementType;
   };
   return {
+    toolbar: required("visualToolbar"),
+    groupAnalysis: required("testGroupAnalysisPanel"),
     empty: required("visualEmpty"),
     content: required("visualContent"),
+    topologyPlayback: required("visualTopologyPlayback"),
+    topologyToggle: required<HTMLButtonElement>("visualTopologyToggle"),
     stage: required("visualDeviceStage"),
     activeMoves: required("visualActiveMoves"),
     source: required("visualSource"),
@@ -621,10 +629,18 @@ function renderEquipmentTopology(snapshot: WorkspaceSnapshot): string {
     </section>`;
 }
 
-/** 将 PJob 全名压缩为队列中可辨认的末级名称。 */
-function shortPJobName(value: string): string {
-  const parts = String(value || "").split(".").filter(Boolean);
-  return parts.at(-1) ?? "—";
+/** 把协议中的晶圆编号转成一致的短标签。 */
+function waferLabel(value: string): string {
+  const material = String(value || "").trim();
+  return /^W/i.test(material) ? material : `W${material}`;
+}
+
+/** 把一次环境切换携带的晶圆显示成紧凑标签。 */
+function renderCycleWafers(wafers: string[]): string {
+  if (!wafers.length) return '<span class="cycle-empty">空载</span>';
+  return wafers
+    .map(wafer => `<span class="cycle-wafer">${escapeHtml(waferLabel(wafer))}</span>`)
+    .join("");
 }
 
 /** 把比例格式化为一位小数百分比。 */
@@ -632,7 +648,7 @@ function formatPercent(value: number): string {
   return `${(Math.max(0, value) * 100).toFixed(1)}%`;
 }
 
-/** 绘制资源占用表、Active Period 瓶颈和真空端晶圆队列。 */
+/** 绘制资源占用表、Active Period 瓶颈和 LoadLock 环境切换顺序。 */
 function renderSchedulePerformance(performance: SchedulePerformance): string {
   const window = performance.window;
   const bottleneck = performance.primaryBottleneck;
@@ -666,20 +682,23 @@ function renderSchedulePerformance(performance: SchedulePerformance): string {
     return `
       <tr class="${resource.isBottleneck ? "is-bottleneck" : ""}">
         <th scope="row">
-          <span class="resource-name">${escapeHtml(resource.name)}</span>
-          <small>${escapeHtml(resourceKindLabels[resource.kind])}</small>
-          ${status}
+          <div class="resource-heading">
+            <span class="resource-name">${escapeHtml(resource.name)}</span>
+            <small>${escapeHtml(resourceKindLabels[resource.kind])}</small>
+            ${status}
+          </div>
         </th>
-        <td>
-          <div class="utilization-value">${formatPercent(resource.utilization)}</div>
+        <td class="utilization-cell">
+          <div class="utilization-line">
+            <div class="utilization-value">${formatPercent(resource.utilization)}</div>
           <div class="utilization-track" aria-label="${escapeHtml(resource.name)} 占用率 ${formatPercent(resource.utilization)}">${categoryBars}</div>
-          <small>${formatSeconds(resource.busyTime)} s</small>
+            <small>${formatSeconds(resource.busyTime)} s</small>
+          </div>
         </td>
-        <td class="performance-number">${formatSeconds(resource.averageActivePeriod)} s<small>${resource.activePeriodCount} 段</small></td>
+        <td class="performance-number">${formatSeconds(resource.averageActivePeriod)} s <small>${resource.activePeriodCount} 段</small></td>
         <td class="performance-number">${formatSeconds(resource.longestIdlePeriod)} s</td>
       </tr>`;
   }).join("");
-  const visibleQueue = performance.vacuumQueue.slice(0, MAXIMUM_VISIBLE_QUEUE_ITEMS);
   const candidateMarkup = performance.bottleneckCandidates.length
     ? `<section class="bottleneck-candidates" aria-labelledby="bottleneckCandidatesTitle">
         <div class="bottleneck-candidate-head">
@@ -709,15 +728,46 @@ function renderSchedulePerformance(performance: SchedulePerformance): string {
         </ol>
       </section>`
     : "";
-  const queueMarkup = visibleQueue.length
-    ? `<ol class="vacuum-queue-sequence">${visibleQueue.map(item => `
-        <li class="${item.targetWasBusy ? "target-busy" : "target-idle"}">
-          <span class="queue-index">${item.index}</span>
-          <strong>W${escapeHtml(item.material)}</strong>
-          <span>${escapeHtml(shortPJobName(item.pjob))} · ${escapeHtml(item.loadLock)} → ${escapeHtml(item.targetModule || "PM?")}</span>
-          <small>${formatSeconds(item.admittedAt)} s · 目标腔${item.targetWasBusy ? "忙" : "闲"} · 至加工 ${formatSeconds(item.processWait)} s</small>
-        </li>`).join("")}</ol>`
-    : '<div class="vacuum-queue-empty">MoveList 中没有识别到“LoadLock → 真空机械手”的入队动作。</div>';
+  const cycleMarkup = performance.loadLockCycles.length
+    ? `<div class="loadlock-cycle-table-wrap">
+        <table class="loadlock-cycle-table" aria-label="LoadLock 抽气和充气携片顺序">
+          <thead><tr><th>顺序</th><th>LoadLock</th><th>抽气携片</th><th>充气携片</th></tr></thead>
+          <tbody>${performance.loadLockCycles.map(cycle => `
+            <tr>
+              <td><span class="cycle-index">${cycle.index}</span></td>
+              <th scope="row">${escapeHtml(cycle.loadLock)}</th>
+              <td><div class="cycle-wafers">${renderCycleWafers(cycle.vacuumWafers)}</div></td>
+              <td><div class="cycle-wafers">${renderCycleWafers(cycle.ventWafers)}</div></td>
+            </tr>`).join("")}</tbody>
+        </table>
+      </div>`
+    : '<div class="loadlock-cycle-empty">MoveList 中没有识别到 LoadLock 抽气或充气动作。</div>';
+  const diagnostics = diagnoseSchedule(performance);
+  const diagnosticMarkup = diagnostics.length
+    ? `<section class="diagnostic-panel" aria-labelledby="diagnosticPanelTitle">
+        <div class="diagnostic-panel-head">
+          <div><span>证据 → 假设 → 实验</span><strong id="diagnosticPanelTitle">下一步优化从这里开始</strong></div>
+          <small>结论来自执行轨迹重建，不冒充算法内部打分</small>
+        </div>
+        <div class="diagnostic-list">
+          ${diagnostics.map((diagnostic, index) => `
+            <article class="diagnostic-card">
+              <header><span class="diagnostic-rank">${index + 1}</span><div><strong>${escapeHtml(diagnostic.title)}</strong><small>${({ strong: "证据较强", moderate: "证据中等", exploratory: "探索性线索" })[diagnostic.confidence]}</small></div></header>
+              <p>${escapeHtml(diagnostic.finding)}</p>
+              <dl>${diagnostic.evidence.map(evidence => `
+                <div><dt>${escapeHtml(evidence.label)}</dt><dd><b>${escapeHtml(evidence.value)}</b><span>${escapeHtml(evidence.interpretation)}</span></dd></div>
+              `).join("")}</dl>
+              <div class="diagnostic-experiment">
+                <span>可证伪的下一步</span>
+                <strong>${escapeHtml(diagnostic.nextExperiment.label)}</strong>
+                <p>${escapeHtml(diagnostic.nextExperiment.change)}</p>
+                <small>预期信号：${escapeHtml(diagnostic.nextExperiment.expectedSignal)}</small>
+              </div>
+              <aside>${escapeHtml(diagnostic.limitation)}</aside>
+            </article>`).join("")}
+        </div>
+      </section>`
+    : "";
   return `
     <div class="performance-summary">
       <div>
@@ -752,6 +802,7 @@ function renderSchedulePerformance(performance: SchedulePerformance): string {
       </div>
     </div>
     ${candidateMarkup}
+    ${diagnosticMarkup}
     <p class="performance-window-note">${escapeHtml(window.detail)}</p>
     <div class="performance-legend" aria-label="占用组成图例">${legend}</div>
     <div class="performance-grid">
@@ -762,25 +813,14 @@ function renderSchedulePerformance(performance: SchedulePerformance): string {
           <tbody>${resourceRows}</tbody>
         </table>
       </div>
-      <aside class="vacuum-queue-panel">
-        <div class="vacuum-queue-head">
-          <div><strong>真空端入队序列</strong><span>按晶圆第一次从 LoadLock 被 VTR 取出排序</span></div>
-          <small>队列交织度 ${formatPercent(performance.vacuumQueueJobSwitchRatio)}<br>最长同 Job 连续 ${performance.vacuumQueueLongestRun} 片</small>
+      <aside class="loadlock-cycle-panel">
+        <div class="loadlock-cycle-head">
+          <div><strong>LoadLock 循环顺序</strong><span>同一行表示一次抽气 → 充气，只保留携片顺序</span></div>
         </div>
-        ${queueMarkup}
-        ${performance.vacuumQueue.length > visibleQueue.length
-          ? `<div class="vacuum-queue-more">另有 ${performance.vacuumQueue.length - visibleQueue.length} 片未展开</div>`
-          : ""}
+        ${cycleMarkup}
       </aside>
     </div>
-    <section class="performance-guidance" aria-labelledby="performanceGuidanceTitle">
-      <strong id="performanceGuidanceTitle">指标怎么读</strong>
-      <div>
-        <p><b>瓶颈候选</b><span>按工序并行容量、机器人和 LoadLock 容量统一比较。多个得分接近的资源会同时保留，不强行给出唯一答案。</span></p>
-        <p><b>节拍波动</b><span>出站间隔 CV 越小表示出片越均匀，但它只描述波动，不能单独解释根因。</span></p>
-        <p><b>队列交织</b><span>交织度只描述 Job 顺序，并非越高越好；重点看目标腔忙闲和入队至加工等待。</span></p>
-      </div>
-    </section>`;
+    `;
 }
 
 /** 创建并管理调度平台中的结果分析页面。 */
@@ -806,6 +846,7 @@ export class VisualizationWorkspace {
     this.elements = collectElements(root);
     this.bindEvents();
     this.updatePlayButton();
+    this.setTopologyVisible(false);
   }
 
   /** 更新当前设备拓扑；已有 MoveList 会立即按新拓扑重绘。 */
@@ -865,9 +906,21 @@ export class VisualizationWorkspace {
 
   /** 切换到工作台标签。 */
   show(): void {
+    if (this.moves.length) this.showSingleResult();
     const tab = this.root.querySelector<HTMLElement>('[data-tab-target="workspace"]');
     tab?.click();
-    this.elements.range.focus({ preventScroll: true });
+    this.elements.performanceWindow.focus({ preventScroll: true });
+  }
+
+  /** 显示测试组统计，并完全隐藏当前单例诊断与回放。 */
+  showGroupAnalysis(markup: string): void {
+    this.pause();
+    this.setTopologyVisible(false);
+    this.elements.toolbar.hidden = true;
+    this.elements.empty.hidden = true;
+    this.elements.content.hidden = true;
+    this.elements.groupAnalysis.innerHTML = markup;
+    this.elements.groupAnalysis.hidden = false;
   }
 
   /** 停止播放并释放动画帧。 */
@@ -885,8 +938,13 @@ export class VisualizationWorkspace {
     this.elements.resultButton.disabled = true;
     this.elements.openGantt.href = "#";
     this.elements.openGantt.setAttribute("aria-disabled", "true");
+    this.elements.toolbar.hidden = false;
+    this.elements.groupAnalysis.hidden = true;
+    this.elements.groupAnalysis.innerHTML = "";
     this.elements.content.hidden = true;
     this.elements.empty.hidden = false;
+    this.elements.topologyToggle.disabled = true;
+    this.setTopologyVisible(false);
     this.elements.empty.classList.remove("is-loading", "is-error");
     this.elements.empty.innerHTML = `
       <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="3"/><path d="M8 9h8M8 13h5"/></svg>
@@ -912,8 +970,9 @@ export class VisualizationWorkspace {
       : "#";
     this.elements.openGantt.setAttribute("aria-disabled", resultUrl ? "false" : "true");
     this.elements.resultButton.disabled = false;
-    this.elements.empty.hidden = true;
-    this.elements.content.hidden = false;
+    this.elements.topologyToggle.disabled = false;
+    this.setTopologyVisible(false);
+    this.showSingleResult();
     this.render(snapshot);
     this.renderPerformance();
   }
@@ -941,6 +1000,9 @@ export class VisualizationWorkspace {
     this.elements.performanceWindow.addEventListener("change", () => {
       this.performanceWindowMode = this.elements.performanceWindow.value === "full" ? "full" : "steady";
       this.renderPerformance();
+    });
+    this.elements.topologyToggle.addEventListener("click", () => {
+      this.setTopologyVisible(this.elements.topologyPlayback.hidden);
     });
     this.elements.resultButton.addEventListener("click", () => this.show());
     this.elements.openGantt.addEventListener("click", event => {
@@ -999,6 +1061,23 @@ export class VisualizationWorkspace {
     this.elements.playButton.classList.toggle("is-playing", this.playing);
   }
 
+  /** 切换单例分析模式，测试组统计与单例诊断不会同时出现。 */
+  private showSingleResult(): void {
+    this.elements.toolbar.hidden = false;
+    this.elements.groupAnalysis.hidden = true;
+    this.elements.empty.hidden = true;
+    this.elements.content.hidden = false;
+  }
+
+  /** 将概要、进度控制、拓扑与当前动作作为一个回放单元统一显隐。 */
+  private setTopologyVisible(visible: boolean): void {
+    if (!visible) this.pause();
+    this.elements.topologyPlayback.hidden = !visible;
+    this.elements.topologyToggle.setAttribute("aria-expanded", String(visible));
+    const label = this.elements.topologyToggle.querySelector("span");
+    if (label) label.textContent = visible ? "隐藏设备拓扑" : "显示设备拓扑";
+  }
+
   /** 绘制当前时间对应的设备快照。 */
   private render(prebuiltSnapshot?: WorkspaceSnapshot): void {
     if (!this.moves.length) return;
@@ -1041,6 +1120,11 @@ export class VisualizationWorkspace {
 
   /** 显示加载状态并保留明确的系统反馈。 */
   private setLoading(loading: boolean, message: string): void {
+    this.pause();
+    this.setTopologyVisible(false);
+    this.elements.toolbar.hidden = false;
+    this.elements.groupAnalysis.hidden = true;
+    this.elements.content.hidden = true;
     this.elements.empty.hidden = false;
     this.elements.empty.classList.toggle("is-loading", loading);
     this.elements.empty.classList.remove("is-error");
@@ -1052,6 +1136,9 @@ export class VisualizationWorkspace {
   /** 在工作台空状态中显示可恢复的错误。 */
   private showError(message: string): void {
     this.pause();
+    this.setTopologyVisible(false);
+    this.elements.toolbar.hidden = false;
+    this.elements.groupAnalysis.hidden = true;
     this.elements.content.hidden = true;
     this.elements.empty.hidden = false;
     this.elements.empty.classList.remove("is-loading");

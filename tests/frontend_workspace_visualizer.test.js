@@ -58,6 +58,110 @@ function moduleAt(snapshot, name) {
   return snapshot.modules.find(module => module.name === name);
 }
 
+class FakeClassList {
+  constructor() {
+    this.values = new Set();
+  }
+
+  add(...names) {
+    names.forEach(name => this.values.add(name));
+  }
+
+  remove(...names) {
+    names.forEach(name => this.values.delete(name));
+  }
+
+  toggle(name, force) {
+    if (force === true) this.values.add(name);
+    else if (force === false) this.values.delete(name);
+    else if (this.values.has(name)) this.values.delete(name);
+    else this.values.add(name);
+  }
+}
+
+class FakeElement {
+  constructor() {
+    this.hidden = false;
+    this.disabled = false;
+    this.href = "";
+    this.value = "";
+    this.min = "";
+    this.max = "";
+    this.step = "";
+    this.innerHTML = "";
+    this.textContent = "";
+    this.classList = new FakeClassList();
+    this.attributes = new Map();
+    this.listeners = new Map();
+    this.label = null;
+  }
+
+  addEventListener(name, handler) {
+    this.listeners.set(name, handler);
+  }
+
+  setAttribute(name, value) {
+    this.attributes.set(name, String(value));
+  }
+
+  getAttribute(name) {
+    return this.attributes.get(name) ?? null;
+  }
+
+  querySelector(selector) {
+    return selector === "span" ? this.label : null;
+  }
+
+  focus() {
+    this.focused = true;
+  }
+
+  click() {
+    this.clicked = true;
+  }
+}
+
+function fakeWorkspaceDocument() {
+  const ids = [
+    "visualToolbar",
+    "testGroupAnalysisPanel",
+    "visualEmpty",
+    "visualContent",
+    "visualTopologyPlayback",
+    "visualTopologyToggle",
+    "visualDeviceStage",
+    "visualActiveMoves",
+    "visualSource",
+    "visualCurrentTime",
+    "visualTotalTime",
+    "visualProgressText",
+    "visualMoveText",
+    "visualWaferText",
+    "visualTimeline",
+    "visualPlayButton",
+    "visualSpeed",
+    "visualFileInput",
+    "visualOpenGantt",
+    "workspaceResultButton",
+    "visualPerformance",
+    "performanceWindow",
+  ];
+  const elements = new Map(ids.map(id => [id, new FakeElement()]));
+  elements.get("visualTopologyToggle").label = new FakeElement();
+  elements.get("visualTopologyToggle").disabled = true;
+  const workspaceTab = new FakeElement();
+  return {
+    elements,
+    workspaceTab,
+    getElementById(id) {
+      return elements.get(id) ?? null;
+    },
+    querySelector(selector) {
+      return selector === '[data-tab-target="workspace"]' ? workspaceTab : null;
+    },
+  };
+}
+
 test("MoveList 输入同时支持数组和结果对象", () => {
   assert.equal(logic.normalizeMovePayload(moves).length, 4);
   assert.equal(logic.normalizeMovePayload({ MoveList: moves }).length, 4);
@@ -65,6 +169,50 @@ test("MoveList 输入同时支持数组和结果对象", () => {
     () => logic.normalizeMovePayload({ moves }),
     /MoveList/,
   );
+});
+
+test("测试组与单例分析互斥，拓扑和进度默认共同折叠", async () => {
+  const root = fakeWorkspaceDocument();
+  const workspace = logic.createVisualizationWorkspace(root);
+  const topology = root.elements.get("visualTopologyPlayback");
+  const toggle = root.elements.get("visualTopologyToggle");
+
+  assert.equal(topology.hidden, true);
+  assert.equal(toggle.disabled, true);
+  assert.equal(toggle.getAttribute("aria-expanded"), "false");
+  assert.equal(toggle.label.textContent, "显示设备拓扑");
+
+  workspace.showGroupAnalysis("<h2>组级统计</h2>");
+  assert.equal(root.elements.get("visualToolbar").hidden, true);
+  assert.equal(root.elements.get("testGroupAnalysisPanel").hidden, false);
+  assert.equal(root.elements.get("visualContent").hidden, true);
+  assert.equal(root.elements.get("visualEmpty").hidden, true);
+
+  await workspace.loadFile({
+    name: "t1.json",
+    async text() {
+      return JSON.stringify({ MoveList: moves });
+    },
+  });
+  assert.equal(root.elements.get("visualToolbar").hidden, false);
+  assert.equal(root.elements.get("testGroupAnalysisPanel").hidden, true);
+  assert.equal(root.elements.get("visualContent").hidden, false);
+  assert.equal(topology.hidden, true);
+  assert.equal(toggle.disabled, false);
+
+  toggle.listeners.get("click")();
+  assert.equal(topology.hidden, false);
+  assert.equal(toggle.getAttribute("aria-expanded"), "true");
+  assert.equal(toggle.label.textContent, "隐藏设备拓扑");
+
+  workspace.showGroupAnalysis("<h2>组级统计</h2>");
+  assert.equal(topology.hidden, true);
+  assert.equal(root.elements.get("visualContent").hidden, true);
+
+  workspace.show();
+  assert.equal(root.elements.get("testGroupAnalysisPanel").hidden, true);
+  assert.equal(root.elements.get("visualContent").hidden, false);
+  assert.equal(root.workspaceTab.clicked, true);
 });
 
 test("时间轴准确回放腔室门的开启和关闭过程", () => {
@@ -389,57 +537,27 @@ test("清洁与门动作重叠时按物理并集计时", () => {
   assert.equal(pm2.categoryTimes.door, 1);
 });
 
-test("性能分析导出真空端晶圆顺序和 Job 交织指标", () => {
-  const performance = logic.analyzeSchedulePerformance(performanceMoves, device, "steady");
-  assert.deepEqual(performance.vacuumQueue.map(item => item.material), ["W1", "W2", "W3", "W4"]);
-  assert.deepEqual(performance.vacuumQueue.map(item => item.pjob), [
-    "1.C1.P1",
-    "1.C1.P2",
-    "1.C1.P1",
-    "1.C1.P2",
+test("性能分析按顺序配对 LoadLock 抽气和充气携片", () => {
+  const performance = logic.analyzeSchedulePerformance([
+    { MoveID: 1, MoveType: 10, ModuleName: "LA", LastState: "ATM", CurState: "VAC", MatIDList: ["W1"], StartTime: 1, EndTime: 5 },
+    { MoveID: 2, MoveType: 10, ModuleName: "LA", LastState: "VAC", CurState: "ATM", MatIDList: ["W4"], StartTime: 10, EndTime: 14 },
+    { MoveID: 3, MoveType: 10, ModuleName: "LA", LastState: "ATM", CurState: "VAC", MatIDList: ["W2", "W3"], StartTime: 20, EndTime: 24 },
+    { MoveID: 4, MoveType: 10, ModuleName: "LA", LastState: "VAC", CurState: "ATM", MatIDList: [], StartTime: 30, EndTime: 34 },
+  ], device, "full");
+
+  assert.deepEqual(performance.loadLockCycles, [
+    { index: 1, loadLock: "LA", vacuumWafers: ["W1"], ventWafers: ["W4"] },
+    { index: 2, loadLock: "LA", vacuumWafers: ["W2", "W3"], ventWafers: [] },
   ]);
-  assert.equal(performance.vacuumQueueJobSwitchRatio, 1);
-  assert.equal(performance.vacuumQueueLongestRun, 1);
 });
 
-test("LoadLock 换片中的生片也进入真空端队列", () => {
-  const swapMoves = [
-    ...performanceMoves,
-    {
-      MoveID: 500,
-      MoveType: 4,
-      ModuleName: "VTR",
-      StationList: ["LA", "LA"],
-      MatIDList: ["W5", "DONE"],
-      RecvMatList: ["W5"],
-      SendMatList: ["DONE"],
-      PJobName: ["1.C1.P1", "1.C1.P1"],
-      StartTime: 54,
-      EndTime: 56,
-    },
-    {
-      MoveID: 501,
-      MoveType: 1,
-      ModuleName: "VTR",
-      DestStationList: ["PM2"],
-      MatIDList: ["W5"],
-      PJobName: ["1.C1.P1"],
-      StartTime: 56,
-      EndTime: 58,
-    },
-    {
-      MoveID: 502,
-      MoveType: 9,
-      ModuleName: "PM2",
-      MatIDList: ["W5"],
-      PJobName: ["1.C1.P1"],
-      StartTime: 58,
-      EndTime: 65,
-    },
-  ];
-  const queue = logic.analyzeSchedulePerformance(swapMoves, device, "steady").vacuumQueue;
-  const swappedWafer = queue.find(item => item.material === "W5");
-  assert.equal(swappedWafer.loadLock, "LA");
-  assert.equal(swappedWafer.targetModule, "PM2");
-  assert.equal(swappedWafer.processWait, 2);
+test("独立抽气和充气 MoveType 也能组成 LoadLock 循环", () => {
+  const performance = logic.analyzeSchedulePerformance([
+    { MoveID: 1, MoveType: 12, ModuleName: "LA", MatIDList: ["W5"], StartTime: 1, EndTime: 5 },
+    { MoveID: 2, MoveType: 13, ModuleName: "LA", MatIDList: ["W6"], StartTime: 10, EndTime: 14 },
+  ], device, "full");
+
+  assert.deepEqual(performance.loadLockCycles, [
+    { index: 1, loadLock: "LA", vacuumWafers: ["W5"], ventWafers: ["W6"] },
+  ]);
 });

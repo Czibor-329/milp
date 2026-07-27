@@ -630,8 +630,15 @@ def _execute_workspace_test_batch(
         if progress_callback is not None:
             progress_callback(index, {"status": "running", "startedAt": _workspace_timestamp()})
         try:
-            result, baseline, run_error = _execute_workspace_test_with_baseline(
+            selected_plan = build_workspace_batch_plan(
                 device, test_case, strategy, options,
+            )
+            result, baseline, run_error = _execute_workspace_test_with_baseline(
+                device,
+                test_case,
+                strategy,
+                options,
+                selected_plan=selected_plan,
             )
             if run_error is not None or result is None:
                 error = run_error or RuntimeError("运行未返回结果")
@@ -658,12 +665,13 @@ def _execute_workspace_test_batch(
                     "testName": str(test_case.get("name") or f"测试 {index + 1}"),
                     "error": "用户终止调度",
                 }
-            result_id = save_result(result["output"])
+            artifact = deepcopy(dict(result["output"]))
+            result_id = save_result(artifact)
             log_id = save_reproduction_log(result["reproductionLog"])
             robot_wafer_dwell_time = _robot_wafer_dwell_time(
                 list(result["output"].get("MoveList") or []),
             )
-            return {
+            item = {
                 "index": index,
                 "ok": True,
                 "status": "succeeded",
@@ -680,6 +688,7 @@ def _execute_workspace_test_batch(
                 **_log_response_fields(log_id),
                 **_baseline_comparison(result, baseline),
             }
+            return item
         except Exception as error:  # noqa: BLE001
             return {
                 "index": index,
@@ -718,7 +727,7 @@ def _execute_workspace_test_batch(
             executor.shutdown(wait=True)
     items.sort(key=lambda item: int(item["index"]))
     succeeded = sum(bool(item["ok"]) for item in items)
-    return {
+    batch_result = {
         "ok": not cancelled and succeeded == len(items),
         "strategy": strategy,
         "group": group,
@@ -732,6 +741,7 @@ def _execute_workspace_test_batch(
         "totalElapsedMs": (time.perf_counter() - started) * 1000.0,
         "items": items,
     }
+    return batch_result
 
 
 def run_workspace_test_batch(
@@ -745,7 +755,7 @@ def run_workspace_test_batch(
     """同步运行当前测试组；保留给测试和非 HTTP 调用方。"""
     device = get_workspace_device(device_id)
     normalized_group, tests = _workspace_group_tests(device, group)
-    return _execute_workspace_test_batch(
+    result = _execute_workspace_test_batch(
         device,
         tests,
         normalized_group,
@@ -753,6 +763,11 @@ def run_workspace_test_batch(
         options,
         maximum_workers=maximum_workers,
     )
+    result.update({
+        "deviceId": device_id,
+        "deviceName": str(device.get("name") or ""),
+    })
+    return result
 
 
 def read_workspace_batch_run(batch_id: str) -> Optional[Dict[str, Any]]:
@@ -809,6 +824,8 @@ def start_workspace_test_batch(
         "status": "queued",
         "strategy": strategy,
         "group": normalized_group,
+        "deviceId": device_id,
+        "deviceName": str(device.get("name") or ""),
         "testCount": len(tests),
         "completed": 0,
         "succeeded": 0,

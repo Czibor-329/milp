@@ -349,12 +349,6 @@ function summarizeIntervals(intervals, windowStart, windowEnd) {
     categoryTimes
   };
 }
-function materialPJob(move, material) {
-  const materials = materialIds(move);
-  const jobs = listValue(move.PJobName).map(String);
-  const index = materials.indexOf(material);
-  return jobs[index] ?? jobs[0] ?? "";
-}
 function waferBoundaryTimes(moves, device) {
   const entries = /* @__PURE__ */ new Map();
   const completions = /* @__PURE__ */ new Map();
@@ -548,62 +542,54 @@ function waferSystemResidenceTime(moves, device, window2) {
   }
   return summarizeDurations(durations);
 }
-function buildVacuumQueue(moves, device, intervalsByResource) {
-  const admittedMaterials = /* @__PURE__ */ new Set();
-  const queue = [];
-  for (const move of moves) {
-    if (/^ATR/i.test(move.ModuleName)) continue;
-    const isPick = PICK_MOVE_TYPES.has(move.MoveType);
-    const isLoadLockSwap = move.MoveType === SWAP_MOVE;
-    if (!isPick && !isLoadLockSwap) continue;
-    const source = isLoadLockSwap ? String(listValue(move.StationList)[0] ?? "") : firstStation(move, "SrcStationList");
-    if (!isLoadLockName(source, stationType(device, source))) continue;
-    const admitted = isLoadLockSwap ? materialIds(move, "RecvMatList") : materialIds(move);
-    for (const material of admitted) {
-      if (admittedMaterials.has(material)) continue;
-      admittedMaterials.add(material);
-      const targetPlacement = moves.find((candidate) => candidate.StartTime >= move.EndTime - PERFORMANCE_TIME_TOLERANCE && (PLACE_MOVE_TYPES.has(candidate.MoveType) && materialIds(candidate).includes(material) || candidate.MoveType === SWAP_MOVE && materialIds(candidate, "SendMatList").includes(material)) && isProcessModule(
-        candidate.MoveType === SWAP_MOVE ? String(listValue(candidate.StationList)[0] ?? "") : firstStation(candidate, "DestStationList"),
-        stationType(
-          device,
-          candidate.MoveType === SWAP_MOVE ? String(listValue(candidate.StationList)[0] ?? "") : firstStation(candidate, "DestStationList")
-        )
-      ));
-      const targetModule = targetPlacement ? targetPlacement.MoveType === SWAP_MOVE ? String(listValue(targetPlacement.StationList)[0] ?? "") : firstStation(targetPlacement, "DestStationList") : "";
-      const processMove = moves.find((candidate) => candidate.StartTime >= move.EndTime - PERFORMANCE_TIME_TOLERANCE && candidate.MoveType === PROCESS_MOVE && candidate.ModuleName === targetModule && materialIds(candidate).includes(material));
-      const admittedAt = move.EndTime;
-      const targetWasBusy = Boolean(targetModule && (intervalsByResource.get(targetModule) ?? []).some((interval) => interval.start < admittedAt + PERFORMANCE_TIME_TOLERANCE && interval.end > admittedAt + PERFORMANCE_TIME_TOLERANCE));
-      queue.push({
-        index: queue.length + 1,
-        material,
-        pjob: materialPJob(move, material),
-        loadLock: source,
-        admittedAt,
-        targetModule,
-        targetWasBusy,
-        processWait: processMove ? Math.max(processMove.StartTime - admittedAt, 0) : 0
-      });
-    }
-  }
-  return queue;
+function loadLockTransitionDirection(move) {
+  const lastState = String(move.LastState ?? "").toUpperCase();
+  const currentState = String(move.CurState ?? "").toUpperCase();
+  if (lastState === "ATM" && currentState === "VAC") return "vacuum";
+  if (lastState === "VAC" && currentState === "ATM") return "vent";
+  if (move.MoveType === 12) return "vacuum";
+  if (move.MoveType === 13) return "vent";
+  return null;
 }
-function vacuumQueuePattern(queue) {
-  if (!queue.length) return { switchRatio: 0, longestRun: 0 };
-  let switches = 0;
-  let run = 1;
-  let longestRun = 1;
-  for (let index = 1; index < queue.length; index += 1) {
-    if (queue[index].pjob === queue[index - 1].pjob) run += 1;
-    else {
-      switches += 1;
-      run = 1;
+function buildLoadLockCycles(moves, device) {
+  const cycles = [];
+  const pendingByLoadLock = /* @__PURE__ */ new Map();
+  for (const move of moves) {
+    const direction = loadLockTransitionDirection(move);
+    const loadLock = move.ModuleName;
+    if (!direction || !isLoadLockName(loadLock, stationType(device, loadLock))) continue;
+    if (direction === "vacuum") {
+      const cycle = {
+        index: 0,
+        loadLock,
+        vacuumWafers: materialIds(move),
+        ventWafers: [],
+        startedAt: move.StartTime
+      };
+      cycles.push(cycle);
+      pendingByLoadLock.set(loadLock, cycle);
+      continue;
     }
-    longestRun = Math.max(longestRun, run);
+    const pending = pendingByLoadLock.get(loadLock);
+    if (pending) {
+      pending.ventWafers = materialIds(move);
+      pendingByLoadLock.delete(loadLock);
+      continue;
+    }
+    cycles.push({
+      index: 0,
+      loadLock,
+      vacuumWafers: [],
+      ventWafers: materialIds(move),
+      startedAt: move.StartTime
+    });
   }
-  return {
-    switchRatio: queue.length > 1 ? switches / (queue.length - 1) : 0,
-    longestRun
-  };
+  return cycles.sort((left, right) => left.startedAt - right.startedAt || naturalCompare(left.loadLock, right.loadLock)).map((cycle, index) => ({
+    index: index + 1,
+    loadLock: cycle.loadLock,
+    vacuumWafers: cycle.vacuumWafers,
+    ventWafers: cycle.ventWafers
+  }));
 }
 function shortJobName(value) {
   const parts = String(value ?? "").split(".").filter(Boolean);
@@ -813,8 +799,7 @@ function analyzeSchedulePerformance(moves, device, mode = "steady", context = nu
   const chamberDwellTime = processChamberDwellTime(records, device, window2);
   const robotDwellTime = robotWaferDwellTime(records, window2);
   const systemResidenceTime = waferSystemResidenceTime(records, device, window2);
-  const vacuumQueue = buildVacuumQueue(records, device, intervalsByResource);
-  const queuePattern = vacuumQueuePattern(vacuumQueue);
+  const loadLockCycles = buildLoadLockCycles(records, device);
   return {
     window: window2,
     resources,
@@ -828,9 +813,7 @@ function analyzeSchedulePerformance(moves, device, mode = "steady", context = nu
     processChamberDwellTime: chamberDwellTime,
     robotWaferDwellTime: robotDwellTime,
     waferSystemResidenceTime: systemResidenceTime,
-    vacuumQueue,
-    vacuumQueueJobSwitchRatio: queuePattern.switchRatio,
-    vacuumQueueLongestRun: queuePattern.longestRun
+    loadLockCycles
   };
 }
 function summarizeBottleneckUtilization(performance2) {
@@ -851,6 +834,123 @@ function displayedPerformanceResources(performance2) {
   );
 }
 
+// ../analysis/diagnostic_guidance.ts
+function percent(value) {
+  return `${(Math.max(0, value) * 100).toFixed(1)}%`;
+}
+function seconds(value) {
+  return `${Math.max(0, value).toFixed(2)} s`;
+}
+function candidateDiagnostic(candidate, performance2) {
+  const confidence = candidate.confidence === "high" ? "strong" : candidate.confidence === "medium" ? "moderate" : "exploratory";
+  if (candidate.kind === "process-group") {
+    return {
+      title: "\u4F18\u5148\u9A8C\u8BC1\u5DE5\u827A\u5BB9\u91CF\u662F\u5426\u9650\u5236\u8282\u62CD",
+      confidence,
+      finding: `${candidate.label} \u662F\u5F53\u524D\u6700\u53EF\u80FD\u7684\u5BB9\u91CF\u7EA6\u675F\uFF1B\u5148\u9A8C\u8BC1\u52A0\u5DE5\u65F6\u957F\u53D8\u5316\u662F\u5426\u4F1A\u540C\u6B65\u6539\u53D8\u603B\u4F53\u5B8C\u5DE5\u65F6\u95F4\u3002`,
+      evidence: [
+        {
+          label: "\u5BB9\u91CF\u5229\u7528\u7387",
+          value: percent(candidate.utilization),
+          interpretation: "\u540C\u7EC4\u5E76\u884C\u8154\u5BA4\u5728\u7EDF\u8BA1\u7A97\u53E3\u5185\u7684\u5E73\u5747\u5FD9\u788C\u7A0B\u5EA6\u3002"
+        },
+        {
+          label: "\u52A0\u5DE5\u540E\u9A7B\u7559",
+          value: seconds(performance2.processChamberDwellTime.meanSeconds),
+          interpretation: "\u82E5\u540C\u65F6\u504F\u9AD8\uFF0C\u8BF4\u660E\u8154\u5BA4\u91CA\u653E\u8FD8\u53EF\u80FD\u88AB\u4E0B\u6E38\u642C\u8FD0\u963B\u585E\u3002"
+        }
+      ],
+      nextExperiment: {
+        id: "processing-time-compare",
+        label: "\u5BF9\u6BD4\u52A0\u5DE5\u65F6\u957F\u53D8\u5316",
+        change: "\u590D\u5236\u5F53\u524D\u6D4B\u8BD5\uFF0C\u5C0F\u5E45\u8C03\u6574\u52A0\u5DE5\u4E0E\u6E05\u6D01\u65F6\u957F\u540E\u91CD\u65B0\u8FD0\u884C\u5E76\u5BF9\u6BD4\u3002",
+        expectedSignal: "\u82E5\u74F6\u9888\u5224\u65AD\u6210\u7ACB\uFF0Cmakespan \u4F1A\u654F\u611F\u4E0A\u5347\uFF0C\u4E14\u8BE5\u8D44\u6E90\u4ECD\u4FDD\u6301\u4E3B\u8981\u5019\u9009\u3002"
+      },
+      limitation: "\u8FD9\u662F\u7531\u6267\u884C\u8F68\u8FF9\u91CD\u5EFA\u7684\u56E0\u679C\u5047\u8BBE\uFF0C\u4E0D\u662F\u7B97\u6CD5\u5185\u90E8\u5019\u9009\u52A8\u4F5C\u6253\u5206\u3002"
+    };
+  }
+  if (candidate.kind === "robot") {
+    return {
+      title: "\u4F18\u5148\u9A8C\u8BC1\u642C\u8FD0\u8D44\u6E90\u662F\u5426\u9020\u6210\u6392\u961F",
+      confidence,
+      finding: `${candidate.label} \u7684\u5360\u7528\u4E0E\u8FDE\u7EED\u5FD9\u788C\u8BC1\u636E\u6700\u5F3A\uFF0C\u53EF\u80FD\u9650\u5236\u5DE5\u827A\u8154\u53CA\u65F6\u4E0A\u4E0B\u7247\u3002`,
+      evidence: [
+        {
+          label: "\u5BB9\u91CF\u5229\u7528\u7387",
+          value: percent(candidate.utilization),
+          interpretation: "\u4F20\u8F93\u52A8\u4F5C\u5360\u636E\u8BE5\u673A\u5668\u4EBA\u53EF\u670D\u52A1\u7A97\u53E3\u7684\u6BD4\u4F8B\u3002"
+        },
+        {
+          label: "\u624B\u4E0A\u9A7B\u7559",
+          value: seconds(performance2.robotWaferDwellTime.meanSeconds),
+          interpretation: "\u6676\u5706\u88AB\u53D6\u51FA\u540E\u7B49\u5F85\u653E\u7F6E\u7684\u5E73\u5747\u65F6\u95F4\uFF0C\u5DF2\u5254\u9664\u663E\u5F0F\u8FD0\u8F93\u533A\u95F4\u3002"
+        }
+      ],
+      nextExperiment: {
+        id: "release-sequence-review",
+        label: "\u5BF9\u6BD4\u642C\u8FD0\u4F18\u5148\u7EA7",
+        change: "\u590D\u5236\u5F53\u524D\u6D4B\u8BD5\uFF0C\u4EC5\u8C03\u6574\u91CA\u653E\u6216\u6D3E\u5DE5\u4F18\u5148\u7EA7\u540E\u91CD\u65B0\u8FD0\u884C\u3002",
+        expectedSignal: "\u82E5\u642C\u8FD0\u6B21\u5E8F\u662F\u4E3B\u56E0\uFF0C\u673A\u5668\u624B\u9A7B\u7559\u548C\u603B\u4F53\u5B8C\u5DE5\u65F6\u95F4\u5E94\u540C\u6B65\u4E0B\u964D\u3002"
+      },
+      limitation: "\u5F53\u524D\u53EA\u80FD\u89C2\u5BDF\u5DF2\u6267\u884C\u52A8\u4F5C\uFF0C\u65E0\u6CD5\u5BA3\u79F0\u7B97\u6CD5\u5F53\u65F6\u6CA1\u6709\u8BC4\u4F30\u5176\u4ED6\u53EF\u884C\u52A8\u4F5C\u3002"
+    };
+  }
+  return {
+    title: "\u4F18\u5148\u9A8C\u8BC1\u771F\u7A7A\u4EA4\u63A5\u662F\u5426\u9650\u5236\u6D41\u91CF",
+    confidence,
+    finding: `${candidate.label} \u5728\u62BD\u5145\u6C14\u4E0E\u4EA4\u63A5\u9636\u6BB5\u5F62\u6210\u8F83\u9AD8\u5BB9\u91CF\u5360\u7528\uFF0C\u53EF\u80FD\u653E\u5927\u771F\u7A7A\u7AEF\u7B49\u5F85\u3002`,
+    evidence: [
+      {
+        label: "\u5BB9\u91CF\u5229\u7528\u7387",
+        value: percent(candidate.utilization),
+        interpretation: "LoadLock \u7EC4\u5728\u7EDF\u8BA1\u7A97\u53E3\u5185\u5904\u7406\u4EA4\u63A5\u5DE5\u4F5C\u7684\u5E73\u5747\u5360\u7528\u3002"
+      },
+      {
+        label: "\u8FDE\u7EED\u6027",
+        value: percent(candidate.continuity),
+        interpretation: "\u53CD\u6620 LoadLock \u5BB9\u91CF\u6D3B\u52A8\u662F\u5426\u6301\u7EED\uFF0C\u8D8A\u9AD8\u8868\u793A\u7A7A\u95F2\u65AD\u70B9\u8D8A\u5C11\u3002"
+      }
+    ],
+    nextExperiment: {
+      id: "loadlock-policy-compare",
+      label: "\u5BF9\u6BD4 LoadLock \u7BA1\u7406\u7B56\u7565",
+      change: "\u4FDD\u6301\u6D4B\u8BD5\u7EC4\u4E0D\u53D8\uFF0C\u4EC5\u5207\u6362 LoadLock \u7BA1\u7406\u5668\u540E\u91CD\u65B0\u8FD0\u884C\u3002",
+      expectedSignal: "\u82E5\u4EA4\u63A5\u7B56\u7565\u662F\u4E3B\u56E0\uFF0C\u771F\u7A7A\u7B49\u5F85\u4E0E makespan \u5E94\u540C\u65F6\u53D8\u5316\u3002"
+    },
+    limitation: "LoadLock \u5360\u7528\u53EF\u80FD\u662F\u4E0A\u6E38\u91CA\u653E\u6216\u4E0B\u6E38\u52A0\u5DE5\u62E5\u585E\u7684\u7ED3\u679C\uFF0C\u9700\u8981\u914D\u5BF9\u5B9E\u9A8C\u533A\u5206\u3002"
+  };
+}
+function diagnoseSchedule(performance2) {
+  const diagnostics = performance2.bottleneckCandidates.slice(0, 2).map((candidate) => candidateDiagnostic(candidate, performance2));
+  if (performance2.departureIntervalCv >= 0.25) {
+    diagnostics.push({
+      title: "\u51FA\u7AD9\u8282\u62CD\u6CE2\u52A8\u9700\u8981\u5355\u72EC\u9A8C\u8BC1",
+      confidence: performance2.completedWaferCount >= 8 ? "moderate" : "exploratory",
+      finding: `\u51FA\u7AD9\u95F4\u9694 CV \u4E3A ${performance2.departureIntervalCv.toFixed(2)}\uFF0C\u5747\u503C\u65E0\u6CD5\u4EE3\u8868\u5C40\u90E8\u62E5\u585E\u6216\u9965\u997F\u3002`,
+      evidence: [
+        {
+          label: "\u51FA\u7AD9\u95F4\u9694 CV",
+          value: performance2.departureIntervalCv.toFixed(2),
+          interpretation: "\u8D8A\u9AD8\u8868\u793A\u76F8\u90BB\u6676\u5706\u5B8C\u6210\u95F4\u9694\u8D8A\u4E0D\u5747\u5300\u3002"
+        },
+        {
+          label: "\u5B8C\u6574\u6676\u5706\u6837\u672C",
+          value: `${performance2.completedWaferCount} \u7247`,
+          interpretation: "\u6837\u672C\u8D8A\u5C11\uFF0C\u6CE2\u52A8\u5224\u65AD\u8D8A\u5E94\u89C6\u4F5C\u63A2\u7D22\u6027\u7EBF\u7D22\u3002"
+        }
+      ],
+      nextExperiment: {
+        id: "load-level-compare",
+        label: "\u8865\u9F50\u8D1F\u8F7D\u68AF\u5EA6\u6D4B\u8BD5",
+        change: "\u590D\u5236\u5F53\u524D\u6D4B\u8BD5\uFF0C\u5206\u522B\u964D\u4F4E\u4E0E\u63D0\u9AD8\u6676\u5706\u89C4\u6A21\uFF0C\u518D\u5BF9\u6BD4\u8282\u62CD CV \u4E0E\u541E\u5410\u3002",
+        expectedSignal: "\u82E5\u6CE2\u52A8\u6765\u81EA\u5BB9\u91CF\u4E34\u754C\u70B9\uFF0C\u4E2D\u9AD8\u8D1F\u8F7D\u7528\u4F8B\u7684 CV \u4F1A\u6301\u7EED\u5347\u9AD8\u3002"
+      },
+      limitation: "CV \u53EA\u63CF\u8FF0\u6CE2\u52A8\uFF0C\u4E0D\u76F4\u63A5\u8BF4\u660E\u8C03\u5EA6\u7B56\u7565\u6216\u8BBE\u5907\u5BB9\u91CF\u8C01\u662F\u6839\u56E0\u3002"
+    });
+  }
+  return diagnostics;
+}
+
 // src/workspace_visualizer.ts
 var PICK_MOVE_TYPES2 = /* @__PURE__ */ new Set([0, 2]);
 var PLACE_MOVE_TYPES2 = /* @__PURE__ */ new Set([1, 3]);
@@ -868,7 +968,6 @@ var PROCESS_ARC_CENTER_X_PERCENT = 50;
 var PROCESS_ARC_CENTER_Y_PIXELS = 214;
 var PROCESS_ARC_RADIUS_X_PERCENT = 38;
 var PROCESS_ARC_RADIUS_Y_PIXELS = 156;
-var MAXIMUM_VISIBLE_QUEUE_ITEMS = 32;
 var ACTIVITY_CATEGORIES2 = [
   "process",
   "clean",
@@ -1143,8 +1242,12 @@ function collectElements(root) {
     return element;
   };
   return {
+    toolbar: required("visualToolbar"),
+    groupAnalysis: required("testGroupAnalysisPanel"),
     empty: required("visualEmpty"),
     content: required("visualContent"),
+    topologyPlayback: required("visualTopologyPlayback"),
+    topologyToggle: required("visualTopologyToggle"),
     stage: required("visualDeviceStage"),
     activeMoves: required("visualActiveMoves"),
     source: required("visualSource"),
@@ -1263,9 +1366,13 @@ function renderEquipmentTopology(snapshot) {
       </div>
     </section>`;
 }
-function shortPJobName(value) {
-  const parts = String(value || "").split(".").filter(Boolean);
-  return parts.at(-1) ?? "\u2014";
+function waferLabel(value) {
+  const material = String(value || "").trim();
+  return /^W/i.test(material) ? material : `W${material}`;
+}
+function renderCycleWafers(wafers) {
+  if (!wafers.length) return '<span class="cycle-empty">\u7A7A\u8F7D</span>';
+  return wafers.map((wafer) => `<span class="cycle-wafer">${escapeHtml(waferLabel(wafer))}</span>`).join("");
 }
 function formatPercent(value) {
   return `${(Math.max(0, value) * 100).toFixed(1)}%`;
@@ -1299,20 +1406,23 @@ function renderSchedulePerformance(performance2) {
     return `
       <tr class="${resource.isBottleneck ? "is-bottleneck" : ""}">
         <th scope="row">
-          <span class="resource-name">${escapeHtml(resource.name)}</span>
-          <small>${escapeHtml(resourceKindLabels[resource.kind])}</small>
-          ${status}
+          <div class="resource-heading">
+            <span class="resource-name">${escapeHtml(resource.name)}</span>
+            <small>${escapeHtml(resourceKindLabels[resource.kind])}</small>
+            ${status}
+          </div>
         </th>
-        <td>
-          <div class="utilization-value">${formatPercent(resource.utilization)}</div>
+        <td class="utilization-cell">
+          <div class="utilization-line">
+            <div class="utilization-value">${formatPercent(resource.utilization)}</div>
           <div class="utilization-track" aria-label="${escapeHtml(resource.name)} \u5360\u7528\u7387 ${formatPercent(resource.utilization)}">${categoryBars}</div>
-          <small>${formatSeconds2(resource.busyTime)} s</small>
+            <small>${formatSeconds2(resource.busyTime)} s</small>
+          </div>
         </td>
-        <td class="performance-number">${formatSeconds2(resource.averageActivePeriod)} s<small>${resource.activePeriodCount} \u6BB5</small></td>
+        <td class="performance-number">${formatSeconds2(resource.averageActivePeriod)} s <small>${resource.activePeriodCount} \u6BB5</small></td>
         <td class="performance-number">${formatSeconds2(resource.longestIdlePeriod)} s</td>
       </tr>`;
   }).join("");
-  const visibleQueue = performance2.vacuumQueue.slice(0, MAXIMUM_VISIBLE_QUEUE_ITEMS);
   const candidateMarkup = performance2.bottleneckCandidates.length ? `<section class="bottleneck-candidates" aria-labelledby="bottleneckCandidatesTitle">
         <div class="bottleneck-candidate-head">
           <div>
@@ -1340,13 +1450,42 @@ function renderSchedulePerformance(performance2) {
             </li>`).join("")}
         </ol>
       </section>` : "";
-  const queueMarkup = visibleQueue.length ? `<ol class="vacuum-queue-sequence">${visibleQueue.map((item) => `
-        <li class="${item.targetWasBusy ? "target-busy" : "target-idle"}">
-          <span class="queue-index">${item.index}</span>
-          <strong>W${escapeHtml(item.material)}</strong>
-          <span>${escapeHtml(shortPJobName(item.pjob))} \xB7 ${escapeHtml(item.loadLock)} \u2192 ${escapeHtml(item.targetModule || "PM?")}</span>
-          <small>${formatSeconds2(item.admittedAt)} s \xB7 \u76EE\u6807\u8154${item.targetWasBusy ? "\u5FD9" : "\u95F2"} \xB7 \u81F3\u52A0\u5DE5 ${formatSeconds2(item.processWait)} s</small>
-        </li>`).join("")}</ol>` : '<div class="vacuum-queue-empty">MoveList \u4E2D\u6CA1\u6709\u8BC6\u522B\u5230\u201CLoadLock \u2192 \u771F\u7A7A\u673A\u68B0\u624B\u201D\u7684\u5165\u961F\u52A8\u4F5C\u3002</div>';
+  const cycleMarkup = performance2.loadLockCycles.length ? `<div class="loadlock-cycle-table-wrap">
+        <table class="loadlock-cycle-table" aria-label="LoadLock \u62BD\u6C14\u548C\u5145\u6C14\u643A\u7247\u987A\u5E8F">
+          <thead><tr><th>\u987A\u5E8F</th><th>LoadLock</th><th>\u62BD\u6C14\u643A\u7247</th><th>\u5145\u6C14\u643A\u7247</th></tr></thead>
+          <tbody>${performance2.loadLockCycles.map((cycle) => `
+            <tr>
+              <td><span class="cycle-index">${cycle.index}</span></td>
+              <th scope="row">${escapeHtml(cycle.loadLock)}</th>
+              <td><div class="cycle-wafers">${renderCycleWafers(cycle.vacuumWafers)}</div></td>
+              <td><div class="cycle-wafers">${renderCycleWafers(cycle.ventWafers)}</div></td>
+            </tr>`).join("")}</tbody>
+        </table>
+      </div>` : '<div class="loadlock-cycle-empty">MoveList \u4E2D\u6CA1\u6709\u8BC6\u522B\u5230 LoadLock \u62BD\u6C14\u6216\u5145\u6C14\u52A8\u4F5C\u3002</div>';
+  const diagnostics = diagnoseSchedule(performance2);
+  const diagnosticMarkup = diagnostics.length ? `<section class="diagnostic-panel" aria-labelledby="diagnosticPanelTitle">
+        <div class="diagnostic-panel-head">
+          <div><span>\u8BC1\u636E \u2192 \u5047\u8BBE \u2192 \u5B9E\u9A8C</span><strong id="diagnosticPanelTitle">\u4E0B\u4E00\u6B65\u4F18\u5316\u4ECE\u8FD9\u91CC\u5F00\u59CB</strong></div>
+          <small>\u7ED3\u8BBA\u6765\u81EA\u6267\u884C\u8F68\u8FF9\u91CD\u5EFA\uFF0C\u4E0D\u5192\u5145\u7B97\u6CD5\u5185\u90E8\u6253\u5206</small>
+        </div>
+        <div class="diagnostic-list">
+          ${diagnostics.map((diagnostic, index) => `
+            <article class="diagnostic-card">
+              <header><span class="diagnostic-rank">${index + 1}</span><div><strong>${escapeHtml(diagnostic.title)}</strong><small>${{ strong: "\u8BC1\u636E\u8F83\u5F3A", moderate: "\u8BC1\u636E\u4E2D\u7B49", exploratory: "\u63A2\u7D22\u6027\u7EBF\u7D22" }[diagnostic.confidence]}</small></div></header>
+              <p>${escapeHtml(diagnostic.finding)}</p>
+              <dl>${diagnostic.evidence.map((evidence) => `
+                <div><dt>${escapeHtml(evidence.label)}</dt><dd><b>${escapeHtml(evidence.value)}</b><span>${escapeHtml(evidence.interpretation)}</span></dd></div>
+              `).join("")}</dl>
+              <div class="diagnostic-experiment">
+                <span>\u53EF\u8BC1\u4F2A\u7684\u4E0B\u4E00\u6B65</span>
+                <strong>${escapeHtml(diagnostic.nextExperiment.label)}</strong>
+                <p>${escapeHtml(diagnostic.nextExperiment.change)}</p>
+                <small>\u9884\u671F\u4FE1\u53F7\uFF1A${escapeHtml(diagnostic.nextExperiment.expectedSignal)}</small>
+              </div>
+              <aside>${escapeHtml(diagnostic.limitation)}</aside>
+            </article>`).join("")}
+        </div>
+      </section>` : "";
   return `
     <div class="performance-summary">
       <div>
@@ -1381,6 +1520,7 @@ function renderSchedulePerformance(performance2) {
       </div>
     </div>
     ${candidateMarkup}
+    ${diagnosticMarkup}
     <p class="performance-window-note">${escapeHtml(window2.detail)}</p>
     <div class="performance-legend" aria-label="\u5360\u7528\u7EC4\u6210\u56FE\u4F8B">${legend}</div>
     <div class="performance-grid">
@@ -1391,23 +1531,14 @@ function renderSchedulePerformance(performance2) {
           <tbody>${resourceRows}</tbody>
         </table>
       </div>
-      <aside class="vacuum-queue-panel">
-        <div class="vacuum-queue-head">
-          <div><strong>\u771F\u7A7A\u7AEF\u5165\u961F\u5E8F\u5217</strong><span>\u6309\u6676\u5706\u7B2C\u4E00\u6B21\u4ECE LoadLock \u88AB VTR \u53D6\u51FA\u6392\u5E8F</span></div>
-          <small>\u961F\u5217\u4EA4\u7EC7\u5EA6 ${formatPercent(performance2.vacuumQueueJobSwitchRatio)}<br>\u6700\u957F\u540C Job \u8FDE\u7EED ${performance2.vacuumQueueLongestRun} \u7247</small>
+      <aside class="loadlock-cycle-panel">
+        <div class="loadlock-cycle-head">
+          <div><strong>LoadLock \u5FAA\u73AF\u987A\u5E8F</strong><span>\u540C\u4E00\u884C\u8868\u793A\u4E00\u6B21\u62BD\u6C14 \u2192 \u5145\u6C14\uFF0C\u53EA\u4FDD\u7559\u643A\u7247\u987A\u5E8F</span></div>
         </div>
-        ${queueMarkup}
-        ${performance2.vacuumQueue.length > visibleQueue.length ? `<div class="vacuum-queue-more">\u53E6\u6709 ${performance2.vacuumQueue.length - visibleQueue.length} \u7247\u672A\u5C55\u5F00</div>` : ""}
+        ${cycleMarkup}
       </aside>
     </div>
-    <section class="performance-guidance" aria-labelledby="performanceGuidanceTitle">
-      <strong id="performanceGuidanceTitle">\u6307\u6807\u600E\u4E48\u8BFB</strong>
-      <div>
-        <p><b>\u74F6\u9888\u5019\u9009</b><span>\u6309\u5DE5\u5E8F\u5E76\u884C\u5BB9\u91CF\u3001\u673A\u5668\u4EBA\u548C LoadLock \u5BB9\u91CF\u7EDF\u4E00\u6BD4\u8F83\u3002\u591A\u4E2A\u5F97\u5206\u63A5\u8FD1\u7684\u8D44\u6E90\u4F1A\u540C\u65F6\u4FDD\u7559\uFF0C\u4E0D\u5F3A\u884C\u7ED9\u51FA\u552F\u4E00\u7B54\u6848\u3002</span></p>
-        <p><b>\u8282\u62CD\u6CE2\u52A8</b><span>\u51FA\u7AD9\u95F4\u9694 CV \u8D8A\u5C0F\u8868\u793A\u51FA\u7247\u8D8A\u5747\u5300\uFF0C\u4F46\u5B83\u53EA\u63CF\u8FF0\u6CE2\u52A8\uFF0C\u4E0D\u80FD\u5355\u72EC\u89E3\u91CA\u6839\u56E0\u3002</span></p>
-        <p><b>\u961F\u5217\u4EA4\u7EC7</b><span>\u4EA4\u7EC7\u5EA6\u53EA\u63CF\u8FF0 Job \u987A\u5E8F\uFF0C\u5E76\u975E\u8D8A\u9AD8\u8D8A\u597D\uFF1B\u91CD\u70B9\u770B\u76EE\u6807\u8154\u5FD9\u95F2\u548C\u5165\u961F\u81F3\u52A0\u5DE5\u7B49\u5F85\u3002</span></p>
-      </div>
-    </section>`;
+    `;
 }
 var VisualizationWorkspace = class {
   root;
@@ -1430,6 +1561,7 @@ var VisualizationWorkspace = class {
     this.elements = collectElements(root);
     this.bindEvents();
     this.updatePlayButton();
+    this.setTopologyVisible(false);
   }
   /** 更新当前设备拓扑；已有 MoveList 会立即按新拓扑重绘。 */
   setDevice(device) {
@@ -1479,9 +1611,20 @@ var VisualizationWorkspace = class {
   }
   /** 切换到工作台标签。 */
   show() {
+    if (this.moves.length) this.showSingleResult();
     const tab = this.root.querySelector('[data-tab-target="workspace"]');
     tab?.click();
-    this.elements.range.focus({ preventScroll: true });
+    this.elements.performanceWindow.focus({ preventScroll: true });
+  }
+  /** 显示测试组统计，并完全隐藏当前单例诊断与回放。 */
+  showGroupAnalysis(markup) {
+    this.pause();
+    this.setTopologyVisible(false);
+    this.elements.toolbar.hidden = true;
+    this.elements.empty.hidden = true;
+    this.elements.content.hidden = true;
+    this.elements.groupAnalysis.innerHTML = markup;
+    this.elements.groupAnalysis.hidden = false;
   }
   /** 停止播放并释放动画帧。 */
   destroy() {
@@ -1497,8 +1640,13 @@ var VisualizationWorkspace = class {
     this.elements.resultButton.disabled = true;
     this.elements.openGantt.href = "#";
     this.elements.openGantt.setAttribute("aria-disabled", "true");
+    this.elements.toolbar.hidden = false;
+    this.elements.groupAnalysis.hidden = true;
+    this.elements.groupAnalysis.innerHTML = "";
     this.elements.content.hidden = true;
     this.elements.empty.hidden = false;
+    this.elements.topologyToggle.disabled = true;
+    this.setTopologyVisible(false);
     this.elements.empty.classList.remove("is-loading", "is-error");
     this.elements.empty.innerHTML = `
       <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="3"/><path d="M8 9h8M8 13h5"/></svg>
@@ -1521,8 +1669,9 @@ var VisualizationWorkspace = class {
     this.elements.openGantt.href = resultUrl ? `/movelist_gantt_viewer.html?src=${encodeURIComponent(resultUrl)}` : "#";
     this.elements.openGantt.setAttribute("aria-disabled", resultUrl ? "false" : "true");
     this.elements.resultButton.disabled = false;
-    this.elements.empty.hidden = true;
-    this.elements.content.hidden = false;
+    this.elements.topologyToggle.disabled = false;
+    this.setTopologyVisible(false);
+    this.showSingleResult();
     this.render(snapshot);
     this.renderPerformance();
   }
@@ -1549,6 +1698,9 @@ var VisualizationWorkspace = class {
     this.elements.performanceWindow.addEventListener("change", () => {
       this.performanceWindowMode = this.elements.performanceWindow.value === "full" ? "full" : "steady";
       this.renderPerformance();
+    });
+    this.elements.topologyToggle.addEventListener("click", () => {
+      this.setTopologyVisible(this.elements.topologyPlayback.hidden);
     });
     this.elements.resultButton.addEventListener("click", () => this.show());
     this.elements.openGantt.addEventListener("click", (event) => {
@@ -1600,6 +1752,21 @@ var VisualizationWorkspace = class {
     this.elements.playButton.setAttribute("aria-label", this.playing ? "\u6682\u505C\u56DE\u653E" : "\u64AD\u653E\u56DE\u653E");
     this.elements.playButton.classList.toggle("is-playing", this.playing);
   }
+  /** 切换单例分析模式，测试组统计与单例诊断不会同时出现。 */
+  showSingleResult() {
+    this.elements.toolbar.hidden = false;
+    this.elements.groupAnalysis.hidden = true;
+    this.elements.empty.hidden = true;
+    this.elements.content.hidden = false;
+  }
+  /** 将概要、进度控制、拓扑与当前动作作为一个回放单元统一显隐。 */
+  setTopologyVisible(visible) {
+    if (!visible) this.pause();
+    this.elements.topologyPlayback.hidden = !visible;
+    this.elements.topologyToggle.setAttribute("aria-expanded", String(visible));
+    const label = this.elements.topologyToggle.querySelector("span");
+    if (label) label.textContent = visible ? "\u9690\u85CF\u8BBE\u5907\u62D3\u6251" : "\u663E\u793A\u8BBE\u5907\u62D3\u6251";
+  }
   /** 绘制当前时间对应的设备快照。 */
   render(prebuiltSnapshot) {
     if (!this.moves.length) return;
@@ -1634,6 +1801,11 @@ var VisualizationWorkspace = class {
   }
   /** 显示加载状态并保留明确的系统反馈。 */
   setLoading(loading, message) {
+    this.pause();
+    this.setTopologyVisible(false);
+    this.elements.toolbar.hidden = false;
+    this.elements.groupAnalysis.hidden = true;
+    this.elements.content.hidden = true;
     this.elements.empty.hidden = false;
     this.elements.empty.classList.toggle("is-loading", loading);
     this.elements.empty.classList.remove("is-error");
@@ -1642,6 +1814,9 @@ var VisualizationWorkspace = class {
   /** 在工作台空状态中显示可恢复的错误。 */
   showError(message) {
     this.pause();
+    this.setTopologyVisible(false);
+    this.elements.toolbar.hidden = false;
+    this.elements.groupAnalysis.hidden = true;
     this.elements.content.hidden = true;
     this.elements.empty.hidden = false;
     this.elements.empty.classList.remove("is-loading");
@@ -1905,9 +2080,6 @@ function cpuChart(summary) {
     </div>`;
   }).join("") || '<p class="group-analysis-empty">\u6CA1\u6709 CPU Time \u6570\u636E\u3002</p>';
 }
-function frequencyTags(summary) {
-  return summary.bottleneckFrequencies.map((item) => `<span class="group-frequency-tag"><b>${escapeHtml2(item.resourceName)}</b>${item.count} \u6B21 \xB7 \u4E2D\u4F4D ${(item.medianUtilization * 100).toFixed(1)}%</span>`).join("") || '<span class="group-analysis-empty">\u6CA1\u6709\u74F6\u9888\u9891\u6B21\u6570\u636E\u3002</span>';
-}
 function resultTable(summary) {
   return summary.cases.map((item, index) => `
     <tr>
@@ -1927,18 +2099,12 @@ function resultTable(summary) {
       <td>${item.validationPassed ? '<span class="group-pass">\u901A\u8FC7</span>' : `<span class="group-fail">${escapeHtml2(item.validation || item.status)}</span>`}</td>
     </tr>`).join("");
 }
-function renderTestGroupAnalysis(summary, groupName, strategy) {
+function renderTestGroupAnalysis(summary, groupName) {
   const weighted = summary.weightedImprovementPercent;
   const medianImprovement = summary.medianImprovementPercent;
-  const windowApproximationCount = summary.windowMethodCounts["middle-approximation"] ?? 0;
   return `
     <div class="group-analysis-head">
-      <div>
-        <span class="eyebrow">\u6D4B\u8BD5\u7EC4\u7ED3\u679C\u5206\u6790</span>
-        <h2>${escapeHtml2(groupName || "\u5F53\u524D\u6D4B\u8BD5\u7EC4")}</h2>
-        <p>${escapeHtml2(strategy || "\u5F53\u524D\u7B56\u7565")} \xB7 ${summary.succeededCount}/${summary.totalCount} \u4E2A\u6D4B\u8BD5\u6709\u6709\u6548\u7ED3\u679C</p>
-      </div>
-      <span class="group-analysis-badge">\u9010\u4F8B\u5BF9\u6BD4 \xB7 \u4E0D\u505A\u7EFC\u5408\u6253\u5206</span>
+      <h2>${escapeHtml2(groupName || "\u5F53\u524D\u6D4B\u8BD5\u7EC4")}</h2>
     </div>
     <div class="group-kpi-grid">
       <article><span>\u6821\u9A8C\u901A\u8FC7\u7387</span><strong>${(summary.validationPassRate * 100).toFixed(1)}%</strong><small>${summary.validationPassedCount}/${summary.succeededCount} \u4E2A\u6709\u6548\u7ED3\u679C</small></article>
@@ -1965,10 +2131,6 @@ function renderTestGroupAnalysis(summary, groupName, strategy) {
         <div class="group-chart-body">${cpuChart(summary)}</div>
       </article>
     </div>
-    <article class="group-frequency-card">
-      <div><h3>\u74F6\u9888\u5019\u9009\u51FA\u73B0\u9891\u6B21</h3><p>\u6309\u5BB9\u91CF\u7EC4\u7EDF\u8BA1\u8DE8\u6D4B\u8BD5\u53CD\u590D\u51FA\u73B0\u7684\u7ED3\u6784\u6027\u7EA6\u675F</p></div>
-      <div class="group-frequency-tags">${frequencyTags(summary)}</div>
-    </article>
     <details class="group-analysis-table-wrap">
       <summary>\u67E5\u770B\u9010\u6D4B\u8BD5\u5B8C\u6574\u6307\u6807</summary>
       <div class="group-analysis-table-scroll">
@@ -1977,11 +2139,7 @@ function renderTestGroupAnalysis(summary, groupName, strategy) {
           <tbody>${resultTable(summary)}</tbody>
         </table>
       </div>
-    </details>
-    <aside class="group-method-note">
-      <strong>\u5982\u4F55\u89E3\u8BFB</strong>
-      <p>\u74F6\u9888\u5148\u6309\u5DE5\u5E8F\u5E76\u884C\u8154\u5BA4\u3001\u673A\u5668\u4EBA\u548C LoadLock \u5EFA\u7ACB\u5BB9\u91CF\u5019\u9009\uFF0C\u518D\u4EE5\u5BB9\u91CF\u5229\u7528\u7387\u4E3A\u4E3B\u3001\u8FDE\u7EED\u6027\u548C\u540C\u7C7B\u76F8\u5BF9\u5F3A\u5EA6\u4E3A\u8F85\u6392\u5E8F\uFF1B\u591A\u4E2A\u63A5\u8FD1\u5019\u9009\u4F1A\u540C\u65F6\u4FDD\u7559\u3002\u5E73\u5747\u6D3B\u8DC3\u671F\u53EA\u4F5C\u4E3A\u8D44\u6E90\u8868\u4E2D\u7684\u8F85\u52A9\u89C2\u5BDF\uFF0C\u4E0D\u518D\u8DE8\u7C7B\u578B\u76F4\u63A5\u5224\u5B9A\u3002\u7EC4\u7EA7\u540C\u65F6\u62A5\u544A\u52A0\u6743\u603B\u4F53\u6539\u5584\u3001\u9010\u4F8B\u4E2D\u4F4D\u6570\u548C\u80DC/\u5E73/\u9000\u5316\uFF0C\u907F\u514D\u5C11\u6570\u957F\u7528\u4F8B\u63A9\u76D6\u5C40\u90E8\u9000\u5316\u3002${windowApproximationCount ? ` \u6709 ${windowApproximationCount} \u4E2A\u6D4B\u8BD5\u56E0\u6837\u672C\u4E0D\u8DB3\u4F7F\u7528\u4E2D\u6BB5\u8FD1\u4F3C\u7A97\u3002` : ""}</p>
-    </aside>`;
+    </details>`;
 }
 
 // src/editor_models.ts
@@ -3670,7 +3828,7 @@ async function runCurrentTestGroup() {
     button.disabled = !state.serviceCompatible;
     runButton.disabled = !state.serviceCompatible;
     button.classList.remove("running", "cancel");
-    button.textContent = "\u25A6 \u6279\u91CF\u8FD0\u884C\u5F53\u524D\u7EC4";
+    button.textContent = "\u25A6 \u8FD0\u884C\u5F53\u524D\u6D4B\u8BD5\u7EC4";
     renderWorkspaceControls();
   }
 }
@@ -3844,15 +4002,13 @@ async function showTestGroupAnalysis() {
       error: item.error || item.baseline?.error || "",
       performance: item.resultUrl ? batchPerformanceAnalyses.get(String(item.resultUrl)) ?? null : null
     })));
-    const panel = document.getElementById("testGroupAnalysisPanel");
-    panel.innerHTML = renderTestGroupAnalysis(
+    const panelMarkup = renderTestGroupAnalysis(
       summary,
-      result.group || state.activeTestGroup || "\u5F53\u524D\u6D4B\u8BD5\u7EC4",
-      result.strategy || state.strategy
+      result.group || state.activeTestGroup || "\u5F53\u524D\u6D4B\u8BD5\u7EC4"
     );
-    panel.hidden = false;
-    document.getElementById("visualEmpty").hidden = true;
+    visualizationWorkspace.showGroupAnalysis(panelMarkup);
     switchTab("workspace");
+    const panel = document.getElementById("testGroupAnalysisPanel");
     panel.scrollIntoView({ behavior: "smooth", block: "start" });
   } finally {
     button.disabled = false;
@@ -3861,13 +4017,13 @@ async function showTestGroupAnalysis() {
 }
 function showBatchProgress(result) {
   const completed = Number(result.completed || 0), total = Number(result.testCount || result.items?.length || 0);
-  const percent = total ? Math.round(completed / total * 100) : 0;
+  const percent2 = total ? Math.round(completed / total * 100) : 0;
   const progress = document.getElementById("batchProgress");
   document.getElementById("testGroupAnalysisButton").hidden = !["completed", "cancelled"].includes(result.status);
   progress.classList.add("visible");
-  progress.setAttribute("aria-valuenow", String(percent));
-  document.getElementById("batchProgressCount").textContent = `${percent}%`;
-  document.getElementById("batchProgressBar").style.width = `${percent}%`;
+  progress.setAttribute("aria-valuenow", String(percent2));
+  document.getElementById("batchProgressCount").textContent = `${percent2}%`;
+  document.getElementById("batchProgressBar").style.width = `${percent2}%`;
   state.batchResult = result;
   if (!state.selectedBatchTestId) showBatchOverviewMetrics(result);
   renderBatchItems(result.items || []);
@@ -3879,7 +4035,7 @@ function showBatchProgress(result) {
   writeTerminal([
     "$ \u6279\u91CF\u8FD0\u884C\u5F53\u524D\u6D4B\u8BD5\u7EC4",
     `  \u7EC4\u522B: ${result.group || "\u672A\u5206\u7EC4"} \xB7 \u7B56\u7565: ${result.strategy}`,
-    `  \u8FDB\u5EA6: ${completed}/${total} (${percent}%) \xB7 \u5E76\u884C\u6570: ${result.workerCount}`,
+    `  \u8FDB\u5EA6: ${completed}/${total} (${percent2}%) \xB7 \u5E76\u884C\u6570: ${result.workerCount}`,
     `  \u7B49\u5F85: ${(result.items || []).filter((item) => item.status === "queued").length} \xB7 \u8FD0\u884C\u4E2D: ${(result.items || []).filter((item) => item.status === "running").length} \xB7 \u6210\u529F: ${result.succeeded || 0} \xB7 \u5931\u8D25: ${result.failed || 0} \xB7 \u7EC8\u6B62: ${result.cancelled || 0}`
   ].join("\n"));
 }

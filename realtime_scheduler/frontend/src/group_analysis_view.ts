@@ -98,13 +98,6 @@ function cpuChart(summary: TestGroupPerformanceSummary): string {
   }).join("") || '<p class="group-analysis-empty">没有 CPU Time 数据。</p>';
 }
 
-function frequencyTags(summary: TestGroupPerformanceSummary): string {
-  return summary.bottleneckFrequencies.map(item => (
-    `<span class="group-frequency-tag"><b>${escapeHtml(item.resourceName)}</b>`
-    + `${item.count} 次 · 中位 ${(item.medianUtilization * 100).toFixed(1)}%</span>`
-  )).join("") || '<span class="group-analysis-empty">没有瓶颈频次数据。</span>';
-}
-
 function resultTable(summary: TestGroupPerformanceSummary): string {
   return summary.cases.map((item, index) => `
     <tr>
@@ -129,19 +122,12 @@ function resultTable(summary: TestGroupPerformanceSummary): string {
 export function renderTestGroupAnalysis(
   summary: TestGroupPerformanceSummary,
   groupName: string,
-  strategy: string,
 ): string {
   const weighted = summary.weightedImprovementPercent;
   const medianImprovement = summary.medianImprovementPercent;
-  const windowApproximationCount = summary.windowMethodCounts["middle-approximation"] ?? 0;
   return `
     <div class="group-analysis-head">
-      <div>
-        <span class="eyebrow">测试组结果分析</span>
-        <h2>${escapeHtml(groupName || "当前测试组")}</h2>
-        <p>${escapeHtml(strategy || "当前策略")} · ${summary.succeededCount}/${summary.totalCount} 个测试有有效结果</p>
-      </div>
-      <span class="group-analysis-badge">逐例对比 · 不做综合打分</span>
+      <h2>${escapeHtml(groupName || "当前测试组")}</h2>
     </div>
     <div class="group-kpi-grid">
       <article><span>校验通过率</span><strong>${(summary.validationPassRate * 100).toFixed(1)}%</strong><small>${summary.validationPassedCount}/${summary.succeededCount} 个有效结果</small></article>
@@ -168,10 +154,6 @@ export function renderTestGroupAnalysis(
         <div class="group-chart-body">${cpuChart(summary)}</div>
       </article>
     </div>
-    <article class="group-frequency-card">
-      <div><h3>瓶颈候选出现频次</h3><p>按容量组统计跨测试反复出现的结构性约束</p></div>
-      <div class="group-frequency-tags">${frequencyTags(summary)}</div>
-    </article>
     <details class="group-analysis-table-wrap">
       <summary>查看逐测试完整指标</summary>
       <div class="group-analysis-table-scroll">
@@ -180,9 +162,5 @@ export function renderTestGroupAnalysis(
           <tbody>${resultTable(summary)}</tbody>
         </table>
       </div>
-    </details>
-    <aside class="group-method-note">
-      <strong>如何解读</strong>
-      <p>瓶颈先按工序并行腔室、机器人和 LoadLock 建立容量候选，再以容量利用率为主、连续性和同类相对强度为辅排序；多个接近候选会同时保留。平均活跃期只作为资源表中的辅助观察，不再跨类型直接判定。组级同时报告加权总体改善、逐例中位数和胜/平/退化，避免少数长用例掩盖局部退化。${windowApproximationCount ? ` 有 ${windowApproximationCount} 个测试因样本不足使用中段近似窗。` : ""}</p>
-    </aside>`;
+    </details>`;
 }

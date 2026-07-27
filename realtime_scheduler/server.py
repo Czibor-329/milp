@@ -201,7 +201,7 @@ BUILTIN_ALGORITHM_METADATA: Dict[str, Dict[str, str]] = {
 def _workspace_catalog_guard(path: Path) -> Iterator[None]:
     """串行化跨线程、跨进程的工作区读改写事务。
 
-    Python 的 ``RLock`` 只能保护当前服务进程。批量验收或桌面端误启第二个服务时，
+    Python 的 ``RLock`` 只能保护当前服务进程。批量运行或桌面端误启第二个服务时，
     两个进程若共用固定 ``.tmp`` 文件会破坏 JSON，单靠原子替换也会发生后写覆盖。
     这里用一字节系统文件锁包住完整读改写事务；锁文件只承载互斥，不保存业务数据。
     """
@@ -3013,7 +3013,8 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                 result.update(_baseline_comparison(result, baseline))
             else:
                 result = execute_plan(payload)
-            result_id = save_result(result["output"])
+            artifact = deepcopy(dict(result["output"]))
+            result_id = save_result(artifact)
             log_id = save_reproduction_log(result["reproductionLog"])
             response = {
                 key: value

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>调度平台</title>
-  <link rel="stylesheet" href="/assets/config_editor.css?v=1.0.7">
+  <link rel="stylesheet" href="/assets/config_editor.css?v=1.0.10">
 </head>
 <body>
   <main class="shell">
@@ -15,9 +15,9 @@
         <button class="tab" data-tab-target="workspace">结果分析</button>
         <button class="tab" data-tab-target="route">路径配置</button>
         <button class="tab" data-tab-target="clean">清洁配置</button>
-        <button class="tab" data-tab-target="algorithm-history">算法记录</button>
+        <button class="tab" data-tab-target="algorithm-history">算法版本</button>
       </nav>
-      <div class="hero-meta"><span class="frontend-version">前端 v1.0.7</span><div class="service-pill" id="serviceState">本地服务</div></div>
+      <div class="hero-meta"><span class="frontend-version">前端 v1.0.10</span><div class="service-pill" id="serviceState">本地服务</div></div>
     </header>
 
     <div class="layout" id="pageLayout">
@@ -116,13 +116,12 @@
 
         <div class="tab-view" data-tab-view="workspace">
           <article class="panel visual-workbench">
-            <div class="visual-toolbar">
-              <div>
-                <span class="visual-kicker">MoveList 回放</span>
-                <h2>调度结果分析</h2>
-                <p>按设备俯视拓扑回放晶圆流转，仅显示当前 MoveList 实际使用的腔室。</p>
-              </div>
+            <div class="visual-toolbar" id="visualToolbar">
               <div class="visual-toolbar-actions">
+                <button class="btn visual-topology-toggle" id="visualTopologyToggle" type="button" aria-expanded="false" aria-controls="visualTopologyPlayback" disabled>
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><circle cx="5" cy="6" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="5" cy="18" r="2"/><circle cx="19" cy="18" r="2"/><path d="m7 7.3 2.8 2.8M17 7.3l-2.8 2.8M7 16.7l2.8-2.8M17 16.7l-2.8-2.8"/></svg>
+                  <span>显示设备拓扑</span>
+                </button>
                 <label class="btn visual-import-button">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L7 9m5-5 5 5M5 15v5h14v-5"/></svg>
                   导入 MoveList
@@ -141,32 +140,6 @@
             </div>
 
             <div class="visual-content" id="visualContent" hidden>
-              <section class="visual-overview" aria-label="回放概要">
-                <div class="visual-source"><span>数据来源</span><strong id="visualSource">—</strong></div>
-                <div class="visual-stat"><span>当前时间</span><strong><b id="visualCurrentTime">0.0</b> s</strong></div>
-                <div class="visual-stat"><span>总时长</span><strong><b id="visualTotalTime">0.0</b> s</strong></div>
-                <div class="visual-stat"><span>回放进度</span><strong id="visualProgressText">0%</strong></div>
-                <div class="visual-stat"><span>已完成 Move</span><strong id="visualMoveText">0 / 0</strong></div>
-                <div class="visual-stat"><span>晶圆数</span><strong id="visualWaferText">0</strong></div>
-              </section>
-
-              <section class="timeline-console" aria-label="MoveList 时间轴控制">
-                <button class="btn primary timeline-play" id="visualPlayButton" type="button" aria-label="播放回放"></button>
-                <div class="timeline-range">
-                  <input id="visualTimeline" type="range" min="0" max="0" step="0.1" value="0" aria-label="回放时间进度">
-                  <div class="timeline-scale"><span>0 s</span><span>拖动查看任意时刻</span><span>结束</span></div>
-                </div>
-                <label class="timeline-speed">播放速度
-                  <select id="visualSpeed">
-                    <option value="1">1×</option>
-                    <option value="2">2×</option>
-                    <option value="4" selected>4×</option>
-                    <option value="8">8×</option>
-                    <option value="16">16×</option>
-                  </select>
-                </label>
-              </section>
-
               <section class="performance-panel" aria-labelledby="performanceTitle">
                 <div class="performance-head">
                   <div>
@@ -184,21 +157,49 @@
                 <div id="visualPerformance"></div>
               </section>
 
-              <div class="visual-workspace-layout">
-                <section class="device-stage" id="visualDeviceStage" aria-label="设备拓扑状态"></section>
-                <aside class="active-moves-panel">
-                  <div class="active-moves-head"><h3>当前动作</h3><span>随时间轴更新</span></div>
-                  <ul id="visualActiveMoves"></ul>
-                  <div class="visual-legend" aria-label="状态图例">
-                    <h3>状态图例</h3>
-                    <span><i class="legend-dot is-normal"></i>空闲 / 已载片</span>
-                    <span><i class="legend-dot is-active"></i>加工 / 传输</span>
-                    <span><i class="legend-dot is-transition"></i>门 / 环境切换</span>
-                    <span><i class="legend-door is-open"></i>门已打开</span>
-                    <span><i class="legend-door is-closed"></i>门已关闭</span>
+              <section class="topology-playback" id="visualTopologyPlayback" hidden aria-label="设备拓扑回放">
+                <section class="visual-overview" aria-label="回放概要">
+                  <div class="visual-source"><span>数据来源</span><strong id="visualSource">—</strong></div>
+                  <div class="visual-stat"><span>当前时间</span><strong><b id="visualCurrentTime">0.0</b> s</strong></div>
+                  <div class="visual-stat"><span>总时长</span><strong><b id="visualTotalTime">0.0</b> s</strong></div>
+                  <div class="visual-stat"><span>回放进度</span><strong id="visualProgressText">0%</strong></div>
+                  <div class="visual-stat"><span>已完成 Move</span><strong id="visualMoveText">0 / 0</strong></div>
+                  <div class="visual-stat"><span>晶圆数</span><strong id="visualWaferText">0</strong></div>
+                </section>
+
+                <section class="timeline-console" aria-label="MoveList 时间轴控制">
+                  <button class="btn primary timeline-play" id="visualPlayButton" type="button" aria-label="播放回放"></button>
+                  <div class="timeline-range">
+                    <input id="visualTimeline" type="range" min="0" max="0" step="0.1" value="0" aria-label="回放时间进度">
+                    <div class="timeline-scale"><span>0 s</span><span>拖动查看任意时刻</span><span>结束</span></div>
                   </div>
-                </aside>
-              </div>
+                  <label class="timeline-speed">播放速度
+                    <select id="visualSpeed">
+                      <option value="1">1×</option>
+                      <option value="2">2×</option>
+                      <option value="4" selected>4×</option>
+                      <option value="8">8×</option>
+                      <option value="16">16×</option>
+                    </select>
+                  </label>
+                </section>
+
+                <div class="visual-workspace-layout">
+                  <section class="device-stage" id="visualDeviceStage" aria-label="设备拓扑状态"></section>
+                  <aside class="active-moves-panel">
+                    <div class="active-moves-head"><h3>当前动作</h3><span>随时间轴更新</span></div>
+                    <ul id="visualActiveMoves"></ul>
+                    <div class="visual-legend" aria-label="状态图例">
+                      <h3>状态图例</h3>
+                      <span><i class="legend-dot is-normal"></i>空闲 / 已载片</span>
+                      <span><i class="legend-dot is-active"></i>加工 / 传输</span>
+                      <span><i class="legend-dot is-transition"></i>门 / 环境切换</span>
+                      <span><i class="legend-door is-open"></i>门已打开</span>
+                      <span><i class="legend-door is-closed"></i>门已关闭</span>
+                    </div>
+                  </aside>
+                </div>
+              </section>
             </div>
           </article>
         </div>
@@ -219,7 +220,7 @@
 
         <div class="tab-view" data-tab-view="algorithm-history">
           <article class="panel algorithm-history-panel">
-            <div class="panel-head"><div><h2>算法变更记录</h2><p>所有算法默认折叠，点击算法名称查看完整版本记录。</p></div></div>
+            <div class="panel-head"><div><h2>算法版本记录</h2><p>记录算法版本、业务说明和每次变更的意图。</p></div></div>
             <div class="panel-body"><div class="algorithm-history-list" id="algorithmHistoryList"></div></div>
           </article>
         </div>
@@ -264,7 +265,11 @@
               <div class="field span-6"><label>约束</label><div class="hint">只能运行首次排程，所有 PJob 的晶圆总数不能超过 12 片。</div></div>
             </div>
           </div>
-          <div class="run-box"><h2>开始运行</h2><label class="export-option"><input id="autoExportLog" type="checkbox">运行结束后自动下载 input_data 复现日志（失败也会生成）</label><div class="run-actions"><button class="btn" id="runButton">▶ 运行当前测试</button><button class="btn batch" id="batchRunButton">▦ 批量运行当前组</button></div></div>
+          <div class="run-box">
+            <h2>开始运行</h2>
+            <label class="export-option"><input id="autoExportLog" type="checkbox">运行结束后自动下载 input_data 复现日志（失败也会生成）</label>
+            <div class="run-actions"><button class="btn" id="runButton">▶ 运行当前测试</button><button class="btn batch" id="batchRunButton">▦ 运行当前测试组</button></div>
+          </div>
         </article>
       </aside>
     </div>
@@ -301,6 +306,6 @@
     </aside>
   </div>
 
-  <script type="module" src="/assets/config_editor.js?v=1.0.7"></script>
+  <script type="module" src="/assets/config_editor.js?v=1.0.10"></script>
 </body>
 </html>

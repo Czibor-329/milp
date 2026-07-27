@@ -60,9 +60,11 @@ export interface BottleneckCandidate {
   confidence: BottleneckConfidence;
   evidence: string[];
 }
-export interface VacuumQueueItem {
-  index: number; material: string; pjob: string; loadLock: string;
-  admittedAt: number; targetModule: string; targetWasBusy: boolean; processWait: number;
+export interface LoadLockCycle {
+  index: number;
+  loadLock: string;
+  vacuumWafers: string[];
+  ventWafers: string[];
 }
 export interface DurationMetricSummary {
   totalSeconds: number;
@@ -84,8 +86,7 @@ export interface SchedulePerformance {
   processChamberDwellTime: DurationMetricSummary;
   robotWaferDwellTime: DurationMetricSummary;
   waferSystemResidenceTime: DurationMetricSummary;
-  vacuumQueue: VacuumQueueItem[];
-  vacuumQueueJobSwitchRatio: number; vacuumQueueLongestRun: number;
+  loadLockCycles: LoadLockCycle[];
 }
 export interface BottleneckUtilizationSummary {
   resourceName: string; utilization: number; windowLabel: string;
@@ -386,14 +387,6 @@ function summarizeIntervals(
   };
 }
 
-/** 返回物料在 Move 的并行列表字段中对应的 PJob 名称。 */
-function materialPJob(move: NormalizedMove, material: string): string {
-  const materials = materialIds(move);
-  const jobs = listValue(move.PJobName).map(String);
-  const index = materials.indexOf(material);
-  return jobs[index] ?? jobs[0] ?? "";
-}
-
 /** 收集晶圆从 LoadPort 离开和返回 LoadPort 的时刻。 */
 function waferBoundaryTimes(
   moves: NormalizedMove[],
@@ -677,100 +670,66 @@ function waferSystemResidenceTime(
   return summarizeDurations(durations);
 }
 
-/** 构造晶圆第一次从 LoadLock 进入真空机器人的可观察队列。 */
-function buildVacuumQueue(
-  moves: NormalizedMove[],
-  device: DeviceDefinition | null,
-  intervalsByResource: Map<string, ActivityInterval[]>,
-): VacuumQueueItem[] {
-  const admittedMaterials = new Set<string>();
-  const queue: VacuumQueueItem[] = [];
-  for (const move of moves) {
-    if (/^ATR/i.test(move.ModuleName)) continue;
-    const isPick = PICK_MOVE_TYPES.has(move.MoveType);
-    const isLoadLockSwap = move.MoveType === SWAP_MOVE;
-    if (!isPick && !isLoadLockSwap) continue;
-    const source = isLoadLockSwap
-      ? String(listValue(move.StationList)[0] ?? "")
-      : firstStation(move, "SrcStationList");
-    if (!isLoadLockName(source, stationType(device, source))) continue;
-    const admitted = isLoadLockSwap ? materialIds(move, "RecvMatList") : materialIds(move);
-    for (const material of admitted) {
-      if (admittedMaterials.has(material)) continue;
-      admittedMaterials.add(material);
-      const targetPlacement = moves.find(candidate => (
-        candidate.StartTime >= move.EndTime - PERFORMANCE_TIME_TOLERANCE
-        && (
-          (
-            PLACE_MOVE_TYPES.has(candidate.MoveType)
-            && materialIds(candidate).includes(material)
-          )
-          || (
-            candidate.MoveType === SWAP_MOVE
-            && materialIds(candidate, "SendMatList").includes(material)
-          )
-        )
-        && isProcessModule(
-          candidate.MoveType === SWAP_MOVE
-            ? String(listValue(candidate.StationList)[0] ?? "")
-            : firstStation(candidate, "DestStationList"),
-          stationType(
-            device,
-            candidate.MoveType === SWAP_MOVE
-              ? String(listValue(candidate.StationList)[0] ?? "")
-              : firstStation(candidate, "DestStationList"),
-          ),
-        )
-      ));
-      const targetModule = targetPlacement
-        ? targetPlacement.MoveType === SWAP_MOVE
-          ? String(listValue(targetPlacement.StationList)[0] ?? "")
-          : firstStation(targetPlacement, "DestStationList")
-        : "";
-      const processMove = moves.find(candidate => (
-        candidate.StartTime >= move.EndTime - PERFORMANCE_TIME_TOLERANCE
-        && candidate.MoveType === PROCESS_MOVE
-        && candidate.ModuleName === targetModule
-        && materialIds(candidate).includes(material)
-      ));
-      const admittedAt = move.EndTime;
-      const targetWasBusy = Boolean(targetModule && (intervalsByResource.get(targetModule) ?? []).some(interval => (
-        interval.start < admittedAt + PERFORMANCE_TIME_TOLERANCE
-        && interval.end > admittedAt + PERFORMANCE_TIME_TOLERANCE
-      )));
-      queue.push({
-        index: queue.length + 1,
-        material,
-        pjob: materialPJob(move, material),
-        loadLock: source,
-        admittedAt,
-        targetModule,
-        targetWasBusy,
-        processWait: processMove ? Math.max(processMove.StartTime - admittedAt, 0) : 0,
-      });
-    }
-  }
-  return queue;
+interface PendingLoadLockCycle extends LoadLockCycle {
+  startedAt: number;
 }
 
-/** 统计真空端队列中相邻 Job 切换比例和最长连续段。 */
-function vacuumQueuePattern(queue: VacuumQueueItem[]): { switchRatio: number; longestRun: number } {
-  if (!queue.length) return { switchRatio: 0, longestRun: 0 };
-  let switches = 0;
-  let run = 1;
-  let longestRun = 1;
-  for (let index = 1; index < queue.length; index += 1) {
-    if (queue[index].pjob === queue[index - 1].pjob) run += 1;
-    else {
-      switches += 1;
-      run = 1;
+/** 判断 LoadLock 环境动作是抽气还是充气。 */
+function loadLockTransitionDirection(move: NormalizedMove): "vacuum" | "vent" | null {
+  const lastState = String(move.LastState ?? "").toUpperCase();
+  const currentState = String(move.CurState ?? "").toUpperCase();
+  if (lastState === "ATM" && currentState === "VAC") return "vacuum";
+  if (lastState === "VAC" && currentState === "ATM") return "vent";
+  if (move.MoveType === 12) return "vacuum";
+  if (move.MoveType === 13) return "vent";
+  return null;
+}
+
+/** 按时间把每个 LoadLock 的一次抽气和随后一次充气配成一行。 */
+function buildLoadLockCycles(
+  moves: NormalizedMove[],
+  device: DeviceDefinition | null,
+): LoadLockCycle[] {
+  const cycles: PendingLoadLockCycle[] = [];
+  const pendingByLoadLock = new Map<string, PendingLoadLockCycle>();
+  for (const move of moves) {
+    const direction = loadLockTransitionDirection(move);
+    const loadLock = move.ModuleName;
+    if (!direction || !isLoadLockName(loadLock, stationType(device, loadLock))) continue;
+    if (direction === "vacuum") {
+      const cycle: PendingLoadLockCycle = {
+        index: 0,
+        loadLock,
+        vacuumWafers: materialIds(move),
+        ventWafers: [],
+        startedAt: move.StartTime,
+      };
+      cycles.push(cycle);
+      pendingByLoadLock.set(loadLock, cycle);
+      continue;
     }
-    longestRun = Math.max(longestRun, run);
+    const pending = pendingByLoadLock.get(loadLock);
+    if (pending) {
+      pending.ventWafers = materialIds(move);
+      pendingByLoadLock.delete(loadLock);
+      continue;
+    }
+    cycles.push({
+      index: 0,
+      loadLock,
+      vacuumWafers: [],
+      ventWafers: materialIds(move),
+      startedAt: move.StartTime,
+    });
   }
-  return {
-    switchRatio: queue.length > 1 ? switches / (queue.length - 1) : 0,
-    longestRun,
-  };
+  return cycles
+    .sort((left, right) => left.startedAt - right.startedAt || naturalCompare(left.loadLock, right.loadLock))
+    .map((cycle, index) => ({
+      index: index + 1,
+      loadLock: cycle.loadLock,
+      vacuumWafers: cycle.vacuumWafers,
+      ventWafers: cycle.ventWafers,
+    }));
 }
 
 interface RawBottleneckCandidate {
@@ -1073,8 +1032,7 @@ export function analyzeSchedulePerformance(
   const chamberDwellTime = processChamberDwellTime(records, device, window);
   const robotDwellTime = robotWaferDwellTime(records, window);
   const systemResidenceTime = waferSystemResidenceTime(records, device, window);
-  const vacuumQueue = buildVacuumQueue(records, device, intervalsByResource);
-  const queuePattern = vacuumQueuePattern(vacuumQueue);
+  const loadLockCycles = buildLoadLockCycles(records, device);
   return {
     window,
     resources,
@@ -1088,9 +1046,7 @@ export function analyzeSchedulePerformance(
     processChamberDwellTime: chamberDwellTime,
     robotWaferDwellTime: robotDwellTime,
     waferSystemResidenceTime: systemResidenceTime,
-    vacuumQueue,
-    vacuumQueueJobSwitchRatio: queuePattern.switchRatio,
-    vacuumQueueLongestRun: queuePattern.longestRun,
+    loadLockCycles,
   };
 }
 /** 将完整性能诊断压缩为结果预览所需的瓶颈摘要。 */

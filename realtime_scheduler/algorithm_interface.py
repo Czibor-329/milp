@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import importlib
+import hashlib
 import json
 import os
 import re
@@ -34,6 +35,44 @@ _SESSION_LOCK = threading.RLock()
 _ACTIVE_ALGORITHM = threading.local()
 _ENTRY_MODULE: Optional[ModuleType] = None
 _ENTRY_ROOT: Optional[Path] = None
+_ENTRY_REVISION: Optional[str] = None
+
+ALGORITHM_SOURCE_SUFFIXES = frozenset({
+    ".py", ".json", ".yaml", ".yml", ".toml", ".npz", ".npy", ".pt",
+    ".pth", ".pkl", ".joblib",
+})
+IGNORED_ALGORITHM_DIRECTORIES = frozenset({
+    "__pycache__", ".git", ".pytest_cache", ".mypy_cache", ".venv", "venv",
+    "results", "exports",
+})
+
+
+def algorithm_revision(root: Path) -> str:
+    """计算算法包的确定性内容指纹，用于热重载与实验复现。
+
+    指纹只纳入代码、配置与常见模型文件，并排除缓存、版本库和运行结果目录。
+    读取文件内容而非仅依赖修改时间，避免文件被复制或时间戳被保留时漏掉改动。
+    """
+    resolved_root = root.resolve()
+    digest = hashlib.sha256()
+    files = sorted(
+        (
+            path for path in resolved_root.rglob("*")
+            if path.is_file()
+            and path.suffix.lower() in ALGORITHM_SOURCE_SUFFIXES
+            and not any(part in IGNORED_ALGORITHM_DIRECTORIES for part in path.relative_to(resolved_root).parts)
+        ),
+        key=lambda path: path.relative_to(resolved_root).as_posix(),
+    )
+    for path in files:
+        relative_path = path.relative_to(resolved_root).as_posix()
+        digest.update(relative_path.encode("utf-8"))
+        digest.update(b"\0")
+        with path.open("rb") as source_file:
+            for chunk in iter(lambda: source_file.read(1024 * 1024), b""):
+                digest.update(chunk)
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def discover_other_algorithms() -> list[JsonObject]:
@@ -71,6 +110,7 @@ def discover_other_algorithms() -> list[JsonObject]:
             "path": str(root.resolve()),
             "entry": str(entry_path.relative_to(root).as_posix()),
             "available": True,
+            "revision": algorithm_revision(root),
         })
     return algorithms
 
@@ -126,6 +166,18 @@ def _unload_previous_algorithm(root: Path) -> None:
             sys.path.remove(search_root_text)
 
 
+def _purge_algorithm_bytecode(root: Path) -> None:
+    """删除算法目录内可再生成的字节码，避免同秒同尺寸改动命中旧缓存。"""
+    for cache_directory in root.rglob("__pycache__"):
+        if not cache_directory.is_dir():
+            continue
+        for bytecode_path in cache_directory.glob("*.pyc"):
+            try:
+                bytecode_path.unlink()
+            except OSError:
+                continue
+
+
 def _prepare_ct_namespace(root: Path) -> None:
     """为去掉外层 ``CT`` 的标准包创建兼容命名空间。"""
     if (root / EXTERNAL_ENTRY_RELATIVE_PATH).is_file():
@@ -137,16 +189,19 @@ def _prepare_ct_namespace(root: Path) -> None:
 
 
 def _load_entry_module() -> ModuleType:
-    """加载当前标准算法入口，切换目录时清理同名模块缓存。"""
-    global _ENTRY_MODULE, _ENTRY_ROOT
+    """加载当前标准算法入口；目录内代码变化后自动卸载并重新导入。"""
+    global _ENTRY_MODULE, _ENTRY_ROOT, _ENTRY_REVISION
     root = _selected_root()
-    if _ENTRY_MODULE is not None and _ENTRY_ROOT == root:
+    revision = algorithm_revision(root)
+    if _ENTRY_MODULE is not None and _ENTRY_ROOT == root and _ENTRY_REVISION == revision:
         return _ENTRY_MODULE
 
     if _ENTRY_ROOT is not None:
         _unload_previous_algorithm(_ENTRY_ROOT)
     _ENTRY_MODULE = None
     _ENTRY_ROOT = None
+    _ENTRY_REVISION = None
+    _purge_algorithm_bytecode(root)
 
     search_roots = [root]
     if (root / "CT").is_dir():
@@ -163,6 +218,7 @@ def _load_entry_module() -> ModuleType:
         raise RuntimeError(f"标准算法入口加载路径异常：{module_path}")
     _ENTRY_MODULE = module
     _ENTRY_ROOT = root
+    _ENTRY_REVISION = revision
     return module
 
 
