@@ -1053,7 +1053,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn('data-tab-target="route">路径配置</button>', html)
         self.assertIn('data-tab-target="clean">清洁配置</button>', html)
         self.assertIn('<h1>调度平台</h1>', html)
-        self.assertIn('class="frontend-version">前端 v1.0.6</span>', html)
+        self.assertIn('class="frontend-version">前端 v1.0.7</span>', html)
         self.assertIn('<span id="metricMovesLabel">瓶颈利用率</span>', html)
         self.assertNotIn('<span id="metricMovesLabel">Move 数</span>', html)
         self.assertNotIn("renderDatasetCatalog", html)
