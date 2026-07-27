@@ -1274,14 +1274,14 @@ function renderOtherAlgorithmOptions(algorithms) {
   renderAlgorithmMetadata();
 }
 
-/** 在列表下方显示指定算法详情，避免浮层遮挡相邻算法。 */
+/** 在列表下方显示指定算法的稳定简介，版本说明只保留在算法记录中。 */
 function showAlgorithmDetails(strategy) {
   const metadata = state.algorithmMetadata[strategy] || {};
   const cardName = document.querySelector(`[data-strategy-card="${CSS.escape(strategy)}"] b`)?.textContent;
   document.getElementById("algorithmHoverInfo").innerHTML = `
-    <span class="algorithm-hover-info-name">${escapeHtml(metadata.name || cardName || strategy)}</span>
-    <span class="algorithm-hover-info-description">${escapeHtml(metadata.description || "暂无算法描述")}</span>
-    <span class="algorithm-hover-info-meta"><span>版本 ${escapeHtml(metadata.version || "未记录")}</span><span>更新 ${escapeHtml(metadata.updatedAt || "未记录")}</span></span>
+    <span class="algorithm-hover-info-name">${escapeHtml(metadata.name || cardName || strategy)}<small>算法简介</small></span>
+    <span class="algorithm-hover-info-description">${escapeHtml(metadata.introduction || "暂无算法简介")}</span>
+    <span class="algorithm-hover-info-meta"><span>当前版本 ${escapeHtml(metadata.version || "未记录")}</span><span>更新日期 ${escapeHtml(metadata.updatedAt || "未记录")}</span></span>
   `;
 }
 
@@ -1318,7 +1318,7 @@ function algorithmChangeLabels(entry, previous) {
   return labels.length ? labels : ["重复保存，无字段变化"];
 }
 
-/** 绘制全部算法的版本时间线，最新版本置顶。 */
+/** 绘制默认全部折叠的算法版本时间线，最新版本置顶。 */
 function renderAlgorithmHistory() {
   const container = document.getElementById("algorithmHistoryList");
   const strategies = [...document.querySelectorAll('input[name="strategy"]')].map(input => input.value);
@@ -1336,12 +1336,16 @@ function renderAlgorithmHistory() {
         <div class="algorithm-version-content"><p>${escapeHtml(entry.description || "暂无算法描述")}</p><div class="algorithm-change-tags">${changes.map(label => `<span>${escapeHtml(label)}</span>`).join("")}</div></div>
       </article>
     `).join("")}</div>` : `<div class="algorithm-history-empty">尚无版本记录。点击“新增记录”保存第一个版本。</div>`;
+    const contentId = `algorithm-history-${strategy.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
     return `<section class="algorithm-history-card">
       <header class="algorithm-history-head">
-        <div class="algorithm-history-title"><h3>${escapeHtml(metadata.name || cardName || strategy)}</h3><p>${escapeHtml(strategy)} · ${history.length} 条版本记录</p></div>
+        <button class="algorithm-history-toggle" type="button" data-toggle-algorithm-history="${escapeHtml(strategy)}" aria-expanded="false" aria-controls="${escapeHtml(contentId)}">
+          <span class="algorithm-history-chevron" aria-hidden="true">›</span>
+          <span class="algorithm-history-title"><strong>${escapeHtml(metadata.name || cardName || strategy)}</strong><small>${escapeHtml(strategy)} · ${history.length} 条版本记录</small></span>
+        </button>
         <div class="algorithm-history-actions"><span class="algorithm-current-version">当前 ${escapeHtml(metadata.version || "未记录")}</span><button class="btn small" type="button" data-edit-algorithm="${escapeHtml(strategy)}">${history.length ? "新增版本" : "新增记录"}</button></div>
       </header>
-      ${timeline}
+      <div class="algorithm-history-body" id="${escapeHtml(contentId)}" hidden>${timeline}</div>
     </section>`;
   }).join("");
 }
@@ -2020,6 +2024,14 @@ document.addEventListener("click", event => {
   const tab = event.target.closest("[data-tab-target]"); if (tab) switchTab(tab.dataset.tabTarget);
   const batchResultCard = event.target.closest("[data-batch-item-index]");
   if (batchResultCard && !event.target.closest(".batch-result-actions")) selectBatchItem(Number(batchResultCard.dataset.batchItemIndex));
+  const algorithmHistoryToggle = event.target.closest("[data-toggle-algorithm-history]");
+  if (algorithmHistoryToggle) {
+    const content = document.getElementById(algorithmHistoryToggle.getAttribute("aria-controls"));
+    const expanded = algorithmHistoryToggle.getAttribute("aria-expanded") === "true";
+    algorithmHistoryToggle.setAttribute("aria-expanded", String(!expanded));
+    content.hidden = expanded;
+    return;
+  }
   const algorithmEdit = event.target.closest("[data-edit-algorithm]");
   if (algorithmEdit) {
     fillAlgorithmDialog(algorithmEdit.dataset.editAlgorithm);

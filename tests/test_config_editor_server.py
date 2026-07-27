@@ -1139,6 +1139,9 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn('data-tab-target="algorithm-history"', html)
         self.assertIn('id="algorithmHistoryList"', html)
         self.assertIn("renderAlgorithmHistory", html)
+        self.assertIn("metadata.introduction", html)
+        self.assertIn('aria-expanded="false"', html)
+        self.assertIn("data-toggle-algorithm-history", html)
         self.assertIn("/api/algorithm-metadata/", html)
         self.assertNotIn("other_alg · init/update", html)
         self.assertNotIn('id="neuralStrategyHint"', html)
@@ -2275,6 +2278,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual("1.1.0", record["version"])
         self.assertEqual("1.1.0", metadata["setrank"]["version"])
         self.assertEqual("2026-07-26", metadata["setrank"]["updatedAt"])
+        self.assertIn("集合网络", metadata["setrank"]["introduction"])
         self.assertEqual("1.2.0", second_record["version"])
         self.assertEqual(["1.0.0", "1.1.0", "1.2.0"], [item["version"] for item in history])
 
@@ -2304,6 +2308,38 @@ class ConfigEditorServerTests(unittest.TestCase):
 
         self.assertEqual(1, len(history))
         self.assertEqual("2.0.0", history[0]["version"])
+
+    def test_external_algorithm_uses_first_snapshot_as_stable_introduction(self) -> None:
+        """外部算法缺少内置简介时，应固定使用首个版本说明而不是最新说明。"""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "algorithm_metadata.json"
+            path.write_text(json.dumps({
+                "other_alg:ANN": {
+                    "name": "ANN",
+                    "version": "1.1.0",
+                    "description": "最新版本调整了网络层数。",
+                    "updatedAt": "2026-07-27",
+                    "history": [
+                        {
+                            "version": "1.0.0",
+                            "description": "基于异质图的端到端神经网络调度算法。",
+                            "updatedAt": "2026-07-23",
+                        },
+                        {
+                            "version": "1.1.0",
+                            "description": "最新版本调整了网络层数。",
+                            "updatedAt": "2026-07-27",
+                        },
+                    ],
+                },
+            }, ensure_ascii=False), encoding="utf-8")
+
+            metadata = config_server.read_algorithm_metadata(path)
+
+        self.assertEqual(
+            "基于异质图的端到端神经网络调度算法。",
+            metadata["other_alg:ANN"]["introduction"],
+        )
 
 
 if __name__ == "__main__":

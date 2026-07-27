@@ -151,39 +151,46 @@ _BATCH_CANCEL_EVENTS: Dict[str, threading.Event] = {}
 BUILTIN_ALGORITHM_METADATA: Dict[str, Dict[str, str]] = {
     "heuristic": {
         "name": "启发式",
+        "introduction": "基于设备状态、工艺约束和局部优先级快速生成可执行排程，适合作为低延迟实时调度策略与稳定基线。",
         "description": "快速启发式排程，适合低延迟的实时调度与稳定基线。",
         "version": "未记录",
     },
     "loadlock-macro": {
         "name": "LoadLock 宏周期",
+        "introduction": "面向真空设备的宏周期规划策略，统一安排 LoadLock 抽气、充气和携片节奏，再由底层安全规则完成动作落地。",
         "description": "顶层一次规划抽气/充气携片顺序，底层复用 Machine 安全规则，并以启发式结果作为质量地板。",
         "version": "1.0.0",
         "updatedAt": "2026-07-26",
     },
     "setrank": {
         "name": "SetRank-PIAC",
+        "introduction": "使用集合网络理解不同规模的晶圆与工艺组合，为每个实例推荐更合适的启发式参数，并通过候选精评保障结果质量。",
         "description": "集合网络按实例推荐启发式参数，并以候选精评和 legacy 质量地板保障结果。",
         "version": "1.0.0",
         "updatedAt": "2026-07-26",
     },
     "neuralucb": {
         "name": "Safe NeuralUCB",
+        "introduction": "结合神经上下文表示与置信下界进行在线策略选择，在探索潜在优解的同时保留安全质量基线。",
         "description": "神经上下文置信下界在线选择启发式参数，并以 legacy 精确结果作为安全质量地板。",
         "version": "1.0.0",
         "updatedAt": "2026-07-26",
     },
     "neural": {
         "name": "深层神经派工",
+        "introduction": "使用已训练的深层神经网络根据实时设备与任务状态直接做出派工决策，适合需要快速响应的连续调度。",
         "description": "使用已训练的深层网络进行实时派工决策。",
         "version": "未记录",
     },
     "rl": {
         "name": "RL 搜索",
+        "introduction": "在限定的时间与 rollout 预算内搜索后续动作，通过强化学习价值评估选择更有潜力的排程方案。",
         "description": "在给定时间与 rollout 预算内执行强化学习搜索。",
         "version": "未记录",
     },
     "milp": {
         "name": "MILP 最优求解",
+        "introduction": "将排程约束建模为混合整数规划并调用求解器寻找全局最优方案，适合规模较小且重视最优性的首次排程。",
         "description": "使用混合整数规划求解小规模首次排程。",
         "version": "未记录",
     },
@@ -2097,9 +2104,26 @@ def read_algorithm_metadata(
             continue
         base = metadata.setdefault(normalized_strategy, {
             "name": normalized_strategy.removeprefix("other_alg:"),
+            "introduction": "通过标准 init/update 接口接入的外部排程算法。",
             "description": "标准 init/update 接口算法包。",
             "version": "未记录",
         })
+        if normalized_strategy not in BUILTIN_ALGORITHM_METADATA:
+            raw_history = record.get("history")
+            first_snapshot = (
+                raw_history[0]
+                if isinstance(raw_history, list) and raw_history
+                and isinstance(raw_history[0], Mapping)
+                else {}
+            )
+            introduction = str(
+                record.get("introduction")
+                or first_snapshot.get("description")
+                or record.get("description")
+                or ""
+            ).strip()
+            if introduction:
+                base["introduction"] = introduction
         for field_name in ("name", "description", "version", "updatedAt"):
             value = str(record.get(field_name) or "").strip()
             if value:
@@ -2189,6 +2213,7 @@ def read_algorithm_history(
     for algorithm in discover_other_algorithms():
         metadata.setdefault(str(algorithm["strategy"]), {
             "name": str(algorithm["name"]),
+            "introduction": "通过标准 init/update 接口接入的外部排程算法。",
             "description": "other_alg 目录中自动发现的标准 init/update 接口算法包。",
             "version": "未记录",
         })
@@ -2231,6 +2256,7 @@ def algorithm_metadata_for_health() -> Dict[str, Dict[str, str]]:
         strategy = str(algorithm["strategy"])
         metadata.setdefault(strategy, {
             "name": str(algorithm["name"]),
+            "introduction": "通过标准 init/update 接口接入的外部排程算法。",
             "description": "other_alg 目录中自动发现的标准 init/update 接口算法包。",
             "version": "未记录",
         })
@@ -3028,12 +3054,11 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             try:
                 strategy = path.removeprefix("/api/algorithm-metadata/")
                 record = update_algorithm_metadata(strategy, self._read_json_object())
+                current_metadata = read_algorithm_metadata().get(strategy, {})
                 self._send_json({
                     "ok": True,
                     "strategy": strategy,
-                    "metadata": {
-                        key: value for key, value in record.items() if key != "history"
-                    },
+                    "metadata": current_metadata,
                     "history": record.get("history") or [],
                 })
             except Exception as error:  # noqa: BLE001
