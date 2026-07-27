@@ -366,7 +366,162 @@ function vacuumQueuePattern(queue) {
     longestRun
   };
 }
-function analyzeSchedulePerformance(moves, device, mode = "steady") {
+function shortJobName(value) {
+  const parts = String(value ?? "").split(".").filter(Boolean);
+  return parts.at(-1) ?? "";
+}
+function processStepId(move) {
+  const direct = move.StepID;
+  if (direct !== void 0 && direct !== null && String(direct) !== "") return String(direct);
+  return String(listValue(move.StepIDList)[0] ?? "");
+}
+function processPJobName(move) {
+  return String(listValue(move.PJobName)[0] ?? move.PJobName ?? "");
+}
+function stageMatchesMove(stage, move) {
+  const configuredStep = stage.stepId === void 0 || stage.stepId === null ? "" : String(stage.stepId);
+  if (configuredStep && configuredStep !== processStepId(move)) return false;
+  const configuredJob = shortJobName(stage.pjobName);
+  const moveJob = shortJobName(processPJobName(move));
+  return !configuredJob || !moveJob || configuredJob === moveJob;
+}
+function processCapacityGroups(moves, resources, context) {
+  const processResourceNames = new Set(
+    resources.filter((resource) => resource.kind === "process").map((resource) => resource.name)
+  );
+  const observed = moves.filter((move) => move.MoveType === PROCESS_MOVE && move.EndTime > move.StartTime + PERFORMANCE_TIME_TOLERANCE && processResourceNames.has(move.ModuleName));
+  const groups = [];
+  for (const stage of context?.processStages ?? []) {
+    const names = stage.resourceNames.map(String).filter((name) => processResourceNames.has(name));
+    if (!names.length) continue;
+    groups.push({
+      resourceNames: new Set(names),
+      contextLabels: new Set(stage.label ? [String(stage.label)] : [])
+    });
+  }
+  const unmatchedByStage = /* @__PURE__ */ new Map();
+  for (const move of observed) {
+    let matching = (context?.processStages ?? []).filter((stage) => stageMatchesMove(stage, move));
+    if (!matching.length) {
+      const moveJob = shortJobName(processPJobName(move));
+      matching = (context?.processStages ?? []).filter((stage) => stage.resourceNames.includes(move.ModuleName) && (!shortJobName(stage.pjobName) || shortJobName(stage.pjobName) === moveJob));
+    }
+    if (matching.length) continue;
+    const key = `${processPJobName(move)}|${processStepId(move)}`;
+    const names = unmatchedByStage.get(key) ?? /* @__PURE__ */ new Set();
+    names.add(move.ModuleName);
+    unmatchedByStage.set(key, names);
+  }
+  for (const [key, names] of unmatchedByStage) {
+    groups.push({
+      resourceNames: names,
+      contextLabels: /* @__PURE__ */ new Set([key.replace("|", " \xB7 \u5DE5\u5E8F ")])
+    });
+  }
+  const merged = /* @__PURE__ */ new Map();
+  for (const group of groups) {
+    const names = [...group.resourceNames].sort(naturalCompare);
+    const key = names.join("|");
+    const existing = merged.get(key) ?? { resourceNames: names, contextLabels: /* @__PURE__ */ new Set() };
+    for (const label of group.contextLabels) existing.contextLabels.add(label);
+    merged.set(key, existing);
+  }
+  return [...merged.values()].map((group) => ({
+    resourceNames: group.resourceNames,
+    contextLabels: [...group.contextLabels].filter(Boolean).sort(naturalCompare)
+  }));
+}
+function rankBottleneckCandidates(moves, resources, window, context) {
+  if (window.duration <= PERFORMANCE_TIME_TOLERANCE) return [];
+  const byName = new Map(resources.map((resource) => [resource.name, resource]));
+  const raw = [];
+  for (const group of processCapacityGroups(moves, resources, context)) {
+    const members = group.resourceNames.map((name) => byName.get(name)).filter(
+      (resource) => Boolean(resource)
+    );
+    const busyTime = members.reduce((sum, resource) => sum + resource.busyTime, 0);
+    if (!members.length || busyTime <= PERFORMANCE_TIME_TOLERANCE) continue;
+    raw.push({
+      id: `process:${group.resourceNames.join("+")}`,
+      label: `\u5DE5\u5E8F\u5BB9\u91CF\u7EC4 \xB7 ${group.resourceNames.join(" / ")}`,
+      kind: "process-group",
+      resourceNames: group.resourceNames,
+      utilization: busyTime / (members.length * window.duration),
+      continuity: members.reduce(
+        (sum, resource) => sum + Math.max(0, 1 - resource.longestIdlePeriod / window.duration),
+        0
+      ) / members.length,
+      contextLabels: group.contextLabels
+    });
+  }
+  for (const resource of resources.filter((item) => item.kind === "robot" && item.busyTime > PERFORMANCE_TIME_TOLERANCE)) {
+    raw.push({
+      id: `robot:${resource.name}`,
+      label: resource.name,
+      kind: "robot",
+      resourceNames: [resource.name],
+      utilization: resource.utilization,
+      continuity: Math.max(0, 1 - resource.longestIdlePeriod / window.duration),
+      contextLabels: []
+    });
+  }
+  const loadLocks = resources.filter((item) => item.kind === "loadlock" && item.busyTime > PERFORMANCE_TIME_TOLERANCE);
+  if (loadLocks.length) {
+    raw.push({
+      id: `loadlock:${loadLocks.map((resource) => resource.name).sort(naturalCompare).join("+")}`,
+      label: `LoadLock \u5BB9\u91CF\u7EC4 \xB7 ${loadLocks.map((resource) => resource.name).sort(naturalCompare).join(" / ")}`,
+      kind: "loadlock-group",
+      resourceNames: loadLocks.map((resource) => resource.name).sort(naturalCompare),
+      utilization: loadLocks.reduce((sum, resource) => sum + resource.busyTime, 0) / (loadLocks.length * window.duration),
+      continuity: loadLocks.reduce(
+        (sum, resource) => sum + Math.max(0, 1 - resource.longestIdlePeriod / window.duration),
+        0
+      ) / loadLocks.length,
+      contextLabels: []
+    });
+  }
+  const maximumByKind = /* @__PURE__ */ new Map();
+  for (const candidate of raw) {
+    maximumByKind.set(
+      candidate.kind,
+      Math.max(maximumByKind.get(candidate.kind) ?? 0, candidate.utilization)
+    );
+  }
+  const ranked = raw.map((candidate) => {
+    const relative = candidate.utilization / Math.max(
+      maximumByKind.get(candidate.kind) ?? 0,
+      PERFORMANCE_TIME_TOLERANCE
+    );
+    const score = Math.min(1, candidate.utilization * 0.82 + candidate.continuity * 0.12 + relative * 0.06);
+    const confidence = score >= 0.72 ? "high" : score >= 0.45 ? "medium" : "low";
+    const evidence = [
+      `${candidate.resourceNames.length > 1 ? "\u7EC4\u5E73\u5747\u5BB9\u91CF\u5360\u7528" : "\u8D44\u6E90\u5360\u7528"} ${(candidate.utilization * 100).toFixed(1)}%`,
+      `\u6700\u957F\u7A7A\u95F2\u6298\u7B97\u8FDE\u7EED\u6027 ${(candidate.continuity * 100).toFixed(1)}%`
+    ];
+    if (candidate.resourceNames.length > 1) {
+      evidence.push(`\u5E76\u884C/\u540C\u7C7B\u8D44\u6E90 ${candidate.resourceNames.join("\u3001")}`);
+    }
+    if (candidate.contextLabels.length) {
+      evidence.push(`\u5173\u8054 ${candidate.contextLabels.slice(0, 3).join("\u3001")}`);
+    }
+    return {
+      id: candidate.id,
+      label: candidate.label,
+      kind: candidate.kind,
+      resourceNames: candidate.resourceNames,
+      utilization: Math.max(0, Math.min(candidate.utilization, 1)),
+      continuity: Math.max(0, Math.min(candidate.continuity, 1)),
+      score,
+      confidence,
+      evidence
+    };
+  }).sort((left, right) => right.score - left.score || right.utilization - left.utilization || naturalCompare(left.label, right.label));
+  if (!ranked.length) return [];
+  const topScore = ranked[0].score;
+  const likelyThreshold = Math.max(0.2, topScore * 0.72, topScore - 0.16);
+  return ranked.filter((candidate) => candidate.score >= likelyThreshold).slice(0, 5);
+}
+function analyzeSchedulePerformance(moves, device, mode = "steady", context = null) {
   const records = normalizeMoves(moves);
   const window = performanceWindow(records, device, mode);
   const definitions = performanceResourceDefinitions(records, device);
@@ -383,12 +538,26 @@ function analyzeSchedulePerformance(moves, device, mode = "steady") {
       kind: definition.kind,
       utilization: window.duration > PERFORMANCE_TIME_TOLERANCE ? summary.busyTime / window.duration : 0,
       ...summary,
-      isBottleneck: false
+      isBottleneck: false,
+      bottleneckCandidateRank: null
     };
   });
-  const bottleneckCandidates = resources.filter((resource) => ["robot", "process", "loadlock"].includes(resource.kind) && resource.busyTime > PERFORMANCE_TIME_TOLERANCE);
-  const bottleneck = [...bottleneckCandidates].sort((left, right) => right.averageActivePeriod - left.averageActivePeriod || right.utilization - left.utilization || naturalCompare(left.name, right.name))[0] ?? null;
-  if (bottleneck) bottleneck.isBottleneck = true;
+  const bottleneckCandidates = rankBottleneckCandidates(
+    records,
+    resources,
+    window,
+    context
+  );
+  const primaryBottleneck = bottleneckCandidates[0] ?? null;
+  for (const [candidateIndex, candidate] of bottleneckCandidates.entries()) {
+    for (const name of candidate.resourceNames) {
+      const resource = resources.find((item) => item.name === name);
+      if (!resource) continue;
+      resource.bottleneckCandidateRank = resource.bottleneckCandidateRank === null ? candidateIndex + 1 : Math.min(resource.bottleneckCandidateRank, candidateIndex + 1);
+      if (candidateIndex === 0) resource.isBottleneck = true;
+    }
+  }
+  const bottleneck = primaryBottleneck ? resources.find((resource) => primaryBottleneck.resourceNames.includes(resource.name)) ?? null : null;
   const kindOrder = {
     robot: 0,
     loadlock: 1,
@@ -407,6 +576,8 @@ function analyzeSchedulePerformance(moves, device, mode = "steady") {
   return {
     window,
     resources,
+    bottleneckCandidates,
+    primaryBottleneck,
     bottleneck,
     completedWaferCount: completionTimes.length,
     throughputPerHour,
@@ -418,11 +589,15 @@ function analyzeSchedulePerformance(moves, device, mode = "steady") {
   };
 }
 function summarizeBottleneckUtilization(performance2) {
-  if (!performance2.bottleneck) return null;
+  const candidate = performance2.primaryBottleneck;
+  if (!candidate) return null;
   return {
-    resourceName: performance2.bottleneck.name,
-    utilization: performance2.bottleneck.utilization,
-    windowLabel: performance2.window.label
+    resourceName: candidate.label,
+    utilization: candidate.utilization,
+    windowLabel: performance2.window.label,
+    confidence: candidate.confidence,
+    candidateCount: performance2.bottleneckCandidates.length,
+    score: candidate.score
   };
 }
 function displayedPerformanceResources(performance2) {
@@ -852,7 +1027,13 @@ function formatPercent(value) {
 }
 function renderSchedulePerformance(performance2) {
   const window = performance2.window;
-  const bottleneck = performance2.bottleneck;
+  const bottleneck = performance2.primaryBottleneck;
+  const confidenceLabels = { high: "\u8BC1\u636E\u8F83\u5F3A", medium: "\u8BC1\u636E\u4E2D\u7B49", low: "\u8BC1\u636E\u8F83\u5F31" };
+  const candidateKindLabels = {
+    "process-group": "\u5DE5\u5E8F\u5BB9\u91CF",
+    robot: "\u4F20\u8F93\u8D44\u6E90",
+    "loadlock-group": "LoadLock \u5BB9\u91CF"
+  };
   const displayedResources = displayedPerformanceResources(performance2);
   const resourceKindLabels = {
     robot: "\u673A\u68B0\u624B",
@@ -869,7 +1050,7 @@ function renderSchedulePerformance(performance2) {
       const width = Math.min(duration / window.duration * 100, 100);
       return `<span class="category-${category}" style="width:${width.toFixed(3)}%" title="${ACTIVITY_CATEGORY_LABELS[category]} ${formatSeconds(duration)} s"></span>`;
     }).join("");
-    const status = resource.isBottleneck ? '<span class="resource-bottleneck">\u6D3B\u8DC3\u671F\u6700\u957F</span>' : "";
+    const status = resource.bottleneckCandidateRank ? `<span class="resource-bottleneck">${resource.bottleneckCandidateRank === 1 ? "\u4E3B\u8981\u5019\u9009" : `\u5019\u9009 #${resource.bottleneckCandidateRank}`}</span>` : "";
     return `
       <tr class="${resource.isBottleneck ? "is-bottleneck" : ""}">
         <th scope="row">
@@ -887,6 +1068,33 @@ function renderSchedulePerformance(performance2) {
       </tr>`;
   }).join("");
   const visibleQueue = performance2.vacuumQueue.slice(0, MAXIMUM_VISIBLE_QUEUE_ITEMS);
+  const candidateMarkup = performance2.bottleneckCandidates.length ? `<section class="bottleneck-candidates" aria-labelledby="bottleneckCandidatesTitle">
+        <div class="bottleneck-candidate-head">
+          <div>
+            <strong id="bottleneckCandidatesTitle">\u74F6\u9888\u53EF\u80FD\u6027\u6392\u5E8F</strong>
+            <span>\u5141\u8BB8\u591A\u4E2A\u5019\u9009\uFF1B\u8BC4\u5206\u4EE5\u5BB9\u91CF\u5229\u7528\u7387\u4E3A\u4E3B\uFF0C\u8FDE\u7EED\u6027\u548C\u540C\u7C7B\u76F8\u5BF9\u5F3A\u5EA6\u4E3A\u8F85\u3002</span>
+          </div>
+          <small>\u5171 ${performance2.bottleneckCandidates.length} \u4E2A\u8F83\u53EF\u80FD\u5019\u9009</small>
+        </div>
+        <ol class="bottleneck-candidate-list">
+          ${performance2.bottleneckCandidates.map((candidate, index) => `
+            <li class="${index === 0 ? "is-primary" : ""}">
+              <span class="candidate-rank">${index + 1}</span>
+              <div class="candidate-main">
+                <div><strong>${escapeHtml(candidate.label)}</strong><span>${escapeHtml(candidateKindLabels[candidate.kind])}</span></div>
+                <small>${candidate.evidence.map(escapeHtml).join(" \xB7 ")}</small>
+              </div>
+              <div class="candidate-metrics">
+                <strong>${formatPercent(candidate.utilization)}</strong>
+                <span>\u5BB9\u91CF\u5229\u7528\u7387</span>
+              </div>
+              <div class="candidate-score">
+                <strong>${Math.round(candidate.score * 100)}</strong>
+                <span>\u53EF\u80FD\u6027\u5206 \xB7 ${confidenceLabels[candidate.confidence]}</span>
+              </div>
+            </li>`).join("")}
+        </ol>
+      </section>` : "";
   const queueMarkup = visibleQueue.length ? `<ol class="vacuum-queue-sequence">${visibleQueue.map((item) => `
         <li class="${item.targetWasBusy ? "target-busy" : "target-idle"}">
           <span class="queue-index">${item.index}</span>
@@ -902,9 +1110,9 @@ function renderSchedulePerformance(performance2) {
         <small>\u5254\u9664\u5F00\u5934 ${formatSeconds(window.trimmedStart)} s / \u7ED3\u5C3E ${formatSeconds(window.trimmedEnd)} s</small>
       </div>
       <div>
-        <span>\u6D3B\u8DC3\u671F\u74F6\u9888\u5019\u9009</span>
-        <strong>${escapeHtml(bottleneck?.name ?? "\u2014")}</strong>
-        <small>${bottleneck ? `\u5E73\u5747\u6D3B\u8DC3\u671F ${formatSeconds(bottleneck.averageActivePeriod)} s \xB7 \u5360\u7528\u7387 ${formatPercent(bottleneck.utilization)}` : "\u6CA1\u6709\u8DB3\u591F\u7684\u8D44\u6E90\u6D3B\u52A8"}</small>
+        <span>\u6700\u53EF\u80FD\u74F6\u9888</span>
+        <strong>${escapeHtml(bottleneck?.label ?? "\u2014")}</strong>
+        <small>${bottleneck ? `\u5BB9\u91CF\u5229\u7528\u7387 ${formatPercent(bottleneck.utilization)} \xB7 ${confidenceLabels[bottleneck.confidence]} \xB7 \u53E6\u6709 ${Math.max(0, performance2.bottleneckCandidates.length - 1)} \u4E2A\u5019\u9009` : "\u6CA1\u6709\u8DB3\u591F\u7684\u8D44\u6E90\u6D3B\u52A8"}</small>
       </div>
       <div>
         <span>\u51FA\u7AD9\u8282\u62CD</span>
@@ -912,6 +1120,7 @@ function renderSchedulePerformance(performance2) {
         <small>\u5E73\u5747\u95F4\u9694 ${formatSeconds(performance2.meanDepartureInterval)} s \xB7 \u95F4\u9694 CV ${performance2.departureIntervalCv.toFixed(2)} \xB7 ${performance2.completedWaferCount} \u7247\u6837\u672C</small>
       </div>
     </div>
+    ${candidateMarkup}
     <p class="performance-window-note">${escapeHtml(window.detail)}</p>
     <div class="performance-legend" aria-label="\u5360\u7528\u7EC4\u6210\u56FE\u4F8B">${legend}</div>
     <div class="performance-grid">
@@ -934,7 +1143,7 @@ function renderSchedulePerformance(performance2) {
     <section class="performance-guidance" aria-labelledby="performanceGuidanceTitle">
       <strong id="performanceGuidanceTitle">\u6307\u6807\u600E\u4E48\u8BFB</strong>
       <div>
-        <p><b>\u74F6\u9888\u5019\u9009</b><span>\u5E73\u5747\u6D3B\u8DC3\u671F\u7528\u4E8E\u7B5B\u9009\u6301\u7EED\u5360\u7528\u8D44\u6E90\uFF1B\u5E94\u540C\u65F6\u6838\u5BF9\u5360\u7528\u7387\u548C\u6700\u957F\u7A7A\u95F2\uFF0C\u4E0D\u80FD\u5355\u9879\u5B9A\u6027\u3002</span></p>
+        <p><b>\u74F6\u9888\u5019\u9009</b><span>\u6309\u5DE5\u5E8F\u5E76\u884C\u5BB9\u91CF\u3001\u673A\u5668\u4EBA\u548C LoadLock \u5BB9\u91CF\u7EDF\u4E00\u6BD4\u8F83\u3002\u591A\u4E2A\u5F97\u5206\u63A5\u8FD1\u7684\u8D44\u6E90\u4F1A\u540C\u65F6\u4FDD\u7559\uFF0C\u4E0D\u5F3A\u884C\u7ED9\u51FA\u552F\u4E00\u7B54\u6848\u3002</span></p>
         <p><b>\u8282\u62CD\u6CE2\u52A8</b><span>\u51FA\u7AD9\u95F4\u9694 CV \u8D8A\u5C0F\u8868\u793A\u51FA\u7247\u8D8A\u5747\u5300\uFF0C\u4F46\u5B83\u53EA\u63CF\u8FF0\u6CE2\u52A8\uFF0C\u4E0D\u80FD\u5355\u72EC\u89E3\u91CA\u6839\u56E0\u3002</span></p>
         <p><b>\u961F\u5217\u4EA4\u7EC7</b><span>\u4EA4\u7EC7\u5EA6\u53EA\u63CF\u8FF0 Job \u987A\u5E8F\uFF0C\u5E76\u975E\u8D8A\u9AD8\u8D8A\u597D\uFF1B\u91CD\u70B9\u770B\u76EE\u6807\u8154\u5FD9\u95F2\u548C\u5165\u961F\u81F3\u52A0\u5DE5\u7B49\u5F85\u3002</span></p>
       </div>
@@ -944,6 +1153,7 @@ var VisualizationWorkspace = class {
   root;
   elements;
   device = null;
+  analysisContext = null;
   moves = [];
   sourceName = "";
   resultUrl = "";
@@ -991,13 +1201,19 @@ var VisualizationWorkspace = class {
       throw error;
     }
   }
+  /** 注入路径中的并行工艺腔定义，使未被调度使用的候选腔仍属于正确容量组。 */
+  setAnalysisContext(context) {
+    this.analysisContext = context ? structuredClone(context) : null;
+    if (this.moves.length) this.renderPerformance();
+  }
   /** 返回与诊断面板一致的稳态瓶颈候选利用率，供运行结果摘要复用。 */
   getBottleneckUtilization() {
     if (!this.moves.length) return null;
     const performance2 = analyzeSchedulePerformance(
       this.moves,
       this.device,
-      this.performanceWindowMode
+      this.performanceWindowMode,
+      this.analysisContext
     );
     return summarizeBottleneckUtilization(performance2);
   }
@@ -1151,7 +1367,8 @@ var VisualizationWorkspace = class {
     const performance2 = analyzeSchedulePerformance(
       this.moves,
       this.device,
-      this.performanceWindowMode
+      this.performanceWindowMode,
+      this.analysisContext
     );
     this.elements.performance.innerHTML = renderSchedulePerformance(performance2);
   }

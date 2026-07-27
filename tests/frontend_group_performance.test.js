@@ -81,3 +81,36 @@ test("缺少 Baseline 或性能数据时保持明确空值", () => {
   assert.equal(result.cases[0].improvementPercent, null);
 });
 
+test("测试组保留每例多个瓶颈候选并统计候选频次", () => {
+  const result = analyzeTestGroupPerformance([{
+    id: "a",
+    name: "t1",
+    status: "succeeded",
+    validation: "passed",
+    makespan: 90,
+    baselineMakespan: 100,
+    performance: {
+      window: { method: "steady-overlap" },
+      primaryBottleneck: {
+        label: "VTR",
+        utilization: 0.8,
+      },
+      bottleneckCandidates: [
+        { label: "VTR", utilization: 0.8, score: 0.82, confidence: "high" },
+        { label: "LoadLock 容量组 · LA / LB", utilization: 0.7, score: 0.7, confidence: "medium" },
+      ],
+      throughputPerHour: 30,
+      departureIntervalCv: 0.2,
+    },
+  }]);
+
+  assert.equal(result.cases[0].bottleneckCandidateCount, 2);
+  assert.deepEqual(
+    result.cases[0].bottleneckCandidates.map(item => item.resourceName),
+    ["VTR", "LoadLock 容量组 · LA / LB"],
+  );
+  assert.deepEqual(
+    result.bottleneckFrequencies.map(item => item.resourceName),
+    ["VTR", "LoadLock 容量组 · LA / LB"],
+  );
+});

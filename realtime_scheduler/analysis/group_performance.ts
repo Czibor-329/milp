@@ -35,6 +35,13 @@ export interface TestGroupCasePerformance {
   elapsedTimeMs: number | null;
   bottleneckResource: string;
   bottleneckUtilization: number | null;
+  bottleneckCandidateCount: number;
+  bottleneckCandidates: Array<{
+    resourceName: string;
+    utilization: number;
+    score: number;
+    confidence: string;
+  }>;
   throughputPerHour: number | null;
   departureIntervalCv: number | null;
   windowMethod: string;
@@ -105,7 +112,21 @@ function normalizeCase(input: TestGroupCaseInput): TestGroupCasePerformance {
   const improvementPercent = comparable
     ? ((baselineMakespan - makespan) / baselineMakespan) * 100
     : null;
-  const bottleneck = input.performance?.bottleneck ?? null;
+  const primaryCandidate = input.performance?.primaryBottleneck ?? null;
+  const legacyBottleneck = input.performance?.bottleneck ?? null;
+  const bottleneckCandidates = input.performance?.bottleneckCandidates?.length
+    ? input.performance.bottleneckCandidates.map(candidate => ({
+      resourceName: candidate.label,
+      utilization: candidate.utilization,
+      score: candidate.score,
+      confidence: candidate.confidence,
+    }))
+    : legacyBottleneck ? [{
+      resourceName: legacyBottleneck.name,
+      utilization: legacyBottleneck.utilization,
+      score: legacyBottleneck.utilization,
+      confidence: "",
+    }] : [];
   return {
     id: String(input.id),
     name: String(input.name),
@@ -119,8 +140,13 @@ function normalizeCase(input: TestGroupCaseInput): TestGroupCasePerformance {
     performanceRatio: comparable ? makespan / baselineMakespan : null,
     cpuTimeMs: finiteOrNull(input.cpuTimeMs),
     elapsedTimeMs: finiteOrNull(input.elapsedTimeMs),
-    bottleneckResource: bottleneck?.name ?? "",
-    bottleneckUtilization: bottleneck ? bottleneck.utilization : null,
+    bottleneckResource: primaryCandidate?.label ?? legacyBottleneck?.name ?? "",
+    bottleneckUtilization: primaryCandidate?.utilization
+      ?? legacyBottleneck?.utilization
+      ?? null,
+    bottleneckCandidateCount: input.performance?.bottleneckCandidates?.length
+      ?? (legacyBottleneck ? 1 : 0),
+    bottleneckCandidates,
     throughputPerHour: input.performance
       ? finiteOrNull(input.performance.throughputPerHour)
       : null,
@@ -166,10 +192,10 @@ export function analyzeTestGroupPerformance(
   const frequencyMap = new Map<string, number[]>();
   const windowMethodCounts: Record<string, number> = {};
   for (const item of succeeded) {
-    if (item.bottleneckResource && item.bottleneckUtilization !== null) {
-      const values = frequencyMap.get(item.bottleneckResource) ?? [];
-      values.push(item.bottleneckUtilization);
-      frequencyMap.set(item.bottleneckResource, values);
+    for (const candidate of item.bottleneckCandidates) {
+      const values = frequencyMap.get(candidate.resourceName) ?? [];
+      values.push(candidate.utilization);
+      frequencyMap.set(candidate.resourceName, values);
     }
     if (item.windowMethod) {
       windowMethodCounts[item.windowMethod] = (
@@ -226,4 +252,3 @@ export function analyzeTestGroupPerformance(
     windowMethodCounts,
   };
 }
-

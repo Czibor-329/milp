@@ -14,6 +14,7 @@ import {
   summarizeBottleneckUtilization,
   type ActivityCategory,
   type BottleneckUtilizationSummary,
+  type ScheduleAnalysisContext,
   type DeviceDefinition,
   type MoveRecord,
   type PerformanceWindowMode,
@@ -30,11 +31,14 @@ export {
 export type {
   ActivityCategory,
   BottleneckUtilizationSummary,
+  BottleneckCandidate,
+  BottleneckCandidateKind,
   DeviceDefinition,
   MoveRecord,
   PerformanceWindowMode,
   ResourcePerformance,
   ResourceKind,
+  ScheduleAnalysisContext,
   SchedulePerformance,
 } from "../../analysis/movelist_performance";
 
@@ -631,7 +635,13 @@ function formatPercent(value: number): string {
 /** 绘制资源占用表、Active Period 瓶颈和真空端晶圆队列。 */
 function renderSchedulePerformance(performance: SchedulePerformance): string {
   const window = performance.window;
-  const bottleneck = performance.bottleneck;
+  const bottleneck = performance.primaryBottleneck;
+  const confidenceLabels = { high: "证据较强", medium: "证据中等", low: "证据较弱" };
+  const candidateKindLabels = {
+    "process-group": "工序容量",
+    robot: "传输资源",
+    "loadlock-group": "LoadLock 容量",
+  };
   const displayedResources = displayedPerformanceResources(performance);
   const resourceKindLabels: Record<ResourceKind, string> = {
     robot: "机械手",
@@ -650,8 +660,8 @@ function renderSchedulePerformance(performance: SchedulePerformance): string {
       const width = Math.min(duration / window.duration * 100, 100);
       return `<span class="category-${category}" style="width:${width.toFixed(3)}%" title="${ACTIVITY_CATEGORY_LABELS[category]} ${formatSeconds(duration)} s"></span>`;
     }).join("");
-    const status = resource.isBottleneck
-      ? '<span class="resource-bottleneck">活跃期最长</span>'
+    const status = resource.bottleneckCandidateRank
+      ? `<span class="resource-bottleneck">${resource.bottleneckCandidateRank === 1 ? "主要候选" : `候选 #${resource.bottleneckCandidateRank}`}</span>`
       : "";
     return `
       <tr class="${resource.isBottleneck ? "is-bottleneck" : ""}">
@@ -670,6 +680,35 @@ function renderSchedulePerformance(performance: SchedulePerformance): string {
       </tr>`;
   }).join("");
   const visibleQueue = performance.vacuumQueue.slice(0, MAXIMUM_VISIBLE_QUEUE_ITEMS);
+  const candidateMarkup = performance.bottleneckCandidates.length
+    ? `<section class="bottleneck-candidates" aria-labelledby="bottleneckCandidatesTitle">
+        <div class="bottleneck-candidate-head">
+          <div>
+            <strong id="bottleneckCandidatesTitle">瓶颈可能性排序</strong>
+            <span>允许多个候选；评分以容量利用率为主，连续性和同类相对强度为辅。</span>
+          </div>
+          <small>共 ${performance.bottleneckCandidates.length} 个较可能候选</small>
+        </div>
+        <ol class="bottleneck-candidate-list">
+          ${performance.bottleneckCandidates.map((candidate, index) => `
+            <li class="${index === 0 ? "is-primary" : ""}">
+              <span class="candidate-rank">${index + 1}</span>
+              <div class="candidate-main">
+                <div><strong>${escapeHtml(candidate.label)}</strong><span>${escapeHtml(candidateKindLabels[candidate.kind])}</span></div>
+                <small>${candidate.evidence.map(escapeHtml).join(" · ")}</small>
+              </div>
+              <div class="candidate-metrics">
+                <strong>${formatPercent(candidate.utilization)}</strong>
+                <span>容量利用率</span>
+              </div>
+              <div class="candidate-score">
+                <strong>${Math.round(candidate.score * 100)}</strong>
+                <span>可能性分 · ${confidenceLabels[candidate.confidence]}</span>
+              </div>
+            </li>`).join("")}
+        </ol>
+      </section>`
+    : "";
   const queueMarkup = visibleQueue.length
     ? `<ol class="vacuum-queue-sequence">${visibleQueue.map(item => `
         <li class="${item.targetWasBusy ? "target-busy" : "target-idle"}">
@@ -687,9 +726,9 @@ function renderSchedulePerformance(performance: SchedulePerformance): string {
         <small>剔除开头 ${formatSeconds(window.trimmedStart)} s / 结尾 ${formatSeconds(window.trimmedEnd)} s</small>
       </div>
       <div>
-        <span>活跃期瓶颈候选</span>
-        <strong>${escapeHtml(bottleneck?.name ?? "—")}</strong>
-        <small>${bottleneck ? `平均活跃期 ${formatSeconds(bottleneck.averageActivePeriod)} s · 占用率 ${formatPercent(bottleneck.utilization)}` : "没有足够的资源活动"}</small>
+        <span>最可能瓶颈</span>
+        <strong>${escapeHtml(bottleneck?.label ?? "—")}</strong>
+        <small>${bottleneck ? `容量利用率 ${formatPercent(bottleneck.utilization)} · ${confidenceLabels[bottleneck.confidence]} · 另有 ${Math.max(0, performance.bottleneckCandidates.length - 1)} 个候选` : "没有足够的资源活动"}</small>
       </div>
       <div>
         <span>出站节拍</span>
@@ -697,6 +736,7 @@ function renderSchedulePerformance(performance: SchedulePerformance): string {
         <small>平均间隔 ${formatSeconds(performance.meanDepartureInterval)} s · 间隔 CV ${performance.departureIntervalCv.toFixed(2)} · ${performance.completedWaferCount} 片样本</small>
       </div>
     </div>
+    ${candidateMarkup}
     <p class="performance-window-note">${escapeHtml(window.detail)}</p>
     <div class="performance-legend" aria-label="占用组成图例">${legend}</div>
     <div class="performance-grid">
@@ -721,7 +761,7 @@ function renderSchedulePerformance(performance: SchedulePerformance): string {
     <section class="performance-guidance" aria-labelledby="performanceGuidanceTitle">
       <strong id="performanceGuidanceTitle">指标怎么读</strong>
       <div>
-        <p><b>瓶颈候选</b><span>平均活跃期用于筛选持续占用资源；应同时核对占用率和最长空闲，不能单项定性。</span></p>
+        <p><b>瓶颈候选</b><span>按工序并行容量、机器人和 LoadLock 容量统一比较。多个得分接近的资源会同时保留，不强行给出唯一答案。</span></p>
         <p><b>节拍波动</b><span>出站间隔 CV 越小表示出片越均匀，但它只描述波动，不能单独解释根因。</span></p>
         <p><b>队列交织</b><span>交织度只描述 Job 顺序，并非越高越好；重点看目标腔忙闲和入队至加工等待。</span></p>
       </div>
@@ -733,6 +773,7 @@ export class VisualizationWorkspace {
   private readonly root: Document;
   private readonly elements: WorkspaceElements;
   private device: DeviceDefinition | null = null;
+  private analysisContext: ScheduleAnalysisContext | null = null;
   private moves: MoveRecord[] = [];
   private sourceName = "";
   private resultUrl = "";
@@ -789,6 +830,12 @@ export class VisualizationWorkspace {
     }
   }
 
+  /** 注入路径中的并行工艺腔定义，使未被调度使用的候选腔仍属于正确容量组。 */
+  setAnalysisContext(context: ScheduleAnalysisContext | null): void {
+    this.analysisContext = context ? structuredClone(context) : null;
+    if (this.moves.length) this.renderPerformance();
+  }
+
   /** 返回与诊断面板一致的稳态瓶颈候选利用率，供运行结果摘要复用。 */
   getBottleneckUtilization(): BottleneckUtilizationSummary | null {
     if (!this.moves.length) return null;
@@ -796,6 +843,7 @@ export class VisualizationWorkspace {
       this.moves,
       this.device,
       this.performanceWindowMode,
+      this.analysisContext,
     );
     return summarizeBottleneckUtilization(performance);
   }
@@ -971,6 +1019,7 @@ export class VisualizationWorkspace {
       this.moves,
       this.device,
       this.performanceWindowMode,
+      this.analysisContext,
     );
     this.elements.performance.innerHTML = renderSchedulePerformance(performance);
   }

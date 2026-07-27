@@ -16,6 +16,7 @@ import {
   summarizeBottleneckUtilization,
 } from "../../analysis/movelist_performance";
 import { analyzeTestGroupPerformance } from "../../analysis/group_performance";
+import { buildScheduleAnalysisContext } from "../../analysis/schedule_context";
 import { renderTestGroupAnalysis } from "./group_analysis_view";
 import {
   CJOB_TYPES,
@@ -488,6 +489,9 @@ function applyTestCase(testCase) {
   }
   state.times.length = state.roundCount; state.rounds.length = state.roundCount; state.times[0] = 0;
   normalizeRounds(); state.drawer = null;
+  visualizationWorkspace.setAnalysisContext(
+    buildScheduleAnalysisContext(state.routes, state.rounds),
+  );
   const cleanNamesChanged = synchronizeCleanNames();
   const routeNamesChanged = synchronizeRouteNames();
   state.dirty = cleanNamesChanged || routeNamesChanged;
@@ -1414,6 +1418,9 @@ function prepareGanttView(result) {
 /** 把本次结果加载进内嵌工作台，并启用直接查看入口。 */
 async function prepareWorkspaceView(result) {
   if (!result?.resultId) return null;
+  visualizationWorkspace.setAnalysisContext(
+    buildScheduleAnalysisContext(state.routes, state.rounds),
+  );
   await visualizationWorkspace.loadResult(result.resultId, state.testCaseName || "当前运行结果");
   return visualizationWorkspace.getBottleneckUtilization();
 }
@@ -1576,7 +1583,9 @@ function setBottleneckMetric(summary, emptyDetail = "运行后计算稳态瓶颈
     "瓶颈利用率",
     available ? `${(utilization * 100).toFixed(1)}%` : "—",
     available
-      ? `${summary.resourceName || "未知资源"} · ${summary.windowLabel || "当前统计窗口"}`
+      ? `${summary.resourceName || "未知资源"} · ${
+        ({ high: "证据较强", medium: "证据中等", low: "证据较弱" })[summary.confidence] || "候选"
+      }${Number(summary.candidateCount) > 1 ? ` · 共 ${summary.candidateCount} 个候选` : ""}`
       : emptyDetail,
   );
 }
@@ -1652,10 +1661,17 @@ async function loadBatchItemPerformance(item, index) {
       const response = await fetch(resultUrl, { cache: "no-store" });
       if (!response.ok) throw new Error(`结果加载失败（HTTP ${response.status}）`);
       const payload = await response.json();
+      const testCase = (state.workspaceDevice?.tests || []).find(
+        test => String(test.id) === String(item.testId),
+      );
       const performance = analyzeSchedulePerformance(
         normalizeMovePayload(payload),
         state.device,
         "steady",
+        buildScheduleAnalysisContext(
+          state.workspaceDevice?.routes || state.routes,
+          testCase?.rounds || state.rounds,
+        ),
       );
       const summary = summarizeBottleneckUtilization(performance);
       batchPerformanceAnalyses.set(resultUrl, performance);

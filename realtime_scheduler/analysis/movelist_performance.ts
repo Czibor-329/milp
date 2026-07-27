@@ -35,6 +35,30 @@ export interface ResourcePerformance {
   activePeriodCount: number;
   categoryTimes: Record<ActivityCategory, number>;
   isBottleneck: boolean;
+  bottleneckCandidateRank: number | null;
+}
+export type BottleneckCandidateKind = "process-group" | "robot" | "loadlock-group";
+export type BottleneckConfidence = "high" | "medium" | "low";
+export interface ProcessStageDefinition {
+  id: string;
+  label?: string;
+  pjobName?: string;
+  stepId?: string | number;
+  resourceNames: string[];
+}
+export interface ScheduleAnalysisContext {
+  processStages?: ProcessStageDefinition[];
+}
+export interface BottleneckCandidate {
+  id: string;
+  label: string;
+  kind: BottleneckCandidateKind;
+  resourceNames: string[];
+  utilization: number;
+  continuity: number;
+  score: number;
+  confidence: BottleneckConfidence;
+  evidence: string[];
 }
 export interface VacuumQueueItem {
   index: number; material: string; pjob: string; loadLock: string;
@@ -43,6 +67,9 @@ export interface VacuumQueueItem {
 export interface SchedulePerformance {
   window: PerformanceWindow;
   resources: ResourcePerformance[];
+  bottleneckCandidates: BottleneckCandidate[];
+  primaryBottleneck: BottleneckCandidate | null;
+  /** @deprecated 兼容旧调用方；新界面应使用 primaryBottleneck。 */
   bottleneck: ResourcePerformance | null;
   completedWaferCount: number; throughputPerHour: number;
   meanDepartureInterval: number; departureIntervalCv: number;
@@ -51,6 +78,9 @@ export interface SchedulePerformance {
 }
 export interface BottleneckUtilizationSummary {
   resourceName: string; utilization: number; windowLabel: string;
+  confidence: BottleneckConfidence;
+  candidateCount: number;
+  score: number;
 }
 interface NormalizedMove extends MoveRecord {
   MoveID: number; MoveType: number; ModuleName: string; StartTime: number; EndTime: number;
@@ -535,11 +565,233 @@ function vacuumQueuePattern(queue: VacuumQueueItem[]): { switchRatio: number; lo
     longestRun,
   };
 }
-/** 从完整 MoveList 计算稳态资源占用、Active Period 和真空端队列。 */
+
+interface RawBottleneckCandidate {
+  id: string;
+  label: string;
+  kind: BottleneckCandidateKind;
+  resourceNames: string[];
+  utilization: number;
+  continuity: number;
+  contextLabels: string[];
+}
+
+/** 把 PJob 全名压缩成稳定的末级名称，兼容上下文和 MoveList 使用不同前缀。 */
+function shortJobName(value: unknown): string {
+  const parts = String(value ?? "").split(".").filter(Boolean);
+  return parts.at(-1) ?? "";
+}
+
+/** 读取 ProcessMove 的工序编号。 */
+function processStepId(move: NormalizedMove): string {
+  const direct = move.StepID;
+  if (direct !== undefined && direct !== null && String(direct) !== "") return String(direct);
+  return String(listValue(move.StepIDList)[0] ?? "");
+}
+
+/** 读取 ProcessMove 的 PJob。 */
+function processPJobName(move: NormalizedMove): string {
+  return String(listValue(move.PJobName)[0] ?? move.PJobName ?? "");
+}
+
+/** 判断配置中的工序定义是否对应一个实际 ProcessMove。 */
+function stageMatchesMove(stage: ProcessStageDefinition, move: NormalizedMove): boolean {
+  const configuredStep = stage.stepId === undefined || stage.stepId === null
+    ? ""
+    : String(stage.stepId);
+  if (configuredStep && configuredStep !== processStepId(move)) return false;
+  const configuredJob = shortJobName(stage.pjobName);
+  const moveJob = shortJobName(processPJobName(move));
+  return !configuredJob || !moveJob || configuredJob === moveJob;
+}
+
+/** 将并行工艺腔折叠成容量组；同一组被多个 Job/工序复用时只保留一次。 */
+function processCapacityGroups(
+  moves: NormalizedMove[],
+  resources: ResourcePerformance[],
+  context: ScheduleAnalysisContext | null,
+): Array<{ resourceNames: string[]; contextLabels: string[] }> {
+  const processResourceNames = new Set(
+    resources.filter(resource => resource.kind === "process").map(resource => resource.name),
+  );
+  const observed = moves.filter(move => (
+    move.MoveType === PROCESS_MOVE
+    && move.EndTime > move.StartTime + PERFORMANCE_TIME_TOLERANCE
+    && processResourceNames.has(move.ModuleName)
+  ));
+  const groups: Array<{ resourceNames: Set<string>; contextLabels: Set<string> }> = [];
+
+  for (const stage of context?.processStages ?? []) {
+    const names = stage.resourceNames
+      .map(String)
+      .filter(name => processResourceNames.has(name));
+    if (!names.length) continue;
+    groups.push({
+      resourceNames: new Set(names),
+      contextLabels: new Set(stage.label ? [String(stage.label)] : []),
+    });
+  }
+
+  const unmatchedByStage = new Map<string, Set<string>>();
+  for (const move of observed) {
+    let matching = (context?.processStages ?? []).filter(stage => stageMatchesMove(stage, move));
+    if (!matching.length) {
+      const moveJob = shortJobName(processPJobName(move));
+      matching = (context?.processStages ?? []).filter(stage => (
+        stage.resourceNames.includes(move.ModuleName)
+        && (!shortJobName(stage.pjobName) || shortJobName(stage.pjobName) === moveJob)
+      ));
+    }
+    if (matching.length) continue;
+    const key = `${processPJobName(move)}|${processStepId(move)}`;
+    const names = unmatchedByStage.get(key) ?? new Set<string>();
+    names.add(move.ModuleName);
+    unmatchedByStage.set(key, names);
+  }
+  for (const [key, names] of unmatchedByStage) {
+    groups.push({
+      resourceNames: names,
+      contextLabels: new Set([key.replace("|", " · 工序 ")]),
+    });
+  }
+
+  const merged = new Map<string, { resourceNames: string[]; contextLabels: Set<string> }>();
+  for (const group of groups) {
+    const names = [...group.resourceNames].sort(naturalCompare);
+    const key = names.join("|");
+    const existing = merged.get(key) ?? { resourceNames: names, contextLabels: new Set<string>() };
+    for (const label of group.contextLabels) existing.contextLabels.add(label);
+    merged.set(key, existing);
+  }
+  return [...merged.values()].map(group => ({
+    resourceNames: group.resourceNames,
+    contextLabels: [...group.contextLabels].filter(Boolean).sort(naturalCompare),
+  }));
+}
+
+/** 由容量占用、连续性和同类相对强度生成可比较的多资源瓶颈候选。 */
+function rankBottleneckCandidates(
+  moves: NormalizedMove[],
+  resources: ResourcePerformance[],
+  window: PerformanceWindow,
+  context: ScheduleAnalysisContext | null,
+): BottleneckCandidate[] {
+  if (window.duration <= PERFORMANCE_TIME_TOLERANCE) return [];
+  const byName = new Map(resources.map(resource => [resource.name, resource]));
+  const raw: RawBottleneckCandidate[] = [];
+
+  for (const group of processCapacityGroups(moves, resources, context)) {
+    const members = group.resourceNames.map(name => byName.get(name)).filter(
+      (resource): resource is ResourcePerformance => Boolean(resource),
+    );
+    const busyTime = members.reduce((sum, resource) => sum + resource.busyTime, 0);
+    if (!members.length || busyTime <= PERFORMANCE_TIME_TOLERANCE) continue;
+    raw.push({
+      id: `process:${group.resourceNames.join("+")}`,
+      label: `工序容量组 · ${group.resourceNames.join(" / ")}`,
+      kind: "process-group",
+      resourceNames: group.resourceNames,
+      utilization: busyTime / (members.length * window.duration),
+      continuity: members.reduce(
+        (sum, resource) => sum + Math.max(0, 1 - resource.longestIdlePeriod / window.duration),
+        0,
+      ) / members.length,
+      contextLabels: group.contextLabels,
+    });
+  }
+
+  for (const resource of resources.filter(item => (
+    item.kind === "robot" && item.busyTime > PERFORMANCE_TIME_TOLERANCE
+  ))) {
+    raw.push({
+      id: `robot:${resource.name}`,
+      label: resource.name,
+      kind: "robot",
+      resourceNames: [resource.name],
+      utilization: resource.utilization,
+      continuity: Math.max(0, 1 - resource.longestIdlePeriod / window.duration),
+      contextLabels: [],
+    });
+  }
+
+  const loadLocks = resources.filter(item => (
+    item.kind === "loadlock" && item.busyTime > PERFORMANCE_TIME_TOLERANCE
+  ));
+  if (loadLocks.length) {
+    raw.push({
+      id: `loadlock:${loadLocks.map(resource => resource.name).sort(naturalCompare).join("+")}`,
+      label: `LoadLock 容量组 · ${loadLocks.map(resource => resource.name).sort(naturalCompare).join(" / ")}`,
+      kind: "loadlock-group",
+      resourceNames: loadLocks.map(resource => resource.name).sort(naturalCompare),
+      utilization: loadLocks.reduce((sum, resource) => sum + resource.busyTime, 0)
+        / (loadLocks.length * window.duration),
+      continuity: loadLocks.reduce(
+        (sum, resource) => sum + Math.max(0, 1 - resource.longestIdlePeriod / window.duration),
+        0,
+      ) / loadLocks.length,
+      contextLabels: [],
+    });
+  }
+
+  const maximumByKind = new Map<BottleneckCandidateKind, number>();
+  for (const candidate of raw) {
+    maximumByKind.set(
+      candidate.kind,
+      Math.max(maximumByKind.get(candidate.kind) ?? 0, candidate.utilization),
+    );
+  }
+  const ranked = raw.map(candidate => {
+    const relative = candidate.utilization / Math.max(
+      maximumByKind.get(candidate.kind) ?? 0,
+      PERFORMANCE_TIME_TOLERANCE,
+    );
+    // 容量占用是跨类型比较的主体；连续性与同类排名仅用于打破接近结果。
+    const score = Math.min(1, (
+      candidate.utilization * 0.82
+      + candidate.continuity * 0.12
+      + relative * 0.06
+    ));
+    const confidence: BottleneckConfidence = score >= 0.72
+      ? "high"
+      : score >= 0.45 ? "medium" : "low";
+    const evidence = [
+      `${candidate.resourceNames.length > 1 ? "组平均容量占用" : "资源占用"} ${(candidate.utilization * 100).toFixed(1)}%`,
+      `最长空闲折算连续性 ${(candidate.continuity * 100).toFixed(1)}%`,
+    ];
+    if (candidate.resourceNames.length > 1) {
+      evidence.push(`并行/同类资源 ${candidate.resourceNames.join("、")}`);
+    }
+    if (candidate.contextLabels.length) {
+      evidence.push(`关联 ${candidate.contextLabels.slice(0, 3).join("、")}`);
+    }
+    return {
+      id: candidate.id,
+      label: candidate.label,
+      kind: candidate.kind,
+      resourceNames: candidate.resourceNames,
+      utilization: Math.max(0, Math.min(candidate.utilization, 1)),
+      continuity: Math.max(0, Math.min(candidate.continuity, 1)),
+      score,
+      confidence,
+      evidence,
+    };
+  }).sort((left, right) => (
+    right.score - left.score
+    || right.utilization - left.utilization
+    || naturalCompare(left.label, right.label)
+  ));
+  if (!ranked.length) return [];
+  const topScore = ranked[0].score;
+  const likelyThreshold = Math.max(0.2, topScore * 0.72, topScore - 0.16);
+  return ranked.filter(candidate => candidate.score >= likelyThreshold).slice(0, 5);
+}
+
+/** 从完整 MoveList 计算稳态资源占用、多候选瓶颈和真空端队列。 */
 export function analyzeSchedulePerformance(
   moves: MoveRecord[],
   device: DeviceDefinition | null,
   mode: PerformanceWindowMode = "steady",
+  context: ScheduleAnalysisContext | null = null,
 ): SchedulePerformance {
   const records = normalizeMoves(moves);
   const window = performanceWindow(records, device, mode);
@@ -560,18 +812,29 @@ export function analyzeSchedulePerformance(
         : 0,
       ...summary,
       isBottleneck: false,
+      bottleneckCandidateRank: null,
     };
   });
-  const bottleneckCandidates = resources.filter(resource => (
-    ["robot", "process", "loadlock"].includes(resource.kind)
-    && resource.busyTime > PERFORMANCE_TIME_TOLERANCE
-  ));
-  const bottleneck = [...bottleneckCandidates].sort((left, right) => (
-    right.averageActivePeriod - left.averageActivePeriod
-    || right.utilization - left.utilization
-    || naturalCompare(left.name, right.name)
-  ))[0] ?? null;
-  if (bottleneck) bottleneck.isBottleneck = true;
+  const bottleneckCandidates = rankBottleneckCandidates(
+    records,
+    resources,
+    window,
+    context,
+  );
+  const primaryBottleneck = bottleneckCandidates[0] ?? null;
+  for (const [candidateIndex, candidate] of bottleneckCandidates.entries()) {
+    for (const name of candidate.resourceNames) {
+      const resource = resources.find(item => item.name === name);
+      if (!resource) continue;
+      resource.bottleneckCandidateRank = resource.bottleneckCandidateRank === null
+        ? candidateIndex + 1
+        : Math.min(resource.bottleneckCandidateRank, candidateIndex + 1);
+      if (candidateIndex === 0) resource.isBottleneck = true;
+    }
+  }
+  const bottleneck = primaryBottleneck
+    ? resources.find(resource => primaryBottleneck.resourceNames.includes(resource.name)) ?? null
+    : null;
   const kindOrder: Record<ResourceKind, number> = {
     robot: 0,
     loadlock: 1,
@@ -605,6 +868,8 @@ export function analyzeSchedulePerformance(
   return {
     window,
     resources,
+    bottleneckCandidates,
+    primaryBottleneck,
     bottleneck,
     completedWaferCount: completionTimes.length,
     throughputPerHour,
@@ -619,11 +884,15 @@ export function analyzeSchedulePerformance(
 export function summarizeBottleneckUtilization(
   performance: SchedulePerformance,
 ): BottleneckUtilizationSummary | null {
-  if (!performance.bottleneck) return null;
+  const candidate = performance.primaryBottleneck;
+  if (!candidate) return null;
   return {
-    resourceName: performance.bottleneck.name,
-    utilization: performance.bottleneck.utilization,
+    resourceName: candidate.label,
+    utilization: candidate.utilization,
     windowLabel: performance.window.label,
+    confidence: candidate.confidence,
+    candidateCount: performance.bottleneckCandidates.length,
+    score: candidate.score,
   };
 }
 

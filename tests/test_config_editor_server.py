@@ -1053,7 +1053,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn('data-tab-target="route">路径配置</button>', html)
         self.assertIn('data-tab-target="clean">清洁配置</button>', html)
         self.assertIn('<h1>调度平台</h1>', html)
-        self.assertIn('class="frontend-version">前端 v1.0.5</span>', html)
+        self.assertIn('class="frontend-version">前端 v1.0.6</span>', html)
         self.assertIn('<span id="metricMovesLabel">瓶颈利用率</span>', html)
         self.assertNotIn('<span id="metricMovesLabel">Move 数</span>', html)
         self.assertNotIn("renderDatasetCatalog", html)
@@ -1252,6 +1252,9 @@ class ConfigEditorServerTests(unittest.TestCase):
         group_source = (analysis_root / "group_performance.ts").read_text(
             encoding="utf-8",
         )
+        context_source = (analysis_root / "schedule_context.ts").read_text(
+            encoding="utf-8",
+        )
         workspace_source = (
             ROOT
             / "realtime_scheduler"
@@ -1263,9 +1266,11 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("../../analysis/movelist_performance", workspace_source)
         self.assertIn("analyzeSchedulePerformance", movelist_source)
         self.assertIn("analyzeTestGroupPerformance", group_source)
+        self.assertIn("buildScheduleAnalysisContext", context_source)
         for browser_dependency in ("document.", "globalThis.window", "fetch("):
             self.assertNotIn(browser_dependency, movelist_source)
             self.assertNotIn(browser_dependency, group_source)
+            self.assertNotIn(browser_dependency, context_source)
 
     def test_device_workspace_persists_independent_test_cases(self) -> None:
         """同一设备的多套 Route/Clean/重算配置应独立保存并可复制、修改、删除。"""

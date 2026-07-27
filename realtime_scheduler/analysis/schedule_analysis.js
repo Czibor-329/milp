@@ -22,6 +22,7 @@ __export(index_exports, {
   PERFORMANCE_TIME_TOLERANCE: () => PERFORMANCE_TIME_TOLERANCE,
   analyzeSchedulePerformance: () => analyzeSchedulePerformance,
   analyzeTestGroupPerformance: () => analyzeTestGroupPerformance,
+  buildScheduleAnalysisContext: () => buildScheduleAnalysisContext,
   displayedPerformanceResources: () => displayedPerformanceResources,
   normalizeMovePayload: () => normalizeMovePayload,
   summarizeBottleneckUtilization: () => summarizeBottleneckUtilization
@@ -365,7 +366,162 @@ function vacuumQueuePattern(queue) {
     longestRun
   };
 }
-function analyzeSchedulePerformance(moves, device, mode = "steady") {
+function shortJobName(value) {
+  const parts = String(value ?? "").split(".").filter(Boolean);
+  return parts.at(-1) ?? "";
+}
+function processStepId(move) {
+  const direct = move.StepID;
+  if (direct !== void 0 && direct !== null && String(direct) !== "") return String(direct);
+  return String(listValue(move.StepIDList)[0] ?? "");
+}
+function processPJobName(move) {
+  return String(listValue(move.PJobName)[0] ?? move.PJobName ?? "");
+}
+function stageMatchesMove(stage, move) {
+  const configuredStep = stage.stepId === void 0 || stage.stepId === null ? "" : String(stage.stepId);
+  if (configuredStep && configuredStep !== processStepId(move)) return false;
+  const configuredJob = shortJobName(stage.pjobName);
+  const moveJob = shortJobName(processPJobName(move));
+  return !configuredJob || !moveJob || configuredJob === moveJob;
+}
+function processCapacityGroups(moves, resources, context) {
+  const processResourceNames = new Set(
+    resources.filter((resource) => resource.kind === "process").map((resource) => resource.name)
+  );
+  const observed = moves.filter((move) => move.MoveType === PROCESS_MOVE && move.EndTime > move.StartTime + PERFORMANCE_TIME_TOLERANCE && processResourceNames.has(move.ModuleName));
+  const groups = [];
+  for (const stage of context?.processStages ?? []) {
+    const names = stage.resourceNames.map(String).filter((name) => processResourceNames.has(name));
+    if (!names.length) continue;
+    groups.push({
+      resourceNames: new Set(names),
+      contextLabels: new Set(stage.label ? [String(stage.label)] : [])
+    });
+  }
+  const unmatchedByStage = /* @__PURE__ */ new Map();
+  for (const move of observed) {
+    let matching = (context?.processStages ?? []).filter((stage) => stageMatchesMove(stage, move));
+    if (!matching.length) {
+      const moveJob = shortJobName(processPJobName(move));
+      matching = (context?.processStages ?? []).filter((stage) => stage.resourceNames.includes(move.ModuleName) && (!shortJobName(stage.pjobName) || shortJobName(stage.pjobName) === moveJob));
+    }
+    if (matching.length) continue;
+    const key = `${processPJobName(move)}|${processStepId(move)}`;
+    const names = unmatchedByStage.get(key) ?? /* @__PURE__ */ new Set();
+    names.add(move.ModuleName);
+    unmatchedByStage.set(key, names);
+  }
+  for (const [key, names] of unmatchedByStage) {
+    groups.push({
+      resourceNames: names,
+      contextLabels: /* @__PURE__ */ new Set([key.replace("|", " \xB7 \u5DE5\u5E8F ")])
+    });
+  }
+  const merged = /* @__PURE__ */ new Map();
+  for (const group of groups) {
+    const names = [...group.resourceNames].sort(naturalCompare);
+    const key = names.join("|");
+    const existing = merged.get(key) ?? { resourceNames: names, contextLabels: /* @__PURE__ */ new Set() };
+    for (const label of group.contextLabels) existing.contextLabels.add(label);
+    merged.set(key, existing);
+  }
+  return [...merged.values()].map((group) => ({
+    resourceNames: group.resourceNames,
+    contextLabels: [...group.contextLabels].filter(Boolean).sort(naturalCompare)
+  }));
+}
+function rankBottleneckCandidates(moves, resources, window, context) {
+  if (window.duration <= PERFORMANCE_TIME_TOLERANCE) return [];
+  const byName = new Map(resources.map((resource) => [resource.name, resource]));
+  const raw = [];
+  for (const group of processCapacityGroups(moves, resources, context)) {
+    const members = group.resourceNames.map((name) => byName.get(name)).filter(
+      (resource) => Boolean(resource)
+    );
+    const busyTime = members.reduce((sum, resource) => sum + resource.busyTime, 0);
+    if (!members.length || busyTime <= PERFORMANCE_TIME_TOLERANCE) continue;
+    raw.push({
+      id: `process:${group.resourceNames.join("+")}`,
+      label: `\u5DE5\u5E8F\u5BB9\u91CF\u7EC4 \xB7 ${group.resourceNames.join(" / ")}`,
+      kind: "process-group",
+      resourceNames: group.resourceNames,
+      utilization: busyTime / (members.length * window.duration),
+      continuity: members.reduce(
+        (sum, resource) => sum + Math.max(0, 1 - resource.longestIdlePeriod / window.duration),
+        0
+      ) / members.length,
+      contextLabels: group.contextLabels
+    });
+  }
+  for (const resource of resources.filter((item) => item.kind === "robot" && item.busyTime > PERFORMANCE_TIME_TOLERANCE)) {
+    raw.push({
+      id: `robot:${resource.name}`,
+      label: resource.name,
+      kind: "robot",
+      resourceNames: [resource.name],
+      utilization: resource.utilization,
+      continuity: Math.max(0, 1 - resource.longestIdlePeriod / window.duration),
+      contextLabels: []
+    });
+  }
+  const loadLocks = resources.filter((item) => item.kind === "loadlock" && item.busyTime > PERFORMANCE_TIME_TOLERANCE);
+  if (loadLocks.length) {
+    raw.push({
+      id: `loadlock:${loadLocks.map((resource) => resource.name).sort(naturalCompare).join("+")}`,
+      label: `LoadLock \u5BB9\u91CF\u7EC4 \xB7 ${loadLocks.map((resource) => resource.name).sort(naturalCompare).join(" / ")}`,
+      kind: "loadlock-group",
+      resourceNames: loadLocks.map((resource) => resource.name).sort(naturalCompare),
+      utilization: loadLocks.reduce((sum, resource) => sum + resource.busyTime, 0) / (loadLocks.length * window.duration),
+      continuity: loadLocks.reduce(
+        (sum, resource) => sum + Math.max(0, 1 - resource.longestIdlePeriod / window.duration),
+        0
+      ) / loadLocks.length,
+      contextLabels: []
+    });
+  }
+  const maximumByKind = /* @__PURE__ */ new Map();
+  for (const candidate of raw) {
+    maximumByKind.set(
+      candidate.kind,
+      Math.max(maximumByKind.get(candidate.kind) ?? 0, candidate.utilization)
+    );
+  }
+  const ranked = raw.map((candidate) => {
+    const relative = candidate.utilization / Math.max(
+      maximumByKind.get(candidate.kind) ?? 0,
+      PERFORMANCE_TIME_TOLERANCE
+    );
+    const score = Math.min(1, candidate.utilization * 0.82 + candidate.continuity * 0.12 + relative * 0.06);
+    const confidence = score >= 0.72 ? "high" : score >= 0.45 ? "medium" : "low";
+    const evidence = [
+      `${candidate.resourceNames.length > 1 ? "\u7EC4\u5E73\u5747\u5BB9\u91CF\u5360\u7528" : "\u8D44\u6E90\u5360\u7528"} ${(candidate.utilization * 100).toFixed(1)}%`,
+      `\u6700\u957F\u7A7A\u95F2\u6298\u7B97\u8FDE\u7EED\u6027 ${(candidate.continuity * 100).toFixed(1)}%`
+    ];
+    if (candidate.resourceNames.length > 1) {
+      evidence.push(`\u5E76\u884C/\u540C\u7C7B\u8D44\u6E90 ${candidate.resourceNames.join("\u3001")}`);
+    }
+    if (candidate.contextLabels.length) {
+      evidence.push(`\u5173\u8054 ${candidate.contextLabels.slice(0, 3).join("\u3001")}`);
+    }
+    return {
+      id: candidate.id,
+      label: candidate.label,
+      kind: candidate.kind,
+      resourceNames: candidate.resourceNames,
+      utilization: Math.max(0, Math.min(candidate.utilization, 1)),
+      continuity: Math.max(0, Math.min(candidate.continuity, 1)),
+      score,
+      confidence,
+      evidence
+    };
+  }).sort((left, right) => right.score - left.score || right.utilization - left.utilization || naturalCompare(left.label, right.label));
+  if (!ranked.length) return [];
+  const topScore = ranked[0].score;
+  const likelyThreshold = Math.max(0.2, topScore * 0.72, topScore - 0.16);
+  return ranked.filter((candidate) => candidate.score >= likelyThreshold).slice(0, 5);
+}
+function analyzeSchedulePerformance(moves, device, mode = "steady", context = null) {
   const records = normalizeMoves(moves);
   const window = performanceWindow(records, device, mode);
   const definitions = performanceResourceDefinitions(records, device);
@@ -382,12 +538,26 @@ function analyzeSchedulePerformance(moves, device, mode = "steady") {
       kind: definition.kind,
       utilization: window.duration > PERFORMANCE_TIME_TOLERANCE ? summary.busyTime / window.duration : 0,
       ...summary,
-      isBottleneck: false
+      isBottleneck: false,
+      bottleneckCandidateRank: null
     };
   });
-  const bottleneckCandidates = resources.filter((resource) => ["robot", "process", "loadlock"].includes(resource.kind) && resource.busyTime > PERFORMANCE_TIME_TOLERANCE);
-  const bottleneck = [...bottleneckCandidates].sort((left, right) => right.averageActivePeriod - left.averageActivePeriod || right.utilization - left.utilization || naturalCompare(left.name, right.name))[0] ?? null;
-  if (bottleneck) bottleneck.isBottleneck = true;
+  const bottleneckCandidates = rankBottleneckCandidates(
+    records,
+    resources,
+    window,
+    context
+  );
+  const primaryBottleneck = bottleneckCandidates[0] ?? null;
+  for (const [candidateIndex, candidate] of bottleneckCandidates.entries()) {
+    for (const name of candidate.resourceNames) {
+      const resource = resources.find((item) => item.name === name);
+      if (!resource) continue;
+      resource.bottleneckCandidateRank = resource.bottleneckCandidateRank === null ? candidateIndex + 1 : Math.min(resource.bottleneckCandidateRank, candidateIndex + 1);
+      if (candidateIndex === 0) resource.isBottleneck = true;
+    }
+  }
+  const bottleneck = primaryBottleneck ? resources.find((resource) => primaryBottleneck.resourceNames.includes(resource.name)) ?? null : null;
   const kindOrder = {
     robot: 0,
     loadlock: 1,
@@ -406,6 +576,8 @@ function analyzeSchedulePerformance(moves, device, mode = "steady") {
   return {
     window,
     resources,
+    bottleneckCandidates,
+    primaryBottleneck,
     bottleneck,
     completedWaferCount: completionTimes.length,
     throughputPerHour,
@@ -417,11 +589,15 @@ function analyzeSchedulePerformance(moves, device, mode = "steady") {
   };
 }
 function summarizeBottleneckUtilization(performance) {
-  if (!performance.bottleneck) return null;
+  const candidate = performance.primaryBottleneck;
+  if (!candidate) return null;
   return {
-    resourceName: performance.bottleneck.name,
-    utilization: performance.bottleneck.utilization,
-    windowLabel: performance.window.label
+    resourceName: candidate.label,
+    utilization: candidate.utilization,
+    windowLabel: performance.window.label,
+    confidence: candidate.confidence,
+    candidateCount: performance.bottleneckCandidates.length,
+    score: candidate.score
   };
 }
 function displayedPerformanceResources(performance) {
@@ -453,7 +629,19 @@ function normalizeCase(input) {
   const baselineMakespan = finiteOrNull(input.baselineMakespan);
   const comparable = input.status === "succeeded" && makespan !== null && baselineMakespan !== null && baselineMakespan > 0;
   const improvementPercent = comparable ? (baselineMakespan - makespan) / baselineMakespan * 100 : null;
-  const bottleneck = input.performance?.bottleneck ?? null;
+  const primaryCandidate = input.performance?.primaryBottleneck ?? null;
+  const legacyBottleneck = input.performance?.bottleneck ?? null;
+  const bottleneckCandidates = input.performance?.bottleneckCandidates?.length ? input.performance.bottleneckCandidates.map((candidate) => ({
+    resourceName: candidate.label,
+    utilization: candidate.utilization,
+    score: candidate.score,
+    confidence: candidate.confidence
+  })) : legacyBottleneck ? [{
+    resourceName: legacyBottleneck.name,
+    utilization: legacyBottleneck.utilization,
+    score: legacyBottleneck.utilization,
+    confidence: ""
+  }] : [];
   return {
     id: String(input.id),
     name: String(input.name),
@@ -467,8 +655,10 @@ function normalizeCase(input) {
     performanceRatio: comparable ? makespan / baselineMakespan : null,
     cpuTimeMs: finiteOrNull(input.cpuTimeMs),
     elapsedTimeMs: finiteOrNull(input.elapsedTimeMs),
-    bottleneckResource: bottleneck?.name ?? "",
-    bottleneckUtilization: bottleneck ? bottleneck.utilization : null,
+    bottleneckResource: primaryCandidate?.label ?? legacyBottleneck?.name ?? "",
+    bottleneckUtilization: primaryCandidate?.utilization ?? legacyBottleneck?.utilization ?? null,
+    bottleneckCandidateCount: input.performance?.bottleneckCandidates?.length ?? (legacyBottleneck ? 1 : 0),
+    bottleneckCandidates,
     throughputPerHour: input.performance ? finiteOrNull(input.performance.throughputPerHour) : null,
     departureIntervalCv: input.performance ? finiteOrNull(input.performance.departureIntervalCv) : null,
     windowMethod: input.performance?.window.method ?? "",
@@ -495,10 +685,10 @@ function analyzeTestGroupPerformance(inputs) {
   const frequencyMap = /* @__PURE__ */ new Map();
   const windowMethodCounts = {};
   for (const item of succeeded) {
-    if (item.bottleneckResource && item.bottleneckUtilization !== null) {
-      const values = frequencyMap.get(item.bottleneckResource) ?? [];
-      values.push(item.bottleneckUtilization);
-      frequencyMap.set(item.bottleneckResource, values);
+    for (const candidate of item.bottleneckCandidates) {
+      const values = frequencyMap.get(candidate.resourceName) ?? [];
+      values.push(candidate.utilization);
+      frequencyMap.set(candidate.resourceName, values);
     }
     if (item.windowMethod) {
       windowMethodCounts[item.windowMethod] = (windowMethodCounts[item.windowMethod] ?? 0) + 1;
@@ -540,11 +730,48 @@ function analyzeTestGroupPerformance(inputs) {
     windowMethodCounts
   };
 }
+
+// ../analysis/schedule_context.ts
+function buildScheduleAnalysisContext(routes, rounds) {
+  const routeByName = new Map(
+    (routes ?? []).map((route) => [String(route?.name ?? ""), route])
+  );
+  const processStages = [];
+  for (const [roundIndex, round] of (rounds ?? []).entries()) {
+    for (const [cjobIndex, cjob] of (round?.cjobs ?? []).entries()) {
+      for (const pjob of cjob?.pjobs ?? []) {
+        const route = routeByName.get(String(pjob?.routeRef ?? ""));
+        if (!route) continue;
+        let processOrdinal = 0;
+        for (const stage of route.stages ?? []) {
+          if (!stage?.needProcess) continue;
+          processOrdinal += 1;
+          const resourceNames = [...new Set(
+            (stage.visits ?? []).map((visit) => String(visit?.stationName ?? "").trim()).filter(Boolean)
+          )];
+          if (!resourceNames.length) continue;
+          const taskId = String(roundIndex + 1);
+          const cjobKey = String(cjob?.key ?? `C${cjobIndex + 1}`);
+          const jobName = String(pjob?.jobName ?? "P?");
+          processStages.push({
+            id: `${taskId}.${cjobKey}.${jobName}:step-${stage.stepId}`,
+            label: `${jobName} \xB7 \u5DE5\u5E8F ${processOrdinal}`,
+            pjobName: `${taskId}.${cjobKey}.${jobName}`,
+            stepId: stage.stepId,
+            resourceNames
+          });
+        }
+      }
+    }
+  }
+  return { processStages };
+}
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   PERFORMANCE_TIME_TOLERANCE,
   analyzeSchedulePerformance,
   analyzeTestGroupPerformance,
+  buildScheduleAnalysisContext,
   displayedPerformanceResources,
   normalizeMovePayload,
   summarizeBottleneckUtilization

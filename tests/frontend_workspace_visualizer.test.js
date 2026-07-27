@@ -3,6 +3,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const logic = require("../realtime_scheduler/frontend/workspace_visualizer_logic.js");
+const analysisLogic = require("../realtime_scheduler/analysis/schedule_analysis.js");
 
 const device = {
   Stations: {
@@ -190,14 +191,125 @@ test("模块物理占用包含开门、取放和加工，界面隐藏未使用�
   assert.equal(pm2.busyTime, 0);
   assert.equal(performance.bottleneck.name, "PM1");
   assert.deepEqual(logic.summarizeBottleneckUtilization(performance), {
-    resourceName: "PM1",
+    resourceName: "工序容量组 · PM1",
     utilization: 0.5,
     windowLabel: "稳态交叠窗",
+    confidence: "medium",
+    candidateCount: 1,
+    score: 0.53,
   });
   assert.equal(
     logic.displayedPerformanceResources(performance).some(resource => resource.name === "PM2"),
     false,
   );
+});
+
+test("并行工艺腔按完整工序容量组识别，即使其中一台没有被使用", () => {
+  const parallelDevice = {
+    Stations: {
+      PM1: { Type: "ProcessChamber" },
+      PM2: { Type: "ProcessChamber" },
+    },
+    Robots: {},
+  };
+  const performance = logic.analyzeSchedulePerformance([
+    {
+      MoveID: 1,
+      MoveType: 9,
+      ModuleName: "PM1",
+      PJobName: ["1.C1.P1"],
+      StepID: 2,
+      StartTime: 0,
+      EndTime: 100,
+    },
+  ], parallelDevice, "full", {
+    processStages: [{
+      id: "p1-step-2",
+      label: "P1 · 工序 1",
+      pjobName: "1.C1.P1",
+      stepId: 2,
+      resourceNames: ["PM1", "PM2"],
+    }],
+  });
+
+  assert.equal(performance.primaryBottleneck.label, "工序容量组 · PM1 / PM2");
+  assert.deepEqual(performance.primaryBottleneck.resourceNames, ["PM1", "PM2"]);
+  assert.equal(performance.primaryBottleneck.utilization, 0.5);
+});
+
+test("路径配置可独立提取并行工序容量组", () => {
+  const context = analysisLogic.buildScheduleAnalysisContext([
+    {
+      name: "RouteA",
+      stages: [
+        { stepId: 0, needProcess: false, visits: [{ stationName: "LP1" }] },
+        {
+          stepId: 2,
+          needProcess: true,
+          visits: [{ stationName: "PM1" }, { stationName: "PM2" }],
+        },
+      ],
+    },
+  ], [{
+    cjobs: [{ key: "C1", pjobs: [{ jobName: "P1", routeRef: "RouteA" }] }],
+  }]);
+
+  assert.deepEqual(context.processStages, [{
+    id: "1.C1.P1:step-2",
+    label: "P1 · 工序 1",
+    pjobName: "1.C1.P1",
+    stepId: 2,
+    resourceNames: ["PM1", "PM2"],
+  }]);
+});
+
+test("高占用 VTR 不再被低占用长加工腔误判覆盖", () => {
+  const transportDevice = {
+    Stations: { PM1: { Type: "ProcessChamber" } },
+    Robots: { VTR: {} },
+  };
+  const performance = logic.analyzeSchedulePerformance([
+    { MoveID: 1, MoveType: 9, ModuleName: "PM1", StartTime: 0, EndTime: 30 },
+    { MoveID: 2, MoveType: 5, ModuleName: "VTR", StartTime: 0, EndTime: 80 },
+  ], transportDevice, "full");
+
+  assert.equal(performance.primaryBottleneck.kind, "robot");
+  assert.equal(performance.primaryBottleneck.label, "VTR");
+  assert.equal(performance.primaryBottleneck.utilization, 1);
+});
+
+test("LoadLock 高容量占用可成为首位候选", () => {
+  const loadLockDevice = {
+    Stations: {
+      LA: { Type: "LoadLock" },
+      PM1: { Type: "ProcessChamber" },
+    },
+    Robots: { VTR: {} },
+  };
+  const performance = logic.analyzeSchedulePerformance([
+    { MoveID: 1, MoveType: 10, ModuleName: "LA", StartTime: 0, EndTime: 80 },
+    { MoveID: 2, MoveType: 9, ModuleName: "PM1", StartTime: 0, EndTime: 20 },
+    { MoveID: 3, MoveType: 5, ModuleName: "VTR", StartTime: 0, EndTime: 10 },
+  ], loadLockDevice, "full");
+
+  assert.equal(performance.primaryBottleneck.kind, "loadlock-group");
+  assert.equal(performance.primaryBottleneck.label, "LoadLock 容量组 · LA");
+});
+
+test("得分接近时保留多个瓶颈候选并按可能性排序", () => {
+  const mixedDevice = {
+    Stations: { PM1: { Type: "ProcessChamber" } },
+    Robots: { VTR: {} },
+  };
+  const performance = logic.analyzeSchedulePerformance([
+    { MoveID: 1, MoveType: 9, ModuleName: "PM1", StartTime: 0, EndTime: 75 },
+    { MoveID: 2, MoveType: 5, ModuleName: "VTR", StartTime: 0, EndTime: 80 },
+    { MoveID: 3, MoveType: 5, ModuleName: "OTHER", StartTime: 80, EndTime: 100 },
+  ], mixedDevice, "full");
+
+  assert.equal(performance.bottleneckCandidates.length, 2);
+  assert.equal(performance.bottleneckCandidates[0].label, "VTR");
+  assert.equal(performance.bottleneckCandidates[1].label, "工序容量组 · PM1");
 });
 
 test("清洁与门动作重叠时按物理并集计时", () => {

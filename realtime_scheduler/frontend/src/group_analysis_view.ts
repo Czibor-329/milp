@@ -59,16 +59,26 @@ function improvementChart(summary: TestGroupPerformanceSummary): string {
 }
 
 function utilizationChart(summary: TestGroupPerformanceSummary): string {
-  const cases = summary.cases.filter(item => item.bottleneckUtilization !== null);
-  return cases.map((item, index) => {
-    const utilization = Math.max(0, Math.min(item.bottleneckUtilization ?? 0, 1));
-    return `<div class="group-chart-row">
-      <span class="group-chart-label" title="${escapeHtml(item.name)}">${escapeHtml(caseLabel(item, index))}</span>
-      <div class="group-linear-track" role="img" aria-label="${escapeHtml(caseLabel(item, index))} 瓶颈 ${escapeHtml(item.bottleneckResource)}，利用率 ${(utilization * 100).toFixed(1)}%">
+  const rows = summary.cases.flatMap((item, caseIndex) => (
+    item.bottleneckCandidates.map((candidate, candidateIndex) => ({
+      item,
+      caseIndex,
+      candidate,
+      candidateIndex,
+    }))
+  ));
+  return rows.map(({ item, caseIndex, candidate, candidateIndex }) => {
+    const utilization = Math.max(0, Math.min(candidate.utilization, 1));
+    const label = candidateIndex === 0
+      ? caseLabel(item, caseIndex)
+      : `↳ 候选 ${candidateIndex + 1}`;
+    return `<div class="group-chart-row ${candidateIndex ? "is-secondary-candidate" : ""}">
+      <span class="group-chart-label" title="${escapeHtml(item.name)}">${escapeHtml(label)}</span>
+      <div class="group-linear-track" role="img" aria-label="${escapeHtml(caseLabel(item, caseIndex))} 瓶颈候选 ${escapeHtml(candidate.resourceName)}，利用率 ${(utilization * 100).toFixed(1)}%">
         <i class="utilization" style="width:${(utilization * 100).toFixed(2)}%"></i>
       </div>
       <strong>${(utilization * 100).toFixed(1)}%</strong>
-      <small title="${escapeHtml(item.bottleneckResource)}">${escapeHtml(item.bottleneckResource || "—")}</small>
+      <small title="${escapeHtml(candidate.resourceName)}">${escapeHtml(candidate.resourceName || "—")}</small>
     </div>`;
   }).join("") || '<p class="group-analysis-empty">没有可分析的瓶颈资源。</p>';
 }
@@ -102,7 +112,7 @@ function resultTable(summary: TestGroupPerformanceSummary): string {
       <td>${finiteText(item.makespan, 2, " s")}</td>
       <td>${finiteText(item.baselineMakespan, 2, " s")}</td>
       <td class="${(item.improvementPercent ?? 0) < 0 ? "loss" : "gain"}">${item.improvementPercent === null ? "—" : `${item.improvementPercent > 0 ? "+" : ""}${item.improvementPercent.toFixed(2)}%`}</td>
-      <td>${escapeHtml(item.bottleneckResource || "—")}</td>
+      <td>${escapeHtml(item.bottleneckResource || "—")}${item.bottleneckCandidateCount > 1 ? ` <small>+${item.bottleneckCandidateCount - 1} 个候选</small>` : ""}</td>
       <td>${percentText(item.bottleneckUtilization, true)}</td>
       <td>${durationText(item.cpuTimeMs)}</td>
       <td>${finiteText(item.throughputPerHour, 1, " 片/h")}</td>
@@ -134,7 +144,7 @@ export function renderTestGroupAnalysis(
       <article><span>加权总体改善</span><strong class="${(weighted ?? 0) < 0 ? "loss" : "gain"}">${weighted === null ? "—" : `${weighted > 0 ? "+" : ""}${weighted.toFixed(2)}%`}</strong><small>按各测试 Baseline makespan 加权</small></article>
       <article><span>逐例中位改善</span><strong class="${(medianImprovement ?? 0) < 0 ? "loss" : "gain"}">${medianImprovement === null ? "—" : `${medianImprovement > 0 ? "+" : ""}${medianImprovement.toFixed(2)}%`}</strong><small>${summary.winCount} 胜 · ${summary.tieCount} 平 · ${summary.regressionCount} 退化</small></article>
       <article><span>CPU Time</span><strong>${durationText(summary.medianCpuTimeMs)}</strong><small>P90 ${durationText(summary.p90CpuTimeMs)} · 总计 ${durationText(summary.totalCpuTimeMs)}</small></article>
-      <article><span>瓶颈利用率中位数</span><strong>${percentText(summary.medianBottleneckUtilization, true)}</strong><small>物理占用时间并集</small></article>
+      <article><span>主要候选利用率中位数</span><strong>${percentText(summary.medianBottleneckUtilization, true)}</strong><small>工序组、机器人或 LoadLock 容量</small></article>
       <article><span>出站表现中位数</span><strong>${finiteText(summary.medianThroughputPerHour, 1, " 片/h")}</strong><small>间隔波动 CV ${finiteText(summary.medianDepartureIntervalCv, 2)}</small></article>
     </div>
     <div class="group-chart-grid">
@@ -143,7 +153,7 @@ export function renderTestGroupAnalysis(
         <div class="group-chart-body">${improvementChart(summary)}</div>
       </article>
       <article class="group-chart-card">
-        <header><div><h3>所有瓶颈利用率</h3><p>每个测试的稳态瓶颈候选与物理占用</p></div></header>
+        <header><div><h3>所有瓶颈候选利用率</h3><p>每个测试按可能性依次显示所有接近候选</p></div></header>
         <div class="group-chart-body">${utilizationChart(summary)}</div>
       </article>
       <article class="group-chart-card">
@@ -152,7 +162,7 @@ export function renderTestGroupAnalysis(
       </article>
     </div>
     <article class="group-frequency-card">
-      <div><h3>瓶颈资源出现频次</h3><p>识别跨测试反复出现的结构性约束</p></div>
+      <div><h3>瓶颈候选出现频次</h3><p>按容量组统计跨测试反复出现的结构性约束</p></div>
       <div class="group-frequency-tags">${frequencyTags(summary)}</div>
     </article>
     <details class="group-analysis-table-wrap">
@@ -166,7 +176,6 @@ export function renderTestGroupAnalysis(
     </details>
     <aside class="group-method-note">
       <strong>如何解读</strong>
-      <p>瓶颈按平均连续忙碌期（Active Period）排序，利用率用于同级判别；它是诊断候选，不等同于完整 SEMI E10 OEE。组级同时报告加权总体改善、逐例中位数和胜/平/退化，避免少数长用例掩盖局部退化。${windowApproximationCount ? ` 有 ${windowApproximationCount} 个测试因样本不足使用中段近似窗。` : ""}</p>
+      <p>瓶颈先按工序并行腔室、机器人和 LoadLock 建立容量候选，再以容量利用率为主、连续性和同类相对强度为辅排序；多个接近候选会同时保留。平均活跃期只作为资源表中的辅助观察，不再跨类型直接判定。组级同时报告加权总体改善、逐例中位数和胜/平/退化，避免少数长用例掩盖局部退化。${windowApproximationCount ? ` 有 ${windowApproximationCount} 个测试因样本不足使用中段近似窗。` : ""}</p>
     </aside>`;
 }
-
