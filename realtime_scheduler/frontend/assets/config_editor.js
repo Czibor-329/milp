@@ -2795,24 +2795,6 @@ function renderRoutes() {
     return `<section class="route-process-group"><button class="route-process-head" data-action="toggle-route-process-group" data-process-key="${escapeHtml3(processGroup.key)}" aria-expanded="${processOpen}"><span class="collapse-arrow ${processOpen ? "open" : ""}">\u25B6</span><strong>${escapeHtml3(processGroup.label)}</strong><span class="route-count">${processGroup.routeCount} \u6761\u8DEF\u5F84 \xB7 ${processGroup.structures.length} \u79CD\u5E76\u884C\u7ED3\u6784</span></button>${processOpen ? `<div class="route-process-body">${structures}</div>` : ""}</section>`;
   }).join("") : `<div class="empty">\u81F3\u5C11\u521B\u5EFA\u4E00\u6761\u8DEF\u5F84\uFF0CJob \u624D\u80FD\u5F15\u7528\u3002</div>`;
 }
-function pjobLoadPortSlots(roundIndex, cjobIndex, pjobIndex) {
-  const target = state.rounds[roundIndex].cjobs[cjobIndex].pjobs[pjobIndex];
-  let occupied = 0;
-  for (let currentCJobIndex = 0; currentCJobIndex <= cjobIndex; currentCJobIndex += 1) {
-    const pjobs = state.rounds[roundIndex].cjobs[currentCJobIndex].pjobs;
-    const end = currentCJobIndex === cjobIndex ? pjobIndex : pjobs.length - 1;
-    for (let currentPJobIndex = 0; currentPJobIndex <= end; currentPJobIndex += 1) {
-      const pjob = pjobs[currentPJobIndex];
-      if (pjob.loadPort !== target.loadPort) continue;
-      const start = occupied + 1;
-      occupied += Number(pjob.waferCount);
-      if (currentCJobIndex === cjobIndex && currentPJobIndex === pjobIndex) {
-        return Array.from({ length: Number(pjob.waferCount) }, (_, index) => start + index);
-      }
-    }
-  }
-  return [];
-}
 function renderPJobRoutePicker(pjob, roundIndex, cjobIndex, pjobIndex) {
   const groups = groupedRoutes().flatMap((processGroup) => processGroup.structures);
   const selectedRoute = state.routes.find((route) => route.name === pjob.routeRef);
@@ -2822,8 +2804,8 @@ function renderPJobRoutePicker(pjob, roundIndex, cjobIndex, pjobIndex) {
   const groupOptions = groups.map((group) => `<option value="${escapeHtml3(group.key)}" ${group.key === selectedKey ? "selected" : ""}>${escapeHtml3(`${group.processLabel} \xB7 ${group.label}`)}</option>`).join("");
   const routeOptions = (selectedGroup?.routes || []).map(({ route }) => `<option value="${escapeHtml3(route.name)}" ${route.name === pjob.routeRef ? "selected" : ""}>${escapeHtml3(route.name)}</option>`).join("");
   return `<div class="pjob-route-picker">
-    <select class="pjob-route-process" data-scope="pjob-route-group" ${common}>${groupOptions || `<option value="">\u6682\u65E0\u5DE5\u5E8F</option>`}</select>
-    <select data-scope="pjob" data-key="routeRef" ${common}>${routeOptions ? `<option value="">\u9009\u62E9\u8DEF\u5F84</option>${routeOptions}` : `<option value="">\u8BF7\u5148\u914D\u7F6E\u8DEF\u5F84</option>`}</select>
+    <select class="pjob-route-process" aria-label="\u8DEF\u5F84\u7C7B\u522B" data-scope="pjob-route-group" ${common}>${groupOptions || `<option value="">\u6682\u65E0\u5DE5\u5E8F</option>`}</select>
+    <select class="pjob-route-specific" aria-label="\u5177\u4F53\u8DEF\u5F84" data-scope="pjob" data-key="routeRef" ${common}>${routeOptions ? `<option value="">\u9009\u62E9\u8DEF\u5F84</option>${routeOptions}` : `<option value="">\u8BF7\u5148\u914D\u7F6E\u8DEF\u5F84</option>`}</select>
   </div>`;
 }
 function renderRounds() {
@@ -2835,9 +2817,8 @@ function renderRounds() {
       const normalLot = cjob.jobType === "NormalLot";
       const pjobRows = cjob.pjobs.map((pjob, pjobIndex) => `<tr>
         <td><span class="readonly-pill">${escapeHtml3(pjob.jobName)}</span></td>
-        <td><input class="pjob-number" type="number" min="1" max="${state.strategy === "milp" ? 12 : 25}" data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="waferCount" value="${Number(pjob.waferCount)}"><small class="mat-list-preview">\u69FD\u4F4D [${pjobLoadPortSlots(roundIndex, cjobIndex, pjobIndex).join(", ")}]</small></td>
+        <td><input class="pjob-number" type="number" min="1" max="${state.strategy === "milp" ? 12 : 25}" data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="waferCount" value="${Number(pjob.waferCount)}"></td>
         <td>${renderPJobRoutePicker(pjob, roundIndex, cjobIndex, pjobIndex)}</td>
-        <td><span class="readonly-pill">${escapeHtml3(pjob.taskId)}</span></td>
         <td><input class="pjob-number" type="number" min="1" data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="priority" value="${Number(pjob.priority)}"></td>
         <td><select data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="loadPort">${optionsHtml(state.loadPorts, pjob.loadPort, state.loadPorts.length ? "\u9009\u62E9\u7AEF\u53E3" : "\u65E0\u7AEF\u53E3")}</select></td>
         <td><button class="btn danger icon small" aria-label="\u5220\u9664 ${escapeHtml3(pjob.jobName)}" data-action="remove-pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" ${cjob.pjobs.length <= 1 ? "disabled" : ""}>\xD7</button></td>
@@ -2850,10 +2831,11 @@ function renderRounds() {
           <div class="field"><label>TaskMode</label><select data-scope="cjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-key="taskMode">${TASK_MODES.map((value) => `<option ${value === cjob.taskMode ? "selected" : ""}>${value}</option>`).join("")}</select></div>
           <div class="field"><label>PJobNameList</label><div class="pjob-name-list">${cjob.pJobNameList.map((name) => `<span>${escapeHtml3(name)}</span>`).join("")}</div></div>
         </div>
-        <div class="pjob-table-wrap"><table class="pjob-table"><thead><tr><th>JobName</th><th>\u6676\u5706\u6570\u91CF / LoadPort \u69FD\u4F4D</th><th>OriginRoute</th><th>TaskID</th><th>Priority</th><th>LoadPort</th><th></th></tr></thead><tbody>${pjobRows}</tbody></table></div>
+        <div class="pjob-table-wrap"><table class="pjob-table"><thead><tr><th>JobName</th><th>Material</th><th>OriginRoute</th><th>Priority</th><th>LoadPort</th><th></th></tr></thead><tbody>${pjobRows}</tbody></table></div>
       </section>`;
     }).join("");
-    return `<section class="round-card"><header class="round-head"><div class="round-title"><div class="round-number">${roundIndex + 1}</div><div><strong>${roundTitle}</strong><span class="readonly-pill">@ ${Number(round.currentTime)}s</span></div></div><div class="round-time-editor field"><label>${roundIndex ? "\u91CD\u7B97\u65F6\u95F4" : "\u6392\u7A0B\u65F6\u95F4"}</label><div><input type="number" min="0" step="0.1" data-round-time-index="${roundIndex}" value="${Number(round.currentTime)}" ${roundIndex ? "" : "disabled"}><span>s</span></div></div><button class="btn small" data-action="add-cjob" data-round-index="${roundIndex}">\uFF0B CJob</button></header><div class="cjob-list">${cjobs}</div></section>`;
+    const roundTimeBadge = roundIndex ? `<span class="readonly-pill">@ ${Number(round.currentTime)}s</span>` : "";
+    return `<section class="round-card"><header class="round-head"><div class="round-title"><div class="round-number">${roundIndex + 1}</div><div><strong>${roundTitle}</strong>${roundTimeBadge}</div></div><div class="round-time-editor field"><label>${roundIndex ? "\u91CD\u7B97\u65F6\u95F4" : "\u6392\u7A0B\u65F6\u95F4"}</label><div><input type="number" min="0" step="0.1" data-round-time-index="${roundIndex}" value="${Number(round.currentTime)}" ${roundIndex ? "" : "disabled"}><span>s</span></div></div><button class="btn small" data-action="add-cjob" data-round-index="${roundIndex}">\uFF0B CJob</button></header><div class="cjob-list">${cjobs}</div></section>`;
   }).join("");
 }
 function renderStepNumberField(label, key, value, routeIndex, stageIndex, options = {}) {

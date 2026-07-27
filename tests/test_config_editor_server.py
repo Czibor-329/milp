@@ -1169,7 +1169,9 @@ class ConfigEditorServerTests(unittest.TestCase):
         ):
             self.assertNotIn(removed_text, page_template)
         self.assertIn('data-scope="pjob-route-group"', html)
-        self.assertIn("晶圆数量 / LoadPort 槽位", html)
+        self.assertIn("<th>Material</th>", html)
+        self.assertNotIn("晶圆数量 / LoadPort 槽位", html)
+        self.assertNotIn("<th>TaskID</th>", html)
         self.assertNotIn("<th>FoupID</th>", html)
         self.assertNotIn("<th>Weight</th>", html)
         self.assertIn("$ 运行失败：${error.message", html)

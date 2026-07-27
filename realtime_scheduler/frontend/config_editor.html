@@ -8,18 +8,17 @@
 </head>
 <body>
   <main class="shell">
-    <header class="hero">
+    <header class="topbar">
       <h1>调度平台</h1>
+      <nav class="tabs" aria-label="主要功能">
+        <button class="tab active" data-tab-target="schedule">运行计划</button>
+        <button class="tab" data-tab-target="workspace">结果分析</button>
+        <button class="tab" data-tab-target="route">路径配置</button>
+        <button class="tab" data-tab-target="clean">清洁配置</button>
+        <button class="tab" data-tab-target="algorithm-history">算法记录</button>
+      </nav>
       <div class="hero-meta"><span class="frontend-version">前端 v1.0.6</span><div class="service-pill" id="serviceState">本地服务</div></div>
     </header>
-
-    <nav class="tabs" aria-label="主要功能">
-      <button class="tab active" data-tab-target="schedule">运行计划</button>
-      <button class="tab" data-tab-target="workspace">结果分析</button>
-      <button class="tab" data-tab-target="route">路径配置</button>
-      <button class="tab" data-tab-target="clean">清洁配置</button>
-      <button class="tab" data-tab-target="algorithm-history">算法记录</button>
-    </nav>
 
     <div class="layout" id="pageLayout">
       <section class="main">
@@ -92,7 +91,7 @@
             </div>
           </article>
           <article class="panel">
-            <div class="panel-head"><div><h2>重算任务</h2></div><div class="field" style="width:140px"><label for="roundCount">总轮数</label><input id="roundCount" type="number" min="1" max="8" value="2"></div></div>
+            <div class="panel-head"><div><h2>重算任务</h2></div><div class="field round-count-field"><label for="roundCount">总轮数</label><input id="roundCount" type="number" min="1" max="8" value="2"></div></div>
             <div class="panel-body"><div class="card-list" id="roundList"></div></div>
           </article>
           <article class="panel result-panel">

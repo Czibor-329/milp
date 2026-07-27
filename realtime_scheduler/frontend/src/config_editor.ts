@@ -861,26 +861,6 @@ function renderRoutes() {
   }).join("") : `<div class="empty">至少创建一条路径，Job 才能引用。</div>`;
 }
 
-/** 返回 PJob 在当前轮次对应 LoadPort 中占用的一基槽位。 */
-function pjobLoadPortSlots(roundIndex, cjobIndex, pjobIndex) {
-  const target = state.rounds[roundIndex].cjobs[cjobIndex].pjobs[pjobIndex];
-  let occupied = 0;
-  for (let currentCJobIndex = 0; currentCJobIndex <= cjobIndex; currentCJobIndex += 1) {
-    const pjobs = state.rounds[roundIndex].cjobs[currentCJobIndex].pjobs;
-    const end = currentCJobIndex === cjobIndex ? pjobIndex : pjobs.length - 1;
-    for (let currentPJobIndex = 0; currentPJobIndex <= end; currentPJobIndex += 1) {
-      const pjob = pjobs[currentPJobIndex];
-      if (pjob.loadPort !== target.loadPort) continue;
-      const start = occupied + 1;
-      occupied += Number(pjob.waferCount);
-      if (currentCJobIndex === cjobIndex && currentPJobIndex === pjobIndex) {
-        return Array.from({ length: Number(pjob.waferCount) }, (_, index) => start + index);
-      }
-    }
-  }
-  return [];
-}
-
 /** 按加工工序数和并行机器结构生成 PJob 的两级路径选择器。 */
 function renderPJobRoutePicker(pjob, roundIndex, cjobIndex, pjobIndex) {
   const groups = groupedRoutes().flatMap(processGroup => processGroup.structures);
@@ -897,8 +877,8 @@ function renderPJobRoutePicker(pjob, roundIndex, cjobIndex, pjobIndex) {
     `<option value="${escapeHtml(route.name)}" ${route.name === pjob.routeRef ? "selected" : ""}>${escapeHtml(route.name)}</option>`
   )).join("");
   return `<div class="pjob-route-picker">
-    <select class="pjob-route-process" data-scope="pjob-route-group" ${common}>${groupOptions || `<option value="">暂无工序</option>`}</select>
-    <select data-scope="pjob" data-key="routeRef" ${common}>${routeOptions ? `<option value="">选择路径</option>${routeOptions}` : `<option value="">请先配置路径</option>`}</select>
+    <select class="pjob-route-process" aria-label="路径类别" data-scope="pjob-route-group" ${common}>${groupOptions || `<option value="">暂无工序</option>`}</select>
+    <select class="pjob-route-specific" aria-label="具体路径" data-scope="pjob" data-key="routeRef" ${common}>${routeOptions ? `<option value="">选择路径</option>${routeOptions}` : `<option value="">请先配置路径</option>`}</select>
   </div>`;
 }
 
@@ -912,9 +892,8 @@ function renderRounds() {
       const normalLot = cjob.jobType === "NormalLot";
       const pjobRows = cjob.pjobs.map((pjob, pjobIndex) => `<tr>
         <td><span class="readonly-pill">${escapeHtml(pjob.jobName)}</span></td>
-        <td><input class="pjob-number" type="number" min="1" max="${state.strategy === "milp" ? 12 : 25}" data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="waferCount" value="${Number(pjob.waferCount)}"><small class="mat-list-preview">槽位 [${pjobLoadPortSlots(roundIndex, cjobIndex, pjobIndex).join(", ")}]</small></td>
+        <td><input class="pjob-number" type="number" min="1" max="${state.strategy === "milp" ? 12 : 25}" data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="waferCount" value="${Number(pjob.waferCount)}"></td>
         <td>${renderPJobRoutePicker(pjob, roundIndex, cjobIndex, pjobIndex)}</td>
-        <td><span class="readonly-pill">${escapeHtml(pjob.taskId)}</span></td>
         <td><input class="pjob-number" type="number" min="1" data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="priority" value="${Number(pjob.priority)}"></td>
         <td><select data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="loadPort">${optionsHtml(state.loadPorts, pjob.loadPort, state.loadPorts.length ? "选择端口" : "无端口")}</select></td>
         <td><button class="btn danger icon small" aria-label="删除 ${escapeHtml(pjob.jobName)}" data-action="remove-pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" ${cjob.pjobs.length <= 1 ? "disabled" : ""}>×</button></td>
@@ -927,10 +906,11 @@ function renderRounds() {
           <div class="field"><label>TaskMode</label><select data-scope="cjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-key="taskMode">${TASK_MODES.map(value => `<option ${value === cjob.taskMode ? "selected" : ""}>${value}</option>`).join("")}</select></div>
           <div class="field"><label>PJobNameList</label><div class="pjob-name-list">${cjob.pJobNameList.map(name => `<span>${escapeHtml(name)}</span>`).join("")}</div></div>
         </div>
-        <div class="pjob-table-wrap"><table class="pjob-table"><thead><tr><th>JobName</th><th>晶圆数量 / LoadPort 槽位</th><th>OriginRoute</th><th>TaskID</th><th>Priority</th><th>LoadPort</th><th></th></tr></thead><tbody>${pjobRows}</tbody></table></div>
+        <div class="pjob-table-wrap"><table class="pjob-table"><thead><tr><th>JobName</th><th>Material</th><th>OriginRoute</th><th>Priority</th><th>LoadPort</th><th></th></tr></thead><tbody>${pjobRows}</tbody></table></div>
       </section>`;
     }).join("");
-    return `<section class="round-card"><header class="round-head"><div class="round-title"><div class="round-number">${roundIndex + 1}</div><div><strong>${roundTitle}</strong><span class="readonly-pill">@ ${Number(round.currentTime)}s</span></div></div><div class="round-time-editor field"><label>${roundIndex ? "重算时间" : "排程时间"}</label><div><input type="number" min="0" step="0.1" data-round-time-index="${roundIndex}" value="${Number(round.currentTime)}" ${roundIndex ? "" : "disabled"}><span>s</span></div></div><button class="btn small" data-action="add-cjob" data-round-index="${roundIndex}">＋ CJob</button></header><div class="cjob-list">${cjobs}</div></section>`;
+    const roundTimeBadge = roundIndex ? `<span class="readonly-pill">@ ${Number(round.currentTime)}s</span>` : "";
+    return `<section class="round-card"><header class="round-head"><div class="round-title"><div class="round-number">${roundIndex + 1}</div><div><strong>${roundTitle}</strong>${roundTimeBadge}</div></div><div class="round-time-editor field"><label>${roundIndex ? "重算时间" : "排程时间"}</label><div><input type="number" min="0" step="0.1" data-round-time-index="${roundIndex}" value="${Number(round.currentTime)}" ${roundIndex ? "" : "disabled"}><span>s</span></div></div><button class="btn small" data-action="add-cjob" data-round-index="${roundIndex}">＋ CJob</button></header><div class="cjob-list">${cjobs}</div></section>`;
   }).join("");
 }
 
