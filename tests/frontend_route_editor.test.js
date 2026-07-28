@@ -24,16 +24,32 @@ test("Route 按工序数与各工序并行机器数形成两级分组", () => {
       counts: [1],
       candidatePath: ["PM1"],
       processTimes: [20],
+      isReentrant: false,
       processLabel: "1 道工序",
       label: "(1)",
       key: "1:1",
     },
   );
   assert.equal(logic.processProfile(route(["PM1", "PM2"])).label, "(2)");
-  assert.equal(logic.processProfile(route(["PM1", "PM2"], ["PM1", "PM2", "PM3"])).label, "(2, 3)");
+  assert.equal(logic.processProfile(route(["PM1", "PM2"], ["PM3", "PM4", "PM5"])).label, "(2, 3)");
   const empty = logic.processProfile({ stages: [{ needProcess: false, visits: [visit("ATR")] }] });
   assert.equal(empty.processLabel, "无加工工序");
   assert.equal(empty.label, "(0)");
+});
+
+test("重复进入加工腔室的 Route 统一归入重入组", () => {
+  const profile = logic.processProfile(route(["PM1"], ["PM2"], ["PM1"], ["PM2"]));
+  assert.equal(profile.isReentrant, true);
+  assert.equal(profile.processLabel, "重入组");
+  assert.equal(profile.label, "重入路径");
+  assert.equal(profile.key, "reentrant");
+  assert.deepEqual(profile.candidatePath, ["PM1", "PM2", "PM1", "PM2"]);
+
+  const parallelReentry = logic.processProfile(
+    route(["PM1", "PM2"], ["PM3"], ["PM1", "PM2"]),
+  );
+  assert.equal(parallelReentry.key, "reentrant");
+  assert.deepEqual(parallelReentry.counts, [2, 1, 2]);
 });
 
 test("Route 名称由腔室种类和加工时间自动生成且不带工序数前缀", () => {
@@ -80,7 +96,7 @@ test("加工 Step Clean 也进入 Route 名称", () => {
 });
 
 test("Route 分组按工序数和候选数量序列排序", () => {
-  const profiles = [route(["PM1", "PM2"], ["PM1"]), route(["PM1", "PM2"]), route(["PM1"])]
+  const profiles = [route(["PM1", "PM2"], ["PM3"]), route(["PM1", "PM2"]), route(["PM1"])]
     .map(logic.processProfile).sort(logic.compareProfiles);
   assert.deepEqual(profiles.map(item => item.key), ["1:1", "1:2", "2:2,1"]);
 });

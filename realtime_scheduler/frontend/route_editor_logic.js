@@ -56,22 +56,28 @@ function cloneVisitParameters(visit) {
 }
 function processProfile(route) {
   const processStages = (route.stages || []).filter((stage) => stage.needProcess);
-  const counts = processStages.map(
-    (stage) => new Set((stage.visits || []).map((visit) => visit.stationName).filter(Boolean)).size
+  const candidateGroups = processStages.map((stage) => [
+    ...new Set((stage.visits || []).map((visit) => String(visit.stationName || "").trim()).filter(Boolean))
+  ]);
+  const counts = candidateGroups.map((candidates) => candidates.length);
+  const candidatePath = candidateGroups.map(
+    (candidates) => candidates.join("/") || "\u672A\u9009\u62E9\u8154\u5BA4"
   );
-  const candidatePath = processStages.map((stage) => [...new Set((stage.visits || []).map((visit) => visit.stationName).filter(Boolean))].join("/") || "\u672A\u9009\u62E9\u8154\u5BA4");
   const processTimes = processStages.map(
     (stage) => Number(stage.visits?.[0]?.processTime ?? stage.visits?.[0]?.recipeTime ?? 0)
   );
   const processCount = processStages.length;
+  const candidateOccurrences = candidateGroups.flat();
+  const isReentrant = new Set(candidateOccurrences).size < candidateOccurrences.length;
   return {
     processCount,
     counts,
     candidatePath,
     processTimes,
-    processLabel: processCount === 0 ? "\u65E0\u52A0\u5DE5\u5DE5\u5E8F" : `${processCount} \u9053\u5DE5\u5E8F`,
-    label: processCount === 0 ? "(0)" : `(${counts.join(", ")})`,
-    key: processCount === 0 ? "0:none" : `${processCount}:${counts.join(",")}`
+    isReentrant,
+    processLabel: isReentrant ? "\u91CD\u5165\u7EC4" : processCount === 0 ? "\u65E0\u52A0\u5DE5\u5DE5\u5E8F" : `${processCount} \u9053\u5DE5\u5E8F`,
+    label: isReentrant ? "\u91CD\u5165\u8DEF\u5F84" : processCount === 0 ? "(0)" : `(${counts.join(", ")})`,
+    key: isReentrant ? "reentrant" : processCount === 0 ? "0:none" : `${processCount}:${counts.join(",")}`
   };
 }
 function formatSeconds(value) {

@@ -43,22 +43,28 @@ function cloneVisitParameters(visit) {
 }
 function processProfile(route) {
   const processStages = (route.stages || []).filter((stage) => stage.needProcess);
-  const counts = processStages.map(
-    (stage) => new Set((stage.visits || []).map((visit) => visit.stationName).filter(Boolean)).size
+  const candidateGroups = processStages.map((stage) => [
+    ...new Set((stage.visits || []).map((visit) => String(visit.stationName || "").trim()).filter(Boolean))
+  ]);
+  const counts = candidateGroups.map((candidates) => candidates.length);
+  const candidatePath = candidateGroups.map(
+    (candidates) => candidates.join("/") || "\u672A\u9009\u62E9\u8154\u5BA4"
   );
-  const candidatePath = processStages.map((stage) => [...new Set((stage.visits || []).map((visit) => visit.stationName).filter(Boolean))].join("/") || "\u672A\u9009\u62E9\u8154\u5BA4");
   const processTimes = processStages.map(
     (stage) => Number(stage.visits?.[0]?.processTime ?? stage.visits?.[0]?.recipeTime ?? 0)
   );
   const processCount = processStages.length;
+  const candidateOccurrences = candidateGroups.flat();
+  const isReentrant = new Set(candidateOccurrences).size < candidateOccurrences.length;
   return {
     processCount,
     counts,
     candidatePath,
     processTimes,
-    processLabel: processCount === 0 ? "\u65E0\u52A0\u5DE5\u5DE5\u5E8F" : `${processCount} \u9053\u5DE5\u5E8F`,
-    label: processCount === 0 ? "(0)" : `(${counts.join(", ")})`,
-    key: processCount === 0 ? "0:none" : `${processCount}:${counts.join(",")}`
+    isReentrant,
+    processLabel: isReentrant ? "\u91CD\u5165\u7EC4" : processCount === 0 ? "\u65E0\u52A0\u5DE5\u5DE5\u5E8F" : `${processCount} \u9053\u5DE5\u5E8F`,
+    label: isReentrant ? "\u91CD\u5165\u8DEF\u5F84" : processCount === 0 ? "(0)" : `(${counts.join(", ")})`,
+    key: isReentrant ? "reentrant" : processCount === 0 ? "0:none" : `${processCount}:${counts.join(",")}`
   };
 }
 function formatSeconds(value) {
@@ -3112,10 +3118,11 @@ function groupedRoutes() {
   const processGroups = /* @__PURE__ */ new Map();
   state.routes.forEach((route, routeIndex) => {
     const profile = routeProcessProfile(route);
-    const processKey = String(profile.processCount);
+    const processKey = profile.isReentrant ? profile.key : String(profile.processCount);
     const processGroup = processGroups.get(processKey) || {
       key: processKey,
       processCount: profile.processCount,
+      isReentrant: profile.isReentrant,
       label: profile.processLabel,
       routeCount: 0,
       structures: /* @__PURE__ */ new Map()
@@ -3130,7 +3137,7 @@ function groupedRoutes() {
       state.expandedRouteGroups.add(profile.key);
     }
   });
-  return [...processGroups.values()].sort((left, right) => left.processCount - right.processCount).map((processGroup) => ({
+  return [...processGroups.values()].sort((left, right) => Number(left.isReentrant) - Number(right.isReentrant) || left.processCount - right.processCount).map((processGroup) => ({
     ...processGroup,
     structures: [...processGroup.structures.values()].sort(compareProfiles).map((structure) => ({
       ...structure,
@@ -3160,9 +3167,10 @@ function renderRoutes() {
         <div class="route-summary-actions"><button class="btn small" data-action="edit-route" data-route-index="${routeIndex}">\u7F16\u8F91</button><button class="btn small" data-action="copy-route" data-route-index="${routeIndex}">\u590D\u5236</button><button class="btn danger small" data-action="remove-route" data-index="${routeIndex}">\u5220\u9664</button></div>
       </div>${routeOpen ? renderRouteDetails(route, routeIndex) : ""}</article>`;
       }).join("");
-      return `<section class="route-type-group"><button class="route-type-head" data-action="toggle-route-group" data-group-key="${escapeHtml3(structure.key)}" aria-expanded="${structureOpen}"><span class="collapse-arrow ${structureOpen ? "open" : ""}">\u25B6</span><strong>\u5E76\u884C\u673A\u5668\u6570 <span class="route-structure-key">${escapeHtml3(structure.label)}</span></strong><span class="route-count">${structure.routes.length} \u6761\u8DEF\u5F84 \xB7 ${structureOpen ? "\u5DF2\u5C55\u5F00" : "\u5DF2\u6536\u8D77"}</span></button>${structureOpen ? `<div class="route-group-body">${routes}</div>` : ""}</section>`;
+      return processGroup.isReentrant ? routes : `<section class="route-type-group"><button class="route-type-head" data-action="toggle-route-group" data-group-key="${escapeHtml3(structure.key)}" aria-expanded="${structureOpen}"><span class="collapse-arrow ${structureOpen ? "open" : ""}">\u25B6</span><strong>\u5E76\u884C\u673A\u5668\u6570 <span class="route-structure-key">${escapeHtml3(structure.label)}</span></strong><span class="route-count">${structure.routes.length} \u6761\u8DEF\u5F84 \xB7 ${structureOpen ? "\u5DF2\u5C55\u5F00" : "\u5DF2\u6536\u8D77"}</span></button>${structureOpen ? `<div class="route-group-body">${routes}</div>` : ""}</section>`;
     }).join("");
-    return `<section class="route-process-group"><button class="route-process-head" data-action="toggle-route-process-group" data-process-key="${escapeHtml3(processGroup.key)}" aria-expanded="${processOpen}"><span class="collapse-arrow ${processOpen ? "open" : ""}">\u25B6</span><strong>${escapeHtml3(processGroup.label)}</strong><span class="route-count">${processGroup.routeCount} \u6761\u8DEF\u5F84 \xB7 ${processGroup.structures.length} \u79CD\u5E76\u884C\u7ED3\u6784</span></button>${processOpen ? `<div class="route-process-body">${structures}</div>` : ""}</section>`;
+    const groupSummary = processGroup.isReentrant ? `${processGroup.routeCount} \u6761\u8DEF\u5F84` : `${processGroup.routeCount} \u6761\u8DEF\u5F84 \xB7 ${processGroup.structures.length} \u79CD\u5E76\u884C\u7ED3\u6784`;
+    return `<section class="route-process-group"><button class="route-process-head" data-action="toggle-route-process-group" data-process-key="${escapeHtml3(processGroup.key)}" aria-expanded="${processOpen}"><span class="collapse-arrow ${processOpen ? "open" : ""}">\u25B6</span><strong>${escapeHtml3(processGroup.label)}</strong><span class="route-count">${groupSummary}</span></button>${processOpen ? `<div class="route-process-body">${structures}</div>` : ""}</section>`;
   }).join("") : `<div class="empty">\u81F3\u5C11\u521B\u5EFA\u4E00\u6761\u8DEF\u5F84\uFF0CJob \u624D\u80FD\u5F15\u7528\u3002</div>`;
 }
 function renderPJobRoutePicker(pjob, roundIndex, cjobIndex, pjobIndex) {
@@ -3171,7 +3179,7 @@ function renderPJobRoutePicker(pjob, roundIndex, cjobIndex, pjobIndex) {
   const selectedKey = selectedRoute ? routeProcessProfile(selectedRoute).key : groups[0]?.key || "";
   const selectedGroup = groups.find((group) => group.key === selectedKey);
   const common = `data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}"`;
-  const groupOptions = groups.map((group) => `<option value="${escapeHtml3(group.key)}" ${group.key === selectedKey ? "selected" : ""}>${escapeHtml3(`${group.processLabel} \xB7 ${group.label}`)}</option>`).join("");
+  const groupOptions = groups.map((group) => `<option value="${escapeHtml3(group.key)}" ${group.key === selectedKey ? "selected" : ""}>${escapeHtml3(group.isReentrant ? group.processLabel : `${group.processLabel} \xB7 ${group.label}`)}</option>`).join("");
   const routeOptions = (selectedGroup?.routes || []).map(({ route }) => `<option value="${escapeHtml3(route.name)}" ${route.name === pjob.routeRef ? "selected" : ""}>${escapeHtml3(route.name)}</option>`).join("");
   return `<div class="pjob-route-picker">
     <select class="pjob-route-process" aria-label="\u8DEF\u5F84\u7C7B\u522B" data-scope="pjob-route-group" ${common}>${groupOptions || `<option value="">\u6682\u65E0\u5DE5\u5E8F</option>`}</select>

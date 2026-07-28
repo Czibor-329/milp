@@ -813,17 +813,18 @@ function synchronizeRouteNames() {
   return changed;
 }
 
-/** 生成“工序数 → 并行机器结构 → 路径”的稳定分组列表。 */
+/** 生成“工序数 → 并行机器结构 → 路径”的稳定分组列表；重入路径统一进入独立分组。 */
 function groupedRoutes() {
   const natural = (left, right) => left.localeCompare(right, undefined, { numeric: true });
   synchronizeRouteNames();
   const processGroups = new Map();
   state.routes.forEach((route, routeIndex) => {
     const profile = routeProcessProfile(route);
-    const processKey = String(profile.processCount);
+    const processKey = profile.isReentrant ? profile.key : String(profile.processCount);
     const processGroup = processGroups.get(processKey) || {
       key: processKey,
       processCount: profile.processCount,
+      isReentrant: profile.isReentrant,
       label: profile.processLabel,
       routeCount: 0,
       structures: new Map(),
@@ -839,7 +840,10 @@ function groupedRoutes() {
     }
   });
   return [...processGroups.values()]
-    .sort((left, right) => left.processCount - right.processCount)
+    .sort((left, right) => (
+      Number(left.isReentrant) - Number(right.isReentrant)
+      || left.processCount - right.processCount
+    ))
     .map(processGroup => ({
       ...processGroup,
       structures: [...processGroup.structures.values()]
@@ -861,7 +865,7 @@ function renderRouteDetails(route, index) {
     <div class="route-table-wrap"><table class="route-table"><thead><tr><th>StepID</th><th>类型</th><th>可选腔室 / 机器手</th><th>PostStepID</th><th>NeedProcess</th><th></th></tr></thead><tbody>${renderSteps(route, index)}</tbody></table></div></div>`;
 }
 
-/** 绘制按工序数和并行机器结构分组、各层均可折叠的路径主视图。 */
+/** 绘制路径分组；普通路径按并行结构细分，重入路径直接展示在独立分组中。 */
 function renderRoutes() {
   const host = document.getElementById("routeList"), processGroups = groupedRoutes();
   host.innerHTML = processGroups.length ? processGroups.map(processGroup => {
@@ -876,13 +880,18 @@ function renderRoutes() {
         <div class="route-summary-actions"><button class="btn small" data-action="edit-route" data-route-index="${routeIndex}">编辑</button><button class="btn small" data-action="copy-route" data-route-index="${routeIndex}">复制</button><button class="btn danger small" data-action="remove-route" data-index="${routeIndex}">删除</button></div>
       </div>${routeOpen ? renderRouteDetails(route, routeIndex) : ""}</article>`;
       }).join("");
-      return `<section class="route-type-group"><button class="route-type-head" data-action="toggle-route-group" data-group-key="${escapeHtml(structure.key)}" aria-expanded="${structureOpen}"><span class="collapse-arrow ${structureOpen ? "open" : ""}">▶</span><strong>并行机器数 <span class="route-structure-key">${escapeHtml(structure.label)}</span></strong><span class="route-count">${structure.routes.length} 条路径 · ${structureOpen ? "已展开" : "已收起"}</span></button>${structureOpen ? `<div class="route-group-body">${routes}</div>` : ""}</section>`;
+      return processGroup.isReentrant
+        ? routes
+        : `<section class="route-type-group"><button class="route-type-head" data-action="toggle-route-group" data-group-key="${escapeHtml(structure.key)}" aria-expanded="${structureOpen}"><span class="collapse-arrow ${structureOpen ? "open" : ""}">▶</span><strong>并行机器数 <span class="route-structure-key">${escapeHtml(structure.label)}</span></strong><span class="route-count">${structure.routes.length} 条路径 · ${structureOpen ? "已展开" : "已收起"}</span></button>${structureOpen ? `<div class="route-group-body">${routes}</div>` : ""}</section>`;
     }).join("");
-    return `<section class="route-process-group"><button class="route-process-head" data-action="toggle-route-process-group" data-process-key="${escapeHtml(processGroup.key)}" aria-expanded="${processOpen}"><span class="collapse-arrow ${processOpen ? "open" : ""}">▶</span><strong>${escapeHtml(processGroup.label)}</strong><span class="route-count">${processGroup.routeCount} 条路径 · ${processGroup.structures.length} 种并行结构</span></button>${processOpen ? `<div class="route-process-body">${structures}</div>` : ""}</section>`;
+    const groupSummary = processGroup.isReentrant
+      ? `${processGroup.routeCount} 条路径`
+      : `${processGroup.routeCount} 条路径 · ${processGroup.structures.length} 种并行结构`;
+    return `<section class="route-process-group"><button class="route-process-head" data-action="toggle-route-process-group" data-process-key="${escapeHtml(processGroup.key)}" aria-expanded="${processOpen}"><span class="collapse-arrow ${processOpen ? "open" : ""}">▶</span><strong>${escapeHtml(processGroup.label)}</strong><span class="route-count">${groupSummary}</span></button>${processOpen ? `<div class="route-process-body">${structures}</div>` : ""}</section>`;
   }).join("") : `<div class="empty">至少创建一条路径，Job 才能引用。</div>`;
 }
 
-/** 按加工工序数和并行机器结构生成 PJob 的两级路径选择器。 */
+/** 按普通并行结构或统一重入组生成 PJob 的两级路径选择器。 */
 function renderPJobRoutePicker(pjob, roundIndex, cjobIndex, pjobIndex) {
   const groups = groupedRoutes().flatMap(processGroup => processGroup.structures);
   const selectedRoute = state.routes.find(route => route.name === pjob.routeRef);
@@ -892,7 +901,7 @@ function renderPJobRoutePicker(pjob, roundIndex, cjobIndex, pjobIndex) {
   const selectedGroup = groups.find(group => group.key === selectedKey);
   const common = `data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}"`;
   const groupOptions = groups.map(group => (
-    `<option value="${escapeHtml(group.key)}" ${group.key === selectedKey ? "selected" : ""}>${escapeHtml(`${group.processLabel} · ${group.label}`)}</option>`
+    `<option value="${escapeHtml(group.key)}" ${group.key === selectedKey ? "selected" : ""}>${escapeHtml(group.isReentrant ? group.processLabel : `${group.processLabel} · ${group.label}`)}</option>`
   )).join("");
   const routeOptions = (selectedGroup?.routes || []).map(({ route }) => (
     `<option value="${escapeHtml(route.name)}" ${route.name === pjob.routeRef ? "selected" : ""}>${escapeHtml(route.name)}</option>`

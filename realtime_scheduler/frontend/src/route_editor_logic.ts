@@ -41,6 +41,7 @@ export interface RouteProcessProfile {
   counts: number[];
   candidatePath: string[];
   processTimes: number[];
+  isReentrant: boolean;
   processLabel: string;
   label: string;
   key: string;
@@ -66,28 +67,42 @@ export function cloneVisitParameters(visit?: RouteVisit): Partial<RouteVisit> {
   ) as Partial<RouteVisit>;
 }
 
-/** 汇总 Route 的加工工序数量、并行机器结构、候选腔室路径与加工时间。 */
+/**
+ * 汇总 Route 的加工工序数量、并行机器结构、候选腔室路径与加工时间。
+ * 任一加工腔室出现在多个加工 Stage 时，该路径视为重入路径，并使用统一分组键。
+ */
 export function processProfile(route: RouteDefinition): RouteProcessProfile {
   const processStages = (route.stages || []).filter((stage) => stage.needProcess);
-  const counts = processStages.map(
-    (stage) => new Set((stage.visits || []).map((visit) => visit.stationName).filter(Boolean)).size,
+  const candidateGroups = processStages.map((stage) => [
+    ...new Set((stage.visits || [])
+      .map((visit) => String(visit.stationName || "").trim())
+      .filter(Boolean)),
+  ]);
+  const counts = candidateGroups.map((candidates) => candidates.length);
+  const candidatePath = candidateGroups.map(
+    (candidates) => candidates.join("/") || "未选择腔室",
   );
-  const candidatePath = processStages.map((stage) => (
-    [...new Set((stage.visits || []).map((visit) => visit.stationName).filter(Boolean))].join("/")
-    || "未选择腔室"
-  ));
   const processTimes = processStages.map(
     (stage) => Number(stage.visits?.[0]?.processTime ?? stage.visits?.[0]?.recipeTime ?? 0),
   );
   const processCount = processStages.length;
+  const candidateOccurrences = candidateGroups.flat();
+  const isReentrant = new Set(candidateOccurrences).size < candidateOccurrences.length;
   return {
     processCount,
     counts,
     candidatePath,
     processTimes,
-    processLabel: processCount === 0 ? "无加工工序" : `${processCount} 道工序`,
-    label: processCount === 0 ? "(0)" : `(${counts.join(", ")})`,
-    key: processCount === 0 ? "0:none" : `${processCount}:${counts.join(",")}`,
+    isReentrant,
+    processLabel: isReentrant
+      ? "重入组"
+      : processCount === 0 ? "无加工工序" : `${processCount} 道工序`,
+    label: isReentrant
+      ? "重入路径"
+      : processCount === 0 ? "(0)" : `(${counts.join(", ")})`,
+    key: isReentrant
+      ? "reentrant"
+      : processCount === 0 ? "0:none" : `${processCount}:${counts.join(",")}`,
   };
 }
 
