@@ -2389,6 +2389,25 @@ class ConfigEditorServerTests(unittest.TestCase):
                 for index, entry in enumerate(log_entries, start=1):
                     self.assertEqual(entry, json.loads(log_lines[index].removesuffix(",")))
 
+    def test_clear_exported_artifacts_removes_files_and_memory_cache(self) -> None:
+        """清理导出数据应只删除结果和日志，并让旧链接立即失效。"""
+        with tempfile.TemporaryDirectory() as directory:
+            export_root = Path(directory)
+            with (
+                patch.object(config_server, "RESULT_EXPORT_DIR", export_root / "results"),
+                patch.object(config_server, "LOG_EXPORT_DIR", export_root / "logs"),
+            ):
+                result_id = config_server.save_result({"MoveList": [], "RecomputePoints": []})
+                log_id = config_server.save_reproduction_log([{"Describe": "Input", "Info": {}}])
+
+                deleted = config_server.clear_exported_artifacts()
+
+                self.assertEqual({"results": 1, "logs": 1}, deleted)
+                self.assertIsNone(config_server.read_result(result_id))
+                self.assertIsNone(config_server.read_reproduction_log(log_id))
+                self.assertFalse((export_root / "results" / f"{result_id}.json").exists())
+                self.assertFalse((export_root / "logs" / f"{log_id}.json").exists())
+
     def test_two_recomputes_merge_movelist_and_markers(self) -> None:
         """首次排程加两次重算应合并 MoveList，并保留两条重算线。"""
         plan = {

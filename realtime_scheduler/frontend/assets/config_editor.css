@@ -331,7 +331,7 @@
     .batch-result.succeeded .batch-status { color: var(--green) !important; background: #d5f2e5; }
     .batch-result.failed .batch-status { color: var(--red) !important; background: #ffdfe2; }
     .batch-result.cancelled .batch-status { color: #9a5b08 !important; background: #ffedc7; }
-    .result-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
+    .result-actions { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
     .btn.analysis { border-color: #bcd8cb; color: #087f5b; background: #ecf8f2; }
     .btn.analysis:hover { border-color: #75b79b; background: #e1f4ea; }
     @container result-area (max-width: 1100px) { .batch-results { grid-template-columns: repeat(3, minmax(0, 1fr)); } }

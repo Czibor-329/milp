@@ -143,6 +143,7 @@ _RESULTS: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
 _RESULTS_LOCK = threading.Lock()
 _REPRODUCTION_LOGS: "OrderedDict[str, List[Dict[str, Any]]]" = OrderedDict()
 _REPRODUCTION_LOGS_LOCK = threading.Lock()
+_EXPORTS_LOCK = threading.RLock()
 _WORKSPACE_STORE_LOCK = threading.RLock()
 _BATCH_RUNS: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
 _BATCH_RUNS_LOCK = threading.RLock()
@@ -2949,12 +2950,13 @@ def delete_workspace_test(
 def save_result(output: Dict[str, Any]) -> str:
     """把甘特图数据写入专用导出目录并放入有界内存缓存。"""
     result_id = uuid.uuid4().hex
-    _write_json_atomic(RESULT_EXPORT_DIR / f"{result_id}.json", output)
-    with _RESULTS_LOCK:
-        _RESULTS[result_id] = output
-        _RESULTS.move_to_end(result_id)
-        while len(_RESULTS) > MAX_SAVED_RESULTS:
-            _RESULTS.popitem(last=False)
+    with _EXPORTS_LOCK:
+        _write_json_atomic(RESULT_EXPORT_DIR / f"{result_id}.json", output)
+        with _RESULTS_LOCK:
+            _RESULTS[result_id] = output
+            _RESULTS.move_to_end(result_id)
+            while len(_RESULTS) > MAX_SAVED_RESULTS:
+                _RESULTS.popitem(last=False)
     return result_id
 
 
@@ -2976,12 +2978,13 @@ def save_reproduction_log(entries: Sequence[Mapping[str, Any]]) -> str:
     """把 input_data 格式日志写入专用导出目录并放入有界内存缓存。"""
     log_id = uuid.uuid4().hex
     payload = deepcopy(list(entries))
-    _write_text_atomic(LOG_EXPORT_DIR / f"{log_id}.json", format_reproduction_log(payload))
-    with _REPRODUCTION_LOGS_LOCK:
-        _REPRODUCTION_LOGS[log_id] = payload
-        _REPRODUCTION_LOGS.move_to_end(log_id)
-        while len(_REPRODUCTION_LOGS) > MAX_SAVED_RESULTS:
-            _REPRODUCTION_LOGS.popitem(last=False)
+    with _EXPORTS_LOCK:
+        _write_text_atomic(LOG_EXPORT_DIR / f"{log_id}.json", format_reproduction_log(payload))
+        with _REPRODUCTION_LOGS_LOCK:
+            _REPRODUCTION_LOGS[log_id] = payload
+            _REPRODUCTION_LOGS.move_to_end(log_id)
+            while len(_REPRODUCTION_LOGS) > MAX_SAVED_RESULTS:
+                _REPRODUCTION_LOGS.popitem(last=False)
     return log_id
 
 
@@ -2997,6 +3000,28 @@ def read_reproduction_log(log_id: str) -> Optional[List[Dict[str, Any]]]:
             value = json.loads(path.read_text(encoding="utf-8"))
             return deepcopy(value) if isinstance(value, list) else None
     return None
+
+
+def clear_exported_artifacts() -> Dict[str, int]:
+    """删除全部已导出的结果和复现日志，并同步清空内存缓存。
+
+    返回值包含结果和日志各自删除的 JSON 文件数量。该操作只处理两个专用导出
+    目录顶层的 JSON 文件，不会影响设备、测试集或其他运行数据。
+    """
+    deleted_counts = {"results": 0, "logs": 0}
+    with _EXPORTS_LOCK:
+        for name, directory in (("results", RESULT_EXPORT_DIR), ("logs", LOG_EXPORT_DIR)):
+            if not directory.is_dir():
+                continue
+            for path in directory.glob("*.json"):
+                if path.is_file():
+                    path.unlink()
+                    deleted_counts[name] += 1
+        with _RESULTS_LOCK:
+            _RESULTS.clear()
+        with _REPRODUCTION_LOGS_LOCK:
+            _REPRODUCTION_LOGS.clear()
+    return deleted_counts
 
 
 def _persist_workspace_baseline(
@@ -3295,8 +3320,15 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
 
     def do_DELETE(self) -> None:
-        """删除设备下指定测试集或测试组，并返回剩余数据。"""
+        """删除导出文件、设备下指定测试集或测试组，并返回剩余数据。"""
         path = unquote(urlparse(self.path).path)
+        if path == "/api/exports":
+            try:
+                deleted_counts = clear_exported_artifacts()
+                self._send_json({"ok": True, "deleted": deleted_counts})
+            except Exception as error:  # noqa: BLE001
+                self._send_json({"ok": False, "error": str(error)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
         if path.startswith("/api/run-batches/"):
             batch = cancel_workspace_batch_run(path.rsplit("/", 1)[-1])
             if batch is None:

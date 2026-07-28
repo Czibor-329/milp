@@ -1899,6 +1899,25 @@ function showBatchResult(result) {
   if (allGanttUrl) { allGantt.href = allGanttUrl; allGantt.removeAttribute("aria-disabled"); }
 }
 
+/** 删除服务端已保存的甘特图结果和复现日志，并重置当前结果入口。 */
+async function clearExportedArtifacts() {
+  if (!window.confirm("将删除全部已导出的结果和复现日志，且无法恢复。是否继续？")) return;
+  const button = document.getElementById("clearExportsButton");
+  button.disabled = true;
+  try {
+    const response = await fetch("/api/exports", { method: "DELETE" });
+    const result = await response.json();
+    if (!response.ok || !result.ok) throw new Error(result.error || "清理失败");
+    resetRunResult();
+    const deleted = result.deleted || {};
+    writeTerminal(`$ 已清理导出数据\n  结果：${Number(deleted.results) || 0} 个\n  复现日志：${Number(deleted.logs) || 0} 个`);
+  } catch (error) {
+    writeTerminal(`$ 清理导出数据失败\n  ${error.message || "未知错误"}`, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 /** 显示运行指标和逐轮日志。 */
 function showResult(result) {
   state.batchResult = null; state.selectedBatchTestId = "";
@@ -1999,6 +2018,7 @@ document.getElementById("deleteTestButton").addEventListener("click", () => dele
 document.getElementById("roundCount").addEventListener("input", event => { resizeRounds(event.target.value); markTestDirty(); });
 document.getElementById("runButton").addEventListener("click", runPlan);
 document.getElementById("batchRunButton").addEventListener("click", runCurrentTestGroup);
+document.getElementById("clearExportsButton").addEventListener("click", clearExportedArtifacts);
 document.getElementById("batchOverviewButton").addEventListener("click", showCurrentBatchOverview);
 document.getElementById("testGroupAnalysisButton").addEventListener("click", () => {
   showTestGroupAnalysis().catch(error => writeTerminal(`$ 测试组结果分析失败\n  ${error.message || "未知错误"}`, true));

@@ -4176,6 +4176,26 @@ function showBatchResult(result) {
     allGantt.removeAttribute("aria-disabled");
   }
 }
+async function clearExportedArtifacts() {
+  if (!window.confirm("\u5C06\u5220\u9664\u5168\u90E8\u5DF2\u5BFC\u51FA\u7684\u7ED3\u679C\u548C\u590D\u73B0\u65E5\u5FD7\uFF0C\u4E14\u65E0\u6CD5\u6062\u590D\u3002\u662F\u5426\u7EE7\u7EED\uFF1F")) return;
+  const button = document.getElementById("clearExportsButton");
+  button.disabled = true;
+  try {
+    const response = await fetch("/api/exports", { method: "DELETE" });
+    const result = await response.json();
+    if (!response.ok || !result.ok) throw new Error(result.error || "\u6E05\u7406\u5931\u8D25");
+    resetRunResult();
+    const deleted = result.deleted || {};
+    writeTerminal(`$ \u5DF2\u6E05\u7406\u5BFC\u51FA\u6570\u636E
+  \u7ED3\u679C\uFF1A${Number(deleted.results) || 0} \u4E2A
+  \u590D\u73B0\u65E5\u5FD7\uFF1A${Number(deleted.logs) || 0} \u4E2A`);
+  } catch (error) {
+    writeTerminal(`$ \u6E05\u7406\u5BFC\u51FA\u6570\u636E\u5931\u8D25
+  ${error.message || "\u672A\u77E5\u9519\u8BEF"}`, true);
+  } finally {
+    button.disabled = false;
+  }
+}
 function showResult(result) {
   state.batchResult = null;
   state.selectedBatchTestId = "";
@@ -4314,6 +4334,7 @@ document.getElementById("roundCount").addEventListener("input", (event) => {
 });
 document.getElementById("runButton").addEventListener("click", runPlan);
 document.getElementById("batchRunButton").addEventListener("click", runCurrentTestGroup);
+document.getElementById("clearExportsButton").addEventListener("click", clearExportedArtifacts);
 document.getElementById("batchOverviewButton").addEventListener("click", showCurrentBatchOverview);
 document.getElementById("testGroupAnalysisButton").addEventListener("click", () => {
   showTestGroupAnalysis().catch((error) => writeTerminal(`$ \u6D4B\u8BD5\u7EC4\u7ED3\u679C\u5206\u6790\u5931\u8D25
