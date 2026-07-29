@@ -139,6 +139,7 @@ ROUTE_EDITOR_LOGIC_PATH = FRONTEND_DIR / "route_editor_logic.js"
 FRONTEND_ASSET_DIR = FRONTEND_DIR / "assets"
 RL_MODEL_PATH = MODELS_DIR / "bc_policy_rl.pt"
 NEURAL_MODEL_PATH = ALGORITHM_ROOT / "src" / "schedule" / "neural_policy.npz"
+E2E_CTQ_MODEL_PATH = ALGORITHM_ROOT / "src" / "schedule" / "e2e_ctq_policy.npz"
 SETRANK_MODEL_PATH = ALGORITHM_ROOT / "src" / "schedule" / "heuristic_config_policy.npz"
 NEURAL_UCB_MODEL_PATH = ALGORITHM_ROOT / "src" / "schedule" / "neural_ucb_policy.npz"
 WORKSPACE_STORE_PATH = DATA_DIR / "workspaces.json"
@@ -197,6 +198,13 @@ BUILTIN_ALGORITHM_METADATA: Dict[str, Dict[str, str]] = {
         "introduction": "使用已训练的深层神经网络根据实时设备与任务状态直接做出派工决策，适合需要快速响应的连续调度。",
         "description": "使用已训练的深层网络进行实时派工决策。",
         "version": "未记录",
+    },
+    "e2e-ctq": {
+        "name": "E2E-CTQ",
+        "introduction": "使用异构资源流图和剩余工期分位价值，从当前设备状态直接生成唯一调度轨迹。",
+        "description": "端到端资源流图策略；在线无搜索、回退或质量地板。",
+        "version": "1.0.0",
+        "updatedAt": "2026-07-28",
     },
     "rl": {
         "name": "RL 搜索",
@@ -1833,6 +1841,7 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
         "setrank",
         "neuralucb",
         "neural",
+        "e2e-ctq",
         "rl",
         "milp",
     }
@@ -1843,7 +1852,7 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
     if normalized_strategy not in builtin_strategies and other_algorithm_id not in discovered_ids:
         raise ValueError(
             "策略只支持 heuristic、loadlock-macro、nn-saea、setrank、"
-            "neuralucb、neural、rl、milp，"
+            "neuralucb、neural、e2e-ctq、rl、milp，"
             "或 other_alg 下已发现的标准算法"
         )
     strategy = normalized_strategy if normalized_strategy in builtin_strategies else strategy
@@ -1861,7 +1870,7 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
 
     options = plan.get("options") if isinstance(plan.get("options"), Mapping) else {}
     default_loadlock_manager_mode = (
-        "joint" if strategy == "neural" else "petri-look"
+        "joint" if strategy in {"neural", "e2e-ctq"} else "petri-look"
     )
     loadlock_manager_mode = str(
         options.get("loadLockManager") or default_loadlock_manager_mode
@@ -3113,6 +3122,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                     "setrank": SETRANK_MODEL_PATH.is_file(),
                     "neuralucb": NEURAL_UCB_MODEL_PATH.is_file(),
                     "neural": NEURAL_MODEL_PATH.is_file(),
+                    "e2e-ctq": E2E_CTQ_MODEL_PATH.is_file(),
                     "rl": RL_MODEL_PATH.is_file(),
                     "milp": True,
                 },
@@ -3120,6 +3130,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                     "setrank": str(SETRANK_MODEL_PATH) if SETRANK_MODEL_PATH.is_file() else "",
                     "neuralucb": str(NEURAL_UCB_MODEL_PATH) if NEURAL_UCB_MODEL_PATH.is_file() else "",
                     "neural": str(NEURAL_MODEL_PATH) if NEURAL_MODEL_PATH.is_file() else "",
+                    "e2e-ctq": str(E2E_CTQ_MODEL_PATH) if E2E_CTQ_MODEL_PATH.is_file() else "",
                 },
                 "strategyErrors": {},
                 "algorithmMetadata": algorithm_metadata_for_health(),
