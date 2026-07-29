@@ -415,8 +415,8 @@ function robotWaferDwellTime(moves, window) {
     } else if (PLACE_MOVE_TYPES.has(move.MoveType)) {
       finishHolding(robot, materialIds(move), move.StartTime);
     } else if (move.MoveType === SWAP_MOVE) {
-      finishHolding(robot, materialIds(move, "RecvMatList"), move.StartTime);
-      for (const material of materialIds(move, "SendMatList")) {
+      finishHolding(robot, materialIds(move, "SendMatList"), move.StartTime);
+      for (const material of materialIds(move, "RecvMatList")) {
         holdingStartedAt.set(`${robot}\0${material}`, move.EndTime);
       }
     }

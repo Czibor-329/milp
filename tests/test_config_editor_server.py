@@ -1709,7 +1709,7 @@ class ConfigEditorServerTests(unittest.TestCase):
             {"MoveID": 3, "MoveType": 2, "ModuleName": "ATR", "MatIDList": [2], "StartTime": 8, "EndTime": 10},
             {"MoveID": 4, "MoveType": 3, "ModuleName": "ATR", "MatIDList": [2], "StartTime": 13, "EndTime": 15},
             {"MoveID": 5, "MoveType": 0, "Robot": "VTR", "MatIDList": [3], "StartTime": 18, "EndTime": 20},
-            {"MoveID": 6, "MoveType": 4, "Robot": "VTR", "RecvMatList": [3], "SendMatList": [4], "StartTime": 22, "EndTime": 24},
+            {"MoveID": 6, "MoveType": 4, "Robot": "VTR", "RecvMatList": [4], "SendMatList": [3], "StartTime": 22, "EndTime": 24},
             {"MoveID": 7, "MoveType": 1, "Robot": "VTR", "MatIDList": [4], "StartTime": 28, "EndTime": 30},
         ]
 

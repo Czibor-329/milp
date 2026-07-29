@@ -214,8 +214,10 @@ def _robot_wafer_dwell_time(moves: Sequence[Mapping[str, Any]]) -> Dict[str, Any
         elif move_type in PLACE_MOVE_TYPES:
             finish_holding(robot_name, _move_material_ids(move), start_time)
         elif move_type == SWAP_MOVE_TYPE:
-            finish_holding(robot_name, _move_material_ids(move, "RecvMatList"), start_time)
-            for material_id in _move_material_ids(move, "SendMatList"):
+            # RecvMatList 是 Robot 换出后新接到手上的晶圆；SendMatList
+            # 是原先在 Robot 手上、于 Swap 开始时送入站点的晶圆。
+            finish_holding(robot_name, _move_material_ids(move, "SendMatList"), start_time)
+            for material_id in _move_material_ids(move, "RecvMatList"):
                 holding_started_at[(robot_name, material_id)] = end_time
 
     return {

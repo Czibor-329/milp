@@ -902,7 +902,7 @@ var VisualizationWorkspace = class {
           <time>${formatSeconds(finiteNumber(move.StartTime))}\u2013${formatSeconds(finiteNumber(move.EndTime))} s</time>
         </li>`).join("") : '<li class="active-move-empty">\u5F53\u524D\u65F6\u523B\u6CA1\u6709\u6267\u884C\u4E2D\u7684\u52A8\u4F5C</li>';
   }
-  /** 重算并绘制与播放时刻无关的整段排程性能诊断。 */
+  /** 请求并绘制与播放时刻无关的服务端排程性能诊断。 */
   async renderPerformance() {
     if (!this.moves.length) return;
     const requestVersion = ++this.analysisRequestVersion;
@@ -1347,8 +1347,8 @@ function robotWaferDwellTime(moves, window) {
     } else if (PLACE_MOVE_TYPES2.has(move.MoveType)) {
       finishHolding(robot, materialIds2(move), move.StartTime);
     } else if (move.MoveType === SWAP_MOVE2) {
-      finishHolding(robot, materialIds2(move, "RecvMatList"), move.StartTime);
-      for (const material of materialIds2(move, "SendMatList")) {
+      finishHolding(robot, materialIds2(move, "SendMatList"), move.StartTime);
+      for (const material of materialIds2(move, "RecvMatList")) {
         holdingStartedAt.set(`${robot}\0${material}`, move.EndTime);
       }
     }

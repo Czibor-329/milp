@@ -614,10 +614,10 @@ def _robot_wafer_dwell_time(
         elif move_type == SWAP_MOVE_TYPE:
             finish_holding(
                 robot,
-                _material_ids(move, "RecvMatList"),
+                _material_ids(move, "SendMatList"),
                 float(move["StartTime"]),
             )
-            for material in _material_ids(move, "SendMatList"):
+            for material in _material_ids(move, "RecvMatList"):
                 holding_started_at[(robot, material)] = float(move["EndTime"])
     return _summarize_durations(durations)
 
