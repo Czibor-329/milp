@@ -468,21 +468,25 @@
     .category-other { background: #94a3b8; }
     .performance-number { min-width: 126px; color: #263650; font-size: 13px; font-weight: 800; font-variant-numeric: tabular-nums; white-space: nowrap; }
     .performance-number small { margin-left: 5px; }
-    .loadlock-cycle-panel { min-width: 0; border-top: 1px solid var(--performance-line); background: #f8fafc; }
-    .loadlock-cycle-head { padding: 14px 18px 10px; }
-    .loadlock-cycle-head strong, .loadlock-cycle-head span { display: block; }
-    .loadlock-cycle-head strong { color: var(--performance-text); font-size: 15px; }
-    .loadlock-cycle-head span { margin-top: 3px; color: var(--performance-muted); font-size: 11px; line-height: 1.45; }
-    .loadlock-cycle-table-wrap { overflow-x: auto; padding: 0 18px 16px; }
-    .loadlock-cycle-table { width: 100%; min-width: 520px; overflow: hidden; border: 1px solid #dce4ee; border-radius: 9px; border-collapse: separate; border-spacing: 0; color: #27364c; background: #fff; font-size: 12px; }
-    .loadlock-cycle-table th, .loadlock-cycle-table td { padding: 8px 10px; border-bottom: 1px solid #e8edf3; text-align: left; vertical-align: middle; }
-    .loadlock-cycle-table thead th { color: #52637b; background: #f3f6fa; font-size: 10px; font-weight: 900; letter-spacing: .04em; }
-    .loadlock-cycle-table tbody th { width: 90px; font: 800 12px/1.3 "Fira Code", Consolas, monospace; }
-    .loadlock-cycle-table tbody tr:last-child > * { border-bottom: 0; }
-    .cycle-index { display: grid; width: 22px; height: 22px; place-items: center; border-radius: 50%; color: #244fae; background: #e4edff; font: 800 10px/1 Consolas, monospace; }
-    .cycle-wafers { display: flex; flex-wrap: wrap; gap: 5px; }
-    .cycle-wafer { padding: 3px 7px; border-radius: 6px; color: #183b8f; background: #edf2ff; font: 800 11px/1.25 "Fira Code", Consolas, monospace; }
-    .cycle-empty { color: #94a3b8; font-size: 11px; }
+    .loadlock-seq-panel { min-width: 0; border-top: 1px solid var(--performance-line); background: #f8fafc; }
+    .loadlock-seq-head { padding: 14px 18px 8px; }
+    .loadlock-seq-head strong { display: block; color: var(--performance-text); font-size: 15px; }
+    .loadlock-seq {
+      --loadlock-pump: #3e6696;
+      --loadlock-pump-border: #31547f;
+      --loadlock-vent: #dfa13d;
+      --loadlock-vent-border: #c88a29;
+      padding: 0 18px 14px;
+    }
+    /* -------- 全局交错序列（横向滚动卡片） -------- */
+    .seq-scroll { overflow-x: auto; padding: 6px 0 8px; scrollbar-color: #a8b3c3 transparent; }
+    .seq-cards { display: flex; width: max-content; min-width: 100%; gap: 5px; }
+    /* -------- 每张卡片 -------- */
+    .seq-card { display: inline-flex; min-width: 44px; min-height: 28px; flex-shrink: 0; align-items: center; justify-content: center; padding: 5px 9px; border: 1px solid; border-radius: 7px; box-shadow: inset 0 1px rgba(255,255,255,.22), 0 1px 2px rgba(15,23,42,.08); cursor: default; }
+    .seq-pump { border-color: var(--loadlock-pump-border); background: var(--loadlock-pump); }
+    .seq-vent { border-color: var(--loadlock-vent-border); background: var(--loadlock-vent); }
+    .seq-dots { display: flex; align-items: center; justify-content: center; gap: 5px; min-height: 14px; }
+    .gantt-wafer-dot { width: 12px; height: 12px; flex-shrink: 0; border: 2px solid rgba(255,255,255,.94); border-radius: 50%; box-shadow: 0 0 0 1px rgba(15,23,42,.28), 0 1px 2px rgba(15,23,42,.22); }
     .loadlock-cycle-empty { padding: 24px 18px; color: var(--performance-muted); font-size: 12px; text-align: center; }
     .diagnostic-panel { padding: 22px 24px; border-top: 1px solid var(--performance-line); background: #f8faff; }
     .diagnostic-panel-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; margin-bottom: 13px; }

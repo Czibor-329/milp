@@ -546,8 +546,8 @@ test("性能分析按顺序配对 LoadLock 抽气和充气携片", () => {
   ], device, "full");
 
   assert.deepEqual(performance.loadLockCycles, [
-    { index: 1, loadLock: "LA", vacuumWafers: ["W1"], ventWafers: ["W4"] },
-    { index: 2, loadLock: "LA", vacuumWafers: ["W2", "W3"], ventWafers: [] },
+    { index: 1, loadLock: "LA", vacuumWafers: ["W1"], ventWafers: ["W4"], startTime: 1, pumpEndTime: 5, ventStartTime: 10, ventEndTime: 14 },
+    { index: 2, loadLock: "LA", vacuumWafers: ["W2", "W3"], ventWafers: [], startTime: 20, pumpEndTime: 24, ventStartTime: 30, ventEndTime: 34 },
   ]);
 });
 
@@ -558,6 +558,6 @@ test("独立抽气和充气 MoveType 也能组成 LoadLock 循环", () => {
   ], device, "full");
 
   assert.deepEqual(performance.loadLockCycles, [
-    { index: 1, loadLock: "LA", vacuumWafers: ["W5"], ventWafers: ["W6"] },
+    { index: 1, loadLock: "LA", vacuumWafers: ["W5"], ventWafers: ["W6"], startTime: 1, pumpEndTime: 5, ventStartTime: 10, ventEndTime: 14 },
   ]);
 });

@@ -455,7 +455,12 @@ function buildLoadLockCycles(moves, device) {
         loadLock,
         vacuumWafers: materialIds(move),
         ventWafers: [],
-        startedAt: move.StartTime
+        startTime: move.StartTime,
+        pumpEndTime: move.EndTime,
+        ventStartTime: 0,
+        ventEndTime: 0,
+        startedAt: move.StartTime,
+        vacuumEndTime: move.EndTime
       };
       cycles.push(cycle);
       pendingByLoadLock.set(loadLock, cycle);
@@ -464,6 +469,8 @@ function buildLoadLockCycles(moves, device) {
     const pending = pendingByLoadLock.get(loadLock);
     if (pending) {
       pending.ventWafers = materialIds(move);
+      pending.ventStartTime = move.StartTime;
+      pending.ventEndTime = move.EndTime;
       pendingByLoadLock.delete(loadLock);
       continue;
     }
@@ -472,14 +479,23 @@ function buildLoadLockCycles(moves, device) {
       loadLock,
       vacuumWafers: [],
       ventWafers: materialIds(move),
-      startedAt: move.StartTime
+      startTime: move.StartTime,
+      pumpEndTime: move.StartTime,
+      ventStartTime: move.StartTime,
+      ventEndTime: move.EndTime,
+      startedAt: move.StartTime,
+      vacuumEndTime: move.StartTime
     });
   }
   return cycles.sort((left, right) => left.startedAt - right.startedAt || naturalCompare(left.loadLock, right.loadLock)).map((cycle, index) => ({
     index: index + 1,
     loadLock: cycle.loadLock,
     vacuumWafers: cycle.vacuumWafers,
-    ventWafers: cycle.ventWafers
+    ventWafers: cycle.ventWafers,
+    startTime: cycle.startTime,
+    pumpEndTime: cycle.pumpEndTime,
+    ventStartTime: cycle.ventStartTime,
+    ventEndTime: cycle.ventEndTime
   }));
 }
 function shortJobName(value) {

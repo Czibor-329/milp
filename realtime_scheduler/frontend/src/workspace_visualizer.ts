@@ -623,18 +623,98 @@ function renderEquipmentTopology(snapshot: WorkspaceSnapshot): string {
     </section>`;
 }
 
+const WAFER_COLOR_PALETTE = [
+  "#d81b60", "#2f9e44", "#5f5bd6", "#e76f51", "#008c95",
+  "#c23b8d", "#2878c8", "#7ca62b", "#b45cc5", "#16856f",
+  "#7a5fb5", "#b66a2c", "#c23b32", "#45a66b", "#4d66c4",
+  "#df6b83", "#2b7a78", "#a33d64", "#7868c8", "#8a6045",
+];
+
 /** 把协议中的晶圆编号转成一致的短标签。 */
 function waferLabel(value: string): string {
   const material = String(value || "").trim();
   return /^W/i.test(material) ? material : `W${material}`;
 }
 
-/** 把一次环境切换携带的晶圆显示成紧凑标签。 */
-function renderCycleWafers(wafers: string[]): string {
-  if (!wafers.length) return '<span class="cycle-empty">空载</span>';
-  return wafers
-    .map(wafer => `<span class="cycle-wafer">${escapeHtml(waferLabel(wafer))}</span>`)
-    .join("");
+/** 为所有出现过晶圆分配唯一颜色。 */
+function buildWaferColorMap(cycles: GanttCycle[]): Map<string, string> {
+  const wafers = new Set<string>();
+  for (const cycle of cycles) {
+    for (const wafer of cycle.vacuumWafers) wafers.add(waferLabel(wafer));
+    for (const wafer of cycle.ventWafers) wafers.add(waferLabel(wafer));
+  }
+  const map = new Map<string, string>();
+  let idx = 0;
+  for (const wafer of wafers) {
+    map.set(wafer, WAFER_COLOR_PALETTE[idx % WAFER_COLOR_PALETTE.length]);
+    idx++;
+  }
+  return map;
+}
+
+type GanttCycle = {
+  index: number; loadLock: string;
+  vacuumWafers: string[]; ventWafers: string[];
+  startTime: number; pumpEndTime: number;
+  ventStartTime: number; ventEndTime: number;
+};
+
+function normalizeGanttCycles(cycles: unknown[]): GanttCycle[] {
+  return cycles.map((cycle: any) => ({
+    index: Number(cycle.index ?? 0),
+    loadLock: String(cycle.loadLock ?? ""),
+    vacuumWafers: Array.isArray(cycle.vacuumWafers) ? cycle.vacuumWafers.map(String) : [],
+    ventWafers: Array.isArray(cycle.ventWafers) ? cycle.ventWafers.map(String) : [],
+    startTime: Number(cycle.startTime ?? cycle.index ?? 0),
+    pumpEndTime: Number(cycle.pumpEndTime ?? cycle.startTime ?? cycle.index ?? 0),
+    ventStartTime: Number(cycle.ventStartTime ?? 0),
+    ventEndTime: Number(cycle.ventEndTime ?? 0),
+  }));
+}
+
+function formatGanttTime(seconds: number): string {
+  return seconds >= 1 ? seconds.toFixed(1) : seconds.toFixed(2);
+}
+
+function renderWaferDots(wafers: string[], waferColors: Map<string, string>): string {
+  if (!wafers.length) return "";
+  return wafers.map(w => {
+    const label = waferLabel(w);
+    const color = waferColors.get(label) || "#94a3b8";
+    return `<span class="gantt-wafer-dot" style="background:${color}" title="${escapeHtml(label)}"></span>`;
+  }).join("");
+}
+
+/** 绘制 LoadLock 环境切换时序 —— 仅保留所有 LoadLock 的全局交错序列。 */
+function renderLoadLockGantt(cycles: GanttCycle[]): string {
+  if (!cycles.length) return '<div class="loadlock-cycle-empty">MoveList 中没有识别到 LoadLock 抽气或充气动作。</div>';
+
+  const waferColors = buildWaferColorMap(cycles);
+
+  /* ---------- 收集所有抽气/充气事件，按时间排序 ---------- */
+  interface SequenceEvent { time: number; loadLock: string; dir: "pump" | "vent"; wafers: string[]; }
+  const events: SequenceEvent[] = [];
+  for (const c of cycles) {
+    events.push({ time: c.startTime, loadLock: c.loadLock, dir: "pump", wafers: c.vacuumWafers });
+    if (c.ventStartTime) events.push({ time: c.ventStartTime, loadLock: c.loadLock, dir: "vent", wafers: c.ventWafers });
+  }
+  events.sort((a, b) => a.time - b.time);
+
+  function renderCard(dir: "pump" | "vent", wafers: string[], loadLock: string, time: number): string {
+    const cls = dir === "pump" ? "seq-pump" : "seq-vent";
+    const label = dir === "pump" ? "抽" : "充";
+    const dots = renderWaferDots(wafers, waferColors);
+    const description = `${loadLock} ${label}气 ${formatGanttTime(time)}s`;
+    return `<div class="seq-card ${cls}" role="img" aria-label="${escapeHtml(description)}" title="${escapeHtml(description)}"><span class="seq-dots">${dots}</span></div>`;
+  }
+
+  const interleavedCards = events.map(e => renderCard(e.dir, e.wafers, e.loadLock, e.time)).join("");
+
+  return `<div class="loadlock-seq">
+    <div class="seq-scroll" aria-label="LoadLock 全局交错时序">
+      <div class="seq-cards">${interleavedCards}</div>
+    </div>
+  </div>`;
 }
 
 /** 把比例格式化为一位小数百分比。 */
@@ -724,20 +804,7 @@ function renderSchedulePerformance(performance: SchedulePerformance): string {
         </ol>
       </section>`
     : "";
-  const cycleMarkup = performance.loadLockCycles.length
-    ? `<div class="loadlock-cycle-table-wrap">
-        <table class="loadlock-cycle-table" aria-label="LoadLock 抽气和充气携片顺序">
-          <thead><tr><th>顺序</th><th>LoadLock</th><th>抽气携片</th><th>充气携片</th></tr></thead>
-          <tbody>${performance.loadLockCycles.map(cycle => `
-            <tr>
-              <td><span class="cycle-index">${cycle.index}</span></td>
-              <th scope="row">${escapeHtml(cycle.loadLock)}</th>
-              <td><div class="cycle-wafers">${renderCycleWafers(cycle.vacuumWafers)}</div></td>
-              <td><div class="cycle-wafers">${renderCycleWafers(cycle.ventWafers)}</div></td>
-            </tr>`).join("")}</tbody>
-        </table>
-      </div>`
-    : '<div class="loadlock-cycle-empty">MoveList 中没有识别到 LoadLock 抽气或充气动作。</div>';
+  const ganttCycles = normalizeGanttCycles(performance.loadLockCycles);
   const diagnostics = performance.diagnostics ?? [];
   const diagnosticMarkup = diagnostics.length
     ? `<section class="diagnostic-panel" aria-labelledby="diagnosticPanelTitle">
@@ -809,11 +876,11 @@ function renderSchedulePerformance(performance: SchedulePerformance): string {
           <tbody>${resourceRows}</tbody>
         </table>
       </div>
-      <aside class="loadlock-cycle-panel">
-        <div class="loadlock-cycle-head">
-          <div><strong>LoadLock 循环顺序</strong><span>同一行表示一次抽气 → 充气，只保留携片顺序</span></div>
+      <aside class="loadlock-seq-panel">
+        <div class="loadlock-seq-head">
+          <strong>LoadLock 交换时序</strong>
         </div>
-        ${cycleMarkup}
+        ${renderLoadLockGantt(ganttCycles)}
       </aside>
     </div>
     `;

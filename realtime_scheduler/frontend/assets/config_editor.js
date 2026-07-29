@@ -594,13 +594,91 @@ function renderEquipmentTopology(snapshot) {
       </div>
     </section>`;
 }
+var WAFER_COLOR_PALETTE = [
+  "#d81b60",
+  "#2f9e44",
+  "#5f5bd6",
+  "#e76f51",
+  "#008c95",
+  "#c23b8d",
+  "#2878c8",
+  "#7ca62b",
+  "#b45cc5",
+  "#16856f",
+  "#7a5fb5",
+  "#b66a2c",
+  "#c23b32",
+  "#45a66b",
+  "#4d66c4",
+  "#df6b83",
+  "#2b7a78",
+  "#a33d64",
+  "#7868c8",
+  "#8a6045"
+];
 function waferLabel(value) {
   const material = String(value || "").trim();
   return /^W/i.test(material) ? material : `W${material}`;
 }
-function renderCycleWafers(wafers) {
-  if (!wafers.length) return '<span class="cycle-empty">\u7A7A\u8F7D</span>';
-  return wafers.map((wafer) => `<span class="cycle-wafer">${escapeHtml(waferLabel(wafer))}</span>`).join("");
+function buildWaferColorMap(cycles) {
+  const wafers = /* @__PURE__ */ new Set();
+  for (const cycle of cycles) {
+    for (const wafer of cycle.vacuumWafers) wafers.add(waferLabel(wafer));
+    for (const wafer of cycle.ventWafers) wafers.add(waferLabel(wafer));
+  }
+  const map = /* @__PURE__ */ new Map();
+  let idx = 0;
+  for (const wafer of wafers) {
+    map.set(wafer, WAFER_COLOR_PALETTE[idx % WAFER_COLOR_PALETTE.length]);
+    idx++;
+  }
+  return map;
+}
+function normalizeGanttCycles(cycles) {
+  return cycles.map((cycle) => ({
+    index: Number(cycle.index ?? 0),
+    loadLock: String(cycle.loadLock ?? ""),
+    vacuumWafers: Array.isArray(cycle.vacuumWafers) ? cycle.vacuumWafers.map(String) : [],
+    ventWafers: Array.isArray(cycle.ventWafers) ? cycle.ventWafers.map(String) : [],
+    startTime: Number(cycle.startTime ?? cycle.index ?? 0),
+    pumpEndTime: Number(cycle.pumpEndTime ?? cycle.startTime ?? cycle.index ?? 0),
+    ventStartTime: Number(cycle.ventStartTime ?? 0),
+    ventEndTime: Number(cycle.ventEndTime ?? 0)
+  }));
+}
+function formatGanttTime(seconds) {
+  return seconds >= 1 ? seconds.toFixed(1) : seconds.toFixed(2);
+}
+function renderWaferDots(wafers, waferColors) {
+  if (!wafers.length) return "";
+  return wafers.map((w) => {
+    const label = waferLabel(w);
+    const color = waferColors.get(label) || "#94a3b8";
+    return `<span class="gantt-wafer-dot" style="background:${color}" title="${escapeHtml(label)}"></span>`;
+  }).join("");
+}
+function renderLoadLockGantt(cycles) {
+  if (!cycles.length) return '<div class="loadlock-cycle-empty">MoveList \u4E2D\u6CA1\u6709\u8BC6\u522B\u5230 LoadLock \u62BD\u6C14\u6216\u5145\u6C14\u52A8\u4F5C\u3002</div>';
+  const waferColors = buildWaferColorMap(cycles);
+  const events = [];
+  for (const c of cycles) {
+    events.push({ time: c.startTime, loadLock: c.loadLock, dir: "pump", wafers: c.vacuumWafers });
+    if (c.ventStartTime) events.push({ time: c.ventStartTime, loadLock: c.loadLock, dir: "vent", wafers: c.ventWafers });
+  }
+  events.sort((a, b) => a.time - b.time);
+  function renderCard(dir, wafers, loadLock, time) {
+    const cls = dir === "pump" ? "seq-pump" : "seq-vent";
+    const label = dir === "pump" ? "\u62BD" : "\u5145";
+    const dots = renderWaferDots(wafers, waferColors);
+    const description = `${loadLock} ${label}\u6C14 ${formatGanttTime(time)}s`;
+    return `<div class="seq-card ${cls}" role="img" aria-label="${escapeHtml(description)}" title="${escapeHtml(description)}"><span class="seq-dots">${dots}</span></div>`;
+  }
+  const interleavedCards = events.map((e) => renderCard(e.dir, e.wafers, e.loadLock, e.time)).join("");
+  return `<div class="loadlock-seq">
+    <div class="seq-scroll" aria-label="LoadLock \u5168\u5C40\u4EA4\u9519\u65F6\u5E8F">
+      <div class="seq-cards">${interleavedCards}</div>
+    </div>
+  </div>`;
 }
 function formatPercent(value) {
   return `${(Math.max(0, value) * 100).toFixed(1)}%`;
@@ -680,18 +758,7 @@ function renderSchedulePerformance(performance2) {
             </li>`).join("")}
         </ol>
       </section>` : "";
-  const cycleMarkup = performance2.loadLockCycles.length ? `<div class="loadlock-cycle-table-wrap">
-        <table class="loadlock-cycle-table" aria-label="LoadLock \u62BD\u6C14\u548C\u5145\u6C14\u643A\u7247\u987A\u5E8F">
-          <thead><tr><th>\u987A\u5E8F</th><th>LoadLock</th><th>\u62BD\u6C14\u643A\u7247</th><th>\u5145\u6C14\u643A\u7247</th></tr></thead>
-          <tbody>${performance2.loadLockCycles.map((cycle) => `
-            <tr>
-              <td><span class="cycle-index">${cycle.index}</span></td>
-              <th scope="row">${escapeHtml(cycle.loadLock)}</th>
-              <td><div class="cycle-wafers">${renderCycleWafers(cycle.vacuumWafers)}</div></td>
-              <td><div class="cycle-wafers">${renderCycleWafers(cycle.ventWafers)}</div></td>
-            </tr>`).join("")}</tbody>
-        </table>
-      </div>` : '<div class="loadlock-cycle-empty">MoveList \u4E2D\u6CA1\u6709\u8BC6\u522B\u5230 LoadLock \u62BD\u6C14\u6216\u5145\u6C14\u52A8\u4F5C\u3002</div>';
+  const ganttCycles = normalizeGanttCycles(performance2.loadLockCycles);
   const diagnostics = performance2.diagnostics ?? [];
   const diagnosticMarkup = diagnostics.length ? `<section class="diagnostic-panel" aria-labelledby="diagnosticPanelTitle">
         <div class="diagnostic-panel-head">
@@ -761,11 +828,11 @@ function renderSchedulePerformance(performance2) {
           <tbody>${resourceRows}</tbody>
         </table>
       </div>
-      <aside class="loadlock-cycle-panel">
-        <div class="loadlock-cycle-head">
-          <div><strong>LoadLock \u5FAA\u73AF\u987A\u5E8F</strong><span>\u540C\u4E00\u884C\u8868\u793A\u4E00\u6B21\u62BD\u6C14 \u2192 \u5145\u6C14\uFF0C\u53EA\u4FDD\u7559\u643A\u7247\u987A\u5E8F</span></div>
+      <aside class="loadlock-seq-panel">
+        <div class="loadlock-seq-head">
+          <strong>LoadLock \u4EA4\u6362\u65F6\u5E8F</strong>
         </div>
-        ${cycleMarkup}
+        ${renderLoadLockGantt(ganttCycles)}
       </aside>
     </div>
     `;

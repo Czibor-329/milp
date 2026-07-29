@@ -117,6 +117,10 @@ export interface SchedulePerformance {
     loadLock: string;
     vacuumWafers: string[];
     ventWafers: string[];
+    startTime: number;
+    pumpEndTime: number;
+    ventStartTime: number;
+    ventEndTime: number;
   }>;
   diagnostics: ScheduleDiagnostic[];
 }

@@ -65,6 +65,10 @@ export interface LoadLockCycle {
   loadLock: string;
   vacuumWafers: string[];
   ventWafers: string[];
+  startTime: number;
+  pumpEndTime: number;
+  ventStartTime: number;
+  ventEndTime: number;
 }
 export interface DurationMetricSummary {
   totalSeconds: number;
@@ -672,6 +676,7 @@ function waferSystemResidenceTime(
 
 interface PendingLoadLockCycle extends LoadLockCycle {
   startedAt: number;
+  vacuumEndTime: number;
 }
 
 /** 判断 LoadLock 环境动作是抽气还是充气。 */
@@ -702,7 +707,12 @@ function buildLoadLockCycles(
         loadLock,
         vacuumWafers: materialIds(move),
         ventWafers: [],
+        startTime: move.StartTime,
+        pumpEndTime: move.EndTime,
+        ventStartTime: 0,
+        ventEndTime: 0,
         startedAt: move.StartTime,
+        vacuumEndTime: move.EndTime,
       };
       cycles.push(cycle);
       pendingByLoadLock.set(loadLock, cycle);
@@ -711,6 +721,8 @@ function buildLoadLockCycles(
     const pending = pendingByLoadLock.get(loadLock);
     if (pending) {
       pending.ventWafers = materialIds(move);
+      pending.ventStartTime = move.StartTime;
+      pending.ventEndTime = move.EndTime;
       pendingByLoadLock.delete(loadLock);
       continue;
     }
@@ -719,7 +731,12 @@ function buildLoadLockCycles(
       loadLock,
       vacuumWafers: [],
       ventWafers: materialIds(move),
+      startTime: move.StartTime,
+      pumpEndTime: move.StartTime,
+      ventStartTime: move.StartTime,
+      ventEndTime: move.EndTime,
       startedAt: move.StartTime,
+      vacuumEndTime: move.StartTime,
     });
   }
   return cycles
@@ -729,6 +746,10 @@ function buildLoadLockCycles(
       loadLock: cycle.loadLock,
       vacuumWafers: cycle.vacuumWafers,
       ventWafers: cycle.ventWafers,
+      startTime: cycle.startTime,
+      pumpEndTime: cycle.pumpEndTime,
+      ventStartTime: cycle.ventStartTime,
+      ventEndTime: cycle.ventEndTime,
     }));
 }
 

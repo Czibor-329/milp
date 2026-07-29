@@ -667,25 +667,42 @@ def _build_load_lock_cycles(
             load_lock, _station_type(device, load_lock),
         ):
             continue
+        start_time = float(move["StartTime"])
+        end_time = float(move["EndTime"])
         if direction == "vacuum":
             cycle = {
                 "index": 0,
                 "loadLock": load_lock,
                 "vacuumWafers": _material_ids(move),
                 "ventWafers": [],
-                "startedAt": float(move["StartTime"]),
+                "startTime": start_time,
+                "pumpEndTime": end_time,
+                "ventStartTime": 0,
+                "ventEndTime": 0,
+                "startedAt": start_time,
+                "vacuumEndTime": end_time,
             }
             cycles.append(cycle)
             pending[load_lock] = cycle
         elif load_lock in pending:
-            pending.pop(load_lock)["ventWafers"] = _material_ids(move)
+            pending[load_lock].update({
+                "ventWafers": _material_ids(move),
+                "ventStartTime": start_time,
+                "ventEndTime": end_time,
+            })
+            pending.pop(load_lock)
         else:
             cycles.append({
                 "index": 0,
                 "loadLock": load_lock,
                 "vacuumWafers": [],
                 "ventWafers": _material_ids(move),
-                "startedAt": float(move["StartTime"]),
+                "startTime": start_time,
+                "pumpEndTime": start_time,
+                "ventStartTime": start_time,
+                "ventEndTime": end_time,
+                "startedAt": start_time,
+                "vacuumEndTime": start_time,
             })
     cycles.sort(key=lambda cycle: (cycle["startedAt"], _natural_key(cycle["loadLock"])))
     return [
@@ -694,6 +711,10 @@ def _build_load_lock_cycles(
             "loadLock": cycle["loadLock"],
             "vacuumWafers": cycle["vacuumWafers"],
             "ventWafers": cycle["ventWafers"],
+            "startTime": cycle["startTime"],
+            "pumpEndTime": cycle["pumpEndTime"],
+            "ventStartTime": cycle["ventStartTime"],
+            "ventEndTime": cycle["ventEndTime"],
         }
         for index, cycle in enumerate(cycles)
     ]
