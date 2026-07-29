@@ -1422,7 +1422,6 @@ var state = {
   strategy: "heuristic",
   availableOtherAlgorithms: [],
   algorithmMetadata: {},
-  algorithmHistory: {},
   roundCount: 2,
   times: [0, 70],
   options: { loadLockManager: "petri-look", residencyGuardSeconds: 0, maximumRobotHoldingSeconds: 0, maximumSystemResidenceCv: 0, loadLockMacroSearchSeconds: 4, loadLockMacroRollouts: 96, nnSAEASearchSeconds: 4, nnSAEARollouts: 64, neuralUCBTopK: 2, neuralUCBExploration: 5, rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
@@ -2090,7 +2089,6 @@ function switchTab(name) {
   document.querySelectorAll("[data-tab-view]").forEach((view) => view.classList.toggle("active", view.dataset.tabView === name));
   document.getElementById("scheduleSide").classList.toggle("is-hidden", name !== "schedule");
   document.getElementById("pageLayout").classList.toggle("editor-mode", name !== "schedule");
-  if (name === "algorithm-history") renderAlgorithmHistory();
   if (name !== "route") closeStepDrawer();
 }
 function resizeRounds(count) {
@@ -2684,7 +2682,6 @@ function showAlgorithmDetails(strategy) {
   document.getElementById("algorithmHoverInfo").innerHTML = `
     <span class="algorithm-hover-info-name">${escapeHtml3(metadata.name || cardName || strategy)}<small>\u7B97\u6CD5\u7B80\u4ECB</small></span>
     <span class="algorithm-hover-info-description">${escapeHtml3(metadata.introduction || "\u6682\u65E0\u7B97\u6CD5\u7B80\u4ECB")}</span>
-    <span class="algorithm-hover-info-meta"><span>\u5F53\u524D\u7248\u672C ${escapeHtml3(metadata.version || "\u672A\u8BB0\u5F55")}</span><span>\u66F4\u65B0\u65E5\u671F ${escapeHtml3(metadata.updatedAt || "\u672A\u8BB0\u5F55")}</span></span>
   `;
 }
 function displayStrategyName(strategy) {
@@ -2727,93 +2724,6 @@ function renderAlgorithmMetadata() {
     if (!strategyOptions.contains(event.relatedTarget)) showAlgorithmDetails(state.strategy);
   };
   showAlgorithmDetails(state.strategy);
-  const strategySelect = document.getElementById("algorithmDialogStrategy");
-  const strategies = [...document.querySelectorAll('input[name="strategy"]')].map((input) => input.value);
-  strategySelect.innerHTML = strategies.map((strategy) => {
-    const name = state.algorithmMetadata[strategy]?.name || document.querySelector(`[data-strategy-card="${CSS.escape(strategy)}"] b`)?.textContent || strategy;
-    return `<option value="${escapeHtml3(strategy)}">${escapeHtml3(name)}</option>`;
-  }).join("");
-}
-function algorithmChangeLabels(entry, previous) {
-  if (!previous) return ["\u521D\u59CB\u8BB0\u5F55"];
-  const labels = [];
-  if (entry.version !== previous.version) labels.push(`\u7248\u672C ${previous.version || "\u672A\u8BB0\u5F55"} \u2192 ${entry.version || "\u672A\u8BB0\u5F55"}`);
-  if (entry.description !== previous.description) labels.push("\u7B97\u6CD5\u63CF\u8FF0\u5DF2\u66F4\u65B0");
-  if (entry.updatedAt !== previous.updatedAt) labels.push("\u66F4\u65B0\u65E5\u671F\u5DF2\u8C03\u6574");
-  return labels.length ? labels : ["\u91CD\u590D\u4FDD\u5B58\uFF0C\u65E0\u5B57\u6BB5\u53D8\u5316"];
-}
-function renderAlgorithmHistory() {
-  const container = document.getElementById("algorithmHistoryList");
-  const strategies = [...document.querySelectorAll('input[name="strategy"]')].map((input) => input.value);
-  container.innerHTML = strategies.map((strategy) => {
-    const metadata = state.algorithmMetadata[strategy] || {};
-    const cardName = document.querySelector(`[data-strategy-card="${CSS.escape(strategy)}"] b`)?.textContent;
-    const history = Array.isArray(state.algorithmHistory[strategy]) ? state.algorithmHistory[strategy] : [];
-    const entries = history.map((entry, index) => ({
-      entry,
-      changes: algorithmChangeLabels(entry, history[index - 1])
-    })).reverse();
-    const timeline = entries.length ? `<div class="algorithm-timeline">${entries.map(({ entry, changes }) => `
-      <article class="algorithm-version-entry">
-        <div class="algorithm-version-label"><strong>v${escapeHtml3(entry.version || "\u672A\u8BB0\u5F55")}</strong><span>\u66F4\u65B0 ${escapeHtml3(entry.updatedAt || "\u672A\u8BB0\u5F55")}</span><span>\u8BB0\u5F55 ${escapeHtml3(String(entry.recordedAt || "\u672A\u8BB0\u5F55").replace("T", " "))}</span></div>
-        <div class="algorithm-version-content"><p>${escapeHtml3(entry.description || "\u6682\u65E0\u7B97\u6CD5\u63CF\u8FF0")}</p><div class="algorithm-change-tags">${changes.map((label) => `<span>${escapeHtml3(label)}</span>`).join("")}</div></div>
-      </article>
-    `).join("")}</div>` : `<div class="algorithm-history-empty">\u5C1A\u65E0\u7248\u672C\u8BB0\u5F55\u3002\u70B9\u51FB\u201C\u65B0\u589E\u8BB0\u5F55\u201D\u4FDD\u5B58\u7B2C\u4E00\u4E2A\u7248\u672C\u3002</div>`;
-    const contentId = `algorithm-history-${strategy.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
-    return `<section class="algorithm-history-card">
-      <header class="algorithm-history-head">
-        <button class="algorithm-history-toggle" type="button" data-toggle-algorithm-history="${escapeHtml3(strategy)}" aria-expanded="false" aria-controls="${escapeHtml3(contentId)}">
-          <span class="algorithm-history-chevron" aria-hidden="true">\u203A</span>
-          <span class="algorithm-history-title"><strong>${escapeHtml3(metadata.name || cardName || strategy)}</strong><small>${escapeHtml3(strategy)} \xB7 ${history.length} \u6761\u7248\u672C\u8BB0\u5F55</small></span>
-        </button>
-        <div class="algorithm-history-actions"><span class="algorithm-current-version">\u5F53\u524D ${escapeHtml3(metadata.version || "\u672A\u8BB0\u5F55")}</span><button class="btn small" type="button" data-edit-algorithm="${escapeHtml3(strategy)}">${history.length ? "\u65B0\u589E\u7248\u672C" : "\u65B0\u589E\u8BB0\u5F55"}</button></div>
-      </header>
-      <div class="algorithm-history-body" id="${escapeHtml3(contentId)}" hidden>${timeline}</div>
-    </section>`;
-  }).join("");
-}
-function fillAlgorithmDialog(strategy) {
-  const metadata = state.algorithmMetadata[strategy] || {};
-  document.getElementById("algorithmDialogStrategy").value = strategy;
-  document.getElementById("algorithmDialogVersion").value = metadata.version === "\u672A\u8BB0\u5F55" ? "" : metadata.version || "";
-  document.getElementById("algorithmDialogDate").value = metadata.updatedAt || (/* @__PURE__ */ new Date()).toLocaleDateString("en-CA");
-  document.getElementById("algorithmDialogDescription").value = metadata.description || "";
-  document.getElementById("algorithmDialogStatus").textContent = "";
-}
-function openAlgorithmDialog() {
-  fillAlgorithmDialog(state.strategy);
-  document.getElementById("algorithmDialog").showModal();
-  window.setTimeout(() => document.getElementById("algorithmDialogVersion").focus(), 0);
-}
-async function saveAlgorithmMetadata(event) {
-  event.preventDefault();
-  const strategy = document.getElementById("algorithmDialogStrategy").value;
-  const saveButton = document.getElementById("algorithmDialogSave");
-  const status = document.getElementById("algorithmDialogStatus");
-  saveButton.disabled = true;
-  status.textContent = "\u6B63\u5728\u4FDD\u5B58\u2026";
-  try {
-    const response = await fetch(`/api/algorithm-metadata/${encodeURIComponent(strategy)}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        version: document.getElementById("algorithmDialogVersion").value.trim(),
-        updatedAt: document.getElementById("algorithmDialogDate").value,
-        description: document.getElementById("algorithmDialogDescription").value.trim()
-      })
-    });
-    const result = await response.json();
-    if (!response.ok || !result.ok) throw new Error(result.error || "\u4FDD\u5B58\u5931\u8D25");
-    state.algorithmMetadata[strategy] = result.metadata;
-    state.algorithmHistory[strategy] = result.history || [];
-    renderAlgorithmMetadata();
-    renderAlgorithmHistory();
-    document.getElementById("algorithmDialog").close();
-  } catch (error) {
-    status.textContent = error.message || "\u4FDD\u5B58\u5931\u8D25";
-  } finally {
-    saveButton.disabled = false;
-  }
 }
 function prepareLogDownload(result) {
   if (!result?.logUrl) return false;
@@ -3536,7 +3446,6 @@ async function checkService() {
     state.serviceCompatible = compatible;
     const loadlockMacroAvailable = status.strategies?.["loadlock-macro"] === true, nnSAEAAvailable = status.strategies?.["nn-saea"] === true, setrankAvailable = status.strategies?.setrank === true, neuralucbAvailable = status.strategies?.neuralucb === true, neuralAvailable = status.strategies?.neural === true, rlAvailable = status.strategies?.rl !== false, milpAvailable = status.strategies?.milp === true;
     state.algorithmMetadata = status.algorithmMetadata || {};
-    state.algorithmHistory = status.algorithmHistory || {};
     document.getElementById("loadlockMacroStrategyInput").disabled = !loadlockMacroAvailable;
     document.getElementById("nnSAEAStrategyInput").disabled = !nnSAEAAvailable;
     document.getElementById("setrankStrategyInput").disabled = !setrankAvailable;
@@ -3545,7 +3454,6 @@ async function checkService() {
     document.getElementById("rlStrategyInput").disabled = !rlAvailable;
     document.getElementById("milpStrategyInput").disabled = !milpAvailable;
     renderOtherAlgorithmOptions(status.otherAlgorithms || []);
-    renderAlgorithmHistory();
     runButton.disabled = !compatible;
     batchRunButton.disabled = !compatible;
     comparisonButton.disabled = !compatible || !state.parameterComparison?.baseline;
@@ -3569,10 +3477,6 @@ async function checkService() {
   }
 }
 document.getElementById("workspaceDialogCancel").addEventListener("click", () => document.getElementById("workspaceDialog").close("cancel"));
-document.getElementById("editAlgorithmButton").addEventListener("click", openAlgorithmDialog);
-document.getElementById("algorithmDialogCancel").addEventListener("click", () => document.getElementById("algorithmDialog").close());
-document.getElementById("algorithmDialogStrategy").addEventListener("change", (event) => fillAlgorithmDialog(event.target.value));
-document.getElementById("algorithmDialogForm").addEventListener("submit", saveAlgorithmMetadata);
 document.getElementById("deviceFile").addEventListener("change", (event) => loadDevice(event.target.files[0]).catch((error) => {
   event.target.value = "";
   writeTerminal(`$ \u8BBE\u5907\u8BFB\u53D6\u5931\u8D25
@@ -3696,21 +3600,6 @@ document.addEventListener("click", (event) => {
   if (tab) switchTab(tab.dataset.tabTarget);
   const batchResultCard = event.target.closest("[data-batch-item-index]");
   if (batchResultCard && !event.target.closest(".batch-result-actions")) selectBatchItem(Number(batchResultCard.dataset.batchItemIndex));
-  const algorithmHistoryToggle = event.target.closest("[data-toggle-algorithm-history]");
-  if (algorithmHistoryToggle) {
-    const content = document.getElementById(algorithmHistoryToggle.getAttribute("aria-controls"));
-    const expanded = algorithmHistoryToggle.getAttribute("aria-expanded") === "true";
-    algorithmHistoryToggle.setAttribute("aria-expanded", String(!expanded));
-    content.hidden = expanded;
-    return;
-  }
-  const algorithmEdit = event.target.closest("[data-edit-algorithm]");
-  if (algorithmEdit) {
-    fillAlgorithmDialog(algorithmEdit.dataset.editAlgorithm);
-    document.getElementById("algorithmDialog").showModal();
-    window.setTimeout(() => document.getElementById("algorithmDialogVersion").focus(), 0);
-    return;
-  }
   const workspaceResult = event.target.closest("[data-workspace-result]");
   if (workspaceResult) {
     visualizationWorkspace.loadResult(workspaceResult.dataset.workspaceResult, workspaceResult.dataset.workspaceName).then(() => visualizationWorkspace.show()).catch((error) => writeTerminal(`$ \u5DE5\u4F5C\u53F0\u52A0\u8F7D\u5931\u8D25

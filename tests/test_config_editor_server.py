@@ -1212,16 +1212,11 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn('id="setrankStrategyInput"', html)
         self.assertIn('value="setrank"', html)
         self.assertIn("status.strategies?.setrank", html)
-        self.assertIn('id="editAlgorithmButton"', html)
-        self.assertIn('id="algorithmDialog"', html)
         self.assertIn("algorithm-hover-info", html)
-        self.assertIn('data-tab-target="algorithm-history"', html)
-        self.assertIn('id="algorithmHistoryList"', html)
-        self.assertIn("renderAlgorithmHistory", html)
         self.assertIn("metadata.introduction", html)
-        self.assertIn('aria-expanded="false"', html)
-        self.assertIn("data-toggle-algorithm-history", html)
-        self.assertIn("/api/algorithm-metadata/", html)
+        self.assertNotIn('data-tab-target="algorithm-history"', html)
+        self.assertNotIn("renderAlgorithmHistory", html)
+        self.assertNotIn("/api/algorithm-metadata/", html)
         self.assertNotIn("other_alg · init/update", html)
         self.assertNotIn('id="neuralStrategyHint"', html)
         self.assertNotIn('id="rlStrategyHint"', html)
@@ -2467,96 +2462,12 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("AlgUpdateMove", descriptions)
         self.assertTrue(all(set(entry) == {"Time", "Describe", "SimTime", "Info"} for entry in reproduction))
 
-    def test_algorithm_metadata_can_be_recorded_and_read_back(self) -> None:
-        """算法版本、描述和更新日期应写入独立记录并覆盖展示默认值。"""
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "algorithm_metadata.json"
-            record = config_server.update_algorithm_metadata(
-                "setrank",
-                {
-                    "version": "1.1.0",
-                    "description": "面向多产品混跑的逐实例参数配置。",
-                    "updatedAt": "2026-07-26",
-                },
-                path,
-            )
-            metadata = config_server.read_algorithm_metadata(path)
-            second_record = config_server.update_algorithm_metadata(
-                "setrank",
-                {
-                    "version": "1.2.0",
-                    "description": "增加在线候选精评。",
-                    "updatedAt": "2026-07-27",
-                },
-                path,
-            )
-            history = config_server.read_algorithm_history(path)["setrank"]
+    def test_algorithm_metadata_only_contains_name_and_introduction(self) -> None:
+        """算法展示信息只保留名称和介绍，不再包含版本记录字段。"""
+        metadata = config_server.read_algorithm_metadata()
 
-        self.assertEqual("1.1.0", record["version"])
-        self.assertEqual("1.1.0", metadata["setrank"]["version"])
-        self.assertEqual("2026-07-26", metadata["setrank"]["updatedAt"])
         self.assertIn("集合网络", metadata["setrank"]["introduction"])
-        self.assertEqual("1.2.0", second_record["version"])
-        self.assertEqual(["1.0.0", "1.1.0", "1.2.0"], [item["version"] for item in history])
-
-    def test_algorithm_metadata_rejects_invalid_date(self) -> None:
-        """算法记录必须使用可解析的标准日期，避免悬浮信息产生脏数据。"""
-        with tempfile.TemporaryDirectory() as directory:
-            with self.assertRaisesRegex(ValueError, "YYYY-MM-DD"):
-                config_server.update_algorithm_metadata(
-                    "setrank",
-                    {"version": "1.0", "description": "SetRank", "updatedAt": "2026/07/26"},
-                    Path(directory) / "algorithm_metadata.json",
-                )
-
-    def test_legacy_algorithm_metadata_appears_as_first_history_entry(self) -> None:
-        """升级前的单条算法信息应直接成为历史页中的第一条版本记录。"""
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "algorithm_metadata.json"
-            path.write_text(json.dumps({
-                "heuristic": {
-                    "name": "启发式",
-                    "version": "2.0.0",
-                    "description": "旧格式记录",
-                    "updatedAt": "2026-07-20",
-                },
-            }, ensure_ascii=False), encoding="utf-8")
-            history = config_server.read_algorithm_history(path)["heuristic"]
-
-        self.assertEqual(1, len(history))
-        self.assertEqual("2.0.0", history[0]["version"])
-
-    def test_external_algorithm_uses_first_snapshot_as_stable_introduction(self) -> None:
-        """外部算法缺少内置简介时，应固定使用首个版本说明而不是最新说明。"""
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "algorithm_metadata.json"
-            path.write_text(json.dumps({
-                "other_alg:ANN": {
-                    "name": "ANN",
-                    "version": "1.1.0",
-                    "description": "最新版本调整了网络层数。",
-                    "updatedAt": "2026-07-27",
-                    "history": [
-                        {
-                            "version": "1.0.0",
-                            "description": "基于异质图的端到端神经网络调度算法。",
-                            "updatedAt": "2026-07-23",
-                        },
-                        {
-                            "version": "1.1.0",
-                            "description": "最新版本调整了网络层数。",
-                            "updatedAt": "2026-07-27",
-                        },
-                    ],
-                },
-            }, ensure_ascii=False), encoding="utf-8")
-
-            metadata = config_server.read_algorithm_metadata(path)
-
-        self.assertEqual(
-            "基于异质图的端到端神经网络调度算法。",
-            metadata["other_alg:ANN"]["introduction"],
-        )
+        self.assertEqual({"name", "introduction"}, set(metadata["setrank"]))
 
 
 if __name__ == "__main__":

@@ -15,7 +15,6 @@
         <button class="tab" data-tab-target="workspace">结果分析</button>
         <button class="tab" data-tab-target="route">路径配置</button>
         <button class="tab" data-tab-target="clean">清洁配置</button>
-        <button class="tab" data-tab-target="algorithm-history">算法版本</button>
       </nav>
       <div class="hero-meta"><span class="frontend-version">前端 v1.0.13</span><div class="service-pill" id="serviceState">本地服务</div></div>
     </header>
@@ -225,17 +224,11 @@
           </article>
         </div>
 
-        <div class="tab-view" data-tab-view="algorithm-history">
-          <article class="panel algorithm-history-panel">
-            <div class="panel-head"><div><h2>算法版本记录</h2><p>记录算法版本、业务说明和每次变更的意图。</p></div></div>
-            <div class="panel-body"><div class="algorithm-history-list" id="algorithmHistoryList"></div></div>
-          </article>
-        </div>
       </section>
 
       <aside class="side" id="scheduleSide">
         <article class="panel">
-          <div class="panel-head"><div><h2>运行策略</h2></div><button class="btn icon algorithm-edit-button" id="editAlgorithmButton" type="button" aria-label="编辑当前算法信息" title="编辑当前算法信息"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4l10.7-10.7a2.1 2.1 0 0 0-3-3L5 17v3Zm10.5-12.5 3 3M13 20h7"/></svg></button></div>
+          <div class="panel-head"><div><h2>运行策略</h2></div></div>
           <div class="panel-body">
             <div class="strategy-options">
               <label class="strategy-card" data-strategy-card="heuristic"><input type="radio" name="strategy" value="heuristic" checked><b>启发式</b></label>
@@ -316,20 +309,6 @@
     </form>
   </dialog>
 
-  <dialog id="algorithmDialog" aria-labelledby="algorithmDialogTitle">
-    <form method="dialog" class="dialog-body algorithm-dialog-body" id="algorithmDialogForm">
-      <h3 id="algorithmDialogTitle">编辑算法记录</h3>
-      <p>版本信息会保存在本地服务中，并显示在算法悬浮卡片里。</p>
-      <div class="algorithm-form-grid">
-        <div class="field"><label for="algorithmDialogStrategy">算法</label><select id="algorithmDialogStrategy"></select></div>
-        <div class="field"><label for="algorithmDialogVersion">版本号</label><input id="algorithmDialogVersion" maxlength="80" placeholder="例如 1.2.0" required></div>
-        <div class="field"><label for="algorithmDialogDate">更新日期</label><input id="algorithmDialogDate" type="date" required></div>
-        <div class="field"><label for="algorithmDialogDescription">算法描述</label><textarea id="algorithmDialogDescription" maxlength="500" rows="4" required></textarea></div>
-      </div>
-      <div class="algorithm-dialog-status" id="algorithmDialogStatus" role="status"></div>
-      <div class="dialog-actions"><button class="btn small" type="button" id="algorithmDialogCancel">取消</button><button class="btn primary small" type="submit" id="algorithmDialogSave">保存记录</button></div>
-    </form>
-  </dialog>
 
   <div class="drawer-layer" id="drawerLayer">
     <aside class="drawer" id="stepDrawer" aria-label="路径 Step 详细设置">
