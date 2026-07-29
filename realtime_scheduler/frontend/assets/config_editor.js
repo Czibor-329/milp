@@ -1025,7 +1025,7 @@ var VisualizationWorkspace = class {
           <time>${formatSeconds2(finiteNumber(move.StartTime))}\u2013${formatSeconds2(finiteNumber(move.EndTime))} s</time>
         </li>`).join("") : '<li class="active-move-empty">\u5F53\u524D\u65F6\u523B\u6CA1\u6709\u6267\u884C\u4E2D\u7684\u52A8\u4F5C</li>';
   }
-  /** 重算并绘制与播放时刻无关的整段排程性能诊断。 */
+  /** 请求并绘制与播放时刻无关的服务端排程性能诊断。 */
   async renderPerformance() {
     if (!this.moves.length) return;
     const requestVersion = ++this.analysisRequestVersion;
@@ -1424,7 +1424,7 @@ var state = {
   algorithmHistory: {},
   roundCount: 2,
   times: [0, 70],
-  options: { loadLockManager: "petri-look", loadLockMacroSearchSeconds: 4, loadLockMacroRollouts: 96, nnSAEASearchSeconds: 4, nnSAEARollouts: 64, neuralUCBTopK: 2, neuralUCBExploration: 5, rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
+  options: { loadLockManager: "petri-look", residencyGuardSeconds: 0, maximumRobotHoldingSeconds: 0, maximumSystemResidenceCv: 0, loadLockMacroSearchSeconds: 4, loadLockMacroRollouts: 96, nnSAEASearchSeconds: 4, nnSAEARollouts: 64, neuralUCBTopK: 2, neuralUCBExploration: 5, rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
   cleans: [],
   routes: [{ name: "RouteA", group: "RouteA", bufferOption: 0, prePJobCleanRefs: [], postPJobCleanRefs: [], postCJobCleanRefs: [], stages: linkRouteSteps([makeStage("LP1"), makeStage("Robot"), makeStage("PM1,PM2", true, "RouteA_Step2"), makeStage("Robot"), makeStage("LP1")]) }],
   rounds: [makeRound(1, 0, "RouteA", "LP1"), makeRound(2, 70, "RouteA", "LP2")],
@@ -1697,7 +1697,7 @@ function makeDefaultTestCase(name = "\u9ED8\u8BA4\u6D4B\u8BD5\u96C6") {
     strategy: "heuristic",
     roundCount: 2,
     times: [0, 70],
-    options: { loadLockManager: "petri-look", loadLockMacroSearchSeconds: 4, loadLockMacroRollouts: 96, nnSAEASearchSeconds: 4, nnSAEARollouts: 64, rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
+    options: { loadLockManager: "petri-look", residencyGuardSeconds: 0, maximumRobotHoldingSeconds: 0, maximumSystemResidenceCv: 0, loadLockMacroSearchSeconds: 4, loadLockMacroRollouts: 96, nnSAEASearchSeconds: 4, nnSAEARollouts: 64, rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
     cleans: state.cleans,
     routes: state.routes,
     rounds: [
@@ -1821,9 +1821,13 @@ function applyTestCase(testCase) {
   state.strategy = value.strategy || "heuristic";
   state.roundCount = Math.max(1, Number(value.roundCount) || 1);
   state.times = Array.isArray(value.times) ? value.times : [0];
-  state.options = value.options || { loadLockManager: "petri-look", loadLockMacroSearchSeconds: 4, loadLockMacroRollouts: 96, nnSAEASearchSeconds: 4, nnSAEARollouts: 64, neuralUCBTopK: 2, neuralUCBExploration: 5, rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 };
+  state.options = value.options || { loadLockManager: "petri-look", residencyGuardSeconds: 0, maximumRobotHoldingSeconds: 0, maximumSystemResidenceCv: 0, loadLockMacroSearchSeconds: 4, loadLockMacroRollouts: 96, nnSAEASearchSeconds: 4, nnSAEARollouts: 64, neuralUCBTopK: 2, neuralUCBExploration: 5, rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 };
   state.options.loadLockManager = state.options.loadLockManager || "petri-look";
   delete state.options.loadLockExchange;
+  for (const key of ["residencyGuardSeconds", "maximumRobotHoldingSeconds", "maximumSystemResidenceCv"]) {
+    const objectiveValue = Number(state.options[key]);
+    state.options[key] = Number.isFinite(objectiveValue) && objectiveValue >= 0 ? objectiveValue : 0;
+  }
   const macroSearchSeconds = Number(state.options.loadLockMacroSearchSeconds);
   state.options.loadLockMacroSearchSeconds = Number.isFinite(macroSearchSeconds) && macroSearchSeconds >= 0 ? macroSearchSeconds : 4;
   const macroRollouts = Number(state.options.loadLockMacroRollouts);
@@ -1865,6 +1869,7 @@ function applyTestCase(testCase) {
     input.value = state.options[input.dataset.option] ?? input.value;
   });
   document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro", "nn-saea", "setrank", "neuralucb", "neural", "rl"].includes(state.strategy));
+  document.getElementById("heuristicObjectiveOptions").classList.toggle("is-hidden", state.strategy !== "heuristic");
   document.getElementById("nnSAEAOptions").classList.toggle("is-hidden", state.strategy !== "nn-saea");
   document.getElementById("neuralucbOptions").classList.toggle("is-hidden", state.strategy !== "neuralucb");
   document.getElementById("rlOptions").classList.toggle("is-hidden", state.strategy !== "rl");
@@ -2395,6 +2400,10 @@ function updateStateFromControl(control) {
     return;
   }
   if (control.dataset.option) {
+    if (["residencyGuardSeconds", "maximumRobotHoldingSeconds", "maximumSystemResidenceCv"].includes(control.dataset.option)) {
+      value = Number.isFinite(value) ? Math.max(0, value) : 0;
+      control.value = value;
+    }
     state.options[control.dataset.option] = value;
     return;
   }
@@ -3286,6 +3295,12 @@ function showResult(result) {
   document.getElementById("metricTime").textContent = `${cpuTime.toFixed(1)} ms`;
   document.getElementById("metricMakespan").textContent = `${result.makespan.toFixed(2)} / ${baselineReady ? Number(baseline.makespan).toFixed(2) : "\u2014"} s`;
   document.getElementById("metricValidation").textContent = result.validation === "passed" ? "\u901A\u8FC7" : result.validation;
+  const objectiveDiagnostics = [...result.rounds || []].reverse().map((round) => round.strategyDiagnostics).find((diagnostics) => diagnostics?.metrics);
+  if (objectiveDiagnostics) {
+    const metrics = objectiveDiagnostics.metrics;
+    document.getElementById("metricValidationLabel").textContent = "\u6821\u9A8C / \u591A\u6307\u6807";
+    document.getElementById("metricValidationDetail").textContent = `\u9A7B\u7559\u8D85\u9650 ${Number(metrics.residencyViolationCount) || 0} \u6B21 \xB7 \u6700\u5927\u6301\u7247 ${Number(metrics.maximumRobotHoldingSeconds || 0).toFixed(2)} s \xB7 \u7CFB\u7EDF\u505C\u7559 CV ${Number(metrics.systemResidenceCv || 0).toFixed(3)}`;
+  }
   writeTerminal(["$ \u8C03\u5EA6\u5B8C\u6210", ...result.rounds.map((round) => {
     if (round.kind === "initial") return `  #${round.index} \u9996\u6B21 | ${round.elapsedMs.toFixed(1)} ms`;
     const request = Number(round.requestedTime);
@@ -3448,6 +3463,7 @@ document.addEventListener("change", (event) => {
     }
     document.getElementById("roundCount").disabled = state.strategy === "milp";
     document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro", "nn-saea", "setrank", "neuralucb", "neural", "rl"].includes(state.strategy));
+    document.getElementById("heuristicObjectiveOptions").classList.toggle("is-hidden", state.strategy !== "heuristic");
     document.getElementById("nnSAEAOptions").classList.toggle("is-hidden", state.strategy !== "nn-saea");
     document.getElementById("neuralucbOptions").classList.toggle("is-hidden", state.strategy !== "neuralucb");
     document.getElementById("rlOptions").classList.toggle("is-hidden", state.strategy !== "rl");
