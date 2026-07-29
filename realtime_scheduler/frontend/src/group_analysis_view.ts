@@ -1,7 +1,6 @@
-import type {
-  TestGroupCasePerformance,
-  TestGroupPerformanceSummary,
-} from "../../analysis/group_performance";
+import type { TestGroupPerformanceSummary } from "./analysis_contracts";
+
+type TestGroupCasePerformance = TestGroupPerformanceSummary["cases"][number];
 
 function escapeHtml(value: unknown): string {
   return String(value ?? "")

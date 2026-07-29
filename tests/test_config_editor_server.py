@@ -1128,7 +1128,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn('data-tab-target="route">路径配置</button>', html)
         self.assertIn('data-tab-target="clean">清洁配置</button>', html)
         self.assertIn('<h1>调度平台</h1>', html)
-        self.assertIn('class="frontend-version">前端 v1.0.10</span>', html)
+        self.assertIn('class="frontend-version">前端 v1.0.11</span>', html)
         self.assertIn('<span id="metricMovesLabel">瓶颈利用率</span>', html)
         self.assertNotIn('<span id="metricMovesLabel">Move 数</span>', html)
         self.assertNotIn("renderDatasetCatalog", html)
@@ -1367,7 +1367,7 @@ class ConfigEditorServerTests(unittest.TestCase):
             self.assertNotIn(removed_content, group_view_source)
 
     def test_schedule_analysis_is_reusable_without_frontend_dependencies(self) -> None:
-        """MoveList 与测试组统计应位于无 DOM、无网络依赖的公共分析层。"""
+        """MoveList 与测试组统计应由无 DOM 的后端层统一计算，页面只请求 API。"""
         analysis_root = ROOT / "realtime_scheduler" / "analysis"
         movelist_source = (analysis_root / "movelist_performance.ts").read_text(
             encoding="utf-8",
@@ -1385,8 +1385,18 @@ class ConfigEditorServerTests(unittest.TestCase):
             / "src"
             / "workspace_visualizer.ts"
         ).read_text(encoding="utf-8")
+        api_source = (
+            ROOT
+            / "realtime_scheduler"
+            / "frontend"
+            / "src"
+            / "api_client.ts"
+        ).read_text(encoding="utf-8")
 
-        self.assertIn("../../analysis/movelist_performance", workspace_source)
+        self.assertIn("requestScheduleAnalysis", workspace_source)
+        self.assertIn("/api/analysis/schedule", api_source)
+        self.assertIn("/api/analysis/test-group", api_source)
+        self.assertNotIn("../../analysis/", workspace_source)
         self.assertIn("analyzeSchedulePerformance", movelist_source)
         self.assertIn("analyzeTestGroupPerformance", group_source)
         self.assertIn("buildScheduleAnalysisContext", context_source)

@@ -1,35 +1,13 @@
 /**
- * MoveList 结果分析页面。
+ * MoveList 结果展示与回放页面。
  *
  * 本模块负责把调度输出回放成设备、机器人、晶圆和腔室门的可观察状态，并管理
- * 时间轴、播放控制、结果加载和本地文件导入。纯回放函数可在浏览器之外独立测试；
- * DOM 控制器只负责把快照呈现到调度平台的“结果分析”页。
+ * 时间轴、播放控制、结果加载和本地文件导入。性能指标通过服务端 API 获取；
+ * 本文件不实现分析规则，也不持久化业务数据。
  */
 
-import {
-  PERFORMANCE_TIME_TOLERANCE,
-  analyzeSchedulePerformance,
-  displayedPerformanceResources,
-  normalizeMovePayload,
-  summarizeBottleneckUtilization,
-  type ActivityCategory,
-  type BottleneckUtilizationSummary,
-  type ScheduleAnalysisContext,
-  type DeviceDefinition,
-  type MoveRecord,
-  type PerformanceWindowMode,
-  type ResourceKind,
-  type SchedulePerformance,
-} from "../../analysis/movelist_performance";
-import { diagnoseSchedule } from "../../analysis/diagnostic_guidance";
-
-export {
-  analyzeSchedulePerformance,
-  displayedPerformanceResources,
-  normalizeMovePayload,
-  summarizeBottleneckUtilization,
-} from "../../analysis/movelist_performance";
-export type {
+import { requestScheduleAnalysis } from "./api_client";
+import type {
   ActivityCategory,
   BottleneckUtilizationSummary,
   BottleneckCandidate,
@@ -39,9 +17,8 @@ export type {
   PerformanceWindowMode,
   ResourcePerformance,
   ResourceKind,
-  ScheduleAnalysisContext,
   SchedulePerformance,
-} from "../../analysis/movelist_performance";
+} from "./analysis_contracts";
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -128,6 +105,7 @@ const PROCESS_ARC_CENTER_X_PERCENT = 50;
 const PROCESS_ARC_CENTER_Y_PIXELS = 214;
 const PROCESS_ARC_RADIUS_X_PERCENT = 38;
 const PROCESS_ARC_RADIUS_Y_PIXELS = 156;
+const PERFORMANCE_DISPLAY_TOLERANCE = 1e-6;
 
 const ACTIVITY_CATEGORIES: ActivityCategory[] = [
   "process",
@@ -180,6 +158,22 @@ function finiteNumber(value: unknown, fallback = 0): number {
 /** 把协议中的列表字段规范为数组。 */
 function listValue(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
+}
+
+/** 从用户文件或服务结果中提取 MoveList；这里只解析协议，不计算业务指标。 */
+export function normalizeMovePayload(payload: unknown): MoveRecord[] {
+  const records = Array.isArray(payload)
+    ? payload
+    : payload && typeof payload === "object"
+      && Array.isArray((payload as UnknownRecord).MoveList)
+      ? (payload as UnknownRecord).MoveList as unknown[]
+      : null;
+  if (!records) throw new Error("文件必须是 MoveList 数组，或包含 MoveList 字段的 JSON 对象");
+  return records
+    .filter((record): record is UnknownRecord => (
+      Boolean(record) && typeof record === "object" && !Array.isArray(record)
+    ))
+    .map(record => ({ ...record }));
 }
 
 /** 返回稳定、适合人眼阅读的自然排序结果。 */
@@ -658,7 +652,9 @@ function renderSchedulePerformance(performance: SchedulePerformance): string {
     robot: "传输资源",
     "loadlock-group": "LoadLock 容量",
   };
-  const displayedResources = displayedPerformanceResources(performance);
+  const displayedResources = performance.resources.filter(
+    resource => resource.busyTime > PERFORMANCE_DISPLAY_TOLERANCE,
+  );
   const resourceKindLabels: Record<ResourceKind, string> = {
     robot: "机械手",
     process: "工艺腔",
@@ -672,7 +668,7 @@ function renderSchedulePerformance(performance: SchedulePerformance): string {
   const resourceRows = displayedResources.map(resource => {
     const categoryBars = ACTIVITY_CATEGORIES.map(category => {
       const duration = resource.categoryTimes[category];
-      if (duration <= PERFORMANCE_TIME_TOLERANCE || window.duration <= PERFORMANCE_TIME_TOLERANCE) return "";
+      if (duration <= PERFORMANCE_DISPLAY_TOLERANCE || window.duration <= PERFORMANCE_DISPLAY_TOLERANCE) return "";
       const width = Math.min(duration / window.duration * 100, 100);
       return `<span class="category-${category}" style="width:${width.toFixed(3)}%" title="${ACTIVITY_CATEGORY_LABELS[category]} ${formatSeconds(duration)} s"></span>`;
     }).join("");
@@ -742,7 +738,7 @@ function renderSchedulePerformance(performance: SchedulePerformance): string {
         </table>
       </div>`
     : '<div class="loadlock-cycle-empty">MoveList 中没有识别到 LoadLock 抽气或充气动作。</div>';
-  const diagnostics = diagnoseSchedule(performance);
+  const diagnostics = performance.diagnostics ?? [];
   const diagnosticMarkup = diagnostics.length
     ? `<section class="diagnostic-panel" aria-labelledby="diagnosticPanelTitle">
         <div class="diagnostic-panel-head">
@@ -828,10 +824,15 @@ export class VisualizationWorkspace {
   private readonly root: Document;
   private readonly elements: WorkspaceElements;
   private device: DeviceDefinition | null = null;
-  private analysisContext: ScheduleAnalysisContext | null = null;
+  private analysisRoutes: Array<Record<string, any>> = [];
+  private analysisRounds: Array<Record<string, any>> = [];
   private moves: MoveRecord[] = [];
   private sourceName = "";
   private resultUrl = "";
+  private analysisResultId = "";
+  private analysis: SchedulePerformance | null = null;
+  private bottleneckSummary: BottleneckUtilizationSummary | null = null;
+  private analysisRequestVersion = 0;
   private time = 0;
   private playing = false;
   private playbackSpeed = DEFAULT_PLAYBACK_SPEED;
@@ -854,14 +855,14 @@ export class VisualizationWorkspace {
     this.device = device ? structuredClone(device) : null;
     if (this.moves.length) {
       this.render();
-      this.renderPerformance();
+      void this.renderPerformance();
     }
   }
 
   /** 加载浏览器中选择的 MoveList 文件。 */
   async loadFile(file: File): Promise<void> {
     const payload = JSON.parse(await file.text()) as unknown;
-    this.loadMoves(normalizeMovePayload(payload), file.name, "");
+    await this.loadMoves(normalizeMovePayload(payload), file.name, "", "");
   }
 
   /** 从后端保存的运行结果加载 MoveList。 */
@@ -879,29 +880,29 @@ export class VisualizationWorkspace {
           : "";
         throw new Error(message || `服务返回 ${response.status}`);
       }
-      this.loadMoves(normalizeMovePayload(payload), sourceName, resultUrl);
+      const resultId = resultUrl.startsWith("/api/results/")
+        ? decodeURIComponent(resultUrl.slice("/api/results/".length))
+        : "";
+      await this.loadMoves(normalizeMovePayload(payload), sourceName, resultUrl, resultId);
     } catch (error) {
       this.showError(error instanceof Error ? error.message : String(error));
       throw error;
     }
   }
 
-  /** 注入路径中的并行工艺腔定义，使未被调度使用的候选腔仍属于正确容量组。 */
-  setAnalysisContext(context: ScheduleAnalysisContext | null): void {
-    this.analysisContext = context ? structuredClone(context) : null;
-    if (this.moves.length) this.renderPerformance();
+  /** 提供后端构建工序容量上下文所需的原始 Route 和轮次配置。 */
+  setAnalysisConfiguration(
+    routes: Array<Record<string, any>> | null,
+    rounds: Array<Record<string, any>> | null,
+  ): void {
+    this.analysisRoutes = structuredClone(routes ?? []);
+    this.analysisRounds = structuredClone(rounds ?? []);
+    if (this.moves.length) void this.renderPerformance();
   }
 
   /** 返回与诊断面板一致的稳态瓶颈候选利用率，供运行结果摘要复用。 */
   getBottleneckUtilization(): BottleneckUtilizationSummary | null {
-    if (!this.moves.length) return null;
-    const performance = analyzeSchedulePerformance(
-      this.moves,
-      this.device,
-      this.performanceWindowMode,
-      this.analysisContext,
-    );
-    return summarizeBottleneckUtilization(performance);
+    return this.bottleneckSummary ? structuredClone(this.bottleneckSummary) : null;
   }
 
   /** 切换到工作台标签。 */
@@ -934,6 +935,10 @@ export class VisualizationWorkspace {
     this.moves = [];
     this.sourceName = "";
     this.resultUrl = "";
+    this.analysisResultId = "";
+    this.analysis = null;
+    this.bottleneckSummary = null;
+    this.analysisRequestVersion += 1;
     this.time = 0;
     this.elements.resultButton.disabled = true;
     this.elements.openGantt.href = "#";
@@ -953,12 +958,20 @@ export class VisualizationWorkspace {
   }
 
   /** 接收规范化后的 MoveList 并重置时间轴。 */
-  private loadMoves(moves: MoveRecord[], sourceName: string, resultUrl: string): void {
+  private async loadMoves(
+    moves: MoveRecord[],
+    sourceName: string,
+    resultUrl: string,
+    analysisResultId: string,
+  ): Promise<void> {
     if (!moves.length) throw new Error("MoveList 为空，无法建立可视化回放");
     this.pause();
     this.moves = moves;
     this.sourceName = sourceName;
     this.resultUrl = resultUrl;
+    this.analysisResultId = analysisResultId;
+    this.analysis = null;
+    this.bottleneckSummary = null;
     const snapshot = buildWorkspaceSnapshot(this.moves, this.device, 0);
     this.time = 0;
     this.elements.range.min = "0";
@@ -974,7 +987,7 @@ export class VisualizationWorkspace {
     this.setTopologyVisible(false);
     this.showSingleResult();
     this.render(snapshot);
-    this.renderPerformance();
+    await this.renderPerformance();
   }
 
   /** 绑定文件、时间轴、播放和快捷控制事件。 */
@@ -999,7 +1012,7 @@ export class VisualizationWorkspace {
     });
     this.elements.performanceWindow.addEventListener("change", () => {
       this.performanceWindowMode = this.elements.performanceWindow.value === "full" ? "full" : "steady";
-      this.renderPerformance();
+      void this.renderPerformance();
     });
     this.elements.topologyToggle.addEventListener("click", () => {
       this.setTopologyVisible(this.elements.topologyPlayback.hidden);
@@ -1106,16 +1119,35 @@ export class VisualizationWorkspace {
       : '<li class="active-move-empty">当前时刻没有执行中的动作</li>';
   }
 
-  /** 重算并绘制与播放时刻无关的整段排程性能诊断。 */
-  private renderPerformance(): void {
+  /** 请求并绘制与播放时刻无关的服务端排程性能诊断。 */
+  private async renderPerformance(): Promise<void> {
     if (!this.moves.length) return;
-    const performance = analyzeSchedulePerformance(
-      this.moves,
-      this.device,
-      this.performanceWindowMode,
-      this.analysisContext,
-    );
-    this.elements.performance.innerHTML = renderSchedulePerformance(performance);
+    const requestVersion = ++this.analysisRequestVersion;
+    this.elements.performance.innerHTML = '<div class="visual-loader" aria-label="正在分析"></div>';
+    try {
+      const result = await requestScheduleAnalysis({
+        ...(this.analysisResultId
+          ? { resultId: this.analysisResultId }
+          : { moves: this.moves }),
+        device: this.device,
+        windowMode: this.performanceWindowMode,
+        routes: this.analysisRoutes,
+        rounds: this.analysisRounds,
+      });
+      if (requestVersion !== this.analysisRequestVersion) return;
+      this.analysis = result.analysis;
+      this.bottleneckSummary = result.bottleneck;
+      this.elements.performance.innerHTML = renderSchedulePerformance(result.analysis);
+    } catch (error) {
+      if (requestVersion !== this.analysisRequestVersion) return;
+      this.analysis = null;
+      this.bottleneckSummary = null;
+      this.elements.performance.innerHTML = `
+        <div class="visual-empty is-error">
+          <strong>结果分析失败</strong>
+          <span>${escapeHtml(error instanceof Error ? error.message : String(error))}</span>
+        </div>`;
+    }
   }
 
   /** 显示加载状态并保留明确的系统反馈。 */

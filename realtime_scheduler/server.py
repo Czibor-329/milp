@@ -1,9 +1,10 @@
 """CT 实时调度终端本地服务。
 
 页面只负责编辑设备引用、设备级共享 Clean/Route 和各轮新增 Job；本服务把请求展开成
-标准调度接口数据，依次运行首次排程与实时重算。设备、共享工艺库、测试集、甘特图结果和
-复现日志统一保存在 realtime_scheduler 目录中。批处理、Baseline 与并发运行状态由
-batch_service 模块负责，本模块保留 HTTP 边界与兼容入口。
+标准调度接口数据，依次运行首次排程与实时重算，并通过 backend.analysis 提供统一的
+MoveList 性能分析 API。设备、共享工艺库、测试集、甘特图结果和复现日志统一保存在
+realtime_scheduler 目录中。批处理、Baseline 与并发运行状态由 batch_service 模块负责，
+本模块保留 HTTP 边界与兼容入口。
 
 用法：
     python realtime_scheduler/server.py
@@ -87,6 +88,13 @@ from realtime_scheduler.algorithm_interface import (
     init as algorithm_init,
     session as algorithm_session,
     update as algorithm_update,
+)
+from realtime_scheduler.backend.analysis import (
+    analyze_schedule_performance,
+    analyze_test_group_performance,
+    build_schedule_analysis_context,
+    normalize_move_payload,
+    summarize_bottleneck_utilization,
 )
 from realtime_scheduler.plan_builder import (
     CJOB_TYPE_VALUES,
@@ -3164,6 +3172,69 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         """接收控制台配置并同步运行后端策略。"""
         path = unquote(urlparse(self.path).path)
+        if path == "/api/analysis/schedule":
+            try:
+                payload = self._read_json_object()
+                result_id = str(payload.get("resultId") or "").strip()
+                if result_id:
+                    saved_result = read_result(result_id)
+                    if saved_result is None:
+                        raise ValueError("结果不存在或已过期")
+                    moves = normalize_move_payload(saved_result)
+                else:
+                    moves = normalize_move_payload(
+                        payload.get("moves", payload.get("result")),
+                    )
+                device = payload.get("device")
+                if device is not None and not isinstance(device, Mapping):
+                    raise ValueError("device 必须是 JSON 对象或 null")
+                context = payload.get("context")
+                if context is None:
+                    routes = payload.get("routes")
+                    rounds = payload.get("rounds")
+                    if routes is not None or rounds is not None:
+                        if routes is not None and not isinstance(routes, list):
+                            raise ValueError("routes 必须是数组")
+                        if rounds is not None and not isinstance(rounds, list):
+                            raise ValueError("rounds 必须是数组")
+                        context = build_schedule_analysis_context(routes, rounds)
+                if context is not None and not isinstance(context, Mapping):
+                    raise ValueError("context 必须是 JSON 对象或 null")
+                analysis = analyze_schedule_performance(
+                    moves,
+                    device,
+                    str(payload.get("windowMode") or "steady"),
+                    context,
+                )
+                self._send_json({
+                    "ok": True,
+                    "analysis": analysis,
+                    "bottleneck": summarize_bottleneck_utilization(analysis),
+                })
+            except Exception as error:  # noqa: BLE001
+                self._send_json(
+                    {"ok": False, "error": str(error)},
+                    HTTPStatus.BAD_REQUEST,
+                )
+            return
+        if path == "/api/analysis/test-group":
+            try:
+                payload = self._read_json_object()
+                cases = payload.get("cases")
+                if not isinstance(cases, list):
+                    raise ValueError("cases 必须是数组")
+                if not all(isinstance(item, Mapping) for item in cases):
+                    raise ValueError("cases 的每一项都必须是 JSON 对象")
+                self._send_json({
+                    "ok": True,
+                    "analysis": analyze_test_group_performance(cases),
+                })
+            except Exception as error:  # noqa: BLE001
+                self._send_json(
+                    {"ok": False, "error": str(error)},
+                    HTTPStatus.BAD_REQUEST,
+                )
+            return
         if path == "/api/run-batch":
             try:
                 payload = self._read_json_object()

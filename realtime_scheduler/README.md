@@ -1,8 +1,9 @@
 # 调度平台
 
-此目录集中保存实时调度前端及其本地数据：
+此目录集中保存实时调度平台的前端、服务端和本地数据：
 
-- `server.py`：本地调度服务、工作区接口与静态资源入口，不再承载前端实现。
+- `server.py`：本地调度服务、工作区接口、分析 API 与静态资源入口，不承载页面分析实现。
+- `backend/analysis.py`：服务端唯一的 MoveList、瓶颈、诊断和测试组分析实现。
 - 内置 `heuristic/neural/rl/milp`：统一调用独立算法仓库
   `alg/infer/scheduler.py` 的 `init/update`，`update` 的可选 `algorithm`
   参数决定算法。
@@ -10,7 +11,7 @@
 - `plan_builder.py`：设备归一化、Route/Recipe 和各轮 CJob/PJob 请求建模。
 - `frontend/config_editor.html`：只保存调度平台的页面骨架。
 - `frontend/src/`：TypeScript 前端源码，按 API、数据模型、Route 逻辑和页面入口拆分。
-- `frontend/src/workspace_visualizer.ts`：MoveList 回放、腔室门状态与设备工作台。
+- `frontend/src/workspace_visualizer.ts`：MoveList 回放、腔室门状态与设备工作台；性能指标通过 `/api/analysis/*` 获取。
 - `frontend/assets/`：可由 Python 服务直接托管的构建产物与样式。
 - `frontend/movelist_gantt_viewer.html`：MoveList 甘特图页面。
 - `data/workspaces.json`：设备、设备级共享 Route/Clean、测试集任务。

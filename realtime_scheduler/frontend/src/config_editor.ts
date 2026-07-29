@@ -8,15 +8,12 @@
 
 // @ts-nocheck
 import * as RouteEditorLogic from "./route_editor_logic";
-import { requestJson } from "./api_client";
-import { createVisualizationWorkspace } from "./workspace_visualizer";
 import {
-  analyzeSchedulePerformance,
-  normalizeMovePayload,
-  summarizeBottleneckUtilization,
-} from "../../analysis/movelist_performance";
-import { analyzeTestGroupPerformance } from "../../analysis/group_performance";
-import { buildScheduleAnalysisContext } from "../../analysis/schedule_context";
+  requestJson,
+  requestScheduleAnalysis,
+  requestTestGroupAnalysis,
+} from "./api_client";
+import { createVisualizationWorkspace } from "./workspace_visualizer";
 import { renderTestGroupAnalysis } from "./group_analysis_view";
 import {
   CJOB_TYPES,
@@ -506,9 +503,7 @@ function applyTestCase(testCase) {
   }
   state.times.length = state.roundCount; state.rounds.length = state.roundCount; state.times[0] = 0;
   normalizeRounds(); state.drawer = null;
-  visualizationWorkspace.setAnalysisContext(
-    buildScheduleAnalysisContext(state.routes, state.rounds),
-  );
+  visualizationWorkspace.setAnalysisConfiguration(state.routes, state.rounds);
   const cleanNamesChanged = synchronizeCleanNames();
   const routeNamesChanged = synchronizeRouteNames();
   state.dirty = cleanNamesChanged || routeNamesChanged;
@@ -1444,9 +1439,7 @@ function prepareGanttView(result) {
 /** 把本次结果加载进内嵌工作台，并启用直接查看入口。 */
 async function prepareWorkspaceView(result) {
   if (!result?.resultId) return null;
-  visualizationWorkspace.setAnalysisContext(
-    buildScheduleAnalysisContext(state.routes, state.rounds),
-  );
+  visualizationWorkspace.setAnalysisConfiguration(state.routes, state.rounds);
   await visualizationWorkspace.loadResult(result.resultId, state.testCaseName || "当前运行结果");
   return visualizationWorkspace.getBottleneckUtilization();
 }
@@ -1673,7 +1666,7 @@ function showBatchItemOverview(item, index) {
   setResultMetric("Validation", "校验", validationText, item.error || "");
 }
 
-/** 加载批量单项的 MoveList，并在独立分析层计算完整稳态性能。 */
+/** 请求后端分析批量单项，并缓存结构化结果供页面复用。 */
 async function loadBatchItemPerformance(item, index) {
   const resultUrl = String(item?.resultUrl || "");
   if (!resultUrl || item.status !== "succeeded") return null;
@@ -1684,25 +1677,23 @@ async function loadBatchItemPerformance(item, index) {
   let request = batchBottleneckRequests.get(resultUrl);
   if (!request) {
     request = (async () => {
-      const response = await fetch(resultUrl, { cache: "no-store" });
-      if (!response.ok) throw new Error(`结果加载失败（HTTP ${response.status}）`);
-      const payload = await response.json();
       const testCase = (state.workspaceDevice?.tests || []).find(
         test => String(test.id) === String(item.testId),
       );
-      const performance = analyzeSchedulePerformance(
-        normalizeMovePayload(payload),
-        state.device,
-        "steady",
-        buildScheduleAnalysisContext(
-          state.workspaceDevice?.routes || state.routes,
-          testCase?.rounds || state.rounds,
-        ),
-      );
-      const summary = summarizeBottleneckUtilization(performance);
-      batchPerformanceAnalyses.set(resultUrl, performance);
-      batchBottleneckSummaries.set(resultUrl, summary);
-      return performance;
+      const resultId = resultUrl.startsWith("/api/results/")
+        ? decodeURIComponent(resultUrl.slice("/api/results/".length))
+        : "";
+      if (!resultId) throw new Error("结果地址不符合服务端分析契约");
+      const response = await requestScheduleAnalysis({
+        resultId,
+        device: state.device,
+        windowMode: "steady",
+        routes: state.workspaceDevice?.routes || state.routes,
+        rounds: testCase?.rounds || state.rounds,
+      });
+      batchPerformanceAnalyses.set(resultUrl, response.analysis);
+      batchBottleneckSummaries.set(resultUrl, response.bottleneck);
+      return response.analysis;
     })();
     batchBottleneckRequests.set(resultUrl, request);
   }
@@ -1746,7 +1737,7 @@ function showCurrentBatchOverview() {
   showBatchOverviewMetrics(state.batchResult);
 }
 
-/** 评估当前测试组，并把多维图表绘制到结果分析工作台。 */
+/** 请求后端评估当前测试组，并把服务端返回的多维统计绘制到结果分析工作台。 */
 async function showTestGroupAnalysis() {
   const result = state.batchResult;
   if (!result?.items?.length) return;
@@ -1767,7 +1758,7 @@ async function showTestGroupAnalysis() {
       await loadBatchItemPerformance(current.item, current.index);
     }
   }));
-  const summary = analyzeTestGroupPerformance(result.items.map((item, index) => ({
+  const summary = await requestTestGroupAnalysis(result.items.map((item, index) => ({
     id: String(item.testId || `index-${index}`),
     name: `t${index + 1}`,
     status: String(item.status || "unknown"),
