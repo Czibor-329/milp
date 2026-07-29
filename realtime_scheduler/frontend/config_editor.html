@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>调度平台</title>
-  <link rel="stylesheet" href="/assets/config_editor.css?v=1.0.12">
+  <link rel="stylesheet" href="/assets/config_editor.css?v=1.0.13">
 </head>
 <body>
   <main class="shell">
@@ -17,7 +17,7 @@
         <button class="tab" data-tab-target="clean">清洁配置</button>
         <button class="tab" data-tab-target="algorithm-history">算法版本</button>
       </nav>
-      <div class="hero-meta"><span class="frontend-version">前端 v1.0.12</span><div class="service-pill" id="serviceState">本地服务</div></div>
+      <div class="hero-meta"><span class="frontend-version">前端 v1.0.13</span><div class="service-pill" id="serviceState">本地服务</div></div>
     </header>
 
     <div class="layout" id="pageLayout">
@@ -108,6 +108,13 @@
               </div>
               <div class="batch-progress" id="batchProgress" role="progressbar" aria-label="批量运行进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="batch-progress-track" aria-hidden="true"><div class="batch-progress-bar" id="batchProgressBar" style="width:0%"></div></div><span class="batch-progress-percent" id="batchProgressCount">0%</span></div>
               <div class="batch-results" id="batchResults"></div>
+              <section class="parameter-comparison" id="parameterComparisonPanel" hidden aria-live="polite">
+                <header class="parameter-comparison-head">
+                  <div><span class="visual-kicker">单测试实验</span><h3>基准与对比测试</h3><p>显示每项指标相对基准的差值，便于判断参数或策略变化的实际影响。</p></div>
+                </header>
+                <div class="parameter-comparison-base" id="parameterComparisonBase"></div>
+                <div id="parameterComparisonResults"></div>
+              </section>
               <div class="result-error-panel" id="resultErrorPanel" role="alert" hidden><strong>运行错误</strong><pre id="terminal"></pre></div>
               <div class="result-actions"><a class="btn" id="logButton" href="#" download aria-disabled="true">导出复现日志</a><button class="btn primary" id="workspaceResultButton" type="button" disabled>在结果分析中查看</button><a class="btn" id="ganttButton" href="#" target="_blank" aria-disabled="true">打开甘特图</a><button class="btn danger" id="clearExportsButton" type="button">清理导出数据</button></div>
             </div>
@@ -275,12 +282,30 @@
           <div class="run-box">
             <h2>开始运行</h2>
             <label class="export-option"><input id="autoExportLog" type="checkbox">运行结束后自动下载 input_data 复现日志（失败也会生成）</label>
-            <div class="run-actions"><button class="btn" id="runButton">▶ 运行当前测试</button><button class="btn batch" id="batchRunButton">▦ 运行当前测试组</button></div>
+            <div class="run-actions"><button class="btn" id="runButton">▶ 运行当前测试</button><button class="btn batch" id="batchRunButton">▦ 运行当前测试组</button><button class="btn batch" id="openParameterComparisonDialogButton" title="先运行当前测试，再选择策略和参数创建对比实验" disabled>⇄ 运行对比测试</button></div>
           </div>
         </article>
       </aside>
     </div>
   </main>
+
+  <dialog id="parameterComparisonDialog" aria-labelledby="parameterComparisonDialogTitle">
+    <form class="dialog-body parameter-comparison-dialog-body" id="parameterComparisonForm">
+      <h3 id="parameterComparisonDialogTitle">运行对比测试</h3>
+      <p>使用当前基准测试的设备、任务和轮次，只替换下面选择的策略和参数。</p>
+      <div class="algorithm-form-grid">
+        <div class="field"><label for="parameterComparisonStrategy">对比策略</label><select id="parameterComparisonStrategy"></select></div>
+        <div class="field"><label for="comparisonLoadLockManager">LoadLock 管理器</label><select id="comparisonLoadLockManager"><option value="petri-look">Petri-ETA</option><option value="collective-look">集选 LOOK</option><option value="round-robin">轮询</option><option value="dedicated-direction">方向分区</option><option value="exchange-look">交换优先 LOOK</option><option value="joint">策略联合选择</option></select></div>
+        <div class="field"><label for="comparisonResidencyGuardSeconds">驻留安全余量（秒）</label><input id="comparisonResidencyGuardSeconds" type="number" min="0" step="0.1" required></div>
+        <div class="field"><label for="comparisonMaximumRobotHoldingSeconds">Robot 最大持片（秒）</label><input id="comparisonMaximumRobotHoldingSeconds" type="number" min="0" step="0.1" required></div>
+        <div class="field"><label for="comparisonMaximumSystemResidenceCv">系统停留时间 CV 上限</label><input id="comparisonMaximumSystemResidenceCv" type="number" min="0" step="0.01" required></div>
+        <div class="field"><label for="comparisonSeed">随机种子</label><input id="comparisonSeed" type="number" step="1" required></div>
+      </div>
+      <section class="comparison-strategy-options" id="parameterComparisonStrategyOptions"></section>
+      <div class="algorithm-dialog-status" id="parameterComparisonDialogStatus" role="status"></div>
+      <div class="dialog-actions"><button class="btn small" type="button" id="parameterComparisonDialogCancel">取消</button><button class="btn primary small" id="runParameterComparisonButton" type="submit">运行对比测试</button></div>
+    </form>
+  </dialog>
 
   <dialog id="workspaceDialog" aria-labelledby="workspaceDialogTitle">
     <form method="dialog" class="dialog-body" id="workspaceDialogForm">
@@ -313,6 +338,6 @@
     </aside>
   </div>
 
-  <script type="module" src="/assets/config_editor.js?v=1.0.12"></script>
+  <script type="module" src="/assets/config_editor.js?v=1.0.13"></script>
 </body>
 </html>

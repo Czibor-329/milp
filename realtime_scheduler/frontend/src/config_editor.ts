@@ -49,7 +49,7 @@ const ROUTE_CLEAN_KEYS = ["prePJobCleanRefs", "postPJobCleanRefs", "postCJobClea
 
 const state = {
   workspaceDevices: [], workspaceDevice: null, workspaceDeviceId: "", testCaseId: "", testCaseName: "", testCaseGroup: "", activeTestGroup: "", serviceCompatible: false, dirty: false,
-  activeBatchId: "", batchRunning: false, batchCancelRequested: false, batchCancelSent: false, batchResult: null, selectedBatchTestId: "",
+  activeBatchId: "", batchRunning: false, batchCancelRequested: false, batchCancelSent: false, batchResult: null, selectedBatchTestId: "", parameterComparison: null,
   deviceName: "", device: null, stationNames: [], loadPorts: [], processModules: [], robotNames: [], robotScopes: {},
   strategy: "heuristic", availableOtherAlgorithms: [], algorithmMetadata: {}, algorithmHistory: {}, roundCount: 2, times: [0, 70], options: { loadLockManager: "petri-look", residencyGuardSeconds: 0, maximumRobotHoldingSeconds: 0, maximumSystemResidenceCv: 0, loadLockMacroSearchSeconds: 4, loadLockMacroRollouts: 96, nnSAEASearchSeconds: 4, nnSAEARollouts: 64, neuralUCBTopK: 2, neuralUCBExploration: 5, rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
   cleans: [],
@@ -413,7 +413,9 @@ function renderWorkspaceControls() {
   document.getElementById("copyTestButton").disabled = !hasTest;
   document.getElementById("saveTestButton").disabled = !hasTest;
   document.getElementById("deleteTestButton").disabled = tests.length <= 1;
-  document.getElementById("batchRunButton").disabled = !state.serviceCompatible || !visibleTests.length;
+  const batchDisabled = state.batchRunning || !state.serviceCompatible || !visibleTests.length;
+  document.getElementById("batchRunButton").disabled = batchDisabled;
+  document.getElementById("openParameterComparisonDialogButton").disabled = state.batchRunning || !state.serviceCompatible || !state.parameterComparison?.baseline;
   const emptyHint = document.getElementById("emptyGroupHint");
   emptyHint.classList.toggle("visible", Boolean(state.workspaceDeviceId) && !visibleTests.length);
   document.getElementById("emptyGroupNewTestButton").disabled = !state.workspaceDeviceId;
@@ -457,6 +459,10 @@ function resetRunResult() {
   document.getElementById("testGroupAnalysisButton").hidden = true;
   document.getElementById("testGroupAnalysisPanel").hidden = true;
   document.getElementById("testGroupAnalysisPanel").innerHTML = "";
+  state.parameterComparison = null;
+  document.getElementById("parameterComparisonPanel").hidden = true;
+  document.getElementById("parameterComparisonResults").innerHTML = "";
+  document.getElementById("openParameterComparisonDialogButton").disabled = true;
   document.getElementById("metricTimeLabel").textContent = "总耗时";
   document.getElementById("metricMakespanLabel").textContent = "Makespan";
   setBottleneckMetric(null);
@@ -515,7 +521,7 @@ function applyTestCase(testCase) {
   document.querySelectorAll('input[name="strategy"]').forEach(input => { input.checked = input.value === state.strategy; });
   document.querySelectorAll("[data-option]").forEach(input => { input.value = state.options[input.dataset.option] ?? input.value; });
   document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro", "nn-saea", "setrank", "neuralucb", "neural", "rl"].includes(state.strategy));
-  document.getElementById("heuristicObjectiveOptions").classList.toggle("is-hidden", state.strategy !== "heuristic");
+  document.getElementById("heuristicObjectiveOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro"].includes(state.strategy));
   document.getElementById("nnSAEAOptions").classList.toggle("is-hidden", state.strategy !== "nn-saea");
   document.getElementById("neuralucbOptions").classList.toggle("is-hidden", state.strategy !== "neuralucb");
   document.getElementById("rlOptions").classList.toggle("is-hidden", state.strategy !== "rl");
@@ -1314,6 +1320,42 @@ function showAlgorithmDetails(strategy) {
   `;
 }
 
+/** 返回策略在批量结果中的可读名称，兼容动态发现的 other_alg 策略。 */
+function displayStrategyName(strategy) {
+  const normalized = String(strategy || "heuristic");
+  const cardName = document.querySelector(`[data-strategy-card="${CSS.escape(normalized)}"] b`)?.textContent;
+  return state.algorithmMetadata[normalized]?.name || cardName || normalized;
+}
+
+/** 将策略关联的常用调度参数压缩成结果卡片可横向比较的摘要。 */
+function batchParameterSummary(options, strategy) {
+  const values = options && typeof options === "object" ? options : {};
+  const normalizedStrategy = String(strategy || "heuristic");
+  const definitions = [
+    ["loadLockManager", "LoadLock", "", []],
+    ["residencyGuardSeconds", "驻留余量", "s", []],
+    ["maximumRobotHoldingSeconds", "持片上限", "s", []],
+    ["maximumSystemResidenceCv", "停留 CV", "", []],
+    ["seed", "随机种子", "", []],
+    ["loadLockMacroSearchSeconds", "宏搜索", "s", ["loadlock-macro"]],
+    ["loadLockMacroRollouts", "宏采样", "", ["loadlock-macro"]],
+    ["nnSAEASearchSeconds", "SAEA 搜索", "s", ["nn-saea"]],
+    ["nnSAEARollouts", "SAEA 采样", "", ["nn-saea"]],
+    ["neuralUCBTopK", "UCB Top-K", "", ["neuralucb"]],
+    ["neuralUCBExploration", "UCB 探索", "", ["neuralucb"]],
+    ["rlSearchSeconds", "RL 搜索", "s", ["rl"]],
+    ["rlRollouts", "RL 采样", "", ["rl"]],
+    ["rlTemperature", "RL 温度", "", ["rl"]],
+    ["milpTimeLimit", "MILP 时限", "s", ["milp"]],
+  ];
+  const labels = definitions.flatMap(([key, label, suffix, strategies]) => strategies.length && !strategies.includes(normalizedStrategy)
+    ? []
+    : values[key] === undefined || values[key] === null || values[key] === ""
+    ? []
+    : [`${label} ${values[key]}${suffix}`]);
+  return labels.length ? labels.join(" · ") : "默认参数";
+}
+
 /** 为算法卡片绑定悬浮和键盘详情，并同步编辑对话框的算法清单。 */
 function renderAlgorithmMetadata() {
   document.querySelectorAll("[data-strategy-card]").forEach(card => {
@@ -1460,6 +1502,7 @@ async function prepareWorkspaceView(result) {
 async function runPlan() {
   const button = document.getElementById("runButton");
   const batchButton = document.getElementById("batchRunButton");
+  const comparisonButton = document.getElementById("openParameterComparisonDialogButton");
   let logReady = false, ganttReady = false, runResult = null, bottleneckSummary = null;
   try {
     const healthResponse = await fetch("/api/health", { cache: "no-store" }), health = await healthResponse.json();
@@ -1473,7 +1516,7 @@ async function runPlan() {
     if (state.strategy === "milp" && state.roundCount !== 1) throw new Error("MILP 策略只能运行首次排程，不能选择多次重算");
     if (state.strategy === "milp" && configuredWaferCount() > 12) throw new Error(`MILP 策略总晶圆数量不能超过 12 片，当前为 ${configuredWaferCount()} 片`);
     if (state.testCaseId) await saveCurrentTest(true);
-    const payload = buildPayload(); button.disabled = true; batchButton.disabled = true; button.classList.add("running"); button.textContent = "正在运行策略…";
+    const payload = buildPayload(); button.disabled = true; batchButton.disabled = true; comparisonButton.disabled = true; button.classList.add("running"); button.textContent = "正在运行策略…";
     resetRunResult();
     writeTerminal(`$ 开始运行 ${state.strategy}\n  总轮数: ${state.roundCount}\n  重算时间: ${state.rounds.map(round => round.currentTime).join(", ")} s`);
     const response = await fetch("/api/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
@@ -1515,7 +1558,9 @@ async function runPlan() {
 
 /** 使用当前所选策略并行运行当前测试组中的全部测试。 */
 async function runCurrentTestGroup() {
-  const button = document.getElementById("batchRunButton"), runButton = document.getElementById("runButton");
+  const button = document.getElementById("batchRunButton");
+  const comparisonButton = document.getElementById("openParameterComparisonDialogButton");
+  const runButton = document.getElementById("runButton");
   if (state.batchRunning) {
     try {
       await requestBatchCancellation();
@@ -1540,9 +1585,9 @@ async function runCurrentTestGroup() {
     document.getElementById("testGroupAnalysisPanel").hidden = true;
     document.getElementById("testGroupAnalysisPanel").innerHTML = "";
     document.getElementById("batchOverviewButton").hidden = true;
-    button.disabled = false; runButton.disabled = true; button.classList.add("cancel"); button.textContent = "■ 终止调度";
+    button.disabled = false; comparisonButton.disabled = true; runButton.disabled = true; button.classList.add("cancel"); button.textContent = "■ 终止调度";
     document.getElementById("batchResults").innerHTML = "";
-    writeTerminal(`$ 批量运行当前测试组\n  组别: ${state.activeTestGroup || "未分组"}\n  策略: ${state.strategy}\n  测试数: ${tests.length}\n  后端最多并行运行 4 项…`);
+    writeTerminal(`$ 批量运行当前测试组\n  组别: ${state.activeTestGroup || "未分组"}\n  策略: ${displayStrategyName(state.strategy)}\n  测试数: ${tests.length}\n  后端最多并行运行 4 项…`);
     const response = await fetch("/api/run-batch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1663,7 +1708,7 @@ function showBatchItemOverview(item, index) {
   const bottleneckSummary = bottleneckReady ? batchBottleneckSummaries.get(resultUrl) : null;
   const bottleneckError = resultUrl ? batchBottleneckErrors.get(resultUrl) : "";
 
-  document.getElementById("metricContext").textContent = `t${index + 1} · ${item.testName || `测试 ${index + 1}`}`;
+  document.getElementById("metricContext").textContent = `t${index + 1} · ${item.testName || `测试 ${index + 1}`} · ${displayStrategyName(state.batchResult?.strategy)}`;
   document.getElementById("batchOverviewButton").hidden = false;
   setResultMetric("Time", "CPU Time / 耗时", Number.isFinite(cpuTime) ? `${cpuTime.toFixed(1)} ms` : "—", Number.isFinite(elapsedTime) ? `端到端耗时 ${elapsedTime.toFixed(1)} ms` : "");
   setResultMetric("Makespan", "Makespan / Baseline", Number.isFinite(makespan) ? `${makespan.toFixed(2)} / ${baselineReady ? Number(baseline.makespan).toFixed(2) : "—"} s` : "—", comparisonDetail);
@@ -1820,7 +1865,7 @@ function showBatchProgress(result) {
   }
   writeTerminal([
     "$ 批量运行当前测试组",
-    `  组别: ${result.group || "未分组"} · 策略: ${result.strategy}`,
+    `  组别: ${result.group || "未分组"} · 策略: ${displayStrategyName(result.strategy)}`,
     `  进度: ${completed}/${total} (${percent}%) · 并行数: ${result.workerCount}`,
     `  等待: ${(result.items || []).filter(item => item.status === "queued").length} · 运行中: ${(result.items || []).filter(item => item.status === "running").length} · 成功: ${result.succeeded || 0} · 失败: ${result.failed || 0} · 终止: ${result.cancelled || 0}`,
   ].join("\n"));
@@ -1847,6 +1892,7 @@ function renderBatchItems(items) {
       <div class="batch-result ${escapeHtml(item.status || "queued")}${selected ? " selected" : ""}" data-batch-item-index="${index}">
         <div class="batch-result-head">
           <button class="batch-result-title" type="button" aria-pressed="${selected}" aria-label="查看 ${escapeHtml(displayId)} ${escapeHtml(item.testName || "")} 的详细指标"><strong title="${escapeHtml(`${item.testId || ""} · ${item.testName || ""}`)}">${escapeHtml(displayId)}</strong></button>
+          <span class="batch-status" title="${escapeHtml(item.testName || "")}">${escapeHtml(item.testName || `测试 ${index + 1}`)}</span>
           <span class="batch-status">${statusLabels[item.status] || "等待中"}</span>
           <div class="batch-result-actions">
             ${item.logUrl ? `<a class="btn" href="${escapeHtml(item.logUrl)}" download>日志</a>` : `<span class="btn" aria-disabled="true">日志</span>`}
@@ -1911,6 +1957,187 @@ function showBatchResult(result) {
   if (allGanttUrl) { allGantt.href = allGanttUrl; allGantt.removeAttribute("aria-disabled"); }
 }
 
+/** 读取策略诊断中的三项约束结果，供单测试参数实验横向比较。 */
+function objectiveComparisonMetrics(result) {
+  const diagnostics = [...(result?.rounds || [])].reverse().map(round => round.strategyDiagnostics).find(value => value?.metrics);
+  const metrics = diagnostics?.metrics || {};
+  return {
+    residencyViolationCount: Number(metrics.residencyViolationCount) || 0,
+    maximumRobotHoldingSeconds: Number(metrics.maximumRobotHoldingSeconds),
+    systemResidenceCv: Number(metrics.systemResidenceCv),
+  };
+}
+
+/** 格式化对比表格中的数值，避免 NaN 或无约束值造成误读。 */
+function comparisonNumber(value, digits = 2, suffix = "") {
+  return Number.isFinite(Number(value)) ? `${Number(value).toFixed(digits)}${suffix}` : "—";
+}
+
+/** 给出候选值相对基准值的差异，并以正负号和比例凸显变化。 */
+function comparisonDelta(baselineValue, candidateValue, digits = 2, suffix = "", lowerIsBetter = true) {
+  const baseline = Number(baselineValue);
+  const candidate = Number(candidateValue);
+  if (!Number.isFinite(baseline) || !Number.isFinite(candidate)) return { text: "—", kind: "neutral" };
+  const delta = candidate - baseline;
+  const sign = delta > 0 ? "+" : "";
+  const percent = Math.abs(baseline) > 1e-9 ? ` (${sign}${(delta / baseline * 100).toFixed(1)}%)` : "";
+  const kind = delta === 0 ? "neutral" : (lowerIsBetter ? (delta < 0 ? "gain" : "loss") : (delta > 0 ? "gain" : "loss"));
+  return { text: `${sign}${delta.toFixed(digits)}${suffix}${percent}`, kind };
+}
+
+/** 格式化约束值；0 统一表示不施加该项上限。 */
+function comparisonLimit(value, digits = 2, suffix = "") {
+  const numeric = Number(value) || 0;
+  return numeric > 0 ? `${numeric.toFixed(digits)}${suffix}` : "不限";
+}
+
+/** 参数变化只用于说明实验设置，不赋予优劣含义。 */
+function comparisonSettingDelta(baselineValue, candidateValue, digits = 2, suffix = "") {
+  return { ...comparisonDelta(baselineValue, candidateValue, digits, suffix, false), kind: "neutral" };
+}
+
+/** 为一个对比实验生成“基准 / 对比 / 差值”行，直观突出性能与约束差异。 */
+function renderParameterComparisonRows(baseline, experiment) {
+  const baselineMetrics = objectiveComparisonMetrics(baseline.result);
+  const experimentMetrics = objectiveComparisonMetrics(experiment.result);
+  const baselineMakespan = Number(baseline.result?.makespan);
+  const experimentMakespan = Number(experiment.result?.makespan);
+  const strategyChanged = baseline.plan.strategy !== experiment.plan.strategy;
+  const rows = [
+    ["策略", displayStrategyName(baseline.plan.strategy), displayStrategyName(experiment.plan.strategy), strategyChanged ? "已切换" : "相同", strategyChanged ? "gain" : "neutral"],
+    ["驻留余量", comparisonNumber(baseline.options.residencyGuardSeconds, 1, " s"), comparisonNumber(experiment.options.residencyGuardSeconds, 1, " s"), comparisonSettingDelta(baseline.options.residencyGuardSeconds, experiment.options.residencyGuardSeconds, 1, " s")],
+    ["持片上限", comparisonLimit(baseline.options.maximumRobotHoldingSeconds, 1, " s"), comparisonLimit(experiment.options.maximumRobotHoldingSeconds, 1, " s"), comparisonSettingDelta(baseline.options.maximumRobotHoldingSeconds, experiment.options.maximumRobotHoldingSeconds, 1, " s")],
+    ["CV 上限", comparisonLimit(baseline.options.maximumSystemResidenceCv, 3), comparisonLimit(experiment.options.maximumSystemResidenceCv, 3), comparisonSettingDelta(baseline.options.maximumSystemResidenceCv, experiment.options.maximumSystemResidenceCv, 3)],
+    ["Makespan", comparisonNumber(baselineMakespan, 2, " s"), comparisonNumber(experimentMakespan, 2, " s"), comparisonDelta(baselineMakespan, experimentMakespan, 2, " s")],
+    ["驻留超限", `${baselineMetrics.residencyViolationCount} 次`, `${experimentMetrics.residencyViolationCount} 次`, comparisonDelta(baselineMetrics.residencyViolationCount, experimentMetrics.residencyViolationCount, 0, " 次")],
+    ["实际最大持片", comparisonNumber(baselineMetrics.maximumRobotHoldingSeconds, 2, " s"), comparisonNumber(experimentMetrics.maximumRobotHoldingSeconds, 2, " s"), comparisonDelta(baselineMetrics.maximumRobotHoldingSeconds, experimentMetrics.maximumRobotHoldingSeconds, 2, " s")],
+    ["系统停留 CV", comparisonNumber(baselineMetrics.systemResidenceCv, 3), comparisonNumber(experimentMetrics.systemResidenceCv, 3), comparisonDelta(baselineMetrics.systemResidenceCv, experimentMetrics.systemResidenceCv, 3)],
+  ];
+  return rows.map(([label, base, candidate, delta, kind]) => {
+    const deltaValue = typeof delta === "string" ? { text: delta, kind } : delta;
+    return `<div class="comparison-row"><span>${escapeHtml(label)}</span><strong>${escapeHtml(base)}</strong><strong>${escapeHtml(candidate)}</strong><strong class="comparison-delta ${escapeHtml(deltaValue.kind)}">${escapeHtml(deltaValue.text)}</strong></div>`;
+  }).join("");
+}
+
+/** 将每条对比实验渲染为可直接读出差值的结果预览区块。 */
+function renderParameterComparisonCard(index, baseline, experiment) {
+  const makespanDelta = comparisonDelta(baseline.result?.makespan, experiment.result?.makespan, 2, " s");
+  const validation = experiment.result?.validation === "passed" ? "校验通过" : `校验 ${experiment.result?.validation || "未知"}`;
+  return `<article class="comparison-experiment">
+    <header class="comparison-experiment-head"><div><strong>基准 vs 对比 ${index + 1}</strong><span> ${escapeHtml(displayStrategyName(baseline.plan.strategy))} → ${escapeHtml(displayStrategyName(experiment.plan.strategy))}</span></div><div><span class="comparison-delta ${escapeHtml(makespanDelta.kind)}">Makespan ${escapeHtml(makespanDelta.text)}</span>${experiment.result?.ganttUrl ? `<a class="btn" href="${escapeHtml(experiment.result.ganttUrl)}" target="_blank">甘特图</a>` : ""}</div></header>
+    <div class="comparison-table"><div class="comparison-row comparison-row-head"><span>指标</span><strong>基准</strong><strong>对比</strong><strong>差值</strong></div>${renderParameterComparisonRows(baseline, experiment)}</div>
+    <small>${escapeHtml(validation)}</small>
+  </article>`;
+}
+
+/** 显示当前单测试的基准配置，以及其后续运行的策略/参数实验结果。 */
+function renderParameterComparison() {
+  const panel = document.getElementById("parameterComparisonPanel");
+  const comparison = state.parameterComparison;
+  if (!comparison?.baseline) {
+    panel.hidden = true;
+    return;
+  }
+  const baseline = comparison.baseline;
+  panel.hidden = false;
+  document.getElementById("parameterComparisonBase").textContent = `基准：${displayStrategyName(baseline.plan.strategy)} · ${batchParameterSummary(baseline.options, baseline.plan.strategy)}`;
+  document.getElementById("parameterComparisonResults").innerHTML = comparison.variants.length
+    ? comparison.variants.map((variant, index) => renderParameterComparisonCard(index, baseline, variant)).join("")
+    : `<div class="comparison-empty">已保存基准结果。点击“运行对比测试”选择策略和参数后，差值会直接显示在这里。</div>`;
+}
+
+/** 根据所选策略绘制对比窗口中的策略专属参数。 */
+function renderParameterComparisonStrategyFields(strategy, options = {}) {
+  const definitions = {
+    "loadlock-macro": [["loadLockMacroSearchSeconds", "宏搜索时间（秒）", "number", "0.1"], ["loadLockMacroRollouts", "宏采样次数", "number", "1"]],
+    "nn-saea": [["nnSAEASearchSeconds", "SAEA 搜索时间（秒）", "number", "0.1"], ["nnSAEARollouts", "SAEA 采样次数", "number", "1"]],
+    neuralucb: [["neuralUCBTopK", "UCB Top-K", "number", "1"], ["neuralUCBExploration", "UCB 探索强度", "number", "0.1"]],
+    rl: [["rlSearchSeconds", "RL 搜索时间（秒）", "number", "0.1"], ["rlRollouts", "RL 采样次数", "number", "1"], ["rlTemperature", "RL 温度", "number", "0.01"]],
+    milp: [["milpTimeLimit", "MILP 时间上限（秒）", "number", "0.1"]],
+  };
+  const fields = definitions[strategy] || [];
+  document.getElementById("parameterComparisonStrategyOptions").innerHTML = fields.length
+    ? `<div class="grid">${fields.map(([key, label, type, step]) => `<div class="field span-4"><label>${escapeHtml(label)}<input data-comparison-option="${escapeHtml(key)}" type="${type}" min="0" step="${step}" value="${escapeHtml(String(options[key] ?? 0))}" required></label></div>`).join("")}</div>`
+    : `<div class="hint">该策略没有额外的策略专属参数；上方通用约束参数仍会生效。</div>`;
+}
+
+/** 打开策略/参数对比窗口，并以基准配置填充初始值。 */
+function openParameterComparisonDialog() {
+  const comparison = state.parameterComparison;
+  if (!comparison?.baseline) return;
+  const baseline = comparison.baseline;
+  const strategySelect = document.getElementById("parameterComparisonStrategy");
+  const strategies = [...document.querySelectorAll('input[name="strategy"]')]
+    .filter(input => !input.disabled || input.value === baseline.plan.strategy)
+    .map(input => input.value);
+  strategySelect.innerHTML = strategies.map(strategy => `<option value="${escapeHtml(strategy)}">${escapeHtml(displayStrategyName(strategy))}</option>`).join("");
+  strategySelect.value = baseline.plan.strategy;
+  document.getElementById("comparisonLoadLockManager").value = baseline.options.loadLockManager || "petri-look";
+  document.getElementById("comparisonResidencyGuardSeconds").value = String(Number(baseline.options.residencyGuardSeconds) || 0);
+  document.getElementById("comparisonMaximumRobotHoldingSeconds").value = String(Number(baseline.options.maximumRobotHoldingSeconds) || 0);
+  document.getElementById("comparisonMaximumSystemResidenceCv").value = String(Number(baseline.options.maximumSystemResidenceCv) || 0);
+  document.getElementById("comparisonSeed").value = String(Number(baseline.options.seed) || 0);
+  renderParameterComparisonStrategyFields(baseline.plan.strategy, baseline.options);
+  document.getElementById("parameterComparisonDialogStatus").textContent = "";
+  document.getElementById("parameterComparisonDialog").showModal();
+}
+
+/** 读取策略/参数实验输入，拒绝负值和非数值以避免提交无效调度请求。 */
+function parameterComparisonOptions() {
+  const optionInputs = [
+    ["comparisonResidencyGuardSeconds", "residencyGuardSeconds"],
+    ["comparisonMaximumRobotHoldingSeconds", "maximumRobotHoldingSeconds"],
+    ["comparisonMaximumSystemResidenceCv", "maximumSystemResidenceCv"],
+    ["comparisonSeed", "seed"],
+  ];
+  const options = Object.fromEntries(optionInputs.map(([inputId, optionKey]) => {
+    const value = Number(document.getElementById(inputId).value);
+    if (!Number.isFinite(value) || value < 0) throw new Error("对比参数必须为大于或等于 0 的数字");
+    return [optionKey, value];
+  }));
+  options.loadLockManager = document.getElementById("comparisonLoadLockManager").value;
+  document.querySelectorAll("[data-comparison-option]").forEach(input => {
+    const value = Number(input.value);
+    if (!Number.isFinite(value) || value < 0) throw new Error("策略参数必须为大于或等于 0 的数字");
+    options[input.dataset.comparisonOption] = value;
+  });
+  return options;
+}
+
+/** 使用基准测试的不可变快照，替换策略和参数后运行一次对比实验。 */
+async function runParameterComparison() {
+  const comparison = state.parameterComparison;
+  if (!comparison?.baseline) throw new Error("请先完成一次单测试运行，再创建参数对比");
+  const button = document.getElementById("runParameterComparisonButton");
+  const status = document.getElementById("parameterComparisonDialogStatus");
+  const overrides = parameterComparisonOptions();
+  const plan = structuredClone(comparison.baseline.plan);
+  plan.strategy = document.getElementById("parameterComparisonStrategy").value;
+  plan.options = { ...plan.options, ...overrides };
+  delete plan.workspaceDeviceId;
+  delete plan.workspaceTestId;
+  button.disabled = true;
+  button.textContent = "正在运行对比…";
+  status.textContent = "正在提交对比测试，请稍候…";
+  try {
+    const response = await fetch("/api/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(plan),
+    });
+    const result = await response.json();
+    if (!response.ok || !result.ok) throw new Error(result.error || `服务返回 ${response.status}`);
+    comparison.variants.push({ plan, options: plan.options, result });
+    renderParameterComparison();
+    document.getElementById("parameterComparisonDialog").close();
+    writeTerminal(`$ 参数对比完成\n  ${displayStrategyName(plan.strategy)} · ${batchParameterSummary(overrides, plan.strategy)}\n  Makespan: ${Number(result.makespan).toFixed(2)} s`);
+  } finally {
+    button.disabled = false;
+    button.textContent = "运行对比测试";
+    status.textContent = "";
+  }
+}
+
 /** 删除服务端已保存的甘特图结果和复现日志，并重置当前结果入口。 */
 async function clearExportedArtifacts() {
   if (!window.confirm("将删除全部已导出的结果和复现日志，且无法恢复。是否继续？")) return;
@@ -1956,6 +2183,13 @@ function showResult(result) {
     document.getElementById("metricValidationLabel").textContent = "校验 / 多指标";
     document.getElementById("metricValidationDetail").textContent = `驻留超限 ${Number(metrics.residencyViolationCount) || 0} 次 · 最大持片 ${Number(metrics.maximumRobotHoldingSeconds || 0).toFixed(2)} s · 系统停留 CV ${Number(metrics.systemResidenceCv || 0).toFixed(3)}`;
   }
+  const baselinePlan = structuredClone(buildPayload());
+  state.parameterComparison = {
+    baseline: { plan: baselinePlan, options: baselinePlan.options, result },
+    variants: [],
+  };
+  document.getElementById("openParameterComparisonDialogButton").disabled = !state.serviceCompatible;
+  renderParameterComparison();
   writeTerminal(["$ 调度完成", ...result.rounds.map(round => {
     if (round.kind === "initial") return `  #${round.index} 首次 | ${round.elapsedMs.toFixed(1)} ms`;
     const request = Number(round.requestedTime);
@@ -1986,6 +2220,7 @@ async function checkService() {
   const pill = document.getElementById("serviceState");
   const runButton = document.getElementById("runButton");
   const batchRunButton = document.getElementById("batchRunButton");
+  const comparisonButton = document.getElementById("openParameterComparisonDialogButton");
   try {
     const response = await fetch("/api/health", { cache: "no-store" });
     if (!response.ok) throw new Error();
@@ -2005,6 +2240,7 @@ async function checkService() {
     renderAlgorithmHistory();
     runButton.disabled = !compatible;
     batchRunButton.disabled = !compatible;
+    comparisonButton.disabled = !compatible || !state.parameterComparison?.baseline;
     renderWorkspaceControls();
     pill.textContent = compatible ? "本地服务已连接" : "服务版本过旧";
     if (!compatible) {
@@ -2012,7 +2248,7 @@ async function checkService() {
       writeTerminal("$ 本地服务版本过旧\n  请重启: py scripts/config_editor_server.py", true);
     }
   }
-  catch { state.serviceCompatible = false; runButton.disabled = true; batchRunButton.disabled = true; renderWorkspaceControls(); pill.textContent = "本地服务未连接"; pill.style.color = "var(--red)"; pill.style.background = "var(--red-soft)"; writeTerminal("$ 无法连接本地服务\n  请运行: py scripts/config_editor_server.py", true); }
+  catch { state.serviceCompatible = false; runButton.disabled = true; batchRunButton.disabled = true; comparisonButton.disabled = true; renderWorkspaceControls(); pill.textContent = "本地服务未连接"; pill.style.color = "var(--red)"; pill.style.background = "var(--red-soft)"; writeTerminal("$ 无法连接本地服务\n  请运行: py scripts/config_editor_server.py", true); }
 }
 
 document.getElementById("workspaceDialogCancel").addEventListener("click", () => document.getElementById("workspaceDialog").close("cancel"));
@@ -2036,6 +2272,19 @@ document.getElementById("deleteTestButton").addEventListener("click", () => dele
 document.getElementById("roundCount").addEventListener("input", event => { resizeRounds(event.target.value); markTestDirty(); });
 document.getElementById("runButton").addEventListener("click", runPlan);
 document.getElementById("batchRunButton").addEventListener("click", runCurrentTestGroup);
+document.getElementById("openParameterComparisonDialogButton").addEventListener("click", openParameterComparisonDialog);
+document.getElementById("parameterComparisonDialogCancel").addEventListener("click", () => document.getElementById("parameterComparisonDialog").close());
+document.getElementById("parameterComparisonStrategy").addEventListener("change", event => {
+  const baselineOptions = state.parameterComparison?.baseline?.options || {};
+  renderParameterComparisonStrategyFields(event.target.value, baselineOptions);
+});
+document.getElementById("parameterComparisonForm").addEventListener("submit", event => {
+  event.preventDefault();
+  runParameterComparison().catch(error => {
+    document.getElementById("parameterComparisonDialogStatus").textContent = error.message || "未知错误";
+    writeTerminal(`$ 参数对比失败\n  ${error.message || "未知错误"}`, true);
+  });
+});
 document.getElementById("clearExportsButton").addEventListener("click", clearExportedArtifacts);
 document.getElementById("batchOverviewButton").addEventListener("click", showCurrentBatchOverview);
 document.getElementById("testGroupAnalysisButton").addEventListener("click", () => {
@@ -2062,7 +2311,7 @@ document.addEventListener("change", event => {
     if (state.strategy === "milp") { resizeRounds(1); document.getElementById("roundCount").value = 1; }
     document.getElementById("roundCount").disabled = state.strategy === "milp";
     document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro", "nn-saea", "setrank", "neuralucb", "neural", "rl"].includes(state.strategy));
-    document.getElementById("heuristicObjectiveOptions").classList.toggle("is-hidden", state.strategy !== "heuristic");
+    document.getElementById("heuristicObjectiveOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro"].includes(state.strategy));
     document.getElementById("nnSAEAOptions").classList.toggle("is-hidden", state.strategy !== "nn-saea");
     document.getElementById("neuralucbOptions").classList.toggle("is-hidden", state.strategy !== "neuralucb");
     document.getElementById("rlOptions").classList.toggle("is-hidden", state.strategy !== "rl");

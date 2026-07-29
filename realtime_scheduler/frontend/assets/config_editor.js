@@ -1411,6 +1411,7 @@ var state = {
   batchCancelSent: false,
   batchResult: null,
   selectedBatchTestId: "",
+  parameterComparison: null,
   deviceName: "",
   device: null,
   stationNames: [],
@@ -1754,7 +1755,9 @@ function renderWorkspaceControls() {
   document.getElementById("copyTestButton").disabled = !hasTest;
   document.getElementById("saveTestButton").disabled = !hasTest;
   document.getElementById("deleteTestButton").disabled = tests.length <= 1;
-  document.getElementById("batchRunButton").disabled = !state.serviceCompatible || !visibleTests.length;
+  const batchDisabled = state.batchRunning || !state.serviceCompatible || !visibleTests.length;
+  document.getElementById("batchRunButton").disabled = batchDisabled;
+  document.getElementById("openParameterComparisonDialogButton").disabled = state.batchRunning || !state.serviceCompatible || !state.parameterComparison?.baseline;
   const emptyHint = document.getElementById("emptyGroupHint");
   emptyHint.classList.toggle("visible", Boolean(state.workspaceDeviceId) && !visibleTests.length);
   document.getElementById("emptyGroupNewTestButton").disabled = !state.workspaceDeviceId;
@@ -1798,6 +1801,10 @@ function resetRunResult() {
   document.getElementById("testGroupAnalysisButton").hidden = true;
   document.getElementById("testGroupAnalysisPanel").hidden = true;
   document.getElementById("testGroupAnalysisPanel").innerHTML = "";
+  state.parameterComparison = null;
+  document.getElementById("parameterComparisonPanel").hidden = true;
+  document.getElementById("parameterComparisonResults").innerHTML = "";
+  document.getElementById("openParameterComparisonDialogButton").disabled = true;
   document.getElementById("metricTimeLabel").textContent = "\u603B\u8017\u65F6";
   document.getElementById("metricMakespanLabel").textContent = "Makespan";
   setBottleneckMetric(null);
@@ -1869,7 +1876,7 @@ function applyTestCase(testCase) {
     input.value = state.options[input.dataset.option] ?? input.value;
   });
   document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro", "nn-saea", "setrank", "neuralucb", "neural", "rl"].includes(state.strategy));
-  document.getElementById("heuristicObjectiveOptions").classList.toggle("is-hidden", state.strategy !== "heuristic");
+  document.getElementById("heuristicObjectiveOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro"].includes(state.strategy));
   document.getElementById("nnSAEAOptions").classList.toggle("is-hidden", state.strategy !== "nn-saea");
   document.getElementById("neuralucbOptions").classList.toggle("is-hidden", state.strategy !== "neuralucb");
   document.getElementById("rlOptions").classList.toggle("is-hidden", state.strategy !== "rl");
@@ -2680,6 +2687,34 @@ function showAlgorithmDetails(strategy) {
     <span class="algorithm-hover-info-meta"><span>\u5F53\u524D\u7248\u672C ${escapeHtml3(metadata.version || "\u672A\u8BB0\u5F55")}</span><span>\u66F4\u65B0\u65E5\u671F ${escapeHtml3(metadata.updatedAt || "\u672A\u8BB0\u5F55")}</span></span>
   `;
 }
+function displayStrategyName(strategy) {
+  const normalized = String(strategy || "heuristic");
+  const cardName = document.querySelector(`[data-strategy-card="${CSS.escape(normalized)}"] b`)?.textContent;
+  return state.algorithmMetadata[normalized]?.name || cardName || normalized;
+}
+function batchParameterSummary(options, strategy) {
+  const values = options && typeof options === "object" ? options : {};
+  const normalizedStrategy = String(strategy || "heuristic");
+  const definitions = [
+    ["loadLockManager", "LoadLock", "", []],
+    ["residencyGuardSeconds", "\u9A7B\u7559\u4F59\u91CF", "s", []],
+    ["maximumRobotHoldingSeconds", "\u6301\u7247\u4E0A\u9650", "s", []],
+    ["maximumSystemResidenceCv", "\u505C\u7559 CV", "", []],
+    ["seed", "\u968F\u673A\u79CD\u5B50", "", []],
+    ["loadLockMacroSearchSeconds", "\u5B8F\u641C\u7D22", "s", ["loadlock-macro"]],
+    ["loadLockMacroRollouts", "\u5B8F\u91C7\u6837", "", ["loadlock-macro"]],
+    ["nnSAEASearchSeconds", "SAEA \u641C\u7D22", "s", ["nn-saea"]],
+    ["nnSAEARollouts", "SAEA \u91C7\u6837", "", ["nn-saea"]],
+    ["neuralUCBTopK", "UCB Top-K", "", ["neuralucb"]],
+    ["neuralUCBExploration", "UCB \u63A2\u7D22", "", ["neuralucb"]],
+    ["rlSearchSeconds", "RL \u641C\u7D22", "s", ["rl"]],
+    ["rlRollouts", "RL \u91C7\u6837", "", ["rl"]],
+    ["rlTemperature", "RL \u6E29\u5EA6", "", ["rl"]],
+    ["milpTimeLimit", "MILP \u65F6\u9650", "s", ["milp"]]
+  ];
+  const labels = definitions.flatMap(([key, label, suffix, strategies]) => strategies.length && !strategies.includes(normalizedStrategy) ? [] : values[key] === void 0 || values[key] === null || values[key] === "" ? [] : [`${label} ${values[key]}${suffix}`]);
+  return labels.length ? labels.join(" \xB7 ") : "\u9ED8\u8BA4\u53C2\u6570";
+}
 function renderAlgorithmMetadata() {
   document.querySelectorAll("[data-strategy-card]").forEach((card) => {
     const strategy = card.dataset.strategyCard;
@@ -2813,6 +2848,7 @@ async function prepareWorkspaceView(result) {
 async function runPlan() {
   const button = document.getElementById("runButton");
   const batchButton = document.getElementById("batchRunButton");
+  const comparisonButton = document.getElementById("openParameterComparisonDialogButton");
   let logReady = false, ganttReady = false, runResult = null, bottleneckSummary = null;
   try {
     const healthResponse = await fetch("/api/health", { cache: "no-store" }), health = await healthResponse.json();
@@ -2829,6 +2865,7 @@ async function runPlan() {
     const payload = buildPayload();
     button.disabled = true;
     batchButton.disabled = true;
+    comparisonButton.disabled = true;
     button.classList.add("running");
     button.textContent = "\u6B63\u5728\u8FD0\u884C\u7B56\u7565\u2026";
     resetRunResult();
@@ -2879,7 +2916,9 @@ async function runPlan() {
   }
 }
 async function runCurrentTestGroup() {
-  const button = document.getElementById("batchRunButton"), runButton = document.getElementById("runButton");
+  const button = document.getElementById("batchRunButton");
+  const comparisonButton = document.getElementById("openParameterComparisonDialogButton");
+  const runButton = document.getElementById("runButton");
   if (state.batchRunning) {
     try {
       await requestBatchCancellation();
@@ -2915,13 +2954,14 @@ async function runCurrentTestGroup() {
     document.getElementById("testGroupAnalysisPanel").innerHTML = "";
     document.getElementById("batchOverviewButton").hidden = true;
     button.disabled = false;
+    comparisonButton.disabled = true;
     runButton.disabled = true;
     button.classList.add("cancel");
     button.textContent = "\u25A0 \u7EC8\u6B62\u8C03\u5EA6";
     document.getElementById("batchResults").innerHTML = "";
     writeTerminal(`$ \u6279\u91CF\u8FD0\u884C\u5F53\u524D\u6D4B\u8BD5\u7EC4
   \u7EC4\u522B: ${state.activeTestGroup || "\u672A\u5206\u7EC4"}
-  \u7B56\u7565: ${state.strategy}
+  \u7B56\u7565: ${displayStrategyName(state.strategy)}
   \u6D4B\u8BD5\u6570: ${tests.length}
   \u540E\u7AEF\u6700\u591A\u5E76\u884C\u8FD0\u884C 4 \u9879\u2026`);
     const response = await fetch("/api/run-batch", {
@@ -3029,7 +3069,7 @@ function showBatchItemOverview(item, index) {
   const bottleneckReady = resultUrl && batchBottleneckSummaries.has(resultUrl);
   const bottleneckSummary = bottleneckReady ? batchBottleneckSummaries.get(resultUrl) : null;
   const bottleneckError = resultUrl ? batchBottleneckErrors.get(resultUrl) : "";
-  document.getElementById("metricContext").textContent = `t${index + 1} \xB7 ${item.testName || `\u6D4B\u8BD5 ${index + 1}`}`;
+  document.getElementById("metricContext").textContent = `t${index + 1} \xB7 ${item.testName || `\u6D4B\u8BD5 ${index + 1}`} \xB7 ${displayStrategyName(state.batchResult?.strategy)}`;
   document.getElementById("batchOverviewButton").hidden = false;
   setResultMetric("Time", "CPU Time / \u8017\u65F6", Number.isFinite(cpuTime) ? `${cpuTime.toFixed(1)} ms` : "\u2014", Number.isFinite(elapsedTime) ? `\u7AEF\u5230\u7AEF\u8017\u65F6 ${elapsedTime.toFixed(1)} ms` : "");
   setResultMetric("Makespan", "Makespan / Baseline", Number.isFinite(makespan) ? `${makespan.toFixed(2)} / ${baselineReady ? Number(baseline.makespan).toFixed(2) : "\u2014"} s` : "\u2014", comparisonDetail);
@@ -3162,7 +3202,7 @@ function showBatchProgress(result) {
   }
   writeTerminal([
     "$ \u6279\u91CF\u8FD0\u884C\u5F53\u524D\u6D4B\u8BD5\u7EC4",
-    `  \u7EC4\u522B: ${result.group || "\u672A\u5206\u7EC4"} \xB7 \u7B56\u7565: ${result.strategy}`,
+    `  \u7EC4\u522B: ${result.group || "\u672A\u5206\u7EC4"} \xB7 \u7B56\u7565: ${displayStrategyName(result.strategy)}`,
     `  \u8FDB\u5EA6: ${completed}/${total} (${percent}%) \xB7 \u5E76\u884C\u6570: ${result.workerCount}`,
     `  \u7B49\u5F85: ${(result.items || []).filter((item) => item.status === "queued").length} \xB7 \u8FD0\u884C\u4E2D: ${(result.items || []).filter((item) => item.status === "running").length} \xB7 \u6210\u529F: ${result.succeeded || 0} \xB7 \u5931\u8D25: ${result.failed || 0} \xB7 \u7EC8\u6B62: ${result.cancelled || 0}`
   ].join("\n"));
@@ -3184,6 +3224,7 @@ function renderBatchItems(items) {
       <div class="batch-result ${escapeHtml3(item.status || "queued")}${selected ? " selected" : ""}" data-batch-item-index="${index}">
         <div class="batch-result-head">
           <button class="batch-result-title" type="button" aria-pressed="${selected}" aria-label="\u67E5\u770B ${escapeHtml3(displayId)} ${escapeHtml3(item.testName || "")} \u7684\u8BE6\u7EC6\u6307\u6807"><strong title="${escapeHtml3(`${item.testId || ""} \xB7 ${item.testName || ""}`)}">${escapeHtml3(displayId)}</strong></button>
+          <span class="batch-status" title="${escapeHtml3(item.testName || "")}">${escapeHtml3(item.testName || `\u6D4B\u8BD5 ${index + 1}`)}</span>
           <span class="batch-status">${statusLabels[item.status] || "\u7B49\u5F85\u4E2D"}</span>
           <div class="batch-result-actions">
             ${item.logUrl ? `<a class="btn" href="${escapeHtml3(item.logUrl)}" download>\u65E5\u5FD7</a>` : `<span class="btn" aria-disabled="true">\u65E5\u5FD7</span>`}
@@ -3251,6 +3292,159 @@ function showBatchResult(result) {
     allGantt.removeAttribute("aria-disabled");
   }
 }
+function objectiveComparisonMetrics(result) {
+  const diagnostics = [...result?.rounds || []].reverse().map((round) => round.strategyDiagnostics).find((value) => value?.metrics);
+  const metrics = diagnostics?.metrics || {};
+  return {
+    residencyViolationCount: Number(metrics.residencyViolationCount) || 0,
+    maximumRobotHoldingSeconds: Number(metrics.maximumRobotHoldingSeconds),
+    systemResidenceCv: Number(metrics.systemResidenceCv)
+  };
+}
+function comparisonNumber(value, digits = 2, suffix = "") {
+  return Number.isFinite(Number(value)) ? `${Number(value).toFixed(digits)}${suffix}` : "\u2014";
+}
+function comparisonDelta(baselineValue, candidateValue, digits = 2, suffix = "", lowerIsBetter = true) {
+  const baseline = Number(baselineValue);
+  const candidate = Number(candidateValue);
+  if (!Number.isFinite(baseline) || !Number.isFinite(candidate)) return { text: "\u2014", kind: "neutral" };
+  const delta = candidate - baseline;
+  const sign = delta > 0 ? "+" : "";
+  const percent = Math.abs(baseline) > 1e-9 ? ` (${sign}${(delta / baseline * 100).toFixed(1)}%)` : "";
+  const kind = delta === 0 ? "neutral" : lowerIsBetter ? delta < 0 ? "gain" : "loss" : delta > 0 ? "gain" : "loss";
+  return { text: `${sign}${delta.toFixed(digits)}${suffix}${percent}`, kind };
+}
+function comparisonLimit(value, digits = 2, suffix = "") {
+  const numeric = Number(value) || 0;
+  return numeric > 0 ? `${numeric.toFixed(digits)}${suffix}` : "\u4E0D\u9650";
+}
+function comparisonSettingDelta(baselineValue, candidateValue, digits = 2, suffix = "") {
+  return { ...comparisonDelta(baselineValue, candidateValue, digits, suffix, false), kind: "neutral" };
+}
+function renderParameterComparisonRows(baseline, experiment) {
+  const baselineMetrics = objectiveComparisonMetrics(baseline.result);
+  const experimentMetrics = objectiveComparisonMetrics(experiment.result);
+  const baselineMakespan = Number(baseline.result?.makespan);
+  const experimentMakespan = Number(experiment.result?.makespan);
+  const strategyChanged = baseline.plan.strategy !== experiment.plan.strategy;
+  const rows = [
+    ["\u7B56\u7565", displayStrategyName(baseline.plan.strategy), displayStrategyName(experiment.plan.strategy), strategyChanged ? "\u5DF2\u5207\u6362" : "\u76F8\u540C", strategyChanged ? "gain" : "neutral"],
+    ["\u9A7B\u7559\u4F59\u91CF", comparisonNumber(baseline.options.residencyGuardSeconds, 1, " s"), comparisonNumber(experiment.options.residencyGuardSeconds, 1, " s"), comparisonSettingDelta(baseline.options.residencyGuardSeconds, experiment.options.residencyGuardSeconds, 1, " s")],
+    ["\u6301\u7247\u4E0A\u9650", comparisonLimit(baseline.options.maximumRobotHoldingSeconds, 1, " s"), comparisonLimit(experiment.options.maximumRobotHoldingSeconds, 1, " s"), comparisonSettingDelta(baseline.options.maximumRobotHoldingSeconds, experiment.options.maximumRobotHoldingSeconds, 1, " s")],
+    ["CV \u4E0A\u9650", comparisonLimit(baseline.options.maximumSystemResidenceCv, 3), comparisonLimit(experiment.options.maximumSystemResidenceCv, 3), comparisonSettingDelta(baseline.options.maximumSystemResidenceCv, experiment.options.maximumSystemResidenceCv, 3)],
+    ["Makespan", comparisonNumber(baselineMakespan, 2, " s"), comparisonNumber(experimentMakespan, 2, " s"), comparisonDelta(baselineMakespan, experimentMakespan, 2, " s")],
+    ["\u9A7B\u7559\u8D85\u9650", `${baselineMetrics.residencyViolationCount} \u6B21`, `${experimentMetrics.residencyViolationCount} \u6B21`, comparisonDelta(baselineMetrics.residencyViolationCount, experimentMetrics.residencyViolationCount, 0, " \u6B21")],
+    ["\u5B9E\u9645\u6700\u5927\u6301\u7247", comparisonNumber(baselineMetrics.maximumRobotHoldingSeconds, 2, " s"), comparisonNumber(experimentMetrics.maximumRobotHoldingSeconds, 2, " s"), comparisonDelta(baselineMetrics.maximumRobotHoldingSeconds, experimentMetrics.maximumRobotHoldingSeconds, 2, " s")],
+    ["\u7CFB\u7EDF\u505C\u7559 CV", comparisonNumber(baselineMetrics.systemResidenceCv, 3), comparisonNumber(experimentMetrics.systemResidenceCv, 3), comparisonDelta(baselineMetrics.systemResidenceCv, experimentMetrics.systemResidenceCv, 3)]
+  ];
+  return rows.map(([label, base, candidate, delta, kind]) => {
+    const deltaValue = typeof delta === "string" ? { text: delta, kind } : delta;
+    return `<div class="comparison-row"><span>${escapeHtml3(label)}</span><strong>${escapeHtml3(base)}</strong><strong>${escapeHtml3(candidate)}</strong><strong class="comparison-delta ${escapeHtml3(deltaValue.kind)}">${escapeHtml3(deltaValue.text)}</strong></div>`;
+  }).join("");
+}
+function renderParameterComparisonCard(index, baseline, experiment) {
+  const makespanDelta = comparisonDelta(baseline.result?.makespan, experiment.result?.makespan, 2, " s");
+  const validation = experiment.result?.validation === "passed" ? "\u6821\u9A8C\u901A\u8FC7" : `\u6821\u9A8C ${experiment.result?.validation || "\u672A\u77E5"}`;
+  return `<article class="comparison-experiment">
+    <header class="comparison-experiment-head"><div><strong>\u57FA\u51C6 vs \u5BF9\u6BD4 ${index + 1}</strong><span> ${escapeHtml3(displayStrategyName(baseline.plan.strategy))} \u2192 ${escapeHtml3(displayStrategyName(experiment.plan.strategy))}</span></div><div><span class="comparison-delta ${escapeHtml3(makespanDelta.kind)}">Makespan ${escapeHtml3(makespanDelta.text)}</span>${experiment.result?.ganttUrl ? `<a class="btn" href="${escapeHtml3(experiment.result.ganttUrl)}" target="_blank">\u7518\u7279\u56FE</a>` : ""}</div></header>
+    <div class="comparison-table"><div class="comparison-row comparison-row-head"><span>\u6307\u6807</span><strong>\u57FA\u51C6</strong><strong>\u5BF9\u6BD4</strong><strong>\u5DEE\u503C</strong></div>${renderParameterComparisonRows(baseline, experiment)}</div>
+    <small>${escapeHtml3(validation)}</small>
+  </article>`;
+}
+function renderParameterComparison() {
+  const panel = document.getElementById("parameterComparisonPanel");
+  const comparison = state.parameterComparison;
+  if (!comparison?.baseline) {
+    panel.hidden = true;
+    return;
+  }
+  const baseline = comparison.baseline;
+  panel.hidden = false;
+  document.getElementById("parameterComparisonBase").textContent = `\u57FA\u51C6\uFF1A${displayStrategyName(baseline.plan.strategy)} \xB7 ${batchParameterSummary(baseline.options, baseline.plan.strategy)}`;
+  document.getElementById("parameterComparisonResults").innerHTML = comparison.variants.length ? comparison.variants.map((variant, index) => renderParameterComparisonCard(index, baseline, variant)).join("") : `<div class="comparison-empty">\u5DF2\u4FDD\u5B58\u57FA\u51C6\u7ED3\u679C\u3002\u70B9\u51FB\u201C\u8FD0\u884C\u5BF9\u6BD4\u6D4B\u8BD5\u201D\u9009\u62E9\u7B56\u7565\u548C\u53C2\u6570\u540E\uFF0C\u5DEE\u503C\u4F1A\u76F4\u63A5\u663E\u793A\u5728\u8FD9\u91CC\u3002</div>`;
+}
+function renderParameterComparisonStrategyFields(strategy, options = {}) {
+  const definitions = {
+    "loadlock-macro": [["loadLockMacroSearchSeconds", "\u5B8F\u641C\u7D22\u65F6\u95F4\uFF08\u79D2\uFF09", "number", "0.1"], ["loadLockMacroRollouts", "\u5B8F\u91C7\u6837\u6B21\u6570", "number", "1"]],
+    "nn-saea": [["nnSAEASearchSeconds", "SAEA \u641C\u7D22\u65F6\u95F4\uFF08\u79D2\uFF09", "number", "0.1"], ["nnSAEARollouts", "SAEA \u91C7\u6837\u6B21\u6570", "number", "1"]],
+    neuralucb: [["neuralUCBTopK", "UCB Top-K", "number", "1"], ["neuralUCBExploration", "UCB \u63A2\u7D22\u5F3A\u5EA6", "number", "0.1"]],
+    rl: [["rlSearchSeconds", "RL \u641C\u7D22\u65F6\u95F4\uFF08\u79D2\uFF09", "number", "0.1"], ["rlRollouts", "RL \u91C7\u6837\u6B21\u6570", "number", "1"], ["rlTemperature", "RL \u6E29\u5EA6", "number", "0.01"]],
+    milp: [["milpTimeLimit", "MILP \u65F6\u95F4\u4E0A\u9650\uFF08\u79D2\uFF09", "number", "0.1"]]
+  };
+  const fields = definitions[strategy] || [];
+  document.getElementById("parameterComparisonStrategyOptions").innerHTML = fields.length ? `<div class="grid">${fields.map(([key, label, type, step]) => `<div class="field span-4"><label>${escapeHtml3(label)}<input data-comparison-option="${escapeHtml3(key)}" type="${type}" min="0" step="${step}" value="${escapeHtml3(String(options[key] ?? 0))}" required></label></div>`).join("")}</div>` : `<div class="hint">\u8BE5\u7B56\u7565\u6CA1\u6709\u989D\u5916\u7684\u7B56\u7565\u4E13\u5C5E\u53C2\u6570\uFF1B\u4E0A\u65B9\u901A\u7528\u7EA6\u675F\u53C2\u6570\u4ECD\u4F1A\u751F\u6548\u3002</div>`;
+}
+function openParameterComparisonDialog() {
+  const comparison = state.parameterComparison;
+  if (!comparison?.baseline) return;
+  const baseline = comparison.baseline;
+  const strategySelect = document.getElementById("parameterComparisonStrategy");
+  const strategies = [...document.querySelectorAll('input[name="strategy"]')].filter((input) => !input.disabled || input.value === baseline.plan.strategy).map((input) => input.value);
+  strategySelect.innerHTML = strategies.map((strategy) => `<option value="${escapeHtml3(strategy)}">${escapeHtml3(displayStrategyName(strategy))}</option>`).join("");
+  strategySelect.value = baseline.plan.strategy;
+  document.getElementById("comparisonLoadLockManager").value = baseline.options.loadLockManager || "petri-look";
+  document.getElementById("comparisonResidencyGuardSeconds").value = String(Number(baseline.options.residencyGuardSeconds) || 0);
+  document.getElementById("comparisonMaximumRobotHoldingSeconds").value = String(Number(baseline.options.maximumRobotHoldingSeconds) || 0);
+  document.getElementById("comparisonMaximumSystemResidenceCv").value = String(Number(baseline.options.maximumSystemResidenceCv) || 0);
+  document.getElementById("comparisonSeed").value = String(Number(baseline.options.seed) || 0);
+  renderParameterComparisonStrategyFields(baseline.plan.strategy, baseline.options);
+  document.getElementById("parameterComparisonDialogStatus").textContent = "";
+  document.getElementById("parameterComparisonDialog").showModal();
+}
+function parameterComparisonOptions() {
+  const optionInputs = [
+    ["comparisonResidencyGuardSeconds", "residencyGuardSeconds"],
+    ["comparisonMaximumRobotHoldingSeconds", "maximumRobotHoldingSeconds"],
+    ["comparisonMaximumSystemResidenceCv", "maximumSystemResidenceCv"],
+    ["comparisonSeed", "seed"]
+  ];
+  const options = Object.fromEntries(optionInputs.map(([inputId, optionKey]) => {
+    const value = Number(document.getElementById(inputId).value);
+    if (!Number.isFinite(value) || value < 0) throw new Error("\u5BF9\u6BD4\u53C2\u6570\u5FC5\u987B\u4E3A\u5927\u4E8E\u6216\u7B49\u4E8E 0 \u7684\u6570\u5B57");
+    return [optionKey, value];
+  }));
+  options.loadLockManager = document.getElementById("comparisonLoadLockManager").value;
+  document.querySelectorAll("[data-comparison-option]").forEach((input) => {
+    const value = Number(input.value);
+    if (!Number.isFinite(value) || value < 0) throw new Error("\u7B56\u7565\u53C2\u6570\u5FC5\u987B\u4E3A\u5927\u4E8E\u6216\u7B49\u4E8E 0 \u7684\u6570\u5B57");
+    options[input.dataset.comparisonOption] = value;
+  });
+  return options;
+}
+async function runParameterComparison() {
+  const comparison = state.parameterComparison;
+  if (!comparison?.baseline) throw new Error("\u8BF7\u5148\u5B8C\u6210\u4E00\u6B21\u5355\u6D4B\u8BD5\u8FD0\u884C\uFF0C\u518D\u521B\u5EFA\u53C2\u6570\u5BF9\u6BD4");
+  const button = document.getElementById("runParameterComparisonButton");
+  const status = document.getElementById("parameterComparisonDialogStatus");
+  const overrides = parameterComparisonOptions();
+  const plan = structuredClone(comparison.baseline.plan);
+  plan.strategy = document.getElementById("parameterComparisonStrategy").value;
+  plan.options = { ...plan.options, ...overrides };
+  delete plan.workspaceDeviceId;
+  delete plan.workspaceTestId;
+  button.disabled = true;
+  button.textContent = "\u6B63\u5728\u8FD0\u884C\u5BF9\u6BD4\u2026";
+  status.textContent = "\u6B63\u5728\u63D0\u4EA4\u5BF9\u6BD4\u6D4B\u8BD5\uFF0C\u8BF7\u7A0D\u5019\u2026";
+  try {
+    const response = await fetch("/api/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(plan)
+    });
+    const result = await response.json();
+    if (!response.ok || !result.ok) throw new Error(result.error || `\u670D\u52A1\u8FD4\u56DE ${response.status}`);
+    comparison.variants.push({ plan, options: plan.options, result });
+    renderParameterComparison();
+    document.getElementById("parameterComparisonDialog").close();
+    writeTerminal(`$ \u53C2\u6570\u5BF9\u6BD4\u5B8C\u6210
+  ${displayStrategyName(plan.strategy)} \xB7 ${batchParameterSummary(overrides, plan.strategy)}
+  Makespan: ${Number(result.makespan).toFixed(2)} s`);
+  } finally {
+    button.disabled = false;
+    button.textContent = "\u8FD0\u884C\u5BF9\u6BD4\u6D4B\u8BD5";
+    status.textContent = "";
+  }
+}
 async function clearExportedArtifacts() {
   if (!window.confirm("\u5C06\u5220\u9664\u5168\u90E8\u5DF2\u5BFC\u51FA\u7684\u7ED3\u679C\u548C\u590D\u73B0\u65E5\u5FD7\uFF0C\u4E14\u65E0\u6CD5\u6062\u590D\u3002\u662F\u5426\u7EE7\u7EED\uFF1F")) return;
   const button = document.getElementById("clearExportsButton");
@@ -3301,6 +3495,13 @@ function showResult(result) {
     document.getElementById("metricValidationLabel").textContent = "\u6821\u9A8C / \u591A\u6307\u6807";
     document.getElementById("metricValidationDetail").textContent = `\u9A7B\u7559\u8D85\u9650 ${Number(metrics.residencyViolationCount) || 0} \u6B21 \xB7 \u6700\u5927\u6301\u7247 ${Number(metrics.maximumRobotHoldingSeconds || 0).toFixed(2)} s \xB7 \u7CFB\u7EDF\u505C\u7559 CV ${Number(metrics.systemResidenceCv || 0).toFixed(3)}`;
   }
+  const baselinePlan = structuredClone(buildPayload());
+  state.parameterComparison = {
+    baseline: { plan: baselinePlan, options: baselinePlan.options, result },
+    variants: []
+  };
+  document.getElementById("openParameterComparisonDialogButton").disabled = !state.serviceCompatible;
+  renderParameterComparison();
   writeTerminal(["$ \u8C03\u5EA6\u5B8C\u6210", ...result.rounds.map((round) => {
     if (round.kind === "initial") return `  #${round.index} \u9996\u6B21 | ${round.elapsedMs.toFixed(1)} ms`;
     const request = Number(round.requestedTime);
@@ -3327,6 +3528,7 @@ async function checkService() {
   const pill = document.getElementById("serviceState");
   const runButton = document.getElementById("runButton");
   const batchRunButton = document.getElementById("batchRunButton");
+  const comparisonButton = document.getElementById("openParameterComparisonDialogButton");
   try {
     const response = await fetch("/api/health", { cache: "no-store" });
     if (!response.ok) throw new Error();
@@ -3346,6 +3548,7 @@ async function checkService() {
     renderAlgorithmHistory();
     runButton.disabled = !compatible;
     batchRunButton.disabled = !compatible;
+    comparisonButton.disabled = !compatible || !state.parameterComparison?.baseline;
     renderWorkspaceControls();
     pill.textContent = compatible ? "\u672C\u5730\u670D\u52A1\u5DF2\u8FDE\u63A5" : "\u670D\u52A1\u7248\u672C\u8FC7\u65E7";
     if (!compatible) {
@@ -3357,6 +3560,7 @@ async function checkService() {
     state.serviceCompatible = false;
     runButton.disabled = true;
     batchRunButton.disabled = true;
+    comparisonButton.disabled = true;
     renderWorkspaceControls();
     pill.textContent = "\u672C\u5730\u670D\u52A1\u672A\u8FDE\u63A5";
     pill.style.color = "var(--red)";
@@ -3415,6 +3619,20 @@ document.getElementById("roundCount").addEventListener("input", (event) => {
 });
 document.getElementById("runButton").addEventListener("click", runPlan);
 document.getElementById("batchRunButton").addEventListener("click", runCurrentTestGroup);
+document.getElementById("openParameterComparisonDialogButton").addEventListener("click", openParameterComparisonDialog);
+document.getElementById("parameterComparisonDialogCancel").addEventListener("click", () => document.getElementById("parameterComparisonDialog").close());
+document.getElementById("parameterComparisonStrategy").addEventListener("change", (event) => {
+  const baselineOptions = state.parameterComparison?.baseline?.options || {};
+  renderParameterComparisonStrategyFields(event.target.value, baselineOptions);
+});
+document.getElementById("parameterComparisonForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  runParameterComparison().catch((error) => {
+    document.getElementById("parameterComparisonDialogStatus").textContent = error.message || "\u672A\u77E5\u9519\u8BEF";
+    writeTerminal(`$ \u53C2\u6570\u5BF9\u6BD4\u5931\u8D25
+  ${error.message || "\u672A\u77E5\u9519\u8BEF"}`, true);
+  });
+});
 document.getElementById("clearExportsButton").addEventListener("click", clearExportedArtifacts);
 document.getElementById("batchOverviewButton").addEventListener("click", showCurrentBatchOverview);
 document.getElementById("testGroupAnalysisButton").addEventListener("click", () => {
@@ -3463,7 +3681,7 @@ document.addEventListener("change", (event) => {
     }
     document.getElementById("roundCount").disabled = state.strategy === "milp";
     document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro", "nn-saea", "setrank", "neuralucb", "neural", "rl"].includes(state.strategy));
-    document.getElementById("heuristicObjectiveOptions").classList.toggle("is-hidden", state.strategy !== "heuristic");
+    document.getElementById("heuristicObjectiveOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro"].includes(state.strategy));
     document.getElementById("nnSAEAOptions").classList.toggle("is-hidden", state.strategy !== "nn-saea");
     document.getElementById("neuralucbOptions").classList.toggle("is-hidden", state.strategy !== "neuralucb");
     document.getElementById("rlOptions").classList.toggle("is-hidden", state.strategy !== "rl");
