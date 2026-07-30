@@ -27,7 +27,17 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ALGORITHM_ROOT = Path(
     os.environ.get("CT_ALGORITHM_ROOT", str(PROJECT_ROOT / "alg"))
 ).expanduser().resolve()
-OTHER_ALGORITHM_ROOT = ALGORITHM_ROOT / "other_alg"
+_DEFAULT_PACKAGED_ALGORITHM_ROOT = (
+    PROJECT_ROOT / "other_alg"
+    if (PROJECT_ROOT / "other_alg").is_dir()
+    else ALGORITHM_ROOT / "other_alg"
+)
+OTHER_ALGORITHM_ROOT = Path(
+    os.environ.get(
+        "CT_OTHER_ALGORITHM_ROOT",
+        str(_DEFAULT_PACKAGED_ALGORITHM_ROOT),
+    )
+).expanduser().resolve()
 OTHER_ALGORITHM_STRATEGY_PREFIX = "other_alg:"
 ALGORITHM_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
@@ -119,12 +129,11 @@ def resolve_other_algorithm_root(algorithm_id: str) -> Optional[Path]:
     """按已发现的稳定 ID 返回本仓库算法目录，拒绝路径穿越。"""
     if not ALGORITHM_ID_PATTERN.fullmatch(str(algorithm_id or "")):
         return None
-    expected = (OTHER_ALGORITHM_ROOT / algorithm_id).resolve()
     return next(
         (
-            Path(str(item["path"]))
+            Path(str(item["path"])).resolve()
             for item in discover_other_algorithms()
-            if item["id"] == algorithm_id and Path(str(item["path"])) == expected
+            if str(item["id"]).casefold() == str(algorithm_id).casefold()
         ),
         None,
     )

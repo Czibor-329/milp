@@ -19,8 +19,17 @@
 - `exports/logs/`：每次运行生成的 input_data 复现日志。
 - `exports/results/`：每次运行生成的统一 MoveList 与重算点。
 
-默认把算法仓库检出到父仓库的 `alg/`；也可用 `CT_ALGORITHM_ROOT`
-指向其他位置。启动：
+默认从父仓库的 `alg/` 加载完整算法仓库；也可用 `CT_ALGORITHM_ROOT`
+指向其他位置。完整算法仓库是可选依赖：缺席时服务和工作区仍可启动，
+内置策略在健康检查中标记为不可用。
+
+独立交付的标准算法包默认从父仓库的 `other_alg/` 加载；若该目录不存在，
+兼容读取 `alg/other_alg/`。也可用 `CT_OTHER_ALGORITHM_ROOT` 指向任意打包
+算法目录。只有打包算法时，多轮重算由算法包自带的重算桥接器根据
+`MoveStates/RemoveList` 恢复状态；本地完整算法仓库存在时仍使用原有
+`src.validation` 状态机做平台侧校验。
+
+完整开发环境启动：
 
 `alg\.venv\Scripts\python.exe realtime_scheduler/server.py --port 8765 --open`
 
