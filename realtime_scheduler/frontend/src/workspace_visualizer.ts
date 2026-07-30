@@ -722,19 +722,25 @@ function formatPercent(value: number): string {
   return `${(Math.max(0, value) * 100).toFixed(1)}%`;
 }
 
-/** 绘制资源占用表、Active Period 瓶颈和 LoadLock 环境切换顺序。 */
-function renderSchedulePerformance(performance: SchedulePerformance): string {
-  const window = performance.window;
-  const bottleneck = performance.primaryBottleneck;
+/** 为单个资源生成分类色条。 */
+function renderCategoryBars(resource: ResourcePerformance, windowDuration: number): string {
+  return ACTIVITY_CATEGORIES.map(category => {
+    const duration = resource.categoryTimes[category];
+    if (duration <= PERFORMANCE_DISPLAY_TOLERANCE || windowDuration <= PERFORMANCE_DISPLAY_TOLERANCE) return "";
+    const width = Math.min(duration / windowDuration * 100, 100);
+    return `<span class="category-${category}" style="width:${width.toFixed(3)}%" title="${ACTIVITY_CATEGORY_LABELS[category]} ${formatSeconds(duration)} s"></span>`;
+  }).join("");
+}
+
+/** 渲染合并后的瓶颈分析区域：候选排序 + 各资源占用比例。 */
+function renderBottleneckAnalysis(performance: SchedulePerformance): string {
+  const { window, bottleneckCandidates, resources } = performance;
   const confidenceLabels = { high: "证据较强", medium: "证据中等", low: "证据较弱" };
   const candidateKindLabels = {
     "process-group": "工序容量",
     robot: "传输资源",
     "loadlock-group": "LoadLock 容量",
   };
-  const displayedResources = performance.resources.filter(
-    resource => resource.busyTime > PERFORMANCE_DISPLAY_TOLERANCE,
-  );
   const resourceKindLabels: Record<ResourceKind, string> = {
     robot: "机械手",
     process: "工艺腔",
@@ -742,147 +748,190 @@ function renderSchedulePerformance(performance: SchedulePerformance): string {
     loadport: "LoadPort",
     auxiliary: "辅助模块",
   };
+
+  const candidateRows = bottleneckCandidates.map((candidate, index) => {
+    const ownedResources = resources.filter(
+      r => candidate.resourceNames.includes(r.name) && r.busyTime > PERFORMANCE_DISPLAY_TOLERANCE,
+    );
+    const resourceBars = ownedResources.map(resource => `
+      <div class="bl-candidate-resource">
+        <span class="bl-resource-name">${escapeHtml(resource.name)}</span>
+        <div class="utilization-line">
+          <div class="utilization-value">${formatPercent(resource.utilization)}</div>
+          <div class="utilization-track" aria-label="${escapeHtml(resource.name)} 占用率 ${formatPercent(resource.utilization)}">${renderCategoryBars(resource, window.duration)}</div>
+          <small>${formatSeconds(resource.busyTime)} s</small>
+        </div>
+      </div>
+    `).join("");
+
+    return `
+      <li class="${index === 0 ? "is-primary" : ""}">
+        <span class="candidate-rank">${index + 1}</span>
+        <div class="candidate-main">
+          <div><strong>${escapeHtml(candidate.label)}</strong><span>${escapeHtml(candidateKindLabels[candidate.kind])}</span></div>
+          <small>${candidate.evidence.map(escapeHtml).join(" · ")}</small>
+        </div>
+        <div class="candidate-metrics">
+          <strong>${formatPercent(candidate.utilization)}</strong>
+          <span>容量利用率</span>
+        </div>
+        <div class="candidate-score">
+          <strong>${Math.round(candidate.score * 100)}</strong>
+          <span>可能性分 · ${confidenceLabels[candidate.confidence]}</span>
+        </div>
+      </li>
+      <li class="bl-candidate-bars">${resourceBars}</li>`;
+  }).join("");
+
+  const candidateResourceNames = new Set(bottleneckCandidates.flatMap(c => c.resourceNames));
+  const otherResources = resources.filter(
+    r => r.busyTime > PERFORMANCE_DISPLAY_TOLERANCE && !candidateResourceNames.has(r.name),
+  );
+  const otherResourceRows = otherResources.length === 0 ? ""
+    : `<details class="other-resources-section">
+        <summary>其他活跃资源（${otherResources.length} 个）</summary>
+        <div class="performance-table-wrap">
+          <table class="performance-table" aria-label="非瓶颈资源占用详情">
+            <thead><tr><th>资源</th><th>资源占用率</th><th>平均活跃期</th><th>最长空闲</th></tr></thead>
+            <tbody>
+              ${otherResources.map(resource => `
+                <tr>
+                  <th scope="row">
+                    <div class="resource-heading">
+                      <span class="resource-name">${escapeHtml(resource.name)}</span>
+                      <small>${escapeHtml(resourceKindLabels[resource.kind])}</small>
+                    </div>
+                  </th>
+                  <td class="utilization-cell">
+                    <div class="utilization-line">
+                      <div class="utilization-value">${formatPercent(resource.utilization)}</div>
+                      <div class="utilization-track" aria-label="${escapeHtml(resource.name)} 占用率 ${formatPercent(resource.utilization)}">${renderCategoryBars(resource, window.duration)}</div>
+                      <small>${formatSeconds(resource.busyTime)} s</small>
+                    </div>
+                  </td>
+                  <td class="performance-number">${formatSeconds(resource.averageActivePeriod)} s <small>${resource.activePeriodCount} 段</small></td>
+                  <td class="performance-number">${formatSeconds(resource.longestIdlePeriod)} s</td>
+                </tr>`).join("")}
+            </tbody>
+          </table>
+        </div>
+      </details>`;
+
   const legend = ACTIVITY_CATEGORIES.map(category => (
     `<span><i class="performance-swatch category-${category}"></i>${ACTIVITY_CATEGORY_LABELS[category]}</span>`
   )).join("");
-  const resourceRows = displayedResources.map(resource => {
-    const categoryBars = ACTIVITY_CATEGORIES.map(category => {
-      const duration = resource.categoryTimes[category];
-      if (duration <= PERFORMANCE_DISPLAY_TOLERANCE || window.duration <= PERFORMANCE_DISPLAY_TOLERANCE) return "";
-      const width = Math.min(duration / window.duration * 100, 100);
-      return `<span class="category-${category}" style="width:${width.toFixed(3)}%" title="${ACTIVITY_CATEGORY_LABELS[category]} ${formatSeconds(duration)} s"></span>`;
-    }).join("");
-    const status = resource.bottleneckCandidateRank
-      ? `<span class="resource-bottleneck">${resource.bottleneckCandidateRank === 1 ? "主要候选" : `候选 #${resource.bottleneckCandidateRank}`}</span>`
-      : "";
-    return `
-      <tr class="${resource.isBottleneck ? "is-bottleneck" : ""}">
-        <th scope="row">
-          <div class="resource-heading">
-            <span class="resource-name">${escapeHtml(resource.name)}</span>
-            <small>${escapeHtml(resourceKindLabels[resource.kind])}</small>
-            ${status}
-          </div>
-        </th>
-        <td class="utilization-cell">
-          <div class="utilization-line">
-            <div class="utilization-value">${formatPercent(resource.utilization)}</div>
-          <div class="utilization-track" aria-label="${escapeHtml(resource.name)} 占用率 ${formatPercent(resource.utilization)}">${categoryBars}</div>
-            <small>${formatSeconds(resource.busyTime)} s</small>
-          </div>
-        </td>
-        <td class="performance-number">${formatSeconds(resource.averageActivePeriod)} s <small>${resource.activePeriodCount} 段</small></td>
-        <td class="performance-number">${formatSeconds(resource.longestIdlePeriod)} s</td>
-      </tr>`;
-  }).join("");
-  const candidateMarkup = performance.bottleneckCandidates.length
-    ? `<section class="bottleneck-candidates" aria-labelledby="bottleneckCandidatesTitle">
-        <div class="bottleneck-candidate-head">
-          <div>
-            <strong id="bottleneckCandidatesTitle">瓶颈可能性排序</strong>
-            <span>允许多个候选；评分以容量利用率为主，连续性和同类相对强度为辅。</span>
-          </div>
-          <small>共 ${performance.bottleneckCandidates.length} 个较可能候选</small>
-        </div>
-        <ol class="bottleneck-candidate-list">
-          ${performance.bottleneckCandidates.map((candidate, index) => `
-            <li class="${index === 0 ? "is-primary" : ""}">
-              <span class="candidate-rank">${index + 1}</span>
-              <div class="candidate-main">
-                <div><strong>${escapeHtml(candidate.label)}</strong><span>${escapeHtml(candidateKindLabels[candidate.kind])}</span></div>
-                <small>${candidate.evidence.map(escapeHtml).join(" · ")}</small>
-              </div>
-              <div class="candidate-metrics">
-                <strong>${formatPercent(candidate.utilization)}</strong>
-                <span>容量利用率</span>
-              </div>
-              <div class="candidate-score">
-                <strong>${Math.round(candidate.score * 100)}</strong>
-                <span>可能性分 · ${confidenceLabels[candidate.confidence]}</span>
-              </div>
-            </li>`).join("")}
-        </ol>
-      </section>`
-    : "";
-  const ganttCycles = normalizeGanttCycles(performance.loadLockCycles);
-  const diagnostics = performance.diagnostics ?? [];
-  const diagnosticMarkup = diagnostics.length
-    ? `<section class="diagnostic-panel" aria-labelledby="diagnosticPanelTitle">
-        <div class="diagnostic-panel-head">
-          <div><span>证据 → 假设 → 实验</span><strong id="diagnosticPanelTitle">下一步优化从这里开始</strong></div>
-          <small>结论来自执行轨迹重建，不冒充算法内部打分</small>
-        </div>
-        <div class="diagnostic-list">
-          ${diagnostics.map((diagnostic, index) => `
-            <article class="diagnostic-card">
-              <header><span class="diagnostic-rank">${index + 1}</span><div><strong>${escapeHtml(diagnostic.title)}</strong><small>${({ strong: "证据较强", moderate: "证据中等", exploratory: "探索性线索" })[diagnostic.confidence]}</small></div></header>
-              <p>${escapeHtml(diagnostic.finding)}</p>
-              <dl>${diagnostic.evidence.map(evidence => `
-                <div><dt>${escapeHtml(evidence.label)}</dt><dd><b>${escapeHtml(evidence.value)}</b><span>${escapeHtml(evidence.interpretation)}</span></dd></div>
-              `).join("")}</dl>
-              <div class="diagnostic-experiment">
-                <span>可证伪的下一步</span>
-                <strong>${escapeHtml(diagnostic.nextExperiment.label)}</strong>
-                <p>${escapeHtml(diagnostic.nextExperiment.change)}</p>
-                <small>预期信号：${escapeHtml(diagnostic.nextExperiment.expectedSignal)}</small>
-              </div>
-              <aside>${escapeHtml(diagnostic.limitation)}</aside>
-            </article>`).join("")}
-        </div>
-      </section>`
-    : "";
+
   return `
-    <div class="performance-summary">
+    <header class="bottleneck-analysis-head">
       <div>
-        <span>统计窗口</span>
-        <strong>${escapeHtml(window.label)} · ${formatSeconds(window.duration)} s</strong>
-        <small>剔除开头 ${formatSeconds(window.trimmedStart)} s / 结尾 ${formatSeconds(window.trimmedEnd)} s</small>
+        <strong>瓶颈分析</strong>
+        <span>候选按容量利用率排序，评分综合连续性与同类相对强度</span>
       </div>
-      <div>
-        <span>最可能瓶颈</span>
-        <strong>${escapeHtml(bottleneck?.label ?? "—")}</strong>
-        <small>${bottleneck ? `容量利用率 ${formatPercent(bottleneck.utilization)} · ${confidenceLabels[bottleneck.confidence]} · 另有 ${Math.max(0, performance.bottleneckCandidates.length - 1)} 个候选` : "没有足够的资源活动"}</small>
-      </div>
-      <div>
-        <span>出站节拍</span>
-        <strong>${performance.throughputPerHour > 0 ? `${performance.throughputPerHour.toFixed(1)} 片/h` : "—"}</strong>
-        <small>平均间隔 ${formatSeconds(performance.meanDepartureInterval)} s · 间隔 CV ${performance.departureIntervalCv.toFixed(2)} · ${performance.completedWaferCount} 片样本</small>
-      </div>
-      <div>
-        <span>晶圆驻留时间 · 加工腔</span>
-        <strong>${performance.processChamberDwellTime.sampleCount ? `${formatSeconds(performance.processChamberDwellTime.meanSeconds)} s` : "—"}</strong>
-        <small>加工结束 → 完全离腔 · 中位 ${formatSeconds(performance.processChamberDwellTime.medianSeconds)} s · 最大 ${formatSeconds(performance.processChamberDwellTime.maxSeconds)} s · ${performance.processChamberDwellTime.sampleCount} 次</small>
-      </div>
-      <div>
-        <span>机器手驻留时间</span>
-        <strong>${performance.robotWaferDwellTime.sampleCount ? `${formatSeconds(performance.robotWaferDwellTime.meanSeconds)} s` : "—"}</strong>
-        <small>Pick 完成 → Place 开始，已扣除 PreTrans 运输 · 最大 ${formatSeconds(performance.robotWaferDwellTime.maxSeconds)} s · ${performance.robotWaferDwellTime.sampleCount} 次</small>
-      </div>
-      <div>
-        <span>晶圆系统停留时间</span>
-        <strong>${performance.waferSystemResidenceTime.sampleCount ? `${formatSeconds(performance.waferSystemResidenceTime.meanSeconds)} s` : "—"}</strong>
-        <small>离开 LP → 返回 LP · CV ${performance.waferSystemResidenceTime.coefficientOfVariation.toFixed(2)} · 最大 ${formatSeconds(performance.waferSystemResidenceTime.maxSeconds)} s · ${performance.waferSystemResidenceTime.sampleCount} 片</small>
-      </div>
-    </div>
-    ${candidateMarkup}
-    ${diagnosticMarkup}
-    <p class="performance-window-note">${escapeHtml(window.detail)}</p>
+      <small>共 ${bottleneckCandidates.length} 个较可能候选</small>
+    </header>
+    <ol class="bottleneck-analysis-list">
+      ${candidateRows}
+    </ol>
     <div class="performance-legend" aria-label="占用组成图例">${legend}</div>
-    <div class="performance-grid">
-      <div class="performance-table-wrap">
-        <table class="performance-table" aria-label="当前统计窗口内实际使用资源的占用和活跃期">
-          <caption>仅显示当前统计窗口内有占用的 ${displayedResources.length} 个资源</caption>
-          <thead><tr><th>资源</th><th>资源占用率</th><th>平均活跃期</th><th>最长空闲</th></tr></thead>
-          <tbody>${resourceRows}</tbody>
-        </table>
-      </div>
-      <aside class="loadlock-seq-panel">
-        <div class="loadlock-seq-head">
-          <strong>LoadLock 交换时序</strong>
+    ${otherResourceRows}
+    <p class="performance-window-note">${escapeHtml(window.detail)}</p>`;
+}
+
+/** 渲染 LoadLock 交换时序独立卡片。 */
+function renderLoadLockCard(performance: SchedulePerformance): string {
+  const ganttCycles = normalizeGanttCycles(performance.loadLockCycles);
+  const gantt = renderLoadLockGantt(ganttCycles);
+  return `
+    <header class="loadlock-card-head">
+      <strong>LoadLock 交换时序</strong>
+      <span>显示全部 LoadLock 的抽气/充气交错序列</span>
+    </header>
+    <div class="loadlock-card-body">${gantt}</div>`;
+}
+
+/** 渲染下一步优化区域。 */
+function renderNextOptimization(performance: SchedulePerformance): string {
+  const diagnostics = performance.diagnostics ?? [];
+  if (!diagnostics.length) return "";
+  return `
+    <header class="next-opt-head">
+      <div><span>证据 → 假设 → 实验</span><strong>下一步优化</strong></div>
+      <small>结论来自执行轨迹重建，不冒充算法内部打分</small>
+    </header>
+    <div class="diagnostic-list">
+      ${diagnostics.map((diagnostic, index) => `
+        <article class="diagnostic-card">
+          <header><span class="diagnostic-rank">${index + 1}</span><div><strong>${escapeHtml(diagnostic.title)}</strong><small>${({ strong: "证据较强", moderate: "证据中等", exploratory: "探索性线索" })[diagnostic.confidence]}</small></div></header>
+          <p>${escapeHtml(diagnostic.finding)}</p>
+          <dl>${diagnostic.evidence.map(evidence => `
+            <div><dt>${escapeHtml(evidence.label)}</dt><dd><b>${escapeHtml(evidence.value)}</b><span>${escapeHtml(evidence.interpretation)}</span></dd></div>
+          `).join("")}</dl>
+          <div class="diagnostic-experiment">
+            <span>可证伪的下一步</span>
+            <strong>${escapeHtml(diagnostic.nextExperiment.label)}</strong>
+            <p>${escapeHtml(diagnostic.nextExperiment.change)}</p>
+            <small>预期信号：${escapeHtml(diagnostic.nextExperiment.expectedSignal)}</small>
+          </div>
+          <aside>${escapeHtml(diagnostic.limitation)}</aside>
+        </article>`).join("")}
+    </div>`;
+}
+
+/** 绘制排程诊断面板 —— 总览、瓶颈分析、LoadLock 时序、下一步优化共四张卡片。 */
+function renderSchedulePerformance(performance: SchedulePerformance): string {
+  const window = performance.window;
+  const bottleneck = performance.primaryBottleneck;
+  const confidenceLabels = { high: "证据较强", medium: "证据中等", low: "证据较弱" };
+
+  return `
+    <section class="result-card overview-card">
+      <header class="overview-head"><span class="visual-kicker">排程概览</span><strong>KPI 总览</strong></header>
+      <div class="performance-summary">
+        <div>
+          <span>统计窗口</span>
+          <strong>${escapeHtml(window.label)} · ${formatSeconds(window.duration)} s</strong>
+          <small>剔除开头 ${formatSeconds(window.trimmedStart)} s / 结尾 ${formatSeconds(window.trimmedEnd)} s</small>
         </div>
-        ${renderLoadLockGantt(ganttCycles)}
-      </aside>
-    </div>
+        <div>
+          <span>最可能瓶颈</span>
+          <strong>${escapeHtml(bottleneck?.label ?? "—")}</strong>
+          <small>${bottleneck ? `容量利用率 ${formatPercent(bottleneck.utilization)} · ${confidenceLabels[bottleneck.confidence]} · 另有 ${Math.max(0, performance.bottleneckCandidates.length - 1)} 个候选` : "没有足够的资源活动"}</small>
+        </div>
+        <div>
+          <span>出站节拍</span>
+          <strong>${performance.throughputPerHour > 0 ? `${performance.throughputPerHour.toFixed(1)} 片/h` : "—"}</strong>
+          <small>平均间隔 ${formatSeconds(performance.meanDepartureInterval)} s · 间隔 CV ${performance.departureIntervalCv.toFixed(2)} · ${performance.completedWaferCount} 片样本</small>
+        </div>
+        <div>
+          <span>晶圆驻留时间 · 加工腔</span>
+          <strong>${performance.processChamberDwellTime.sampleCount ? `${formatSeconds(performance.processChamberDwellTime.meanSeconds)} s` : "—"}</strong>
+          <small>加工结束 → 完全离腔 · 中位 ${formatSeconds(performance.processChamberDwellTime.medianSeconds)} s · 最大 ${formatSeconds(performance.processChamberDwellTime.maxSeconds)} s · ${performance.processChamberDwellTime.sampleCount} 次</small>
+        </div>
+        <div>
+          <span>机器手驻留时间</span>
+          <strong>${performance.robotWaferDwellTime.sampleCount ? `${formatSeconds(performance.robotWaferDwellTime.meanSeconds)} s` : "—"}</strong>
+          <small>Pick 完成 → Place 开始，已扣除 PreTrans 运输 · 最大 ${formatSeconds(performance.robotWaferDwellTime.maxSeconds)} s · ${performance.robotWaferDwellTime.sampleCount} 次</small>
+        </div>
+        <div>
+          <span>晶圆系统停留时间</span>
+          <strong>${performance.waferSystemResidenceTime.sampleCount ? `${formatSeconds(performance.waferSystemResidenceTime.meanSeconds)} s` : "—"}</strong>
+          <small>离开 LP → 返回 LP · CV ${performance.waferSystemResidenceTime.coefficientOfVariation.toFixed(2)} · 最大 ${formatSeconds(performance.waferSystemResidenceTime.maxSeconds)} s · ${performance.waferSystemResidenceTime.sampleCount} 片</small>
+        </div>
+      </div>
+    </section>
+
+    <section class="result-card bottleneck-analysis-card">
+      ${renderBottleneckAnalysis(performance)}
+    </section>
+
+    <section class="result-card loadlock-swap-card">
+      ${renderLoadLockCard(performance)}
+    </section>
+
+    ${performance.diagnostics?.length ? `
+    <section class="result-card next-optimization-card">
+      ${renderNextOptimization(performance)}
+    </section>` : ""}
     `;
 }
 

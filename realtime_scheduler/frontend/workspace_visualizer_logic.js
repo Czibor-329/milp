@@ -560,18 +560,22 @@ function renderLoadLockGantt(cycles) {
 function formatPercent(value) {
   return `${(Math.max(0, value) * 100).toFixed(1)}%`;
 }
-function renderSchedulePerformance(performance2) {
-  const window = performance2.window;
-  const bottleneck = performance2.primaryBottleneck;
+function renderCategoryBars(resource, windowDuration) {
+  return ACTIVITY_CATEGORIES.map((category) => {
+    const duration = resource.categoryTimes[category];
+    if (duration <= PERFORMANCE_DISPLAY_TOLERANCE || windowDuration <= PERFORMANCE_DISPLAY_TOLERANCE) return "";
+    const width = Math.min(duration / windowDuration * 100, 100);
+    return `<span class="category-${category}" style="width:${width.toFixed(3)}%" title="${ACTIVITY_CATEGORY_LABELS[category]} ${formatSeconds(duration)} s"></span>`;
+  }).join("");
+}
+function renderBottleneckAnalysis(performance2) {
+  const { window, bottleneckCandidates, resources } = performance2;
   const confidenceLabels = { high: "\u8BC1\u636E\u8F83\u5F3A", medium: "\u8BC1\u636E\u4E2D\u7B49", low: "\u8BC1\u636E\u8F83\u5F31" };
   const candidateKindLabels = {
     "process-group": "\u5DE5\u5E8F\u5BB9\u91CF",
     robot: "\u4F20\u8F93\u8D44\u6E90",
     "loadlock-group": "LoadLock \u5BB9\u91CF"
   };
-  const displayedResources = performance2.resources.filter(
-    (resource) => resource.busyTime > PERFORMANCE_DISPLAY_TOLERANCE
-  );
   const resourceKindLabels = {
     robot: "\u673A\u68B0\u624B",
     process: "\u5DE5\u827A\u8154",
@@ -579,139 +583,175 @@ function renderSchedulePerformance(performance2) {
     loadport: "LoadPort",
     auxiliary: "\u8F85\u52A9\u6A21\u5757"
   };
-  const legend = ACTIVITY_CATEGORIES.map((category) => `<span><i class="performance-swatch category-${category}"></i>${ACTIVITY_CATEGORY_LABELS[category]}</span>`).join("");
-  const resourceRows = displayedResources.map((resource) => {
-    const categoryBars = ACTIVITY_CATEGORIES.map((category) => {
-      const duration = resource.categoryTimes[category];
-      if (duration <= PERFORMANCE_DISPLAY_TOLERANCE || window.duration <= PERFORMANCE_DISPLAY_TOLERANCE) return "";
-      const width = Math.min(duration / window.duration * 100, 100);
-      return `<span class="category-${category}" style="width:${width.toFixed(3)}%" title="${ACTIVITY_CATEGORY_LABELS[category]} ${formatSeconds(duration)} s"></span>`;
-    }).join("");
-    const status = resource.bottleneckCandidateRank ? `<span class="resource-bottleneck">${resource.bottleneckCandidateRank === 1 ? "\u4E3B\u8981\u5019\u9009" : `\u5019\u9009 #${resource.bottleneckCandidateRank}`}</span>` : "";
+  const candidateRows = bottleneckCandidates.map((candidate, index) => {
+    const ownedResources = resources.filter(
+      (r) => candidate.resourceNames.includes(r.name) && r.busyTime > PERFORMANCE_DISPLAY_TOLERANCE
+    );
+    const resourceBars = ownedResources.map((resource) => `
+      <div class="bl-candidate-resource">
+        <span class="bl-resource-name">${escapeHtml(resource.name)}</span>
+        <div class="utilization-line">
+          <div class="utilization-value">${formatPercent(resource.utilization)}</div>
+          <div class="utilization-track" aria-label="${escapeHtml(resource.name)} \u5360\u7528\u7387 ${formatPercent(resource.utilization)}">${renderCategoryBars(resource, window.duration)}</div>
+          <small>${formatSeconds(resource.busyTime)} s</small>
+        </div>
+      </div>
+    `).join("");
     return `
-      <tr class="${resource.isBottleneck ? "is-bottleneck" : ""}">
-        <th scope="row">
-          <div class="resource-heading">
-            <span class="resource-name">${escapeHtml(resource.name)}</span>
-            <small>${escapeHtml(resourceKindLabels[resource.kind])}</small>
-            ${status}
-          </div>
-        </th>
-        <td class="utilization-cell">
-          <div class="utilization-line">
-            <div class="utilization-value">${formatPercent(resource.utilization)}</div>
-          <div class="utilization-track" aria-label="${escapeHtml(resource.name)} \u5360\u7528\u7387 ${formatPercent(resource.utilization)}">${categoryBars}</div>
-            <small>${formatSeconds(resource.busyTime)} s</small>
-          </div>
-        </td>
-        <td class="performance-number">${formatSeconds(resource.averageActivePeriod)} s <small>${resource.activePeriodCount} \u6BB5</small></td>
-        <td class="performance-number">${formatSeconds(resource.longestIdlePeriod)} s</td>
-      </tr>`;
+      <li class="${index === 0 ? "is-primary" : ""}">
+        <span class="candidate-rank">${index + 1}</span>
+        <div class="candidate-main">
+          <div><strong>${escapeHtml(candidate.label)}</strong><span>${escapeHtml(candidateKindLabels[candidate.kind])}</span></div>
+          <small>${candidate.evidence.map(escapeHtml).join(" \xB7 ")}</small>
+        </div>
+        <div class="candidate-metrics">
+          <strong>${formatPercent(candidate.utilization)}</strong>
+          <span>\u5BB9\u91CF\u5229\u7528\u7387</span>
+        </div>
+        <div class="candidate-score">
+          <strong>${Math.round(candidate.score * 100)}</strong>
+          <span>\u53EF\u80FD\u6027\u5206 \xB7 ${confidenceLabels[candidate.confidence]}</span>
+        </div>
+      </li>
+      <li class="bl-candidate-bars">${resourceBars}</li>`;
   }).join("");
-  const candidateMarkup = performance2.bottleneckCandidates.length ? `<section class="bottleneck-candidates" aria-labelledby="bottleneckCandidatesTitle">
-        <div class="bottleneck-candidate-head">
-          <div>
-            <strong id="bottleneckCandidatesTitle">\u74F6\u9888\u53EF\u80FD\u6027\u6392\u5E8F</strong>
-            <span>\u5141\u8BB8\u591A\u4E2A\u5019\u9009\uFF1B\u8BC4\u5206\u4EE5\u5BB9\u91CF\u5229\u7528\u7387\u4E3A\u4E3B\uFF0C\u8FDE\u7EED\u6027\u548C\u540C\u7C7B\u76F8\u5BF9\u5F3A\u5EA6\u4E3A\u8F85\u3002</span>
-          </div>
-          <small>\u5171 ${performance2.bottleneckCandidates.length} \u4E2A\u8F83\u53EF\u80FD\u5019\u9009</small>
+  const candidateResourceNames = new Set(bottleneckCandidates.flatMap((c) => c.resourceNames));
+  const otherResources = resources.filter(
+    (r) => r.busyTime > PERFORMANCE_DISPLAY_TOLERANCE && !candidateResourceNames.has(r.name)
+  );
+  const otherResourceRows = otherResources.length === 0 ? "" : `<details class="other-resources-section">
+        <summary>\u5176\u4ED6\u6D3B\u8DC3\u8D44\u6E90\uFF08${otherResources.length} \u4E2A\uFF09</summary>
+        <div class="performance-table-wrap">
+          <table class="performance-table" aria-label="\u975E\u74F6\u9888\u8D44\u6E90\u5360\u7528\u8BE6\u60C5">
+            <thead><tr><th>\u8D44\u6E90</th><th>\u8D44\u6E90\u5360\u7528\u7387</th><th>\u5E73\u5747\u6D3B\u8DC3\u671F</th><th>\u6700\u957F\u7A7A\u95F2</th></tr></thead>
+            <tbody>
+              ${otherResources.map((resource) => `
+                <tr>
+                  <th scope="row">
+                    <div class="resource-heading">
+                      <span class="resource-name">${escapeHtml(resource.name)}</span>
+                      <small>${escapeHtml(resourceKindLabels[resource.kind])}</small>
+                    </div>
+                  </th>
+                  <td class="utilization-cell">
+                    <div class="utilization-line">
+                      <div class="utilization-value">${formatPercent(resource.utilization)}</div>
+                      <div class="utilization-track" aria-label="${escapeHtml(resource.name)} \u5360\u7528\u7387 ${formatPercent(resource.utilization)}">${renderCategoryBars(resource, window.duration)}</div>
+                      <small>${formatSeconds(resource.busyTime)} s</small>
+                    </div>
+                  </td>
+                  <td class="performance-number">${formatSeconds(resource.averageActivePeriod)} s <small>${resource.activePeriodCount} \u6BB5</small></td>
+                  <td class="performance-number">${formatSeconds(resource.longestIdlePeriod)} s</td>
+                </tr>`).join("")}
+            </tbody>
+          </table>
         </div>
-        <ol class="bottleneck-candidate-list">
-          ${performance2.bottleneckCandidates.map((candidate, index) => `
-            <li class="${index === 0 ? "is-primary" : ""}">
-              <span class="candidate-rank">${index + 1}</span>
-              <div class="candidate-main">
-                <div><strong>${escapeHtml(candidate.label)}</strong><span>${escapeHtml(candidateKindLabels[candidate.kind])}</span></div>
-                <small>${candidate.evidence.map(escapeHtml).join(" \xB7 ")}</small>
-              </div>
-              <div class="candidate-metrics">
-                <strong>${formatPercent(candidate.utilization)}</strong>
-                <span>\u5BB9\u91CF\u5229\u7528\u7387</span>
-              </div>
-              <div class="candidate-score">
-                <strong>${Math.round(candidate.score * 100)}</strong>
-                <span>\u53EF\u80FD\u6027\u5206 \xB7 ${confidenceLabels[candidate.confidence]}</span>
-              </div>
-            </li>`).join("")}
-        </ol>
-      </section>` : "";
-  const ganttCycles = normalizeGanttCycles(performance2.loadLockCycles);
-  const diagnostics = performance2.diagnostics ?? [];
-  const diagnosticMarkup = diagnostics.length ? `<section class="diagnostic-panel" aria-labelledby="diagnosticPanelTitle">
-        <div class="diagnostic-panel-head">
-          <div><span>\u8BC1\u636E \u2192 \u5047\u8BBE \u2192 \u5B9E\u9A8C</span><strong id="diagnosticPanelTitle">\u4E0B\u4E00\u6B65\u4F18\u5316\u4ECE\u8FD9\u91CC\u5F00\u59CB</strong></div>
-          <small>\u7ED3\u8BBA\u6765\u81EA\u6267\u884C\u8F68\u8FF9\u91CD\u5EFA\uFF0C\u4E0D\u5192\u5145\u7B97\u6CD5\u5185\u90E8\u6253\u5206</small>
-        </div>
-        <div class="diagnostic-list">
-          ${diagnostics.map((diagnostic, index) => `
-            <article class="diagnostic-card">
-              <header><span class="diagnostic-rank">${index + 1}</span><div><strong>${escapeHtml(diagnostic.title)}</strong><small>${{ strong: "\u8BC1\u636E\u8F83\u5F3A", moderate: "\u8BC1\u636E\u4E2D\u7B49", exploratory: "\u63A2\u7D22\u6027\u7EBF\u7D22" }[diagnostic.confidence]}</small></div></header>
-              <p>${escapeHtml(diagnostic.finding)}</p>
-              <dl>${diagnostic.evidence.map((evidence) => `
-                <div><dt>${escapeHtml(evidence.label)}</dt><dd><b>${escapeHtml(evidence.value)}</b><span>${escapeHtml(evidence.interpretation)}</span></dd></div>
-              `).join("")}</dl>
-              <div class="diagnostic-experiment">
-                <span>\u53EF\u8BC1\u4F2A\u7684\u4E0B\u4E00\u6B65</span>
-                <strong>${escapeHtml(diagnostic.nextExperiment.label)}</strong>
-                <p>${escapeHtml(diagnostic.nextExperiment.change)}</p>
-                <small>\u9884\u671F\u4FE1\u53F7\uFF1A${escapeHtml(diagnostic.nextExperiment.expectedSignal)}</small>
-              </div>
-              <aside>${escapeHtml(diagnostic.limitation)}</aside>
-            </article>`).join("")}
-        </div>
-      </section>` : "";
+      </details>`;
+  const legend = ACTIVITY_CATEGORIES.map((category) => `<span><i class="performance-swatch category-${category}"></i>${ACTIVITY_CATEGORY_LABELS[category]}</span>`).join("");
   return `
-    <div class="performance-summary">
+    <header class="bottleneck-analysis-head">
       <div>
-        <span>\u7EDF\u8BA1\u7A97\u53E3</span>
-        <strong>${escapeHtml(window.label)} \xB7 ${formatSeconds(window.duration)} s</strong>
-        <small>\u5254\u9664\u5F00\u5934 ${formatSeconds(window.trimmedStart)} s / \u7ED3\u5C3E ${formatSeconds(window.trimmedEnd)} s</small>
+        <strong>\u74F6\u9888\u5206\u6790</strong>
+        <span>\u5019\u9009\u6309\u5BB9\u91CF\u5229\u7528\u7387\u6392\u5E8F\uFF0C\u8BC4\u5206\u7EFC\u5408\u8FDE\u7EED\u6027\u4E0E\u540C\u7C7B\u76F8\u5BF9\u5F3A\u5EA6</span>
       </div>
-      <div>
-        <span>\u6700\u53EF\u80FD\u74F6\u9888</span>
-        <strong>${escapeHtml(bottleneck?.label ?? "\u2014")}</strong>
-        <small>${bottleneck ? `\u5BB9\u91CF\u5229\u7528\u7387 ${formatPercent(bottleneck.utilization)} \xB7 ${confidenceLabels[bottleneck.confidence]} \xB7 \u53E6\u6709 ${Math.max(0, performance2.bottleneckCandidates.length - 1)} \u4E2A\u5019\u9009` : "\u6CA1\u6709\u8DB3\u591F\u7684\u8D44\u6E90\u6D3B\u52A8"}</small>
-      </div>
-      <div>
-        <span>\u51FA\u7AD9\u8282\u62CD</span>
-        <strong>${performance2.throughputPerHour > 0 ? `${performance2.throughputPerHour.toFixed(1)} \u7247/h` : "\u2014"}</strong>
-        <small>\u5E73\u5747\u95F4\u9694 ${formatSeconds(performance2.meanDepartureInterval)} s \xB7 \u95F4\u9694 CV ${performance2.departureIntervalCv.toFixed(2)} \xB7 ${performance2.completedWaferCount} \u7247\u6837\u672C</small>
-      </div>
-      <div>
-        <span>\u6676\u5706\u9A7B\u7559\u65F6\u95F4 \xB7 \u52A0\u5DE5\u8154</span>
-        <strong>${performance2.processChamberDwellTime.sampleCount ? `${formatSeconds(performance2.processChamberDwellTime.meanSeconds)} s` : "\u2014"}</strong>
-        <small>\u52A0\u5DE5\u7ED3\u675F \u2192 \u5B8C\u5168\u79BB\u8154 \xB7 \u4E2D\u4F4D ${formatSeconds(performance2.processChamberDwellTime.medianSeconds)} s \xB7 \u6700\u5927 ${formatSeconds(performance2.processChamberDwellTime.maxSeconds)} s \xB7 ${performance2.processChamberDwellTime.sampleCount} \u6B21</small>
-      </div>
-      <div>
-        <span>\u673A\u5668\u624B\u9A7B\u7559\u65F6\u95F4</span>
-        <strong>${performance2.robotWaferDwellTime.sampleCount ? `${formatSeconds(performance2.robotWaferDwellTime.meanSeconds)} s` : "\u2014"}</strong>
-        <small>Pick \u5B8C\u6210 \u2192 Place \u5F00\u59CB\uFF0C\u5DF2\u6263\u9664 PreTrans \u8FD0\u8F93 \xB7 \u6700\u5927 ${formatSeconds(performance2.robotWaferDwellTime.maxSeconds)} s \xB7 ${performance2.robotWaferDwellTime.sampleCount} \u6B21</small>
-      </div>
-      <div>
-        <span>\u6676\u5706\u7CFB\u7EDF\u505C\u7559\u65F6\u95F4</span>
-        <strong>${performance2.waferSystemResidenceTime.sampleCount ? `${formatSeconds(performance2.waferSystemResidenceTime.meanSeconds)} s` : "\u2014"}</strong>
-        <small>\u79BB\u5F00 LP \u2192 \u8FD4\u56DE LP \xB7 CV ${performance2.waferSystemResidenceTime.coefficientOfVariation.toFixed(2)} \xB7 \u6700\u5927 ${formatSeconds(performance2.waferSystemResidenceTime.maxSeconds)} s \xB7 ${performance2.waferSystemResidenceTime.sampleCount} \u7247</small>
-      </div>
-    </div>
-    ${candidateMarkup}
-    ${diagnosticMarkup}
-    <p class="performance-window-note">${escapeHtml(window.detail)}</p>
+      <small>\u5171 ${bottleneckCandidates.length} \u4E2A\u8F83\u53EF\u80FD\u5019\u9009</small>
+    </header>
+    <ol class="bottleneck-analysis-list">
+      ${candidateRows}
+    </ol>
     <div class="performance-legend" aria-label="\u5360\u7528\u7EC4\u6210\u56FE\u4F8B">${legend}</div>
-    <div class="performance-grid">
-      <div class="performance-table-wrap">
-        <table class="performance-table" aria-label="\u5F53\u524D\u7EDF\u8BA1\u7A97\u53E3\u5185\u5B9E\u9645\u4F7F\u7528\u8D44\u6E90\u7684\u5360\u7528\u548C\u6D3B\u8DC3\u671F">
-          <caption>\u4EC5\u663E\u793A\u5F53\u524D\u7EDF\u8BA1\u7A97\u53E3\u5185\u6709\u5360\u7528\u7684 ${displayedResources.length} \u4E2A\u8D44\u6E90</caption>
-          <thead><tr><th>\u8D44\u6E90</th><th>\u8D44\u6E90\u5360\u7528\u7387</th><th>\u5E73\u5747\u6D3B\u8DC3\u671F</th><th>\u6700\u957F\u7A7A\u95F2</th></tr></thead>
-          <tbody>${resourceRows}</tbody>
-        </table>
-      </div>
-      <aside class="loadlock-seq-panel">
-        <div class="loadlock-seq-head">
-          <strong>LoadLock \u4EA4\u6362\u65F6\u5E8F</strong>
+    ${otherResourceRows}
+    <p class="performance-window-note">${escapeHtml(window.detail)}</p>`;
+}
+function renderLoadLockCard(performance2) {
+  const ganttCycles = normalizeGanttCycles(performance2.loadLockCycles);
+  const gantt = renderLoadLockGantt(ganttCycles);
+  return `
+    <header class="loadlock-card-head">
+      <strong>LoadLock \u4EA4\u6362\u65F6\u5E8F</strong>
+      <span>\u663E\u793A\u5168\u90E8 LoadLock \u7684\u62BD\u6C14/\u5145\u6C14\u4EA4\u9519\u5E8F\u5217</span>
+    </header>
+    <div class="loadlock-card-body">${gantt}</div>`;
+}
+function renderNextOptimization(performance2) {
+  const diagnostics = performance2.diagnostics ?? [];
+  if (!diagnostics.length) return "";
+  return `
+    <header class="next-opt-head">
+      <div><span>\u8BC1\u636E \u2192 \u5047\u8BBE \u2192 \u5B9E\u9A8C</span><strong>\u4E0B\u4E00\u6B65\u4F18\u5316</strong></div>
+      <small>\u7ED3\u8BBA\u6765\u81EA\u6267\u884C\u8F68\u8FF9\u91CD\u5EFA\uFF0C\u4E0D\u5192\u5145\u7B97\u6CD5\u5185\u90E8\u6253\u5206</small>
+    </header>
+    <div class="diagnostic-list">
+      ${diagnostics.map((diagnostic, index) => `
+        <article class="diagnostic-card">
+          <header><span class="diagnostic-rank">${index + 1}</span><div><strong>${escapeHtml(diagnostic.title)}</strong><small>${{ strong: "\u8BC1\u636E\u8F83\u5F3A", moderate: "\u8BC1\u636E\u4E2D\u7B49", exploratory: "\u63A2\u7D22\u6027\u7EBF\u7D22" }[diagnostic.confidence]}</small></div></header>
+          <p>${escapeHtml(diagnostic.finding)}</p>
+          <dl>${diagnostic.evidence.map((evidence) => `
+            <div><dt>${escapeHtml(evidence.label)}</dt><dd><b>${escapeHtml(evidence.value)}</b><span>${escapeHtml(evidence.interpretation)}</span></dd></div>
+          `).join("")}</dl>
+          <div class="diagnostic-experiment">
+            <span>\u53EF\u8BC1\u4F2A\u7684\u4E0B\u4E00\u6B65</span>
+            <strong>${escapeHtml(diagnostic.nextExperiment.label)}</strong>
+            <p>${escapeHtml(diagnostic.nextExperiment.change)}</p>
+            <small>\u9884\u671F\u4FE1\u53F7\uFF1A${escapeHtml(diagnostic.nextExperiment.expectedSignal)}</small>
+          </div>
+          <aside>${escapeHtml(diagnostic.limitation)}</aside>
+        </article>`).join("")}
+    </div>`;
+}
+function renderSchedulePerformance(performance2) {
+  const window = performance2.window;
+  const bottleneck = performance2.primaryBottleneck;
+  const confidenceLabels = { high: "\u8BC1\u636E\u8F83\u5F3A", medium: "\u8BC1\u636E\u4E2D\u7B49", low: "\u8BC1\u636E\u8F83\u5F31" };
+  return `
+    <section class="result-card overview-card">
+      <header class="overview-head"><span class="visual-kicker">\u6392\u7A0B\u6982\u89C8</span><strong>KPI \u603B\u89C8</strong></header>
+      <div class="performance-summary">
+        <div>
+          <span>\u7EDF\u8BA1\u7A97\u53E3</span>
+          <strong>${escapeHtml(window.label)} \xB7 ${formatSeconds(window.duration)} s</strong>
+          <small>\u5254\u9664\u5F00\u5934 ${formatSeconds(window.trimmedStart)} s / \u7ED3\u5C3E ${formatSeconds(window.trimmedEnd)} s</small>
         </div>
-        ${renderLoadLockGantt(ganttCycles)}
-      </aside>
-    </div>
+        <div>
+          <span>\u6700\u53EF\u80FD\u74F6\u9888</span>
+          <strong>${escapeHtml(bottleneck?.label ?? "\u2014")}</strong>
+          <small>${bottleneck ? `\u5BB9\u91CF\u5229\u7528\u7387 ${formatPercent(bottleneck.utilization)} \xB7 ${confidenceLabels[bottleneck.confidence]} \xB7 \u53E6\u6709 ${Math.max(0, performance2.bottleneckCandidates.length - 1)} \u4E2A\u5019\u9009` : "\u6CA1\u6709\u8DB3\u591F\u7684\u8D44\u6E90\u6D3B\u52A8"}</small>
+        </div>
+        <div>
+          <span>\u51FA\u7AD9\u8282\u62CD</span>
+          <strong>${performance2.throughputPerHour > 0 ? `${performance2.throughputPerHour.toFixed(1)} \u7247/h` : "\u2014"}</strong>
+          <small>\u5E73\u5747\u95F4\u9694 ${formatSeconds(performance2.meanDepartureInterval)} s \xB7 \u95F4\u9694 CV ${performance2.departureIntervalCv.toFixed(2)} \xB7 ${performance2.completedWaferCount} \u7247\u6837\u672C</small>
+        </div>
+        <div>
+          <span>\u6676\u5706\u9A7B\u7559\u65F6\u95F4 \xB7 \u52A0\u5DE5\u8154</span>
+          <strong>${performance2.processChamberDwellTime.sampleCount ? `${formatSeconds(performance2.processChamberDwellTime.meanSeconds)} s` : "\u2014"}</strong>
+          <small>\u52A0\u5DE5\u7ED3\u675F \u2192 \u5B8C\u5168\u79BB\u8154 \xB7 \u4E2D\u4F4D ${formatSeconds(performance2.processChamberDwellTime.medianSeconds)} s \xB7 \u6700\u5927 ${formatSeconds(performance2.processChamberDwellTime.maxSeconds)} s \xB7 ${performance2.processChamberDwellTime.sampleCount} \u6B21</small>
+        </div>
+        <div>
+          <span>\u673A\u5668\u624B\u9A7B\u7559\u65F6\u95F4</span>
+          <strong>${performance2.robotWaferDwellTime.sampleCount ? `${formatSeconds(performance2.robotWaferDwellTime.meanSeconds)} s` : "\u2014"}</strong>
+          <small>Pick \u5B8C\u6210 \u2192 Place \u5F00\u59CB\uFF0C\u5DF2\u6263\u9664 PreTrans \u8FD0\u8F93 \xB7 \u6700\u5927 ${formatSeconds(performance2.robotWaferDwellTime.maxSeconds)} s \xB7 ${performance2.robotWaferDwellTime.sampleCount} \u6B21</small>
+        </div>
+        <div>
+          <span>\u6676\u5706\u7CFB\u7EDF\u505C\u7559\u65F6\u95F4</span>
+          <strong>${performance2.waferSystemResidenceTime.sampleCount ? `${formatSeconds(performance2.waferSystemResidenceTime.meanSeconds)} s` : "\u2014"}</strong>
+          <small>\u79BB\u5F00 LP \u2192 \u8FD4\u56DE LP \xB7 CV ${performance2.waferSystemResidenceTime.coefficientOfVariation.toFixed(2)} \xB7 \u6700\u5927 ${formatSeconds(performance2.waferSystemResidenceTime.maxSeconds)} s \xB7 ${performance2.waferSystemResidenceTime.sampleCount} \u7247</small>
+        </div>
+      </div>
+    </section>
+
+    <section class="result-card bottleneck-analysis-card">
+      ${renderBottleneckAnalysis(performance2)}
+    </section>
+
+    <section class="result-card loadlock-swap-card">
+      ${renderLoadLockCard(performance2)}
+    </section>
+
+    ${performance2.diagnostics?.length ? `
+    <section class="result-card next-optimization-card">
+      ${renderNextOptimization(performance2)}
+    </section>` : ""}
     `;
 }
 var VisualizationWorkspace = class {

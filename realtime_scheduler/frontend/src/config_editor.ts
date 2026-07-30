@@ -711,6 +711,37 @@ function switchTab(name) {
   if (name !== "route") closeStepDrawer();
 }
 
+const THEME_STORAGE_KEY = "realtime-scheduler-theme";
+
+/** 应用界面主题，并同步侧栏按钮的可访问状态和文案。 */
+function applyColorTheme(isDarkMode) {
+  document.body.classList.toggle("theme-dark", isDarkMode);
+  const toggle = document.getElementById("themeToggle");
+  toggle.setAttribute("aria-pressed", String(isDarkMode));
+  toggle.setAttribute("aria-label", isDarkMode ? "切换到日间模式" : "切换到夜间模式");
+  toggle.querySelector("span").textContent = isDarkMode ? "日间模式" : "夜间模式";
+}
+
+/** 初始化日夜主题开关，并在可用时保留用户的上次选择。 */
+function initializeThemeToggle() {
+  let isDarkMode = false;
+  try {
+    isDarkMode = window.localStorage.getItem(THEME_STORAGE_KEY) === "dark";
+  } catch {
+    // 隐私模式下无法使用本地存储时，继续使用默认的日间主题。
+  }
+  applyColorTheme(isDarkMode);
+  document.getElementById("themeToggle").addEventListener("click", () => {
+    isDarkMode = !document.body.classList.contains("theme-dark");
+    applyColorTheme(isDarkMode);
+    try {
+      window.localStorage.setItem(THEME_STORAGE_KEY, isDarkMode ? "dark" : "light");
+    } catch {
+      // 主题切换仍可生效，只是不在下次打开时恢复。
+    }
+  });
+}
+
 /** 同步轮数、时间和每轮 CJob/PJob 容器；缩放只裁剪尾部，已有轮次保持原位。 */
 function resizeRounds(count) {
   normalizeRounds();
@@ -2235,4 +2266,5 @@ window.addEventListener("pagehide", () => {
   }).catch(() => {});
 });
 
+initializeThemeToggle();
 renderAll(); renderWorkspaceControls(); checkService(); loadWorkspaceCatalog().catch(error => setWorkspaceStatus(`测试集读取失败：${error.message}`, "dirty"));
