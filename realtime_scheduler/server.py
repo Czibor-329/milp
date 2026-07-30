@@ -2358,22 +2358,23 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
         "rl",
         "milp",
     }
-    discovered_ids = {
-        str(item["id"]).casefold()
-        for item in discover_other_algorithms()
-    }
-    if (
-        normalized_strategy not in builtin_strategies
-        and (
-            other_algorithm_id is None
-            or other_algorithm_id.casefold() not in discovered_ids
-        )
-    ):
-        raise ValueError(
-            "策略只支持 heuristic、loadlock-macro、nn-saea、setrank、"
-            "neuralucb、neural、e2e-ctq、rl、milp，"
-            "或 other_alg 下已发现的标准算法"
-        )
+    if normalized_strategy not in builtin_strategies:
+        if other_algorithm_id is None:
+            raise ValueError(
+                "策略只支持 heuristic、loadlock-macro、nn-saea、setrank、"
+                "neuralucb、neural、e2e-ctq、rl、milp，"
+                "或 other_alg 下已发现的标准算法"
+            )
+        discovered_ids = {
+            str(item["id"]).casefold()
+            for item in discover_other_algorithms()
+        }
+        if other_algorithm_id.casefold() not in discovered_ids:
+            raise ValueError(
+                "策略只支持 heuristic、loadlock-macro、nn-saea、setrank、"
+                "neuralucb、neural、e2e-ctq、rl、milp，"
+                "或 other_alg 下已发现的标准算法"
+            )
     strategy = normalized_strategy if normalized_strategy in builtin_strategies else strategy
     rounds = [row for row in (plan.get("rounds") or []) if isinstance(row, Mapping)]
     round_count = int(_finite_number(plan.get("roundCount"), len(rounds)))
@@ -2442,7 +2443,6 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
         started,
         builtin_strategy=strategy,
     )
-
 
 def execute_plan(raw_plan: Mapping[str, Any]) -> Dict[str, Any]:
     """执行计划；成功和失败都生成可重放的 input_data 格式日志。"""
@@ -4027,6 +4027,9 @@ def main() -> None:
     server = ThreadingHTTPServer((args.host, args.port), ConfigEditorHandler)
     url = f"http://{args.host}:{args.port}/"
     print(f"CT 调度控制台：{url}")
+    print("正在预热算法缓存…", end="", flush=True)
+    discover_other_algorithms()
+    print(" 完成")
     print("按 Ctrl+C 停止服务")
     if args.open:
         webbrowser.open(url)
