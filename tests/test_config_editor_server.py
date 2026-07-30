@@ -8,6 +8,8 @@ import tempfile
 import threading
 import time
 import unittest
+import zipfile
+from io import BytesIO
 from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import patch
@@ -1263,6 +1265,9 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn('id="batchResults"', html)
         self.assertIn('id="batchProgress"', html)
         self.assertIn('id="batchGanttButton"', html)
+        self.assertIn('id="batchLogButton"', html)
+        self.assertIn("function updateBatchLogDownload", html)
+        self.assertIn("/api/run-batches/${encodeURIComponent(result.batchId)}/logs", html)
         self.assertIn("/api/run-batch", html)
         self.assertIn("/api/run-batches/", html)
         self.assertIn('method: "DELETE"', html)
@@ -1654,6 +1659,34 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual(2, completed["completed"])
         self.assertEqual(["succeeded", "succeeded"], [item["status"] for item in completed["items"]])
         self.assertTrue(all(item["resultUrl"] == "/api/results/result-id" for item in completed["items"]))
+
+    def test_batch_log_archive_contains_each_available_test_log_and_manifest(self) -> None:
+        """批量日志下载应将各测试日志及其测试集映射一次性打包。"""
+        batch_id = "a" * 32
+        config_server._BATCH_RUNS[batch_id] = {
+            "batchId": batch_id,
+            "deviceName": "fixture.json",
+            "group": "回归",
+            "strategy": "heuristic",
+            "items": [
+                {"index": 0, "testId": "test-a", "testName": "案例/A", "status": "succeeded", "logUrl": "/api/logs/log-a"},
+                {"index": 1, "testId": "test-b", "testName": "案例 B", "status": "cancelled"},
+                {"index": 2, "testId": "test-c", "testName": "案例 C", "status": "failed", "logUrl": "/api/logs/log-c"},
+            ],
+        }
+        try:
+            with patch.object(config_server, "read_reproduction_log", side_effect=lambda log_id: [{"Type": log_id}]):
+                content, filename = config_server.build_workspace_batch_log_archive(batch_id)
+        finally:
+            config_server._BATCH_RUNS.pop(batch_id, None)
+
+        self.assertEqual(f"ct-batch-logs-{batch_id[:8]}.zip", filename)
+        with zipfile.ZipFile(BytesIO(content)) as archive:
+            self.assertEqual(["t01_案例_A.json", "t03_案例 C.json", "manifest.json"], archive.namelist())
+            manifest = json.loads(archive.read("manifest.json"))
+        self.assertEqual(2, manifest["exportedLogCount"])
+        self.assertEqual("t01_案例_A.json", manifest["items"][0]["logFile"])
+        self.assertEqual("", manifest["items"][1]["logFile"])
 
     def test_non_heuristic_batch_creates_baseline_and_reports_improvement(self) -> None:
         """其他策略首次运行时应先补算 Heuristic，并返回相对改善。"""

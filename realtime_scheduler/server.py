@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+from io import BytesIO
 import json
 import math
 import os
@@ -26,6 +27,7 @@ import threading
 import time
 import uuid
 import webbrowser
+from zipfile import ZIP_DEFLATED, ZipFile
 from collections import OrderedDict
 from contextlib import contextmanager
 from copy import deepcopy
@@ -2835,6 +2837,59 @@ def read_reproduction_log(log_id: str) -> Optional[List[Dict[str, Any]]]:
     return None
 
 
+def build_workspace_batch_log_archive(batch_id: str) -> Tuple[bytes, str]:
+    """打包一个批量任务中已生成的测试复现日志。
+
+    参数 ``batch_id`` 为批量任务 ID。返回 ZIP 二进制内容及推荐下载文件名；每条
+    日志采用与单条日志下载相同的逐行 JSON 格式，压缩包中的 ``manifest.json``
+    记录测试集、运行状态及对应文件名。批量任务不存在或尚未生成任何日志时抛出异常。
+    """
+    batch = read_workspace_batch_run(batch_id)
+    if batch is None:
+        raise LookupError("批量任务不存在或已过期")
+
+    manifest_items: List[Dict[str, Any]] = []
+    archive_buffer = BytesIO()
+    with ZipFile(archive_buffer, "w", compression=ZIP_DEFLATED) as archive:
+        for item in sorted(batch.get("items") or [], key=lambda value: int(value.get("index", 0))):
+            if not isinstance(item, Mapping):
+                continue
+            log_url = str(item.get("logUrl") or "")
+            log_id = log_url.rsplit("/", 1)[-1]
+            reproduction_log = read_reproduction_log(log_id) if log_id else None
+            manifest_item = {
+                "index": int(item.get("index", 0)) + 1,
+                "testId": str(item.get("testId") or ""),
+                "testName": str(item.get("testName") or ""),
+                "status": str(item.get("status") or "queued"),
+                "logFile": "",
+            }
+            if reproduction_log is not None:
+                safe_name = re.sub(
+                    r'[\\/:*?"<>|\x00-\x1f]+', "_", manifest_item["testName"],
+                ).strip(" ._") or f"测试{manifest_item['index']}"
+                log_file = f"t{manifest_item['index']:02d}_{safe_name}.json"
+                archive.writestr(log_file, format_reproduction_log(reproduction_log))
+                manifest_item["logFile"] = log_file
+            manifest_items.append(manifest_item)
+
+        exported_count = sum(bool(item["logFile"]) for item in manifest_items)
+        if not exported_count:
+            raise ValueError("本批次尚无可导出的复现日志")
+        archive.writestr(
+            "manifest.json",
+            json.dumps({
+                "batchId": batch_id,
+                "deviceName": str(batch.get("deviceName") or ""),
+                "group": str(batch.get("group") or ""),
+                "strategy": str(batch.get("strategy") or ""),
+                "exportedLogCount": exported_count,
+                "items": manifest_items,
+            }, ensure_ascii=False, indent=2),
+        )
+    return archive_buffer.getvalue(), f"ct-batch-logs-{batch_id[:8]}.zip"
+
+
 def clear_exported_artifacts() -> Dict[str, int]:
     """删除全部已导出的结果和复现日志，并同步清空内存缓存。
 
@@ -2985,6 +3040,16 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                     download_name=f"ct-input-log-{log_id[:8]}.json",
                     top_level_item_per_line=True,
                 )
+            return
+        batch_parts = [part for part in path.split("/") if part]
+        if len(batch_parts) == 4 and batch_parts[:2] == ["api", "run-batches"] and batch_parts[3] == "logs":
+            try:
+                content, download_name = build_workspace_batch_log_archive(batch_parts[2])
+                self._send_bytes(content, "application/zip", download_name)
+            except LookupError as error:
+                self._send_json({"ok": False, "error": str(error)}, HTTPStatus.NOT_FOUND)
+            except ValueError as error:
+                self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
             return
         if path.startswith("/api/run-batches/"):
             batch = read_workspace_batch_run(path.rsplit("/", 1)[-1])
@@ -3252,6 +3317,16 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(content)))
         self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(content)
+
+    def _send_bytes(self, content: bytes, content_type: str, download_name: str) -> None:
+        """发送一次性生成的二进制下载内容。"""
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(content)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Disposition", f'attachment; filename="{download_name}"')
         self.end_headers()
         self.wfile.write(content)
 

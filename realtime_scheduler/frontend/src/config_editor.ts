@@ -1901,6 +1901,7 @@ function showBatchProgress(result) {
   document.getElementById("batchProgressCount").textContent = `${percent}%`;
   document.getElementById("batchProgressBar").style.width = `${percent}%`;
   state.batchResult = result;
+  updateBatchLogDownload(result);
   if (!state.selectedBatchTestId) showBatchOverviewMetrics(result);
   renderBatchItems(result.items || []);
   const selectedIndex = (result.items || []).findIndex((item, index) => String(item.testId || `index-${index}`) === state.selectedBatchTestId);
@@ -1967,9 +1968,24 @@ function batchGanttUrl(items) {
   return params.size ? `/movelist_gantt_viewer.html?${params.toString()}` : "";
 }
 
+/** 更新当前批量任务的 ZIP 日志下载入口；执行中可下载已完成测试的日志。 */
+function updateBatchLogDownload(result) {
+  const button = document.getElementById("batchLogButton");
+  const hasLogs = (result.items || []).some(item => item.logUrl);
+  if (!result.batchId || !hasLogs) {
+    button.href = "#";
+    button.setAttribute("aria-disabled", "true");
+    return;
+  }
+  button.href = `/api/run-batches/${encodeURIComponent(result.batchId)}/logs`;
+  button.download = `ct-batch-logs-${String(result.batchId).slice(0, 8)}.zip`;
+  button.removeAttribute("aria-disabled");
+}
+
 /** 汇总批量运行指标，并为每个测试保留甘特图和复现日志入口。 */
 function showBatchResult(result) {
   state.batchResult = result;
+  updateBatchLogDownload(result);
   document.getElementById("testGroupAnalysisButton").hidden = false;
   if (!state.selectedBatchTestId) showBatchOverviewMetrics(result);
   const resultErrors = result.items.flatMap((item, index) => {
@@ -2211,6 +2227,7 @@ function showResult(result) {
   document.getElementById("batchProgress").classList.remove("visible");
   document.getElementById("batchResults").innerHTML = "";
   const allGantt = document.getElementById("batchGanttButton"); allGantt.href = "#"; allGantt.setAttribute("aria-disabled", "true");
+  updateBatchLogDownload({});
   const baseline = result.baseline || {}, baselineReady = baseline.status === "succeeded";
   const cpuTime = Number(result.cpuTimeMs ?? result.totalElapsedMs);
   document.getElementById("metricContext").textContent = "当前测试";
@@ -2334,6 +2351,7 @@ document.getElementById("testGroupAnalysisButton").addEventListener("click", () 
 });
 document.getElementById("logButton").addEventListener("click", event => { if (event.currentTarget.getAttribute("aria-disabled") === "true") event.preventDefault(); });
 document.getElementById("ganttButton").addEventListener("click", event => { if (event.currentTarget.getAttribute("aria-disabled") === "true") event.preventDefault(); });
+document.getElementById("batchLogButton").addEventListener("click", event => { if (event.currentTarget.getAttribute("aria-disabled") === "true") event.preventDefault(); });
 document.getElementById("batchGanttButton").addEventListener("click", event => { if (event.currentTarget.getAttribute("aria-disabled") === "true") event.preventDefault(); });
 document.getElementById("closeDrawer").addEventListener("click", closeStepDrawer);
 document.getElementById("drawerLayer").addEventListener("click", event => { if (event.target.id === "drawerLayer") closeStepDrawer(); });

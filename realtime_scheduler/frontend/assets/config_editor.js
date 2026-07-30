@@ -3287,6 +3287,7 @@ function showBatchProgress(result) {
   document.getElementById("batchProgressCount").textContent = `${percent}%`;
   document.getElementById("batchProgressBar").style.width = `${percent}%`;
   state.batchResult = result;
+  updateBatchLogDownload(result);
   if (!state.selectedBatchTestId) showBatchOverviewMetrics(result);
   renderBatchItems(result.items || []);
   const selectedIndex = (result.items || []).findIndex((item, index) => String(item.testId || `index-${index}`) === state.selectedBatchTestId);
@@ -3345,8 +3346,21 @@ function batchGanttUrl(items) {
   });
   return params.size ? `/movelist_gantt_viewer.html?${params.toString()}` : "";
 }
+function updateBatchLogDownload(result) {
+  const button = document.getElementById("batchLogButton");
+  const hasLogs = (result.items || []).some((item) => item.logUrl);
+  if (!result.batchId || !hasLogs) {
+    button.href = "#";
+    button.setAttribute("aria-disabled", "true");
+    return;
+  }
+  button.href = `/api/run-batches/${encodeURIComponent(result.batchId)}/logs`;
+  button.download = `ct-batch-logs-${String(result.batchId).slice(0, 8)}.zip`;
+  button.removeAttribute("aria-disabled");
+}
 function showBatchResult(result) {
   state.batchResult = result;
+  updateBatchLogDownload(result);
   document.getElementById("testGroupAnalysisButton").hidden = false;
   if (!state.selectedBatchTestId) showBatchOverviewMetrics(result);
   const resultErrors = result.items.flatMap((item, index) => {
@@ -3571,6 +3585,7 @@ function showResult(result) {
   const allGantt = document.getElementById("batchGanttButton");
   allGantt.href = "#";
   allGantt.setAttribute("aria-disabled", "true");
+  updateBatchLogDownload({});
   const baseline = result.baseline || {}, baselineReady = baseline.status === "succeeded";
   const cpuTime = Number(result.cpuTimeMs ?? result.totalElapsedMs);
   document.getElementById("metricContext").textContent = "\u5F53\u524D\u6D4B\u8BD5";
@@ -3735,6 +3750,9 @@ document.getElementById("logButton").addEventListener("click", (event) => {
   if (event.currentTarget.getAttribute("aria-disabled") === "true") event.preventDefault();
 });
 document.getElementById("ganttButton").addEventListener("click", (event) => {
+  if (event.currentTarget.getAttribute("aria-disabled") === "true") event.preventDefault();
+});
+document.getElementById("batchLogButton").addEventListener("click", (event) => {
   if (event.currentTarget.getAttribute("aria-disabled") === "true") event.preventDefault();
 });
 document.getElementById("batchGanttButton").addEventListener("click", (event) => {
