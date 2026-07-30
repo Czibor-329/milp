@@ -2023,7 +2023,7 @@ function applyTestCase(testCase) {
   document.querySelectorAll("[data-option]").forEach((input) => {
     input.value = state.options[input.dataset.option] ?? input.value;
   });
-  document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro", "nn-saea", "setrank", "neuralucb", "neural", "rl"].includes(state.strategy));
+  document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro", "nn-saea", "setrank", "neuralucb", "neural", "e2e-ctq", "rl"].includes(state.strategy));
   document.getElementById("heuristicObjectiveOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro"].includes(state.strategy));
   document.getElementById("nnSAEAOptions").classList.toggle("is-hidden", state.strategy !== "nn-saea");
   document.getElementById("neuralucbOptions").classList.toggle("is-hidden", state.strategy !== "neuralucb");
@@ -3796,13 +3796,14 @@ async function checkService() {
     if (!response.ok) throw new Error();
     const status = await response.json(), compatible = status.schemaVersion === EXPECTED_API_SCHEMA;
     state.serviceCompatible = compatible;
-    const loadlockMacroAvailable = status.strategies?.["loadlock-macro"] === true, nnSAEAAvailable = status.strategies?.["nn-saea"] === true, setrankAvailable = status.strategies?.setrank === true, neuralucbAvailable = status.strategies?.neuralucb === true, neuralAvailable = status.strategies?.neural === true, rlAvailable = status.strategies?.rl !== false, milpAvailable = status.strategies?.milp === true;
+    const loadlockMacroAvailable = status.strategies?.["loadlock-macro"] === true, nnSAEAAvailable = status.strategies?.["nn-saea"] === true, setrankAvailable = status.strategies?.setrank === true, neuralucbAvailable = status.strategies?.neuralucb === true, neuralAvailable = status.strategies?.neural === true, e2eCTQAvailable = status.strategies?.["e2e-ctq"] === true, rlAvailable = status.strategies?.rl !== false, milpAvailable = status.strategies?.milp === true;
     state.algorithmMetadata = status.algorithmMetadata || {};
     document.getElementById("loadlockMacroStrategyInput").disabled = !loadlockMacroAvailable;
     document.getElementById("nnSAEAStrategyInput").disabled = !nnSAEAAvailable;
     document.getElementById("setrankStrategyInput").disabled = !setrankAvailable;
     document.getElementById("neuralucbStrategyInput").disabled = !neuralucbAvailable;
     document.getElementById("neuralStrategyInput").disabled = !neuralAvailable;
+    document.getElementById("e2eCTQStrategyInput").disabled = !e2eCTQAvailable;
     document.getElementById("rlStrategyInput").disabled = !rlAvailable;
     document.getElementById("milpStrategyInput").disabled = !milpAvailable;
     renderOtherAlgorithmOptions(status.otherAlgorithms || []);
@@ -3945,14 +3946,14 @@ document.addEventListener("change", (event) => {
   }
   if (event.target.name === "strategy") {
     state.strategy = event.target.value;
-    if (state.strategy === "neural") state.options.loadLockManager = "joint";
+    if (["neural", "e2e-ctq"].includes(state.strategy)) state.options.loadLockManager = "joint";
     else if (["heuristic", "loadlock-macro", "nn-saea", "setrank", "neuralucb", "rl"].includes(state.strategy)) state.options.loadLockManager = "petri-look";
     if (state.strategy === "milp") {
       resizeRounds(1);
       document.getElementById("roundCount").value = 1;
     }
     document.getElementById("roundCount").disabled = state.strategy === "milp";
-    document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro", "nn-saea", "setrank", "neuralucb", "neural", "rl"].includes(state.strategy));
+    document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro", "nn-saea", "setrank", "neuralucb", "neural", "e2e-ctq", "rl"].includes(state.strategy));
     document.getElementById("heuristicObjectiveOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro"].includes(state.strategy));
     document.getElementById("nnSAEAOptions").classList.toggle("is-hidden", state.strategy !== "nn-saea");
     document.getElementById("neuralucbOptions").classList.toggle("is-hidden", state.strategy !== "neuralucb");
