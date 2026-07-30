@@ -3351,14 +3351,16 @@ function renderParameterComparisonCard(index, baseline, experiment) {
 function renderParameterComparison() {
   const panel = document.getElementById("parameterComparisonPanel");
   const comparison = state.parameterComparison;
-  if (!comparison?.baseline) {
+  if (!comparison?.baseline || !comparison.variants.length) {
     panel.hidden = true;
+    document.getElementById("parameterComparisonBase").textContent = "";
+    document.getElementById("parameterComparisonResults").innerHTML = "";
     return;
   }
   const baseline = comparison.baseline;
   panel.hidden = false;
   document.getElementById("parameterComparisonBase").textContent = `\u57FA\u51C6\uFF1A${displayStrategyName(baseline.plan.strategy)} \xB7 ${batchParameterSummary(baseline.options, baseline.plan.strategy)}`;
-  document.getElementById("parameterComparisonResults").innerHTML = comparison.variants.length ? comparison.variants.map((variant, index) => renderParameterComparisonCard(index, baseline, variant)).join("") : `<div class="comparison-empty">\u5DF2\u4FDD\u5B58\u57FA\u51C6\u7ED3\u679C\u3002\u70B9\u51FB\u201C\u8FD0\u884C\u5BF9\u6BD4\u6D4B\u8BD5\u201D\u9009\u62E9\u7B56\u7565\u548C\u53C2\u6570\u540E\uFF0C\u5DEE\u503C\u4F1A\u76F4\u63A5\u663E\u793A\u5728\u8FD9\u91CC\u3002</div>`;
+  document.getElementById("parameterComparisonResults").innerHTML = comparison.variants.map((variant, index) => renderParameterComparisonCard(index, baseline, variant)).join("");
 }
 function renderParameterComparisonStrategyFields(strategy, options = {}) {
   const definitions = {

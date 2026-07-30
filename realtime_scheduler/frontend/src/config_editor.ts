@@ -1964,16 +1964,17 @@ function renderParameterComparisonCard(index, baseline, experiment) {
 function renderParameterComparison() {
   const panel = document.getElementById("parameterComparisonPanel");
   const comparison = state.parameterComparison;
-  if (!comparison?.baseline) {
+  if (!comparison?.baseline || !comparison.variants.length) {
     panel.hidden = true;
+    document.getElementById("parameterComparisonBase").textContent = "";
+    document.getElementById("parameterComparisonResults").innerHTML = "";
     return;
   }
   const baseline = comparison.baseline;
   panel.hidden = false;
   document.getElementById("parameterComparisonBase").textContent = `基准：${displayStrategyName(baseline.plan.strategy)} · ${batchParameterSummary(baseline.options, baseline.plan.strategy)}`;
-  document.getElementById("parameterComparisonResults").innerHTML = comparison.variants.length
-    ? comparison.variants.map((variant, index) => renderParameterComparisonCard(index, baseline, variant)).join("")
-    : `<div class="comparison-empty">已保存基准结果。点击“运行对比测试”选择策略和参数后，差值会直接显示在这里。</div>`;
+  document.getElementById("parameterComparisonResults").innerHTML = comparison.variants
+    .map((variant, index) => renderParameterComparisonCard(index, baseline, variant)).join("");
 }
 
 /** 根据所选策略绘制对比窗口中的策略专属参数。 */

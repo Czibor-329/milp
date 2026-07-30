@@ -318,7 +318,7 @@
     .result-actions { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
     .btn.analysis { border-color: #bcd8cb; color: #087f5b; background: #ecf8f2; }
     .btn.analysis:hover { border-color: #75b79b; background: #e1f4ea; }
-    .parameter-comparison { display: grid; gap: 12px; margin-bottom: 16px; padding: 16px; border: 1px solid #cbd8f4; border-radius: 12px; background: #f7f9ff; }
+    .parameter-comparison { display: grid; gap: 12px; margin: 24px 0 16px; padding: 16px; border: 1px solid #cbd8f4; border-radius: 12px; background: #f7f9ff; }
     .parameter-comparison[hidden] { display: none; }
     .parameter-comparison-head h3 { margin: 3px 0 5px; font-size: 17px; }
     .parameter-comparison-head p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
