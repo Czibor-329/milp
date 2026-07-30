@@ -571,11 +571,6 @@ function renderCategoryBars(resource, windowDuration) {
 function renderBottleneckAnalysis(performance2) {
   const { window, bottleneckCandidates, resources } = performance2;
   const confidenceLabels = { high: "\u8BC1\u636E\u8F83\u5F3A", medium: "\u8BC1\u636E\u4E2D\u7B49", low: "\u8BC1\u636E\u8F83\u5F31" };
-  const candidateKindLabels = {
-    "process-group": "\u5DE5\u5E8F\u5BB9\u91CF",
-    robot: "\u4F20\u8F93\u8D44\u6E90",
-    "loadlock-group": "LoadLock \u5BB9\u91CF"
-  };
   const resourceKindLabels = {
     robot: "\u673A\u68B0\u624B",
     process: "\u5DE5\u827A\u8154",
@@ -583,84 +578,40 @@ function renderBottleneckAnalysis(performance2) {
     loadport: "LoadPort",
     auxiliary: "\u8F85\u52A9\u6A21\u5757"
   };
-  const candidateRows = bottleneckCandidates.map((candidate, index) => {
-    const ownedResources = resources.filter(
-      (r) => candidate.resourceNames.includes(r.name) && r.busyTime > PERFORMANCE_DISPLAY_TOLERANCE
-    );
-    const resourceBars = ownedResources.map((resource) => `
-      <div class="bl-candidate-resource">
-        <span class="bl-resource-name">${escapeHtml(resource.name)}</span>
-        <div class="utilization-line">
-          <div class="utilization-value">${formatPercent(resource.utilization)}</div>
-          <div class="utilization-track" aria-label="${escapeHtml(resource.name)} \u5360\u7528\u7387 ${formatPercent(resource.utilization)}">${renderCategoryBars(resource, window.duration)}</div>
-          <small>${formatSeconds(resource.busyTime)} s</small>
-        </div>
-      </div>
-    `).join("");
+  const activeResources = resources.filter((resource) => resource.busyTime > PERFORMANCE_DISPLAY_TOLERANCE).sort((left, right) => right.utilization - left.utilization);
+  const displayedResources = activeResources.slice(0, 6);
+  const remainingResources = activeResources.slice(displayedResources.length);
+  const resourceRows = (items) => items.map((resource, index) => {
+    const candidate = bottleneckCandidates.filter((item) => item.resourceNames.includes(resource.name)).sort((left, right) => right.score - left.score)[0];
+    const evidenceScore = candidate ? Math.round(candidate.score * 100) : null;
+    const evidenceLabel = candidate ? confidenceLabels[candidate.confidence] : "\u672A\u5165\u9009\u5019\u9009";
     return `
-      <li class="${index === 0 ? "is-primary" : ""}">
-        <span class="candidate-rank">${index + 1}</span>
-        <div class="candidate-main">
-          <div><strong>${escapeHtml(candidate.label)}</strong><span>${escapeHtml(candidateKindLabels[candidate.kind])}</span></div>
-          <small>${candidate.evidence.map(escapeHtml).join(" \xB7 ")}</small>
+      <li class="resource-utilization-row">
+        <div class="resource-utilization-name">
+          <span>${index + 1}</span>
+          <div><strong>${escapeHtml(resource.name)}</strong><small>${escapeHtml(resourceKindLabels[resource.kind])}</small></div>
         </div>
-        <div class="candidate-metrics">
-          <strong>${formatPercent(candidate.utilization)}</strong>
-          <span>\u5BB9\u91CF\u5229\u7528\u7387</span>
-        </div>
-        <div class="candidate-score">
-          <strong>${Math.round(candidate.score * 100)}</strong>
-          <span>\u53EF\u80FD\u6027\u5206 \xB7 ${confidenceLabels[candidate.confidence]}</span>
-        </div>
-      </li>
-      <li class="bl-candidate-bars">${resourceBars}</li>`;
+        <strong class="resource-utilization-percent">${formatPercent(resource.utilization)}</strong>
+        <div class="utilization-track" aria-label="${escapeHtml(resource.name)} \u5360\u7528\u7387 ${formatPercent(resource.utilization)}">${renderCategoryBars(resource, window.duration)}</div>
+        <small class="resource-utilization-time">${formatSeconds(resource.busyTime)} s</small>
+        <div class="resource-evidence-score"><strong>${evidenceScore ?? "\u2014"}</strong><small>${evidenceLabel}</small></div>
+      </li>`;
   }).join("");
-  const candidateResourceNames = new Set(bottleneckCandidates.flatMap((c) => c.resourceNames));
-  const otherResources = resources.filter(
-    (r) => r.busyTime > PERFORMANCE_DISPLAY_TOLERANCE && !candidateResourceNames.has(r.name)
-  );
-  const otherResourceRows = otherResources.length === 0 ? "" : `<details class="other-resources-section">
-        <summary>\u5176\u4ED6\u6D3B\u8DC3\u8D44\u6E90\uFF08${otherResources.length} \u4E2A\uFF09</summary>
-        <div class="performance-table-wrap">
-          <table class="performance-table" aria-label="\u975E\u74F6\u9888\u8D44\u6E90\u5360\u7528\u8BE6\u60C5">
-            <thead><tr><th>\u8D44\u6E90</th><th>\u8D44\u6E90\u5360\u7528\u7387</th><th>\u5E73\u5747\u6D3B\u8DC3\u671F</th><th>\u6700\u957F\u7A7A\u95F2</th></tr></thead>
-            <tbody>
-              ${otherResources.map((resource) => `
-                <tr>
-                  <th scope="row">
-                    <div class="resource-heading">
-                      <span class="resource-name">${escapeHtml(resource.name)}</span>
-                      <small>${escapeHtml(resourceKindLabels[resource.kind])}</small>
-                    </div>
-                  </th>
-                  <td class="utilization-cell">
-                    <div class="utilization-line">
-                      <div class="utilization-value">${formatPercent(resource.utilization)}</div>
-                      <div class="utilization-track" aria-label="${escapeHtml(resource.name)} \u5360\u7528\u7387 ${formatPercent(resource.utilization)}">${renderCategoryBars(resource, window.duration)}</div>
-                      <small>${formatSeconds(resource.busyTime)} s</small>
-                    </div>
-                  </td>
-                  <td class="performance-number">${formatSeconds(resource.averageActivePeriod)} s <small>${resource.activePeriodCount} \u6BB5</small></td>
-                  <td class="performance-number">${formatSeconds(resource.longestIdlePeriod)} s</td>
-                </tr>`).join("")}
-            </tbody>
-          </table>
-        </div>
-      </details>`;
   const legend = ACTIVITY_CATEGORIES.map((category) => `<span><i class="performance-swatch category-${category}"></i>${ACTIVITY_CATEGORY_LABELS[category]}</span>`).join("");
   return `
     <header class="bottleneck-analysis-head">
       <div>
         <strong>\u74F6\u9888\u5206\u6790</strong>
-        <span>\u5019\u9009\u6309\u5BB9\u91CF\u5229\u7528\u7387\u6392\u5E8F\uFF0C\u8BC4\u5206\u7EFC\u5408\u8FDE\u7EED\u6027\u4E0E\u540C\u7C7B\u76F8\u5BF9\u5F3A\u5EA6</span>
+        <span>\u9ED8\u8BA4\u663E\u793A\u5229\u7528\u7387\u6700\u9AD8\u7684 6 \u4E2A\u6D3B\u8DC3\u8D44\u6E90\uFF0C\u5E76\u7ED9\u51FA\u5BF9\u5E94\u7684\u74F6\u9888\u8BC1\u636E\u5F97\u5206\u3002</span>
       </div>
-      <small>\u5171 ${bottleneckCandidates.length} \u4E2A\u8F83\u53EF\u80FD\u5019\u9009</small>
+      <label class="bottleneck-window-control">\u7EDF\u8BA1\u53E3\u5F84<span class="bottleneck-window-slot"></span></label>
     </header>
-    <ol class="bottleneck-analysis-list">
-      ${candidateRows}
+    <div class="resource-utilization-head" aria-hidden="true"><span>\u8D44\u6E90</span><span>\u5229\u7528\u7387</span><span>\u5360\u7528\u7EC4\u6210</span><span>\u6D3B\u8DC3\u65F6\u957F</span><span>\u74F6\u9888\u8BC1\u636E\u5F97\u5206</span></div>
+    <ol class="resource-utilization-list">
+      ${resourceRows(displayedResources)}
     </ol>
     <div class="performance-legend" aria-label="\u5360\u7528\u7EC4\u6210\u56FE\u4F8B">${legend}</div>
-    ${otherResourceRows}
+    ${remainingResources.length ? `<details class="additional-resource-details"><summary>\u67E5\u770B\u5176\u4ED6\u6D3B\u8DC3\u8D44\u6E90\uFF08${remainingResources.length} \u4E2A\uFF09</summary><ol class="resource-utilization-list">${resourceRows(remainingResources)}</ol></details>` : ""}
     <p class="performance-window-note">${escapeHtml(window.detail)}</p>`;
 }
 function renderLoadLockCard(performance2) {
@@ -1026,6 +977,11 @@ var VisualizationWorkspace = class {
       this.analysis = result.analysis;
       this.bottleneckSummary = result.bottleneck;
       this.elements.performance.innerHTML = renderSchedulePerformance(result.analysis);
+      const windowSlot = this.elements.performance.querySelector(".bottleneck-window-slot");
+      if (windowSlot) {
+        this.elements.performanceWindow.tabIndex = 0;
+        windowSlot.append(this.elements.performanceWindow);
+      }
     } catch (error) {
       if (requestVersion !== this.analysisRequestVersion) return;
       this.analysis = null;
