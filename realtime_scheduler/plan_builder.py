@@ -233,6 +233,17 @@ def _slot_list(value: Any) -> List[int]:
     return slots or [FIRST_SLOT_ID]
 
 
+def _station_slot_ids(station: Mapping[str, Any]) -> List[int]:
+    """从站点配置读取真实物理槽位编号。"""
+    raw_slots = station.get("Slots")
+    if isinstance(raw_slots, Sequence) and not isinstance(raw_slots, (str, bytes)):
+        return [int(item) for item in raw_slots]
+    capacity = _finite_number(station.get("Capacity"), 0)
+    if capacity >= 1:
+        return list(range(1, int(capacity) + 1))
+    return [FIRST_SLOT_ID]
+
+
 def _finite_number(value: Any, default: float) -> float:
     """读取有限浮点数，非法值回退默认值。"""
     try:
@@ -533,6 +544,7 @@ def build_route(
     recipe_by_name: Mapping[str, Mapping[str, Any]],
     clean_by_name: Mapping[str, Mapping[str, Any]],
     robot_names: Optional[set[str]] = None,
+    station_slots: Optional[Mapping[str, List[int]]] = None,
 ) -> Dict[str, Any]:
     """把控制台 Route 展开成解析器接受的标准 Route。"""
     route_name = str(route.get("name") or "").strip()
@@ -628,8 +640,11 @@ def build_route(
                     after_pjob_names,
                     clean_by_name,
                 )
+            slot_id = _slot_list(visit.get("slotIds") or visit.get("SlotID"))
+            if station_slots and str(station) in station_slots and sorted(slot_id) == [FIRST_SLOT_ID]:
+                slot_id = list(station_slots[str(station)])
             visits.append({
-                "SlotID": _slot_list(visit.get("slotIds") or visit.get("SlotID")),
+                "SlotID": slot_id,
                 "StationName": station,
                 "ProcessRecipe": recipe_name,
                 "MoveTimeOffset": deepcopy(dict(move_offsets)),
@@ -839,8 +854,13 @@ def build_round_update(
     route_by_name = _name_index(routes, "Route")
     tool_topo = plan["device"]
     robot_names = {str(name) for name in (tool_topo.get("Robots") or {})}
+    station_slots_map = {
+        str(station_name): _station_slot_ids(station_data)
+        for station_name, station_data in (tool_topo.get("Stations") or {}).items()
+        if isinstance(station_data, Mapping)
+    }
     built_routes = {
-        name: build_route(route, recipe_by_name, clean_by_name, robot_names)
+        name: build_route(route, recipe_by_name, clean_by_name, robot_names, station_slots_map)
         for name, route in route_by_name.items()
     }
     cjobs = _round_cjob_rows(round_config)

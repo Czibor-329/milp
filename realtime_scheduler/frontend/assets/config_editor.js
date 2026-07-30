@@ -2931,8 +2931,29 @@ function collectRecipes(routes = state.routes) {
   });
   return recipes;
 }
+function stationSlotList(stationName) {
+  const station = state.device?.Stations?.[stationName];
+  if (!station) return [1];
+  if (Array.isArray(station.Slots) && station.Slots.length) return station.Slots.map(Number);
+  const capacity = Number(station.Capacity) || 0;
+  return capacity >= 1 ? Array.from({ length: capacity }, (_, index) => index + 1) : [1];
+}
+function expandVisitSlotIds() {
+  if (!state.device) return;
+  for (const route of state.routes) {
+    for (const stage of route.stages || []) {
+      for (const visit of stage.visits || []) {
+        const stationName = String(visit.stationName || "").trim();
+        if (!stationName) continue;
+        const slots = stationSlotList(stationName);
+        visit.slotIds = slots.join(",");
+      }
+    }
+  }
+}
 function buildPayload() {
   normalizeRounds();
+  expandVisitSlotIds();
   const routes = selectReferencedRoutes2(state.routes, state.rounds).map((route) => ({ ...normalizeRoute(route), stages: route.stages.map((stage) => ({ ...stage, visits: stage.visits.map((visit) => structuredClone(visit)) })) }));
   const cleans = state.cleans.map(runtimeClean);
   return { schemaVersion: EXPECTED_API_SCHEMA, workspaceDeviceId: state.workspaceDeviceId, workspaceTestId: state.testCaseId, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options: state.options, recipes: collectRecipes(routes), cleans, routes, rounds: structuredClone(state.rounds) };
