@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>调度平台</title>
-  <link rel="stylesheet" href="/assets/config_editor.css?v=1.1.0">
+  <link rel="stylesheet" href="/assets/config_editor.css?v=1.1.3">
 </head>
 <body>
   <a class="skip-link" href="#mainContent">跳到主要内容</a>
@@ -54,7 +54,7 @@
               <div class="workspace-device-row">
                 <label for="deviceSelect">设备</label>
                 <div class="workspace-device-controls">
-                  <select id="deviceSelect"><option value="">尚未导入设备</option></select>
+                  <select id="deviceSelect" data-compact-label="设备"><option value="">尚未导入设备</option></select>
                   <label class="btn workspace-icon-button import-device" title="导入新设备" aria-label="导入新设备">
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
                     <input id="deviceFile" type="file" accept=".json,application/json">
@@ -69,7 +69,7 @@
                 <section class="field workspace-editor-section">
                   <label for="testGroupSelect">测试组别</label>
                   <div class="workspace-control-row">
-                    <select id="testGroupSelect"><option value="">未分组</option></select>
+                    <select id="testGroupSelect" data-compact-label="测试组别"><option value="">未分组</option></select>
                     <div class="workspace-icon-actions" aria-label="测试组别操作">
                       <button class="btn workspace-icon-button" id="newGroupButton" type="button" title="新增组别" aria-label="新增组别" disabled>
                         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
@@ -89,7 +89,7 @@
                   <label for="testCaseSelect">测试</label>
                   <div class="workspace-control-row workspace-test-row">
                     <div class="test-picker">
-                      <select id="testCaseSelect"><option value="">请先选择设备</option></select>
+                      <select id="testCaseSelect" data-compact-label="测试"><option value="">请先选择设备</option></select>
                       <input id="testCaseName" value="" placeholder="测试名称" aria-label="测试重命名" disabled>
                     </div>
                     <div class="workspace-icon-actions" aria-label="测试操作">
@@ -335,6 +335,6 @@
     </aside>
   </div>
 
-  <script type="module" src="/assets/config_editor.js?v=1.1.0"></script>
+  <script type="module" src="/assets/config_editor.js?v=1.1.1"></script>
 </body>
 </html>

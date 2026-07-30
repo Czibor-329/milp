@@ -1785,6 +1785,100 @@ function showWorkspaceDialog({ title, message, value = "", needsInput = false, d
     resolve(dialog.returnValue === "confirm" ? needsInput ? input.value.trim() : true : null);
   }, { once: true }));
 }
+var compactSelectMenus = /* @__PURE__ */ new WeakMap();
+function compactSelectMenu(wrapper) {
+  return compactSelectMenus.get(wrapper) || wrapper.querySelector(".compact-select-menu");
+}
+function closeCompactSelect(wrapper) {
+  const trigger = wrapper.querySelector(".compact-select-trigger");
+  const menu = compactSelectMenu(wrapper);
+  wrapper.classList.remove("is-open");
+  trigger.setAttribute("aria-expanded", "false");
+  menu.hidden = true;
+  menu.removeAttribute("style");
+  if (menu.parentElement !== wrapper) wrapper.append(menu);
+}
+function closeCompactSelects(exceptSelect = null) {
+  document.querySelectorAll(".compact-select.is-open").forEach((wrapper) => {
+    if (wrapper.querySelector("select") !== exceptSelect) closeCompactSelect(wrapper);
+  });
+}
+function compactSelectTargets() {
+  return document.querySelectorAll("select[data-compact-label], #roundList select:not([multiple])");
+}
+function compactSelectLabel(select) {
+  return select.dataset.compactLabel || select.getAttribute("aria-label") || select.closest(".field")?.querySelector("label")?.textContent?.trim() || "\u8BF7\u9009\u62E9";
+}
+function refreshCompactSelect(select) {
+  const wrapper = select.parentElement;
+  if (!wrapper?.classList.contains("compact-select")) return;
+  const trigger = wrapper.querySelector(".compact-select-trigger");
+  const menu = compactSelectMenu(wrapper);
+  const selectedOption = select.selectedOptions[0] || select.options[0];
+  trigger.disabled = select.disabled;
+  trigger.setAttribute("aria-label", `${compactSelectLabel(select)}\uFF1A${selectedOption?.textContent?.trim() || "\u672A\u9009\u62E9"}`);
+  trigger.querySelector(".compact-select-value").textContent = selectedOption?.textContent?.trim() || "\u672A\u9009\u62E9";
+  menu.innerHTML = Array.from(select.options).map((option, index) => `<button class="compact-select-option" type="button" role="option" data-option-index="${index}" aria-selected="${option.selected}" ${option.disabled ? "disabled" : ""}>${escapeHtml3(option.textContent?.trim() || "\u672A\u547D\u540D\u9009\u9879")}</button>`).join("");
+}
+function initializeCompactSelects() {
+  compactSelectTargets().forEach((select) => {
+    if (select.parentElement?.classList.contains("compact-select")) return;
+    const wrapper = document.createElement("div");
+    const trigger = document.createElement("button");
+    const menu = document.createElement("div");
+    wrapper.className = "compact-select";
+    trigger.className = "compact-select-trigger";
+    trigger.type = "button";
+    trigger.setAttribute("aria-expanded", "false");
+    trigger.innerHTML = `<span class="compact-select-label">${escapeHtml3(compactSelectLabel(select))}</span><span class="compact-select-value"></span><i class="compact-select-chevron" aria-hidden="true"></i>`;
+    menu.className = "compact-select-menu";
+    menu.setAttribute("role", "listbox");
+    menu.setAttribute("aria-label", compactSelectLabel(select));
+    menu.hidden = true;
+    select.before(wrapper);
+    wrapper.append(select, trigger, menu);
+    compactSelectMenus.set(wrapper, menu);
+    const setOpen = (open) => {
+      if (!open) {
+        closeCompactSelect(wrapper);
+        return;
+      }
+      closeCompactSelects(select);
+      const triggerBounds = trigger.getBoundingClientRect();
+      document.body.append(menu);
+      menu.hidden = false;
+      menu.style.position = "fixed";
+      menu.style.top = `${triggerBounds.bottom + 6}px`;
+      menu.style.left = `${triggerBounds.left}px`;
+      menu.style.width = `${triggerBounds.width}px`;
+      wrapper.classList.add("is-open");
+      trigger.setAttribute("aria-expanded", "true");
+      window.setTimeout(() => menu.querySelector("[aria-selected='true']")?.focus(), 0);
+    };
+    trigger.addEventListener("click", () => !select.disabled && setOpen(!wrapper.classList.contains("is-open")));
+    trigger.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") setOpen(false);
+      if (["ArrowDown", "ArrowUp", "Enter", " "].includes(event.key)) {
+        event.preventDefault();
+        setOpen(true);
+      }
+    });
+    menu.addEventListener("click", (event) => {
+      const optionButton = event.target.closest("[data-option-index]");
+      if (!optionButton || optionButton.disabled) return;
+      select.selectedIndex = Number(optionButton.dataset.optionIndex);
+      setOpen(false);
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    refreshCompactSelect(select);
+  });
+  if (!document.body.dataset.compactSelectCloseHandler) {
+    document.body.dataset.compactSelectCloseHandler = "true";
+    document.addEventListener("click", (event) => {
+      if (!event.target.closest(".compact-select, .compact-select-menu")) closeCompactSelects();
+    });
+  }
+}
 function renderWorkspaceControls() {
   const deviceSelect = document.getElementById("deviceSelect"), tests = state.workspaceDevice?.tests || [];
   const displayDeviceName = (name) => String(name || "\u672A\u547D\u540D\u8BBE\u5907").replace(/\.json$/i, "");
@@ -1825,6 +1919,7 @@ function renderWorkspaceControls() {
   document.getElementById("emptyGroupNewTestButton").disabled = !state.workspaceDeviceId;
   const deviceType = /PSE300/i.test(state.deviceName) ? "\u5355\u8154\u975E\u7EA7\u8054" : String(state.workspaceDevice?.deviceType || "\u5355\u8154\u975E\u7EA7\u8054");
   document.getElementById("deviceSummary").innerHTML = state.device ? `<span class="chip good">${escapeHtml3(deviceType)}</span>` : `<span class="chip">\u5C1A\u672A\u9009\u62E9\u8BBE\u5907</span>`;
+  compactSelectTargets().forEach(refreshCompactSelect);
 }
 function setWorkspaceStatus(message, kind = "") {
   const status = document.getElementById("workspaceStatus");
@@ -1871,6 +1966,7 @@ function resetRunResult() {
   document.getElementById("metricMakespanLabel").textContent = "Makespan";
   setBottleneckMetric(null);
   document.getElementById("metricValidationLabel").textContent = "\u6821\u9A8C";
+  document.getElementById("metricValidation").closest(".metric").classList.remove("is-success", "is-error");
   document.getElementById("batchProgress").classList.remove("visible");
   document.getElementById("batchResults").innerHTML = "";
   for (const id of ["logButton", "ganttButton", "batchGanttButton"]) {
@@ -2379,6 +2475,7 @@ function renderRounds() {
     const addCJobTitle = serialMode ? "Pipeline/Sequential \u6BCF\u8F6E\u53EA\u80FD\u914D\u7F6E\u4E00\u4E2A CJob" : "\u6BCF\u8F6E CJob \u6570\u4E0D\u80FD\u8D85\u8FC7 LoadPort \u6570";
     return `<section class="round-card"><header class="round-head"><div class="round-title"><div class="round-number">${roundIndex + 1}</div><div><strong>${roundTitle}</strong>${roundTimeBadge}</div></div><div class="round-time-editor field"><label>${roundIndex ? "\u91CD\u7B97\u65F6\u95F4" : "\u6392\u7A0B\u65F6\u95F4"}</label><div><input type="number" min="0" step="0.1" data-round-time-index="${roundIndex}" value="${Number(round.currentTime)}" ${roundIndex ? "" : "disabled"}><span>s</span></div></div><button class="btn small" data-action="add-cjob" data-round-index="${roundIndex}" ${addCJobDisabled ? `disabled title="${addCJobTitle}"` : ""}>\uFF0B CJob</button></header><div class="cjob-list">${cjobs}</div></section>`;
   }).join("");
+  initializeCompactSelects();
 }
 function renderStepNumberField(label, key, value, routeIndex, stageIndex, options = {}) {
   const inputId = `step-${routeIndex}-${stageIndex}-${key}`;
@@ -3488,6 +3585,8 @@ function showResult(result) {
   document.getElementById("metricTime").textContent = `${cpuTime.toFixed(1)} ms`;
   document.getElementById("metricMakespan").textContent = `${result.makespan.toFixed(2)} / ${baselineReady ? Number(baseline.makespan).toFixed(2) : "\u2014"} s`;
   document.getElementById("metricValidation").textContent = result.validation === "passed" ? "\u901A\u8FC7" : result.validation;
+  document.getElementById("metricValidation").closest(".metric").classList.toggle("is-success", result.validation === "passed");
+  document.getElementById("metricValidation").closest(".metric").classList.toggle("is-error", result.validation !== "passed");
   const objectiveDiagnostics = [...result.rounds || []].reverse().map((round) => round.strategyDiagnostics).find((diagnostics) => diagnostics?.metrics);
   if (objectiveDiagnostics) {
     const metrics = objectiveDiagnostics.metrics;
@@ -3714,6 +3813,7 @@ window.addEventListener("pagehide", () => {
   });
 });
 initializeThemeToggle();
+initializeCompactSelects();
 renderAll();
 renderWorkspaceControls();
 checkService();
