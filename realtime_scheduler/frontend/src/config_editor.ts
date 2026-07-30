@@ -1577,13 +1577,17 @@ async function runPlan() {
       }
       catch (workspaceError) { writeTerminal(`$ 工作台加载失败\n  ${workspaceError.message || "未知错误"}`, true); }
     }
-    if (!response.ok || !runResult.ok) throw new Error(runResult.error || `服务返回 ${response.status}`); showResult(runResult);
+    if (!response.ok || !runResult.ok) {
+      if (runResult?.metricsAvailable) showFailedResultMetrics(runResult);
+      throw new Error(runResult.error || `服务返回 ${response.status}`);
+    }
+    showResult(runResult);
   } catch (error) {
     const baselineError = runResult?.baseline?.status === "failed" ? `\n  Baseline 失败：${runResult.baseline.error || "未知原因"}` : "";
     const validationIssues = Array.isArray(runResult?.validationIssues)
       ? runResult.validationIssues.map(issue => `  ${issue}`)
       : [];
-    if (ganttReady) {
+    if (!runResult?.metricsAvailable && ganttReady) {
       setBottleneckMetric(bottleneckSummary, "没有足够的资源活动");
       document.getElementById("metricMakespan").textContent = Number.isFinite(Number(runResult.makespan))
         ? `${Number(runResult.makespan).toFixed(2)} s`
@@ -1596,7 +1600,9 @@ async function runPlan() {
       ...(ganttReady ? ["  失败 MoveList 已保留，可点击“打开甘特图”查看红色问题 Move"] : []),
       ...(logReady ? ["  复现日志已生成，可点击“导出复现日志”"] : []),
     ].join("\n"), true);
-    document.getElementById("metricValidation").textContent = "失败";
+    document.getElementById("metricValidation").textContent = runResult?.metricsAvailable
+      ? (runResult.validation === "failed" ? "未通过" : String(runResult.validation || "失败"))
+      : "失败";
   }
   finally { button.disabled = false; button.classList.remove("running"); button.textContent = "▶ 运行当前测试"; renderWorkspaceControls(); }
 }
@@ -1695,6 +1701,11 @@ function setResultMetric(key, label, value, detail = "") {
   document.getElementById(`metric${key}Detail`).textContent = detail;
 }
 
+/** 校验未通过的外部算法原始输出也可保留为只读指标与诊断数据。 */
+function hasBatchResultMetrics(item) {
+  return item?.status === "succeeded" || item?.metricsAvailable === true;
+}
+
 /** 将结果分析中的同一瓶颈口径写入顶部摘要卡片。 */
 function setBottleneckMetric(summary, emptyDetail = "运行后计算稳态瓶颈候选") {
   const utilization = Number(summary?.utilization);
@@ -1713,17 +1724,17 @@ function setBottleneckMetric(summary, emptyDetail = "运行后计算稳态瓶颈
 
 /** 绘制批量任务的组级汇总指标。 */
 function showBatchOverviewMetrics(result) {
-  const successful = (result.items || []).filter(item => item.status === "succeeded");
-  const averageMakespan = successful.length ? successful.reduce((sum, item) => sum + Number(item.makespan), 0) / successful.length : 0;
-  const comparable = successful.filter(item => item.baseline?.status === "succeeded");
+  const measured = (result.items || []).filter(hasBatchResultMetrics);
+  const averageMakespan = measured.length ? measured.reduce((sum, item) => sum + Number(item.makespan), 0) / measured.length : 0;
+  const comparable = measured.filter(item => item.baseline?.status === "succeeded");
   const totalMakespan = comparable.reduce((sum, item) => sum + Number(item.makespan), 0);
   const totalBaseline = comparable.reduce((sum, item) => sum + Number(item.baseline.makespan), 0);
   const aggregateImprovement = totalBaseline > 0 ? (totalBaseline - totalMakespan) / totalBaseline * 100 : NaN;
-  const moveCount = successful.reduce((sum, item) => sum + Number(item.moveCount || 0), 0);
+  const moveCount = measured.reduce((sum, item) => sum + Number(item.moveCount || 0), 0);
   const timeText = result.status === "completed" ? `${(Number(result.totalElapsedMs) / 1000).toFixed(2)} s` : result.status === "cancelled" ? "已终止" : "运行中";
   const makespanText = comparable.length
     ? `${totalMakespan.toFixed(2)} / ${totalBaseline.toFixed(2)} s`
-    : successful.length ? `${averageMakespan.toFixed(2)} s` : "—";
+    : measured.length ? `${averageMakespan.toFixed(2)} s` : "—";
   const improvementText = comparable.length && Number.isFinite(aggregateImprovement)
     ? `${aggregateImprovement >= 0 ? "提升" : "退化"} ${Math.abs(aggregateImprovement).toFixed(2)}%`
     : "";
@@ -1737,14 +1748,14 @@ function showBatchOverviewMetrics(result) {
 
 /** 把所选测试的耗时、基线、瓶颈利用率和校验结果展示在顶部。 */
 function showBatchItemOverview(item, index) {
-  const succeeded = item.status === "succeeded";
+  const hasMetrics = hasBatchResultMetrics(item);
   const baseline = item.baseline || {};
   const baselineReady = baseline.status === "succeeded";
   const cpuTime = Number(item.cpuTimeMs ?? item.totalElapsedMs);
   const elapsedTime = Number(item.totalElapsedMs);
   const makespan = Number(item.makespan);
   const improvement = Number(item.improvementPercent);
-  const validationText = item.validation === "passed" ? "通过" : succeeded ? String(item.validation || "未知") : item.status === "failed" ? "失败" : item.status === "cancelled" ? "已终止" : "等待完成";
+  const validationText = item.validation === "passed" ? "通过" : item.validation ? String(item.validation) : item.status === "failed" ? "运行失败" : item.status === "cancelled" ? "已终止" : "等待完成";
   const comparisonDetail = baselineReady && Number.isFinite(improvement)
     ? `${improvement >= 0 ? "提升" : "退化"} ${Math.abs(improvement).toFixed(2)}%`
     : baseline.status && baseline.status !== "succeeded" ? `Baseline ${baseline.status === "failed" ? "失败" : "失效"}` : "";
@@ -1759,7 +1770,7 @@ function showBatchItemOverview(item, index) {
   setResultMetric("Makespan", "Makespan / Baseline", Number.isFinite(makespan) ? `${makespan.toFixed(2)} / ${baselineReady ? Number(baseline.makespan).toFixed(2) : "—"} s` : "—", comparisonDetail);
   setBottleneckMetric(
     bottleneckSummary,
-    succeeded && resultUrl
+    hasMetrics && resultUrl
       ? bottleneckError
         ? `瓶颈计算失败：${bottleneckError}`
         : bottleneckReady ? "没有足够的资源活动" : "正在计算稳态瓶颈…"
@@ -1771,7 +1782,7 @@ function showBatchItemOverview(item, index) {
 /** 请求后端分析批量单项，并缓存结构化结果供页面复用。 */
 async function loadBatchItemPerformance(item, index) {
   const resultUrl = String(item?.resultUrl || "");
-  if (!resultUrl || item.status !== "succeeded") return null;
+  if (!resultUrl || !hasBatchResultMetrics(item)) return null;
   if (batchPerformanceAnalyses.has(resultUrl)) {
     return batchPerformanceAnalyses.get(resultUrl);
   }
@@ -1848,14 +1859,14 @@ async function showTestGroupAnalysis() {
   button.disabled = true;
   button.textContent = "正在分析…";
   try {
-  const successful = result.items
+  const analyzable = result.items
     .map((item, index) => ({ item, index }))
-    .filter(entry => entry.item.status === "succeeded" && entry.item.resultUrl);
+    .filter(entry => hasBatchResultMetrics(entry.item) && entry.item.resultUrl);
   let cursor = 0;
-  const workerCount = Math.min(4, successful.length);
+  const workerCount = Math.min(4, analyzable.length);
   await Promise.all(Array.from({ length: workerCount }, async () => {
-    while (cursor < successful.length) {
-      const current = successful[cursor];
+    while (cursor < analyzable.length) {
+      const current = analyzable[cursor];
       cursor += 1;
       await loadBatchItemPerformance(current.item, current.index);
     }
@@ -1865,6 +1876,7 @@ async function showTestGroupAnalysis() {
     name: `t${index + 1}`,
     status: String(item.status || "unknown"),
     validation: String(item.validation || "unknown"),
+    metricsAvailable: hasBatchResultMetrics(item),
     makespan: item.makespan,
     baselineMakespan: item.baseline?.status === "succeeded"
       ? item.baseline.makespan
@@ -1920,17 +1932,17 @@ function showBatchProgress(result) {
 function renderBatchItems(items) {
   const statusLabels = { queued: "等待中", running: "运行中", succeeded: "成功", failed: "失败", cancelled: "已终止" };
   document.getElementById("batchResults").innerHTML = items.map((item, index) => {
-    const finished = item.status === "succeeded";
+    const hasMetrics = hasBatchResultMetrics(item);
     const baseline = item.baseline || {}, baselineReady = baseline.status === "succeeded";
     const cpuTime = Number(item.cpuTimeMs);
     const improvement = Number(item.improvementPercent);
-    const improvementText = finished && baselineReady && Number.isFinite(improvement)
+    const improvementText = hasMetrics && baselineReady && Number.isFinite(improvement)
       ? `${improvement >= 0 ? "提升" : "退化"} ${Math.abs(improvement).toFixed(2)}%`
       : baseline.status && baseline.status !== "succeeded" ? "无有效基线" : "提升 —";
     const baselineReason = baseline.status && baseline.status !== "succeeded"
       ? `Baseline ${baseline.status === "failed" ? "失败" : "失效"}：${baseline.error || "等待重新计算"}`
       : "";
-    const summaryError = baseline.status === "failed" ? baselineReason : item.status === "failed" ? `运行失败：${item.error || "未知错误"}` : item.status === "cancelled" ? "调度已终止" : baselineReason;
+    const summaryError = baseline.status === "failed" ? baselineReason : item.status === "failed" ? `${hasMetrics ? "校验失败" : "运行失败"}：${item.error || "未知错误"}` : item.status === "cancelled" ? "调度已终止" : baselineReason;
     const displayId = `t${index + 1}`;
     const itemSelectionId = String(item.testId || `index-${index}`);
     const selected = itemSelectionId === state.selectedBatchTestId;
@@ -1948,9 +1960,9 @@ function renderBatchItems(items) {
         </div>
         <div class="batch-result-summary">
           <div class="batch-metric-tags" aria-label="主要指标">
-            <span class="batch-metric-tag makespan" title="Makespan${baselineReady ? `；Baseline ${Number(baseline.makespan).toFixed(2)} s` : ""}">${finished ? `${Number(item.makespan).toFixed(2)} s` : "— s"}</span>
+            <span class="batch-metric-tag makespan" title="Makespan${baselineReady ? `；Baseline ${Number(baseline.makespan).toFixed(2)} s` : ""}">${hasMetrics ? `${Number(item.makespan).toFixed(2)} s` : "— s"}</span>
             <span class="batch-metric-tag ${improvement < 0 ? "loss" : "gain"}">${escapeHtml(improvementText)}</span>
-            <span class="batch-metric-tag cpu">CPU Time ${finished && Number.isFinite(cpuTime) ? `${cpuTime.toFixed(1)} ms` : "—"}</span>
+            <span class="batch-metric-tag cpu">CPU Time ${hasMetrics && Number.isFinite(cpuTime) ? `${cpuTime.toFixed(1)} ms` : "—"}</span>
           </div>
           ${summaryError ? `<span class="summary-error" title="${escapeHtml(summaryError)}">${escapeHtml(summaryError)}</span>` : ""}
         </div>
@@ -2255,7 +2267,7 @@ function showResult(result) {
   };
   document.getElementById("openParameterComparisonDialogButton").disabled = !state.serviceCompatible;
   renderParameterComparison();
-  writeTerminal(["$ 调度完成", ...result.rounds.map(round => {
+  writeTerminal(["$ 调度完成", ...(result.rounds || []).map(round => {
     if (round.kind === "initial") return `  #${round.index} 首次 | ${round.elapsedMs.toFixed(1)} ms`;
     const request = Number(round.requestedTime);
     const recoveryEnd = Number(round.recoveryEndTime ?? round.effectiveTime);
@@ -2263,8 +2275,41 @@ function showResult(result) {
       ? `@${request}s 重算 · 固定旧动作收尾至 @${recoveryEnd}s`
       : `@${request}s 重算`;
     return `  #${round.index} ${timing} | ${round.elapsedMs.toFixed(1)} ms`;
-  }), "", ...result.logs].join("\n"));
+  }), "", ...(result.logs || [])].join("\n"));
   const gantt = document.getElementById("ganttButton"); gantt.href = result.ganttUrl; gantt.removeAttribute("aria-disabled");
+}
+
+/** 外部算法失败时展示仍然客观可用的耗时、原始 Makespan 与 Baseline。 */
+function showFailedResultMetrics(result) {
+  state.batchResult = null;
+  state.selectedBatchTestId = "";
+  document.getElementById("testGroupAnalysisButton").hidden = true;
+  document.getElementById("testGroupAnalysisPanel").hidden = true;
+  document.getElementById("batchProgress").classList.remove("visible");
+  document.getElementById("batchResults").innerHTML = "";
+
+  const baseline = result?.baseline || {};
+  const baselineMakespan = baseline.status === "succeeded" ? Number(baseline.makespan) : NaN;
+  const makespan = Number(result?.makespan);
+  const elapsedTime = Number(result?.totalElapsedMs ?? result?.cpuTimeMs);
+  const improvement = Number(result?.improvementPercent);
+  const makespanText = `${Number.isFinite(makespan) ? makespan.toFixed(2) : "—"} / ${Number.isFinite(baselineMakespan) ? baselineMakespan.toFixed(2) : "—"} s`;
+  const comparisonDetail = Number.isFinite(improvement)
+    ? `${improvement >= 0 ? "提升" : "退化"} ${Math.abs(improvement).toFixed(2)}% · 结果校验未通过`
+    : baseline.status && baseline.status !== "succeeded"
+      ? `Baseline ${baseline.status === "failed" ? "失败" : "失效"}`
+      : "外部算法未返回可比较的完整 Makespan";
+
+  document.getElementById("metricContext").textContent = "当前测试 · 外部算法失败结果";
+  document.getElementById("batchOverviewButton").hidden = true;
+  setResultMetric("Time", "失败前耗时", Number.isFinite(elapsedTime) ? `${elapsedTime.toFixed(1)} ms` : "—", "从提交到返回失败结果");
+  setResultMetric("Makespan", "Makespan / Baseline", makespanText, comparisonDetail);
+  setBottleneckMetric(result?.bottleneckUtilization, result?.resultId ? "失败结果没有足够的资源活动" : "未生成可分析的 MoveList");
+  setResultMetric("Validation", "校验", result?.validation === "failed" ? "未通过" : String(result?.validation || "失败"), result?.error || "");
+  document.getElementById("metricValidation").closest(".metric").classList.remove("is-success");
+  document.getElementById("metricValidation").closest(".metric").classList.add("is-error");
+  state.parameterComparison = null;
+  document.getElementById("openParameterComparisonDialogButton").disabled = true;
 }
 
 /** 正常过程保持界面安静；只有错误才显示可复制的详细信息。 */

@@ -105,6 +105,28 @@ test("缺少 Baseline 或性能数据时保持明确空值", () => {
   assert.equal(result.cases[0].improvementPercent, null);
 });
 
+test("校验失败但保留指标的外部算法结果仍参与对比与测试组分析", () => {
+  const result = analyzeTestGroupPerformance([{
+    id: "external-invalid",
+    name: "外部算法",
+    status: "failed",
+    validation: "failed",
+    metricsAvailable: true,
+    makespan: 80,
+    baselineMakespan: 100,
+    cpuTimeMs: 25,
+    performance: performance("PM1", 0.75, 24, 0.3),
+  }]);
+
+  assert.equal(result.succeededCount, 0);
+  assert.equal(result.metricsCount, 1);
+  assert.equal(result.comparableCount, 1);
+  assert.equal(result.weightedImprovementPercent, 20);
+  assert.equal(result.medianCpuTimeMs, 25);
+  assert.equal(result.validationPassRate, 0);
+  assert.equal(result.bottleneckFrequencies[0].resourceName, "PM1");
+});
+
 test("测试组保留每例多个瓶颈候选并统计候选频次", () => {
   const result = analyzeTestGroupPerformance([{
     id: "a",

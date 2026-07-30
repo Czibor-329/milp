@@ -12,6 +12,8 @@ export interface TestGroupCaseInput {
   name: string;
   status: string;
   validation: string;
+  /** 校验失败但保留了原始 MoveList 指标的外部算法结果。 */
+  metricsAvailable?: boolean;
   makespan?: number | null;
   baselineMakespan?: number | null;
   cpuTimeMs?: number | null;
@@ -25,6 +27,7 @@ export interface TestGroupCasePerformance {
   name: string;
   status: string;
   validation: string;
+  metricsAvailable: boolean;
   validationPassed: boolean;
   makespan: number | null;
   baselineMakespan: number | null;
@@ -64,6 +67,7 @@ export interface TestGroupPerformanceSummary {
   totalCount: number;
   succeededCount: number;
   failedCount: number;
+  metricsCount: number;
   validationPassedCount: number;
   validationPassRate: number;
   comparableCount: number;
@@ -111,8 +115,9 @@ function median(values: number[]): number | null {
 function normalizeCase(input: TestGroupCaseInput): TestGroupCasePerformance {
   const makespan = finiteOrNull(input.makespan);
   const baselineMakespan = finiteOrNull(input.baselineMakespan);
+  const metricsAvailable = input.status === "succeeded" || input.metricsAvailable === true;
   const comparable = (
-    input.status === "succeeded"
+    metricsAvailable
     && makespan !== null
     && baselineMakespan !== null
     && baselineMakespan > 0
@@ -140,6 +145,7 @@ function normalizeCase(input: TestGroupCaseInput): TestGroupCasePerformance {
     name: String(input.name),
     status: String(input.status || "unknown"),
     validation: String(input.validation || "unknown"),
+    metricsAvailable,
     validationPassed: input.validation === "passed",
     makespan,
     baselineMakespan,
@@ -184,6 +190,7 @@ export function analyzeTestGroupPerformance(
 ): TestGroupPerformanceSummary {
   const cases = inputs.map(normalizeCase);
   const succeeded = cases.filter(item => item.status === "succeeded");
+  const measured = cases.filter(item => item.metricsAvailable);
   const comparable = cases.filter(item => item.comparable);
   const improvements = comparable
     .map(item => item.improvementPercent)
@@ -196,34 +203,34 @@ export function analyzeTestGroupPerformance(
     (sum, item) => sum + (item.baselineMakespan ?? 0),
     0,
   );
-  const cpuTimes = succeeded
+  const cpuTimes = measured
     .map(item => item.cpuTimeMs)
     .filter((value): value is number => value !== null && value >= 0);
-  const bottleneckUtilizations = succeeded
+  const bottleneckUtilizations = measured
     .map(item => item.bottleneckUtilization)
     .filter((value): value is number => value !== null);
-  const throughputs = succeeded
+  const throughputs = measured
     .map(item => item.throughputPerHour)
     .filter((value): value is number => value !== null && value > 0);
-  const departureCvs = succeeded
+  const departureCvs = measured
     .map(item => item.departureIntervalCv)
     .filter((value): value is number => value !== null);
-  const chamberDwellMeans = succeeded
+  const chamberDwellMeans = measured
     .map(item => item.processChamberDwellMeanSeconds)
     .filter((value): value is number => value !== null);
-  const robotDwellMeans = succeeded
+  const robotDwellMeans = measured
     .map(item => item.robotWaferDwellMeanSeconds)
     .filter((value): value is number => value !== null);
-  const systemResidenceMeans = succeeded
+  const systemResidenceMeans = measured
     .map(item => item.waferSystemResidenceMeanSeconds)
     .filter((value): value is number => value !== null);
-  const systemResidenceCvs = succeeded
+  const systemResidenceCvs = measured
     .map(item => item.waferSystemResidenceCv)
     .filter((value): value is number => value !== null);
 
   const frequencyMap = new Map<string, number[]>();
   const windowMethodCounts: Record<string, number> = {};
-  for (const item of succeeded) {
+  for (const item of measured) {
     for (const candidate of item.bottleneckCandidates) {
       const values = frequencyMap.get(candidate.resourceName) ?? [];
       values.push(candidate.utilization);
@@ -239,7 +246,7 @@ export function analyzeTestGroupPerformance(
     .map(([resourceName, values]) => ({
       resourceName,
       count: values.length,
-      share: succeeded.length ? values.length / succeeded.length : 0,
+      share: measured.length ? values.length / measured.length : 0,
       medianUtilization: median(values) ?? 0,
     }))
     .sort((left, right) => (
@@ -255,9 +262,10 @@ export function analyzeTestGroupPerformance(
     totalCount: cases.length,
     succeededCount: succeeded.length,
     failedCount: cases.length - succeeded.length,
-    validationPassedCount: succeeded.filter(item => item.validationPassed).length,
-    validationPassRate: succeeded.length
-      ? succeeded.filter(item => item.validationPassed).length / succeeded.length
+    metricsCount: measured.length,
+    validationPassedCount: measured.filter(item => item.validationPassed).length,
+    validationPassRate: measured.length
+      ? measured.filter(item => item.validationPassed).length / measured.length
       : 0,
     comparableCount: comparable.length,
     winCount: improvements.filter(value => value > COMPARISON_TOLERANCE_PERCENT).length,

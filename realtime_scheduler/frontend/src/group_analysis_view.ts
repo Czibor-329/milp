@@ -129,7 +129,7 @@ export function renderTestGroupAnalysis(
       <h2>${escapeHtml(groupName || "当前测试组")}</h2>
     </div>
     <div class="group-kpi-grid">
-      <article><span>校验通过率</span><strong>${(summary.validationPassRate * 100).toFixed(1)}%</strong><small>${summary.validationPassedCount}/${summary.succeededCount} 个有效结果</small></article>
+      <article><span>校验通过率</span><strong>${(summary.validationPassRate * 100).toFixed(1)}%</strong><small>${summary.validationPassedCount}/${summary.metricsCount} 个有指标结果</small></article>
       <article><span>加权总体改善</span><strong class="${(weighted ?? 0) < 0 ? "loss" : "gain"}">${weighted === null ? "—" : `${weighted > 0 ? "+" : ""}${weighted.toFixed(2)}%`}</strong><small>按各测试 Baseline makespan 加权</small></article>
       <article><span>逐例中位改善</span><strong class="${(medianImprovement ?? 0) < 0 ? "loss" : "gain"}">${medianImprovement === null ? "—" : `${medianImprovement > 0 ? "+" : ""}${medianImprovement.toFixed(2)}%`}</strong><small>${summary.winCount} 胜 · ${summary.tieCount} 平 · ${summary.regressionCount} 退化</small></article>
       <article><span>CPU Time</span><strong>${durationText(summary.medianCpuTimeMs)}</strong><small>P90 ${durationText(summary.p90CpuTimeMs)} · 总计 ${durationText(summary.totalCpuTimeMs)}</small></article>

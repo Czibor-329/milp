@@ -1728,6 +1728,52 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual(20.0, item["improvementPercent"])
         self.assertEqual(0, item["robotWaferDwellTime"]["sampleCount"])
 
+    def test_external_validation_failure_keeps_metrics_and_baseline_comparison(self) -> None:
+        """外部算法校验失败后仍应保留原始指标和 Baseline 对比。"""
+        test_case = {
+            "id": "test-external-invalid", "name": "外部校验失败案例", "group": "回归",
+            "roundCount": 1, "options": {},
+            "rounds": [{"currentTime": 0, "jobs": [_job("A", "BatchRoute", "LP1")] }],
+        }
+        device = {
+            "id": "device-external-invalid", "name": "fixture.json", "device": self.device,
+            "routes": [_route("BatchRoute", "PM1,PM2", "BatchRecipe")],
+            "cleans": [], "tests": [test_case],
+        }
+
+        def fake_execute(plan):
+            if plan["strategy"] == "heuristic":
+                return {
+                    "ok": True, "totalElapsedMs": 12.0, "cpuTimeMs": 7.0,
+                    "makespan": 100.0, "moveCount": 3, "validation": "passed",
+                    "output": {"MoveList": []}, "reproductionLog": [],
+                }
+            raise LoggedPlanError(
+                "MoveList 状态校验失败：无效动作",
+                [],
+                failure_output={"MoveList": [{"MoveID": 1, "StartTime": 0, "EndTime": 80}]},
+                validation_issues=["MoveID=1 无效动作"],
+            )
+
+        with (
+            patch.object(config_server, "get_workspace_device", return_value=device),
+            patch.object(config_server, "execute_plan", side_effect=fake_execute),
+            patch.object(config_server, "_persist_workspace_baseline", return_value=True),
+            patch.object(config_server, "save_result", return_value="result-id"),
+            patch.object(config_server, "save_reproduction_log", return_value="log-id"),
+        ):
+            result = config_server.run_workspace_test_batch(
+                "device-external-invalid", "回归", "other_alg:demo", {}, maximum_workers=1,
+            )
+
+        item = result["items"][0]
+        self.assertEqual("failed", item["status"])
+        self.assertTrue(item["metricsAvailable"])
+        self.assertEqual("failed", item["validation"])
+        self.assertEqual(80.0, item["makespan"])
+        self.assertEqual(20.0, item["improvementPercent"])
+        self.assertEqual("/api/results/result-id", item["resultUrl"])
+
     def test_robot_wafer_dwell_time_tracks_pick_place_and_swap_waits(self) -> None:
         """机器人持片驻留应统计 Pick/Place 间隙，并正确衔接 Swap 的收发晶圆。"""
         moves = [
@@ -1911,6 +1957,17 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn('path.startswith("/api/run-batches/")', get_source)
         self.assertNotIn('path.startswith("/api/run-batches/")', post_source)
         self.assertIn("cancel_workspace_batch_run", delete_source)
+
+    def test_single_external_failure_keeps_elapsed_time_and_baseline_visible(self) -> None:
+        """单次外部算法失败也应返回并绘制耗时及 Baseline 对比。"""
+        html = _editor_source()
+        post_source = inspect.getsource(config_server.ConfigEditorHandler.do_POST)
+
+        self.assertIn('"metricsAvailable": True', post_source)
+        self.assertIn('strategy.casefold().startswith("other_alg:")', post_source)
+        self.assertIn("showFailedResultMetrics(runResult)", html)
+        self.assertIn('setResultMetric("Time", "失败前耗时"', html)
+        self.assertIn('setResultMetric("Makespan", "Makespan / Baseline"', html)
 
     def test_automatic_route_rename_updates_every_test_reference(self) -> None:
         """共享 Route 自动改名后，设备下所有测试的 PJob 引用都应同步迁移。"""

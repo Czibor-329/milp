@@ -139,6 +139,7 @@ export interface TestGroupPerformanceSummary {
   totalCount: number;
   succeededCount: number;
   failedCount: number;
+  metricsCount: number;
   validationPassedCount: number;
   validationPassRate: number;
   comparableCount: number;

@@ -529,6 +529,11 @@ def _baseline_comparison(
     return fields
 
 
+def _is_external_algorithm(strategy: str) -> bool:
+    """判断策略是否来自 ``other_alg`` 标准算法包。"""
+    return str(strategy or "").strip().casefold().startswith("other_alg:")
+
+
 def _execute_workspace_test_with_baseline(
     device: Mapping[str, Any],
     test_case: Mapping[str, Any],
@@ -631,6 +636,7 @@ def _execute_workspace_test_batch(
             }
         if progress_callback is not None:
             progress_callback(index, {"status": "running", "startedAt": _workspace_timestamp()})
+        run_started = time.perf_counter()
         try:
             selected_plan = build_workspace_batch_plan(
                 device, test_case, strategy, options,
@@ -657,6 +663,19 @@ def _execute_workspace_test_batch(
                     log_id = save_reproduction_log(error.reproduction_log)
                     failure.update(_log_response_fields(log_id))
                     failure.update(_logged_failure_result_fields(error))
+                    # 外部算法的 MoveList 即使未通过平台校验，仍是该算法的原始
+                    # 输出。保留其客观指标、Baseline 对比和诊断入口；状态仍为
+                    # failed，避免误把无效计划计入校验通过的成功结果。
+                    if _is_external_algorithm(strategy) and error.validation_issues:
+                        elapsed_ms = (time.perf_counter() - run_started) * 1000.0
+                        moves = list((error.failure_output or {}).get("MoveList") or [])
+                        failure.update({
+                            "metricsAvailable": True,
+                            "totalElapsedMs": elapsed_ms,
+                            "cpuTimeMs": elapsed_ms,
+                            "robotWaferDwellTime": _robot_wafer_dwell_time(moves),
+                        })
+                        failure.update(_baseline_comparison(failure, baseline))
                 return failure
             if cancel_event is not None and cancel_event.is_set():
                 return {

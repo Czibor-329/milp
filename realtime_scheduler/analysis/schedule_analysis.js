@@ -762,7 +762,8 @@ function median(values) {
 function normalizeCase(input) {
   const makespan = finiteOrNull(input.makespan);
   const baselineMakespan = finiteOrNull(input.baselineMakespan);
-  const comparable = input.status === "succeeded" && makespan !== null && baselineMakespan !== null && baselineMakespan > 0;
+  const metricsAvailable = input.status === "succeeded" || input.metricsAvailable === true;
+  const comparable = metricsAvailable && makespan !== null && baselineMakespan !== null && baselineMakespan > 0;
   const improvementPercent = comparable ? (baselineMakespan - makespan) / baselineMakespan * 100 : null;
   const primaryCandidate = input.performance?.primaryBottleneck ?? null;
   const legacyBottleneck = input.performance?.bottleneck ?? null;
@@ -782,6 +783,7 @@ function normalizeCase(input) {
     name: String(input.name),
     status: String(input.status || "unknown"),
     validation: String(input.validation || "unknown"),
+    metricsAvailable,
     validationPassed: input.validation === "passed",
     makespan,
     baselineMakespan,
@@ -807,6 +809,7 @@ function normalizeCase(input) {
 function analyzeTestGroupPerformance(inputs) {
   const cases = inputs.map(normalizeCase);
   const succeeded = cases.filter((item) => item.status === "succeeded");
+  const measured = cases.filter((item) => item.metricsAvailable);
   const comparable = cases.filter((item) => item.comparable);
   const improvements = comparable.map((item) => item.improvementPercent).filter((value) => value !== null);
   const totalMakespan = comparable.reduce(
@@ -817,17 +820,17 @@ function analyzeTestGroupPerformance(inputs) {
     (sum, item) => sum + (item.baselineMakespan ?? 0),
     0
   );
-  const cpuTimes = succeeded.map((item) => item.cpuTimeMs).filter((value) => value !== null && value >= 0);
-  const bottleneckUtilizations = succeeded.map((item) => item.bottleneckUtilization).filter((value) => value !== null);
-  const throughputs = succeeded.map((item) => item.throughputPerHour).filter((value) => value !== null && value > 0);
-  const departureCvs = succeeded.map((item) => item.departureIntervalCv).filter((value) => value !== null);
-  const chamberDwellMeans = succeeded.map((item) => item.processChamberDwellMeanSeconds).filter((value) => value !== null);
-  const robotDwellMeans = succeeded.map((item) => item.robotWaferDwellMeanSeconds).filter((value) => value !== null);
-  const systemResidenceMeans = succeeded.map((item) => item.waferSystemResidenceMeanSeconds).filter((value) => value !== null);
-  const systemResidenceCvs = succeeded.map((item) => item.waferSystemResidenceCv).filter((value) => value !== null);
+  const cpuTimes = measured.map((item) => item.cpuTimeMs).filter((value) => value !== null && value >= 0);
+  const bottleneckUtilizations = measured.map((item) => item.bottleneckUtilization).filter((value) => value !== null);
+  const throughputs = measured.map((item) => item.throughputPerHour).filter((value) => value !== null && value > 0);
+  const departureCvs = measured.map((item) => item.departureIntervalCv).filter((value) => value !== null);
+  const chamberDwellMeans = measured.map((item) => item.processChamberDwellMeanSeconds).filter((value) => value !== null);
+  const robotDwellMeans = measured.map((item) => item.robotWaferDwellMeanSeconds).filter((value) => value !== null);
+  const systemResidenceMeans = measured.map((item) => item.waferSystemResidenceMeanSeconds).filter((value) => value !== null);
+  const systemResidenceCvs = measured.map((item) => item.waferSystemResidenceCv).filter((value) => value !== null);
   const frequencyMap = /* @__PURE__ */ new Map();
   const windowMethodCounts = {};
-  for (const item of succeeded) {
+  for (const item of measured) {
     for (const candidate of item.bottleneckCandidates) {
       const values = frequencyMap.get(candidate.resourceName) ?? [];
       values.push(candidate.utilization);
@@ -840,7 +843,7 @@ function analyzeTestGroupPerformance(inputs) {
   const bottleneckFrequencies = [...frequencyMap.entries()].map(([resourceName, values]) => ({
     resourceName,
     count: values.length,
-    share: succeeded.length ? values.length / succeeded.length : 0,
+    share: measured.length ? values.length / measured.length : 0,
     medianUtilization: median(values) ?? 0
   })).sort((left, right) => right.count - left.count || right.medianUtilization - left.medianUtilization || left.resourceName.localeCompare(right.resourceName, void 0, {
     numeric: true
@@ -850,8 +853,9 @@ function analyzeTestGroupPerformance(inputs) {
     totalCount: cases.length,
     succeededCount: succeeded.length,
     failedCount: cases.length - succeeded.length,
-    validationPassedCount: succeeded.filter((item) => item.validationPassed).length,
-    validationPassRate: succeeded.length ? succeeded.filter((item) => item.validationPassed).length / succeeded.length : 0,
+    metricsCount: measured.length,
+    validationPassedCount: measured.filter((item) => item.validationPassed).length,
+    validationPassRate: measured.length ? measured.filter((item) => item.validationPassed).length / measured.length : 0,
     comparableCount: comparable.length,
     winCount: improvements.filter((value) => value > COMPARISON_TOLERANCE_PERCENT).length,
     tieCount: improvements.filter(

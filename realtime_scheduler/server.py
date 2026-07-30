@@ -3746,6 +3746,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             return
         payload: Any = None
         baseline_response: Optional[Dict[str, Any]] = None
+        request_started = time.perf_counter()
         try:
             length = int(self.headers.get("Content-Length") or 0)
             if length <= 0 or length > MAX_REQUEST_BYTES:
@@ -3795,6 +3796,19 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                 response["baseline"] = baseline_response
             response.update(_log_response_fields(log_id))
             response.update(_logged_failure_result_fields(error))
+            strategy = str(payload.get("strategy") or "") if isinstance(payload, Mapping) else ""
+            if strategy.casefold().startswith("other_alg:"):
+                elapsed_ms = (time.perf_counter() - request_started) * 1000.0
+                moves = list((error.failure_output or {}).get("MoveList") or [])
+                response.update({
+                    "metricsAvailable": True,
+                    "totalElapsedMs": elapsed_ms,
+                    "cpuTimeMs": elapsed_ms,
+                    "validation": "failed",
+                    "robotWaferDwellTime": _robot_wafer_dwell_time(moves),
+                })
+                if baseline_response is not None and "makespan" in response:
+                    response.update(_baseline_comparison(response, baseline_response))
             self._send_json(response, HTTPStatus.BAD_REQUEST)
         except Exception as error:  # noqa: BLE001
             reproduction = ReproductionLog()
