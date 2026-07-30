@@ -2099,10 +2099,9 @@ function renderBatchItems(items) {
     return `
       <div class="batch-result ${escapeHtml(item.status || "queued")}${selected ? " selected" : ""}" data-batch-item-index="${index}">
         <div class="batch-result-head">
-          <button class="batch-result-title" type="button" aria-pressed="${selected}" aria-label="查看 ${escapeHtml(displayId)} ${escapeHtml(item.testName || "")} 的详细指标"><strong title="${escapeHtml(`${item.testId || ""} · ${item.testName || ""}`)}">${escapeHtml(displayId)}</strong></button>
-          <span class="batch-status" title="${escapeHtml(item.testName || "")}">${escapeHtml(item.testName || `测试 ${index + 1}`)}</span>
-          <span class="batch-status">${statusLabels[item.status] || "等待中"}</span>
-          <div class="batch-result-actions">
+          <button class="batch-result-title" type="button" aria-pressed="${selected}" aria-label="查看 ${escapeHtml(displayId)} ${escapeHtml(item.testName || "")} 的详细指标"><strong title="${escapeHtml(`${item.testId || ""} · ${item.testName || ""}`)}">${escapeHtml(item.testName || `测试 ${index + 1}`)}</strong></button>
+          <div class="batch-result-meta">
+            <span class="batch-status">${statusLabels[item.status] || "等待中"}</span>
             ${item.logUrl ? `<a class="btn" href="${escapeHtml(item.logUrl)}" download>日志</a>` : `<span class="btn" aria-disabled="true">日志</span>`}
             ${item.resultUrl ? `<button class="btn primary" type="button" data-workspace-result="${escapeHtml(item.resultUrl)}" data-workspace-name="${escapeHtml(item.testName || `测试 ${index + 1}`)}">工作台</button>` : `<span class="btn" aria-disabled="true">工作台</span>`}
             ${item.ganttUrl ? `<a class="btn" href="${escapeHtml(item.ganttUrl)}" target="_blank">甘特图</a>` : `<span class="btn" aria-disabled="true">甘特图</span>`}
@@ -2589,7 +2588,7 @@ document.addEventListener("change", event => {
 document.addEventListener("click", event => {
   const tab = event.target.closest("[data-tab-target]"); if (tab) switchTab(tab.dataset.tabTarget);
   const batchResultCard = event.target.closest("[data-batch-item-index]");
-  if (batchResultCard && !event.target.closest(".batch-result-actions")) selectBatchItem(Number(batchResultCard.dataset.batchItemIndex));
+  if (batchResultCard && !event.target.closest(".batch-result-meta")) selectBatchItem(Number(batchResultCard.dataset.batchItemIndex));
   const workspaceResult = event.target.closest("[data-workspace-result]");
   if (workspaceResult) {
     visualizationWorkspace.loadResult(workspaceResult.dataset.workspaceResult, workspaceResult.dataset.workspaceName)
