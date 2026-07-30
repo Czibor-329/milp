@@ -16,7 +16,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from copy import deepcopy
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from realtime_scheduler.plan_builder import (
     _finite_number,
@@ -333,19 +333,7 @@ def _batch_test_recipes(
             return
         existing["modules"] = list(dict.fromkeys([*existing["modules"], *module_names]))
 
-    clean_modules: Dict[str, List[str]] = {}
-
-    def add_clean_modules(names: Any, modules: Iterable[Any]) -> None:
-        """记录清洗配方可使用的腔室集合。"""
-        module_names = _string_list(list(modules))
-        for clean_name in _string_list(names):
-            targets = clean_modules.setdefault(clean_name, [])
-            for module_name in module_names:
-                if module_name not in targets:
-                    targets.append(module_name)
-
     for route in routes:
-        route_modules: List[str] = []
         for stage in route.get("stages") or []:
             if not isinstance(stage, Mapping):
                 continue
@@ -363,26 +351,9 @@ def _batch_test_recipes(
                     visit.get("processType"),
                     visit.get("weight") or {},
                 )
-                if process_recipe and module_name and module_name not in route_modules:
-                    route_modules.append(module_name)
-                if module_name:
-                    add_clean_modules(
-                        visit.get("beforeCleanRefs") or visit.get("BeforeInPM"),
-                        [module_name],
-                    )
-                    add_clean_modules(
-                        visit.get("afterCleanRefs") or visit.get("AfterOutPM"),
-                        [module_name],
-                    )
-        for field_name in (
-            "prePJobCleanRefs",
-            "postPJobCleanRefs",
-            "postCJobCleanRefs",
-        ):
-            add_clean_modules(route.get(field_name), route_modules)
     for clean in cleans:
         runtime_clean = _runtime_clean(clean)
-        modules = clean_modules.get(str(runtime_clean.get("name") or ""), [])
+        modules = _string_list(runtime_clean.get("modules"))
         add(
             runtime_clean.get("recipeRef"),
             runtime_clean.get("recipeTime"),

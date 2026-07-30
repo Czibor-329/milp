@@ -26,9 +26,6 @@
         <button class="tab" data-tab-target="route" type="button">
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="6" r="2"/><circle cx="19" cy="18" r="2"/><path d="M7 6h4a4 4 0 0 1 4 4v4"/></svg><span>路径配置</span>
         </button>
-        <button class="tab" data-tab-target="clean" type="button">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 11h14l-1 9H6l-1-9Z"/><path d="M8 11V7a4 4 0 0 1 8 0v4M9 15h6"/></svg><span>清洁配置</span>
-        </button>
       </nav>
       <div class="sidebar-footer">
         <button class="theme-toggle" id="themeToggle" type="button" aria-pressed="false">
@@ -234,13 +231,6 @@
           </article>
         </div>
 
-        <div class="tab-view" data-tab-view="clean">
-          <article class="panel">
-            <div class="panel-head"><div><h2>清洁配置</h2></div><button class="btn small" data-action="add-clean">＋ Clean</button></div>
-            <div class="panel-body"><div class="card-list" id="cleanList"></div></div>
-          </article>
-        </div>
-
       </section>
 
       <aside class="side" id="scheduleSide">
@@ -324,6 +314,32 @@
       <p id="workspaceDialogMessage"></p>
       <input id="workspaceDialogInput" type="text" maxlength="80" autocomplete="off">
       <div class="dialog-actions"><button class="btn small" type="button" id="workspaceDialogCancel">取消</button><button class="btn primary small" id="workspaceDialogConfirm" value="confirm">确认</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="clean-dialog" id="cleanDialog" aria-labelledby="cleanDialogTitle">
+    <form class="dialog-body clean-dialog-body" id="cleanDialogForm">
+      <h3 id="cleanDialogTitle">新增 Clean</h3>
+      <p id="cleanDialogDescription">配置 Clean 参数和适用腔室。</p>
+      <div class="clean-dialog-grid">
+        <div class="field"><label for="cleanPlacement">执行位置</label><select id="cleanPlacement"></select></div>
+        <div class="field"><label for="cleanType">清洁类别</label><select id="cleanType"></select></div>
+        <div class="field"><label for="cleanRecipeTime">清洁时间（秒）</label><input id="cleanRecipeTime" type="number" min="0" step="0.1" required></div>
+        <div class="field" id="cleanTriggerField"><label for="cleanTriggerCount">触发次数</label><input id="cleanTriggerCount" type="number" min="1" step="1" required></div>
+        <div class="field" id="cleanWacTimeField"><label for="cleanWacRecipeTime">WAC 清洁长度（秒）</label><input id="cleanWacRecipeTime" type="number" min="0" step="0.1" required></div>
+        <fieldset class="clean-module-field">
+          <legend>适用腔室</legend>
+          <div class="clean-module-options" id="cleanModuleOptions"></div>
+          <small>Clean 只会出现在这里勾选的腔室，不再从整条路径自动推导。</small>
+        </fieldset>
+      </div>
+      <div class="clean-dialog-error" id="cleanDialogError" role="alert"></div>
+      <div class="dialog-actions clean-dialog-actions">
+        <button class="btn danger small" type="button" id="deleteCleanBindingButton" data-action="delete-clean-binding">移除 Clean</button>
+        <span></span>
+        <button class="btn small" type="button" id="cleanDialogCancel">取消</button>
+        <button class="btn primary small" type="submit">保存</button>
+      </div>
     </form>
   </dialog>
 

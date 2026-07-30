@@ -156,6 +156,12 @@ API_SCHEMA_VERSION = "cjob-pjob-v3"
 HEURISTIC_BASELINE_SCHEMA_VERSION = "petri-look-dynamic-v1"
 MAX_MILP_WAFERS = 12
 DEFAULT_MILP_TIME_LIMIT_SECONDS = 120.0
+PROCESSING_STATION_TYPES = frozenset({
+    "processchamber",
+    "multiprocesschamber",
+    "heater",
+    "cooler",
+})
 CJOB_TYPE_NAMES = {value: name for name, value in CJOB_TYPE_VALUES.items()}
 TASK_MODE_NAMES = {value: name for name, value in TASK_MODE_VALUES.items()}
 REALTIME_APP_DIR = ROOT / "realtime_scheduler"
@@ -2501,28 +2507,56 @@ def _merge_named_assets(base: Sequence[Any], additions: Sequence[Any]) -> List[D
     return merged
 
 
-def _repair_workspace_route_recipes(routes: Sequence[Any]) -> bool:
-    """为旧共享 Route 中加工 Step 的空 Recipe 补稳定名称和已有加工时间。
+def _repair_workspace_route_recipes(
+    routes: Sequence[Any],
+    processing_modules: Iterable[str] = (),
+) -> bool:
+    """修复旧共享 Route 的加工标记，并补稳定 Recipe 名称和已有加工时间。
 
     早期导入数据可能只在第一道工序保存 ``processRecipe``，后续工序虽然
     ``needProcess=true`` 且已有 ``processTime``，却无法生成 ProcessRecipes。
+    旧版页面还只识别 ProcessChamber，导致 Heater、Cooler 等设备即使保存了
+    加工时长，也会被错误写成 ``needProcess=false``；迁移时根据设备拓扑纠正。
     """
     changed = False
+    processing_module_names = {
+        str(module_name).strip()
+        for module_name in processing_modules
+        if str(module_name).strip()
+    }
     for raw_route in routes:
         if not isinstance(raw_route, dict):
             continue
         prefix = str(raw_route.get("group") or raw_route.get("name") or "Route").strip()
         for stage_index, raw_stage in enumerate(raw_route.get("stages") or []):
-            if not isinstance(raw_stage, dict) or not bool(
+            if not isinstance(raw_stage, dict):
+                continue
+            raw_visits = raw_stage.get("visits") or raw_stage.get("Visits") or []
+            topology_requires_process = any(
+                isinstance(raw_visit, Mapping)
+                and str(
+                    raw_visit.get("stationName", raw_visit.get("ModuleName", ""))
+                ).strip() in processing_module_names
+                for raw_visit in raw_visits
+            )
+            need_process = bool(
                 raw_stage.get("needProcess", raw_stage.get("NeedProcess", False))
-            ):
+            ) or topology_requires_process
+            if topology_requires_process:
+                need_process_key = (
+                    "NeedProcess" if "NeedProcess" in raw_stage else "needProcess"
+                )
+                if raw_stage.get(need_process_key) is not True:
+                    raw_stage[need_process_key] = True
+                    changed = True
+            if not need_process:
                 continue
             step_id = int(_finite_number(
                 raw_stage.get("stepId", raw_stage.get("StepID")),
                 stage_index,
             ))
             recipe_name = f"{prefix}_Step{step_id}"
-            for raw_visit in raw_stage.get("visits") or raw_stage.get("Visits") or []:
+            for raw_visit in raw_visits:
                 if not isinstance(raw_visit, dict):
                     continue
                 recipe_key = "processRecipe" if "ProcessRecipe" not in raw_visit else "ProcessRecipe"
@@ -2557,6 +2591,24 @@ def _workspace_load_ports(device: Mapping[str, Any]) -> List[str]:
             for name, station in stations.items()
             if isinstance(station, Mapping)
             and str(station.get("Type") or "").strip().lower() == "loadport"
+        ),
+        key=_natural_name_key,
+    )
+
+
+def _workspace_processing_modules(device: Mapping[str, Any]) -> List[str]:
+    """返回拓扑中需要生成加工事件和甘特图加工条的模块名称。"""
+    topology = device.get("device") if isinstance(device.get("device"), Mapping) else device
+    stations = topology.get("Stations") if isinstance(topology, Mapping) else {}
+    if not isinstance(stations, Mapping):
+        return []
+    return sorted(
+        (
+            str(name)
+            for name, station in stations.items()
+            if isinstance(station, Mapping)
+            and str(station.get("Type") or "").strip().lower()
+            in PROCESSING_STATION_TYPES
         ),
         key=_natural_name_key,
     )
@@ -2716,7 +2768,10 @@ def _migrate_workspace_catalog(catalog: Dict[str, Any]) -> bool:
                 cleans = _merge_named_assets(cleans, test.get("cleans") or [])
                 test.pop("cleans", None)
                 changed = True
-        if _repair_workspace_route_recipes(routes):
+        if _repair_workspace_route_recipes(
+            routes,
+            _workspace_processing_modules(raw_device),
+        ):
             changed = True
         if _repair_workspace_route_contracts(routes):
             changed = True

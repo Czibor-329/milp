@@ -143,10 +143,30 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn('min="0"', buffer_input)
         self.assertIn('max="4"', buffer_input)
         self.assertIn('step="1"', buffer_input)
-        self.assertIn("当前算法不支持 PostCJob Clean", source)
+        clean_placements = source.split("function cleanPlacementDefinitions(scope)", 1)[1]
+        clean_placements = clean_placements.split("/** 返回当前 Route", 1)[0]
+        self.assertIn('key: "prePJobCleanRefs"', clean_placements)
+        self.assertIn('key: "postPJobCleanRefs"', clean_placements)
+        self.assertNotIn("postCJobCleanRefs", clean_placements)
         self.assertNotIn("LoadPort（自动）", source)
         self.assertNotIn("LoadPort ${escapeHtml(cjob.loadPort", source)
         self.assertNotIn('data-scope="pjob" data-key="loadPort"', source)
+
+    def test_frontend_treats_heater_and_cooler_as_processing_modules(self) -> None:
+        """热处理多槽腔室应生成 Recipe 和可见的加工时间条。"""
+        source = _editor_source()
+        self.assertIn("const PROCESSING_STATION_TYPES = new Set([", source)
+        for station_type in (
+            '"processchamber"',
+            '"multiprocesschamber"',
+            '"heater"',
+            '"cooler"',
+        ):
+            self.assertIn(station_type, source)
+        self.assertIn(
+            "PROCESSING_STATION_TYPES.has(String(item.Type || \"\").trim().toLowerCase())",
+            source,
+        )
 
     def test_same_recipe_name_supports_module_specific_parameters(self) -> None:
         """同名 Recipe 在不同 PM 上可以使用不同加工时间，且仍由 Route 统一引用。"""
@@ -193,6 +213,57 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertTrue(config_server._repair_workspace_route_recipes(routes))
         self.assertEqual("Route7_Step6", routes[0]["stages"][0]["visits"][0]["processRecipe"])
         self.assertFalse(config_server._repair_workspace_route_recipes(routes))
+
+    def test_workspace_migration_restores_heater_and_cooler_process_steps(self) -> None:
+        """旧页面漏写加工标记时，迁移应保留时长并恢复 Heater、Cooler 工序。"""
+        routes = [{
+            "name": "t1",
+            "group": "PM1/PM2/PM3/PM4(60s)",
+            "stages": [
+                {
+                    "stepId": 4,
+                    "needProcess": False,
+                    "visits": [{
+                        "stationName": "heater",
+                        "processRecipe": "",
+                        "processTime": 20,
+                        "recipeTime": 20,
+                    }],
+                },
+                {
+                    "stepId": 10,
+                    "needProcess": False,
+                    "visits": [{
+                        "stationName": "Cooler",
+                        "processRecipe": "",
+                        "processTime": 20,
+                        "recipeTime": 20,
+                    }],
+                },
+            ],
+        }]
+
+        self.assertTrue(config_server._repair_workspace_route_recipes(
+            routes,
+            ["heater", "Cooler"],
+        ))
+        stages = routes[0]["stages"]
+        self.assertEqual([True, True], [stage["needProcess"] for stage in stages])
+        self.assertEqual(
+            [
+                "PM1/PM2/PM3/PM4(60s)_Step4",
+                "PM1/PM2/PM3/PM4(60s)_Step10",
+            ],
+            [stage["visits"][0]["processRecipe"] for stage in stages],
+        )
+        self.assertEqual(
+            [20, 20],
+            [stage["visits"][0]["processTime"] for stage in stages],
+        )
+        self.assertFalse(config_server._repair_workspace_route_recipes(
+            routes,
+            ["heater", "Cooler"],
+        ))
 
     def test_same_recipe_name_rejects_overlapping_modules(self) -> None:
         """同名 Recipe 只有模块范围重叠时才属于真正的重复定义。"""
@@ -944,7 +1015,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         dummy = _runtime_clean({"name": "Dummy", "cleanType": "dummy", "recipeTime": 13})
         dummy_wac = _runtime_clean({
             "name": "DummyWac", "cleanType": "dummywac",
-            "recipeTime": 14, "wacRecipeTime": 6,
+            "recipeTime": 14, "wacRecipeTime": 6, "modules": ["PM1"],
         })
 
         self.assertEqual("PreClean", pre["taskName"])
@@ -955,7 +1026,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual(("PreWacClean", 2), (dummy_wac["taskName"], dummy_wac["materialCount"]))
         self.assertEqual("DummyWac-Recipe-WAC", dummy_wac["emptyRecipeRef"])
         self.assertEqual(6, dummy_wac["wacRecipeTime"])
-        self.assertEqual([], dummy_wac["modules"])
+        self.assertEqual(["PM1"], dummy_wac["modules"])
 
     def test_wac_clean_adds_standard_process_count_recipe_weight(self) -> None:
         """WAC 条件引用 ProcessCount 时，产品 Recipe 必须按公司标准递增该变量。"""
@@ -974,6 +1045,7 @@ class ConfigEditorServerTests(unittest.TestCase):
                 "cleanType": "wacclean",
                 "recipeTime": 30,
                 "triggerCount": 2,
+                "modules": ["PM1"],
             }],
             "routes": [route],
         }
@@ -1022,15 +1094,24 @@ class ConfigEditorServerTests(unittest.TestCase):
             product_recipe["Weight"],
         )
 
-    def test_step_clean_references_bind_to_process_chamber_by_category(self) -> None:
-        """Step 引用 Clean 后，应按类别自动挂到该 Step 的 PM，而无需 Clean 选择腔室。"""
-        route = _route("CleanRoute", "PM1", "Recipe1")
+    def test_step_clean_references_only_bind_to_explicit_modules(self) -> None:
+        """Step 同时包含 Heater 和 PM 时，Clean 只应挂到显式选择的 PM。"""
+        route = _route("CleanRoute", "heater,PM1", "Recipe1")
         route["stages"][4]["beforeCleanRefs"] = ["DummyWac"]
         route["stages"][4]["afterCleanRefs"] = ["Post", "Wac"]
         clean_rows = [
-            _runtime_clean({"name": "DummyWac", "cleanType": "dummywac", "recipeTime": 30}),
-            _runtime_clean({"name": "Post", "cleanType": "postclean", "recipeTime": 20}),
-            _runtime_clean({"name": "Wac", "cleanType": "wacclean", "recipeTime": 8, "triggerCount": 5}),
+            _runtime_clean({
+                "name": "DummyWac", "cleanType": "dummywac",
+                "recipeTime": 30, "modules": ["PM1"],
+            }),
+            _runtime_clean({
+                "name": "Post", "cleanType": "postclean",
+                "recipeTime": 20, "modules": ["PM1"],
+            }),
+            _runtime_clean({
+                "name": "Wac", "cleanType": "wacclean",
+                "recipeTime": 8, "triggerCount": 5, "modules": ["PM1"],
+            }),
         ]
         clean_by_name = {clean["name"]: clean for clean in clean_rows}
 
@@ -1043,8 +1124,13 @@ class ConfigEditorServerTests(unittest.TestCase):
 
         dummy_task = built["PrePJob"]["PM1"][0]["CheckConditions"]["DummyWac"][0]
         post_task = built["PostPJob"]["PM1"][0]["CheckConditions"]["Post"][0]
-        process_visit = built["RouteSteps"][4]["Visits"][0]
+        process_visits = built["RouteSteps"][4]["Visits"]
+        heater_visit = next(visit for visit in process_visits if visit["StationName"] == "heater")
+        process_visit = next(visit for visit in process_visits if visit["StationName"] == "PM1")
         wac_condition = process_visit["AfterOutPM"][0]
+        self.assertNotIn("heater", built["PrePJob"])
+        self.assertNotIn("heater", built["PostPJob"])
+        self.assertEqual([], heater_visit["AfterOutPM"])
         self.assertEqual((2, "DummyWac-Recipe-WAC"), (
             dummy_task["MaterialCount"],
             dummy_task["EmptyCleanRecipeAfterMaterial"],
@@ -1055,6 +1141,30 @@ class ConfigEditorServerTests(unittest.TestCase):
             wac_condition["ExecuteOrder"][0]["ThresholdValueList"],
         )
         self.assertEqual([], process_visit["BeforeInPM"])
+
+    def test_route_clean_references_only_bind_to_explicit_modules(self) -> None:
+        """Route 级 Clean 不得自动扩散到同路径中未勾选的 Heater。"""
+        route = _route("CleanRoute", "heater,PM1", "Recipe1")
+        route["prePJobCleanRefs"] = ["Pre"]
+        clean = _runtime_clean({
+            "name": "Pre",
+            "cleanType": "preclean",
+            "recipeTime": 20,
+            "modules": ["PM1"],
+        })
+
+        built = build_route(
+            route,
+            {
+                "Recipe1": {"name": "Recipe1"},
+                "Pre-Recipe": {"name": "Pre-Recipe", "modules": ["PM1"]},
+            },
+            {"Pre": clean},
+            {"ATR", "VTR"},
+        )
+
+        self.assertEqual(["PM1"], list(built["PrePJob"]))
+        self.assertNotIn("heater", built["PrePJob"])
 
     def test_dummy_wac_batch_plan_derives_recipes_and_dummy_port_material(self) -> None:
         """Dummy WAC 应从 Route PM 自动生成两段 Recipe，并准备可复用 DummyPort 晶圆。"""
@@ -1070,6 +1180,7 @@ class ConfigEditorServerTests(unittest.TestCase):
                 "cleanType": "dummywac",
                 "recipeTime": 30,
                 "wacRecipeTime": 8,
+                "modules": ["PM1"],
             }],
         }
         test_case = {
@@ -1119,18 +1230,17 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertGreater(result["makespan"], 0)
 
     def test_editor_uses_persistent_route_table_and_step_drawer(self) -> None:
-        """路径按工艺结构折叠，Step 抽屉只开放四项业务参数。"""
+        """路径按工艺结构折叠，Route 和 Step 都提供 Clean 弹窗入口。"""
         html = _editor_source()
         drawer_editor = html.split("function renderStepDrawer()", 1)[1]
         drawer_editor = drawer_editor.split("/** 打开指定 Step", 1)[0]
         self.assertIn('data-tab-target="schedule"', html)
         self.assertIn('data-tab-target="route"', html)
-        self.assertIn('data-tab-target="clean"', html)
-        self.assertIn('data-tab-target="workspace">结果分析</button>', html)
-        self.assertIn('data-tab-target="route">路径配置</button>', html)
-        self.assertIn('data-tab-target="clean">清洁配置</button>', html)
-        self.assertIn('<h1>调度平台</h1>', html)
-        self.assertIn('class="frontend-version">前端 v1.0.13</span>', html)
+        self.assertNotIn('data-tab-target="clean"', html)
+        self.assertIn("<span>结果分析</span>", html)
+        self.assertIn("<span>路径配置</span>", html)
+        self.assertNotIn('data-tab-view="clean"', html)
+        self.assertIn('class="frontend-version">前端 v1.1.0</span>', html)
         self.assertIn('data-option="residencyGuardSeconds"', html)
         self.assertIn('data-option="maximumRobotHoldingSeconds"', html)
         self.assertIn('data-option="maximumSystemResidenceCv"', html)
@@ -1145,10 +1255,10 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn('data-scope="stage-candidate-toggle"', html)
         self.assertIn('class="step-overview-card"', html)
         self.assertIn('class="step-edit-grid"', html)
-        self.assertIn('class="clean-choice-list"', html)
+        self.assertIn('class="step-clean-section"', html)
         self.assertIn('class="step-system-details"', html)
-        self.assertIn('data-action="toggle-after-clean"', html)
-        self.assertIn("No Clean", html)
+        self.assertIn('data-action="open-context-clean"', html)
+        self.assertIn('data-clean-scope="step"', html)
         for label, field in (
             ("Process Time", "processTime"),
             ("QTime", "qTimeLimit"),
@@ -1162,35 +1272,27 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn('if (key === "processTime") stage.visits[0].recipeTime = Number(value);', html)
         self.assertIn("width: min(760px, 100vw)", html)
 
-    def test_clean_editor_is_grouped_and_only_exposes_category_parameters(self) -> None:
-        """Clean 页面应按五类折叠，且不再编辑腔室和底层条件字段。"""
+    def test_clean_editor_is_embedded_in_route_and_uses_parameter_dialog(self) -> None:
+        """独立 Clean 页面应删除，Route/Step 通过弹窗配置参数和适用腔室。"""
         html = _editor_source()
-        clean_editor = html.split("function renderCleans()", 1)[1]
-        clean_editor = clean_editor.split("/** 返回 Step 类型", 1)[0]
         template = EDITOR_PATH.read_text(encoding="utf-8")
 
-        self.assertNotIn("当前设备共享，清洁 Recipe 归属于 Clean。", template)
+        self.assertNotIn('data-tab-target="clean"', template)
+        self.assertNotIn('id="cleanList"', template)
+        self.assertIn('id="cleanDialog"', template)
         for label in ("PreClean", "PostClean", "WAC Clean", "Dummy", "Dummy WAC"):
             self.assertIn(label, html)
         self.assertIn("function automaticCleanName(clean)", html)
         self.assertIn("主清洁", html)
         self.assertIn("renameCleanReferences", html)
-        self.assertIn('data-action="toggle-clean-type"', clean_editor)
-        self.assertIn("清洁类别", clean_editor)
-        self.assertIn("清洁时间（秒）", clean_editor)
-        self.assertIn("触发次数", clean_editor)
-        self.assertIn("WAC 清洁长度（秒）", clean_editor)
-        for removed_label in (
-            "Clean 名称 / Alias",
-            "Recipe 名称",
-            "适用腔室",
-            "StateVariable",
-            "TaskName",
-            "触发下限",
-            "触发上限",
-            "更新状态量（逗号分隔）",
-        ):
-            self.assertNotIn(removed_label, clean_editor)
+        for label in ("执行位置", "清洁类别", "清洁时间（秒）", "触发次数", "WAC 清洁长度（秒）", "适用腔室"):
+            self.assertIn(label, template)
+        self.assertIn('data-clean-scope="route"', html)
+        self.assertIn('data-clean-scope="step"', html)
+        self.assertIn("function openCleanDialog(", html)
+        self.assertIn("function saveCleanDialog()", html)
+        self.assertIn("Clean 只会出现在这里勾选的腔室", template)
+        self.assertIn("modules: value.modules", html)
         self.assertIn("scheduleAutoSave", html)
         self.assertIn('window.addEventListener("pagehide"', html)
         self.assertIn("StepID", html)

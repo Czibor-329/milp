@@ -282,7 +282,7 @@ def _clean_type(clean: Mapping[str, Any]) -> str:
 
 
 def _runtime_clean(clean: Mapping[str, Any]) -> Dict[str, Any]:
-    """把精简编辑字段展开为标准 Clean 模板，同时保留旧字段兼容性。"""
+    """把精简编辑字段展开为标准 Clean 模板，同时保留显式适用腔室。"""
     value = deepcopy(dict(clean))
     name = str(value.get("name") or "").strip()
     clean_type = _clean_type(value)
@@ -311,7 +311,7 @@ def _runtime_clean(clean: Mapping[str, Any]) -> Dict[str, Any]:
         "recipeName": recipe_name,
         "recipeRef": recipe_name,
         "recipeTime": max(0.0, _finite_number(value.get("recipeTime"), 0.0)),
-        "modules": [],
+        "modules": _string_list(value.get("modules")),
         "taskName": task_names[clean_type],
         "stateVariable": "ProcessCount" if is_wac else "IdleTime",
         "lower": trigger_count if is_wac else 0,
@@ -398,6 +398,22 @@ def _clean_names_for_types(
     return result
 
 
+def _clean_names_for_module(
+    names: Any,
+    clean_by_name: Mapping[str, Mapping[str, Any]],
+    module: str,
+) -> List[str]:
+    """按 Clean 显式配置的适用腔室筛选引用。"""
+    result: List[str] = []
+    for name in _string_list(names):
+        clean = clean_by_name.get(name)
+        if clean is None:
+            raise ValueError(f"Route 引用了不存在的 Clean：{name}")
+        if module in _string_list(clean.get("modules")):
+            result.append(name)
+    return result
+
+
 def _append_module_clean_conditions(
     table: Dict[str, List[Dict[str, Any]]],
     module: str,
@@ -407,8 +423,16 @@ def _append_module_clean_conditions(
     """向指定腔室追加 Clean 条件并去重。"""
     if not module:
         return
+    module_clean_names = _clean_names_for_module(
+        clean_names,
+        clean_by_name,
+        module,
+    )
+    conditions = _clean_conditions(module_clean_names, clean_by_name)
+    if not conditions:
+        return
     target = table.setdefault(module, [])
-    for condition in _clean_conditions(clean_names, clean_by_name):
+    for condition in conditions:
         if condition not in target:
             target.append(condition)
 
@@ -428,30 +452,6 @@ def _dummy_material_count(route: Mapping[str, Any]) -> int:
                             int(_finite_number(task.get("MaterialCount"), 0)),
                         )
     return total
-
-
-def _route_process_modules(route: Mapping[str, Any]) -> List[str]:
-    """收集 Route 中所有引用 Recipe 的候选加工模块。"""
-    modules: List[str] = []
-    for stage in route.get("stages") or []:
-        if not isinstance(stage, Mapping):
-            continue
-        visit_rows = stage.get("visits")
-        if isinstance(visit_rows, Sequence) and not isinstance(visit_rows, (str, bytes)):
-            for visit in visit_rows:
-                if not isinstance(visit, Mapping) or not str(
-                    visit.get("processRecipe") or visit.get("ProcessRecipe") or ""
-                ).strip():
-                    continue
-                module = str(visit.get("stationName") or visit.get("StationName") or "").strip()
-                if module and module not in modules:
-                    modules.append(module)
-            continue
-        if str(stage.get("recipeRef") or "").strip():
-            for module in _string_list(stage.get("stations")):
-                if module not in modules:
-                    modules.append(module)
-    return modules
 
 
 def _integer_list(value: Any) -> List[int]:
@@ -490,19 +490,19 @@ def _clean_target_modules(
     clean_names: Any,
     clean_by_name: Mapping[str, Mapping[str, Any]],
     recipe_by_name: Mapping[str, Mapping[str, Any]],
-    route: Mapping[str, Any],
 ) -> List[str]:
-    """由 Clean 所引用 Recipe 的适用模块推断 Route 顶层清洁目标。"""
+    """读取 Clean 显式配置的 Route 顶层清洁目标。"""
     targets: List[str] = []
-    route_modules = _route_process_modules(route)
     for clean_name in _string_list(clean_names):
         clean = clean_by_name.get(clean_name)
         if clean is None:
             raise ValueError(f"Route 引用了不存在的 Clean：{clean_name}")
         recipe_name = str(clean.get("recipeRef") or "").strip()
         recipe = recipe_by_name.get(recipe_name)
-        modules = _string_list(recipe.get("modules")) if recipe else []
-        for module in modules or route_modules:
+        modules = _string_list(clean.get("modules"))
+        if not modules and recipe:
+            modules = _string_list(recipe.get("modules"))
+        for module in modules:
             if module not in targets:
                 targets.append(module)
     return targets
@@ -512,7 +512,6 @@ def _route_clean_dict(
     clean_names: Any,
     clean_by_name: Mapping[str, Mapping[str, Any]],
     recipe_by_name: Mapping[str, Mapping[str, Any]],
-    route: Mapping[str, Any],
     allowed_types: Optional[set[str]] = None,
 ) -> Dict[str, List[Dict[str, Any]]]:
     """把 Route 顶层 Clean 引用展开为 PM 到条件列表的标准字典。"""
@@ -525,7 +524,7 @@ def _route_clean_dict(
     conditions = _clean_conditions(clean_names, clean_by_name)
     return {
         module: deepcopy(conditions)
-        for module in _clean_target_modules(clean_names, clean_by_name, recipe_by_name, route)
+        for module in _clean_target_modules(clean_names, clean_by_name, recipe_by_name)
     }
 
 
@@ -546,21 +545,18 @@ def build_route(
         route.get("prePJobCleanRefs"),
         clean_by_name,
         recipe_by_name,
-        route,
         {"preclean", "dummy", "dummywac"},
     )
     post_pjob = _route_clean_dict(
         route.get("postPJobCleanRefs"),
         clean_by_name,
         recipe_by_name,
-        route,
         {"postclean"},
     )
     post_cjob = _route_clean_dict(
         route.get("postCJobCleanRefs"),
         clean_by_name,
         recipe_by_name,
-        route,
         {"postclean"},
     )
     route_steps: List[Dict[str, Any]] = []
@@ -613,6 +609,11 @@ def build_route(
                 after_names,
                 clean_by_name,
                 {"wacclean"},
+            )
+            after_wac_names = _clean_names_for_module(
+                after_wac_names,
+                clean_by_name,
+                station,
             )
             if recipe_name:
                 _append_module_clean_conditions(
@@ -727,6 +728,8 @@ def build_process_recipes(
                 for clean_name in clean_names:
                     clean = clean_by_name.get(clean_name)
                     if clean is None:
+                        continue
+                    if module not in _string_list(clean.get("modules")):
                         continue
                     state_variable = str(clean.get("stateVariable") or "").strip()
                     # IdleTime 由设备空闲时钟维护，不属于产品 Recipe 的增量。

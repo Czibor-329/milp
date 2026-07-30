@@ -1458,6 +1458,12 @@ var CLEAN_TYPE_DEFINITIONS = [
   { key: "dummywac", label: "Dummy WAC" }
 ];
 var ROUTE_CLEAN_KEYS = ["prePJobCleanRefs", "postPJobCleanRefs", "postCJobCleanRefs"];
+var PROCESSING_STATION_TYPES = /* @__PURE__ */ new Set([
+  "processchamber",
+  "multiprocesschamber",
+  "heater",
+  "cooler"
+]);
 var state = {
   workspaceDevices: [],
   workspaceDevice: null,
@@ -1492,10 +1498,10 @@ var state = {
   routes: [{ name: "RouteA", group: "RouteA", bufferOption: 0, prePJobCleanRefs: [], postPJobCleanRefs: [], postCJobCleanRefs: [], stages: linkRouteSteps([makeStage("LP1"), makeStage("Robot"), makeStage("PM1,PM2", true, "RouteA_Step2"), makeStage("Robot"), makeStage("LP1")]) }],
   rounds: [makeRound(1, 0, "RouteA", "LP1"), makeRound(2, 70, "RouteA", "LP2")],
   drawer: null,
+  cleanDialogContext: null,
   expandedRouteProcessGroups: /* @__PURE__ */ new Set(),
   expandedRouteGroups: /* @__PURE__ */ new Set(),
   expandedRoutes: /* @__PURE__ */ new Set(),
-  expandedCleanTypes: /* @__PURE__ */ new Set(),
   routeNameChanges: /* @__PURE__ */ new Map()
 };
 function inferCleanType(clean) {
@@ -1521,6 +1527,7 @@ function normalizeClean(clean) {
   value.triggerCount = Math.max(1, Math.floor(Number(value.triggerCount ?? value.lower) || 5));
   const wacRecipeTime = Number(value.wacRecipeTime ?? value.emptyRecipeTime);
   value.wacRecipeTime = Math.max(0, Number.isFinite(wacRecipeTime) ? wacRecipeTime : 20);
+  value.modules = [...new Set(stringList(value.modules))];
   return value;
 }
 function formatCleanSeconds(value) {
@@ -1581,7 +1588,7 @@ function runtimeClean(clean) {
   return {
     ...value,
     recipeRef: value.recipeName,
-    modules: [],
+    modules: value.modules,
     taskName: taskNames[type],
     stateVariable: isWac ? "ProcessCount" : "IdleTime",
     lower: isWac ? value.triggerCount : 0,
@@ -1593,22 +1600,7 @@ function runtimeClean(clean) {
   };
 }
 function makeClean(cleanType = "preclean") {
-  return normalizeClean({ name: "", cleanType, recipeTime: 20, triggerCount: 5, wacRecipeTime: 20 });
-}
-function cleanNamesFor(types) {
-  const allowed = new Set(types);
-  return state.cleans.filter((clean) => allowed.has(inferCleanType(clean))).map((clean) => clean.name).filter(Boolean);
-}
-function removeCleanReferences(cleanName) {
-  state.routes.forEach((route) => {
-    for (const key of ["prePJobCleanRefs", "postPJobCleanRefs", "postCJobCleanRefs"]) {
-      route[key] = stringList(route[key]).filter((name) => name !== cleanName);
-    }
-    (route.stages || []).forEach((stage) => (stage.visits || []).forEach((visit) => {
-      visit.beforeCleanRefs = stringList(visit.beforeCleanRefs).filter((name) => name !== cleanName);
-      visit.afterCleanRefs = stringList(visit.afterCleanRefs).filter((name) => name !== cleanName);
-    }));
-  });
+  return normalizeClean({ name: "", cleanType, recipeTime: 20, triggerCount: 5, wacRecipeTime: 20, modules: [] });
 }
 function stageUsesRobot(stage, index) {
   const names = (stage.visits || []).map((visit) => visit.stationName).filter(Boolean);
@@ -1617,7 +1609,7 @@ function stageUsesRobot(stage, index) {
 function normalizeRoute(route) {
   route.stages = Array.isArray(route.stages) ? route.stages : [];
   ROUTE_CLEAN_KEYS.forEach((key) => {
-    route[key] = stringList(route[key]).slice(0, 1);
+    route[key] = stringList(route[key]);
   });
   route.postCJobCleanRefs = [];
   route.bufferOption = Math.max(0, Math.min(4, Math.trunc(Number(route.bufferOption) || 0)));
@@ -1645,6 +1637,7 @@ function synchronizeStageVisits(stage) {
     recipeTime: Number(first.processTime),
     qTimeLimit: Number(first.qTimeLimit),
     residencyConstraint: Number(first.residencyConstraint),
+    beforeCleanRefs: structuredClone(stringList(first.beforeCleanRefs)),
     afterCleanRefs: structuredClone(stringList(first.afterCleanRefs))
   };
   stage.visits.forEach((visit) => Object.assign(visit, structuredClone(editableValues)));
@@ -1683,9 +1676,6 @@ function readonlyText(value) {
 function renderReadonlyField(label, value, wide = false) {
   return `<div class="readonly-field ${wide ? "wide" : ""}"><span>${escapeHtml3(label)}</span><strong>${escapeHtml3(readonlyText(value))}</strong></div>`;
 }
-function optionsHtml(values, selected, emptyLabel = "\u8BF7\u9009\u62E9") {
-  return `<option value="">${escapeHtml3(emptyLabel)}</option>` + values.map((value) => `<option value="${escapeHtml3(value)}" ${value === selected ? "selected" : ""}>${escapeHtml3(value)}</option>`).join("");
-}
 function unwrapDevice(raw) {
   let value = raw;
   if (Array.isArray(value)) {
@@ -1719,7 +1709,7 @@ function applyDeviceTopology(device, deviceName) {
   state.deviceName = deviceName;
   state.stationNames = stations.map(([name]) => name).sort(natural);
   state.loadPorts = stations.filter(([, item]) => String(item.Type || "").toLowerCase() === "loadport").map(([name]) => name).sort(natural);
-  state.processModules = stations.filter(([, item]) => String(item.Type || "").toLowerCase() === "processchamber").map(([name]) => name).sort(natural);
+  state.processModules = stations.filter(([, item]) => PROCESSING_STATION_TYPES.has(String(item.Type || "").trim().toLowerCase())).map(([name]) => name).sort(natural);
   state.robotNames = Object.keys(device.Robots).sort(natural);
   state.robotScopes = Object.fromEntries(Object.entries(device.Robots).map(([name, robot]) => [name, [...new Set(Object.values(robot.ArmInfo || {}).flatMap((arm) => arm.AccessibleStations || []))]]));
   visualizationWorkspace.setDevice(state.device);
@@ -2222,7 +2212,6 @@ async function selectWorkspaceDevice(deviceId, preferredTestId = "") {
   applyDeviceTopology(result.device.device, result.device.name);
   state.routes = Array.isArray(result.device.routes) ? structuredClone(result.device.routes) : [];
   state.cleans = Array.isArray(result.device.cleans) ? structuredClone(result.device.cleans).map(normalizeClean) : [];
-  state.expandedCleanTypes = new Set(state.cleans.map((clean) => clean.cleanType));
   if (!result.device.tests.length) {
     const created = await requestJson(`/api/workspaces/${deviceId}/tests`, {
       method: "POST",
@@ -2289,22 +2278,166 @@ function resizeRounds(count) {
 function renderTimes() {
   normalizeRounds();
 }
-function renderCleans() {
-  const host = document.getElementById("cleanList");
+function cleanPlacementDefinitions(scope) {
+  return scope === "route" ? [
+    { key: "prePJobCleanRefs", label: "PJob \u524D", types: ["preclean", "dummy", "dummywac"] },
+    { key: "postPJobCleanRefs", label: "PJob \u540E", types: ["postclean"] }
+  ] : [
+    { key: "beforeCleanRefs", label: "\u8FDB\u5165\u8154\u5BA4\u524D", types: ["preclean", "dummy", "dummywac"] },
+    { key: "afterCleanRefs", label: "\u79BB\u5F00\u8154\u5BA4\u540E", types: ["postclean", "wacclean"] }
+  ];
+}
+function cleanContextModules(scope, routeIndex, stageIndex = -1) {
+  const route = state.routes[routeIndex];
+  if (!route) return [];
+  const stages = scope === "step" ? [route.stages[stageIndex]] : route.stages;
+  return [...new Set((stages || []).flatMap((stage) => (stage?.visits || []).map((visit) => visit.stationName).filter((module) => state.processModules.includes(module))))];
+}
+function cleanContextReferences(scope, routeIndex, stageIndex, placement) {
+  const route = state.routes[routeIndex];
+  if (!route) return [];
+  if (scope === "route") return stringList(route[placement]);
+  return stringList(route.stages[stageIndex]?.visits?.[0]?.[placement]);
+}
+function setCleanContextReference(context, placement, cleanName, enabled) {
+  const route = state.routes[context.routeIndex];
+  if (!route) return;
+  const update = (target) => {
+    const names = new Set(stringList(target[placement]));
+    if (enabled) names.add(cleanName);
+    else names.delete(cleanName);
+    target[placement] = [...names];
+  };
+  if (context.scope === "route") update(route);
+  else (route.stages[context.stageIndex]?.visits || []).forEach(update);
+}
+function cleanReferenceCount(cleanName) {
+  let count = 0;
+  state.routes.forEach((route) => {
+    ROUTE_CLEAN_KEYS.forEach((key) => {
+      if (stringList(route[key]).includes(cleanName)) count += 1;
+    });
+    (route.stages || []).forEach((stage) => (stage.visits || []).forEach((visit) => {
+      for (const key of ["beforeCleanRefs", "afterCleanRefs"]) {
+        if (stringList(visit[key]).includes(cleanName)) count += 1;
+      }
+    }));
+  });
+  return count;
+}
+function renderContextCleans(scope, routeIndex, stageIndex = -1) {
+  const rows = cleanPlacementDefinitions(scope).flatMap(
+    (placement) => cleanContextReferences(scope, routeIndex, stageIndex, placement.key).map((cleanName) => ({
+      cleanName,
+      placement,
+      clean: state.cleans.find((item) => item.name === cleanName)
+    }))
+  );
+  if (!rows.length) return `<div class="context-clean-empty">\u5C1A\u672A\u914D\u7F6E Clean</div>`;
+  return `<div class="context-clean-list">${rows.map(({ cleanName, placement, clean }) => {
+    const modules = stringList(clean?.modules);
+    const moduleSummary = modules.length ? modules.join(" / ") : "\u672A\u9009\u62E9\u8154\u5BA4";
+    return `<div class="context-clean-item">
+      <div><strong>${escapeHtml3(cleanName)}</strong><small>${escapeHtml3(placement.label)} \xB7 ${escapeHtml3(moduleSummary)}</small></div>
+      <div class="context-clean-actions">
+        <button class="btn small" type="button" data-action="edit-context-clean" data-clean-scope="${scope}" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-placement="${placement.key}" data-clean-name="${escapeHtml3(cleanName)}">\u7F16\u8F91</button>
+        <button class="btn danger small" type="button" data-action="remove-context-clean" data-clean-scope="${scope}" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-placement="${placement.key}" data-clean-name="${escapeHtml3(cleanName)}">\u79FB\u9664</button>
+      </div>
+    </div>`;
+  }).join("")}</div>`;
+}
+function updateCleanDialogFields() {
+  const context = state.cleanDialogContext;
+  if (!context) return;
+  const placement = document.getElementById("cleanPlacement").value;
+  const definition = cleanPlacementDefinitions(context.scope).find((item) => item.key === placement);
+  const typeSelect = document.getElementById("cleanType");
+  const currentType = typeSelect.value || context.draft.cleanType;
+  typeSelect.innerHTML = CLEAN_TYPE_DEFINITIONS.filter((item) => definition?.types.includes(item.key)).map((item) => `<option value="${item.key}">${escapeHtml3(item.label)}</option>`).join("");
+  typeSelect.value = definition?.types.includes(currentType) ? currentType : definition?.types[0] || "";
+  document.getElementById("cleanTriggerField").hidden = typeSelect.value !== "wacclean";
+  document.getElementById("cleanWacTimeField").hidden = typeSelect.value !== "dummywac";
+}
+function openCleanDialog(scope, routeIndex, stageIndex = -1, cleanName = "", placement = "") {
+  const existing = state.cleans.find((clean) => clean.name === cleanName);
+  const definitions = cleanPlacementDefinitions(scope);
+  const selectedPlacement = definitions.some((item) => item.key === placement) ? placement : definitions[0].key;
+  const draft = normalizeClean(existing || makeClean(definitions[0].types[0]));
+  state.cleanDialogContext = {
+    scope,
+    routeIndex,
+    stageIndex,
+    cleanName,
+    originalPlacement: selectedPlacement,
+    draft: structuredClone(draft)
+  };
+  document.getElementById("cleanDialogTitle").textContent = `${cleanName ? "\u7F16\u8F91" : "\u65B0\u589E"} ${scope === "route" ? "Route" : "RouteStep"} Clean`;
+  document.getElementById("cleanDialogDescription").textContent = scope === "route" ? "Clean \u53EA\u4F1A\u51FA\u73B0\u5728\u6240\u9009 Route \u8154\u5BA4\u4E2D\u3002" : "Clean \u53EA\u4F1A\u51FA\u73B0\u5728\u5F53\u524D Step \u6240\u9009\u8154\u5BA4\u4E2D\u3002";
+  const placementSelect = document.getElementById("cleanPlacement");
+  placementSelect.innerHTML = definitions.map((item) => `<option value="${item.key}">${escapeHtml3(item.label)}</option>`).join("");
+  placementSelect.value = selectedPlacement;
+  document.getElementById("cleanType").innerHTML = `<option value="${draft.cleanType}">${escapeHtml3(draft.cleanType)}</option>`;
+  document.getElementById("cleanRecipeTime").value = String(draft.recipeTime);
+  document.getElementById("cleanTriggerCount").value = String(draft.triggerCount);
+  document.getElementById("cleanWacRecipeTime").value = String(draft.wacRecipeTime);
+  const selectedModules = new Set(stringList(draft.modules));
+  const moduleHost = document.getElementById("cleanModuleOptions");
+  const modules = cleanContextModules(scope, routeIndex, stageIndex);
+  moduleHost.innerHTML = modules.length ? modules.map((module) => `<label class="clean-module-option"><input type="checkbox" name="cleanModule" value="${escapeHtml3(module)}" ${selectedModules.has(module) ? "checked" : ""}><span>${escapeHtml3(module)}</span></label>`).join("") : `<span class="clean-dialog-empty">\u5F53\u524D\u8303\u56F4\u6CA1\u6709\u53EF\u914D\u7F6E\u7684\u52A0\u5DE5\u8154\u5BA4</span>`;
+  document.getElementById("cleanDialogError").textContent = "";
+  document.getElementById("deleteCleanBindingButton").hidden = !cleanName;
+  updateCleanDialogFields();
+  document.getElementById("cleanType").value = draft.cleanType;
+  updateCleanDialogFields();
+  document.getElementById("cleanDialog").showModal();
+}
+function saveCleanDialog() {
+  const context = state.cleanDialogContext;
+  if (!context) return;
+  const modules = Array.from(document.querySelectorAll('#cleanModuleOptions input[name="cleanModule"]:checked'), (input) => input.value);
+  if (!modules.length) {
+    document.getElementById("cleanDialogError").textContent = "\u8BF7\u81F3\u5C11\u9009\u62E9\u4E00\u4E2A Clean \u9002\u7528\u8154\u5BA4\u3002";
+    return;
+  }
+  const placement = document.getElementById("cleanPlacement").value;
+  const clean = normalizeClean({
+    ...context.draft,
+    cleanType: document.getElementById("cleanType").value,
+    recipeTime: Number(document.getElementById("cleanRecipeTime").value),
+    triggerCount: Number(document.getElementById("cleanTriggerCount").value),
+    wacRecipeTime: Number(document.getElementById("cleanWacRecipeTime").value),
+    modules
+  });
+  if (context.cleanName) {
+    const cleanIndex = state.cleans.findIndex((item) => item.name === context.cleanName);
+    if (cleanIndex < 0) return;
+    state.cleans[cleanIndex] = clean;
+    if (context.originalPlacement !== placement) {
+      setCleanContextReference(context, context.originalPlacement, context.cleanName, false);
+      setCleanContextReference(context, placement, context.cleanName, true);
+    }
+  } else {
+    state.cleans.push(clean);
+    synchronizeCleanNames();
+    const createdName = state.cleans.at(-1).name;
+    setCleanContextReference(context, placement, createdName, true);
+  }
   synchronizeCleanNames();
-  host.innerHTML = CLEAN_TYPE_DEFINITIONS.map((type) => {
-    const rows = state.cleans.map((clean, index) => ({ clean, index })).filter((item) => item.clean.cleanType === type.key);
-    const open = state.expandedCleanTypes.has(type.key);
-    const cards = rows.map(({ clean, index }) => {
-      const conditional = clean.cleanType === "wacclean" ? `<div class="field"><label>\u89E6\u53D1\u6B21\u6570</label><input type="number" min="1" step="1" data-scope="clean" data-index="${index}" data-key="triggerCount" value="${Number(clean.triggerCount)}"></div>` : clean.cleanType === "dummywac" ? `<div class="field"><label>WAC \u6E05\u6D01\u957F\u5EA6\uFF08\u79D2\uFF09</label><input type="number" min="0" step="0.1" data-scope="clean" data-index="${index}" data-key="wacRecipeTime" value="${Number(clean.wacRecipeTime)}"></div>` : "";
-      return `<article class="clean-card"><div class="clean-card-title"><strong>${escapeHtml3(clean.name)}</strong><button class="btn danger small" data-action="remove-clean" data-index="${index}">\u5220\u9664</button></div><div class="clean-fields">
-        <div class="field"><label>\u6E05\u6D01\u7C7B\u522B</label><select data-scope="clean" data-index="${index}" data-key="cleanType">${CLEAN_TYPE_DEFINITIONS.map((option) => `<option value="${option.key}" ${option.key === clean.cleanType ? "selected" : ""}>${escapeHtml3(option.label)}</option>`).join("")}</select></div>
-        <div class="field"><label>\u6E05\u6D01\u65F6\u95F4\uFF08\u79D2\uFF09</label><input type="number" min="0" step="0.1" data-scope="clean" data-index="${index}" data-key="recipeTime" value="${Number(clean.recipeTime)}"></div>
-        ${conditional}
-      </div></article>`;
-    }).join("");
-    return `<section class="clean-type-group"><button class="clean-type-head" data-action="toggle-clean-type" data-clean-type="${type.key}"><span class="collapse-arrow ${open ? "open" : ""}">\u25B6</span><strong>${escapeHtml3(type.label)}</strong><span class="route-count">${rows.length} \u4E2A \xB7 ${open ? "\u5DF2\u5C55\u5F00" : "\u5DF2\u6536\u8D77"}</span></button>${open ? `<div class="clean-type-body">${cards || `<div class="clean-type-empty">\u6682\u65E0 ${escapeHtml3(type.label)}</div>`}</div>` : ""}</section>`;
-  }).join("");
+  markTestDirty();
+  document.getElementById("cleanDialog").close();
+  state.cleanDialogContext = null;
+  renderRoutes();
+  if (state.drawer) renderStepDrawer();
+}
+function removeContextClean(scope, routeIndex, stageIndex, placement, cleanName) {
+  const context = { scope, routeIndex, stageIndex };
+  setCleanContextReference(context, placement, cleanName, false);
+  if (cleanReferenceCount(cleanName) === 0) {
+    state.cleans = state.cleans.filter((clean) => clean.name !== cleanName);
+  }
+  markTestDirty();
+  renderRoutes();
+  if (state.drawer) renderStepDrawer();
 }
 function stepKind(route, index) {
   return stageUsesRobot(route.stages[index], index) ? "Robot" : "Station";
@@ -2403,11 +2536,9 @@ function groupedRoutes() {
   }));
 }
 function renderRouteDetails(route, index) {
-  const preCleans = cleanNamesFor(["preclean", "dummy", "dummywac"]);
-  const postCleans = cleanNamesFor(["postclean"]);
-  return `<div class="route-details"><div class="edit-card-head"><strong>\u8DEF\u5F84\u8BE6\u60C5</strong><div><button class="btn small" data-action="add-stage" data-index="${index}">\uFF0B Step \u7EC4</button> <button class="btn danger small" data-action="remove-route" data-index="${index}">\u5220\u9664</button></div></div>
+  return `<div class="route-details"><div class="edit-card-head"><strong>\u8DEF\u5F84\u8BE6\u60C5</strong><div><button class="btn small" data-action="open-context-clean" data-clean-scope="route" data-route-index="${index}">\uFF0B Clean</button> <button class="btn small" data-action="add-stage" data-index="${index}">\uFF0B Step \u7EC4</button> <button class="btn danger small" data-action="remove-route" data-index="${index}">\u5220\u9664</button></div></div>
     <div class="route-meta"><div class="route-meta-grid"><div class="field"><label>\u8DEF\u5F84\u540D\u79F0\uFF08\u81EA\u52A8\u751F\u6210\uFF09</label><input value="${escapeHtml3(route.name)}" readonly></div><div class="field"><label>Group</label><input data-scope="route" data-index="${index}" data-key="group" value="${escapeHtml3(route.group)}"></div><div class="field"><label>BufferOption</label><input type="number" min="0" max="4" step="1" data-scope="route" data-index="${index}" data-key="bufferOption" value="${Number(route.bufferOption)}"><small class="field-help">\u4EC5\u9650\u5236\u63A5\u53E3\u679A\u4E3E\u8303\u56F4\uFF0C\u6682\u4E0D\u81EA\u52A8\u4FEE\u6539\u8DEF\u5F84\u3002</small></div></div>
-    <details class="route-clean-details"><summary>\u8DEF\u5F84\u7EA7 Clean \u8BBE\u7F6E</summary><div class="grid"><div class="field span-4"><label>PJob \u524D</label><select data-scope="route" data-index="${index}" data-key="prePJobCleanRefs">${optionsHtml(preCleans, stringList(route.prePJobCleanRefs)[0] || "", "\u4E0D\u9700\u8981\u6E05\u6D01")}</select></div><div class="field span-4"><label>PJob \u540E</label><select data-scope="route" data-index="${index}" data-key="postPJobCleanRefs">${optionsHtml(postCleans, stringList(route.postPJobCleanRefs)[0] || "", "\u4E0D\u9700\u8981\u6E05\u6D01")}</select></div><div class="field span-4 disabled-field"><label>CJob \u540E</label><select disabled><option>\u5F53\u524D\u7B97\u6CD5\u4E0D\u652F\u6301 PostCJob Clean</option></select></div></div></details></div>
+    <section class="route-clean-section"><div class="context-clean-head"><div><strong>Route Clean</strong><small>Clean \u4EC5\u4F5C\u7528\u4E8E\u5F39\u7A97\u4E2D\u9009\u62E9\u7684\u8154\u5BA4</small></div><button class="btn small" type="button" data-action="open-context-clean" data-clean-scope="route" data-route-index="${index}">\uFF0B Clean</button></div>${renderContextCleans("route", index)}</section></div>
     <div class="route-table-wrap"><table class="route-table"><thead><tr><th>StepID</th><th>\u7C7B\u578B</th><th>\u53EF\u9009\u8154\u5BA4 / \u673A\u5668\u624B</th><th>PostStepID</th><th>NeedProcess</th><th></th></tr></thead><tbody>${renderSteps(route, index)}</tbody></table></div></div>`;
 }
 function renderRoutes() {
@@ -2421,7 +2552,7 @@ function renderRoutes() {
         const processSummary = profile.processCount ? profile.candidatePath.join(" \u2192 ") : "\u65E0\u52A0\u5DE5\u5DE5\u5E8F";
         return `<article class="route-summary-card"><div class="route-summary-head"><button class="route-summary-toggle" data-action="toggle-route" data-route-index="${routeIndex}" aria-expanded="${routeOpen}">
         <div class="route-summary-title"><span class="collapse-arrow ${routeOpen ? "open" : ""}">\u25B6</span><strong>${escapeHtml3(route.name || "\u672A\u547D\u540D\u8DEF\u5F84")}</strong></div><div class="route-summary-meta">${escapeHtml3(processSummary)} \xB7 ${route.stages.length} Steps</div></button>
-        <div class="route-summary-actions"><button class="btn small" data-action="edit-route" data-route-index="${routeIndex}">\u7F16\u8F91</button><button class="btn small" data-action="copy-route" data-route-index="${routeIndex}">\u590D\u5236</button><button class="btn danger small" data-action="remove-route" data-index="${routeIndex}">\u5220\u9664</button></div>
+        <div class="route-summary-actions"><button class="btn small" data-action="open-context-clean" data-clean-scope="route" data-route-index="${routeIndex}">\uFF0B Clean</button><button class="btn small" data-action="edit-route" data-route-index="${routeIndex}">\u7F16\u8F91</button><button class="btn small" data-action="copy-route" data-route-index="${routeIndex}">\u590D\u5236</button><button class="btn danger small" data-action="remove-route" data-index="${routeIndex}">\u5220\u9664</button></div>
       </div>${routeOpen ? renderRouteDetails(route, routeIndex) : ""}</article>`;
       }).join("");
       return processGroup.isReentrant ? routes : `<section class="route-type-group"><button class="route-type-head" data-action="toggle-route-group" data-group-key="${escapeHtml3(structure.key)}" aria-expanded="${structureOpen}"><span class="collapse-arrow ${structureOpen ? "open" : ""}">\u25B6</span><strong>\u5E76\u884C\u673A\u5668\u6570 <span class="route-structure-key">${escapeHtml3(structure.label)}</span></strong><span class="route-count">${structure.routes.length} \u6761\u8DEF\u5F84 \xB7 ${structureOpen ? "\u5DF2\u5C55\u5F00" : "\u5DF2\u6536\u8D77"}</span></button>${structureOpen ? `<div class="route-group-body">${routes}</div>` : ""}</section>`;
@@ -2490,19 +2621,11 @@ function renderStepNumberField(label, key, value, routeIndex, stageIndex, option
     ${helper}
   </div>`;
 }
-function renderAfterCleanChoices(first, routeIndex, stageIndex) {
-  const selected = new Set(stringList(first.afterCleanRefs));
-  const choices = cleanNamesFor(["postclean", "wacclean"]);
-  const noCleanActive = selected.size === 0;
-  const cleanButtons = choices.map((name) => `<button type="button" class="clean-choice ${selected.has(name) ? "active" : ""}" data-action="toggle-after-clean" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-clean-name="${escapeHtml3(name)}" aria-pressed="${selected.has(name)}"><span class="clean-choice-indicator" aria-hidden="true">\u2713</span><span>${escapeHtml3(name)}</span></button>`).join("");
-  return `<fieldset class="step-edit-field after-clean-field">
-    <legend>After Clean</legend>
-    <div class="clean-choice-list">
-      <button type="button" class="clean-choice no-clean ${noCleanActive ? "active" : ""}" data-action="toggle-after-clean" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-clean-name="" aria-pressed="${noCleanActive}"><span class="clean-choice-indicator" aria-hidden="true">\u2713</span><span>No Clean</span></button>
-      ${cleanButtons || `<span class="clean-choice-empty">\u6682\u65E0\u53EF\u7528\u7684 PostClean / WAC Clean</span>`}
-    </div>
-    <small class="field-help">\u53EF\u9009\u62E9\u591A\u4E2A\u6E05\u6D01\uFF1B\u9009\u62E9 No Clean \u5C06\u6E05\u7A7A\u5F53\u524D\u9009\u62E9\u3002</small>
-  </fieldset>`;
+function renderStepCleanEditor(routeIndex, stageIndex) {
+  return `<section class="step-clean-section">
+    <div class="context-clean-head"><div><strong>RouteStep Clean</strong><small>\u8FDB\u5165\u6216\u79BB\u5F00\u8154\u5BA4\u65F6\u6267\u884C</small></div><button class="btn small" type="button" data-action="open-context-clean" data-clean-scope="step" data-route-index="${routeIndex}" data-stage-index="${stageIndex}">\uFF0B Clean</button></div>
+    ${renderContextCleans("step", routeIndex, stageIndex)}
+  </section>`;
 }
 function renderStepDrawer() {
   if (!state.drawer) return;
@@ -2515,20 +2638,19 @@ function renderStepDrawer() {
   document.getElementById("drawerTitle").textContent = `Step ${stage.stepId} \u914D\u7F6E`;
   document.getElementById("drawerSubtitle").textContent = `${stepKind(route, stageIndex)} \xB7 ${stage.visits.length} \u4E2A\u5019\u9009`;
   const first = stage.visits[0] ? normalizeVisit(stage.visits[0]) : null;
-  const editableFieldLabels = { processTime: "Process Time", qTimeLimit: "QTime", residencyConstraint: "Residency", afterCleanRefs: "After Clean" };
+  const editableFieldLabels = { processTime: "Process Time", qTimeLimit: "QTime", residencyConstraint: "Residency", beforeCleanRefs: "Clean", afterCleanRefs: "Clean" };
   const differences = visitDifferenceFields(stage).filter((field) => editableFieldLabels[field]);
   const candidates = [...new Set(stage.visits.map((visit) => visit.stationName).filter(Boolean))];
   const differenceNames = differences.map((field) => editableFieldLabels[field] || field);
   const warning = differences.length ? `<div class="visit-warning" role="status"><strong>\u5019\u9009\u8154\u5BA4\u7684\u53EF\u7F16\u8F91\u53C2\u6570\u4E0D\u4E00\u81F4</strong><p>\u5DEE\u5F02\u9879\uFF1A${differenceNames.map(escapeHtml3).join("\u3001")}\u3002\u5F53\u524D\u663E\u793A\u9996\u4E2A\u5019\u9009\u7684\u503C\u3002</p><button class="btn small" data-action="sync-stage-visits" data-route-index="${routeIndex}" data-stage-index="${stageIndex}">\u540C\u6B65\u5230\u5168\u90E8\u5019\u9009</button></div>` : "";
   const editor = first ? `<section class="step-editor-card" aria-labelledby="stepEditorHeading">
-    <header class="step-editor-head"><div><h3 id="stepEditorHeading">\u53EF\u7F16\u8F91\u53C2\u6570</h3><p>\u4FEE\u6539\u540E\u81EA\u52A8\u540C\u6B65\u5230 ${stage.visits.length} \u4E2A\u5019\u9009\u8154\u5BA4</p></div><span class="editable-badge">4 \u9879</span></header>
+    <header class="step-editor-head"><div><h3 id="stepEditorHeading">\u53EF\u7F16\u8F91\u53C2\u6570</h3><p>\u4FEE\u6539\u540E\u81EA\u52A8\u540C\u6B65\u5230 ${stage.visits.length} \u4E2A\u5019\u9009\u8154\u5BA4</p></div><span class="editable-badge">3 \u9879</span></header>
     <div class="step-edit-grid">
       ${renderStepNumberField("Process Time", "processTime", first.processTime, routeIndex, stageIndex, { minimum: 0, helper: "Recipe Time \u5C06\u81EA\u52A8\u4FDD\u6301\u4E00\u81F4" })}
       ${renderStepNumberField("QTime", "qTimeLimit", first.qTimeLimit, routeIndex, stageIndex)}
       ${renderStepNumberField("Residency", "residencyConstraint", first.residencyConstraint, routeIndex, stageIndex)}
-      ${renderAfterCleanChoices(first, routeIndex, stageIndex)}
     </div>
-  </section>
+  </section>${renderStepCleanEditor(routeIndex, stageIndex)}
   <details class="step-system-details">
     <summary><span><strong>\u7CFB\u7EDF\u53C2\u6570</strong><small>\u7531\u8DEF\u5F84\u6216\u7CFB\u7EDF\u7EF4\u62A4\uFF0C\u4EC5\u4F9B\u67E5\u770B</small></span><span class="details-chevron" aria-hidden="true">\u2304</span></summary>
     <div class="step-system-grid">
@@ -2539,7 +2661,6 @@ function renderStepDrawer() {
       ${renderReadonlyField("Weight", first.weight)}
       ${renderReadonlyField("Move Time Offset", first.moveTimeOffset, true)}
     </div>
-    <p class="system-note">Before Clean \u7531\u7CFB\u7EDF\u7BA1\u7406\uFF0C\u4E0D\u5728 RouteStep \u4E2D\u914D\u7F6E\u3002</p>
   </details>` : `<div class="empty">\u672A\u9009\u62E9\u5019\u9009\u8BBE\u5907\uFF0C\u8BF7\u5148\u5728\u8DEF\u5F84\u5217\u8868\u4E2D\u9009\u62E9\u3002</div>`;
   const routeName = escapeHtml3(route.name || "\u672A\u547D\u540D\u8DEF\u5F84");
   document.getElementById("drawerBody").innerHTML = `<section class="step-overview-card">
@@ -2569,7 +2690,6 @@ function closeStepDrawer() {
 }
 function renderAll() {
   renderTimes();
-  renderCleans();
   renderRoutes();
   renderRounds();
   if (state.drawer) renderStepDrawer();
@@ -2597,15 +2717,6 @@ function updateStateFromControl(control) {
     return;
   }
   const scope = control.dataset.scope;
-  if (scope === "clean") {
-    const cleanIndex = Number(control.dataset.index), clean = state.cleans[cleanIndex];
-    if (key === "cleanType" && clean.cleanType !== value) {
-      removeCleanReferences(clean.name);
-      clean.cleanType = value;
-      state.expandedCleanTypes.add(value);
-    } else clean[key] = value;
-    state.cleans[cleanIndex] = normalizeClean(clean);
-  }
   if (scope === "route") state.routes[Number(control.dataset.index)][key] = ROUTE_CLEAN_KEYS.includes(key) ? value ? [value] : [] : value;
   if (scope === "stage-candidates") setStageCandidates(Number(control.dataset.routeIndex), Number(control.dataset.stageIndex), Array.from(control.selectedOptions, (item) => item.value));
   if (scope === "stage-candidate-toggle") {
@@ -2653,6 +2764,41 @@ function updateStateFromControl(control) {
 }
 function handleAction(button) {
   const action = button.dataset.action, index = Number(button.dataset.index), routeIndex = Number(button.dataset.routeIndex), stageIndex = Number(button.dataset.stageIndex), visitIndex = Number(button.dataset.visitIndex);
+  if (action === "open-context-clean" || action === "edit-context-clean") {
+    openCleanDialog(
+      button.dataset.cleanScope,
+      routeIndex,
+      Number.isFinite(stageIndex) ? stageIndex : -1,
+      action === "edit-context-clean" ? button.dataset.cleanName || "" : "",
+      button.dataset.placement || ""
+    );
+    return;
+  }
+  if (action === "remove-context-clean") {
+    removeContextClean(
+      button.dataset.cleanScope,
+      routeIndex,
+      Number.isFinite(stageIndex) ? stageIndex : -1,
+      button.dataset.placement,
+      button.dataset.cleanName
+    );
+    return;
+  }
+  if (action === "delete-clean-binding") {
+    const context = state.cleanDialogContext;
+    if (context?.cleanName) {
+      removeContextClean(
+        context.scope,
+        context.routeIndex,
+        context.stageIndex,
+        context.originalPlacement,
+        context.cleanName
+      );
+    }
+    document.getElementById("cleanDialog").close();
+    state.cleanDialogContext = null;
+    return;
+  }
   if (action === "toggle-route-group") {
     const key = button.dataset.groupKey;
     if (state.expandedRouteGroups.has(key)) state.expandedRouteGroups.delete(key);
@@ -2665,13 +2811,6 @@ function handleAction(button) {
     if (state.expandedRouteProcessGroups.has(key)) state.expandedRouteProcessGroups.delete(key);
     else state.expandedRouteProcessGroups.add(key);
     renderRoutes();
-    return;
-  }
-  if (action === "toggle-clean-type") {
-    const cleanType = button.dataset.cleanType;
-    if (state.expandedCleanTypes.has(cleanType)) state.expandedCleanTypes.delete(cleanType);
-    else state.expandedCleanTypes.add(cleanType);
-    renderCleans();
     return;
   }
   if (action === "toggle-route" || action === "edit-route") {
@@ -2688,30 +2827,6 @@ function handleAction(button) {
     markTestDirty();
     renderStepDrawer();
     return;
-  }
-  if (action === "toggle-after-clean") {
-    const stage = state.routes[routeIndex]?.stages[stageIndex];
-    if (!stage?.visits?.length) return;
-    const cleanName = button.dataset.cleanName || "";
-    const selected = new Set(stringList(stage.visits[0].afterCleanRefs));
-    if (!cleanName) selected.clear();
-    else if (selected.has(cleanName)) selected.delete(cleanName);
-    else selected.add(cleanName);
-    stage.visits[0].afterCleanRefs = [...selected];
-    synchronizeStageVisits(stage);
-    markTestDirty();
-    renderRoutes();
-    renderStepDrawer();
-    return;
-  }
-  if (action === "add-clean") {
-    const clean = makeClean("preclean");
-    state.cleans.push(clean);
-    state.expandedCleanTypes.add(clean.cleanType);
-  }
-  if (action === "remove-clean") {
-    removeCleanReferences(state.cleans[index]?.name);
-    state.cleans.splice(index, 1);
   }
   if (action === "add-route") {
     const name = `Route${state.routes.length + 1}`, route = { name, group: name, bufferOption: 0, prePJobCleanRefs: [], postPJobCleanRefs: [], postCJobCleanRefs: [], stages: state.device ? defaultRouteStages(name) : linkRouteSteps([makeStage(""), makeStage(""), makeStage("", true, `${name}_Step2`), makeStage(""), makeStage("")]) };
@@ -2788,7 +2903,9 @@ function collectRecipes(routes = state.routes) {
     }
     if (!weight || typeof weight !== "object" || Array.isArray(weight)) return rawWeight;
     [...stringList(visit.beforeCleanRefs), ...stringList(visit.afterCleanRefs)].forEach((cleanName) => {
-      const stateVariable = String(cleanByName.get(cleanName)?.stateVariable || "").trim();
+      const clean = cleanByName.get(cleanName);
+      if (!stringList(clean?.modules).includes(visit.stationName)) return;
+      const stateVariable = String(clean?.stateVariable || "").trim();
       if (stateVariable && stateVariable !== "IdleTime" && weight[stateVariable] === void 0) {
         weight[stateVariable] = 1;
       }
@@ -2808,29 +2925,9 @@ function collectRecipes(routes = state.routes) {
       if (visit.processRecipe) add(visit.processRecipe, visit.processTime, [visit.stationName], visit.processType, standardProcessWeight(visit));
     }));
   });
-  const cleanModules = /* @__PURE__ */ new Map();
-  function addCleanModules(names, modules) {
-    stringList(names).forEach((name) => {
-      const targets = cleanModules.get(name) || /* @__PURE__ */ new Set();
-      stringList(modules).forEach((module) => targets.add(module));
-      cleanModules.set(name, targets);
-    });
-  }
-  routes.forEach((route) => {
-    const routeModules = [...new Set((route.stages || []).flatMap((stage) => (stage.visits || []).filter((visit) => state.processModules.includes(visit.stationName)).map((visit) => visit.stationName)))];
-    addCleanModules(route.prePJobCleanRefs, routeModules);
-    addCleanModules(route.postPJobCleanRefs, routeModules);
-    addCleanModules(route.postCJobCleanRefs, routeModules);
-    (route.stages || []).forEach((stage) => (stage.visits || []).forEach((visit) => {
-      if (!state.processModules.includes(visit.stationName)) return;
-      addCleanModules(visit.beforeCleanRefs, [visit.stationName]);
-      addCleanModules(visit.afterCleanRefs, [visit.stationName]);
-    }));
-  });
   state.cleans.map(runtimeClean).forEach((clean) => {
-    const modules = [...cleanModules.get(clean.name) || []];
-    add(clean.recipeRef, clean.recipeTime, modules);
-    if (clean.cleanType === "dummywac") add(clean.emptyRecipeRef, clean.wacRecipeTime, modules);
+    add(clean.recipeRef, clean.recipeTime, clean.modules);
+    if (clean.cleanType === "dummywac") add(clean.emptyRecipeRef, clean.wacRecipeTime, clean.modules);
   });
   return recipes;
 }
@@ -3712,6 +3809,19 @@ async function checkService() {
   }
 }
 document.getElementById("workspaceDialogCancel").addEventListener("click", () => document.getElementById("workspaceDialog").close("cancel"));
+document.getElementById("cleanDialogCancel").addEventListener("click", () => {
+  document.getElementById("cleanDialog").close();
+  state.cleanDialogContext = null;
+});
+document.getElementById("cleanDialog").addEventListener("close", () => {
+  state.cleanDialogContext = null;
+});
+document.getElementById("cleanPlacement").addEventListener("change", updateCleanDialogFields);
+document.getElementById("cleanType").addEventListener("change", updateCleanDialogFields);
+document.getElementById("cleanDialogForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  saveCleanDialog();
+});
 document.getElementById("deviceFile").addEventListener("change", (event) => loadDevice(event.target.files[0]).catch((error) => {
   event.target.value = "";
   writeTerminal(`$ \u8BBE\u5907\u8BFB\u53D6\u5931\u8D25

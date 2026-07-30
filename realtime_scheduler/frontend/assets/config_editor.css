@@ -171,6 +171,42 @@
     .clean-card-title strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
     .clean-fields { display: grid; grid-template-columns: repeat(3, minmax(160px, 1fr)); gap: 11px; padding: 12px; }
     .clean-type-empty { padding: 18px; color: var(--muted); font-size: 11px; text-align: center; }
+    .route-clean-section, .step-clean-section { margin-top: 14px; overflow: hidden; border: 1px solid #dbe3ee; border-radius: 11px; background: #fff; }
+    .step-clean-section { margin: 0; }
+    .context-clean-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 12px; border-bottom: 1px solid #e8edf4; background: #f8fafc; }
+    .context-clean-head strong, .context-clean-head small { display: block; }
+    .context-clean-head strong { color: #25344d; font-size: 12px; }
+    .context-clean-head small { margin-top: 2px; color: var(--muted); font-size: 9px; }
+    .context-clean-list { display: grid; }
+    .context-clean-item { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-top: 1px solid #edf1f6; }
+    .context-clean-item:first-child { border-top: 0; }
+    .context-clean-item > div:first-child { min-width: 0; }
+    .context-clean-item strong, .context-clean-item small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .context-clean-item strong { color: #25344d; font-size: 11px; }
+    .context-clean-item small { margin-top: 2px; color: var(--muted); font-size: 9px; }
+    .context-clean-actions { display: flex; flex: 0 0 auto; gap: 6px; }
+    .context-clean-empty { padding: 14px 12px; color: var(--muted); font-size: 10px; text-align: center; }
+    dialog.clean-dialog { width: min(680px, calc(100vw - 32px)); }
+    .clean-dialog-body > p { margin-bottom: 16px; }
+    .clean-dialog-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+    .clean-dialog-grid .field input, .clean-dialog-grid .field select { margin-top: 0; }
+    .clean-module-field { grid-column: 1 / -1; margin: 0; padding: 12px; border: 1px solid #dbe3ee; border-radius: 10px; }
+    .clean-module-field legend { padding: 0 5px; color: #42526b; font-size: 12px; font-weight: 700; }
+    .clean-module-field > small { display: block; margin-top: 9px; color: var(--muted); font-size: 9px; }
+    .clean-module-options { display: flex; flex-wrap: wrap; gap: 8px; }
+    .clean-module-option { position: relative; display: inline-flex; min-height: 38px; align-items: center; cursor: pointer; }
+    .clean-module-option input { position: absolute; width: 1px; height: 1px; margin: 0; opacity: 0; }
+    .clean-module-option span { display: inline-flex; min-height: 36px; align-items: center; padding: 7px 11px; border: 1px solid #cbd6e5; border-radius: 9px; color: #475569; background: #fff; font-size: 11px; font-weight: 700; }
+    .clean-module-option input:checked + span { border-color: #6689df; color: #234b9b; background: #edf3ff; box-shadow: inset 0 0 0 1px rgba(58,96,190,.12); }
+    .clean-module-option input:focus-visible + span { outline: 3px solid var(--accent-ring); outline-offset: 2px; }
+    .clean-dialog-empty { color: var(--muted); font-size: 10px; }
+    .clean-dialog-error { min-height: 20px; margin-top: 8px; color: var(--red); font-size: 11px; }
+    .clean-dialog-actions { display: grid; grid-template-columns: auto 1fr auto auto; }
+    @media (max-width: 700px) {
+      .clean-dialog-grid { grid-template-columns: 1fr; }
+      .clean-module-field { grid-column: auto; }
+      .context-clean-item { align-items: flex-start; flex-direction: column; }
+    }
     .empty { padding: 28px 18px; border: 1px dashed #bdc8d8; border-radius: 12px; color: var(--muted); text-align: center; }
     .round-card { overflow: hidden; border: 1px solid #ccd8ea; border-radius: 14px; background: #f7f9fc; }
     .round-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 14px 16px; border-bottom: 1px solid #d8e1ed; background: linear-gradient(90deg, #edf3ff, #f8faff); }

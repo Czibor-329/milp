@@ -46,6 +46,12 @@ const CLEAN_TYPE_DEFINITIONS = [
   { key: "dummywac", label: "Dummy WAC" },
 ];
 const ROUTE_CLEAN_KEYS = ["prePJobCleanRefs", "postPJobCleanRefs", "postCJobCleanRefs"];
+const PROCESSING_STATION_TYPES = new Set([
+  "processchamber",
+  "multiprocesschamber",
+  "heater",
+  "cooler",
+]);
 
 const state = {
   workspaceDevices: [], workspaceDevice: null, workspaceDeviceId: "", testCaseId: "", testCaseName: "", testCaseGroup: "", activeTestGroup: "", serviceCompatible: false, dirty: false,
@@ -55,7 +61,7 @@ const state = {
   cleans: [],
   routes: [{ name: "RouteA", group: "RouteA", bufferOption: 0, prePJobCleanRefs: [], postPJobCleanRefs: [], postCJobCleanRefs: [], stages: linkRouteSteps([makeStage("LP1"), makeStage("Robot"), makeStage("PM1,PM2", true, "RouteA_Step2"), makeStage("Robot"), makeStage("LP1")]) }],
   rounds: [makeRound(1, 0, "RouteA", "LP1"), makeRound(2, 70, "RouteA", "LP2")],
-  drawer: null, expandedRouteProcessGroups: new Set(), expandedRouteGroups: new Set(), expandedRoutes: new Set(), expandedCleanTypes: new Set(), routeNameChanges: new Map()
+  drawer: null, cleanDialogContext: null, expandedRouteProcessGroups: new Set(), expandedRouteGroups: new Set(), expandedRoutes: new Set(), routeNameChanges: new Map()
 };
 
 /** 从新版字段或旧版任务参数识别清洁类别。 */
@@ -72,7 +78,7 @@ function inferCleanType(clean) {
   return "preclean";
 }
 
-/** 兼容旧 Clean，并只保留页面需要编辑的类型及时长参数。 */
+/** 兼容旧 Clean，并保留弹窗需要编辑的类型、时长和适用腔室。 */
 function normalizeClean(clean) {
   const value = { ...(clean || {}) }, cleanType = inferCleanType(value);
   const name = String(value.name || `Clean${state.cleans.length + 1}`).trim() || `Clean${state.cleans.length + 1}`;
@@ -84,6 +90,7 @@ function normalizeClean(clean) {
   value.triggerCount = Math.max(1, Math.floor(Number(value.triggerCount ?? value.lower) || 5));
   const wacRecipeTime = Number(value.wacRecipeTime ?? value.emptyRecipeTime);
   value.wacRecipeTime = Math.max(0, Number.isFinite(wacRecipeTime) ? wacRecipeTime : 20);
+  value.modules = [...new Set(stringList(value.modules))];
   return value;
 }
 
@@ -144,7 +151,7 @@ function synchronizeCleanNames() {
   return changed;
 }
 
-/** 将精简编辑模型展开为调度接口使用的 Clean 模板。 */
+/** 将精简编辑模型展开为调度接口使用的 Clean 模板，并保留显式适用腔室。 */
 function runtimeClean(clean) {
   const value = normalizeClean(clean), type = value.cleanType;
   const taskNames = { preclean: "PreClean", postclean: "PostClean", wacclean: "WacClean", dummy: "PreDummyClean", dummywac: "PreWacClean" };
@@ -152,7 +159,7 @@ function runtimeClean(clean) {
   return {
     ...value,
     recipeRef: value.recipeName,
-    modules: [],
+    modules: value.modules,
     taskName: taskNames[type],
     stateVariable: isWac ? "ProcessCount" : "IdleTime",
     lower: isWac ? value.triggerCount : 0,
@@ -164,28 +171,9 @@ function runtimeClean(clean) {
   };
 }
 
-/** 创建一个使用默认时长的 Clean；统一命名阶段会处理重名序号。 */
+/** 创建一个使用默认时长且尚未选择腔室的 Clean。 */
 function makeClean(cleanType = "preclean") {
-  return normalizeClean({ name: "", cleanType, recipeTime: 20, triggerCount: 5, wacRecipeTime: 20 });
-}
-
-/** 返回指定类别的 Clean 名称，供 Route 引用控件筛选。 */
-function cleanNamesFor(types) {
-  const allowed = new Set(types);
-  return state.cleans.filter(clean => allowed.has(inferCleanType(clean))).map(clean => clean.name).filter(Boolean);
-}
-
-/** 删除某个 Clean 的所有 Route 引用，避免删除或换类型后留下失效引用。 */
-function removeCleanReferences(cleanName) {
-  state.routes.forEach(route => {
-    for (const key of ["prePJobCleanRefs", "postPJobCleanRefs", "postCJobCleanRefs"]) {
-      route[key] = stringList(route[key]).filter(name => name !== cleanName);
-    }
-    (route.stages || []).forEach(stage => (stage.visits || []).forEach(visit => {
-      visit.beforeCleanRefs = stringList(visit.beforeCleanRefs).filter(name => name !== cleanName);
-      visit.afterCleanRefs = stringList(visit.afterCleanRefs).filter(name => name !== cleanName);
-    }));
-  });
+  return normalizeClean({ name: "", cleanType, recipeTime: 20, triggerCount: 5, wacRecipeTime: 20, modules: [] });
 }
 
 /** 判断 Step 是否使用 Robot；旧数据没有类型时按已有候选项和原有交替规则兼容。 */
@@ -202,7 +190,7 @@ function cloneVisitParameters(visit) {
 /** 统一补全 Step 的派生字段，避免 StepID、PostStepID、NeedProcess 被手工改坏。 */
 function normalizeRoute(route) {
   route.stages = Array.isArray(route.stages) ? route.stages : [];
-  ROUTE_CLEAN_KEYS.forEach(key => { route[key] = stringList(route[key]).slice(0, 1); });
+  ROUTE_CLEAN_KEYS.forEach(key => { route[key] = stringList(route[key]); });
   route.postCJobCleanRefs = [];
   route.bufferOption = Math.max(0, Math.min(4, Math.trunc(Number(route.bufferOption) || 0)));
   linkRouteSteps(route.stages);
@@ -233,6 +221,7 @@ function synchronizeStageVisits(stage) {
     recipeTime: Number(first.processTime),
     qTimeLimit: Number(first.qTimeLimit),
     residencyConstraint: Number(first.residencyConstraint),
+    beforeCleanRefs: structuredClone(stringList(first.beforeCleanRefs)),
     afterCleanRefs: structuredClone(stringList(first.afterCleanRefs)),
   };
   stage.visits.forEach(visit => Object.assign(visit, structuredClone(editableValues)));
@@ -321,7 +310,10 @@ function applyDeviceTopology(device, deviceName) {
   state.device = structuredClone(device); state.deviceName = deviceName;
   state.stationNames = stations.map(([name]) => name).sort(natural);
   state.loadPorts = stations.filter(([, item]) => String(item.Type || "").toLowerCase() === "loadport").map(([name]) => name).sort(natural);
-  state.processModules = stations.filter(([, item]) => String(item.Type || "").toLowerCase() === "processchamber").map(([name]) => name).sort(natural);
+  state.processModules = stations
+    .filter(([, item]) => PROCESSING_STATION_TYPES.has(String(item.Type || "").trim().toLowerCase()))
+    .map(([name]) => name)
+    .sort(natural);
   state.robotNames = Object.keys(device.Robots).sort(natural);
   state.robotScopes = Object.fromEntries(Object.entries(device.Robots).map(([name, robot]) => [name, [...new Set(Object.values(robot.ArmInfo || {}).flatMap(arm => arm.AccessibleStations || []))]]));
   visualizationWorkspace.setDevice(state.device);
@@ -797,7 +789,6 @@ async function selectWorkspaceDevice(deviceId, preferredTestId = "") {
   applyDeviceTopology(result.device.device, result.device.name);
   state.routes = Array.isArray(result.device.routes) ? structuredClone(result.device.routes) : [];
   state.cleans = Array.isArray(result.device.cleans) ? structuredClone(result.device.cleans).map(normalizeClean) : [];
-  state.expandedCleanTypes = new Set(state.cleans.map(clean => clean.cleanType));
   if (!result.device.tests.length) {
     const created = await requestJson(`/api/workspaces/${deviceId}/tests`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(makeDefaultTestCase())
@@ -870,27 +861,193 @@ function resizeRounds(count) {
 /** 重算时间已合并到轮次卡片，此函数仅维持旧调用点的状态同步。 */
 function renderTimes() { normalizeRounds(); }
 
-/** 绘制按清洁类别分组、可折叠的精简 Clean 编辑器。 */
-function renderCleans() {
-  const host = document.getElementById("cleanList");
+/** 返回 Route 或 RouteStep 支持的 Clean 挂载位置。 */
+function cleanPlacementDefinitions(scope) {
+  return scope === "route"
+    ? [
+        { key: "prePJobCleanRefs", label: "PJob 前", types: ["preclean", "dummy", "dummywac"] },
+        { key: "postPJobCleanRefs", label: "PJob 后", types: ["postclean"] },
+      ]
+    : [
+        { key: "beforeCleanRefs", label: "进入腔室前", types: ["preclean", "dummy", "dummywac"] },
+        { key: "afterCleanRefs", label: "离开腔室后", types: ["postclean", "wacclean"] },
+      ];
+}
+
+/** 返回当前 Route 或 RouteStep 中允许 Clean 出现的加工腔室。 */
+function cleanContextModules(scope, routeIndex, stageIndex = -1) {
+  const route = state.routes[routeIndex];
+  if (!route) return [];
+  const stages = scope === "step" ? [route.stages[stageIndex]] : route.stages;
+  return [...new Set((stages || []).flatMap(stage => (stage?.visits || [])
+    .map(visit => visit.stationName)
+    .filter(module => state.processModules.includes(module))))];
+}
+
+/** 读取某一挂载位置的 Clean 引用。 */
+function cleanContextReferences(scope, routeIndex, stageIndex, placement) {
+  const route = state.routes[routeIndex];
+  if (!route) return [];
+  if (scope === "route") return stringList(route[placement]);
+  return stringList(route.stages[stageIndex]?.visits?.[0]?.[placement]);
+}
+
+/** 在 Route 或 RouteStep 上添加、删除一个 Clean 引用。 */
+function setCleanContextReference(context, placement, cleanName, enabled) {
+  const route = state.routes[context.routeIndex];
+  if (!route) return;
+  const update = target => {
+    const names = new Set(stringList(target[placement]));
+    if (enabled) names.add(cleanName); else names.delete(cleanName);
+    target[placement] = [...names];
+  };
+  if (context.scope === "route") update(route);
+  else (route.stages[context.stageIndex]?.visits || []).forEach(update);
+}
+
+/** 统计 Clean 在全部 Route 和 RouteStep 中的引用次数。 */
+function cleanReferenceCount(cleanName) {
+  let count = 0;
+  state.routes.forEach(route => {
+    ROUTE_CLEAN_KEYS.forEach(key => { if (stringList(route[key]).includes(cleanName)) count += 1; });
+    (route.stages || []).forEach(stage => (stage.visits || []).forEach(visit => {
+      for (const key of ["beforeCleanRefs", "afterCleanRefs"]) {
+        if (stringList(visit[key]).includes(cleanName)) count += 1;
+      }
+    }));
+  });
+  return count;
+}
+
+/** 绘制绑定在当前 Route 或 RouteStep 上的 Clean 列表。 */
+function renderContextCleans(scope, routeIndex, stageIndex = -1) {
+  const rows = cleanPlacementDefinitions(scope).flatMap(placement =>
+    cleanContextReferences(scope, routeIndex, stageIndex, placement.key).map(cleanName => ({
+      cleanName,
+      placement,
+      clean: state.cleans.find(item => item.name === cleanName),
+    }))
+  );
+  if (!rows.length) return `<div class="context-clean-empty">尚未配置 Clean</div>`;
+  return `<div class="context-clean-list">${rows.map(({ cleanName, placement, clean }) => {
+    const modules = stringList(clean?.modules);
+    const moduleSummary = modules.length ? modules.join(" / ") : "未选择腔室";
+    return `<div class="context-clean-item">
+      <div><strong>${escapeHtml(cleanName)}</strong><small>${escapeHtml(placement.label)} · ${escapeHtml(moduleSummary)}</small></div>
+      <div class="context-clean-actions">
+        <button class="btn small" type="button" data-action="edit-context-clean" data-clean-scope="${scope}" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-placement="${placement.key}" data-clean-name="${escapeHtml(cleanName)}">编辑</button>
+        <button class="btn danger small" type="button" data-action="remove-context-clean" data-clean-scope="${scope}" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-placement="${placement.key}" data-clean-name="${escapeHtml(cleanName)}">移除</button>
+      </div>
+    </div>`;
+  }).join("")}</div>`;
+}
+
+/** 根据挂载位置刷新 Clean 类型选项和条件字段。 */
+function updateCleanDialogFields() {
+  const context = state.cleanDialogContext;
+  if (!context) return;
+  const placement = document.getElementById("cleanPlacement").value;
+  const definition = cleanPlacementDefinitions(context.scope).find(item => item.key === placement);
+  const typeSelect = document.getElementById("cleanType");
+  const currentType = typeSelect.value || context.draft.cleanType;
+  typeSelect.innerHTML = CLEAN_TYPE_DEFINITIONS
+    .filter(item => definition?.types.includes(item.key))
+    .map(item => `<option value="${item.key}">${escapeHtml(item.label)}</option>`)
+    .join("");
+  typeSelect.value = definition?.types.includes(currentType) ? currentType : definition?.types[0] || "";
+  document.getElementById("cleanTriggerField").hidden = typeSelect.value !== "wacclean";
+  document.getElementById("cleanWacTimeField").hidden = typeSelect.value !== "dummywac";
+}
+
+/** 打开 Route 或 RouteStep 的 Clean 参数弹窗。 */
+function openCleanDialog(scope, routeIndex, stageIndex = -1, cleanName = "", placement = "") {
+  const existing = state.cleans.find(clean => clean.name === cleanName);
+  const definitions = cleanPlacementDefinitions(scope);
+  const selectedPlacement = definitions.some(item => item.key === placement) ? placement : definitions[0].key;
+  const draft = normalizeClean(existing || makeClean(definitions[0].types[0]));
+  state.cleanDialogContext = {
+    scope,
+    routeIndex,
+    stageIndex,
+    cleanName,
+    originalPlacement: selectedPlacement,
+    draft: structuredClone(draft),
+  };
+  document.getElementById("cleanDialogTitle").textContent = `${cleanName ? "编辑" : "新增"} ${scope === "route" ? "Route" : "RouteStep"} Clean`;
+  document.getElementById("cleanDialogDescription").textContent = scope === "route"
+    ? "Clean 只会出现在所选 Route 腔室中。"
+    : "Clean 只会出现在当前 Step 所选腔室中。";
+  const placementSelect = document.getElementById("cleanPlacement");
+  placementSelect.innerHTML = definitions.map(item => `<option value="${item.key}">${escapeHtml(item.label)}</option>`).join("");
+  placementSelect.value = selectedPlacement;
+  document.getElementById("cleanType").innerHTML = `<option value="${draft.cleanType}">${escapeHtml(draft.cleanType)}</option>`;
+  document.getElementById("cleanRecipeTime").value = String(draft.recipeTime);
+  document.getElementById("cleanTriggerCount").value = String(draft.triggerCount);
+  document.getElementById("cleanWacRecipeTime").value = String(draft.wacRecipeTime);
+  const selectedModules = new Set(stringList(draft.modules));
+  const moduleHost = document.getElementById("cleanModuleOptions");
+  const modules = cleanContextModules(scope, routeIndex, stageIndex);
+  moduleHost.innerHTML = modules.length
+    ? modules.map(module => `<label class="clean-module-option"><input type="checkbox" name="cleanModule" value="${escapeHtml(module)}" ${selectedModules.has(module) ? "checked" : ""}><span>${escapeHtml(module)}</span></label>`).join("")
+    : `<span class="clean-dialog-empty">当前范围没有可配置的加工腔室</span>`;
+  document.getElementById("cleanDialogError").textContent = "";
+  document.getElementById("deleteCleanBindingButton").hidden = !cleanName;
+  updateCleanDialogFields();
+  document.getElementById("cleanType").value = draft.cleanType;
+  updateCleanDialogFields();
+  document.getElementById("cleanDialog").showModal();
+}
+
+/** 保存 Clean 参数并绑定到当前 Route 或 RouteStep。 */
+function saveCleanDialog() {
+  const context = state.cleanDialogContext;
+  if (!context) return;
+  const modules = Array.from(document.querySelectorAll('#cleanModuleOptions input[name="cleanModule"]:checked'), input => input.value);
+  if (!modules.length) {
+    document.getElementById("cleanDialogError").textContent = "请至少选择一个 Clean 适用腔室。";
+    return;
+  }
+  const placement = document.getElementById("cleanPlacement").value;
+  const clean = normalizeClean({
+    ...context.draft,
+    cleanType: document.getElementById("cleanType").value,
+    recipeTime: Number(document.getElementById("cleanRecipeTime").value),
+    triggerCount: Number(document.getElementById("cleanTriggerCount").value),
+    wacRecipeTime: Number(document.getElementById("cleanWacRecipeTime").value),
+    modules,
+  });
+  if (context.cleanName) {
+    const cleanIndex = state.cleans.findIndex(item => item.name === context.cleanName);
+    if (cleanIndex < 0) return;
+    state.cleans[cleanIndex] = clean;
+    if (context.originalPlacement !== placement) {
+      setCleanContextReference(context, context.originalPlacement, context.cleanName, false);
+      setCleanContextReference(context, placement, context.cleanName, true);
+    }
+  } else {
+    state.cleans.push(clean);
+    synchronizeCleanNames();
+    const createdName = state.cleans.at(-1).name;
+    setCleanContextReference(context, placement, createdName, true);
+  }
   synchronizeCleanNames();
-  host.innerHTML = CLEAN_TYPE_DEFINITIONS.map(type => {
-    const rows = state.cleans.map((clean, index) => ({ clean, index })).filter(item => item.clean.cleanType === type.key);
-    const open = state.expandedCleanTypes.has(type.key);
-    const cards = rows.map(({ clean, index }) => {
-      const conditional = clean.cleanType === "wacclean"
-        ? `<div class="field"><label>触发次数</label><input type="number" min="1" step="1" data-scope="clean" data-index="${index}" data-key="triggerCount" value="${Number(clean.triggerCount)}"></div>`
-        : clean.cleanType === "dummywac"
-          ? `<div class="field"><label>WAC 清洁长度（秒）</label><input type="number" min="0" step="0.1" data-scope="clean" data-index="${index}" data-key="wacRecipeTime" value="${Number(clean.wacRecipeTime)}"></div>`
-          : "";
-      return `<article class="clean-card"><div class="clean-card-title"><strong>${escapeHtml(clean.name)}</strong><button class="btn danger small" data-action="remove-clean" data-index="${index}">删除</button></div><div class="clean-fields">
-        <div class="field"><label>清洁类别</label><select data-scope="clean" data-index="${index}" data-key="cleanType">${CLEAN_TYPE_DEFINITIONS.map(option => `<option value="${option.key}" ${option.key === clean.cleanType ? "selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}</select></div>
-        <div class="field"><label>清洁时间（秒）</label><input type="number" min="0" step="0.1" data-scope="clean" data-index="${index}" data-key="recipeTime" value="${Number(clean.recipeTime)}"></div>
-        ${conditional}
-      </div></article>`;
-    }).join("");
-    return `<section class="clean-type-group"><button class="clean-type-head" data-action="toggle-clean-type" data-clean-type="${type.key}"><span class="collapse-arrow ${open ? "open" : ""}">▶</span><strong>${escapeHtml(type.label)}</strong><span class="route-count">${rows.length} 个 · ${open ? "已展开" : "已收起"}</span></button>${open ? `<div class="clean-type-body">${cards || `<div class="clean-type-empty">暂无 ${escapeHtml(type.label)}</div>`}</div>` : ""}</section>`;
-  }).join("");
+  markTestDirty();
+  document.getElementById("cleanDialog").close();
+  state.cleanDialogContext = null;
+  renderRoutes();
+  if (state.drawer) renderStepDrawer();
+}
+
+/** 从当前上下文移除 Clean；无其他引用时同时清理定义。 */
+function removeContextClean(scope, routeIndex, stageIndex, placement, cleanName) {
+  const context = { scope, routeIndex, stageIndex };
+  setCleanContextReference(context, placement, cleanName, false);
+  if (cleanReferenceCount(cleanName) === 0) {
+    state.cleans = state.cleans.filter(clean => clean.name !== cleanName);
+  }
+  markTestDirty();
+  renderRoutes();
+  if (state.drawer) renderStepDrawer();
 }
 
 /** 返回 Step 类型的简短名称。 */
@@ -1007,11 +1164,9 @@ function groupedRoutes() {
 
 /** 绘制一条已展开路径的原有编辑能力。 */
 function renderRouteDetails(route, index) {
-  const preCleans = cleanNamesFor(["preclean", "dummy", "dummywac"]);
-  const postCleans = cleanNamesFor(["postclean"]);
-  return `<div class="route-details"><div class="edit-card-head"><strong>路径详情</strong><div><button class="btn small" data-action="add-stage" data-index="${index}">＋ Step 组</button> <button class="btn danger small" data-action="remove-route" data-index="${index}">删除</button></div></div>
+  return `<div class="route-details"><div class="edit-card-head"><strong>路径详情</strong><div><button class="btn small" data-action="open-context-clean" data-clean-scope="route" data-route-index="${index}">＋ Clean</button> <button class="btn small" data-action="add-stage" data-index="${index}">＋ Step 组</button> <button class="btn danger small" data-action="remove-route" data-index="${index}">删除</button></div></div>
     <div class="route-meta"><div class="route-meta-grid"><div class="field"><label>路径名称（自动生成）</label><input value="${escapeHtml(route.name)}" readonly></div><div class="field"><label>Group</label><input data-scope="route" data-index="${index}" data-key="group" value="${escapeHtml(route.group)}"></div><div class="field"><label>BufferOption</label><input type="number" min="0" max="4" step="1" data-scope="route" data-index="${index}" data-key="bufferOption" value="${Number(route.bufferOption)}"><small class="field-help">仅限制接口枚举范围，暂不自动修改路径。</small></div></div>
-    <details class="route-clean-details"><summary>路径级 Clean 设置</summary><div class="grid"><div class="field span-4"><label>PJob 前</label><select data-scope="route" data-index="${index}" data-key="prePJobCleanRefs">${optionsHtml(preCleans, stringList(route.prePJobCleanRefs)[0] || "", "不需要清洁")}</select></div><div class="field span-4"><label>PJob 后</label><select data-scope="route" data-index="${index}" data-key="postPJobCleanRefs">${optionsHtml(postCleans, stringList(route.postPJobCleanRefs)[0] || "", "不需要清洁")}</select></div><div class="field span-4 disabled-field"><label>CJob 后</label><select disabled><option>当前算法不支持 PostCJob Clean</option></select></div></div></details></div>
+    <section class="route-clean-section"><div class="context-clean-head"><div><strong>Route Clean</strong><small>Clean 仅作用于弹窗中选择的腔室</small></div><button class="btn small" type="button" data-action="open-context-clean" data-clean-scope="route" data-route-index="${index}">＋ Clean</button></div>${renderContextCleans("route", index)}</section></div>
     <div class="route-table-wrap"><table class="route-table"><thead><tr><th>StepID</th><th>类型</th><th>可选腔室 / 机器手</th><th>PostStepID</th><th>NeedProcess</th><th></th></tr></thead><tbody>${renderSteps(route, index)}</tbody></table></div></div>`;
 }
 
@@ -1027,7 +1182,7 @@ function renderRoutes() {
         const processSummary = profile.processCount ? profile.candidatePath.join(" → ") : "无加工工序";
         return `<article class="route-summary-card"><div class="route-summary-head"><button class="route-summary-toggle" data-action="toggle-route" data-route-index="${routeIndex}" aria-expanded="${routeOpen}">
         <div class="route-summary-title"><span class="collapse-arrow ${routeOpen ? "open" : ""}">▶</span><strong>${escapeHtml(route.name || "未命名路径")}</strong></div><div class="route-summary-meta">${escapeHtml(processSummary)} · ${route.stages.length} Steps</div></button>
-        <div class="route-summary-actions"><button class="btn small" data-action="edit-route" data-route-index="${routeIndex}">编辑</button><button class="btn small" data-action="copy-route" data-route-index="${routeIndex}">复制</button><button class="btn danger small" data-action="remove-route" data-index="${routeIndex}">删除</button></div>
+        <div class="route-summary-actions"><button class="btn small" data-action="open-context-clean" data-clean-scope="route" data-route-index="${routeIndex}">＋ Clean</button><button class="btn small" data-action="edit-route" data-route-index="${routeIndex}">编辑</button><button class="btn small" data-action="copy-route" data-route-index="${routeIndex}">复制</button><button class="btn danger small" data-action="remove-route" data-index="${routeIndex}">删除</button></div>
       </div>${routeOpen ? renderRouteDetails(route, routeIndex) : ""}</article>`;
       }).join("");
       return processGroup.isReentrant
@@ -1115,20 +1270,12 @@ function renderStepNumberField(label, key, value, routeIndex, stageIndex, option
   </div>`;
 }
 
-/** 绘制 After Clean 选择器；No Clean 与清洁项目互斥，清洁项目之间支持多选。 */
-function renderAfterCleanChoices(first, routeIndex, stageIndex) {
-  const selected = new Set(stringList(first.afterCleanRefs));
-  const choices = cleanNamesFor(["postclean", "wacclean"]);
-  const noCleanActive = selected.size === 0;
-  const cleanButtons = choices.map(name => `<button type="button" class="clean-choice ${selected.has(name) ? "active" : ""}" data-action="toggle-after-clean" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-clean-name="${escapeHtml(name)}" aria-pressed="${selected.has(name)}"><span class="clean-choice-indicator" aria-hidden="true">✓</span><span>${escapeHtml(name)}</span></button>`).join("");
-  return `<fieldset class="step-edit-field after-clean-field">
-    <legend>After Clean</legend>
-    <div class="clean-choice-list">
-      <button type="button" class="clean-choice no-clean ${noCleanActive ? "active" : ""}" data-action="toggle-after-clean" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-clean-name="" aria-pressed="${noCleanActive}"><span class="clean-choice-indicator" aria-hidden="true">✓</span><span>No Clean</span></button>
-      ${cleanButtons || `<span class="clean-choice-empty">暂无可用的 PostClean / WAC Clean</span>`}
-    </div>
-    <small class="field-help">可选择多个清洁；选择 No Clean 将清空当前选择。</small>
-  </fieldset>`;
+/** 绘制 RouteStep 的 Clean 绑定列表和新增入口。 */
+function renderStepCleanEditor(routeIndex, stageIndex) {
+  return `<section class="step-clean-section">
+    <div class="context-clean-head"><div><strong>RouteStep Clean</strong><small>进入或离开腔室时执行</small></div><button class="btn small" type="button" data-action="open-context-clean" data-clean-scope="step" data-route-index="${routeIndex}" data-stage-index="${stageIndex}">＋ Clean</button></div>
+    ${renderContextCleans("step", routeIndex, stageIndex)}
+  </section>`;
 }
 
 /** 绘制当前 Step 的配置详情；主区域只暴露业务允许修改的四项参数。 */
@@ -1140,20 +1287,19 @@ function renderStepDrawer() {
   document.getElementById("drawerTitle").textContent = `Step ${stage.stepId} 配置`;
   document.getElementById("drawerSubtitle").textContent = `${stepKind(route, stageIndex)} · ${stage.visits.length} 个候选`;
   const first = stage.visits[0] ? normalizeVisit(stage.visits[0]) : null;
-  const editableFieldLabels = { processTime: "Process Time", qTimeLimit: "QTime", residencyConstraint: "Residency", afterCleanRefs: "After Clean" };
+  const editableFieldLabels = { processTime: "Process Time", qTimeLimit: "QTime", residencyConstraint: "Residency", beforeCleanRefs: "Clean", afterCleanRefs: "Clean" };
   const differences = visitDifferenceFields(stage).filter(field => editableFieldLabels[field]);
   const candidates = [...new Set(stage.visits.map(visit => visit.stationName).filter(Boolean))];
   const differenceNames = differences.map(field => editableFieldLabels[field] || field);
   const warning = differences.length ? `<div class="visit-warning" role="status"><strong>候选腔室的可编辑参数不一致</strong><p>差异项：${differenceNames.map(escapeHtml).join("、")}。当前显示首个候选的值。</p><button class="btn small" data-action="sync-stage-visits" data-route-index="${routeIndex}" data-stage-index="${stageIndex}">同步到全部候选</button></div>` : "";
   const editor = first ? `<section class="step-editor-card" aria-labelledby="stepEditorHeading">
-    <header class="step-editor-head"><div><h3 id="stepEditorHeading">可编辑参数</h3><p>修改后自动同步到 ${stage.visits.length} 个候选腔室</p></div><span class="editable-badge">4 项</span></header>
+    <header class="step-editor-head"><div><h3 id="stepEditorHeading">可编辑参数</h3><p>修改后自动同步到 ${stage.visits.length} 个候选腔室</p></div><span class="editable-badge">3 项</span></header>
     <div class="step-edit-grid">
       ${renderStepNumberField("Process Time", "processTime", first.processTime, routeIndex, stageIndex, { minimum: 0, helper: "Recipe Time 将自动保持一致" })}
       ${renderStepNumberField("QTime", "qTimeLimit", first.qTimeLimit, routeIndex, stageIndex)}
       ${renderStepNumberField("Residency", "residencyConstraint", first.residencyConstraint, routeIndex, stageIndex)}
-      ${renderAfterCleanChoices(first, routeIndex, stageIndex)}
     </div>
-  </section>
+  </section>${renderStepCleanEditor(routeIndex, stageIndex)}
   <details class="step-system-details">
     <summary><span><strong>系统参数</strong><small>由路径或系统维护，仅供查看</small></span><span class="details-chevron" aria-hidden="true">⌄</span></summary>
     <div class="step-system-grid">
@@ -1164,7 +1310,6 @@ function renderStepDrawer() {
       ${renderReadonlyField("Weight", first.weight)}
       ${renderReadonlyField("Move Time Offset", first.moveTimeOffset, true)}
     </div>
-    <p class="system-note">Before Clean 由系统管理，不在 RouteStep 中配置。</p>
   </details>` : `<div class="empty">未选择候选设备，请先在路径列表中选择。</div>`;
   const routeName = escapeHtml(route.name || "未命名路径");
   document.getElementById("drawerBody").innerHTML = `<section class="step-overview-card">
@@ -1195,7 +1340,7 @@ function openStepDrawer(routeIndex, stageIndex) {
 function closeStepDrawer() { state.drawer = null; document.getElementById("drawerLayer").classList.remove("open"); }
 
 /** 渲染所有依赖状态的区域。 */
-function renderAll() { renderTimes(); renderCleans(); renderRoutes(); renderRounds(); if (state.drawer) renderStepDrawer(); }
+function renderAll() { renderTimes(); renderRoutes(); renderRounds(); if (state.drawer) renderStepDrawer(); }
 
 /** 根据 data 属性把表单值写回状态。 */
 function updateStateFromControl(control) {
@@ -1218,15 +1363,6 @@ function updateStateFromControl(control) {
     return;
   }
   const scope = control.dataset.scope;
-  if (scope === "clean") {
-    const cleanIndex = Number(control.dataset.index), clean = state.cleans[cleanIndex];
-    if (key === "cleanType" && clean.cleanType !== value) {
-      removeCleanReferences(clean.name);
-      clean.cleanType = value;
-      state.expandedCleanTypes.add(value);
-    } else clean[key] = value;
-    state.cleans[cleanIndex] = normalizeClean(clean);
-  }
   if (scope === "route") state.routes[Number(control.dataset.index)][key] = ROUTE_CLEAN_KEYS.includes(key) ? (value ? [value] : []) : value;
   if (scope === "stage-candidates") setStageCandidates(Number(control.dataset.routeIndex), Number(control.dataset.stageIndex), Array.from(control.selectedOptions, item => item.value));
   if (scope === "stage-candidate-toggle") {
@@ -1275,6 +1411,41 @@ function updateStateFromControl(control) {
 /** 处理新增、删除和 Step 排序动作。 */
 function handleAction(button) {
   const action = button.dataset.action, index = Number(button.dataset.index), routeIndex = Number(button.dataset.routeIndex), stageIndex = Number(button.dataset.stageIndex), visitIndex = Number(button.dataset.visitIndex);
+  if (action === "open-context-clean" || action === "edit-context-clean") {
+    openCleanDialog(
+      button.dataset.cleanScope,
+      routeIndex,
+      Number.isFinite(stageIndex) ? stageIndex : -1,
+      action === "edit-context-clean" ? button.dataset.cleanName || "" : "",
+      button.dataset.placement || "",
+    );
+    return;
+  }
+  if (action === "remove-context-clean") {
+    removeContextClean(
+      button.dataset.cleanScope,
+      routeIndex,
+      Number.isFinite(stageIndex) ? stageIndex : -1,
+      button.dataset.placement,
+      button.dataset.cleanName,
+    );
+    return;
+  }
+  if (action === "delete-clean-binding") {
+    const context = state.cleanDialogContext;
+    if (context?.cleanName) {
+      removeContextClean(
+        context.scope,
+        context.routeIndex,
+        context.stageIndex,
+        context.originalPlacement,
+        context.cleanName,
+      );
+    }
+    document.getElementById("cleanDialog").close();
+    state.cleanDialogContext = null;
+    return;
+  }
   if (action === "toggle-route-group") {
     const key = button.dataset.groupKey;
     if (state.expandedRouteGroups.has(key)) state.expandedRouteGroups.delete(key); else state.expandedRouteGroups.add(key);
@@ -1284,11 +1455,6 @@ function handleAction(button) {
     const key = button.dataset.processKey;
     if (state.expandedRouteProcessGroups.has(key)) state.expandedRouteProcessGroups.delete(key); else state.expandedRouteProcessGroups.add(key);
     renderRoutes(); return;
-  }
-  if (action === "toggle-clean-type") {
-    const cleanType = button.dataset.cleanType;
-    if (state.expandedCleanTypes.has(cleanType)) state.expandedCleanTypes.delete(cleanType); else state.expandedCleanTypes.add(cleanType);
-    renderCleans(); return;
   }
   if (action === "toggle-route" || action === "edit-route") {
     if (action === "toggle-route" && state.expandedRoutes.has(routeIndex)) state.expandedRoutes.delete(routeIndex); else state.expandedRoutes.add(routeIndex);
@@ -1300,29 +1466,6 @@ function handleAction(button) {
   if (action === "sync-stage-visits") {
     synchronizeStageVisits(state.routes[routeIndex].stages[stageIndex]);
     markTestDirty(); renderStepDrawer(); return;
-  }
-  if (action === "toggle-after-clean") {
-    const stage = state.routes[routeIndex]?.stages[stageIndex];
-    if (!stage?.visits?.length) return;
-    const cleanName = button.dataset.cleanName || "";
-    const selected = new Set(stringList(stage.visits[0].afterCleanRefs));
-    if (!cleanName) selected.clear();
-    else if (selected.has(cleanName)) selected.delete(cleanName);
-    else selected.add(cleanName);
-    stage.visits[0].afterCleanRefs = [...selected];
-    synchronizeStageVisits(stage);
-    markTestDirty();
-    renderRoutes();
-    renderStepDrawer();
-    return;
-  }
-  if (action === "add-clean") {
-    const clean = makeClean("preclean");
-    state.cleans.push(clean); state.expandedCleanTypes.add(clean.cleanType);
-  }
-  if (action === "remove-clean") {
-    removeCleanReferences(state.cleans[index]?.name);
-    state.cleans.splice(index, 1);
   }
   if (action === "add-route") {
     const name = `Route${state.routes.length + 1}`, route = { name, group: name, bufferOption: 0, prePJobCleanRefs: [], postPJobCleanRefs: [], postCJobCleanRefs: [], stages: state.device ? defaultRouteStages(name) : linkRouteSteps([makeStage(""), makeStage(""), makeStage("", true, `${name}_Step2`), makeStage(""), makeStage("")]) };
@@ -1380,7 +1523,9 @@ function collectRecipes(routes = state.routes) {
     }
     if (!weight || typeof weight !== "object" || Array.isArray(weight)) return rawWeight;
     [...stringList(visit.beforeCleanRefs), ...stringList(visit.afterCleanRefs)].forEach(cleanName => {
-      const stateVariable = String(cleanByName.get(cleanName)?.stateVariable || "").trim();
+      const clean = cleanByName.get(cleanName);
+      if (!stringList(clean?.modules).includes(visit.stationName)) return;
+      const stateVariable = String(clean?.stateVariable || "").trim();
       // IdleTime 是设备空闲时钟；其余 CleanCondition 计数器随产品加工递增。
       if (stateVariable && stateVariable !== "IdleTime" && weight[stateVariable] === undefined) {
         weight[stateVariable] = 1;
@@ -1397,29 +1542,9 @@ function collectRecipes(routes = state.routes) {
     } else recipes.push({ name, time: Number(time), modules: moduleList, processType, weight });
   }
   routes.forEach(route => { normalizeRoute(route); route.stages.forEach(stage => stage.visits.forEach(visit => { if (visit.processRecipe) add(visit.processRecipe, visit.processTime, [visit.stationName], visit.processType, standardProcessWeight(visit)); })); });
-  const cleanModules = new Map();
-  function addCleanModules(names, modules) {
-    stringList(names).forEach(name => {
-      const targets = cleanModules.get(name) || new Set();
-      stringList(modules).forEach(module => targets.add(module));
-      cleanModules.set(name, targets);
-    });
-  }
-  routes.forEach(route => {
-    const routeModules = [...new Set((route.stages || []).flatMap(stage => (stage.visits || []).filter(visit => state.processModules.includes(visit.stationName)).map(visit => visit.stationName)))];
-    addCleanModules(route.prePJobCleanRefs, routeModules);
-    addCleanModules(route.postPJobCleanRefs, routeModules);
-    addCleanModules(route.postCJobCleanRefs, routeModules);
-    (route.stages || []).forEach(stage => (stage.visits || []).forEach(visit => {
-      if (!state.processModules.includes(visit.stationName)) return;
-      addCleanModules(visit.beforeCleanRefs, [visit.stationName]);
-      addCleanModules(visit.afterCleanRefs, [visit.stationName]);
-    }));
-  });
   state.cleans.map(runtimeClean).forEach(clean => {
-    const modules = [...(cleanModules.get(clean.name) || [])];
-    add(clean.recipeRef, clean.recipeTime, modules);
-    if (clean.cleanType === "dummywac") add(clean.emptyRecipeRef, clean.wacRecipeTime, modules);
+    add(clean.recipeRef, clean.recipeTime, clean.modules);
+    if (clean.cleanType === "dummywac") add(clean.emptyRecipeRef, clean.wacRecipeTime, clean.modules);
   });
   return recipes;
 }
@@ -2360,6 +2485,17 @@ async function checkService() {
 }
 
 document.getElementById("workspaceDialogCancel").addEventListener("click", () => document.getElementById("workspaceDialog").close("cancel"));
+document.getElementById("cleanDialogCancel").addEventListener("click", () => {
+  document.getElementById("cleanDialog").close();
+  state.cleanDialogContext = null;
+});
+document.getElementById("cleanDialog").addEventListener("close", () => { state.cleanDialogContext = null; });
+document.getElementById("cleanPlacement").addEventListener("change", updateCleanDialogFields);
+document.getElementById("cleanType").addEventListener("change", updateCleanDialogFields);
+document.getElementById("cleanDialogForm").addEventListener("submit", event => {
+  event.preventDefault();
+  saveCleanDialog();
+});
 document.getElementById("deviceFile").addEventListener("change", event => loadDevice(event.target.files[0]).catch(error => { event.target.value = ""; writeTerminal(`$ 设备读取失败\n  ${error.message}`, true); }));
 document.getElementById("deviceSelect").addEventListener("change", event => (async () => { if (state.dirty) await saveCurrentTest(true); await selectWorkspaceDevice(event.target.value); })().catch(error => writeTerminal(`$ 设备切换失败\n  ${error.message}`, true)));
 document.getElementById("testGroupSelect").addEventListener("change", event => selectWorkspaceGroup(event.target.value).catch(error => writeTerminal(`$ 测试组别切换失败\n  ${error.message}`, true)));
