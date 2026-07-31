@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>调度平台</title>
-  <link rel="stylesheet" href="/assets/config_editor.css?v=1.1.3">
+  <link rel="stylesheet" href="/assets/config_editor.css?v=1.1.4">
 </head>
 <body>
   <a class="skip-link" href="#mainContent">跳到主要内容</a>
@@ -22,6 +22,9 @@
         </button>
         <button class="tab" data-tab-target="workspace" type="button">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V5m5 14v-6m5 6V9m5 10V3"/><path d="M3 19h18"/></svg><span>结果分析</span>
+        </button>
+        <button class="tab" data-tab-target="device-config" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V21h-4v-.08A1.7 1.7 0 0 0 8.97 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.52-1.03H3v-4h.08A1.7 1.7 0 0 0 4.6 8.94a1.7 1.7 0 0 0-.34-1.88L4.2 7l2.83-2.83.06.06a1.7 1.7 0 0 0 1.88.34A1.7 1.7 0 0 0 10 3.05V3h4v.05a1.7 1.7 0 0 0 1.03 1.52 1.7 1.7 0 0 0 1.88-.34l.06-.06L19.8 7l-.06.06a1.7 1.7 0 0 0-.34 1.88A1.7 1.7 0 0 0 20.92 10H21v4h-.08A1.7 1.7 0 0 0 19.4 15Z"/></svg><span>设备配置</span>
         </button>
         <button class="tab" data-tab-target="route" type="button">
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="6" r="2"/><circle cx="19" cy="18" r="2"/><path d="M7 6h4a4 4 0 0 1 4 4v4"/></svg><span>路径配置</span>
@@ -231,6 +234,40 @@
           </article>
         </div>
 
+        <div class="tab-view" data-tab-view="device-config">
+          <header class="device-config-heading">
+            <div>
+              <h1>设备配置</h1>
+              <p>统一管理当前设备的硬件能力；后续设备选项将在此处继续扩展。</p>
+            </div>
+          </header>
+          <div class="device-config-layout">
+            <nav class="device-config-nav" aria-label="设备配置分类">
+              <div class="device-config-nav-title">配置分类</div>
+              <div class="device-config-nav-item active" aria-current="page">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="7" width="16" height="11" rx="3"/><path d="M12 3v4M8 12h.01M16 12h.01M8 18v3m8-3v3"/></svg>
+                <span><strong>机器手槽位</strong><small>单臂 / 双臂模式</small></span>
+              </div>
+            </nav>
+            <article class="panel robot-slot-panel">
+              <div class="panel-head robot-slot-panel-head">
+                <div>
+                  <h2>机器手可用槽位</h2>
+                  <p>按设备设置单臂或双臂；保存后应用到当前设备下的全部测试。</p>
+                </div>
+                <div class="robot-slot-summary" id="robotSlotSummary">请先选择设备</div>
+              </div>
+              <div class="panel-body">
+                <div class="robot-slot-notice">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8v5m0 3h.01"/><circle cx="12" cy="12" r="9"/></svg>
+                  <span>切换会同步更新 Robots.Slot、Capacity、CanMultiTrans 和 ArmInfo；下次运行及批量测试会自动使用新配置。</span>
+                </div>
+                <div class="robot-slot-grid" id="robotSlotList"></div>
+              </div>
+            </article>
+          </div>
+        </div>
+
       </section>
 
       <aside class="side" id="scheduleSide">
@@ -352,6 +389,6 @@
     </aside>
   </div>
 
-  <script type="module" src="/assets/config_editor.js?v=1.1.2"></script>
+  <script type="module" src="/assets/config_editor.js?v=1.1.3"></script>
 </body>
 </html>

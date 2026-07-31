@@ -397,10 +397,16 @@ def build_workspace_batch_plan(
     ]
     merged_options = deepcopy(dict(test_case.get("options") or {}))
     merged_options.update(deepcopy(dict(options)))
+    runtime_device = deepcopy(device.get("device"))
+    if isinstance(runtime_device, dict):
+        _services().apply_robot_slot_selection(
+            runtime_device,
+            device.get("robotSlots"),
+        )
     return {
         "schemaVersion": API_SCHEMA_VERSION,
         "deviceName": str(device.get("name") or "selected init"),
-        "device": deepcopy(device.get("device")),
+        "device": runtime_device,
         "strategy": str(strategy or "heuristic"),
         "roundCount": len(rounds),
         "options": merged_options,

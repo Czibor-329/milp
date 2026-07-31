@@ -136,6 +136,94 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertNotIn('data-option="loadLockExchange"', source)
         self.assertNotIn("禁用交换", source)
 
+    def test_frontend_contains_extensible_device_config_and_robot_slot_save(self) -> None:
+        """页面应提供可扩展设备配置入口，并独立保存机器手单臂/双臂配置。"""
+        source = _editor_source()
+        for marker in (
+            'data-tab-target="device-config"',
+            'data-tab-view="device-config"',
+            "设备配置分类",
+            "机器手槽位",
+            'id="robotSlotList"',
+            'data-robot-slot-count="1"',
+            'data-robot-slot-count="2"',
+            "/robot-slots",
+            "Robots.Slot",
+        ):
+            self.assertIn(marker, source)
+
+    def test_robot_slot_selection_projects_single_and_dual_arm_fields(self) -> None:
+        """槽位选择应同步影响 Slot、Capacity、CanMultiTrans 与 ArmInfo。"""
+        single_arm_device = json.loads(json.dumps(self.device))
+        selected = config_server.apply_robot_slot_selection(
+            single_arm_device,
+            {"ATR": [1], "VTR": [1]},
+        )
+        self.assertEqual([1], selected["VTR"])
+        self.assertEqual([1], single_arm_device["Robots"]["VTR"]["Slot"])
+        self.assertEqual(1, single_arm_device["Robots"]["VTR"]["Capacity"])
+        self.assertFalse(single_arm_device["Robots"]["VTR"]["CanMultiTrans"])
+        enabled_single_slots = [
+            slot_id
+            for arm in single_arm_device["Robots"]["VTR"]["ArmInfo"].values()
+            if arm["IsEnable"]
+            for slot_id in arm["SlotIDs"]
+        ]
+        self.assertEqual([1], enabled_single_slots)
+
+        dual_arm_device = json.loads(json.dumps(self.device))
+        config_server.apply_robot_slot_selection(
+            dual_arm_device,
+            {"ATR": config_server.robot_available_slots(self.device["Robots"]["ATR"]), "VTR": [1, 2]},
+        )
+        self.assertEqual([1, 2], dual_arm_device["Robots"]["VTR"]["Slot"])
+        self.assertEqual(2, dual_arm_device["Robots"]["VTR"]["Capacity"])
+        self.assertTrue(dual_arm_device["Robots"]["VTR"]["CanMultiTrans"])
+        self.assertTrue(all(
+            arm["IsEnable"]
+            for arm in dual_arm_device["Robots"]["VTR"]["ArmInfo"].values()
+        ))
+        explicit_single_device = json.loads(json.dumps(self.device))
+        explicit_single_device["Robots"]["VTR"]["Slot"] = [1]
+        defaults = config_server.normalize_robot_slot_selection(
+            explicit_single_device,
+            {},
+        )
+        self.assertEqual([1], defaults["VTR"])
+
+    def test_workspace_robot_slot_selection_is_persisted_and_used_by_batch_plan(self) -> None:
+        """设备级槽位设置应持久保存，并进入批量计划与 Baseline 指纹输入。"""
+        with tempfile.TemporaryDirectory() as directory:
+            store_path = Path(directory) / "workspaces.json"
+            workspace_device, _ = import_workspace_device(
+                "device.json", self.device, store_path,
+            )
+            selection = {
+                robot_name: [config_server.robot_available_slots(robot)[0]]
+                for robot_name, robot in self.device["Robots"].items()
+            }
+            saved = config_server.update_workspace_robot_slots(
+                workspace_device["id"], selection, store_path,
+            )
+            reloaded = get_workspace_device(workspace_device["id"], store_path)
+            plan = config_server.build_workspace_batch_plan(
+                reloaded,
+                {"rounds": [], "options": {}},
+                "heuristic",
+                {},
+            )
+
+        self.assertEqual(selection, saved)
+        self.assertEqual(selection, reloaded["robotSlots"])
+        for robot_name, selected_slots in selection.items():
+            self.assertEqual(selected_slots, plan["device"]["Robots"][robot_name]["Slot"])
+            self.assertEqual(1, plan["device"]["Robots"][robot_name]["Capacity"])
+        with self.assertRaisesRegex(ValueError, "不支持槽位"):
+            config_server.normalize_robot_slot_selection(
+                self.device,
+                {**selection, "VTR": [999]},
+            )
+
     def test_frontend_limits_buffer_and_hides_automatic_load_port(self) -> None:
         """页面应限制 BufferOption，但不展示由系统自动分配的 LoadPort。"""
         source = _editor_source()

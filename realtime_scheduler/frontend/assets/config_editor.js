@@ -1464,6 +1464,8 @@ var PROCESSING_STATION_TYPES = /* @__PURE__ */ new Set([
   "heater",
   "cooler"
 ]);
+var FIRST_ROBOT_SLOT_ID = 1;
+var DUAL_ARM_SLOT_COUNT = 2;
 var state = {
   workspaceDevices: [],
   workspaceDevice: null,
@@ -1482,12 +1484,15 @@ var state = {
   selectedBatchTestId: "",
   parameterComparison: null,
   deviceName: "",
+  baseDevice: null,
   device: null,
   stationNames: [],
   loadPorts: [],
   processModules: [],
   robotNames: [],
   robotScopes: {},
+  robotSlots: {},
+  robotSlotsSaving: /* @__PURE__ */ new Set(),
   strategy: "heuristic",
   availableOtherAlgorithms: [],
   algorithmMetadata: {},
@@ -1702,16 +1707,88 @@ async function loadDevice(file) {
   \u8BE5\u8BBE\u5907\u4E0B\u6709 ${state.workspaceDevice?.tests?.length || 0} \u4E2A\u6D4B\u8BD5\u96C6`);
   document.getElementById("deviceFile").value = "";
 }
-function applyDeviceTopology(device, deviceName) {
-  const stations = Object.entries(device.Stations);
+function robotAvailableSlots(robot) {
+  const slots = /* @__PURE__ */ new Set();
+  const addSlots = (rawSlots, scalarIsCapacity = false) => {
+    let values = [];
+    if (Number.isInteger(rawSlots) && typeof rawSlots !== "boolean") {
+      values = scalarIsCapacity ? Array.from({ length: Math.max(0, rawSlots) }, (_, index) => index + FIRST_ROBOT_SLOT_ID) : [rawSlots];
+    } else if (Array.isArray(rawSlots)) values = rawSlots;
+    else if (rawSlots && typeof rawSlots === "object") values = Object.keys(rawSlots);
+    values.forEach((value) => {
+      const slotId = Number(value);
+      if (Number.isInteger(slotId) && slotId >= FIRST_ROBOT_SLOT_ID) slots.add(slotId);
+    });
+  };
+  addSlots(robot?.Slot, true);
+  addSlots(robot?.Slots);
+  addSlots(robot?.SlotIDs);
+  Object.values(robot?.ArmInfo || {}).forEach((arm) => addSlots(arm?.SlotIDs));
+  addSlots(robot?.Capacity, true);
+  if (robot?.CanMultiTrans === true) {
+    for (let slotId = FIRST_ROBOT_SLOT_ID; slotId < FIRST_ROBOT_SLOT_ID + DUAL_ARM_SLOT_COUNT; slotId += 1) slots.add(slotId);
+  }
+  return [...slots.size ? slots : /* @__PURE__ */ new Set([FIRST_ROBOT_SLOT_ID])].sort((left, right) => left - right);
+}
+function robotDefaultSlots(robot) {
+  const available = robotAvailableSlots(robot);
+  const rawSlots = robot?.Slot;
+  let requested = [];
+  if (Number.isInteger(rawSlots) && typeof rawSlots !== "boolean") {
+    requested = Array.from({ length: Math.max(0, rawSlots) }, (_, index) => index + FIRST_ROBOT_SLOT_ID);
+  } else if (Array.isArray(rawSlots)) requested = rawSlots.map(Number);
+  else if (rawSlots && typeof rawSlots === "object") requested = Object.keys(rawSlots).map(Number);
+  const selected = [...new Set(requested.filter((slotId) => Number.isInteger(slotId) && available.includes(slotId)))].sort((left, right) => left - right);
+  return selected.length ? selected : available;
+}
+function normalizeRobotSlotSelections(device, rawSelections = {}) {
+  const selections = rawSelections && typeof rawSelections === "object" ? rawSelections : {};
+  return Object.fromEntries(Object.entries(device?.Robots || {}).map(([robotName, robot]) => {
+    const available = robotAvailableSlots(robot);
+    const requested = Array.isArray(selections[robotName]) ? selections[robotName].map(Number) : robotDefaultSlots(robot);
+    const selected = [...new Set(requested.filter((slotId) => Number.isInteger(slotId) && available.includes(slotId)))].sort((left, right) => left - right);
+    return [robotName, selected.length ? selected : available];
+  }));
+}
+function configuredDeviceForRobotSlots(baseDevice, rawSelections) {
+  const device = structuredClone(baseDevice);
+  const selections = normalizeRobotSlotSelections(device, rawSelections);
+  Object.entries(device?.Robots || {}).forEach(([robotName, robot]) => {
+    const selected = selections[robotName];
+    robot.Slot = Number.isInteger(robot.Slot) ? selected.length : [...selected];
+    if ("Slots" in robot) robot.Slots = [...selected];
+    if ("SlotIDs" in robot) robot.SlotIDs = [...selected];
+    robot.Capacity = selected.length;
+    robot.CanMultiTrans = selected.length >= DUAL_ARM_SLOT_COUNT;
+    const arms = Object.values(robot.ArmInfo || {}).filter((arm) => arm && typeof arm === "object");
+    const assignedSlots = /* @__PURE__ */ new Set();
+    arms.forEach((arm) => {
+      const armSlots = (arm.SlotIDs || []).map(Number).filter((slotId) => selected.includes(slotId));
+      arm.SlotIDs = armSlots;
+      arm.IsEnable = armSlots.length > 0;
+      armSlots.forEach((slotId) => assignedSlots.add(slotId));
+    });
+    const missingSlots = selected.filter((slotId) => !assignedSlots.has(slotId));
+    if (arms[0] && missingSlots.length) {
+      arms[0].SlotIDs = [.../* @__PURE__ */ new Set([...arms[0].SlotIDs || [], ...missingSlots])].sort((left, right) => left - right);
+      arms[0].IsEnable = true;
+    }
+  });
+  return { device, selections };
+}
+function applyDeviceTopology(device, deviceName, rawRobotSlots = {}) {
+  state.baseDevice = structuredClone(device);
+  const configured = configuredDeviceForRobotSlots(state.baseDevice, rawRobotSlots);
+  state.device = configured.device;
+  state.robotSlots = configured.selections;
+  const stations = Object.entries(state.device.Stations);
   const natural = (left, right) => left.localeCompare(right, void 0, { numeric: true });
-  state.device = structuredClone(device);
   state.deviceName = deviceName;
   state.stationNames = stations.map(([name]) => name).sort(natural);
   state.loadPorts = stations.filter(([, item]) => String(item.Type || "").toLowerCase() === "loadport").map(([name]) => name).sort(natural);
   state.processModules = stations.filter(([, item]) => PROCESSING_STATION_TYPES.has(String(item.Type || "").trim().toLowerCase())).map(([name]) => name).sort(natural);
-  state.robotNames = Object.keys(device.Robots).sort(natural);
-  state.robotScopes = Object.fromEntries(Object.entries(device.Robots).map(([name, robot]) => [name, [...new Set(Object.values(robot.ArmInfo || {}).flatMap((arm) => arm.AccessibleStations || []))]]));
+  state.robotNames = Object.keys(state.device.Robots).sort(natural);
+  state.robotScopes = Object.fromEntries(Object.entries(state.device.Robots).map(([name, robot]) => [name, [...new Set(Object.values(robot.ArmInfo || {}).filter((arm) => arm.IsEnable !== false).flatMap((arm) => arm.AccessibleStations || []))]]));
   visualizationWorkspace.setDevice(state.device);
   if (!state.loadPorts.length || !state.processModules.length) throw new Error("\u8BBE\u5907\u5FC5\u987B\u5305\u542B LoadPort \u548C ProcessChamber");
 }
@@ -2209,7 +2286,7 @@ async function selectWorkspaceDevice(deviceId, preferredTestId = "") {
   state.workspaceDeviceId = result.device.id;
   state.activeTestGroup = "";
   state.testCaseGroup = "";
-  applyDeviceTopology(result.device.device, result.device.name);
+  applyDeviceTopology(result.device.device, result.device.name, result.device.robotSlots);
   state.routes = Array.isArray(result.device.routes) ? structuredClone(result.device.routes) : [];
   state.cleans = Array.isArray(result.device.cleans) ? structuredClone(result.device.cleans).map(normalizeClean) : [];
   if (!result.device.tests.length) {
@@ -2688,10 +2765,89 @@ function closeStepDrawer() {
   state.drawer = null;
   document.getElementById("drawerLayer").classList.remove("open");
 }
+function renderRobotSlots() {
+  const container = document.getElementById("robotSlotList");
+  const summary = document.getElementById("robotSlotSummary");
+  if (!state.baseDevice || !state.robotNames.length) {
+    summary.textContent = state.baseDevice ? "\u8BBE\u5907\u672A\u58F0\u660E\u673A\u5668\u624B" : "\u8BF7\u5148\u9009\u62E9\u8BBE\u5907";
+    container.innerHTML = `<div class="robot-slot-empty"><span>${state.baseDevice ? "\u5F53\u524D\u8BBE\u5907\u6CA1\u6709\u53EF\u914D\u7F6E\u7684\u673A\u5668\u624B\u3002" : "\u9009\u62E9\u6216\u5BFC\u5165\u8BBE\u5907\u540E\uFF0C\u53EF\u5728\u8FD9\u91CC\u5207\u6362\u673A\u5668\u624B\u7684\u5355\u81C2\u4E0E\u53CC\u81C2\u6A21\u5F0F\u3002"}</span></div>`;
+    return;
+  }
+  const dualArmCount = state.robotNames.filter((name) => (state.robotSlots[name] || []).length >= DUAL_ARM_SLOT_COUNT).length;
+  summary.textContent = `${state.robotNames.length} \u53F0\u673A\u5668\u624B \xB7 ${dualArmCount} \u53F0\u53CC\u81C2`;
+  container.innerHTML = state.robotNames.map((robotName) => {
+    const robot = state.baseDevice.Robots[robotName] || {};
+    const available = robotAvailableSlots(robot);
+    const selected = state.robotSlots[robotName] || available;
+    const isDualArm = selected.length >= DUAL_ARM_SLOT_COUNT;
+    const supportsDualArm = available.length >= DUAL_ARM_SLOT_COUNT;
+    const isSaving = state.robotSlotsSaving.has(robotName);
+    const accessibleStationCount = new Set(
+      Object.values(robot.ArmInfo || {}).flatMap((arm) => arm?.AccessibleStations || [])
+    ).size;
+    const tokens = available.map((slotId) => `
+      <span class="robot-slot-token ${selected.includes(slotId) ? "is-active" : ""}">
+        Slot ${slotId}
+      </span>
+    `).join("");
+    return `
+      <article class="robot-slot-card" data-robot-slot-card="${escapeHtml3(robotName)}">
+        <header class="robot-slot-card-head">
+          <div class="robot-slot-card-title">
+            <span class="robot-slot-card-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><rect x="4" y="7" width="16" height="11" rx="3"/><path d="M12 3v4M8 12h.01M16 12h.01M8 18v3m8-3v3"/></svg>
+            </span>
+            <div>
+              <h3>${escapeHtml3(robotName)}</h3>
+              <p>${escapeHtml3(robot.Type || "Robot")} \xB7 \u53EF\u8FBE ${accessibleStationCount} \u4E2A\u7AD9\u70B9</p>
+            </div>
+          </div>
+          <span class="robot-slot-mode">${isSaving ? "\u4FDD\u5B58\u4E2D\u2026" : isDualArm ? "\u53CC\u81C2" : "\u5355\u81C2"}</span>
+        </header>
+        <div class="robot-slot-visual" aria-label="${escapeHtml3(robotName)} \u53EF\u7528\u69FD\u4F4D">${tokens}</div>
+        <div class="robot-slot-controls" role="group" aria-label="${escapeHtml3(robotName)} \u5DE5\u4F5C\u6A21\u5F0F">
+          <button class="robot-slot-choice" type="button" data-robot-slot-name="${escapeHtml3(robotName)}" data-robot-slot-count="1" aria-pressed="${String(!isDualArm)}" ${isSaving ? "disabled" : ""}>\u5355\u81C2</button>
+          <button class="robot-slot-choice" type="button" data-robot-slot-name="${escapeHtml3(robotName)}" data-robot-slot-count="2" aria-pressed="${String(isDualArm)}" ${!supportsDualArm || isSaving ? "disabled" : ""}>\u53CC\u81C2</button>
+        </div>
+        <p class="robot-slot-card-note">${supportsDualArm ? "\u5207\u6362\u540E\u7ACB\u5373\u4FDD\u5B58\uFF0C\u5E76\u7528\u4E8E\u8BE5\u8BBE\u5907\u4E0B\u7684\u6240\u6709\u6D4B\u8BD5\u3002" : "\u8BBE\u5907\u6587\u4EF6\u4EC5\u58F0\u660E\u4E00\u4E2A\u53EF\u7528\u69FD\u4F4D\uFF0C\u5F53\u524D\u53EA\u80FD\u4F7F\u7528\u5355\u81C2\u3002"}</p>
+      </article>
+    `;
+  }).join("");
+}
+async function setRobotSlotCount(robotName, slotCount) {
+  if (!state.workspaceDeviceId || !state.baseDevice?.Robots?.[robotName]) return;
+  const available = robotAvailableSlots(state.baseDevice.Robots[robotName]);
+  const boundedCount = Math.max(1, Math.min(Number(slotCount) || 1, DUAL_ARM_SLOT_COUNT, available.length));
+  const previousSelections = structuredClone(state.robotSlots);
+  const nextSelections = { ...state.robotSlots, [robotName]: available.slice(0, boundedCount) };
+  if (JSON.stringify(previousSelections[robotName]) === JSON.stringify(nextSelections[robotName])) return;
+  state.robotSlotsSaving.add(robotName);
+  applyDeviceTopology(state.baseDevice, state.deviceName, nextSelections);
+  renderRobotSlots();
+  try {
+    const result = await requestJson(`/api/workspaces/${state.workspaceDeviceId}/robot-slots`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ robotSlots: nextSelections })
+    });
+    state.workspaceDevice.robotSlots = structuredClone(result.robotSlots);
+    applyDeviceTopology(state.baseDevice, state.deviceName, result.robotSlots);
+    resetRunResult();
+    setWorkspaceStatus(`\u5DF2\u4FDD\u5B58 ${robotName} \u7684${boundedCount >= DUAL_ARM_SLOT_COUNT ? "\u53CC\u81C2" : "\u5355\u81C2"}\u914D\u7F6E`, "saved");
+  } catch (error) {
+    applyDeviceTopology(state.baseDevice, state.deviceName, previousSelections);
+    setWorkspaceStatus(`\u673A\u5668\u624B\u69FD\u4F4D\u4FDD\u5B58\u5931\u8D25\uFF1A${error.message}`, "dirty");
+    throw error;
+  } finally {
+    state.robotSlotsSaving.delete(robotName);
+    renderRobotSlots();
+  }
+}
 function renderAll() {
   renderTimes();
   renderRoutes();
   renderRounds();
+  renderRobotSlots();
   if (state.drawer) renderStepDrawer();
 }
 function updateStateFromControl(control) {
@@ -3967,6 +4123,12 @@ document.addEventListener("change", (event) => {
 document.addEventListener("click", (event) => {
   const tab = event.target.closest("[data-tab-target]");
   if (tab) switchTab(tab.dataset.tabTarget);
+  const robotSlotChoice = event.target.closest("[data-robot-slot-name][data-robot-slot-count]");
+  if (robotSlotChoice && !robotSlotChoice.disabled) {
+    setRobotSlotCount(robotSlotChoice.dataset.robotSlotName, Number(robotSlotChoice.dataset.robotSlotCount)).catch((error) => writeTerminal(`$ \u673A\u5668\u624B\u69FD\u4F4D\u4FDD\u5B58\u5931\u8D25
+  ${error.message}`, true));
+    return;
+  }
   const batchResultCard = event.target.closest("[data-batch-item-index]");
   if (batchResultCard && !event.target.closest(".batch-result-meta")) selectBatchItem(Number(batchResultCard.dataset.batchItemIndex));
   const workspaceResult = event.target.closest("[data-workspace-result]");

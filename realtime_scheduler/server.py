@@ -156,6 +156,8 @@ API_SCHEMA_VERSION = "cjob-pjob-v3"
 HEURISTIC_BASELINE_SCHEMA_VERSION = "petri-look-dynamic-v1"
 MAX_MILP_WAFERS = 12
 DEFAULT_MILP_TIME_LIMIT_SECONDS = 120.0
+FIRST_ROBOT_SLOT_ID = 1
+DUAL_ARM_SLOT_COUNT = 2
 PROCESSING_STATION_TYPES = frozenset({
     "processchamber",
     "multiprocesschamber",
@@ -2888,6 +2890,214 @@ def get_workspace_device(device_id: str, path: Path = WORKSPACE_STORE_PATH) -> D
         return deepcopy(dict(device))
 
 
+def robot_available_slots(robot: Mapping[str, Any]) -> List[int]:
+    """返回设备声明的机器手可用槽位。
+
+    优先合并 ``Slot/Slots/SlotIDs`` 与 ``ArmInfo.*.SlotIDs``；旧设备只声明
+    ``Capacity`` 或通过 ``CanMultiTrans`` 隐式表达双臂能力时，也会补出连续槽位。
+    """
+    slots: set[int] = set()
+
+    def add_slots(raw_slots: Any, *, scalar_is_capacity: bool = False) -> None:
+        """把一种槽位表达加入集合，忽略布尔值和非正整数。"""
+        if isinstance(raw_slots, bool):
+            return
+        if isinstance(raw_slots, int):
+            values = (
+                range(FIRST_ROBOT_SLOT_ID, raw_slots + FIRST_ROBOT_SLOT_ID)
+                if scalar_is_capacity else [raw_slots]
+            )
+        elif isinstance(raw_slots, Mapping):
+            values = raw_slots.keys()
+        elif isinstance(raw_slots, Sequence) and not isinstance(raw_slots, (str, bytes)):
+            values = raw_slots
+        else:
+            return
+        for value in values:
+            try:
+                slot_id = int(value)
+            except (TypeError, ValueError):
+                continue
+            if slot_id >= FIRST_ROBOT_SLOT_ID:
+                slots.add(slot_id)
+
+    add_slots(robot.get("Slot"), scalar_is_capacity=True)
+    add_slots(robot.get("Slots"))
+    add_slots(robot.get("SlotIDs"))
+    arm_info = robot.get("ArmInfo")
+    if isinstance(arm_info, Mapping):
+        for arm in arm_info.values():
+            if isinstance(arm, Mapping):
+                add_slots(arm.get("SlotIDs"))
+    add_slots(robot.get("Capacity"), scalar_is_capacity=True)
+    if robot.get("CanMultiTrans") is True:
+        slots.update(range(FIRST_ROBOT_SLOT_ID, DUAL_ARM_SLOT_COUNT + FIRST_ROBOT_SLOT_ID))
+    return sorted(slots or {FIRST_ROBOT_SLOT_ID})
+
+
+def robot_default_slots(robot: Mapping[str, Any]) -> List[int]:
+    """返回机器手初次加载时应启用的槽位。
+
+    设备显式提供 ``Slot`` 时以其为当前模式；未提供时沿用全部已声明能力，兼容旧版
+    仅通过 ``Capacity/CanMultiTrans/ArmInfo`` 表达双臂的设备。
+    """
+    raw_slots = robot.get("Slot")
+    selected: set[int] = set()
+    if isinstance(raw_slots, bool):
+        raw_slots = None
+    if isinstance(raw_slots, int):
+        selected.update(range(FIRST_ROBOT_SLOT_ID, raw_slots + FIRST_ROBOT_SLOT_ID))
+    elif isinstance(raw_slots, Mapping):
+        for value in raw_slots.keys():
+            try:
+                selected.add(int(value))
+            except (TypeError, ValueError):
+                continue
+    elif isinstance(raw_slots, Sequence) and not isinstance(raw_slots, (str, bytes)):
+        for value in raw_slots:
+            try:
+                selected.add(int(value))
+            except (TypeError, ValueError):
+                continue
+    available = robot_available_slots(robot)
+    explicit = sorted(
+        slot_id
+        for slot_id in selected
+        if slot_id >= FIRST_ROBOT_SLOT_ID and slot_id in available
+    )
+    return explicit or available
+
+
+def normalize_robot_slot_selection(
+    device_data: Mapping[str, Any],
+    raw_selection: Any,
+) -> Dict[str, List[int]]:
+    """校验并补齐每台机器手的槽位选择。
+
+    未显式配置的机器手沿用设备声明的全部槽位。配置必须至少保留一个槽位，且不能
+    引用设备能力之外的槽位或未知机器手。
+    """
+    robots = device_data.get("Robots")
+    if not isinstance(robots, Mapping):
+        raise ValueError("设备文件必须包含 Robots")
+    selection = raw_selection if isinstance(raw_selection, Mapping) else {}
+    unknown_names = sorted(str(name) for name in selection if str(name) not in robots)
+    if unknown_names:
+        raise ValueError(f"机器手不存在：{', '.join(unknown_names)}")
+    normalized: Dict[str, List[int]] = {}
+    for robot_name, raw_robot in robots.items():
+        if not isinstance(raw_robot, Mapping):
+            continue
+        available = robot_available_slots(raw_robot)
+        raw_slots = selection.get(robot_name, robot_default_slots(raw_robot))
+        if not isinstance(raw_slots, Sequence) or isinstance(raw_slots, (str, bytes)):
+            raise ValueError(f"{robot_name} 的槽位配置必须是数组")
+        selected = sorted({
+            int(slot_id)
+            for slot_id in raw_slots
+            if not isinstance(slot_id, bool)
+            and isinstance(slot_id, (int, float))
+            and float(slot_id).is_integer()
+        })
+        if not selected:
+            raise ValueError(f"{robot_name} 至少需要保留一个可用槽位")
+        unavailable = [slot_id for slot_id in selected if slot_id not in available]
+        if unavailable:
+            raise ValueError(
+                f"{robot_name} 不支持槽位：{', '.join(map(str, unavailable))}"
+            )
+        normalized[str(robot_name)] = selected
+    return normalized
+
+
+def apply_robot_slot_selection(
+    device_data: Dict[str, Any],
+    raw_selection: Any,
+) -> Dict[str, List[int]]:
+    """将设备级槽位选择投影到运行时机器手配置并返回规范化结果。
+
+    除写入 ``Robots.*.Slot`` 外，还同步 ``Capacity``、``CanMultiTrans`` 与
+    ``ArmInfo.*.IsEnable/SlotIDs``，保证新旧算法都能识别单臂或双臂状态。
+    """
+    normalized = normalize_robot_slot_selection(device_data, raw_selection)
+    robots = device_data.get("Robots")
+    if not isinstance(robots, dict):
+        return normalized
+    for robot_name, selected in normalized.items():
+        robot = robots.get(robot_name)
+        if not isinstance(robot, dict):
+            continue
+        original_slot = robot.get("Slot")
+        robot["Slot"] = len(selected) if isinstance(original_slot, int) else list(selected)
+        if "Slots" in robot:
+            robot["Slots"] = list(selected)
+        if "SlotIDs" in robot:
+            robot["SlotIDs"] = list(selected)
+        robot["Capacity"] = len(selected)
+        robot["CanMultiTrans"] = len(selected) >= DUAL_ARM_SLOT_COUNT
+
+        arm_info = robot.get("ArmInfo")
+        if not isinstance(arm_info, dict):
+            continue
+        assigned_slots: set[int] = set()
+        first_arm: Optional[Dict[str, Any]] = None
+        for arm in arm_info.values():
+            if not isinstance(arm, dict):
+                continue
+            if first_arm is None:
+                first_arm = arm
+            arm_slots = [
+                int(slot_id)
+                for slot_id in (arm.get("SlotIDs") or [])
+                if isinstance(slot_id, int) and slot_id in selected
+            ]
+            arm["SlotIDs"] = arm_slots
+            arm["IsEnable"] = bool(arm_slots)
+            assigned_slots.update(arm_slots)
+        missing_slots = [slot_id for slot_id in selected if slot_id not in assigned_slots]
+        if first_arm is not None and missing_slots:
+            first_arm["SlotIDs"] = sorted({
+                *(
+                    int(slot_id)
+                    for slot_id in (first_arm.get("SlotIDs") or [])
+                    if isinstance(slot_id, int)
+                ),
+                *missing_slots,
+            })
+            first_arm["IsEnable"] = True
+            slot_station_map = first_arm.get("SlotsStationMap")
+            if isinstance(slot_station_map, dict):
+                for station_slots in slot_station_map.values():
+                    if not isinstance(station_slots, dict) or not station_slots:
+                        continue
+                    template = next(iter(station_slots.values()))
+                    for slot_id in missing_slots:
+                        station_slots.setdefault(str(slot_id), deepcopy(template))
+    return normalized
+
+
+def update_workspace_robot_slots(
+    device_id: str,
+    raw_selection: Any,
+    path: Path = WORKSPACE_STORE_PATH,
+) -> Dict[str, List[int]]:
+    """保存设备级机器手槽位选择，并使依赖旧拓扑的 Baseline 失效。"""
+    with _workspace_catalog_guard(path):
+        catalog = _read_workspace_catalog_unlocked(path)
+        device = next((item for item in catalog["devices"] if item.get("id") == device_id), None)
+        if device is None:
+            raise ValueError(f"设备不存在：{device_id}")
+        device_data = device.get("device")
+        if not isinstance(device_data, Mapping):
+            raise ValueError("设备拓扑无效")
+        normalized = normalize_robot_slot_selection(device_data, raw_selection)
+        device["robotSlots"] = normalized
+        _invalidate_stale_device_baselines(device)
+        device["updatedAt"] = _workspace_timestamp()
+        _write_workspace_catalog_unlocked(path, catalog)
+        return deepcopy(normalized)
+
+
 def _unique_workspace_name(name: str, existing_names: Iterable[str]) -> str:
     """为设备或测试集生成易读且不重复的名称。"""
     normalized = name.strip() or "未命名"
@@ -3819,12 +4029,17 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                 ), None)
                 if test_case is None:
                     raise ValueError(f"测试集不存在：{workspace_test_id}")
+                selected_plan = deepcopy(dict(payload))
+                runtime_device = deepcopy(device.get("device"))
+                if isinstance(runtime_device, dict):
+                    apply_robot_slot_selection(runtime_device, device.get("robotSlots"))
+                    selected_plan["device"] = runtime_device
                 result, baseline, run_error = _execute_workspace_test_with_baseline(
                     device,
                     test_case,
                     str(payload.get("strategy") or "heuristic"),
                     dict(payload.get("options") or {}),
-                    selected_plan=payload,
+                    selected_plan=selected_plan,
                 )
                 baseline_response = deepcopy(baseline)
                 if run_error is not None or result is None:
@@ -3881,9 +4096,19 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             self._send_json(response, HTTPStatus.BAD_REQUEST)
 
     def do_PUT(self) -> None:
-        """保存测试集或重命名设备下的测试组别。"""
+        """保存测试集、机器手槽位或重命名设备下的测试组别。"""
         path = unquote(urlparse(self.path).path)
         parts = [part for part in path.split("/") if part]
+        if len(parts) == 4 and parts[:2] == ["api", "workspaces"] and parts[3] == "robot-slots":
+            try:
+                payload = self._read_json_object()
+                robot_slots = update_workspace_robot_slots(
+                    parts[2], payload.get("robotSlots"),
+                )
+                self._send_json({"ok": True, "robotSlots": robot_slots})
+            except Exception as error:  # noqa: BLE001
+                self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
+            return
         if len(parts) == 4 and parts[:2] == ["api", "workspaces"] and parts[3] == "groups":
             try:
                 payload = self._read_json_object()
