@@ -326,10 +326,16 @@ test("拓扑回放补全设备配置中未被 MoveList 引用的腔室", () => {
 
 function positionsFromTopology(topology) {
   const positions = [];
-  const pattern = /--(?:module|robot)-left:([\d.]+)%;--(?:module|robot)-top:(\d+)px/g;
+  const pattern = /class="reference-(module|robot)-position" style="--(?:module|robot)-left:([\d.]+)%;--(?:module|robot)-top:(\d+)px">([\s\S]*?)(?=<div class="reference-|\s*<svg class="topology-target-arrows)/g;
   let match;
   while ((match = pattern.exec(topology)) !== null) {
-    positions.push({ x: Number(match[1]) / 100 * 1000, y: Number(match[2]) });
+    const isLoadLock = /class="equipment-card equipment-lock\b/.test(match[4]);
+    positions.push({
+      x: Number(match[2]) / 100 * 1000,
+      y: Number(match[3]),
+      width: isLoadLock ? 136 : 96,
+      height: isLoadLock ? 64 : 96,
+    });
   }
   return positions;
 }
@@ -344,7 +350,8 @@ function assertTopologyComplete(topology, requiredNames) {
     for (let j = i + 1; j < positions.length; j += 1) {
       const a = positions[i];
       const b = positions[j];
-      const overlaps = Math.abs(a.x - b.x) < 96 && Math.abs(a.y - b.y) < 96;
+      const overlaps = Math.abs(a.x - b.x) < (a.width + b.width) / 2
+        && Math.abs(a.y - b.y) < (a.height + b.height) / 2;
       assert.equal(overlaps, false, `模块位置重叠：${JSON.stringify([a, b])}`);
     }
   }
@@ -378,8 +385,8 @@ test("单真空机械手拓扑完整显示 LP1-LP4、LA/LB 与 PM1-PM6 且不重
   assert.doesNotMatch(topology, />DummyPort</);
   assert.doesNotMatch(topology, />heater</i);
   assert.doesNotMatch(topology, /DEVICE TOPOLOGY|设备配置全量模块/);
-  assert.match(topology, /--module-left:20%;/);
-  assert.match(topology, /--topology-canvas-height:723px/);
+  assert.match(topology, /--module-left:26%;/);
+  assert.match(topology, /--topology-canvas-height:784px/);
 
   const modulePosition = name => {
     const match = new RegExp(
@@ -400,6 +407,18 @@ test("单真空机械手拓扑完整显示 LP1-LP4、LA/LB 与 PM1-PM6 且不重
   const vtr = robotPosition("VTR");
   assert.equal(vtr.x, 50);
   assert.equal(vtr.y, (pm1.y + pm2.y) / 2);
+
+  const la = modulePosition("LA");
+  const lb = modulePosition("LB");
+  const lc = modulePosition("LC");
+  const ld = modulePosition("LD");
+  assert.deepEqual([la.x, lc.x], [42, 58], "第一行应为 LA / LC");
+  assert.deepEqual([lb.x, ld.x], [42, 58], "第二行应为 LB / LD");
+  assert.equal(la.y, lc.y);
+  assert.equal(lb.y, ld.y);
+  assert.equal(lb.y - la.y, 64, "上下两排 LoadLock 应无缝拼接");
+  assert.match(topology, /class="loadlock-layers"/);
+  assert.equal((topology.match(/class="loadlock-layer /g) || []).length, 8, "四个 LoadLock 各显示两层");
 });
 
 test("双真空机械手级联拓扑完整显示 LP1-LP4、LA/LB 与 PM1-PM6 且不重叠", () => {
@@ -459,6 +478,76 @@ test("多个大气机械手在同一排横向分布且不重叠", () => {
   const positions = [...found.values()];
   assert.ok(Math.abs(positions[0].x - positions[1].x) >= 96, "两个大气机械手应横向分开");
   assert.equal(positions[0].y, positions[1].y, "两个大气机械手应在同一排");
+});
+
+test("LoadLock 空层不画晶圆线，并区分已加工晶圆且按环境变化蓝色液位", () => {
+  const loadLockMoves = [
+    { MoveID: 1, MoveType: 13, ModuleName: "LA", StartTime: 0, EndTime: 1 },
+    { MoveID: 2, MoveType: 0, ModuleName: "VTR", SrcStationList: ["LP1"], MatIDList: ["W_DONE"], StartTime: 0, EndTime: 1 },
+    { MoveID: 3, MoveType: 1, ModuleName: "VTR", DestStationList: ["PM1"], MatIDList: ["W_DONE"], StartTime: 1, EndTime: 2 },
+    { MoveID: 4, MoveType: 9, ModuleName: "PM1", MatIDList: ["W_DONE"], StartTime: 2, EndTime: 3 },
+    { MoveID: 5, MoveType: 0, ModuleName: "VTR", SrcStationList: ["PM1"], MatIDList: ["W_DONE"], StartTime: 3, EndTime: 4 },
+    { MoveID: 6, MoveType: 1, ModuleName: "VTR", DestStationList: ["LA"], MatIDList: ["W_DONE"], StartTime: 4, EndTime: 5 },
+    { MoveID: 7, MoveType: 12, ModuleName: "LA", StartTime: 6, EndTime: 10 },
+    { MoveID: 8, MoveType: 0, ModuleName: "VTR", SrcStationList: ["LA"], MatIDList: ["W_RAW"], StartTime: 10, EndTime: 11 },
+    { MoveID: 9, MoveType: 13, ModuleName: "LA", StartTime: 12, EndTime: 16 },
+  ];
+  const atmosphereSnapshot = logic.buildWorkspaceSnapshot(loadLockMoves, device, 5);
+  assert.deepEqual(moduleAt(atmosphereSnapshot, "LA").processedWafers, ["W_DONE"]);
+  const atmosphereTopology = logic.renderEquipmentTopology(atmosphereSnapshot, null);
+  assert.match(atmosphereTopology, /--loadlock-atmosphere:100\.0%/);
+  assert.match(atmosphereTopology, /loadlock-wafer-line wafer-processed/);
+  assert.match(atmosphereTopology, /loadlock-wafer-line wafer-unprocessed/);
+  assert.doesNotMatch(atmosphereTopology, /loadlock-empty-slot/);
+
+  const pumpingTopology = logic.renderEquipmentTopology(
+    logic.buildWorkspaceSnapshot(loadLockMoves, device, 8),
+    null,
+  );
+  assert.match(pumpingTopology, /loadlock-pumping/);
+  assert.match(pumpingTopology, /--loadlock-atmosphere:50\.0%/);
+
+  const ventingTopology = logic.renderEquipmentTopology(
+    logic.buildWorkspaceSnapshot(loadLockMoves, device, 14),
+    null,
+  );
+  assert.match(ventingTopology, /loadlock-venting/);
+  assert.match(ventingTopology, /--loadlock-atmosphere:50\.0%/);
+
+  const emptyTopology = logic.renderEquipmentTopology(
+    logic.snapshotWithFullDeviceModules(logic.buildWorkspaceSnapshot([], device, 0), device),
+    null,
+  );
+  assert.doesNotMatch(emptyTopology, /loadlock-wafer-line/);
+});
+
+test("ATR 箭头固定走 LoadLock 下排，VTR 箭头固定走上排", () => {
+  const portalDevice = {
+    Stations: {
+      LP1: { Type: "LoadPort" }, PM1: { Type: "Process" },
+      LA: { Type: "LoadLock" }, LB: { Type: "LoadLock" },
+      LC: { Type: "LoadLock" }, LD: { Type: "LoadLock" },
+    },
+    Robots: { ATR: {}, VTR: {} },
+  };
+  const portalMoves = [
+    { MoveID: 1, MoveType: 2, ModuleName: "ATR", SrcStationList: ["LP1"], DestStationList: ["LA"], StartTime: 0, EndTime: 10 },
+    { MoveID: 2, MoveType: 0, ModuleName: "VTR", SrcStationList: ["PM1"], DestStationList: ["LB"], StartTime: 0, EndTime: 10 },
+  ];
+  const snapshot = logic.snapshotWithFullDeviceModules(
+    logic.buildWorkspaceSnapshot(portalMoves, portalDevice, 5),
+    portalDevice,
+  );
+  const topology = logic.renderEquipmentTopology(snapshot, null);
+  const moduleY = name => {
+    const match = new RegExp(`--module-left:[\\d.]+%;--module-top:(\\d+)px">(?:(?!class="reference-module-position")[\\s\\S])*?<strong>${name}</strong>`).exec(topology);
+    assert.ok(match, `应找到 ${name} 的纵坐标`);
+    return Number(match[1]);
+  };
+  const arrowEnds = [...topology.matchAll(/<line[^>]*\sy2="([\d.]+)"[^>]*>/g)].map(match => Number(match[1]));
+  assert.equal(arrowEnds.length, 2);
+  assert.equal(arrowEnds[0], moduleY("LB") + 32, "ATR 指向 LA/LB 时应从下排 LB 进入");
+  assert.equal(arrowEnds[1], moduleY("LA") - 32, "VTR 指向 LA/LB 时应从上排 LA 进入");
 });
 
 test("完成取放动作后晶圆位置与机器人状态一致", () => {

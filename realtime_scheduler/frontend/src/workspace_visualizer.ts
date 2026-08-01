@@ -31,6 +31,7 @@ export interface ModuleSnapshot {
   status: ModuleStatus;
   door: DoorStatus;
   wafers: string[];
+  processedWafers: string[];
   activeMoveName: string;
   progress: number;
   environment: string;
@@ -143,7 +144,10 @@ const PREPARE_MOVE = 6;
 const COMPLETE_MOVE = 7;
 const PROCESS_MOVE = 9;
 const PRE_PREPARE_MOVE = 10;
+const PUMP_MOVE = 12;
+const VENT_MOVE = 13;
 const CLEAN_MOVE = 14;
+const LOADLOCK_ENVIRONMENT_MOVE_TYPES = new Set([PRE_PREPARE_MOVE, PUMP_MOVE, VENT_MOVE]);
 const PLAYBACK_FRAME_INTERVAL_MS = 40;
 const DOOR_VISUAL_MIN_SECONDS = 0.7;
 const DEFAULT_PLAYBACK_SPEED = 4;
@@ -499,6 +503,7 @@ export function buildWorkspaceSnapshot(
   const locations = initialMaterialLocations(records);
   const doorStates = new Map<string, DoorStatus>();
   const environments = new Map<string, string>();
+  const processedMaterials = new Set<string>();
   const activeMoves: NormalizedMove[] = [];
   let completedMoves = 0;
 
@@ -513,6 +518,9 @@ export function buildWorkspaceSnapshot(
     if (completed) {
       completedMoves += 1;
       applyCompletedTransfer(move, locations);
+      if (move.MoveType === PROCESS_MOVE) {
+        for (const material of materialIds(move)) processedMaterials.add(material);
+      }
     }
 
     const doorVisualActive = move.StartTime <= time
@@ -523,8 +531,12 @@ export function buildWorkspaceSnapshot(
     } else if (move.MoveType === COMPLETE_MOVE) {
       if (doorVisualActive) doorStates.set(move.ModuleName, "closing");
       else if (completed) doorStates.set(move.ModuleName, "closed");
-    } else if (move.MoveType === PRE_PREPARE_MOVE && (active || completed)) {
-      const currentState = String(move.CurState ?? "");
+    } else if (LOADLOCK_ENVIRONMENT_MOVE_TYPES.has(move.MoveType) && (active || completed)) {
+      const currentState = move.MoveType === PUMP_MOVE
+        ? "VAC"
+        : move.MoveType === VENT_MOVE
+          ? "ATM"
+          : String(move.CurState ?? "");
       const environment = /VTR|VAC/i.test(currentState) ? "真空" : /ATR|ATM/i.test(currentState) ? "大气" : currentState;
       if (environment) environments.set(move.ModuleName, active ? `${environment}切换中` : environment);
     }
@@ -553,21 +565,21 @@ export function buildWorkspaceSnapshot(
     ));
     const primaryMove = moduleMoves.find(move => move.MoveType === CLEAN_MOVE)
       ?? moduleMoves.find(move => move.MoveType === PROCESS_MOVE)
-      ?? moduleMoves.find(move => move.MoveType === PRE_PREPARE_MOVE)
+      ?? moduleMoves.find(move => LOADLOCK_ENVIRONMENT_MOVE_TYPES.has(move.MoveType))
       ?? moduleMoves.find(move => [PREPARE_MOVE, COMPLETE_MOVE].includes(move.MoveType))
       ?? moduleMoves[0];
     let status: ModuleStatus = (wafersByLocation.get(name)?.length ?? 0) > 0 ? "occupied" : "idle";
     if (primaryMove?.MoveType === CLEAN_MOVE) status = "cleaning";
     else if (primaryMove?.MoveType === PROCESS_MOVE) status = "processing";
-    else if (primaryMove?.MoveType === PRE_PREPARE_MOVE) status = "environment";
+    else if (primaryMove && LOADLOCK_ENVIRONMENT_MOVE_TYPES.has(primaryMove.MoveType)) status = "environment";
     else if (primaryMove && [PREPARE_MOVE, COMPLETE_MOVE].includes(primaryMove.MoveType)) status = "door";
     else if (primaryMove) status = "transfer";
     const currentEnvironment = String(primaryMove?.CurState ?? "");
     const prePrepareType = String(primaryMove?.PrePrepareType ?? "");
-    const loadLockPhase = primaryMove?.MoveType === PRE_PREPARE_MOVE
-      ? (/VTR|VAC|PUMP/i.test(`${currentEnvironment} ${prePrepareType}`)
+    const loadLockPhase = primaryMove && LOADLOCK_ENVIRONMENT_MOVE_TYPES.has(primaryMove.MoveType)
+      ? (primaryMove.MoveType === PUMP_MOVE || /VTR|VAC|PUMP/i.test(`${currentEnvironment} ${prePrepareType}`)
           ? "pumping"
-          : /ATR|ATM|VENT/i.test(`${currentEnvironment} ${prePrepareType}`)
+          : primaryMove.MoveType === VENT_MOVE || /ATR|ATM|VENT/i.test(`${currentEnvironment} ${prePrepareType}`)
             ? "venting"
             : "")
       : "";
@@ -577,6 +589,7 @@ export function buildWorkspaceSnapshot(
       status,
       door: doorStates.get(name) ?? "closed",
       wafers: wafersByLocation.get(name) ?? [],
+      processedWafers: (wafersByLocation.get(name) ?? []).filter(wafer => processedMaterials.has(wafer)),
       activeMoveName: primaryMove ? (MOVE_NAMES[primaryMove.MoveType] ?? `动作 ${primaryMove.MoveType}`) : "",
       progress: primaryMove ? moveProgress(primaryMove, time) : 0,
       environment: environments.get(name) ?? "",
@@ -711,6 +724,7 @@ function snapshotWithCandidateModules(
       status: "idle",
       door: "closed",
       wafers: [],
+      processedWafers: [],
       activeMoveName: "",
       progress: 0,
       environment: "",
@@ -745,6 +759,7 @@ export function snapshotWithFullDeviceModules(
       status: "idle",
       door: isDoorlessModule(name, type) ? "doorless" : "closed",
       wafers: [],
+      processedWafers: [],
       activeMoveName: "",
       progress: 0,
       environment: "",
@@ -777,13 +792,13 @@ function renderWaferToken(wafer: string, progress: number): string {
   return `<span class="wafer-token" style="--wafer-progress:${normalizedProgress * 360}deg" title="晶圆 ${escapeHtml(wafer)}"><span>${escapeHtml(wafer)}</span></span>`;
 }
 
-/** 门沿用原机台朝向：LoadLock 双侧、LP 顶部，PM 按所在边布置。 */
+/** 门沿用原机台朝向；LoadLock 改由正视双层结构单独表达。 */
 function moduleDoorSides(
   module: ModuleSnapshot,
   role: "process" | "lock" | "port" | "auxiliary",
 ): Array<"top" | "right" | "bottom" | "left"> {
   if (module.door === "doorless") return [];
-  if (role === "lock") return ["top", "bottom"];
+  if (role === "lock") return [];
   if (role === "port") return ["top"];
   const name = module.name.trim().toUpperCase();
   if (/^PM[12]$/.test(name)) return ["left"];
@@ -801,11 +816,12 @@ function renderModule(
   candidate: CandidateDestinationSummary | undefined,
 ): string {
   const waferProgress = module.status === "processing" ? module.progress : 0;
-  const wafers = module.wafers.slice(0, 1)
+  const visibleWaferCount = role === "lock" ? 2 : 1;
+  const wafers = module.wafers.slice(0, visibleWaferCount)
     .map(wafer => renderWaferToken(wafer, waferProgress))
     .join("");
-  const overflow = module.wafers.length > 1
-    ? `<span class="wafer-more">+ ${module.wafers.length - 1}</span>`
+  const overflow = module.wafers.length > visibleWaferCount
+    ? `<span class="wafer-more">+ ${module.wafers.length - visibleWaferCount}</span>`
     : "";
   const doors = moduleDoorSides(module, role)
     .map(side => `<i class="chamber-door chamber-door-${side}"></i>`)
@@ -814,13 +830,31 @@ function renderModule(
   const candidateLabel = candidate
     ? `${candidate.count} 个可行动作，最高模型偏好 ${(candidate.preference * 100).toFixed(0)}%`
     : "";
+  const atmosphereLevel = role === "lock"
+    ? module.loadLockPhase === "pumping"
+      ? 100 - module.progress * 100
+      : module.loadLockPhase === "venting"
+        ? module.progress * 100
+        : /大气|ATM|ATR/i.test(module.environment)
+          ? 100
+          : 0
+    : 0;
+  const processedWafers = new Set(module.processedWafers ?? []);
+  const loadLockLayers = role === "lock"
+    ? `<div class="loadlock-layers" aria-hidden="true">${[0, 1].map(index => {
+        const wafer = module.wafers[index];
+        const processed = wafer ? processedWafers.has(wafer) : false;
+        const waferState = processed ? "processed" : "unprocessed";
+        return `<div class="loadlock-layer ${wafer ? "is-occupied" : "is-empty"}"><span class="loadlock-layer-index">${index + 1}</span>${wafer ? `<span class="loadlock-wafer-line wafer-${waferState}" title="晶圆 ${escapeHtml(wafer)}（${processed ? "已加工" : "未加工"}）"></span>` : ""}</div>`;
+      }).join("")}${overflow}</div>`
+    : `<div class="wafer-stack">${wafers}${overflow}</div>`;
   return `
-    <article class="equipment-card equipment-${role} status-${module.status} door-${module.door} ${module.loadLockPhase ? `loadlock-${module.loadLockPhase}` : ""} ${module.isRobotTarget ? "is-target" : ""} ${candidate ? "is-candidate-destination" : ""} ${candidate?.selected ? "is-model-selected" : ""}" style="--module-progress:${Math.round(module.progress * 100)}%" aria-label="${escapeHtml(`${accessibleStatus}${candidateLabel ? `，${candidateLabel}` : ""}`)}">
+    <article class="equipment-card equipment-${role} status-${module.status} door-${module.door} ${module.loadLockPhase ? `loadlock-${module.loadLockPhase}` : ""} ${module.isRobotTarget ? "is-target" : ""} ${candidate ? "is-candidate-destination" : ""} ${candidate?.selected ? "is-model-selected" : ""}" style="--module-progress:${Math.round(module.progress * 100)}%;--loadlock-atmosphere:${Math.max(0, Math.min(100, atmosphereLevel)).toFixed(1)}%" aria-label="${escapeHtml(`${accessibleStatus}${candidateLabel ? `，${candidateLabel}` : ""}`)}">
       <div class="equipment-head">
         <strong>${escapeHtml(module.name)}</strong>
       </div>
       <div class="equipment-body">
-        <div class="wafer-stack">${wafers}${overflow}</div>
+        ${loadLockLayers}
       </div>
       <div class="chamber-doors" aria-hidden="true">${doors}</div>
     </article>`;
@@ -842,12 +876,19 @@ function renderRobotHub(robot: RobotSnapshot, environment: "vacuum" | "atmospher
 interface TopologyPosition {
   leftPercent: number;
   topPixels: number;
+  widthPixels?: number;
+  heightPixels?: number;
 }
 
-const TOPOLOGY_COLUMN_PERCENTAGES = [20, 40, 60, 80] as const;
+const TOPOLOGY_COLUMN_PERCENTAGES = [26, 42, 58, 74] as const;
 const TOPOLOGY_ROW_TOP_PIXELS = [52, 154, 256, 358, 460, 562, 664, 786, 929, 1031, 1133] as const;
 const TOPOLOGY_VIEWBOX_WIDTH = 1000;
 const TOPOLOGY_ITEM_SIZE = 96;
+const TOPOLOGY_LOADLOCK_WIDTH = 136;
+const TOPOLOGY_LOADLOCK_HEIGHT = 64;
+const TOPOLOGY_LOADLOCK_ROW_TOP_PIXELS = [664, 728] as const;
+const TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS = 866;
+const TOPOLOGY_LOADPORT_ROW_TOP_PIXELS = 990;
 const TOPOLOGY_CANVAS_PADDING = 28;
 
 /** 返回均匀分布在四列设备网格中的横向位置。 */
@@ -876,10 +917,11 @@ function moduleTopologyPosition(
   module: ModuleSnapshot,
   role: "process" | "lock" | "port" | "auxiliary",
   index: number,
-  roleCount: number,
+  roleModules: ModuleSnapshot[],
   cascade: boolean,
 ): TopologyPosition {
   const name = module.name.trim().toUpperCase();
+  const roleCount = roleModules.length;
   const column = TOPOLOGY_COLUMN_PERCENTAGES;
   const row = TOPOLOGY_ROW_TOP_PIXELS;
   const cascadePositions: Record<string, TopologyPosition> = {
@@ -909,19 +951,34 @@ function moduleTopologyPosition(
   const explicit = (cascade ? cascadePositions : singlePositions)[name];
   if (explicit) return explicit;
   if (role === "lock") {
-    return { leftPercent: distributedTopologyColumns(roleCount)[index], topPixels: row[6] };
+    const canonicalOrder: Record<string, number> = { LA: 0, LC: 1, LB: 2, LD: 3 };
+    const orderedLoadLocks = [...roleModules].sort((left, right) => {
+      const leftName = left.name.trim().toUpperCase();
+      const rightName = right.name.trim().toUpperCase();
+      const leftRank = canonicalOrder[leftName] ?? 100;
+      const rightRank = canonicalOrder[rightName] ?? 100;
+      return leftRank - rightRank || naturalCompare(left.name, right.name);
+    });
+    const gridIndex = Math.max(0, orderedLoadLocks.findIndex(item => item.name === module.name));
+    const loadLockRowGap = TOPOLOGY_LOADLOCK_ROW_TOP_PIXELS[1] - TOPOLOGY_LOADLOCK_ROW_TOP_PIXELS[0];
+    return {
+      leftPercent: gridIndex % 2 === 0 ? column[1] : column[2],
+      topPixels: TOPOLOGY_LOADLOCK_ROW_TOP_PIXELS[0] + Math.floor(gridIndex / 2) * loadLockRowGap,
+      widthPixels: TOPOLOGY_LOADLOCK_WIDTH,
+      heightPixels: TOPOLOGY_LOADLOCK_HEIGHT,
+    };
   }
   if (role === "port") {
     const loadPortColumns: Record<string, number> = {
-      LP1: 20, LP2: 40, LP3: 60, LP4: 80,
+      LP1: column[0], LP2: column[1], LP3: column[2], LP4: column[3],
     };
     if (loadPortColumns[name] !== undefined) {
-      return { leftPercent: loadPortColumns[name], topPixels: row[8] };
+      return { leftPercent: loadPortColumns[name], topPixels: TOPOLOGY_LOADPORT_ROW_TOP_PIXELS };
     }
-    return { leftPercent: distributedTopologyColumns(roleCount)[index], topPixels: row[8] };
+    return { leftPercent: distributedTopologyColumns(roleCount)[index], topPixels: TOPOLOGY_LOADPORT_ROW_TOP_PIXELS };
   }
-  if (["AL", "ALIGNER"].includes(name)) return { leftPercent: column[0], topPixels: row[7] };
-  if (["CL", "COOLER"].includes(name)) return { leftPercent: column[3], topPixels: row[7] };
+  if (["AL", "ALIGNER"].includes(name)) return { leftPercent: column[0], topPixels: TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS };
+  if (["CL", "COOLER"].includes(name)) return { leftPercent: column[3], topPixels: TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS };
   if (role === "auxiliary") {
     const perRow = 6;
     const rowIndex = Math.floor(index / perRow);
@@ -930,7 +987,7 @@ function moduleTopologyPosition(
     const rowGap = row[1] - row[0];
     return {
       leftPercent: distributedTopologyColumns(columnsInRow)[columnIndex] ?? 50,
-      topPixels: row[9] + rowIndex * rowGap,
+      topPixels: TOPOLOGY_LOADPORT_ROW_TOP_PIXELS + row[1] - row[0] + rowIndex * rowGap,
     };
   }
 
@@ -952,10 +1009,10 @@ function robotTopologyPosition(
     if (robotCount > 1) {
       return {
         leftPercent: distributedTopologyColumns(robotCount)[robotIndex] ?? 50,
-        topPixels: TOPOLOGY_ROW_TOP_PIXELS[7],
+        topPixels: TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS,
       };
     }
-    return { leftPercent: 50, topPixels: TOPOLOGY_ROW_TOP_PIXELS[7] };
+    return { leftPercent: 50, topPixels: TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS };
   }
   if (cascade && robotCount > 1) {
     return {
@@ -983,13 +1040,16 @@ function topologySvgPoint(position: TopologyPosition): { x: number; y: number } 
 function topologyEdgePoint(
   center: { x: number; y: number },
   toward: { x: number; y: number },
+  width = TOPOLOGY_ITEM_SIZE,
+  height = TOPOLOGY_ITEM_SIZE,
 ): { x: number; y: number } {
-  const half = TOPOLOGY_ITEM_SIZE / 2;
+  const halfWidth = width / 2;
+  const halfHeight = height / 2;
   const dx = toward.x - center.x;
   const dy = toward.y - center.y;
   if (Math.abs(dx) < 1e-6 && Math.abs(dy) < 1e-6) return center;
-  const scaleX = Math.abs(dx) > 1e-6 ? half / Math.abs(dx) : Number.POSITIVE_INFINITY;
-  const scaleY = Math.abs(dy) > 1e-6 ? half / Math.abs(dy) : Number.POSITIVE_INFINITY;
+  const scaleX = Math.abs(dx) > 1e-6 ? halfWidth / Math.abs(dx) : Number.POSITIVE_INFINITY;
+  const scaleY = Math.abs(dy) > 1e-6 ? halfHeight / Math.abs(dy) : Number.POSITIVE_INFINITY;
   const scale = Math.min(scaleX, scaleY);
   return { x: center.x + dx * scale, y: center.y + dy * scale };
 }
@@ -1002,6 +1062,27 @@ function interpolatedRobotAngle(start: number, end: number, progress: number): n
   return start + delta * Math.max(0, Math.min(1, progress));
 }
 
+/**
+ * LoadLock 田字布局使用靠近对应机械手的一排作为箭头入口：
+ * ATR/ATM 固定进入下排 LB/LD，VTR 固定进入上排 LA/LC。
+ */
+function robotLoadLockPortal(
+  robotName: string,
+  moduleName: string,
+  modulePositions: Map<string, TopologyPosition>,
+): string {
+  const normalizedModule = moduleName.trim().toUpperCase();
+  const isAtmosphereRobot = /^(ATR|ATM)/i.test(robotName);
+  const isVacuumRobot = /^(VTR|VTM)/i.test(robotName);
+  if (!isAtmosphereRobot && !isVacuumRobot) return moduleName;
+  const preferred = ["LA", "LB"].includes(normalizedModule)
+    ? (isAtmosphereRobot ? "LB" : "LA")
+    : ["LC", "LD"].includes(normalizedModule)
+      ? (isAtmosphereRobot ? "LD" : "LC")
+      : moduleName;
+  return modulePositions.has(preferred) ? preferred : moduleName;
+}
+
 /** 生成当前机械手目标的虚线箭头，复刻参考画布的目标提示。 */
 function renderRobotTargetArrows(
   robots: RobotSnapshot[],
@@ -1012,20 +1093,33 @@ function renderRobotTargetArrows(
   const colors = ["var(--brand)", "var(--green)", "var(--red)", "var(--muted)"];
   const lines = robots.map((robot, index) => {
     const robotPosition = robotPositions.get(robot.name);
-    const targetPosition = modulePositions.get(robot.target);
+    const targetName = robotLoadLockPortal(robot.name, robot.target, modulePositions);
+    const targetPosition = modulePositions.get(targetName);
     if (!robotPosition || !targetPosition || !robot.target) return "";
     const robotCenter = topologySvgPoint(robotPosition);
     const targetCenter = topologySvgPoint(targetPosition);
-    let endPoint = topologyEdgePoint(targetCenter, robotCenter);
+    let endPoint = topologyEdgePoint(
+      targetCenter,
+      robotCenter,
+      targetPosition.widthPixels,
+      targetPosition.heightPixels,
+    );
     if (robot.isPreTrans) {
-      const sourcePosition = modulePositions.get(robot.source);
+      const sourceName = robotLoadLockPortal(robot.name, robot.source, modulePositions);
+      const sourcePosition = modulePositions.get(sourceName);
       if (sourcePosition) {
         const sourceCenter = topologySvgPoint(sourcePosition);
         const startAngle = Math.atan2(sourceCenter.y - robotCenter.y, sourceCenter.x - robotCenter.x);
         const endAngle = Math.atan2(targetCenter.y - robotCenter.y, targetCenter.x - robotCenter.x);
         const angle = interpolatedRobotAngle(startAngle, endAngle, robot.preTransProgress);
-        const sourceRadius = Math.max(TOPOLOGY_ITEM_SIZE / 2, Math.hypot(sourceCenter.x - robotCenter.x, sourceCenter.y - robotCenter.y) - TOPOLOGY_ITEM_SIZE / 2);
-        const targetRadius = Math.max(TOPOLOGY_ITEM_SIZE / 2, Math.hypot(targetCenter.x - robotCenter.x, targetCenter.y - robotCenter.y) - TOPOLOGY_ITEM_SIZE / 2);
+        const sourceEdge = topologyEdgePoint(
+          sourceCenter,
+          robotCenter,
+          sourcePosition.widthPixels,
+          sourcePosition.heightPixels,
+        );
+        const sourceRadius = Math.hypot(sourceEdge.x - robotCenter.x, sourceEdge.y - robotCenter.y);
+        const targetRadius = Math.hypot(endPoint.x - robotCenter.x, endPoint.y - robotCenter.y);
         const radius = sourceRadius + (targetRadius - sourceRadius) * robot.preTransProgress;
         endPoint = {
           x: robotCenter.x + Math.cos(angle) * radius,
@@ -1061,7 +1155,7 @@ export function renderEquipmentTopology(
     modules: ModuleSnapshot[],
     role: "process" | "lock" | "port" | "auxiliary",
   ): void => modules.forEach((module, index) => {
-    const position = moduleTopologyPosition(module, role, index, modules.length, cascade);
+    const position = moduleTopologyPosition(module, role, index, modules, cascade);
     modulePositions.set(module.name, position);
   });
   positionModuleGroup(groups.processModules, "process");
@@ -1080,16 +1174,20 @@ export function renderEquipmentTopology(
   positionRobotGroup(vacuumRobots, "vacuum");
   positionRobotGroup(atmosphereRobots, "atmosphere");
 
-  const allTopPixels = [
+  const allPositions = [
     ...modulePositions.values(),
     ...robotPositions.values(),
-  ].map(position => position.topPixels);
-  const minimumTop = allTopPixels.length ? Math.min(...allTopPixels) : 0;
-  const maximumTop = allTopPixels.length ? Math.max(...allTopPixels) : TOPOLOGY_ITEM_SIZE;
-  const verticalOffset = TOPOLOGY_CANVAS_PADDING + TOPOLOGY_ITEM_SIZE / 2 - minimumTop;
+  ];
+  const minimumTop = allPositions.length
+    ? Math.min(...allPositions.map(position => position.topPixels - (position.heightPixels ?? TOPOLOGY_ITEM_SIZE) / 2))
+    : 0;
+  const maximumBottom = allPositions.length
+    ? Math.max(...allPositions.map(position => position.topPixels + (position.heightPixels ?? TOPOLOGY_ITEM_SIZE) / 2))
+    : TOPOLOGY_ITEM_SIZE;
+  const verticalOffset = TOPOLOGY_CANVAS_PADDING - minimumTop;
   const canvasHeight = Math.max(
     520,
-    Math.ceil(maximumTop + verticalOffset + TOPOLOGY_ITEM_SIZE / 2 + TOPOLOGY_CANVAS_PADDING),
+    Math.ceil(maximumBottom + verticalOffset + TOPOLOGY_CANVAS_PADDING),
   );
   for (const [name, position] of modulePositions) {
     modulePositions.set(name, { ...position, topPixels: position.topPixels + verticalOffset });

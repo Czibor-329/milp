@@ -182,7 +182,10 @@ var PREPARE_MOVE = 6;
 var COMPLETE_MOVE = 7;
 var PROCESS_MOVE = 9;
 var PRE_PREPARE_MOVE = 10;
+var PUMP_MOVE = 12;
+var VENT_MOVE = 13;
 var CLEAN_MOVE = 14;
+var LOADLOCK_ENVIRONMENT_MOVE_TYPES = /* @__PURE__ */ new Set([PRE_PREPARE_MOVE, PUMP_MOVE, VENT_MOVE]);
 var PLAYBACK_FRAME_INTERVAL_MS = 40;
 var DOOR_VISUAL_MIN_SECONDS = 0.7;
 var DEFAULT_PLAYBACK_SPEED = 4;
@@ -444,6 +447,7 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
   const locations = initialMaterialLocations(records);
   const doorStates = /* @__PURE__ */ new Map();
   const environments = /* @__PURE__ */ new Map();
+  const processedMaterials = /* @__PURE__ */ new Set();
   const activeMoves = [];
   let completedMoves = 0;
   for (const [name, definition] of definitions) {
@@ -456,6 +460,9 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
     if (completed) {
       completedMoves += 1;
       applyCompletedTransfer(move, locations);
+      if (move.MoveType === PROCESS_MOVE) {
+        for (const material of materialIds(move)) processedMaterials.add(material);
+      }
     }
     const doorVisualActive = move.StartTime <= time && time < Math.max(move.EndTime, move.StartTime + DOOR_VISUAL_MIN_SECONDS);
     if (move.MoveType === PREPARE_MOVE) {
@@ -464,8 +471,8 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
     } else if (move.MoveType === COMPLETE_MOVE) {
       if (doorVisualActive) doorStates.set(move.ModuleName, "closing");
       else if (completed) doorStates.set(move.ModuleName, "closed");
-    } else if (move.MoveType === PRE_PREPARE_MOVE && (active || completed)) {
-      const currentState = String(move.CurState ?? "");
+    } else if (LOADLOCK_ENVIRONMENT_MOVE_TYPES.has(move.MoveType) && (active || completed)) {
+      const currentState = move.MoveType === PUMP_MOVE ? "VAC" : move.MoveType === VENT_MOVE ? "ATM" : String(move.CurState ?? "");
       const environment = /VTR|VAC/i.test(currentState) ? "\u771F\u7A7A" : /ATR|ATM/i.test(currentState) ? "\u5927\u6C14" : currentState;
       if (environment) environments.set(move.ModuleName, active ? `${environment}\u5207\u6362\u4E2D` : environment);
     }
@@ -484,22 +491,23 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
   for (const wafers of wafersByLocation.values()) wafers.sort(naturalCompare);
   const modules = [...definitions.entries()].map(([name, definition]) => {
     const moduleMoves = activeMoves.filter((move) => move.ModuleName === name || firstStation(move, "SrcStationList") === name || firstStation(move, "DestStationList") === name || listValue(move.StationList).map(String).includes(name));
-    const primaryMove = moduleMoves.find((move) => move.MoveType === CLEAN_MOVE) ?? moduleMoves.find((move) => move.MoveType === PROCESS_MOVE) ?? moduleMoves.find((move) => move.MoveType === PRE_PREPARE_MOVE) ?? moduleMoves.find((move) => [PREPARE_MOVE, COMPLETE_MOVE].includes(move.MoveType)) ?? moduleMoves[0];
+    const primaryMove = moduleMoves.find((move) => move.MoveType === CLEAN_MOVE) ?? moduleMoves.find((move) => move.MoveType === PROCESS_MOVE) ?? moduleMoves.find((move) => LOADLOCK_ENVIRONMENT_MOVE_TYPES.has(move.MoveType)) ?? moduleMoves.find((move) => [PREPARE_MOVE, COMPLETE_MOVE].includes(move.MoveType)) ?? moduleMoves[0];
     let status = (wafersByLocation.get(name)?.length ?? 0) > 0 ? "occupied" : "idle";
     if (primaryMove?.MoveType === CLEAN_MOVE) status = "cleaning";
     else if (primaryMove?.MoveType === PROCESS_MOVE) status = "processing";
-    else if (primaryMove?.MoveType === PRE_PREPARE_MOVE) status = "environment";
+    else if (primaryMove && LOADLOCK_ENVIRONMENT_MOVE_TYPES.has(primaryMove.MoveType)) status = "environment";
     else if (primaryMove && [PREPARE_MOVE, COMPLETE_MOVE].includes(primaryMove.MoveType)) status = "door";
     else if (primaryMove) status = "transfer";
     const currentEnvironment = String(primaryMove?.CurState ?? "");
     const prePrepareType = String(primaryMove?.PrePrepareType ?? "");
-    const loadLockPhase = primaryMove?.MoveType === PRE_PREPARE_MOVE ? /VTR|VAC|PUMP/i.test(`${currentEnvironment} ${prePrepareType}`) ? "pumping" : /ATR|ATM|VENT/i.test(`${currentEnvironment} ${prePrepareType}`) ? "venting" : "" : "";
+    const loadLockPhase = primaryMove && LOADLOCK_ENVIRONMENT_MOVE_TYPES.has(primaryMove.MoveType) ? primaryMove.MoveType === PUMP_MOVE || /VTR|VAC|PUMP/i.test(`${currentEnvironment} ${prePrepareType}`) ? "pumping" : primaryMove.MoveType === VENT_MOVE || /ATR|ATM|VENT/i.test(`${currentEnvironment} ${prePrepareType}`) ? "venting" : "" : "";
     return {
       name,
       type: definition.type,
       status,
       door: doorStates.get(name) ?? "closed",
       wafers: wafersByLocation.get(name) ?? [],
+      processedWafers: (wafersByLocation.get(name) ?? []).filter((wafer) => processedMaterials.has(wafer)),
       activeMoveName: primaryMove ? MOVE_NAMES[primaryMove.MoveType] ?? `\u52A8\u4F5C ${primaryMove.MoveType}` : "",
       progress: primaryMove ? moveProgress(primaryMove, time) : 0,
       environment: environments.get(name) ?? "",
@@ -601,6 +609,7 @@ function snapshotWithCandidateModules(snapshot, decision, device) {
       status: "idle",
       door: "closed",
       wafers: [],
+      processedWafers: [],
       activeMoveName: "",
       progress: 0,
       environment: "",
@@ -626,6 +635,7 @@ function snapshotWithFullDeviceModules(snapshot, device) {
       status: "idle",
       door: isDoorlessModule(name, type) ? "doorless" : "closed",
       wafers: [],
+      processedWafers: [],
       activeMoveName: "",
       progress: 0,
       environment: "",
@@ -657,7 +667,7 @@ function renderWaferToken(wafer, progress) {
 }
 function moduleDoorSides(module, role) {
   if (module.door === "doorless") return [];
-  if (role === "lock") return ["top", "bottom"];
+  if (role === "lock") return [];
   if (role === "port") return ["top"];
   const name = module.name.trim().toUpperCase();
   if (/^PM[12]$/.test(name)) return ["left"];
@@ -669,18 +679,27 @@ function moduleDoorSides(module, role) {
 }
 function renderModule(module, role, candidate) {
   const waferProgress = module.status === "processing" ? module.progress : 0;
-  const wafers = module.wafers.slice(0, 1).map((wafer) => renderWaferToken(wafer, waferProgress)).join("");
-  const overflow = module.wafers.length > 1 ? `<span class="wafer-more">+ ${module.wafers.length - 1}</span>` : "";
+  const visibleWaferCount = role === "lock" ? 2 : 1;
+  const wafers = module.wafers.slice(0, visibleWaferCount).map((wafer) => renderWaferToken(wafer, waferProgress)).join("");
+  const overflow = module.wafers.length > visibleWaferCount ? `<span class="wafer-more">+ ${module.wafers.length - visibleWaferCount}</span>` : "";
   const doors = moduleDoorSides(module, role).map((side) => `<i class="chamber-door chamber-door-${side}"></i>`).join("");
   const accessibleStatus = `${module.name}\uFF0C${STATUS_LABELS[module.status]}\uFF0C${DOOR_LABELS[module.door]}`;
   const candidateLabel = candidate ? `${candidate.count} \u4E2A\u53EF\u884C\u52A8\u4F5C\uFF0C\u6700\u9AD8\u6A21\u578B\u504F\u597D ${(candidate.preference * 100).toFixed(0)}%` : "";
+  const atmosphereLevel = role === "lock" ? module.loadLockPhase === "pumping" ? 100 - module.progress * 100 : module.loadLockPhase === "venting" ? module.progress * 100 : /大气|ATM|ATR/i.test(module.environment) ? 100 : 0 : 0;
+  const processedWafers = new Set(module.processedWafers ?? []);
+  const loadLockLayers = role === "lock" ? `<div class="loadlock-layers" aria-hidden="true">${[0, 1].map((index) => {
+    const wafer = module.wafers[index];
+    const processed = wafer ? processedWafers.has(wafer) : false;
+    const waferState = processed ? "processed" : "unprocessed";
+    return `<div class="loadlock-layer ${wafer ? "is-occupied" : "is-empty"}"><span class="loadlock-layer-index">${index + 1}</span>${wafer ? `<span class="loadlock-wafer-line wafer-${waferState}" title="\u6676\u5706 ${escapeHtml(wafer)}\uFF08${processed ? "\u5DF2\u52A0\u5DE5" : "\u672A\u52A0\u5DE5"}\uFF09"></span>` : ""}</div>`;
+  }).join("")}${overflow}</div>` : `<div class="wafer-stack">${wafers}${overflow}</div>`;
   return `
-    <article class="equipment-card equipment-${role} status-${module.status} door-${module.door} ${module.loadLockPhase ? `loadlock-${module.loadLockPhase}` : ""} ${module.isRobotTarget ? "is-target" : ""} ${candidate ? "is-candidate-destination" : ""} ${candidate?.selected ? "is-model-selected" : ""}" style="--module-progress:${Math.round(module.progress * 100)}%" aria-label="${escapeHtml(`${accessibleStatus}${candidateLabel ? `\uFF0C${candidateLabel}` : ""}`)}">
+    <article class="equipment-card equipment-${role} status-${module.status} door-${module.door} ${module.loadLockPhase ? `loadlock-${module.loadLockPhase}` : ""} ${module.isRobotTarget ? "is-target" : ""} ${candidate ? "is-candidate-destination" : ""} ${candidate?.selected ? "is-model-selected" : ""}" style="--module-progress:${Math.round(module.progress * 100)}%;--loadlock-atmosphere:${Math.max(0, Math.min(100, atmosphereLevel)).toFixed(1)}%" aria-label="${escapeHtml(`${accessibleStatus}${candidateLabel ? `\uFF0C${candidateLabel}` : ""}`)}">
       <div class="equipment-head">
         <strong>${escapeHtml(module.name)}</strong>
       </div>
       <div class="equipment-body">
-        <div class="wafer-stack">${wafers}${overflow}</div>
+        ${loadLockLayers}
       </div>
       <div class="chamber-doors" aria-hidden="true">${doors}</div>
     </article>`;
@@ -694,10 +713,15 @@ function renderRobotHub(robot, environment) {
       <div class="robot-wafers">${wafer}${overflow}</div>
     </article>`;
 }
-var TOPOLOGY_COLUMN_PERCENTAGES = [20, 40, 60, 80];
+var TOPOLOGY_COLUMN_PERCENTAGES = [26, 42, 58, 74];
 var TOPOLOGY_ROW_TOP_PIXELS = [52, 154, 256, 358, 460, 562, 664, 786, 929, 1031, 1133];
 var TOPOLOGY_VIEWBOX_WIDTH = 1e3;
 var TOPOLOGY_ITEM_SIZE = 96;
+var TOPOLOGY_LOADLOCK_WIDTH = 136;
+var TOPOLOGY_LOADLOCK_HEIGHT = 64;
+var TOPOLOGY_LOADLOCK_ROW_TOP_PIXELS = [664, 728];
+var TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS = 866;
+var TOPOLOGY_LOADPORT_ROW_TOP_PIXELS = 990;
 var TOPOLOGY_CANVAS_PADDING = 28;
 function distributedTopologyColumns(count) {
   if (count <= 1) return [50];
@@ -712,8 +736,9 @@ function processModuleNumber(name) {
 function usesCascadeTopology(modules, vacuumRobotCount) {
   return vacuumRobotCount > 1 || modules.some((module) => processModuleNumber(module.name) > 6 || /^BUF[_-]?[AB]$/i.test(module.name));
 }
-function moduleTopologyPosition(module, role, index, roleCount, cascade) {
+function moduleTopologyPosition(module, role, index, roleModules, cascade) {
   const name = module.name.trim().toUpperCase();
+  const roleCount = roleModules.length;
   const column = TOPOLOGY_COLUMN_PERCENTAGES;
   const row = TOPOLOGY_ROW_TOP_PIXELS;
   const cascadePositions = {
@@ -743,22 +768,37 @@ function moduleTopologyPosition(module, role, index, roleCount, cascade) {
   const explicit = (cascade ? cascadePositions : singlePositions)[name];
   if (explicit) return explicit;
   if (role === "lock") {
-    return { leftPercent: distributedTopologyColumns(roleCount)[index], topPixels: row[6] };
+    const canonicalOrder = { LA: 0, LC: 1, LB: 2, LD: 3 };
+    const orderedLoadLocks = [...roleModules].sort((left, right) => {
+      const leftName = left.name.trim().toUpperCase();
+      const rightName = right.name.trim().toUpperCase();
+      const leftRank = canonicalOrder[leftName] ?? 100;
+      const rightRank = canonicalOrder[rightName] ?? 100;
+      return leftRank - rightRank || naturalCompare(left.name, right.name);
+    });
+    const gridIndex = Math.max(0, orderedLoadLocks.findIndex((item) => item.name === module.name));
+    const loadLockRowGap = TOPOLOGY_LOADLOCK_ROW_TOP_PIXELS[1] - TOPOLOGY_LOADLOCK_ROW_TOP_PIXELS[0];
+    return {
+      leftPercent: gridIndex % 2 === 0 ? column[1] : column[2],
+      topPixels: TOPOLOGY_LOADLOCK_ROW_TOP_PIXELS[0] + Math.floor(gridIndex / 2) * loadLockRowGap,
+      widthPixels: TOPOLOGY_LOADLOCK_WIDTH,
+      heightPixels: TOPOLOGY_LOADLOCK_HEIGHT
+    };
   }
   if (role === "port") {
     const loadPortColumns = {
-      LP1: 20,
-      LP2: 40,
-      LP3: 60,
-      LP4: 80
+      LP1: column[0],
+      LP2: column[1],
+      LP3: column[2],
+      LP4: column[3]
     };
     if (loadPortColumns[name] !== void 0) {
-      return { leftPercent: loadPortColumns[name], topPixels: row[8] };
+      return { leftPercent: loadPortColumns[name], topPixels: TOPOLOGY_LOADPORT_ROW_TOP_PIXELS };
     }
-    return { leftPercent: distributedTopologyColumns(roleCount)[index], topPixels: row[8] };
+    return { leftPercent: distributedTopologyColumns(roleCount)[index], topPixels: TOPOLOGY_LOADPORT_ROW_TOP_PIXELS };
   }
-  if (["AL", "ALIGNER"].includes(name)) return { leftPercent: column[0], topPixels: row[7] };
-  if (["CL", "COOLER"].includes(name)) return { leftPercent: column[3], topPixels: row[7] };
+  if (["AL", "ALIGNER"].includes(name)) return { leftPercent: column[0], topPixels: TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS };
+  if (["CL", "COOLER"].includes(name)) return { leftPercent: column[3], topPixels: TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS };
   if (role === "auxiliary") {
     const perRow = 6;
     const rowIndex = Math.floor(index / perRow);
@@ -767,7 +807,7 @@ function moduleTopologyPosition(module, role, index, roleCount, cascade) {
     const rowGap = row[1] - row[0];
     return {
       leftPercent: distributedTopologyColumns(columnsInRow)[columnIndex] ?? 50,
-      topPixels: row[9] + rowIndex * rowGap
+      topPixels: TOPOLOGY_LOADPORT_ROW_TOP_PIXELS + row[1] - row[0] + rowIndex * rowGap
     };
   }
   const fallbackRow = role === "process" ? row[3] : row[7];
@@ -781,10 +821,10 @@ function robotTopologyPosition(robotIndex, robotCount, environment, cascade) {
     if (robotCount > 1) {
       return {
         leftPercent: distributedTopologyColumns(robotCount)[robotIndex] ?? 50,
-        topPixels: TOPOLOGY_ROW_TOP_PIXELS[7]
+        topPixels: TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS
       };
     }
-    return { leftPercent: 50, topPixels: TOPOLOGY_ROW_TOP_PIXELS[7] };
+    return { leftPercent: 50, topPixels: TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS };
   }
   if (cascade && robotCount > 1) {
     return {
@@ -803,13 +843,14 @@ function topologySvgPoint(position) {
     y: position.topPixels
   };
 }
-function topologyEdgePoint(center, toward) {
-  const half = TOPOLOGY_ITEM_SIZE / 2;
+function topologyEdgePoint(center, toward, width = TOPOLOGY_ITEM_SIZE, height = TOPOLOGY_ITEM_SIZE) {
+  const halfWidth = width / 2;
+  const halfHeight = height / 2;
   const dx = toward.x - center.x;
   const dy = toward.y - center.y;
   if (Math.abs(dx) < 1e-6 && Math.abs(dy) < 1e-6) return center;
-  const scaleX = Math.abs(dx) > 1e-6 ? half / Math.abs(dx) : Number.POSITIVE_INFINITY;
-  const scaleY = Math.abs(dy) > 1e-6 ? half / Math.abs(dy) : Number.POSITIVE_INFINITY;
+  const scaleX = Math.abs(dx) > 1e-6 ? halfWidth / Math.abs(dx) : Number.POSITIVE_INFINITY;
+  const scaleY = Math.abs(dy) > 1e-6 ? halfHeight / Math.abs(dy) : Number.POSITIVE_INFINITY;
   const scale = Math.min(scaleX, scaleY);
   return { x: center.x + dx * scale, y: center.y + dy * scale };
 }
@@ -819,24 +860,45 @@ function interpolatedRobotAngle(start, end, progress) {
   if (delta < -Math.PI) delta += Math.PI * 2;
   return start + delta * Math.max(0, Math.min(1, progress));
 }
+function robotLoadLockPortal(robotName, moduleName, modulePositions) {
+  const normalizedModule = moduleName.trim().toUpperCase();
+  const isAtmosphereRobot = /^(ATR|ATM)/i.test(robotName);
+  const isVacuumRobot = /^(VTR|VTM)/i.test(robotName);
+  if (!isAtmosphereRobot && !isVacuumRobot) return moduleName;
+  const preferred = ["LA", "LB"].includes(normalizedModule) ? isAtmosphereRobot ? "LB" : "LA" : ["LC", "LD"].includes(normalizedModule) ? isAtmosphereRobot ? "LD" : "LC" : moduleName;
+  return modulePositions.has(preferred) ? preferred : moduleName;
+}
 function renderRobotTargetArrows(robots, robotPositions, modulePositions, canvasHeight) {
   const colors = ["var(--brand)", "var(--green)", "var(--red)", "var(--muted)"];
   const lines = robots.map((robot, index) => {
     const robotPosition = robotPositions.get(robot.name);
-    const targetPosition = modulePositions.get(robot.target);
+    const targetName = robotLoadLockPortal(robot.name, robot.target, modulePositions);
+    const targetPosition = modulePositions.get(targetName);
     if (!robotPosition || !targetPosition || !robot.target) return "";
     const robotCenter = topologySvgPoint(robotPosition);
     const targetCenter = topologySvgPoint(targetPosition);
-    let endPoint = topologyEdgePoint(targetCenter, robotCenter);
+    let endPoint = topologyEdgePoint(
+      targetCenter,
+      robotCenter,
+      targetPosition.widthPixels,
+      targetPosition.heightPixels
+    );
     if (robot.isPreTrans) {
-      const sourcePosition = modulePositions.get(robot.source);
+      const sourceName = robotLoadLockPortal(robot.name, robot.source, modulePositions);
+      const sourcePosition = modulePositions.get(sourceName);
       if (sourcePosition) {
         const sourceCenter = topologySvgPoint(sourcePosition);
         const startAngle = Math.atan2(sourceCenter.y - robotCenter.y, sourceCenter.x - robotCenter.x);
         const endAngle = Math.atan2(targetCenter.y - robotCenter.y, targetCenter.x - robotCenter.x);
         const angle = interpolatedRobotAngle(startAngle, endAngle, robot.preTransProgress);
-        const sourceRadius = Math.max(TOPOLOGY_ITEM_SIZE / 2, Math.hypot(sourceCenter.x - robotCenter.x, sourceCenter.y - robotCenter.y) - TOPOLOGY_ITEM_SIZE / 2);
-        const targetRadius = Math.max(TOPOLOGY_ITEM_SIZE / 2, Math.hypot(targetCenter.x - robotCenter.x, targetCenter.y - robotCenter.y) - TOPOLOGY_ITEM_SIZE / 2);
+        const sourceEdge = topologyEdgePoint(
+          sourceCenter,
+          robotCenter,
+          sourcePosition.widthPixels,
+          sourcePosition.heightPixels
+        );
+        const sourceRadius = Math.hypot(sourceEdge.x - robotCenter.x, sourceEdge.y - robotCenter.y);
+        const targetRadius = Math.hypot(endPoint.x - robotCenter.x, endPoint.y - robotCenter.y);
         const radius = sourceRadius + (targetRadius - sourceRadius) * robot.preTransProgress;
         endPoint = {
           x: robotCenter.x + Math.cos(angle) * radius,
@@ -864,7 +926,7 @@ function renderEquipmentTopology(snapshot, decision) {
   const cascade = usesCascadeTopology(visibleModules, vacuumRobots.length);
   const modulePositions = /* @__PURE__ */ new Map();
   const positionModuleGroup = (modules, role) => modules.forEach((module, index) => {
-    const position = moduleTopologyPosition(module, role, index, modules.length, cascade);
+    const position = moduleTopologyPosition(module, role, index, modules, cascade);
     modulePositions.set(module.name, position);
   });
   positionModuleGroup(groups.processModules, "process");
@@ -878,16 +940,16 @@ function renderEquipmentTopology(snapshot, decision) {
   });
   positionRobotGroup(vacuumRobots, "vacuum");
   positionRobotGroup(atmosphereRobots, "atmosphere");
-  const allTopPixels = [
+  const allPositions = [
     ...modulePositions.values(),
     ...robotPositions.values()
-  ].map((position) => position.topPixels);
-  const minimumTop = allTopPixels.length ? Math.min(...allTopPixels) : 0;
-  const maximumTop = allTopPixels.length ? Math.max(...allTopPixels) : TOPOLOGY_ITEM_SIZE;
-  const verticalOffset = TOPOLOGY_CANVAS_PADDING + TOPOLOGY_ITEM_SIZE / 2 - minimumTop;
+  ];
+  const minimumTop = allPositions.length ? Math.min(...allPositions.map((position) => position.topPixels - (position.heightPixels ?? TOPOLOGY_ITEM_SIZE) / 2)) : 0;
+  const maximumBottom = allPositions.length ? Math.max(...allPositions.map((position) => position.topPixels + (position.heightPixels ?? TOPOLOGY_ITEM_SIZE) / 2)) : TOPOLOGY_ITEM_SIZE;
+  const verticalOffset = TOPOLOGY_CANVAS_PADDING - minimumTop;
   const canvasHeight = Math.max(
     520,
-    Math.ceil(maximumTop + verticalOffset + TOPOLOGY_ITEM_SIZE / 2 + TOPOLOGY_CANVAS_PADDING)
+    Math.ceil(maximumBottom + verticalOffset + TOPOLOGY_CANVAS_PADDING)
   );
   for (const [name, position] of modulePositions) {
     modulePositions.set(name, { ...position, topPixels: position.topPixels + verticalOffset });

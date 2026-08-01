@@ -23,3 +23,5 @@ src_data_structures.xlsx
 /alg/
 /.codex
 /design-system
+/.reasonix
+reasonix.toml

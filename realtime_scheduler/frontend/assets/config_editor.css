@@ -997,7 +997,7 @@
     .topology-toolbar-actions { display: flex; gap: 6px; }
     .topology-toolbar-actions .btn { width: auto; min-height: 44px; padding: 8px 11px; border-radius: 0; white-space: nowrap; }
     .topology-toolbar-actions .btn svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
-    .petri-console-layout { display: grid; grid-template-columns: minmax(620px, 1fr) 332px; gap: 12px; align-items: start; }
+    .petri-console-layout { display: grid; grid-template-columns: minmax(620px, 1fr) 284px; gap: 10px; align-items: start; }
     .petri-center-column { display: grid; min-width: 0; }
 
     .petri-control-panel { position: sticky; top: 18px; display: grid; max-height: calc(100dvh - 36px); min-width: 0; gap: 10px; padding: 10px; overflow: auto; border: 1px solid var(--line); border-radius: 0; background: rgba(255,255,255,.98); box-shadow: 0 8px 24px rgba(32,47,81,.06); scrollbar-width: thin; }
@@ -1040,17 +1040,31 @@
     .reference-grid-canvas { position: relative !important; display: block !important; height: var(--topology-canvas-height, 640px) !important; min-height: 0 !important; padding: 0 !important; overflow: hidden; background-color: var(--soft); background-image: linear-gradient(rgba(148,163,184,.12) 1px, transparent 1px), linear-gradient(90deg, rgba(148,163,184,.12) 1px, transparent 1px); background-size: 15px 15px; }
     .reference-grid-canvas::before { display: none; }
     .reference-module-position, .reference-robot-position { position: absolute; z-index: 3; left: var(--module-left); top: var(--module-top); width: 96px; transform: translate(-50%, -50%); }
+    .reference-module-position:has(.equipment-lock) { width: 136px; }
     .reference-robot-position { z-index: 4; left: var(--robot-left); top: var(--robot-top); }
     .reference-grid-canvas .equipment-card, .reference-grid-canvas .equipment-lock, .reference-grid-canvas .equipment-port, .reference-grid-canvas .equipment-auxiliary { display: grid; width: 96px; height: 96px; grid-template-rows: auto 1fr; overflow: hidden; border-radius: 0; color: var(--ink); background: rgba(255,255,255,.97); box-shadow: 0 3px 10px rgba(32,47,81,.08); }
-    .reference-grid-canvas .equipment-lock.loadlock-pumping { border-color: #5796d9; background: linear-gradient(to top, rgba(87,150,217,.30) 0, rgba(87,150,217,.22) var(--module-progress), rgba(255,255,255,.97) var(--module-progress), rgba(255,255,255,.97) 100%); }
-    .reference-grid-canvas .equipment-lock.loadlock-venting { border-color: #d5a044; background: linear-gradient(to bottom, rgba(235,183,86,.30) 0, rgba(235,183,86,.22) var(--module-progress), rgba(255,255,255,.97) var(--module-progress), rgba(255,255,255,.97) 100%); }
+    .reference-grid-canvas .equipment-lock { width: 136px; height: 64px; grid-template-rows: 20px 1fr; border-color: #95a4b8; background: linear-gradient(180deg, #fbfcfe 0, #edf2f7 100%); box-shadow: 0 3px 8px rgba(32,47,81,.10); }
+    .reference-grid-canvas .equipment-lock::before { position: absolute; z-index: 0; right: 0; bottom: 0; left: 0; height: var(--loadlock-atmosphere, 0%); background: rgba(51,145,224,.48); content: ""; transition: height .12s linear; }
+    .reference-grid-canvas .equipment-lock.loadlock-pumping { border-color: #5796d9; }
+    .reference-grid-canvas .equipment-lock.loadlock-venting { border-color: #4b9ddd; }
     .reference-grid-canvas .equipment-head { display: block; padding: 7px 8px 2px; }
     .reference-grid-canvas .equipment-head strong { font-size: 12px; }
+    .reference-grid-canvas .equipment-lock .equipment-head { z-index: 1; display: flex; align-items: center; padding: 3px 7px 1px; border-bottom: 1px solid rgba(125,143,166,.35); }
+    .reference-grid-canvas .equipment-lock .equipment-head strong { font-size: 10px; letter-spacing: .04em; }
     .reference-grid-canvas .equipment-body { position: relative; min-height: 0; justify-content: center; padding: 0 6px 6px; }
     .reference-grid-canvas .wafer-stack { position: relative; width: 100%; height: 100%; align-content: center; justify-content: center; gap: 4px; }
     .reference-grid-canvas .wafer-token { display: inline-grid; width: 56px; min-width: 56px; height: 56px; place-items: center; padding: 4px; border: 0; border-radius: 50%; color: #093c2d; background: conic-gradient(from -90deg, var(--brand) 0 var(--wafer-progress), #d7e0eb var(--wafer-progress) 360deg); box-shadow: 0 3px 8px rgba(24,94,70,.22); font: 900 10px/1 "Fira Code", Consolas, monospace; }
     .reference-grid-canvas .wafer-token > span { display: grid; width: 100%; height: 100%; place-items: center; overflow: hidden; border: 1px solid rgba(8,105,75,.38); border-radius: 50%; background: radial-gradient(circle at 34% 28%, #a8edc8 0, #55cd8f 44%, #1f9c69 100%); text-overflow: ellipsis; white-space: nowrap; }
     .reference-grid-canvas .wafer-more { position: absolute; right: 2px; bottom: 2px; color: #475569; font: 900 10px/1 "Fira Code", Consolas, monospace; }
+    .reference-grid-canvas .equipment-lock .equipment-body { z-index: 1; display: block; padding: 3px 7px 5px; }
+    .loadlock-layers { position: relative; display: grid; height: 100%; grid-template-rows: repeat(2, minmax(0, 1fr)); gap: 3px; }
+    .loadlock-layer { position: relative; display: flex; min-height: 0; align-items: center; padding: 0 24px 0 17px; overflow: hidden; border: 1px solid rgba(116,132,153,.78); background: rgba(248,250,252,.52); box-shadow: inset 0 1px 2px rgba(51,65,85,.12); }
+    .loadlock-layer::after { position: absolute; top: 2px; right: 4px; bottom: 2px; width: 15px; border: 1px solid #40516a; background: var(--door-color); box-shadow: inset 0 0 0 2px rgba(255,255,255,.15); content: ""; transform: scaleY(var(--door-scale)); transform-origin: center; transition: transform .22s ease-out, background-color .18s ease; }
+    .loadlock-layer-index { position: absolute; left: 5px; color: #64748b; font: 800 7px/1 "Fira Code", Consolas, monospace; }
+    .loadlock-wafer-line { width: 100%; height: 3px; border-radius: 999px; box-shadow: 0 0 0 1px rgba(255,255,255,.82), 0 1px 3px rgba(15,23,42,.28); }
+    .loadlock-wafer-line.wafer-unprocessed { background: #d79224; }
+    .loadlock-wafer-line.wafer-processed { background: #159167; }
+    .loadlock-layers .wafer-more { right: 25px; bottom: 3px; font-size: 7px; }
     .reference-grid-canvas .equipment-card { --door-scale: 1; --door-color: #56677d; }
     .reference-grid-canvas .equipment-card.door-opening { --door-scale: .56; --door-color: #c58112; }
     .reference-grid-canvas .equipment-card.door-open { --door-scale: .12; --door-color: #159167; }
