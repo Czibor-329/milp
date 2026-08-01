@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>调度平台</title>
-  <link rel="stylesheet" href="/assets/config_editor.css?v=1.1.4">
+  <link rel="stylesheet" href="/assets/config_editor.css?v=1.1.5">
 </head>
 <body>
   <a class="skip-link" href="#mainContent">跳到主要内容</a>
@@ -219,17 +219,20 @@
 
               <div class="visual-workspace-layout">
                 <section class="device-stage" id="visualDeviceStage" aria-label="设备拓扑状态"></section>
-                <aside class="active-moves-panel">
-                  <div class="active-moves-head"><h3>当前动作</h3><span>随时间轴更新</span></div>
-                  <ul id="visualActiveMoves"></ul>
-                  <div class="visual-legend" aria-label="状态图例">
-                    <h3>状态图例</h3>
-                    <span><i class="legend-dot is-normal"></i>空闲 / 已载片</span>
-                    <span><i class="legend-dot is-active"></i>加工 / 传输</span>
-                    <span><i class="legend-dot is-transition"></i>门 / 环境切换</span>
-                    <span><i class="legend-door is-open"></i>门已打开</span>
-                    <span><i class="legend-door is-closed"></i>门已关闭</span>
-                  </div>
+                <aside class="playback-inspector" aria-label="回放决策与动作检查器">
+                  <section class="decision-lens-panel" id="visualDecisionLens" aria-live="polite"></section>
+                  <section class="active-moves-panel">
+                    <div class="active-moves-head"><h3>正在执行</h3><span>MoveList 事实</span></div>
+                    <ul id="visualActiveMoves"></ul>
+                    <div class="visual-legend" aria-label="状态图例">
+                      <h3>状态图例</h3>
+                      <span><i class="legend-dot is-normal"></i>空闲 / 已载片</span>
+                      <span><i class="legend-dot is-active"></i>加工 / 传输</span>
+                      <span><i class="legend-dot is-transition"></i>门 / 环境切换</span>
+                      <span><i class="legend-door is-open"></i>门已打开</span>
+                      <span><i class="legend-door is-closed"></i>门已关闭</span>
+                    </div>
+                  </section>
                 </aside>
               </div>
             </section>

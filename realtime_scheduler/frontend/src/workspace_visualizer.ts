@@ -56,6 +56,45 @@ export interface WorkspaceSnapshot {
   waferCount: number;
 }
 
+export interface DecisionCandidate {
+  actionId: string;
+  kind: string;
+  flowKind: string;
+  robot: string;
+  materialIds: string[];
+  waferId: number;
+  stageIndex: number;
+  source: string;
+  sourceSlot: number;
+  destination: string;
+  destinationSlot: number;
+  earliestStart: number;
+  finishTime: number;
+  rank: number;
+  selected: boolean;
+  policyScore: number;
+  policyPreference: number;
+  expectedRemainingMakespan: number | null;
+  medianRemainingMakespan: number | null;
+  lowerRemainingMakespan: number | null;
+  upperRemainingMakespan: number | null;
+  makespanDelta: number | null;
+}
+
+export interface DecisionTraceStep {
+  decisionIndex: number;
+  time: number;
+  revision: number;
+  roundIndex: number;
+  roundKind: string;
+  selectedActionId: string;
+  candidateCount: number;
+  shownCandidateCount: number;
+  candidatesTruncated: boolean;
+  modelEvaluated: boolean;
+  candidates: DecisionCandidate[];
+}
+
 interface NormalizedMove extends MoveRecord {
   MoveID: number;
   MoveType: number;
@@ -72,6 +111,7 @@ interface WorkspaceElements {
   content: HTMLElement;
   topologyPlayback: HTMLElement;
   stage: HTMLElement;
+  decisionLens: HTMLElement;
   activeMoves: HTMLElement;
   source: HTMLElement;
   currentTime: HTMLElement;
@@ -106,6 +146,7 @@ const PROCESS_ARC_CENTER_Y_PIXELS = 214;
 const PROCESS_ARC_RADIUS_X_PERCENT = 38;
 const PROCESS_ARC_RADIUS_Y_PIXELS = 156;
 const PERFORMANCE_DISPLAY_TOLERANCE = 1e-6;
+const FUTURE_DECISION_COUNT = 6;
 
 const ACTIVITY_CATEGORIES: ActivityCategory[] = [
   "process",
@@ -155,6 +196,13 @@ function finiteNumber(value: unknown, fallback = 0): number {
   return Number.isFinite(number) ? number : fallback;
 }
 
+/** 把可选模型指标规范为有限数字；缺失或非有限值统一返回 null。 */
+function nullableFiniteNumber(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
 /** 把协议中的列表字段规范为数组。 */
 function listValue(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
@@ -174,6 +222,74 @@ export function normalizeMovePayload(payload: unknown): MoveRecord[] {
       Boolean(record) && typeof record === "object" && !Array.isArray(record)
     ))
     .map(record => ({ ...record }));
+}
+
+/** 从运行结果中提取有界的 E2E 候选动作与剩余 Makespan 预测。 */
+export function normalizeDecisionTrace(payload: unknown): DecisionTraceStep[] {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return [];
+  const rawTrace = (payload as UnknownRecord).DecisionTrace;
+  if (!Array.isArray(rawTrace)) return [];
+  return rawTrace
+    .filter((step): step is UnknownRecord => Boolean(step) && typeof step === "object" && !Array.isArray(step))
+    .map((step): DecisionTraceStep => {
+      const rawCandidates = Array.isArray(step.candidates) ? step.candidates : [];
+      const candidates = rawCandidates
+        .filter((candidate): candidate is UnknownRecord => (
+          Boolean(candidate) && typeof candidate === "object" && !Array.isArray(candidate)
+        ))
+        .map((candidate): DecisionCandidate => ({
+          actionId: String(candidate.actionId ?? ""),
+          kind: String(candidate.kind ?? ""),
+          flowKind: String(candidate.flowKind ?? ""),
+          robot: String(candidate.robot ?? ""),
+          materialIds: listValue(candidate.materialIds).map(String),
+          waferId: finiteNumber(candidate.waferId),
+          stageIndex: finiteNumber(candidate.stageIndex),
+          source: String(candidate.source ?? ""),
+          sourceSlot: finiteNumber(candidate.sourceSlot),
+          destination: String(candidate.destination ?? ""),
+          destinationSlot: finiteNumber(candidate.destinationSlot),
+          earliestStart: finiteNumber(candidate.earliestStart),
+          finishTime: finiteNumber(candidate.finishTime),
+          rank: finiteNumber(candidate.rank),
+          selected: Boolean(candidate.selected),
+          policyScore: finiteNumber(candidate.policyScore),
+          policyPreference: Math.max(0, Math.min(1, finiteNumber(candidate.policyPreference))),
+          expectedRemainingMakespan: nullableFiniteNumber(candidate.expectedRemainingMakespan),
+          medianRemainingMakespan: nullableFiniteNumber(candidate.medianRemainingMakespan),
+          lowerRemainingMakespan: nullableFiniteNumber(candidate.lowerRemainingMakespan),
+          upperRemainingMakespan: nullableFiniteNumber(candidate.upperRemainingMakespan),
+          makespanDelta: nullableFiniteNumber(candidate.makespanDelta),
+        }))
+        .sort((left, right) => left.rank - right.rank || right.policyPreference - left.policyPreference);
+      return {
+        decisionIndex: finiteNumber(step.decisionIndex),
+        time: finiteNumber(step.time),
+        revision: finiteNumber(step.revision),
+        roundIndex: finiteNumber(step.roundIndex),
+        roundKind: String(step.roundKind ?? ""),
+        selectedActionId: String(step.selectedActionId ?? ""),
+        candidateCount: Math.max(candidates.length, finiteNumber(step.candidateCount, candidates.length)),
+        shownCandidateCount: Math.max(candidates.length, finiteNumber(step.shownCandidateCount, candidates.length)),
+        candidatesTruncated: Boolean(step.candidatesTruncated),
+        modelEvaluated: Boolean(step.modelEvaluated),
+        candidates,
+      };
+    })
+    .sort((left, right) => left.time - right.time || left.decisionIndex - right.decisionIndex);
+}
+
+/** 返回播放时刻最近一次已经发生的模型决策。 */
+export function decisionAtTime(
+  trace: DecisionTraceStep[],
+  time: number,
+): DecisionTraceStep | null {
+  let selected: DecisionTraceStep | null = null;
+  for (const step of trace) {
+    if (step.time > time + PERFORMANCE_DISPLAY_TOLERANCE) break;
+    selected = step;
+  }
+  return selected ?? trace[0] ?? null;
 }
 
 /** 返回稳定、适合人眼阅读的自然排序结果。 */
@@ -481,6 +597,7 @@ function collectElements(root: Document): WorkspaceElements {
     content: required("visualContent"),
     topologyPlayback: required("visualTopologyPlayback"),
     stage: required("visualDeviceStage"),
+    decisionLens: required("visualDecisionLens"),
     activeMoves: required("visualActiveMoves"),
     source: required("visualSource"),
     currentTime: required("visualCurrentTime"),
@@ -517,6 +634,65 @@ interface TopologyGroups {
   auxiliaryModules: ModuleSnapshot[];
 }
 
+interface CandidateDestinationSummary {
+  count: number;
+  bestRank: number;
+  preference: number;
+  makespanDelta: number | null;
+  selected: boolean;
+}
+
+/** 按目标模块聚合同一决策点的候选，供拓扑绘制类似围棋候选点的热区。 */
+function candidateDestinations(
+  decision: DecisionTraceStep | null,
+): Map<string, CandidateDestinationSummary> {
+  const destinations = new Map<string, CandidateDestinationSummary>();
+  for (const candidate of decision?.candidates ?? []) {
+    if (!candidate.destination) continue;
+    const previous = destinations.get(candidate.destination);
+    destinations.set(candidate.destination, {
+      count: (previous?.count ?? 0) + 1,
+      bestRank: Math.min(previous?.bestRank ?? Number.POSITIVE_INFINITY, candidate.rank),
+      preference: Math.max(previous?.preference ?? 0, candidate.policyPreference),
+      makespanDelta: candidate.makespanDelta === null
+        ? previous?.makespanDelta ?? null
+        : Math.min(previous?.makespanDelta ?? Number.POSITIVE_INFINITY, candidate.makespanDelta),
+      selected: Boolean(previous?.selected || candidate.selected),
+    });
+  }
+  return destinations;
+}
+
+/** 把未进入最终 MoveList 的候选目标补进只读拓扑，避免只显示模型已选落点。 */
+function snapshotWithCandidateModules(
+  snapshot: WorkspaceSnapshot,
+  decision: DecisionTraceStep | null,
+  device: DeviceDefinition | null,
+): WorkspaceSnapshot {
+  const modules = [...snapshot.modules];
+  const knownNames = new Set(modules.map(module => module.name));
+  for (const candidate of decision?.candidates ?? []) {
+    const name = candidate.destination;
+    if (!name || isRobotName(name) || knownNames.has(name)) continue;
+    modules.push({
+      name,
+      type: String(device?.Stations?.[name]?.Type ?? ""),
+      status: "idle",
+      door: "closed",
+      wafers: [],
+      activeMoveName: "",
+      progress: 0,
+      environment: "",
+      isRobotTarget: false,
+    });
+    knownNames.add(name);
+  }
+  return {
+    ...snapshot,
+    modules: modules.sort((left, right) => naturalCompare(left.name, right.name)),
+  };
+}
+
 /** 按参考设备图的物理区域划分当前 MoveList 真正使用的模块。 */
 function topologyGroups(modules: ModuleSnapshot[]): TopologyGroups {
   const loadLocks = modules.filter(module => isLoadLockName(module.name, module.type));
@@ -532,7 +708,11 @@ function topologyGroups(modules: ModuleSnapshot[]): TopologyGroups {
 }
 
 /** 绘制拓扑中的紧凑腔室，包括门、晶圆、动作和进度状态。 */
-function renderModule(module: ModuleSnapshot, role: "process" | "lock" | "port" | "auxiliary"): string {
+function renderModule(
+  module: ModuleSnapshot,
+  role: "process" | "lock" | "port" | "auxiliary",
+  candidate: CandidateDestinationSummary | undefined,
+): string {
   const waferLimit = 3;
   const wafers = module.wafers.slice(0, waferLimit)
     .map(wafer => `<span class="wafer-token" title="晶圆 ${escapeHtml(wafer)}">${escapeHtml(wafer)}</span>`)
@@ -542,8 +722,12 @@ function renderModule(module: ModuleSnapshot, role: "process" | "lock" | "port" 
     : "";
   const progress = Math.round(module.progress * 100);
   const accessibleStatus = `${module.name}，${STATUS_LABELS[module.status]}，${DOOR_LABELS[module.door]}`;
+  const candidateLabel = candidate
+    ? `${candidate.count} 个可行动作，最高模型偏好 ${(candidate.preference * 100).toFixed(0)}%`
+    : "";
   return `
-    <article class="equipment-card equipment-${role} status-${module.status} door-${module.door} ${module.isRobotTarget ? "is-target" : ""}" aria-label="${escapeHtml(accessibleStatus)}">
+    <article class="equipment-card equipment-${role} status-${module.status} door-${module.door} ${module.isRobotTarget ? "is-target" : ""} ${candidate ? "is-candidate-destination" : ""} ${candidate?.selected ? "is-model-selected" : ""}" aria-label="${escapeHtml(`${accessibleStatus}${candidateLabel ? `，${candidateLabel}` : ""}`)}">
+      ${candidate ? `<div class="candidate-landing" aria-hidden="true"><b>${candidate.bestRank}</b><span>${(candidate.preference * 100).toFixed(0)}%</span></div>` : ""}
       <div class="equipment-gate" aria-hidden="true"><span></span></div>
       <div class="equipment-head">
         <strong>${escapeHtml(module.name)}</strong>
@@ -585,8 +769,12 @@ function processModulePosition(index: number, count: number): string {
 }
 
 /** 按参考图绘制 VTR、ATR、腔室、Load Lock 与装载端口的设备俯视拓扑。 */
-function renderEquipmentTopology(snapshot: WorkspaceSnapshot): string {
+function renderEquipmentTopology(
+  snapshot: WorkspaceSnapshot,
+  decision: DecisionTraceStep | null,
+): string {
   const groups = topologyGroups(snapshot.modules);
+  const destinations = candidateDestinations(decision);
   const vacuumRobot = snapshot.robots.find(robot => /^(VTR|TM\d*)/i.test(robot.name));
   const atmosphereRobot = snapshot.robots.find(robot => /^ATR/i.test(robot.name));
   const assignedRobots = new Set([vacuumRobot?.name, atmosphereRobot?.name].filter(Boolean));
@@ -596,31 +784,136 @@ function renderEquipmentTopology(snapshot: WorkspaceSnapshot): string {
   return `
     <section class="equipment-schematic" aria-label="当前 MoveList 使用的设备拓扑">
       <div class="schematic-head">
-        <div><strong>设备拓扑</strong><span>仅显示当前 MoveList 使用的模块</span></div>
+        <div><strong>设备拓扑</strong><span>MoveList 模块 + 当前候选目标</span></div>
         <small>${snapshot.modules.length} 个腔室 · ${snapshot.robots.length} 台机械手</small>
       </div>
       <div class="schematic-canvas">
         <div class="process-ring" aria-label="工艺腔室">
           ${groups.processModules.map((module, index) => `
             <div class="process-module-position" style="${processModulePosition(index, groups.processModules.length)}">
-              ${renderModule(module, "process")}
+              ${renderModule(module, "process", destinations.get(module.name))}
             </div>`).join("")}
         </div>
         ${vacuumRobot ? renderRobotHub(vacuumRobot, "vacuum") : '<div class="topology-junction vacuum-junction"><strong>真空传输区</strong></div>'}
         <div class="load-lock-bank" aria-label="真空过渡腔">
-          ${groups.loadLocks.map(module => renderModule(module, "lock")).join("")}
+          ${groups.loadLocks.map(module => renderModule(module, "lock", destinations.get(module.name))).join("")}
         </div>
         <div class="atmosphere-deck">
-          <div class="auxiliary-bank auxiliary-left">${leftAuxiliary.map(module => renderModule(module, "auxiliary")).join("")}</div>
+          <div class="auxiliary-bank auxiliary-left">${leftAuxiliary.map(module => renderModule(module, "auxiliary", destinations.get(module.name))).join("")}</div>
           ${atmosphereRobot ? renderRobotHub(atmosphereRobot, "atmosphere") : '<div class="topology-junction atmosphere-junction"><strong>大气传输区</strong></div>'}
-          <div class="auxiliary-bank auxiliary-right">${rightAuxiliary.map(module => renderModule(module, "auxiliary")).join("")}</div>
+          <div class="auxiliary-bank auxiliary-right">${rightAuxiliary.map(module => renderModule(module, "auxiliary", destinations.get(module.name))).join("")}</div>
         </div>
         <div class="load-port-bank" aria-label="装载端口">
-          ${groups.loadPorts.map(module => renderModule(module, "port")).join("")}
+          ${groups.loadPorts.map(module => renderModule(module, "port", destinations.get(module.name))).join("")}
         </div>
         ${additionalRobots.length ? `<div class="additional-robot-bank">${additionalRobots.map(robot => renderRobotHub(robot, "atmosphere")).join("")}</div>` : ""}
       </div>
     </section>`;
+}
+
+/** 把可选秒数格式化为适合紧凑决策卡片的文本。 */
+function modelSeconds(value: number | null, sign = false): string {
+  if (value === null) return "—";
+  const prefix = sign && value > PERFORMANCE_DISPLAY_TOLERANCE ? "+" : "";
+  return `${prefix}${value.toFixed(value >= 100 ? 0 : 1)} s`;
+}
+
+/** 生成候选动作的人类可读路径标签。 */
+function decisionCandidatePath(candidate: DecisionCandidate): string {
+  const source = candidate.source || "当前位置";
+  const destination = candidate.destination || "—";
+  return `${source} → ${destination}${candidate.destinationSlot ? ` · 槽 ${candidate.destinationSlot}` : ""}`;
+}
+
+/** 返回当前决策之后的有限条已选动作，作为单轨迹未来规划视图。 */
+function futureDecisionSteps(
+  trace: DecisionTraceStep[],
+  current: DecisionTraceStep,
+): DecisionTraceStep[] {
+  const index = trace.indexOf(current);
+  if (index < 0) return [current];
+  return trace.slice(index, index + FUTURE_DECISION_COUNT);
+}
+
+/** 绘制 E2E 决策透镜：候选偏好、Makespan 分布和未来单轨迹。 */
+function renderDecisionLens(
+  decision: DecisionTraceStep | null,
+  trace: DecisionTraceStep[],
+): string {
+  if (!decision) {
+    return `
+      <div class="decision-empty">
+        <strong>没有模型决策轨迹</strong>
+        <p>当前结果只包含 MoveList。请使用 E2E-CTQ 重新运行，或导入含 <code>DecisionTrace</code> 的结果 JSON。</p>
+      </div>`;
+  }
+  const selected = decision.candidates.find(candidate => candidate.selected)
+    ?? decision.candidates.find(candidate => candidate.actionId === decision.selectedActionId)
+    ?? decision.candidates[0];
+  const shownText = decision.candidatesTruncated
+    ? `展示 Top ${decision.shownCandidateCount} / ${decision.candidateCount}`
+    : `${decision.candidateCount} 个可行动作`;
+  const candidates = decision.candidates.map(candidate => {
+    const preference = Math.round(candidate.policyPreference * 100);
+    const uncertainty = candidate.lowerRemainingMakespan !== null && candidate.upperRemainingMakespan !== null
+      ? `${modelSeconds(candidate.lowerRemainingMakespan)}–${modelSeconds(candidate.upperRemainingMakespan)}`
+      : "未评估";
+    const material = candidate.materialIds.length
+      ? candidate.materialIds.join(" / ")
+      : `Wafer ${candidate.waferId}`;
+    return `
+      <li class="decision-candidate ${candidate.selected ? "is-selected" : ""}">
+        <div class="decision-candidate-rank">${candidate.rank}</div>
+        <div class="decision-candidate-main">
+          <div><strong>${escapeHtml(decisionCandidatePath(candidate))}</strong>${candidate.selected ? "<span>模型选择</span>" : ""}</div>
+          <small>${escapeHtml(material)} · ${escapeHtml(candidate.robot || "Robot")} · ${escapeHtml(candidate.flowKind || candidate.kind)}</small>
+          <div class="decision-preference-track" aria-label="模型偏好 ${preference}%"><i style="transform:scaleX(${candidate.policyPreference})"></i></div>
+        </div>
+        <div class="decision-candidate-metrics">
+          <strong>${preference}%</strong>
+          <span>Δ ${modelSeconds(candidate.makespanDelta, true)}</span>
+          <small title="剩余 Makespan 预测区间">${uncertainty}</small>
+        </div>
+      </li>`;
+  }).join("");
+  const future = futureDecisionSteps(trace, decision).map((step, index) => {
+    const action = step.candidates.find(candidate => candidate.selected)
+      ?? step.candidates.find(candidate => candidate.actionId === step.selectedActionId)
+      ?? step.candidates[0];
+    if (!action) return "";
+    return `
+      <li class="future-decision-step ${index === 0 ? "is-current" : ""}">
+        <span>${index === 0 ? "当前" : `+${index}`}</span>
+        <strong>${escapeHtml(action.destination || "—")}</strong>
+        <small>${formatSeconds(step.time)} s · ${escapeHtml(action.materialIds.join("/") || `W${action.waferId}`)}</small>
+      </li>`;
+  }).join("");
+  const selectedSummary = selected
+    ? `<div class="decision-selected-summary">
+        <span>${decision.modelEvaluated ? "E2E-CTQ 选择" : "物理约束唯一解"}</span>
+        <strong>${escapeHtml(decisionCandidatePath(selected))}</strong>
+        <dl>
+          <div><dt>模型偏好</dt><dd>${Math.round(selected.policyPreference * 100)}%</dd></div>
+          <div><dt>剩余 Makespan</dt><dd>${modelSeconds(selected.expectedRemainingMakespan)}</dd></div>
+          <div><dt>相对最优 Δ</dt><dd>${modelSeconds(selected.makespanDelta, true)}</dd></div>
+        </dl>
+      </div>`
+    : "";
+  return `
+    <div class="decision-lens-head">
+      <div><span>AI DECISION LENS</span><strong>决策 #${decision.decisionIndex}</strong></div>
+      <small>${escapeHtml(shownText)}</small>
+    </div>
+    ${selectedSummary}
+    <section class="future-trajectory" aria-labelledby="futureTrajectoryTitle">
+      <header><strong id="futureTrajectoryTitle">未来单轨迹</strong><span>后续 ${FUTURE_DECISION_COUNT} 个决策点</span></header>
+      <ol>${future}</ol>
+    </section>
+    <section class="decision-candidate-section" aria-labelledby="decisionCandidatesTitle">
+      <header><strong id="decisionCandidatesTitle">候选动作</strong><span>偏好 · Δ Makespan · 预测区间</span></header>
+      <ol>${candidates}</ol>
+    </section>
+    <p class="decision-method-note">偏好来自策略分数的同组归一化；Δ Makespan 相对当前候选中预测均值最小者。区间来自分位价值头，不代表完成时间保证。</p>`;
 }
 
 const WAFER_COLOR_PALETTE = [
@@ -895,6 +1188,7 @@ export class VisualizationWorkspace {
   private analysisRoutes: Array<Record<string, any>> = [];
   private analysisRounds: Array<Record<string, any>> = [];
   private moves: MoveRecord[] = [];
+  private decisionTrace: DecisionTraceStep[] = [];
   private sourceName = "";
   private resultUrl = "";
   private analysisResultId = "";
@@ -930,7 +1224,13 @@ export class VisualizationWorkspace {
   /** 加载浏览器中选择的 MoveList 文件。 */
   async loadFile(file: File): Promise<void> {
     const payload = JSON.parse(await file.text()) as unknown;
-    await this.loadMoves(normalizeMovePayload(payload), file.name, "", "");
+    await this.loadMoves(
+      normalizeMovePayload(payload),
+      normalizeDecisionTrace(payload),
+      file.name,
+      "",
+      "",
+    );
   }
 
   /** 从后端保存的运行结果加载 MoveList。 */
@@ -951,7 +1251,13 @@ export class VisualizationWorkspace {
       const resultId = resultUrl.startsWith("/api/results/")
         ? decodeURIComponent(resultUrl.slice("/api/results/".length))
         : "";
-      await this.loadMoves(normalizeMovePayload(payload), sourceName, resultUrl, resultId);
+      await this.loadMoves(
+        normalizeMovePayload(payload),
+        normalizeDecisionTrace(payload),
+        sourceName,
+        resultUrl,
+        resultId,
+      );
     } catch (error) {
       this.showError(error instanceof Error ? error.message : String(error));
       throw error;
@@ -999,6 +1305,7 @@ export class VisualizationWorkspace {
   clear(): void {
     this.pause();
     this.moves = [];
+    this.decisionTrace = [];
     this.sourceName = "";
     this.resultUrl = "";
     this.analysisResultId = "";
@@ -1031,6 +1338,7 @@ export class VisualizationWorkspace {
   /** 接收规范化后的 MoveList 并重置时间轴。 */
   private async loadMoves(
     moves: MoveRecord[],
+    decisionTrace: DecisionTraceStep[],
     sourceName: string,
     resultUrl: string,
     analysisResultId: string,
@@ -1038,6 +1346,7 @@ export class VisualizationWorkspace {
     if (!moves.length) throw new Error("MoveList 为空，无法建立可视化回放");
     this.pause();
     this.moves = moves;
+    this.decisionTrace = decisionTrace;
     this.sourceName = sourceName;
     this.resultUrl = resultUrl;
     this.analysisResultId = analysisResultId;
@@ -1172,7 +1481,10 @@ export class VisualizationWorkspace {
     this.elements.waferText.textContent = String(snapshot.waferCount);
     this.elements.range.value = String(snapshot.time);
 
-    this.elements.stage.innerHTML = renderEquipmentTopology(snapshot);
+    const currentDecision = decisionAtTime(this.decisionTrace, snapshot.time);
+    const topologySnapshot = snapshotWithCandidateModules(snapshot, currentDecision, this.device);
+    this.elements.stage.innerHTML = renderEquipmentTopology(topologySnapshot, currentDecision);
+    this.elements.decisionLens.innerHTML = renderDecisionLens(currentDecision, this.decisionTrace);
 
     this.elements.activeMoves.innerHTML = snapshot.activeMoves.length
       ? snapshot.activeMoves.map(move => `

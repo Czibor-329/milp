@@ -23,7 +23,9 @@ __export(workspace_visualizer_test_entry_exports, {
   buildScheduleAnalysisContext: () => buildScheduleAnalysisContext,
   buildWorkspaceSnapshot: () => buildWorkspaceSnapshot,
   createVisualizationWorkspace: () => createVisualizationWorkspace,
+  decisionAtTime: () => decisionAtTime,
   displayedPerformanceResources: () => displayedPerformanceResources,
+  normalizeDecisionTrace: () => normalizeDecisionTrace,
   normalizeMovePayload: () => normalizeMovePayload,
   summarizeBottleneckUtilization: () => summarizeBottleneckUtilization
 });
@@ -68,6 +70,7 @@ var PROCESS_ARC_CENTER_Y_PIXELS = 214;
 var PROCESS_ARC_RADIUS_X_PERCENT = 38;
 var PROCESS_ARC_RADIUS_Y_PIXELS = 156;
 var PERFORMANCE_DISPLAY_TOLERANCE = 1e-6;
+var FUTURE_DECISION_COUNT = 6;
 var ACTIVITY_CATEGORIES = [
   "process",
   "clean",
@@ -121,6 +124,11 @@ function finiteNumber(value, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
 }
+function nullableFiniteNumber(value) {
+  if (value === null || value === void 0 || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
 function listValue(value) {
   return Array.isArray(value) ? value : [];
 }
@@ -128,6 +136,59 @@ function normalizeMovePayload(payload) {
   const records = Array.isArray(payload) ? payload : payload && typeof payload === "object" && Array.isArray(payload.MoveList) ? payload.MoveList : null;
   if (!records) throw new Error("\u6587\u4EF6\u5FC5\u987B\u662F MoveList \u6570\u7EC4\uFF0C\u6216\u5305\u542B MoveList \u5B57\u6BB5\u7684 JSON \u5BF9\u8C61");
   return records.filter((record) => Boolean(record) && typeof record === "object" && !Array.isArray(record)).map((record) => ({ ...record }));
+}
+function normalizeDecisionTrace(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return [];
+  const rawTrace = payload.DecisionTrace;
+  if (!Array.isArray(rawTrace)) return [];
+  return rawTrace.filter((step) => Boolean(step) && typeof step === "object" && !Array.isArray(step)).map((step) => {
+    const rawCandidates = Array.isArray(step.candidates) ? step.candidates : [];
+    const candidates = rawCandidates.filter((candidate) => Boolean(candidate) && typeof candidate === "object" && !Array.isArray(candidate)).map((candidate) => ({
+      actionId: String(candidate.actionId ?? ""),
+      kind: String(candidate.kind ?? ""),
+      flowKind: String(candidate.flowKind ?? ""),
+      robot: String(candidate.robot ?? ""),
+      materialIds: listValue(candidate.materialIds).map(String),
+      waferId: finiteNumber(candidate.waferId),
+      stageIndex: finiteNumber(candidate.stageIndex),
+      source: String(candidate.source ?? ""),
+      sourceSlot: finiteNumber(candidate.sourceSlot),
+      destination: String(candidate.destination ?? ""),
+      destinationSlot: finiteNumber(candidate.destinationSlot),
+      earliestStart: finiteNumber(candidate.earliestStart),
+      finishTime: finiteNumber(candidate.finishTime),
+      rank: finiteNumber(candidate.rank),
+      selected: Boolean(candidate.selected),
+      policyScore: finiteNumber(candidate.policyScore),
+      policyPreference: Math.max(0, Math.min(1, finiteNumber(candidate.policyPreference))),
+      expectedRemainingMakespan: nullableFiniteNumber(candidate.expectedRemainingMakespan),
+      medianRemainingMakespan: nullableFiniteNumber(candidate.medianRemainingMakespan),
+      lowerRemainingMakespan: nullableFiniteNumber(candidate.lowerRemainingMakespan),
+      upperRemainingMakespan: nullableFiniteNumber(candidate.upperRemainingMakespan),
+      makespanDelta: nullableFiniteNumber(candidate.makespanDelta)
+    })).sort((left, right) => left.rank - right.rank || right.policyPreference - left.policyPreference);
+    return {
+      decisionIndex: finiteNumber(step.decisionIndex),
+      time: finiteNumber(step.time),
+      revision: finiteNumber(step.revision),
+      roundIndex: finiteNumber(step.roundIndex),
+      roundKind: String(step.roundKind ?? ""),
+      selectedActionId: String(step.selectedActionId ?? ""),
+      candidateCount: Math.max(candidates.length, finiteNumber(step.candidateCount, candidates.length)),
+      shownCandidateCount: Math.max(candidates.length, finiteNumber(step.shownCandidateCount, candidates.length)),
+      candidatesTruncated: Boolean(step.candidatesTruncated),
+      modelEvaluated: Boolean(step.modelEvaluated),
+      candidates
+    };
+  }).sort((left, right) => left.time - right.time || left.decisionIndex - right.decisionIndex);
+}
+function decisionAtTime(trace, time) {
+  let selected = null;
+  for (const step of trace) {
+    if (step.time > time + PERFORMANCE_DISPLAY_TOLERANCE) break;
+    selected = step;
+  }
+  return selected ?? trace[0] ?? null;
 }
 function naturalCompare(left, right) {
   return left.localeCompare(right, void 0, { numeric: true, sensitivity: "base" });
@@ -354,6 +415,7 @@ function collectElements(root) {
     content: required("visualContent"),
     topologyPlayback: required("visualTopologyPlayback"),
     stage: required("visualDeviceStage"),
+    decisionLens: required("visualDecisionLens"),
     activeMoves: required("visualActiveMoves"),
     source: required("visualSource"),
     currentTime: required("visualCurrentTime"),
@@ -380,6 +442,45 @@ function icon(name) {
   };
   return `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">${paths[name]}</svg>`;
 }
+function candidateDestinations(decision) {
+  const destinations = /* @__PURE__ */ new Map();
+  for (const candidate of decision?.candidates ?? []) {
+    if (!candidate.destination) continue;
+    const previous = destinations.get(candidate.destination);
+    destinations.set(candidate.destination, {
+      count: (previous?.count ?? 0) + 1,
+      bestRank: Math.min(previous?.bestRank ?? Number.POSITIVE_INFINITY, candidate.rank),
+      preference: Math.max(previous?.preference ?? 0, candidate.policyPreference),
+      makespanDelta: candidate.makespanDelta === null ? previous?.makespanDelta ?? null : Math.min(previous?.makespanDelta ?? Number.POSITIVE_INFINITY, candidate.makespanDelta),
+      selected: Boolean(previous?.selected || candidate.selected)
+    });
+  }
+  return destinations;
+}
+function snapshotWithCandidateModules(snapshot, decision, device) {
+  const modules = [...snapshot.modules];
+  const knownNames = new Set(modules.map((module2) => module2.name));
+  for (const candidate of decision?.candidates ?? []) {
+    const name = candidate.destination;
+    if (!name || isRobotName(name) || knownNames.has(name)) continue;
+    modules.push({
+      name,
+      type: String(device?.Stations?.[name]?.Type ?? ""),
+      status: "idle",
+      door: "closed",
+      wafers: [],
+      activeMoveName: "",
+      progress: 0,
+      environment: "",
+      isRobotTarget: false
+    });
+    knownNames.add(name);
+  }
+  return {
+    ...snapshot,
+    modules: modules.sort((left, right) => naturalCompare(left.name, right.name))
+  };
+}
 function topologyGroups(modules) {
   const loadLocks = modules.filter((module2) => isLoadLockName(module2.name, module2.type));
   const loadPorts = modules.filter((module2) => isLoadPortName(module2.name, module2.type));
@@ -392,14 +493,16 @@ function topologyGroups(modules) {
     auxiliaryModules: modules.filter((module2) => !assignedNames.has(module2.name))
   };
 }
-function renderModule(module2, role) {
+function renderModule(module2, role, candidate) {
   const waferLimit = 3;
   const wafers = module2.wafers.slice(0, waferLimit).map((wafer) => `<span class="wafer-token" title="\u6676\u5706 ${escapeHtml(wafer)}">${escapeHtml(wafer)}</span>`).join("");
   const overflow = module2.wafers.length > waferLimit ? `<span class="wafer-more">+${module2.wafers.length - waferLimit}</span>` : "";
   const progress = Math.round(module2.progress * 100);
   const accessibleStatus = `${module2.name}\uFF0C${STATUS_LABELS[module2.status]}\uFF0C${DOOR_LABELS[module2.door]}`;
+  const candidateLabel = candidate ? `${candidate.count} \u4E2A\u53EF\u884C\u52A8\u4F5C\uFF0C\u6700\u9AD8\u6A21\u578B\u504F\u597D ${(candidate.preference * 100).toFixed(0)}%` : "";
   return `
-    <article class="equipment-card equipment-${role} status-${module2.status} door-${module2.door} ${module2.isRobotTarget ? "is-target" : ""}" aria-label="${escapeHtml(accessibleStatus)}">
+    <article class="equipment-card equipment-${role} status-${module2.status} door-${module2.door} ${module2.isRobotTarget ? "is-target" : ""} ${candidate ? "is-candidate-destination" : ""} ${candidate?.selected ? "is-model-selected" : ""}" aria-label="${escapeHtml(`${accessibleStatus}${candidateLabel ? `\uFF0C${candidateLabel}` : ""}`)}">
+      ${candidate ? `<div class="candidate-landing" aria-hidden="true"><b>${candidate.bestRank}</b><span>${(candidate.preference * 100).toFixed(0)}%</span></div>` : ""}
       <div class="equipment-gate" aria-hidden="true"><span></span></div>
       <div class="equipment-head">
         <strong>${escapeHtml(module2.name)}</strong>
@@ -434,8 +537,9 @@ function processModulePosition(index, count) {
   const top = PROCESS_ARC_CENTER_Y_PIXELS + Math.sin(radians) * PROCESS_ARC_RADIUS_Y_PIXELS;
   return `--module-left:${left.toFixed(2)}%;--module-top:${top.toFixed(2)}px;--module-order:${index}`;
 }
-function renderEquipmentTopology(snapshot) {
+function renderEquipmentTopology(snapshot, decision) {
   const groups = topologyGroups(snapshot.modules);
+  const destinations = candidateDestinations(decision);
   const vacuumRobot = snapshot.robots.find((robot) => /^(VTR|TM\d*)/i.test(robot.name));
   const atmosphereRobot = snapshot.robots.find((robot) => /^ATR/i.test(robot.name));
   const assignedRobots = new Set([vacuumRobot?.name, atmosphereRobot?.name].filter(Boolean));
@@ -445,31 +549,110 @@ function renderEquipmentTopology(snapshot) {
   return `
     <section class="equipment-schematic" aria-label="\u5F53\u524D MoveList \u4F7F\u7528\u7684\u8BBE\u5907\u62D3\u6251">
       <div class="schematic-head">
-        <div><strong>\u8BBE\u5907\u62D3\u6251</strong><span>\u4EC5\u663E\u793A\u5F53\u524D MoveList \u4F7F\u7528\u7684\u6A21\u5757</span></div>
+        <div><strong>\u8BBE\u5907\u62D3\u6251</strong><span>MoveList \u6A21\u5757 + \u5F53\u524D\u5019\u9009\u76EE\u6807</span></div>
         <small>${snapshot.modules.length} \u4E2A\u8154\u5BA4 \xB7 ${snapshot.robots.length} \u53F0\u673A\u68B0\u624B</small>
       </div>
       <div class="schematic-canvas">
         <div class="process-ring" aria-label="\u5DE5\u827A\u8154\u5BA4">
           ${groups.processModules.map((module2, index) => `
             <div class="process-module-position" style="${processModulePosition(index, groups.processModules.length)}">
-              ${renderModule(module2, "process")}
+              ${renderModule(module2, "process", destinations.get(module2.name))}
             </div>`).join("")}
         </div>
         ${vacuumRobot ? renderRobotHub(vacuumRobot, "vacuum") : '<div class="topology-junction vacuum-junction"><strong>\u771F\u7A7A\u4F20\u8F93\u533A</strong></div>'}
         <div class="load-lock-bank" aria-label="\u771F\u7A7A\u8FC7\u6E21\u8154">
-          ${groups.loadLocks.map((module2) => renderModule(module2, "lock")).join("")}
+          ${groups.loadLocks.map((module2) => renderModule(module2, "lock", destinations.get(module2.name))).join("")}
         </div>
         <div class="atmosphere-deck">
-          <div class="auxiliary-bank auxiliary-left">${leftAuxiliary.map((module2) => renderModule(module2, "auxiliary")).join("")}</div>
+          <div class="auxiliary-bank auxiliary-left">${leftAuxiliary.map((module2) => renderModule(module2, "auxiliary", destinations.get(module2.name))).join("")}</div>
           ${atmosphereRobot ? renderRobotHub(atmosphereRobot, "atmosphere") : '<div class="topology-junction atmosphere-junction"><strong>\u5927\u6C14\u4F20\u8F93\u533A</strong></div>'}
-          <div class="auxiliary-bank auxiliary-right">${rightAuxiliary.map((module2) => renderModule(module2, "auxiliary")).join("")}</div>
+          <div class="auxiliary-bank auxiliary-right">${rightAuxiliary.map((module2) => renderModule(module2, "auxiliary", destinations.get(module2.name))).join("")}</div>
         </div>
         <div class="load-port-bank" aria-label="\u88C5\u8F7D\u7AEF\u53E3">
-          ${groups.loadPorts.map((module2) => renderModule(module2, "port")).join("")}
+          ${groups.loadPorts.map((module2) => renderModule(module2, "port", destinations.get(module2.name))).join("")}
         </div>
         ${additionalRobots.length ? `<div class="additional-robot-bank">${additionalRobots.map((robot) => renderRobotHub(robot, "atmosphere")).join("")}</div>` : ""}
       </div>
     </section>`;
+}
+function modelSeconds(value, sign = false) {
+  if (value === null) return "\u2014";
+  const prefix = sign && value > PERFORMANCE_DISPLAY_TOLERANCE ? "+" : "";
+  return `${prefix}${value.toFixed(value >= 100 ? 0 : 1)} s`;
+}
+function decisionCandidatePath(candidate) {
+  const source = candidate.source || "\u5F53\u524D\u4F4D\u7F6E";
+  const destination = candidate.destination || "\u2014";
+  return `${source} \u2192 ${destination}${candidate.destinationSlot ? ` \xB7 \u69FD ${candidate.destinationSlot}` : ""}`;
+}
+function futureDecisionSteps(trace, current) {
+  const index = trace.indexOf(current);
+  if (index < 0) return [current];
+  return trace.slice(index, index + FUTURE_DECISION_COUNT);
+}
+function renderDecisionLens(decision, trace) {
+  if (!decision) {
+    return `
+      <div class="decision-empty">
+        <strong>\u6CA1\u6709\u6A21\u578B\u51B3\u7B56\u8F68\u8FF9</strong>
+        <p>\u5F53\u524D\u7ED3\u679C\u53EA\u5305\u542B MoveList\u3002\u8BF7\u4F7F\u7528 E2E-CTQ \u91CD\u65B0\u8FD0\u884C\uFF0C\u6216\u5BFC\u5165\u542B <code>DecisionTrace</code> \u7684\u7ED3\u679C JSON\u3002</p>
+      </div>`;
+  }
+  const selected = decision.candidates.find((candidate) => candidate.selected) ?? decision.candidates.find((candidate) => candidate.actionId === decision.selectedActionId) ?? decision.candidates[0];
+  const shownText = decision.candidatesTruncated ? `\u5C55\u793A Top ${decision.shownCandidateCount} / ${decision.candidateCount}` : `${decision.candidateCount} \u4E2A\u53EF\u884C\u52A8\u4F5C`;
+  const candidates = decision.candidates.map((candidate) => {
+    const preference = Math.round(candidate.policyPreference * 100);
+    const uncertainty = candidate.lowerRemainingMakespan !== null && candidate.upperRemainingMakespan !== null ? `${modelSeconds(candidate.lowerRemainingMakespan)}\u2013${modelSeconds(candidate.upperRemainingMakespan)}` : "\u672A\u8BC4\u4F30";
+    const material = candidate.materialIds.length ? candidate.materialIds.join(" / ") : `Wafer ${candidate.waferId}`;
+    return `
+      <li class="decision-candidate ${candidate.selected ? "is-selected" : ""}">
+        <div class="decision-candidate-rank">${candidate.rank}</div>
+        <div class="decision-candidate-main">
+          <div><strong>${escapeHtml(decisionCandidatePath(candidate))}</strong>${candidate.selected ? "<span>\u6A21\u578B\u9009\u62E9</span>" : ""}</div>
+          <small>${escapeHtml(material)} \xB7 ${escapeHtml(candidate.robot || "Robot")} \xB7 ${escapeHtml(candidate.flowKind || candidate.kind)}</small>
+          <div class="decision-preference-track" aria-label="\u6A21\u578B\u504F\u597D ${preference}%"><i style="transform:scaleX(${candidate.policyPreference})"></i></div>
+        </div>
+        <div class="decision-candidate-metrics">
+          <strong>${preference}%</strong>
+          <span>\u0394 ${modelSeconds(candidate.makespanDelta, true)}</span>
+          <small title="\u5269\u4F59 Makespan \u9884\u6D4B\u533A\u95F4">${uncertainty}</small>
+        </div>
+      </li>`;
+  }).join("");
+  const future = futureDecisionSteps(trace, decision).map((step, index) => {
+    const action = step.candidates.find((candidate) => candidate.selected) ?? step.candidates.find((candidate) => candidate.actionId === step.selectedActionId) ?? step.candidates[0];
+    if (!action) return "";
+    return `
+      <li class="future-decision-step ${index === 0 ? "is-current" : ""}">
+        <span>${index === 0 ? "\u5F53\u524D" : `+${index}`}</span>
+        <strong>${escapeHtml(action.destination || "\u2014")}</strong>
+        <small>${formatSeconds(step.time)} s \xB7 ${escapeHtml(action.materialIds.join("/") || `W${action.waferId}`)}</small>
+      </li>`;
+  }).join("");
+  const selectedSummary = selected ? `<div class="decision-selected-summary">
+        <span>${decision.modelEvaluated ? "E2E-CTQ \u9009\u62E9" : "\u7269\u7406\u7EA6\u675F\u552F\u4E00\u89E3"}</span>
+        <strong>${escapeHtml(decisionCandidatePath(selected))}</strong>
+        <dl>
+          <div><dt>\u6A21\u578B\u504F\u597D</dt><dd>${Math.round(selected.policyPreference * 100)}%</dd></div>
+          <div><dt>\u5269\u4F59 Makespan</dt><dd>${modelSeconds(selected.expectedRemainingMakespan)}</dd></div>
+          <div><dt>\u76F8\u5BF9\u6700\u4F18 \u0394</dt><dd>${modelSeconds(selected.makespanDelta, true)}</dd></div>
+        </dl>
+      </div>` : "";
+  return `
+    <div class="decision-lens-head">
+      <div><span>AI DECISION LENS</span><strong>\u51B3\u7B56 #${decision.decisionIndex}</strong></div>
+      <small>${escapeHtml(shownText)}</small>
+    </div>
+    ${selectedSummary}
+    <section class="future-trajectory" aria-labelledby="futureTrajectoryTitle">
+      <header><strong id="futureTrajectoryTitle">\u672A\u6765\u5355\u8F68\u8FF9</strong><span>\u540E\u7EED ${FUTURE_DECISION_COUNT} \u4E2A\u51B3\u7B56\u70B9</span></header>
+      <ol>${future}</ol>
+    </section>
+    <section class="decision-candidate-section" aria-labelledby="decisionCandidatesTitle">
+      <header><strong id="decisionCandidatesTitle">\u5019\u9009\u52A8\u4F5C</strong><span>\u504F\u597D \xB7 \u0394 Makespan \xB7 \u9884\u6D4B\u533A\u95F4</span></header>
+      <ol>${candidates}</ol>
+    </section>
+    <p class="decision-method-note">\u504F\u597D\u6765\u81EA\u7B56\u7565\u5206\u6570\u7684\u540C\u7EC4\u5F52\u4E00\u5316\uFF1B\u0394 Makespan \u76F8\u5BF9\u5F53\u524D\u5019\u9009\u4E2D\u9884\u6D4B\u5747\u503C\u6700\u5C0F\u8005\u3002\u533A\u95F4\u6765\u81EA\u5206\u4F4D\u4EF7\u503C\u5934\uFF0C\u4E0D\u4EE3\u8868\u5B8C\u6210\u65F6\u95F4\u4FDD\u8BC1\u3002</p>`;
 }
 var WAFER_COLOR_PALETTE = [
   "#d81b60",
@@ -712,6 +895,7 @@ var VisualizationWorkspace = class {
   analysisRoutes = [];
   analysisRounds = [];
   moves = [];
+  decisionTrace = [];
   sourceName = "";
   resultUrl = "";
   analysisResultId = "";
@@ -744,7 +928,13 @@ var VisualizationWorkspace = class {
   /** 加载浏览器中选择的 MoveList 文件。 */
   async loadFile(file) {
     const payload = JSON.parse(await file.text());
-    await this.loadMoves(normalizeMovePayload(payload), file.name, "", "");
+    await this.loadMoves(
+      normalizeMovePayload(payload),
+      normalizeDecisionTrace(payload),
+      file.name,
+      "",
+      ""
+    );
   }
   /** 从后端保存的运行结果加载 MoveList。 */
   async loadResult(resultIdOrUrl, sourceName = "\u5F53\u524D\u8FD0\u884C\u7ED3\u679C") {
@@ -758,7 +948,13 @@ var VisualizationWorkspace = class {
         throw new Error(message || `\u670D\u52A1\u8FD4\u56DE ${response.status}`);
       }
       const resultId = resultUrl.startsWith("/api/results/") ? decodeURIComponent(resultUrl.slice("/api/results/".length)) : "";
-      await this.loadMoves(normalizeMovePayload(payload), sourceName, resultUrl, resultId);
+      await this.loadMoves(
+        normalizeMovePayload(payload),
+        normalizeDecisionTrace(payload),
+        sourceName,
+        resultUrl,
+        resultId
+      );
     } catch (error) {
       this.showError(error instanceof Error ? error.message : String(error));
       throw error;
@@ -797,6 +993,7 @@ var VisualizationWorkspace = class {
   clear() {
     this.pause();
     this.moves = [];
+    this.decisionTrace = [];
     this.sourceName = "";
     this.resultUrl = "";
     this.analysisResultId = "";
@@ -826,10 +1023,11 @@ var VisualizationWorkspace = class {
       <span>\u8FD0\u884C\u4E00\u6B21\u8BA1\u5212\uFF0C\u6216\u5BFC\u5165\u5DF2\u6709\u7684 MoveList JSON \u6587\u4EF6\u540E\u67E5\u770B\u8BBE\u5907\u62D3\u6251\u5E76\u5F00\u59CB\u56DE\u653E\u3002</span>`;
   }
   /** 接收规范化后的 MoveList 并重置时间轴。 */
-  async loadMoves(moves, sourceName, resultUrl, analysisResultId) {
+  async loadMoves(moves, decisionTrace, sourceName, resultUrl, analysisResultId) {
     if (!moves.length) throw new Error("MoveList \u4E3A\u7A7A\uFF0C\u65E0\u6CD5\u5EFA\u7ACB\u53EF\u89C6\u5316\u56DE\u653E");
     this.pause();
     this.moves = moves;
+    this.decisionTrace = decisionTrace;
     this.sourceName = sourceName;
     this.resultUrl = resultUrl;
     this.analysisResultId = analysisResultId;
@@ -949,7 +1147,10 @@ var VisualizationWorkspace = class {
     this.elements.moveText.textContent = `${snapshot.completedMoves} / ${snapshot.totalMoves}`;
     this.elements.waferText.textContent = String(snapshot.waferCount);
     this.elements.range.value = String(snapshot.time);
-    this.elements.stage.innerHTML = renderEquipmentTopology(snapshot);
+    const currentDecision = decisionAtTime(this.decisionTrace, snapshot.time);
+    const topologySnapshot = snapshotWithCandidateModules(snapshot, currentDecision, this.device);
+    this.elements.stage.innerHTML = renderEquipmentTopology(topologySnapshot, currentDecision);
+    this.elements.decisionLens.innerHTML = renderDecisionLens(currentDecision, this.decisionTrace);
     this.elements.activeMoves.innerHTML = snapshot.activeMoves.length ? snapshot.activeMoves.map((move) => `
         <li>
           <span class="active-move-id">#${finiteNumber(move.MoveID)}</span>
@@ -1787,7 +1988,9 @@ function buildScheduleAnalysisContext(routes, rounds) {
   buildScheduleAnalysisContext,
   buildWorkspaceSnapshot,
   createVisualizationWorkspace,
+  decisionAtTime,
   displayedPerformanceResources,
+  normalizeDecisionTrace,
   normalizeMovePayload,
   summarizeBottleneckUtilization
 });

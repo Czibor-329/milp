@@ -529,6 +529,50 @@ class ConfigEditorServerTests(unittest.TestCase):
                 {"neural", "neural-safe-retry"},
             )
 
+    def test_e2e_ctq_persists_decision_trace_for_topology_playback(self) -> None:
+        """E2E 候选评分应进入结果文件，运行摘要只保留轨迹计数。"""
+        from src.schedule.e2e_ctq import DEFAULT_MODEL_PATH, load_e2e_ctq_policy
+
+        plan = {
+            "deviceName": DEVICE_PATH.name,
+            "device": self.device,
+            "strategy": "e2e-ctq",
+            "roundCount": 1,
+            "options": {},
+            "recipes": [{
+                "name": "DecisionTraceRecipe",
+                "time": 40,
+                "modules": ["PM1", "PM2"],
+                "weight": {},
+            }],
+            "cleans": [],
+            "routes": [_route(
+                "DecisionTraceRoute",
+                "PM1,PM2",
+                "DecisionTraceRecipe",
+            )],
+            "rounds": [{
+                "currentTime": 0,
+                "jobs": [{
+                    **_job("DecisionTraceJob", "DecisionTraceRoute", "LP1"),
+                    "waferCount": 2,
+                }],
+            }],
+        }
+        policy = load_e2e_ctq_policy(DEFAULT_MODEL_PATH)
+
+        with patch("infer.function._load_policy", return_value=policy):
+            result = execute_plan(plan)
+
+        trace = result["output"]["DecisionTrace"]
+        self.assertGreater(len(trace), 0)
+        self.assertEqual("e2e-ctq-decision-trace-v1", result["output"]["DecisionTraceMeta"]["schema"])
+        self.assertGreaterEqual(trace[0]["candidateCount"], 1)
+        self.assertIn("policyPreference", trace[0]["candidates"][0])
+        diagnostics = result["rounds"][0]["strategyDiagnostics"]
+        self.assertNotIn("decisionTrace", diagnostics)
+        self.assertEqual(len(trace), diagnostics["decisionTraceCount"])
+
     def test_neural_recompute_allows_required_cross_plan_empty_pressure_reversal(self) -> None:
         """旧段在途空充收尾后，新段应能为真空侧任务执行必要的反向空抽。"""
         from src.schedule.neural import DEFAULT_MODEL_PATH, load_neural_policy
@@ -1552,6 +1596,8 @@ class ConfigEditorServerTests(unittest.TestCase):
         topology_playback = page.split('id="visualTopologyPlayback"', 1)[1]
         self.assertIn('id="visualTimeline"', topology_playback)
         self.assertIn('id="visualDeviceStage"', topology_playback)
+        self.assertIn('id="visualDecisionLens"', topology_playback)
+        self.assertIn("AI DECISION LENS", workspace_source)
         self.assertNotIn("调度结果分析", page)
         self.assertNotIn("按设备俯视拓扑回放晶圆流转", page)
 

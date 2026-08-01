@@ -6,7 +6,13 @@
  * 兼容分析函数；新的业务代码必须使用服务端 `/api/analysis/*` 契约。
  */
 
-export { buildWorkspaceSnapshot, createVisualizationWorkspace, normalizeMovePayload } from "./workspace_visualizer";
+export {
+  buildWorkspaceSnapshot,
+  createVisualizationWorkspace,
+  decisionAtTime,
+  normalizeDecisionTrace,
+  normalizeMovePayload,
+} from "./workspace_visualizer";
 export {
   analyzeSchedulePerformance,
   displayedPerformanceResources,

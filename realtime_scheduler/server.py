@@ -2295,6 +2295,39 @@ def _execute_standard_algorithm(
                 )
 
     combined_output = runtime.combined_output()
+
+    # 决策轨迹只进入可回放结果文件；运行摘要保留计数，避免 API 响应重复携带大数组。
+    decision_trace: List[Dict[str, Any]] = []
+    decision_trace_truncated = False
+    for summary in summaries:
+        strategy_diagnostics = summary.get("strategyDiagnostics")
+        if not isinstance(strategy_diagnostics, dict):
+            continue
+        round_trace = strategy_diagnostics.pop("decisionTrace", [])
+        decision_trace_truncated = bool(
+            decision_trace_truncated
+            or strategy_diagnostics.get("decisionTraceTruncated", False)
+        )
+        if isinstance(round_trace, list):
+            for raw_decision in round_trace:
+                if not isinstance(raw_decision, Mapping):
+                    continue
+                decision_trace.append({
+                    **deepcopy(dict(raw_decision)),
+                    "roundIndex": int(summary.get("index") or 0),
+                    "roundKind": str(summary.get("kind") or ""),
+                })
+        strategy_diagnostics["decisionTraceCount"] = (
+            len(round_trace) if isinstance(round_trace, list) else 0
+        )
+    if decision_trace:
+        combined_output["DecisionTrace"] = decision_trace
+        combined_output["DecisionTraceMeta"] = {
+            "schema": "e2e-ctq-decision-trace-v1",
+            "model": "E2E-CTQ",
+            "decisionCount": len(decision_trace),
+            "truncated": decision_trace_truncated,
+        }
     total_ms = (time.perf_counter() - started) * 1000.0
     makespan = _segment_end(combined_output["MoveList"])
     logs.append(

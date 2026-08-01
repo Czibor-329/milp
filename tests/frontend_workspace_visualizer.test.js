@@ -130,6 +130,7 @@ function fakeWorkspaceDocument() {
     "visualContent",
     "visualTopologyPlayback",
     "visualDeviceStage",
+    "visualDecisionLens",
     "visualActiveMoves",
     "visualSource",
     "visualCurrentTime",
@@ -169,6 +170,39 @@ test("MoveList 输入同时支持数组和结果对象", () => {
   );
 });
 
+test("E2E 决策轨迹保留候选偏好、Makespan 增量和未来决策时刻", () => {
+  const trace = logic.normalizeDecisionTrace({
+    DecisionTrace: [
+      {
+        decisionIndex: 2,
+        time: 8,
+        candidateCount: 2,
+        modelEvaluated: true,
+        selectedActionId: "move-b",
+        candidates: [
+          {
+            actionId: "move-b", rank: 1, selected: true, source: "LA",
+            destination: "PM2", policyPreference: 0.72,
+            expectedRemainingMakespan: 90, makespanDelta: 0,
+          },
+          {
+            actionId: "move-a", rank: 2, source: "LA",
+            destination: "PM1", policyPreference: 0.28,
+            expectedRemainingMakespan: 96, makespanDelta: 6,
+          },
+        ],
+      },
+      { decisionIndex: 1, time: 3, candidateCount: 1, candidates: [] },
+    ],
+  });
+
+  assert.equal(trace.length, 2);
+  assert.equal(trace[1].candidates[0].destination, "PM2");
+  assert.equal(trace[1].candidates[1].makespanDelta, 6);
+  assert.equal(logic.decisionAtTime(trace, 7).decisionIndex, 1);
+  assert.equal(logic.decisionAtTime(trace, 8).decisionIndex, 2);
+});
+
 test("结果分析与拓扑回放使用独立界面并共享当前 MoveList", async () => {
   const root = fakeWorkspaceDocument();
   const workspace = logic.createVisualizationWorkspace(root);
@@ -186,7 +220,18 @@ test("结果分析与拓扑回放使用独立界面并共享当前 MoveList", as
   await workspace.loadFile({
     name: "t1.json",
     async text() {
-      return JSON.stringify({ MoveList: moves });
+      return JSON.stringify({
+        MoveList: moves,
+        DecisionTrace: [{
+          decisionIndex: 0,
+          time: 0,
+          candidateCount: 1,
+          candidates: [{
+            actionId: "a", rank: 1, selected: true, destination: "PM2",
+            policyPreference: 1,
+          }],
+        }],
+      });
     },
   });
   assert.equal(root.elements.get("visualToolbar").hidden, false);
@@ -194,6 +239,8 @@ test("结果分析与拓扑回放使用独立界面并共享当前 MoveList", as
   assert.equal(root.elements.get("visualContent").hidden, false);
   assert.equal(topology.hidden, false);
   assert.equal(root.elements.get("visualPlaybackEmpty").hidden, true);
+  assert.match(root.elements.get("visualDecisionLens").innerHTML, /AI DECISION LENS/);
+  assert.match(root.elements.get("visualDeviceStage").innerHTML, /PM2/);
 
   workspace.showGroupAnalysis("<h2>组级统计</h2>");
   assert.equal(topology.hidden, false);
