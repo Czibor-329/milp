@@ -971,3 +971,122 @@
       .resource-utilization-row .utilization-track, .resource-utilization-time { display: none; }
       .resource-evidence-score { grid-column: 2 / -1; }
     }
+
+    /* -------- 参考 PySide 拓扑控制台：中央画布 + 右侧控制面板 -------- */
+    .playback-toolbar-placeholder { display: none !important; }
+    .playback-workbench { position: relative; }
+    .visual-empty-import { position: absolute; z-index: 2; top: 340px; left: 50%; display: flex; justify-content: center; transform: translateX(-50%); }
+    #visualPlaybackEmpty[hidden] + .visual-empty-import { display: none; }
+    .visual-empty-import .btn { min-height: 44px; }
+    .visual-empty-import .btn svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
+    body:has([data-tab-view="playback"].active) .app-content { width: min(100%, 1760px); padding-right: clamp(18px, 2.5vw, 40px); padding-left: clamp(18px, 2.5vw, 40px); }
+    .topology-playback { display: block; }
+    .petri-top-playback-controls { grid-template-columns: auto minmax(88px, 120px) minmax(260px, 1fr) auto auto; gap: 8px; margin-bottom: 8px; padding: 8px 10px; border-radius: 0; box-shadow: 0 1px 2px rgba(32,47,81,.04); }
+    .petri-top-playback-controls .timeline-play { min-width: 92px; min-height: 44px; border-radius: 0; }
+    .timeline-movelist { min-width: 0; }
+    .timeline-movelist span, .timeline-movelist strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .timeline-movelist span { color: var(--brand); font: 800 8px/1.2 "Fira Code", Consolas, monospace; letter-spacing: .1em; }
+    .timeline-movelist strong { margin-top: 3px; color: var(--ink); font: 800 11px/1.25 "Fira Code", Consolas, monospace; }
+    .petri-top-playback-controls .timeline-range { min-width: 0; }
+    .petri-top-playback-controls .timeline-range input[type="range"] { height: 18px; min-height: 18px; }
+    .petri-top-playback-controls .timeline-scale { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px; }
+    .petri-top-playback-controls .petri-route-metrics { display: flex; min-width: 0; flex-wrap: nowrap; justify-content: center; gap: 10px; overflow: hidden; font: 700 8px/1.25 "Fira Code", Consolas, monospace; white-space: nowrap; }
+    .petri-top-playback-controls .petri-route-metrics b { color: var(--brand); font-size: 9px; font-variant-numeric: tabular-nums; }
+    .petri-top-playback-controls .timeline-speed { gap: 6px; }
+    .petri-top-playback-controls .timeline-speed select { min-width: 64px; min-height: 44px; border-radius: 0; }
+    .topology-toolbar-actions { display: flex; gap: 6px; }
+    .topology-toolbar-actions .btn { width: auto; min-height: 44px; padding: 8px 11px; border-radius: 0; white-space: nowrap; }
+    .topology-toolbar-actions .btn svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
+    .petri-console-layout { display: grid; grid-template-columns: minmax(620px, 1fr) 332px; gap: 12px; align-items: start; }
+    .petri-center-column { display: grid; min-width: 0; }
+
+    .petri-control-panel { position: sticky; top: 18px; display: grid; max-height: calc(100dvh - 36px); min-width: 0; gap: 10px; padding: 10px; overflow: auto; border: 1px solid var(--line); border-radius: 0; background: rgba(255,255,255,.98); box-shadow: 0 8px 24px rgba(32,47,81,.06); scrollbar-width: thin; }
+    .petri-control-section { display: grid; min-width: 0; gap: 6px; }
+    .petri-panel-title { margin: 0; padding: 3px 0; color: var(--brand); font: 800 16px/1.3 "Fira Code", Consolas, monospace; letter-spacing: -.02em; }
+    .petri-section-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+    .petri-section-heading > span { color: var(--muted); font: 800 8px/1.3 "Fira Code", Consolas, monospace; letter-spacing: .08em; }
+    .petri-control-panel .decision-lens-panel, .petri-control-panel .active-moves-panel { border: 1px solid var(--line); border-radius: 0; background: var(--soft); box-shadow: none; }
+    .petri-control-panel .decision-lens-head { padding: 9px 10px; background: var(--soft); }
+    .petri-control-panel .decision-lens-head div strong { font-size: 11px; }
+    .petri-control-panel .decision-selected-summary { padding: 10px; }
+    .petri-control-panel .decision-selected-summary > strong { font-size: 11px; }
+    .petri-control-panel .decision-selected-summary dl { margin-top: 8px; border-radius: 0; }
+    .petri-control-panel .decision-selected-summary dl div { padding: 6px; }
+    .petri-control-panel .future-trajectory ol { padding-right: 9px; padding-left: 9px; }
+    .petri-control-panel .decision-candidate-section ol { max-height: 260px; }
+    .petri-control-panel .decision-candidate { min-height: 62px; padding: 7px 8px; }
+    .petri-control-panel .decision-method-note { padding: 8px 10px; }
+    .petri-control-panel .active-moves-panel ul { max-height: 170px; }
+    .petri-control-panel .active-moves-panel li { min-height: 44px; padding: 7px 9px; background: var(--surface); }
+    .petri-control-panel .active-moves-panel li:hover { background: var(--brand-soft); }
+    .petri-control-panel .active-moves-panel .active-move-empty { padding: 18px 10px; }
+
+    .transition-button-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+    .transition-action-button { display: grid; min-width: 0; min-height: 50px; align-content: center; justify-items: start; gap: 3px; padding: 7px 8px; border: 1px solid #b8c5d8; border-radius: 0; color: #27364b; background: var(--surface); box-shadow: 0 1px 2px rgba(32,47,81,.04); text-align: left; cursor: default; transition: border-color .18s ease, background-color .18s ease, box-shadow .18s ease; }
+    .transition-action-button span { width: 100%; overflow: hidden; font: 800 9px/1.35 "Fira Code", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+    .transition-action-button small { color: var(--muted); font: 700 8px/1.3 "Fira Code", Consolas, monospace; }
+    .transition-action-button.is-selected { border-color: #1b8b65; color: #086748; background: #eaf8f1; box-shadow: inset 3px 0 0 #159167; }
+    .transition-button-empty { grid-column: 1 / -1; padding: 14px 10px; border: 1px solid var(--line); color: var(--muted); background: var(--soft); font-size: 9px; text-align: center; }
+
+    .petri-playback-controls .timeline-play { width: 100%; min-height: 44px; border-radius: 0; }
+    .petri-playback-controls .timeline-range { padding: 3px 0; }
+    .petri-playback-controls .timeline-range input[type="range"] { min-height: 28px; }
+    .petri-playback-controls .timeline-speed { justify-content: space-between; min-height: 44px; }
+    .petri-playback-controls .timeline-speed select { min-width: 96px; min-height: 44px; border-radius: 0; }
+    .petri-control-panel .visual-legend { grid-template-columns: 1fr 1fr; padding: 10px; border: 1px solid var(--line); border-radius: 0; background: var(--soft); }
+    .petri-control-panel .visual-legend h3 { font: 800 10px/1.3 "Fira Code", Consolas, monospace; letter-spacing: .06em; }
+
+    .petri-center-column .equipment-schematic { border-radius: 0; box-shadow: 0 1px 2px rgba(32,47,81,.04); }
+    .reference-grid-canvas { position: relative !important; display: block !important; height: var(--topology-canvas-height, 640px) !important; min-height: 0 !important; padding: 0 !important; overflow: hidden; background-color: var(--soft); background-image: linear-gradient(rgba(148,163,184,.12) 1px, transparent 1px), linear-gradient(90deg, rgba(148,163,184,.12) 1px, transparent 1px); background-size: 15px 15px; }
+    .reference-grid-canvas::before { display: none; }
+    .reference-module-position, .reference-robot-position { position: absolute; z-index: 3; left: var(--module-left); top: var(--module-top); width: 96px; transform: translate(-50%, -50%); }
+    .reference-robot-position { z-index: 4; left: var(--robot-left); top: var(--robot-top); }
+    .reference-grid-canvas .equipment-card, .reference-grid-canvas .equipment-lock, .reference-grid-canvas .equipment-port, .reference-grid-canvas .equipment-auxiliary { display: grid; width: 96px; height: 96px; grid-template-rows: auto 1fr; overflow: hidden; border-radius: 0; color: var(--ink); background: rgba(255,255,255,.97); box-shadow: 0 3px 10px rgba(32,47,81,.08); }
+    .reference-grid-canvas .equipment-lock.loadlock-pumping { border-color: #5796d9; background: linear-gradient(to top, rgba(87,150,217,.30) 0, rgba(87,150,217,.22) var(--module-progress), rgba(255,255,255,.97) var(--module-progress), rgba(255,255,255,.97) 100%); }
+    .reference-grid-canvas .equipment-lock.loadlock-venting { border-color: #d5a044; background: linear-gradient(to bottom, rgba(235,183,86,.30) 0, rgba(235,183,86,.22) var(--module-progress), rgba(255,255,255,.97) var(--module-progress), rgba(255,255,255,.97) 100%); }
+    .reference-grid-canvas .equipment-head { display: block; padding: 7px 8px 2px; }
+    .reference-grid-canvas .equipment-head strong { font-size: 12px; }
+    .reference-grid-canvas .equipment-body { position: relative; min-height: 0; justify-content: center; padding: 0 6px 6px; }
+    .reference-grid-canvas .wafer-stack { position: relative; width: 100%; height: 100%; align-content: center; justify-content: center; gap: 4px; }
+    .reference-grid-canvas .wafer-token { display: inline-grid; width: 56px; min-width: 56px; height: 56px; place-items: center; padding: 4px; border: 0; border-radius: 50%; color: #093c2d; background: conic-gradient(from -90deg, var(--brand) 0 var(--wafer-progress), #d7e0eb var(--wafer-progress) 360deg); box-shadow: 0 3px 8px rgba(24,94,70,.22); font: 900 10px/1 "Fira Code", Consolas, monospace; }
+    .reference-grid-canvas .wafer-token > span { display: grid; width: 100%; height: 100%; place-items: center; overflow: hidden; border: 1px solid rgba(8,105,75,.38); border-radius: 50%; background: radial-gradient(circle at 34% 28%, #a8edc8 0, #55cd8f 44%, #1f9c69 100%); text-overflow: ellipsis; white-space: nowrap; }
+    .reference-grid-canvas .wafer-more { position: absolute; right: 2px; bottom: 2px; color: #475569; font: 900 10px/1 "Fira Code", Consolas, monospace; }
+    .reference-grid-canvas .equipment-card { --door-scale: 1; --door-color: #56677d; }
+    .reference-grid-canvas .equipment-card.door-opening { --door-scale: .56; --door-color: #c58112; }
+    .reference-grid-canvas .equipment-card.door-open { --door-scale: .12; --door-color: #159167; }
+    .reference-grid-canvas .equipment-card.door-closing { --door-scale: .72; --door-color: #c58112; }
+    .reference-grid-canvas .chamber-door { position: absolute; z-index: 3; display: block; border: 1px solid #35465d; background: var(--door-color); box-shadow: 0 1px 2px rgba(15,23,42,.18); transition: transform .22s ease-out, background-color .18s ease; }
+    .reference-grid-canvas .chamber-door-top, .reference-grid-canvas .chamber-door-bottom { right: 8px; left: 8px; height: 6px; transform: scaleX(var(--door-scale)); }
+    .reference-grid-canvas .chamber-door-left, .reference-grid-canvas .chamber-door-right { top: 8px; bottom: 8px; width: 6px; transform: scaleY(var(--door-scale)); }
+    .reference-grid-canvas .chamber-door-top { top: 0; border-radius: 0 0 3px 3px; }
+    .reference-grid-canvas .chamber-door-right { right: 0; border-radius: 3px 0 0 3px; }
+    .reference-grid-canvas .chamber-door-bottom { bottom: 0; border-radius: 3px 3px 0 0; }
+    .reference-grid-canvas .chamber-door-left { left: 0; border-radius: 0 3px 3px 0; }
+    .reference-grid-canvas .robot-hub, .reference-grid-canvas .robot-hub-vacuum, .reference-grid-canvas .robot-hub-atmosphere { position: static; width: 96px; height: 96px; min-height: 96px; border-radius: 0; clip-path: none; color: #334155; background: #edf1f5; box-shadow: inset 0 0 0 1px #9ca9b8, 0 3px 10px rgba(32,47,81,.08); transform: none; }
+    .reference-grid-canvas .robot-hub strong { font-size: 12px; }
+    .reference-grid-canvas .robot-hub .robot-wafers { position: relative; width: 100%; min-height: 60px; margin-top: 4px; }
+    .topology-target-arrows { position: absolute; z-index: 2; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+    .topology-target-arrows line { stroke-width: 2.2; stroke-dasharray: 8 6; vector-effect: non-scaling-stroke; }
+    .topology-target-arrows line.is-pre-trans { stroke-width: 3; stroke-dasharray: none; stroke-linecap: round; }
+
+    body.theme-dark .petri-control-panel { border-color: var(--line); color: var(--ink); background: var(--surface); box-shadow: none; }
+    body.theme-dark .reference-grid-canvas { background-color: var(--soft); background-image: linear-gradient(rgba(148,163,184,.10) 1px, transparent 1px), linear-gradient(90deg, rgba(148,163,184,.10) 1px, transparent 1px); }
+
+    @media (max-width: 980px) {
+      .petri-top-playback-controls { grid-template-columns: auto minmax(76px, 100px) minmax(180px, 1fr) auto; }
+      .topology-toolbar-actions { grid-column: 1 / -1; justify-content: flex-end; }
+      .petri-console-layout { grid-template-columns: 1fr; }
+      .petri-control-panel { position: static; max-height: none; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .model-evaluation-section { grid-column: 1 / -1; }
+      .petri-control-panel > .visual-legend { align-content: start; }
+    }
+    @media (max-width: 700px) {
+      .petri-console-layout { display: block; }
+      .petri-top-playback-controls { grid-template-columns: auto minmax(72px, 96px) minmax(180px, 1fr); }
+      .petri-top-playback-controls .timeline-speed { grid-column: 1 / 2; }
+      .topology-toolbar-actions { grid-column: 2 / -1; }
+      .petri-control-panel { display: grid; grid-template-columns: 1fr; margin-top: 12px; }
+      .model-evaluation-section { grid-column: auto; }
+      .reference-grid-canvas { min-width: 580px; }
+      .petri-center-column .device-stage { overflow-x: auto; }
+    }

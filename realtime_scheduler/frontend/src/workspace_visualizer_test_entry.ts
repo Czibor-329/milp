@@ -12,6 +12,8 @@ export {
   decisionAtTime,
   normalizeDecisionTrace,
   normalizeMovePayload,
+  renderEquipmentTopology,
+  snapshotWithFullDeviceModules,
 } from "./workspace_visualizer";
 export {
   analyzeSchedulePerformance,

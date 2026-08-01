@@ -40,7 +40,7 @@
         </button>
         <span class="sidebar-footer-label">系统状态</span>
         <div class="service-pill" id="serviceState">本地服务</div>
-        <span class="frontend-version">前端 v1.1.0</span>
+        <span class="frontend-version">前端 v1.1.1</span>
       </div>
     </aside>
 
@@ -173,40 +173,42 @@
 
         <div class="tab-view" data-tab-view="playback">
           <article class="visual-workbench playback-workbench">
-            <div class="visual-toolbar" id="visualToolbar">
-              <div class="visual-toolbar-actions">
-                <label class="btn visual-import-button">
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L7 9m5-5 5 5M5 15v5h14v-5"/></svg>
-                  导入 MoveList
-                  <input id="visualFileInput" type="file" accept=".json,application/json">
-                </label>
-                <a class="btn" id="visualOpenGantt" href="#" target="_blank" aria-disabled="true">打开甘特图</a>
-              </div>
-            </div>
+            <div class="visual-toolbar playback-toolbar-placeholder" id="visualToolbar" aria-hidden="true"></div>
 
             <div class="visual-empty" id="visualPlaybackEmpty">
               <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><circle cx="5" cy="6" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="5" cy="18" r="2"/><circle cx="19" cy="18" r="2"/><path d="m7 7.3 2.8 2.8M17 7.3l-2.8 2.8M7 16.7l2.8-2.8M17 16.7l-2.8-2.8"/></svg>
               <strong>等待 MoveList</strong>
               <span>运行一次计划，或导入已有的 MoveList JSON 文件后查看设备拓扑并开始回放。</span>
             </div>
+            <div class="visual-empty-import">
+              <label class="btn visual-import-button">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L7 9m5-5 5 5M5 15v5h14v-5"/></svg>
+                导入 MoveList
+                <input id="visualFileInput" type="file" accept=".json,application/json">
+              </label>
+            </div>
 
             <section class="topology-playback" id="visualTopologyPlayback" hidden aria-label="设备拓扑回放">
-              <section class="visual-overview" aria-label="回放概要">
-                <div class="visual-source"><span>数据来源</span><strong id="visualSource">—</strong></div>
-                <div class="visual-stat"><span>当前时间</span><strong><b id="visualCurrentTime">0.0</b> s</strong></div>
-                <div class="visual-stat"><span>总时长</span><strong><b id="visualTotalTime">0.0</b> s</strong></div>
-                <div class="visual-stat"><span>回放进度</span><strong id="visualProgressText">0%</strong></div>
-                <div class="visual-stat"><span>已完成 Move</span><strong id="visualMoveText">0 / 0</strong></div>
-                <div class="visual-stat"><span>晶圆数</span><strong id="visualWaferText">0</strong></div>
-              </section>
-
-              <section class="timeline-console" aria-label="MoveList 时间轴控制">
+              <section class="timeline-console petri-top-playback-controls" aria-label="MoveList 时间轴控制">
                 <button class="btn primary timeline-play" id="visualPlayButton" type="button" aria-label="播放回放"></button>
+                <div class="timeline-movelist" aria-label="当前 MoveList">
+                  <span>MOVE LIST</span>
+                  <strong id="visualSource">—</strong>
+                </div>
                 <div class="timeline-range">
                   <input id="visualTimeline" type="range" min="0" max="0" step="0.1" value="0" aria-label="回放时间进度">
-                  <div class="timeline-scale"><span>0 s</span><span>拖动查看任意时刻</span><span>结束</span></div>
+                  <div class="timeline-scale">
+                    <span>0 s</span>
+                    <div class="petri-route-metrics">
+                      <span>TIME <b id="visualCurrentTime">0.0</b> / <b id="visualTotalTime">0.0</b> s</span>
+                      <span>PROGRESS <b id="visualProgressText">0%</b></span>
+                      <span>MOVE <b id="visualMoveText">0 / 0</b></span>
+                      <span>WAFERS <b id="visualWaferText">0</b></span>
+                    </div>
+                    <span>结束</span>
+                  </div>
                 </div>
-                <label class="timeline-speed">播放速度
+                <label class="timeline-speed">速度
                   <select id="visualSpeed">
                     <option value="1">1×</option>
                     <option value="2">2×</option>
@@ -215,24 +217,40 @@
                     <option value="16">16×</option>
                   </select>
                 </label>
+                <div class="topology-toolbar-actions" aria-label="回放工具">
+                  <button class="btn" id="visualImportButton" type="button">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L7 9m5-5 5 5M5 15v5h14v-5"/></svg>
+                    导入 MoveList
+                  </button>
+                  <a class="btn" id="visualOpenGantt" href="#" target="_blank" aria-disabled="true">打开甘特图</a>
+                </div>
               </section>
 
-              <div class="visual-workspace-layout">
-                <section class="device-stage" id="visualDeviceStage" aria-label="设备拓扑状态"></section>
-                <aside class="playback-inspector" aria-label="回放决策与动作检查器">
-                  <section class="decision-lens-panel" id="visualDecisionLens" aria-live="polite"></section>
-                  <section class="active-moves-panel">
-                    <div class="active-moves-head"><h3>正在执行</h3><span>MoveList 事实</span></div>
-                    <ul id="visualActiveMoves"></ul>
-                    <div class="visual-legend" aria-label="状态图例">
-                      <h3>状态图例</h3>
-                      <span><i class="legend-dot is-normal"></i>空闲 / 已载片</span>
-                      <span><i class="legend-dot is-active"></i>加工 / 传输</span>
-                      <span><i class="legend-dot is-transition"></i>门 / 环境切换</span>
-                      <span><i class="legend-door is-open"></i>门已打开</span>
-                      <span><i class="legend-door is-closed"></i>门已关闭</span>
-                    </div>
+              <div class="petri-console-layout">
+                <main class="petri-center-column">
+                  <section class="device-stage" id="visualDeviceStage" aria-label="设备拓扑状态"></section>
+                </main>
+
+                <aside class="petri-control-panel" aria-label="拓扑回放控制面板">
+                  <section class="petri-control-section">
+                    <div class="petri-section-heading"><h2 class="petri-panel-title">TRANSITIONS</h2><span>AVAILABLE ACTIONS</span></div>
+                    <div class="transition-button-grid" id="visualTransitionButtons" aria-label="当前可行动作"></div>
+                    <ul id="visualActiveMoves" hidden></ul>
                   </section>
+
+                  <section class="petri-control-section model-evaluation-section">
+                    <h2 class="petri-panel-title">MODEL EVALUATION</h2>
+                    <div class="decision-lens-panel" id="visualDecisionLens" aria-live="polite"></div>
+                  </section>
+
+                  <div class="visual-legend" aria-label="状态图例">
+                    <h3>STATUS LEGEND</h3>
+                    <span><i class="legend-dot is-normal"></i>空闲 / 已载片</span>
+                    <span><i class="legend-dot is-active"></i>加工 / 传输</span>
+                    <span><i class="legend-dot is-transition"></i>门 / 环境切换</span>
+                    <span><i class="legend-door is-open"></i>门已打开</span>
+                    <span><i class="legend-door is-closed"></i>门已关闭</span>
+                  </div>
                 </aside>
               </div>
             </section>

@@ -27,6 +27,8 @@ __export(workspace_visualizer_test_entry_exports, {
   displayedPerformanceResources: () => displayedPerformanceResources,
   normalizeDecisionTrace: () => normalizeDecisionTrace,
   normalizeMovePayload: () => normalizeMovePayload,
+  renderEquipmentTopology: () => renderEquipmentTopology,
+  snapshotWithFullDeviceModules: () => snapshotWithFullDeviceModules,
   summarizeBottleneckUtilization: () => summarizeBottleneckUtilization
 });
 module.exports = __toCommonJS(workspace_visualizer_test_entry_exports);
@@ -56,19 +58,15 @@ async function requestScheduleAnalysis(input) {
 var PICK_MOVE_TYPES = /* @__PURE__ */ new Set([0, 2]);
 var PLACE_MOVE_TYPES = /* @__PURE__ */ new Set([1, 3]);
 var SWAP_MOVE = 4;
+var PRE_TRANS_MOVE = 5;
 var PREPARE_MOVE = 6;
 var COMPLETE_MOVE = 7;
 var PROCESS_MOVE = 9;
 var PRE_PREPARE_MOVE = 10;
 var CLEAN_MOVE = 14;
-var PLAYBACK_FRAME_INTERVAL_MS = 80;
+var PLAYBACK_FRAME_INTERVAL_MS = 40;
+var DOOR_VISUAL_MIN_SECONDS = 0.7;
 var DEFAULT_PLAYBACK_SPEED = 4;
-var PROCESS_ARC_START_DEGREES = 200;
-var PROCESS_ARC_END_DEGREES = 340;
-var PROCESS_ARC_CENTER_X_PERCENT = 50;
-var PROCESS_ARC_CENTER_Y_PIXELS = 214;
-var PROCESS_ARC_RADIUS_X_PERCENT = 38;
-var PROCESS_ARC_RADIUS_Y_PIXELS = 156;
 var PERFORMANCE_DISPLAY_TOLERANCE = 1e-6;
 var FUTURE_DECISION_COUNT = 6;
 var ACTIVITY_CATEGORIES = [
@@ -211,6 +209,11 @@ function isRobotName(name) {
 function isDummyPortName(name) {
   return /DUMMY/i.test(name) && /PORT/i.test(name);
 }
+function isTopologyHiddenModule(module2) {
+  const name = module2.name.trim();
+  const type = module2.type.trim().toLowerCase();
+  return /^BUF(?:FER)?(?:[_-]?\w+)?$/i.test(name) || type === "buffer" || isDummyPortName(name) || type === "dummyport" || /^HEATER$/i.test(name) || type === "heater";
+}
 function isLoadPortName(name, type = "") {
   return !isDummyPortName(name) && (type.toLowerCase() === "loadport" || /^(LP\d*|P\d+|.*PORT)$/i.test(name));
 }
@@ -335,11 +338,12 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
       completedMoves += 1;
       applyCompletedTransfer(move, locations);
     }
+    const doorVisualActive = move.StartTime <= time && time < Math.max(move.EndTime, move.StartTime + DOOR_VISUAL_MIN_SECONDS);
     if (move.MoveType === PREPARE_MOVE) {
-      if (active) doorStates.set(move.ModuleName, "opening");
+      if (doorVisualActive) doorStates.set(move.ModuleName, "opening");
       else if (completed) doorStates.set(move.ModuleName, "open");
     } else if (move.MoveType === COMPLETE_MOVE) {
-      if (active) doorStates.set(move.ModuleName, "closing");
+      if (doorVisualActive) doorStates.set(move.ModuleName, "closing");
       else if (completed) doorStates.set(move.ModuleName, "closed");
     } else if (move.MoveType === PRE_PREPARE_MOVE && (active || completed)) {
       const currentState = String(move.CurState ?? "");
@@ -368,6 +372,9 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
     else if (primaryMove?.MoveType === PRE_PREPARE_MOVE) status = "environment";
     else if (primaryMove && [PREPARE_MOVE, COMPLETE_MOVE].includes(primaryMove.MoveType)) status = "door";
     else if (primaryMove) status = "transfer";
+    const currentEnvironment = String(primaryMove?.CurState ?? "");
+    const prePrepareType = String(primaryMove?.PrePrepareType ?? "");
+    const loadLockPhase = primaryMove?.MoveType === PRE_PREPARE_MOVE ? /VTR|VAC|PUMP/i.test(`${currentEnvironment} ${prePrepareType}`) ? "pumping" : /ATR|ATM|VENT/i.test(`${currentEnvironment} ${prePrepareType}`) ? "venting" : "" : "";
     return {
       name,
       type: definition.type,
@@ -377,6 +384,7 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
       activeMoveName: primaryMove ? MOVE_NAMES[primaryMove.MoveType] ?? `\u52A8\u4F5C ${primaryMove.MoveType}` : "",
       progress: primaryMove ? moveProgress(primaryMove, time) : 0,
       environment: environments.get(name) ?? "",
+      loadLockPhase,
       isRobotTarget: [...robotTargets.values()].includes(name)
     };
   }).sort((left, right) => naturalCompare(left.name, right.name));
@@ -386,8 +394,11 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
       name,
       wafers: wafersByLocation.get(name) ?? [],
       busy: Boolean(move),
+      source: move ? firstStation(move, "SrcStationList") : "",
       target: robotTargets.get(name) ?? "",
-      activeMoveName: move ? MOVE_NAMES[move.MoveType] ?? `\u52A8\u4F5C ${move.MoveType}` : ""
+      activeMoveName: move ? MOVE_NAMES[move.MoveType] ?? `\u52A8\u4F5C ${move.MoveType}` : "",
+      isPreTrans: move?.MoveType === PRE_TRANS_MOVE,
+      preTransProgress: move?.MoveType === PRE_TRANS_MOVE ? moveProgress(move, time) : 1
     };
   });
   return {
@@ -416,6 +427,7 @@ function collectElements(root) {
     topologyPlayback: required("visualTopologyPlayback"),
     stage: required("visualDeviceStage"),
     decisionLens: required("visualDecisionLens"),
+    transitionButtons: root.getElementById("visualTransitionButtons"),
     activeMoves: required("visualActiveMoves"),
     source: required("visualSource"),
     currentTime: required("visualCurrentTime"),
@@ -427,6 +439,7 @@ function collectElements(root) {
     playButton: required("visualPlayButton"),
     speed: required("visualSpeed"),
     fileInput: required("visualFileInput"),
+    importButton: root.getElementById("visualImportButton"),
     openGantt: required("visualOpenGantt"),
     resultButton: required("workspaceResultButton"),
     performance: required("visualPerformance"),
@@ -472,6 +485,32 @@ function snapshotWithCandidateModules(snapshot, decision, device) {
       activeMoveName: "",
       progress: 0,
       environment: "",
+      loadLockPhase: "",
+      isRobotTarget: false
+    });
+    knownNames.add(name);
+  }
+  return {
+    ...snapshot,
+    modules: modules.sort((left, right) => naturalCompare(left.name, right.name))
+  };
+}
+function snapshotWithFullDeviceModules(snapshot, device) {
+  const modules = [...snapshot.modules];
+  const knownNames = new Set(modules.map((module2) => module2.name));
+  for (const [name, definition] of Object.entries(device?.Stations ?? {})) {
+    if (knownNames.has(name) || isRobotName(name)) continue;
+    const type = String(definition?.Type ?? "");
+    modules.push({
+      name,
+      type,
+      status: "idle",
+      door: isDoorlessModule(name, type) ? "doorless" : "closed",
+      wafers: [],
+      activeMoveName: "",
+      progress: 0,
+      environment: "",
+      loadLockPhase: "",
       isRobotTarget: false
     });
     knownNames.add(name);
@@ -493,85 +532,273 @@ function topologyGroups(modules) {
     auxiliaryModules: modules.filter((module2) => !assignedNames.has(module2.name))
   };
 }
+function renderWaferToken(wafer, progress) {
+  const normalizedProgress = Math.max(0, Math.min(1, progress));
+  return `<span class="wafer-token" style="--wafer-progress:${normalizedProgress * 360}deg" title="\u6676\u5706 ${escapeHtml(wafer)}"><span>${escapeHtml(wafer)}</span></span>`;
+}
+function moduleDoorSides(module2, role) {
+  if (module2.door === "doorless") return [];
+  if (role === "lock") return ["top", "bottom"];
+  if (role === "port") return ["top"];
+  const name = module2.name.trim().toUpperCase();
+  if (/^PM[12]$/.test(name)) return ["left"];
+  if (/^PM[56]$/.test(name) || name === "HEATER") return ["right"];
+  if (/^PM[34]$/.test(name)) return ["bottom"];
+  if (["AL", "ALIGNER"].includes(name)) return ["right"];
+  if (["CL", "COOLER"].includes(name)) return ["left"];
+  return ["top"];
+}
 function renderModule(module2, role, candidate) {
-  const waferLimit = 3;
-  const wafers = module2.wafers.slice(0, waferLimit).map((wafer) => `<span class="wafer-token" title="\u6676\u5706 ${escapeHtml(wafer)}">${escapeHtml(wafer)}</span>`).join("");
-  const overflow = module2.wafers.length > waferLimit ? `<span class="wafer-more">+${module2.wafers.length - waferLimit}</span>` : "";
-  const progress = Math.round(module2.progress * 100);
+  const waferProgress = module2.status === "processing" ? module2.progress : 0;
+  const wafers = module2.wafers.slice(0, 1).map((wafer) => renderWaferToken(wafer, waferProgress)).join("");
+  const overflow = module2.wafers.length > 1 ? `<span class="wafer-more">+ ${module2.wafers.length - 1}</span>` : "";
+  const doors = moduleDoorSides(module2, role).map((side) => `<i class="chamber-door chamber-door-${side}"></i>`).join("");
   const accessibleStatus = `${module2.name}\uFF0C${STATUS_LABELS[module2.status]}\uFF0C${DOOR_LABELS[module2.door]}`;
   const candidateLabel = candidate ? `${candidate.count} \u4E2A\u53EF\u884C\u52A8\u4F5C\uFF0C\u6700\u9AD8\u6A21\u578B\u504F\u597D ${(candidate.preference * 100).toFixed(0)}%` : "";
   return `
-    <article class="equipment-card equipment-${role} status-${module2.status} door-${module2.door} ${module2.isRobotTarget ? "is-target" : ""} ${candidate ? "is-candidate-destination" : ""} ${candidate?.selected ? "is-model-selected" : ""}" aria-label="${escapeHtml(`${accessibleStatus}${candidateLabel ? `\uFF0C${candidateLabel}` : ""}`)}">
-      ${candidate ? `<div class="candidate-landing" aria-hidden="true"><b>${candidate.bestRank}</b><span>${(candidate.preference * 100).toFixed(0)}%</span></div>` : ""}
-      <div class="equipment-gate" aria-hidden="true"><span></span></div>
+    <article class="equipment-card equipment-${role} status-${module2.status} door-${module2.door} ${module2.loadLockPhase ? `loadlock-${module2.loadLockPhase}` : ""} ${module2.isRobotTarget ? "is-target" : ""} ${candidate ? "is-candidate-destination" : ""} ${candidate?.selected ? "is-model-selected" : ""}" style="--module-progress:${Math.round(module2.progress * 100)}%" aria-label="${escapeHtml(`${accessibleStatus}${candidateLabel ? `\uFF0C${candidateLabel}` : ""}`)}">
       <div class="equipment-head">
         <strong>${escapeHtml(module2.name)}</strong>
-        <span class="equipment-status"><i></i>${escapeHtml(STATUS_LABELS[module2.status])}</span>
       </div>
       <div class="equipment-body">
-        <div class="wafer-stack">${wafers || '<span class="wafer-empty">\u7A7A\u8154</span>'}${overflow}</div>
-        ${module2.environment ? `<span class="environment-state">${escapeHtml(module2.environment)}</span>` : ""}
+        <div class="wafer-stack">${wafers}${overflow}</div>
       </div>
-      <div class="equipment-foot">
-        <span class="door-state"><i></i>${escapeHtml(DOOR_LABELS[module2.door])}</span>
-        <span>${escapeHtml(module2.activeMoveName || "\u7B49\u5F85")}${module2.activeMoveName ? ` \xB7 ${progress}%` : ""}</span>
-      </div>
-      <div class="equipment-progress"><span style="transform:scaleX(${module2.activeMoveName ? module2.progress : 0})"></span></div>
+      <div class="chamber-doors" aria-hidden="true">${doors}</div>
     </article>`;
 }
 function renderRobotHub(robot, environment) {
+  const wafer = robot.wafers[0] ? renderWaferToken(robot.wafers[0], 0) : "";
+  const overflow = robot.wafers.length > 1 ? `<span class="wafer-more">+ ${robot.wafers.length - 1}</span>` : "";
   return `
     <article class="robot-hub robot-hub-${environment} ${robot.busy ? "is-busy" : ""}" aria-label="${escapeHtml(robot.name)} ${robot.busy ? "\u5DE5\u4F5C\u4E2D" : "\u5F85\u547D"}">
-      <div class="robot-hub-icon">${icon("robot")}</div>
       <strong>${escapeHtml(robot.name)}</strong>
-      <span>${environment === "vacuum" ? "\u771F\u7A7A\u4F20\u8F93\u533A" : "\u5927\u6C14\u4F20\u8F93\u533A"}</span>
-      <small>${escapeHtml(robot.busy ? `${robot.activeMoveName}${robot.target ? ` \u2192 ${robot.target}` : ""}` : "\u5F85\u547D")}</small>
-      <div class="robot-wafers">${robot.wafers.map((wafer) => `<span class="wafer-token">${escapeHtml(wafer)}</span>`).join("")}</div>
+      <div class="robot-wafers">${wafer}${overflow}</div>
     </article>`;
 }
-function processModulePosition(index, count) {
-  const progress = count <= 1 ? 0.5 : index / (count - 1);
-  const degrees = PROCESS_ARC_START_DEGREES + (PROCESS_ARC_END_DEGREES - PROCESS_ARC_START_DEGREES) * progress;
-  const radians = degrees * Math.PI / 180;
-  const left = PROCESS_ARC_CENTER_X_PERCENT + Math.cos(radians) * PROCESS_ARC_RADIUS_X_PERCENT;
-  const top = PROCESS_ARC_CENTER_Y_PIXELS + Math.sin(radians) * PROCESS_ARC_RADIUS_Y_PIXELS;
-  return `--module-left:${left.toFixed(2)}%;--module-top:${top.toFixed(2)}px;--module-order:${index}`;
+var TOPOLOGY_COLUMN_PERCENTAGES = [20, 40, 60, 80];
+var TOPOLOGY_ROW_TOP_PIXELS = [52, 154, 256, 358, 460, 562, 664, 786, 929, 1031, 1133];
+var TOPOLOGY_VIEWBOX_WIDTH = 1e3;
+var TOPOLOGY_ITEM_SIZE = 96;
+var TOPOLOGY_CANVAS_PADDING = 28;
+function distributedTopologyColumns(count) {
+  if (count <= 1) return [50];
+  if (count === 2) return [40, 60];
+  if (count === 3) return [30, 50, 70];
+  return Array.from({ length: count }, (_, index) => 20 + index * 60 / (count - 1));
+}
+function processModuleNumber(name) {
+  const match = /^PM[_-]?(\d+)$/i.exec(name.trim());
+  return match ? finiteNumber(match[1]) : 0;
+}
+function usesCascadeTopology(modules, vacuumRobotCount) {
+  return vacuumRobotCount > 1 || modules.some((module2) => processModuleNumber(module2.name) > 6 || /^BUF[_-]?[AB]$/i.test(module2.name));
+}
+function moduleTopologyPosition(module2, role, index, roleCount, cascade) {
+  const name = module2.name.trim().toUpperCase();
+  const column = TOPOLOGY_COLUMN_PERCENTAGES;
+  const row = TOPOLOGY_ROW_TOP_PIXELS;
+  const cascadePositions = {
+    PM3: { leftPercent: column[1], topPixels: row[0] },
+    PM4: { leftPercent: column[2], topPixels: row[0] },
+    PM2: { leftPercent: column[0], topPixels: row[1] },
+    PM1: { leftPercent: column[0], topPixels: row[2] },
+    PM5: { leftPercent: column[3], topPixels: row[1] },
+    PM6: { leftPercent: column[3], topPixels: row[2] },
+    BUF_A: { leftPercent: column[1], topPixels: row[3] },
+    BUFA: { leftPercent: column[1], topPixels: row[3] },
+    BUF_B: { leftPercent: column[2], topPixels: row[3] },
+    BUFB: { leftPercent: column[2], topPixels: row[3] },
+    PM8: { leftPercent: column[0], topPixels: row[4] },
+    PM7: { leftPercent: column[0], topPixels: row[5] },
+    PM9: { leftPercent: column[3], topPixels: row[4] },
+    PM10: { leftPercent: column[3], topPixels: row[5] }
+  };
+  const singlePositions = {
+    PM3: { leftPercent: column[1], topPixels: row[3] },
+    PM4: { leftPercent: column[2], topPixels: row[3] },
+    PM2: { leftPercent: column[0], topPixels: row[4] },
+    PM1: { leftPercent: column[0], topPixels: row[5] },
+    PM5: { leftPercent: column[3], topPixels: row[4] },
+    PM6: { leftPercent: column[3], topPixels: row[5] }
+  };
+  const explicit = (cascade ? cascadePositions : singlePositions)[name];
+  if (explicit) return explicit;
+  if (role === "lock") {
+    return { leftPercent: distributedTopologyColumns(roleCount)[index], topPixels: row[6] };
+  }
+  if (role === "port") {
+    const loadPortColumns = {
+      LP1: 20,
+      LP2: 40,
+      LP3: 60,
+      LP4: 80
+    };
+    if (loadPortColumns[name] !== void 0) {
+      return { leftPercent: loadPortColumns[name], topPixels: row[8] };
+    }
+    return { leftPercent: distributedTopologyColumns(roleCount)[index], topPixels: row[8] };
+  }
+  if (["AL", "ALIGNER"].includes(name)) return { leftPercent: column[0], topPixels: row[7] };
+  if (["CL", "COOLER"].includes(name)) return { leftPercent: column[3], topPixels: row[7] };
+  if (role === "auxiliary") {
+    const perRow = 6;
+    const rowIndex = Math.floor(index / perRow);
+    const columnIndex = index % perRow;
+    const columnsInRow = Math.max(1, Math.min(perRow, roleCount - rowIndex * perRow));
+    const rowGap = row[1] - row[0];
+    return {
+      leftPercent: distributedTopologyColumns(columnsInRow)[columnIndex] ?? 50,
+      topPixels: row[9] + rowIndex * rowGap
+    };
+  }
+  const fallbackRow = role === "process" ? row[3] : row[7];
+  return {
+    leftPercent: distributedTopologyColumns(Math.max(roleCount, 1))[index] ?? 50,
+    topPixels: fallbackRow
+  };
+}
+function robotTopologyPosition(robotIndex, robotCount, environment, cascade) {
+  if (environment === "atmosphere") {
+    if (robotCount > 1) {
+      return {
+        leftPercent: distributedTopologyColumns(robotCount)[robotIndex] ?? 50,
+        topPixels: TOPOLOGY_ROW_TOP_PIXELS[7]
+      };
+    }
+    return { leftPercent: 50, topPixels: TOPOLOGY_ROW_TOP_PIXELS[7] };
+  }
+  if (cascade && robotCount > 1) {
+    return {
+      leftPercent: 50,
+      topPixels: robotIndex === 0 ? TOPOLOGY_ROW_TOP_PIXELS[4] : (TOPOLOGY_ROW_TOP_PIXELS[1] + TOPOLOGY_ROW_TOP_PIXELS[2]) / 2
+    };
+  }
+  return {
+    leftPercent: 50,
+    topPixels: (TOPOLOGY_ROW_TOP_PIXELS[4] + TOPOLOGY_ROW_TOP_PIXELS[5]) / 2
+  };
+}
+function topologySvgPoint(position) {
+  return {
+    x: position.leftPercent / 100 * TOPOLOGY_VIEWBOX_WIDTH,
+    y: position.topPixels
+  };
+}
+function topologyEdgePoint(center, toward) {
+  const half = TOPOLOGY_ITEM_SIZE / 2;
+  const dx = toward.x - center.x;
+  const dy = toward.y - center.y;
+  if (Math.abs(dx) < 1e-6 && Math.abs(dy) < 1e-6) return center;
+  const scaleX = Math.abs(dx) > 1e-6 ? half / Math.abs(dx) : Number.POSITIVE_INFINITY;
+  const scaleY = Math.abs(dy) > 1e-6 ? half / Math.abs(dy) : Number.POSITIVE_INFINITY;
+  const scale = Math.min(scaleX, scaleY);
+  return { x: center.x + dx * scale, y: center.y + dy * scale };
+}
+function interpolatedRobotAngle(start, end, progress) {
+  let delta = (end - start) % (Math.PI * 2);
+  if (delta > Math.PI) delta -= Math.PI * 2;
+  if (delta < -Math.PI) delta += Math.PI * 2;
+  return start + delta * Math.max(0, Math.min(1, progress));
+}
+function renderRobotTargetArrows(robots, robotPositions, modulePositions, canvasHeight) {
+  const colors = ["var(--brand)", "var(--green)", "var(--red)", "var(--muted)"];
+  const lines = robots.map((robot, index) => {
+    const robotPosition = robotPositions.get(robot.name);
+    const targetPosition = modulePositions.get(robot.target);
+    if (!robotPosition || !targetPosition || !robot.target) return "";
+    const robotCenter = topologySvgPoint(robotPosition);
+    const targetCenter = topologySvgPoint(targetPosition);
+    let endPoint = topologyEdgePoint(targetCenter, robotCenter);
+    if (robot.isPreTrans) {
+      const sourcePosition = modulePositions.get(robot.source);
+      if (sourcePosition) {
+        const sourceCenter = topologySvgPoint(sourcePosition);
+        const startAngle = Math.atan2(sourceCenter.y - robotCenter.y, sourceCenter.x - robotCenter.x);
+        const endAngle = Math.atan2(targetCenter.y - robotCenter.y, targetCenter.x - robotCenter.x);
+        const angle = interpolatedRobotAngle(startAngle, endAngle, robot.preTransProgress);
+        const sourceRadius = Math.max(TOPOLOGY_ITEM_SIZE / 2, Math.hypot(sourceCenter.x - robotCenter.x, sourceCenter.y - robotCenter.y) - TOPOLOGY_ITEM_SIZE / 2);
+        const targetRadius = Math.max(TOPOLOGY_ITEM_SIZE / 2, Math.hypot(targetCenter.x - robotCenter.x, targetCenter.y - robotCenter.y) - TOPOLOGY_ITEM_SIZE / 2);
+        const radius = sourceRadius + (targetRadius - sourceRadius) * robot.preTransProgress;
+        endPoint = {
+          x: robotCenter.x + Math.cos(angle) * radius,
+          y: robotCenter.y + Math.sin(angle) * radius
+        };
+      }
+    }
+    const startPoint = topologyEdgePoint(robotCenter, endPoint);
+    const color = colors[index % colors.length];
+    return `<line class="${robot.isPreTrans ? "is-pre-trans" : ""}" x1="${startPoint.x}" y1="${startPoint.y}" x2="${endPoint.x}" y2="${endPoint.y}" stroke="${color}" marker-end="url(#topology-arrowhead-${index})"/>`;
+  }).join("");
+  const markers = robots.map((_, index) => {
+    const color = colors[index % colors.length];
+    return `<marker id="topology-arrowhead-${index}" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="${color}"/></marker>`;
+  }).join("");
+  return `<svg class="topology-target-arrows" viewBox="0 0 ${TOPOLOGY_VIEWBOX_WIDTH} ${canvasHeight}" preserveAspectRatio="none" aria-hidden="true"><defs>${markers}</defs>${lines}</svg>`;
 }
 function renderEquipmentTopology(snapshot, decision) {
-  const groups = topologyGroups(snapshot.modules);
+  const visibleModules = snapshot.modules.filter((module2) => !isTopologyHiddenModule(module2));
+  const groups = topologyGroups(visibleModules);
   const destinations = candidateDestinations(decision);
-  const vacuumRobot = snapshot.robots.find((robot) => /^(VTR|TM\d*)/i.test(robot.name));
-  const atmosphereRobot = snapshot.robots.find((robot) => /^ATR/i.test(robot.name));
-  const assignedRobots = new Set([vacuumRobot?.name, atmosphereRobot?.name].filter(Boolean));
-  const additionalRobots = snapshot.robots.filter((robot) => !assignedRobots.has(robot.name));
-  const leftAuxiliary = groups.auxiliaryModules.filter((_, index) => index % 2 === 0);
-  const rightAuxiliary = groups.auxiliaryModules.filter((_, index) => index % 2 === 1);
+  const atmosphereRobots = snapshot.robots.filter((robot) => /^(ATR|ATM)/i.test(robot.name));
+  const atmosphereNames = new Set(atmosphereRobots.map((robot) => robot.name));
+  const vacuumRobots = snapshot.robots.filter((robot) => !atmosphereNames.has(robot.name));
+  const cascade = usesCascadeTopology(visibleModules, vacuumRobots.length);
+  const modulePositions = /* @__PURE__ */ new Map();
+  const positionModuleGroup = (modules, role) => modules.forEach((module2, index) => {
+    const position = moduleTopologyPosition(module2, role, index, modules.length, cascade);
+    modulePositions.set(module2.name, position);
+  });
+  positionModuleGroup(groups.processModules, "process");
+  positionModuleGroup(groups.loadLocks, "lock");
+  positionModuleGroup(groups.loadPorts, "port");
+  positionModuleGroup(groups.auxiliaryModules, "auxiliary");
+  const robotPositions = /* @__PURE__ */ new Map();
+  const positionRobotGroup = (robots, environment) => robots.forEach((robot, index) => {
+    const position = robotTopologyPosition(index, robots.length, environment, cascade);
+    robotPositions.set(robot.name, position);
+  });
+  positionRobotGroup(vacuumRobots, "vacuum");
+  positionRobotGroup(atmosphereRobots, "atmosphere");
+  const allTopPixels = [
+    ...modulePositions.values(),
+    ...robotPositions.values()
+  ].map((position) => position.topPixels);
+  const minimumTop = allTopPixels.length ? Math.min(...allTopPixels) : 0;
+  const maximumTop = allTopPixels.length ? Math.max(...allTopPixels) : TOPOLOGY_ITEM_SIZE;
+  const verticalOffset = TOPOLOGY_CANVAS_PADDING + TOPOLOGY_ITEM_SIZE / 2 - minimumTop;
+  const canvasHeight = Math.max(
+    520,
+    Math.ceil(maximumTop + verticalOffset + TOPOLOGY_ITEM_SIZE / 2 + TOPOLOGY_CANVAS_PADDING)
+  );
+  for (const [name, position] of modulePositions) {
+    modulePositions.set(name, { ...position, topPixels: position.topPixels + verticalOffset });
+  }
+  for (const [name, position] of robotPositions) {
+    robotPositions.set(name, { ...position, topPixels: position.topPixels + verticalOffset });
+  }
+  const renderModuleGroup = (modules, role) => modules.map((module2) => {
+    const position = modulePositions.get(module2.name);
+    if (!position) return "";
+    return `<div class="reference-module-position" style="--module-left:${position.leftPercent}%;--module-top:${position.topPixels}px">${renderModule(module2, role, destinations.get(module2.name))}</div>`;
+  }).join("");
+  const moduleMarkup = [
+    renderModuleGroup(groups.processModules, "process"),
+    renderModuleGroup(groups.loadLocks, "lock"),
+    renderModuleGroup(groups.loadPorts, "port"),
+    renderModuleGroup(groups.auxiliaryModules, "auxiliary")
+  ].join("");
+  const renderRobotGroup = (robots, environment) => robots.map((robot) => {
+    const position = robotPositions.get(robot.name);
+    if (!position) return "";
+    return `<div class="reference-robot-position" style="--robot-left:${position.leftPercent}%;--robot-top:${position.topPixels}px">${renderRobotHub(robot, environment)}</div>`;
+  }).join("");
+  const robotMarkup = renderRobotGroup(vacuumRobots, "vacuum") + renderRobotGroup(atmosphereRobots, "atmosphere");
   return `
-    <section class="equipment-schematic" aria-label="\u5F53\u524D MoveList \u4F7F\u7528\u7684\u8BBE\u5907\u62D3\u6251">
-      <div class="schematic-head">
-        <div><strong>\u8BBE\u5907\u62D3\u6251</strong><span>MoveList \u6A21\u5757 + \u5F53\u524D\u5019\u9009\u76EE\u6807</span></div>
-        <small>${snapshot.modules.length} \u4E2A\u8154\u5BA4 \xB7 ${snapshot.robots.length} \u53F0\u673A\u68B0\u624B</small>
-      </div>
-      <div class="schematic-canvas">
-        <div class="process-ring" aria-label="\u5DE5\u827A\u8154\u5BA4">
-          ${groups.processModules.map((module2, index) => `
-            <div class="process-module-position" style="${processModulePosition(index, groups.processModules.length)}">
-              ${renderModule(module2, "process", destinations.get(module2.name))}
-            </div>`).join("")}
-        </div>
-        ${vacuumRobot ? renderRobotHub(vacuumRobot, "vacuum") : '<div class="topology-junction vacuum-junction"><strong>\u771F\u7A7A\u4F20\u8F93\u533A</strong></div>'}
-        <div class="load-lock-bank" aria-label="\u771F\u7A7A\u8FC7\u6E21\u8154">
-          ${groups.loadLocks.map((module2) => renderModule(module2, "lock", destinations.get(module2.name))).join("")}
-        </div>
-        <div class="atmosphere-deck">
-          <div class="auxiliary-bank auxiliary-left">${leftAuxiliary.map((module2) => renderModule(module2, "auxiliary", destinations.get(module2.name))).join("")}</div>
-          ${atmosphereRobot ? renderRobotHub(atmosphereRobot, "atmosphere") : '<div class="topology-junction atmosphere-junction"><strong>\u5927\u6C14\u4F20\u8F93\u533A</strong></div>'}
-          <div class="auxiliary-bank auxiliary-right">${rightAuxiliary.map((module2) => renderModule(module2, "auxiliary", destinations.get(module2.name))).join("")}</div>
-        </div>
-        <div class="load-port-bank" aria-label="\u88C5\u8F7D\u7AEF\u53E3">
-          ${groups.loadPorts.map((module2) => renderModule(module2, "port", destinations.get(module2.name))).join("")}
-        </div>
-        ${additionalRobots.length ? `<div class="additional-robot-bank">${additionalRobots.map((robot) => renderRobotHub(robot, "atmosphere")).join("")}</div>` : ""}
+    <section class="equipment-schematic" aria-label="\u5B8C\u6574\u8BBE\u5907\u62D3\u6251\u56DE\u653E">
+      <div class="schematic-canvas reference-grid-canvas" style="--topology-canvas-height:${canvasHeight}px">
+        ${moduleMarkup}
+        ${robotMarkup}
+        ${renderRobotTargetArrows(snapshot.robots, robotPositions, modulePositions, canvasHeight)}
       </div>
     </section>`;
 }
@@ -584,6 +811,20 @@ function decisionCandidatePath(candidate) {
   const source = candidate.source || "\u5F53\u524D\u4F4D\u7F6E";
   const destination = candidate.destination || "\u2014";
   return `${source} \u2192 ${destination}${candidate.destinationSlot ? ` \xB7 \u69FD ${candidate.destinationSlot}` : ""}`;
+}
+function renderTransitionButtons(decision) {
+  if (!decision?.candidates.length) {
+    return '<div class="transition-button-empty">\u5F53\u524D\u65F6\u523B\u6CA1\u6709\u6A21\u578B\u53EF\u884C\u52A8\u4F5C</div>';
+  }
+  return [...decision.candidates].sort((left, right) => left.rank - right.rank).map((candidate) => {
+    const selected = candidate.selected || candidate.actionId === decision.selectedActionId;
+    const path = decisionCandidatePath(candidate);
+    return `
+        <button class="transition-action-button ${selected ? "is-selected" : ""}" type="button" tabindex="-1" aria-disabled="true" title="${escapeHtml(path)}">
+          <span>${escapeHtml(path)}</span>
+          <small>#${candidate.rank} \xB7 ${Math.round(candidate.policyPreference * 100)}%</small>
+        </button>`;
+  }).join("");
 }
 function futureDecisionSteps(trace, current) {
   const index = trace.indexOf(current);
@@ -1049,6 +1290,7 @@ var VisualizationWorkspace = class {
   }
   /** 绑定文件、时间轴、播放和快捷控制事件。 */
   bindEvents() {
+    this.elements.importButton?.addEventListener("click", () => this.elements.fileInput.click());
     this.elements.fileInput.addEventListener("change", () => {
       const file = this.elements.fileInput.files?.item(0);
       if (!file) return;
@@ -1148,9 +1390,15 @@ var VisualizationWorkspace = class {
     this.elements.waferText.textContent = String(snapshot.waferCount);
     this.elements.range.value = String(snapshot.time);
     const currentDecision = decisionAtTime(this.decisionTrace, snapshot.time);
-    const topologySnapshot = snapshotWithCandidateModules(snapshot, currentDecision, this.device);
+    const topologySnapshot = snapshotWithFullDeviceModules(
+      snapshotWithCandidateModules(snapshot, currentDecision, this.device),
+      this.device
+    );
     this.elements.stage.innerHTML = renderEquipmentTopology(topologySnapshot, currentDecision);
     this.elements.decisionLens.innerHTML = renderDecisionLens(currentDecision, this.decisionTrace);
+    if (this.elements.transitionButtons) {
+      this.elements.transitionButtons.innerHTML = renderTransitionButtons(currentDecision);
+    }
     this.elements.activeMoves.innerHTML = snapshot.activeMoves.length ? snapshot.activeMoves.map((move) => `
         <li>
           <span class="active-move-id">#${finiteNumber(move.MoveID)}</span>
@@ -1248,7 +1496,7 @@ var MINIMUM_STEADY_WAFERS = 4;
 var PICK_MOVE_TYPES2 = /* @__PURE__ */ new Set([0, 2]);
 var PLACE_MOVE_TYPES2 = /* @__PURE__ */ new Set([1, 3]);
 var SWAP_MOVE2 = 4;
-var PRE_TRANS_MOVE = 5;
+var PRE_TRANS_MOVE2 = 5;
 var PREPARE_MOVE2 = 6;
 var COMPLETE_MOVE2 = 7;
 var PROCESS_MOVE2 = 9;
@@ -1586,7 +1834,7 @@ function coveredDuration(intervals, boundaryStart, boundaryEnd) {
 function robotWaferDwellTime(moves, window) {
   const transportByRobot = /* @__PURE__ */ new Map();
   for (const move of moves) {
-    if (move.MoveType !== PRE_TRANS_MOVE || move.EndTime <= move.StartTime) continue;
+    if (move.MoveType !== PRE_TRANS_MOVE2 || move.EndTime <= move.StartTime) continue;
     const robot = moveRobotName(move);
     if (!robot) continue;
     const intervals = transportByRobot.get(robot) ?? [];
@@ -1992,5 +2240,7 @@ function buildScheduleAnalysisContext(routes, rounds) {
   displayedPerformanceResources,
   normalizeDecisionTrace,
   normalizeMovePayload,
+  renderEquipmentTopology,
+  snapshotWithFullDeviceModules,
   summarizeBottleneckUtilization
 });

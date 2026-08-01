@@ -2,6 +2,8 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const logic = require("../realtime_scheduler/frontend/workspace_visualizer_logic.js");
 const analysisLogic = require("../realtime_scheduler/analysis/schedule_analysis.js");
 
@@ -170,6 +172,23 @@ test("MoveList 输入同时支持数组和结果对象", () => {
   );
 });
 
+test("回放进度、MoveList 与中文工具入口合并在顶部紧凑工具栏", () => {
+  const html = fs.readFileSync(
+    path.join(__dirname, "../realtime_scheduler/frontend/config_editor.html"),
+    "utf8",
+  );
+  const toolbarStart = html.indexOf('<section class="timeline-console petri-top-playback-controls"');
+  const toolbarEnd = html.indexOf("</section>", toolbarStart);
+  const toolbar = html.slice(toolbarStart, toolbarEnd);
+  assert.ok(toolbarStart >= 0 && toolbarEnd > toolbarStart);
+  assert.match(toolbar, /id="visualPlayButton"/);
+  assert.match(toolbar, /id="visualSource"/);
+  assert.match(toolbar, /id="visualTimeline"/);
+  assert.match(toolbar, /id="visualImportButton"[^>]*>[\s\S]*导入 MoveList/);
+  assert.match(toolbar, /id="visualOpenGantt"[^>]*>打开甘特图</);
+  assert.doesNotMatch(html, /petri-utils/);
+});
+
 test("E2E 决策轨迹保留候选偏好、Makespan 增量和未来决策时刻", () => {
   const trace = logic.normalizeDecisionTrace({
     DecisionTrace: [
@@ -260,9 +279,186 @@ test("时间轴准确回放腔室门的开启和关闭过程", () => {
   assert.equal(moduleAt(logic.buildWorkspaceSnapshot(moves, device, 2), "Cooler"), undefined);
 });
 
+test("短门动作、LoadLock 相位和 PRE_TRANS 转位保持可观察", () => {
+  const animationMoves = [
+    {
+      MoveID: 1, MoveType: 5, ModuleName: "ATR", Robot: "ATR",
+      SrcStationList: ["LP1"], DestStationList: ["LA"],
+      StartTime: 0, EndTime: 10,
+    },
+    {
+      MoveID: 2, MoveType: 10, ModuleName: "LA",
+      LastState: "ATR", CurState: "VTR", StartTime: 0, EndTime: 10,
+    },
+    {
+      MoveID: 3, MoveType: 6, ModuleName: "PM1",
+      StartTime: 9, EndTime: 9.1,
+    },
+  ];
+  const snapshot = logic.buildWorkspaceSnapshot(animationMoves, device, 9.4);
+  assert.equal(moduleAt(snapshot, "PM1").door, "opening");
+  assert.equal(moduleAt(snapshot, "LA").loadLockPhase, "pumping");
+  assert.equal(snapshot.robots[0].source, "LP1");
+  assert.equal(snapshot.robots[0].target, "LA");
+  assert.equal(snapshot.robots[0].isPreTrans, true);
+  assert.ok(Math.abs(snapshot.robots[0].preTransProgress - 0.94) < 1e-9);
+});
+
 test("设备拓扑只包含 MoveList 实际引用的腔室", () => {
   const snapshot = logic.buildWorkspaceSnapshot(moves, device, 2);
   assert.deepEqual(snapshot.modules.map(module => module.name), ["LP1", "PM1"]);
+});
+
+test("拓扑回放补全设备配置中未被 MoveList 引用的腔室", () => {
+  const snapshot = logic.buildWorkspaceSnapshot(moves, device, 0);
+  assert.deepEqual(snapshot.modules.map(module => module.name), ["LP1", "PM1"]);
+  const full = logic.snapshotWithFullDeviceModules(snapshot, device);
+  assert.deepEqual(
+    full.modules.map(module => module.name),
+    ["Cooler", "LA", "LP1", "PM1", "PM2"],
+  );
+  const cooler = full.modules.find(module => module.name === "Cooler");
+  assert.equal(cooler.status, "idle");
+  assert.equal(cooler.door, "doorless");
+  assert.equal(cooler.type, "Cooler");
+  assert.equal(full.modules.find(module => module.name === "LA").door, "closed");
+});
+
+function positionsFromTopology(topology) {
+  const positions = [];
+  const pattern = /--(?:module|robot)-left:([\d.]+)%;--(?:module|robot)-top:(\d+)px/g;
+  let match;
+  while ((match = pattern.exec(topology)) !== null) {
+    positions.push({ x: Number(match[1]) / 100 * 1000, y: Number(match[2]) });
+  }
+  return positions;
+}
+
+function assertTopologyComplete(topology, requiredNames) {
+  for (const name of requiredNames) {
+    assert.match(topology, new RegExp(`>${name}<`), `拓扑应包含 ${name}`);
+  }
+  const positions = positionsFromTopology(topology);
+  assert.ok(positions.length >= requiredNames.length);
+  for (let i = 0; i < positions.length; i += 1) {
+    for (let j = i + 1; j < positions.length; j += 1) {
+      const a = positions[i];
+      const b = positions[j];
+      const overlaps = Math.abs(a.x - b.x) < 96 && Math.abs(a.y - b.y) < 96;
+      assert.equal(overlaps, false, `模块位置重叠：${JSON.stringify([a, b])}`);
+    }
+  }
+}
+
+test("单真空机械手拓扑完整显示 LP1-LP4、LA/LB 与 PM1-PM6 且不重叠", () => {
+  const fullDevice = {
+    Stations: {
+      LP1: { Type: "LoadPort" }, LP2: { Type: "LoadPort" },
+      LP3: { Type: "LoadPort" }, LP4: { Type: "LoadPort" },
+      LA: { Type: "LoadLock" }, LB: { Type: "LoadLock" },
+      LC: { Type: "LoadLock" }, LD: { Type: "LoadLock" },
+      PM1: { Type: "ProcessChamber" }, PM2: { Type: "ProcessChamber" },
+      PM3: { Type: "ProcessChamber" }, PM4: { Type: "ProcessChamber" },
+      PM5: { Type: "ProcessChamber" }, PM6: { Type: "ProcessChamber" },
+      Buffer1: { Type: "Buffer" }, Buffer2: { Type: "Buffer" },
+      Buffer3: { Type: "Buffer" }, Buffer4: { Type: "Buffer" },
+      Aligner: { Type: "Aligner" }, heater: { Type: "Heater" },
+      Cooler: { Type: "Cooler" }, DummyPort: { Type: "LoadPort" },
+    },
+    Robots: { ATR: { Type: "ATMRobot" }, VTR: { Type: "VTMRobot" } },
+  };
+  const required = ["LP1", "LP2", "LP3", "LP4", "LA", "LB", "PM1", "PM2", "PM3", "PM4", "PM5", "PM6"];
+  const snapshot = logic.buildWorkspaceSnapshot(moves, fullDevice, 0);
+  const topology = logic.renderEquipmentTopology(
+    logic.snapshotWithFullDeviceModules(snapshot, fullDevice),
+    null,
+  );
+  assertTopologyComplete(topology, required);
+  assert.doesNotMatch(topology, />Buffer[1-4]</);
+  assert.doesNotMatch(topology, />DummyPort</);
+  assert.doesNotMatch(topology, />heater</i);
+  assert.doesNotMatch(topology, /DEVICE TOPOLOGY|设备配置全量模块/);
+  assert.match(topology, /--module-left:20%;/);
+  assert.match(topology, /--topology-canvas-height:723px/);
+
+  const modulePosition = name => {
+    const match = new RegExp(
+      `class="reference-module-position" style="--module-left:([\\d.]+)%;--module-top:(\\d+)px">(?:(?!class="reference-module-position")[\\s\\S])*?<strong>${name}</strong>`,
+    ).exec(topology);
+    assert.ok(match, `应找到 ${name} 的坐标`);
+    return { x: Number(match[1]), y: Number(match[2]) };
+  };
+  const robotPosition = name => {
+    const match = new RegExp(
+      `class="reference-robot-position" style="--robot-left:([\\d.]+)%;--robot-top:(\\d+)px">(?:(?!class="reference-robot-position")[\\s\\S])*?<strong>${name}</strong>`,
+    ).exec(topology);
+    assert.ok(match, `应找到 ${name} 的坐标`);
+    return { x: Number(match[1]), y: Number(match[2]) };
+  };
+  const pm2 = modulePosition("PM2");
+  const pm1 = modulePosition("PM1");
+  const vtr = robotPosition("VTR");
+  assert.equal(vtr.x, 50);
+  assert.equal(vtr.y, (pm1.y + pm2.y) / 2);
+});
+
+test("双真空机械手级联拓扑完整显示 LP1-LP4、LA/LB 与 PM1-PM6 且不重叠", () => {
+  const fullDevice = {
+    Stations: {
+      LP1: { Type: "LoadPort" }, LP2: { Type: "LoadPort" },
+      LP3: { Type: "LoadPort" }, LP4: { Type: "LoadPort" },
+      LA: { Type: "LoadLock" }, LB: { Type: "LoadLock" },
+      UBR: { Type: "LoadLock" }, DBR: { Type: "LoadLock" },
+      PM1: { Type: "ProcessChamber" }, PM2: { Type: "ProcessChamber" },
+      PM3: { Type: "ProcessChamber" }, PM4: { Type: "ProcessChamber" },
+      PM5: { Type: "ProcessChamber" }, PM6: { Type: "ProcessChamber" },
+      Buffer1: { Type: "Buffer" }, Buffer2: { Type: "Buffer" },
+      Buffer3: { Type: "Buffer" }, Buffer4: { Type: "Buffer" },
+      Aligner: { Type: "Aligner" },
+    },
+    Robots: { ATR: { Type: "ATMRobot" }, VTR_1: { Type: "VTMRobot" }, VTR_2: { Type: "HighVTMRobot" } },
+  };
+  const required = ["LP1", "LP2", "LP3", "LP4", "LA", "LB", "PM1", "PM2", "PM3", "PM4", "PM5", "PM6"];
+  const snapshot = logic.buildWorkspaceSnapshot(moves, fullDevice, 0);
+  const topology = logic.renderEquipmentTopology(
+    logic.snapshotWithFullDeviceModules(snapshot, fullDevice),
+    null,
+  );
+  assertTopologyComplete(topology, required);
+});
+
+test("多个大气机械手在同一排横向分布且不重叠", () => {
+  const multiAtrDevice = {
+    Stations: {
+      LP1: { Type: "LoadPort" }, LP2: { Type: "LoadPort" },
+      LA: { Type: "LoadLock" }, LB: { Type: "LoadLock" },
+      PM1: { Type: "Process" }, PM2: { Type: "Process" },
+    },
+    Robots: {
+      ATR_1: { Type: "ATMRobot" }, ATR_2: { Type: "ATMRobot" },
+      VTR: { Type: "VTMRobot" },
+    },
+  };
+  const multiAtrMoves = [
+    { MoveID: 1, MoveType: 6, ModuleName: "PM1", StartTime: 0, EndTime: 1 },
+    { MoveID: 2, MoveType: 2, ModuleName: "ATR_1", SrcStationList: ["LP1"], MatIDList: ["W1"], StartTime: 1, EndTime: 2 },
+  ];
+  const snapshot = logic.buildWorkspaceSnapshot(multiAtrMoves, multiAtrDevice, 0);
+  const topology = logic.renderEquipmentTopology(
+    logic.snapshotWithFullDeviceModules(snapshot, multiAtrDevice),
+    null,
+  );
+  assertTopologyComplete(topology, ["LP1", "LP2", "LA", "LB", "PM1", "PM2"]);
+  const reAtr = /class="reference-robot-position" style="--robot-left:([\d.]+)%;--robot-top:(\d+)px">\s*<article class="robot-hub[^"]*"[^>]*aria-label="(ATR_\d)[^"]*"/g;
+  let match;
+  const found = new Map();
+  while ((match = reAtr.exec(topology)) !== null) {
+    found.set(match[3], { x: Number(match[1]) / 100 * 1000, y: Number(match[2]) });
+  }
+  assert.equal(found.size, 2);
+  const positions = [...found.values()];
+  assert.ok(Math.abs(positions[0].x - positions[1].x) >= 96, "两个大气机械手应横向分开");
+  assert.equal(positions[0].y, positions[1].y, "两个大气机械手应在同一排");
 });
 
 test("完成取放动作后晶圆位置与机器人状态一致", () => {
