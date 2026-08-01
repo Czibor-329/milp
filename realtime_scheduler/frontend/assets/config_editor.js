@@ -473,9 +473,9 @@ function collectElements(root) {
     toolbar: required("visualToolbar"),
     groupAnalysis: required("testGroupAnalysisPanel"),
     empty: required("visualEmpty"),
+    playbackEmpty: required("visualPlaybackEmpty"),
     content: required("visualContent"),
     topologyPlayback: required("visualTopologyPlayback"),
-    topologyToggle: required("visualTopologyToggle"),
     stage: required("visualDeviceStage"),
     activeMoves: required("visualActiveMoves"),
     source: required("visualSource"),
@@ -904,11 +904,9 @@ var VisualizationWorkspace = class {
     tab?.click();
     this.elements.performanceWindow.focus({ preventScroll: true });
   }
-  /** 显示测试组统计，并完全隐藏当前单例诊断与回放。 */
+  /** 显示测试组统计，并隐藏当前单例诊断；独立回放页保留已加载的数据。 */
   showGroupAnalysis(markup) {
     this.pause();
-    this.setTopologyVisible(false);
-    this.elements.toolbar.hidden = true;
     this.elements.empty.hidden = true;
     this.elements.content.hidden = true;
     this.elements.groupAnalysis.innerHTML = markup;
@@ -937,13 +935,18 @@ var VisualizationWorkspace = class {
     this.elements.groupAnalysis.innerHTML = "";
     this.elements.content.hidden = true;
     this.elements.empty.hidden = false;
-    this.elements.topologyToggle.disabled = true;
+    this.elements.playbackEmpty.hidden = false;
     this.setTopologyVisible(false);
     this.elements.empty.classList.remove("is-loading", "is-error");
     this.elements.empty.innerHTML = `
       <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="3"/><path d="M8 9h8M8 13h5"/></svg>
+      <strong>\u7B49\u5F85\u5206\u6790\u6570\u636E</strong>
+      <span>\u8FD0\u884C\u4E00\u6B21\u8BA1\u5212\uFF0C\u6216\u5728\u62D3\u6251\u56DE\u653E\u754C\u9762\u5BFC\u5165\u5DF2\u6709\u7684 MoveList JSON \u6587\u4EF6\u540E\u67E5\u770B\u7ED3\u679C\u5206\u6790\u3002</span>`;
+    this.elements.playbackEmpty.classList.remove("is-loading", "is-error");
+    this.elements.playbackEmpty.innerHTML = `
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><circle cx="5" cy="6" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="5" cy="18" r="2"/><circle cx="19" cy="18" r="2"/><path d="m7 7.3 2.8 2.8M17 7.3l-2.8 2.8M7 16.7l2.8-2.8M17 16.7l-2.8-2.8"/></svg>
       <strong>\u7B49\u5F85 MoveList</strong>
-      <span>\u8FD0\u884C\u4E00\u6B21\u8BA1\u5212\uFF0C\u6216\u5BFC\u5165\u5DF2\u6709\u7684 MoveList JSON \u6587\u4EF6\u540E\u5F00\u59CB\u56DE\u653E\u3002</span>`;
+      <span>\u8FD0\u884C\u4E00\u6B21\u8BA1\u5212\uFF0C\u6216\u5BFC\u5165\u5DF2\u6709\u7684 MoveList JSON \u6587\u4EF6\u540E\u67E5\u770B\u8BBE\u5907\u62D3\u6251\u5E76\u5F00\u59CB\u56DE\u653E\u3002</span>`;
   }
   /** 接收规范化后的 MoveList 并重置时间轴。 */
   async loadMoves(moves, sourceName, resultUrl, analysisResultId) {
@@ -964,9 +967,8 @@ var VisualizationWorkspace = class {
     this.elements.openGantt.href = resultUrl ? `/movelist_gantt_viewer.html?src=${encodeURIComponent(resultUrl)}` : "#";
     this.elements.openGantt.setAttribute("aria-disabled", resultUrl ? "false" : "true");
     this.elements.resultButton.disabled = false;
-    this.elements.topologyToggle.disabled = false;
-    this.setTopologyVisible(false);
     this.showSingleResult();
+    this.setTopologyVisible(true);
     this.render(snapshot);
     await this.renderPerformance();
   }
@@ -993,9 +995,6 @@ var VisualizationWorkspace = class {
     this.elements.performanceWindow.addEventListener("change", () => {
       this.performanceWindowMode = this.elements.performanceWindow.value === "full" ? "full" : "steady";
       void this.renderPerformance();
-    });
-    this.elements.topologyToggle.addEventListener("click", () => {
-      this.setTopologyVisible(this.elements.topologyPlayback.hidden);
     });
     this.elements.resultButton.addEventListener("click", () => this.show());
     this.elements.openGantt.addEventListener("click", (event) => {
@@ -1053,14 +1052,13 @@ var VisualizationWorkspace = class {
     this.elements.groupAnalysis.hidden = true;
     this.elements.empty.hidden = true;
     this.elements.content.hidden = false;
+    this.elements.playbackEmpty.hidden = true;
   }
-  /** 将概要、进度控制、拓扑与当前动作作为一个回放单元统一显隐。 */
+  /** 统一切换独立回放页中的概要、时间轴、拓扑与当前动作。 */
   setTopologyVisible(visible) {
     if (!visible) this.pause();
     this.elements.topologyPlayback.hidden = !visible;
-    this.elements.topologyToggle.setAttribute("aria-expanded", String(visible));
-    const label = this.elements.topologyToggle.querySelector("span");
-    if (label) label.textContent = visible ? "\u9690\u85CF\u8BBE\u5907\u62D3\u6251" : "\u663E\u793A\u8BBE\u5907\u62D3\u6251";
+    this.elements.playbackEmpty.hidden = visible;
   }
   /** 绘制当前时间对应的设备快照。 */
   render(prebuiltSnapshot) {
@@ -1124,9 +1122,14 @@ var VisualizationWorkspace = class {
     this.elements.groupAnalysis.hidden = true;
     this.elements.content.hidden = true;
     this.elements.empty.hidden = false;
+    this.elements.playbackEmpty.hidden = false;
     this.elements.empty.classList.toggle("is-loading", loading);
+    this.elements.playbackEmpty.classList.toggle("is-loading", loading);
     this.elements.empty.classList.remove("is-error");
-    this.elements.empty.innerHTML = loading ? `<span class="visual-loader" aria-hidden="true"></span><strong>${escapeHtml(message)}</strong>` : `<strong>${escapeHtml(message)}</strong>`;
+    this.elements.playbackEmpty.classList.remove("is-error");
+    const loadingMarkup = loading ? `<span class="visual-loader" aria-hidden="true"></span><strong>${escapeHtml(message)}</strong>` : `<strong>${escapeHtml(message)}</strong>`;
+    this.elements.empty.innerHTML = loadingMarkup;
+    this.elements.playbackEmpty.innerHTML = loadingMarkup;
   }
   /** 在工作台空状态中显示可恢复的错误。 */
   showError(message) {
@@ -1136,16 +1139,23 @@ var VisualizationWorkspace = class {
     this.elements.groupAnalysis.hidden = true;
     this.elements.content.hidden = true;
     this.elements.empty.hidden = false;
+    this.elements.playbackEmpty.hidden = false;
     this.elements.empty.classList.remove("is-loading");
+    this.elements.playbackEmpty.classList.remove("is-loading");
     this.elements.empty.classList.add("is-error");
-    this.elements.empty.innerHTML = `
+    this.elements.playbackEmpty.classList.add("is-error");
+    const errorMarkup = `
       <strong>\u65E0\u6CD5\u52A0\u8F7D MoveList</strong>
       <span>${escapeHtml(message)}</span>
       <label class="btn visual-import-button">${icon("upload")}\u91CD\u65B0\u9009\u62E9\u6587\u4EF6<input type="file" accept=".json,application/json" data-visual-retry></label>`;
-    const retryInput = this.elements.empty.querySelector("[data-visual-retry]");
-    retryInput?.addEventListener("change", () => {
-      const file = retryInput.files?.item(0);
-      if (file) this.loadFile(file).catch((error) => this.showError(error instanceof Error ? error.message : String(error)));
+    this.elements.empty.innerHTML = errorMarkup;
+    this.elements.playbackEmpty.innerHTML = errorMarkup;
+    [this.elements.empty, this.elements.playbackEmpty].forEach((container) => {
+      const retryInput = container.querySelector("[data-visual-retry]");
+      retryInput?.addEventListener("change", () => {
+        const file = retryInput.files?.item(0);
+        if (file) this.loadFile(file).catch((error) => this.showError(error instanceof Error ? error.message : String(error)));
+      });
     });
   }
 };

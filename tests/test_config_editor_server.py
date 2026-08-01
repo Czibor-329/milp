@@ -1523,8 +1523,8 @@ class ConfigEditorServerTests(unittest.TestCase):
         for label in ("测试名称", "等待中", "运行中", "成功", "失败", "Makespan", "Move", "耗时"):
             self.assertIn(label, html)
 
-    def test_result_analysis_modes_are_exclusive_and_topology_is_collapsed(self) -> None:
-        """组级与单例分析应互斥，拓扑、概要和播放控制默认整体折叠。"""
+    def test_result_analysis_and_topology_playback_use_separate_views(self) -> None:
+        """结果分析与拓扑回放应使用独立主界面，并共享同一份 MoveList。"""
         page = EDITOR_PATH.read_text(encoding="utf-8")
         workspace_source = (
             ROOT
@@ -1542,9 +1542,13 @@ class ConfigEditorServerTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         editor_source = EDITOR_SCRIPT_PATH.read_text(encoding="utf-8")
 
-        self.assertIn('id="visualTopologyToggle"', page)
-        self.assertIn('aria-controls="visualTopologyPlayback"', page)
+        self.assertIn('data-tab-target="playback"', page)
+        self.assertIn('data-tab-view="playback"', page)
+        self.assertIn('id="visualPlaybackEmpty"', page)
+        self.assertNotIn('id="visualTopologyToggle"', page)
         self.assertIn('id="visualTopologyPlayback" hidden', page)
+        analysis_view = page.split('data-tab-view="workspace"', 1)[1].split('data-tab-view="playback"', 1)[0]
+        self.assertNotIn('id="visualTopologyPlayback"', analysis_view)
         topology_playback = page.split('id="visualTopologyPlayback"', 1)[1]
         self.assertIn('id="visualTimeline"', topology_playback)
         self.assertIn('id="visualDeviceStage"', topology_playback)

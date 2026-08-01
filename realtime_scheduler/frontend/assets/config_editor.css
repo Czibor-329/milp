@@ -400,13 +400,13 @@
     @container result-area (max-width: 1100px) { .batch-results { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
     @container result-area (max-width: 720px) { .batch-results, .result-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } .metric:nth-child(odd) { border-left: 0; } .metric:nth-child(n+3) { border-top: 1px solid var(--line); } .comparison-row { grid-template-columns: 86px repeat(3, minmax(0, 1fr)); } }
     @container result-area (max-width: 520px) { .batch-results, .result-metrics { grid-template-columns: 1fr; } .metric { border-top: 1px solid var(--line); border-left: 0; } .metric:first-child { border-top: 0; } .comparison-experiment-head { align-items: flex-start; flex-direction: column; } .comparison-row { grid-template-columns: 76px repeat(3, minmax(0, 1fr)); } .comparison-row > * { padding: 6px 4px; font-size: 10px; } }
-    /* -------- MoveList 结果分析 -------- */
+    /* -------- MoveList 结果分析与独立拓扑回放 -------- */
     .visual-workbench { min-width: 0; }
     .visual-toolbar { display: flex; align-items: center; justify-content: flex-end; margin-bottom: 16px; padding: 0; }
     .visual-kicker { color: var(--brand); font-size: 10px; font-weight: 900; letter-spacing: .12em; text-transform: uppercase; }
     .visual-toolbar-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
     .visual-toolbar-actions svg, .visual-import-button svg, .timeline-play svg, .robot-icon svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-    .visual-topology-toggle[aria-expanded="true"] { border-color: #9fb4d5; color: #244fae; background: #eef4ff; }
+    .playback-workbench .visual-toolbar { margin-bottom: 14px; }
     .test-group-analysis { display: grid; gap: 16px; padding: 20px; background: #f7f9fc; }
     .test-group-analysis[hidden] { display: none; }
     .group-analysis-head { padding: 4px 2px; }

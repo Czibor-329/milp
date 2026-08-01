@@ -126,9 +126,9 @@ function fakeWorkspaceDocument() {
     "visualToolbar",
     "testGroupAnalysisPanel",
     "visualEmpty",
+    "visualPlaybackEmpty",
     "visualContent",
     "visualTopologyPlayback",
-    "visualTopologyToggle",
     "visualDeviceStage",
     "visualActiveMoves",
     "visualSource",
@@ -147,8 +147,6 @@ function fakeWorkspaceDocument() {
     "performanceWindow",
   ];
   const elements = new Map(ids.map(id => [id, new FakeElement()]));
-  elements.get("visualTopologyToggle").label = new FakeElement();
-  elements.get("visualTopologyToggle").disabled = true;
   const workspaceTab = new FakeElement();
   return {
     elements,
@@ -171,19 +169,16 @@ test("MoveList 输入同时支持数组和结果对象", () => {
   );
 });
 
-test("测试组与单例分析互斥，拓扑和进度默认共同折叠", async () => {
+test("结果分析与拓扑回放使用独立界面并共享当前 MoveList", async () => {
   const root = fakeWorkspaceDocument();
   const workspace = logic.createVisualizationWorkspace(root);
   const topology = root.elements.get("visualTopologyPlayback");
-  const toggle = root.elements.get("visualTopologyToggle");
 
   assert.equal(topology.hidden, true);
-  assert.equal(toggle.disabled, true);
-  assert.equal(toggle.getAttribute("aria-expanded"), "false");
-  assert.equal(toggle.label.textContent, "显示设备拓扑");
+  assert.equal(root.elements.get("visualPlaybackEmpty").hidden, false);
 
   workspace.showGroupAnalysis("<h2>组级统计</h2>");
-  assert.equal(root.elements.get("visualToolbar").hidden, true);
+  assert.equal(root.elements.get("visualToolbar").hidden, false);
   assert.equal(root.elements.get("testGroupAnalysisPanel").hidden, false);
   assert.equal(root.elements.get("visualContent").hidden, true);
   assert.equal(root.elements.get("visualEmpty").hidden, true);
@@ -197,16 +192,11 @@ test("测试组与单例分析互斥，拓扑和进度默认共同折叠", async
   assert.equal(root.elements.get("visualToolbar").hidden, false);
   assert.equal(root.elements.get("testGroupAnalysisPanel").hidden, true);
   assert.equal(root.elements.get("visualContent").hidden, false);
-  assert.equal(topology.hidden, true);
-  assert.equal(toggle.disabled, false);
-
-  toggle.listeners.get("click")();
   assert.equal(topology.hidden, false);
-  assert.equal(toggle.getAttribute("aria-expanded"), "true");
-  assert.equal(toggle.label.textContent, "隐藏设备拓扑");
+  assert.equal(root.elements.get("visualPlaybackEmpty").hidden, true);
 
   workspace.showGroupAnalysis("<h2>组级统计</h2>");
-  assert.equal(topology.hidden, true);
+  assert.equal(topology.hidden, false);
   assert.equal(root.elements.get("visualContent").hidden, true);
 
   workspace.show();

@@ -68,9 +68,9 @@ interface WorkspaceElements {
   toolbar: HTMLElement;
   groupAnalysis: HTMLElement;
   empty: HTMLElement;
+  playbackEmpty: HTMLElement;
   content: HTMLElement;
   topologyPlayback: HTMLElement;
-  topologyToggle: HTMLButtonElement;
   stage: HTMLElement;
   activeMoves: HTMLElement;
   source: HTMLElement;
@@ -477,9 +477,9 @@ function collectElements(root: Document): WorkspaceElements {
     toolbar: required("visualToolbar"),
     groupAnalysis: required("testGroupAnalysisPanel"),
     empty: required("visualEmpty"),
+    playbackEmpty: required("visualPlaybackEmpty"),
     content: required("visualContent"),
     topologyPlayback: required("visualTopologyPlayback"),
-    topologyToggle: required<HTMLButtonElement>("visualTopologyToggle"),
     stage: required("visualDeviceStage"),
     activeMoves: required("visualActiveMoves"),
     source: required("visualSource"),
@@ -981,11 +981,9 @@ export class VisualizationWorkspace {
     this.elements.performanceWindow.focus({ preventScroll: true });
   }
 
-  /** 显示测试组统计，并完全隐藏当前单例诊断与回放。 */
+  /** 显示测试组统计，并隐藏当前单例诊断；独立回放页保留已加载的数据。 */
   showGroupAnalysis(markup: string): void {
     this.pause();
-    this.setTopologyVisible(false);
-    this.elements.toolbar.hidden = true;
     this.elements.empty.hidden = true;
     this.elements.content.hidden = true;
     this.elements.groupAnalysis.innerHTML = markup;
@@ -1016,13 +1014,18 @@ export class VisualizationWorkspace {
     this.elements.groupAnalysis.innerHTML = "";
     this.elements.content.hidden = true;
     this.elements.empty.hidden = false;
-    this.elements.topologyToggle.disabled = true;
+    this.elements.playbackEmpty.hidden = false;
     this.setTopologyVisible(false);
     this.elements.empty.classList.remove("is-loading", "is-error");
     this.elements.empty.innerHTML = `
       <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="3"/><path d="M8 9h8M8 13h5"/></svg>
+      <strong>等待分析数据</strong>
+      <span>运行一次计划，或在拓扑回放界面导入已有的 MoveList JSON 文件后查看结果分析。</span>`;
+    this.elements.playbackEmpty.classList.remove("is-loading", "is-error");
+    this.elements.playbackEmpty.innerHTML = `
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><circle cx="5" cy="6" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="5" cy="18" r="2"/><circle cx="19" cy="18" r="2"/><path d="m7 7.3 2.8 2.8M17 7.3l-2.8 2.8M7 16.7l2.8-2.8M17 16.7l-2.8-2.8"/></svg>
       <strong>等待 MoveList</strong>
-      <span>运行一次计划，或导入已有的 MoveList JSON 文件后开始回放。</span>`;
+      <span>运行一次计划，或导入已有的 MoveList JSON 文件后查看设备拓扑并开始回放。</span>`;
   }
 
   /** 接收规范化后的 MoveList 并重置时间轴。 */
@@ -1051,9 +1054,8 @@ export class VisualizationWorkspace {
       : "#";
     this.elements.openGantt.setAttribute("aria-disabled", resultUrl ? "false" : "true");
     this.elements.resultButton.disabled = false;
-    this.elements.topologyToggle.disabled = false;
-    this.setTopologyVisible(false);
     this.showSingleResult();
+    this.setTopologyVisible(true);
     this.render(snapshot);
     await this.renderPerformance();
   }
@@ -1081,9 +1083,6 @@ export class VisualizationWorkspace {
     this.elements.performanceWindow.addEventListener("change", () => {
       this.performanceWindowMode = this.elements.performanceWindow.value === "full" ? "full" : "steady";
       void this.renderPerformance();
-    });
-    this.elements.topologyToggle.addEventListener("click", () => {
-      this.setTopologyVisible(this.elements.topologyPlayback.hidden);
     });
     this.elements.resultButton.addEventListener("click", () => this.show());
     this.elements.openGantt.addEventListener("click", event => {
@@ -1148,15 +1147,14 @@ export class VisualizationWorkspace {
     this.elements.groupAnalysis.hidden = true;
     this.elements.empty.hidden = true;
     this.elements.content.hidden = false;
+    this.elements.playbackEmpty.hidden = true;
   }
 
-  /** 将概要、进度控制、拓扑与当前动作作为一个回放单元统一显隐。 */
+  /** 统一切换独立回放页中的概要、时间轴、拓扑与当前动作。 */
   private setTopologyVisible(visible: boolean): void {
     if (!visible) this.pause();
     this.elements.topologyPlayback.hidden = !visible;
-    this.elements.topologyToggle.setAttribute("aria-expanded", String(visible));
-    const label = this.elements.topologyToggle.querySelector("span");
-    if (label) label.textContent = visible ? "隐藏设备拓扑" : "显示设备拓扑";
+    this.elements.playbackEmpty.hidden = visible;
   }
 
   /** 绘制当前时间对应的设备快照。 */
@@ -1231,11 +1229,16 @@ export class VisualizationWorkspace {
     this.elements.groupAnalysis.hidden = true;
     this.elements.content.hidden = true;
     this.elements.empty.hidden = false;
+    this.elements.playbackEmpty.hidden = false;
     this.elements.empty.classList.toggle("is-loading", loading);
+    this.elements.playbackEmpty.classList.toggle("is-loading", loading);
     this.elements.empty.classList.remove("is-error");
-    this.elements.empty.innerHTML = loading
+    this.elements.playbackEmpty.classList.remove("is-error");
+    const loadingMarkup = loading
       ? `<span class="visual-loader" aria-hidden="true"></span><strong>${escapeHtml(message)}</strong>`
       : `<strong>${escapeHtml(message)}</strong>`;
+    this.elements.empty.innerHTML = loadingMarkup;
+    this.elements.playbackEmpty.innerHTML = loadingMarkup;
   }
 
   /** 在工作台空状态中显示可恢复的错误。 */
@@ -1246,16 +1249,23 @@ export class VisualizationWorkspace {
     this.elements.groupAnalysis.hidden = true;
     this.elements.content.hidden = true;
     this.elements.empty.hidden = false;
+    this.elements.playbackEmpty.hidden = false;
     this.elements.empty.classList.remove("is-loading");
+    this.elements.playbackEmpty.classList.remove("is-loading");
     this.elements.empty.classList.add("is-error");
-    this.elements.empty.innerHTML = `
+    this.elements.playbackEmpty.classList.add("is-error");
+    const errorMarkup = `
       <strong>无法加载 MoveList</strong>
       <span>${escapeHtml(message)}</span>
       <label class="btn visual-import-button">${icon("upload")}重新选择文件<input type="file" accept=".json,application/json" data-visual-retry></label>`;
-    const retryInput = this.elements.empty.querySelector<HTMLInputElement>("[data-visual-retry]");
-    retryInput?.addEventListener("change", () => {
-      const file = retryInput.files?.item(0);
-      if (file) this.loadFile(file).catch(error => this.showError(error instanceof Error ? error.message : String(error)));
+    this.elements.empty.innerHTML = errorMarkup;
+    this.elements.playbackEmpty.innerHTML = errorMarkup;
+    [this.elements.empty, this.elements.playbackEmpty].forEach(container => {
+      const retryInput = container.querySelector<HTMLInputElement>("[data-visual-retry]");
+      retryInput?.addEventListener("change", () => {
+        const file = retryInput.files?.item(0);
+        if (file) this.loadFile(file).catch(error => this.showError(error instanceof Error ? error.message : String(error)));
+      });
     });
   }
 }
