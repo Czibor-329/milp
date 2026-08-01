@@ -704,6 +704,7 @@ function applyTestCase(testCase) {
   state.times.length = state.roundCount; state.rounds.length = state.roundCount; state.times[0] = 0;
   normalizeRounds(); state.drawer = null;
   visualizationWorkspace.setAnalysisConfiguration(state.routes, state.rounds);
+  visualizationWorkspace.setReplayPlan(buildPayload());
   const cleanNamesChanged = synchronizeCleanNames();
   const routeNamesChanged = synchronizeRouteNames();
   state.dirty = cleanNamesChanged || routeNamesChanged;
@@ -1855,6 +1856,7 @@ function prepareGanttView(result) {
 async function prepareWorkspaceView(result) {
   if (!result?.resultId) return null;
   visualizationWorkspace.setAnalysisConfiguration(state.routes, state.rounds);
+  visualizationWorkspace.setReplayPlan(buildPayload());
   await visualizationWorkspace.loadResult(result.resultId, state.testCaseName || "当前运行结果");
   return visualizationWorkspace.getBottleneckUtilization();
 }

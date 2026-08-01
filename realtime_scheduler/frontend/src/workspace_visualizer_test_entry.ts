@@ -10,6 +10,7 @@ export {
   buildWorkspaceSnapshot,
   createVisualizationWorkspace,
   decisionAtTime,
+  decisionSpaceSignature,
   normalizeDecisionTrace,
   normalizeMovePayload,
   renderEquipmentTopology,

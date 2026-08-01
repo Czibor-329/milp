@@ -664,6 +664,11 @@ def _execute_workspace_test_batch(
                     "error": "用户终止调度",
                 }
             artifact = deepcopy(dict(result["output"]))
+            artifact["ReplayContext"] = {
+                "schema": "machine-replay-context-v1",
+                "plan": deepcopy(selected_plan),
+                "updates": deepcopy(list(result.get("updates") or [])),
+            }
             result_id = save_result(artifact)
             log_id = save_reproduction_log(result["reproductionLog"])
             robot_wafer_dwell_time = _robot_wafer_dwell_time(

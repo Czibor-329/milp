@@ -6,7 +6,7 @@
  * 本文件不实现分析规则，也不持久化业务数据。
  */
 
-import { requestScheduleAnalysis } from "./api_client";
+import { requestReplayDecision, requestScheduleAnalysis } from "./api_client";
 import type {
   ActivityCategory,
   BottleneckUtilizationSummary,
@@ -32,6 +32,7 @@ export interface ModuleSnapshot {
   door: DoorStatus;
   wafers: string[];
   processedWafers: string[];
+  loadPortSlots: LoadPortSlotSnapshot[];
   activeMoveName: string;
   progress: number;
   environment: string;
@@ -42,6 +43,7 @@ export interface ModuleSnapshot {
 export interface RobotSnapshot {
   name: string;
   wafers: string[];
+  processedWafers: string[];
   busy: boolean;
   source: string;
   target: string;
@@ -61,6 +63,12 @@ export interface WorkspaceSnapshot {
   waferCount: number;
 }
 
+export interface LoadPortSlotSnapshot {
+  slot: number;
+  wafer: string;
+  processed: boolean;
+}
+
 export interface DecisionCandidate {
   actionId: string;
   kind: string;
@@ -77,6 +85,7 @@ export interface DecisionCandidate {
   finishTime: number;
   rank: number;
   selected: boolean;
+  executed: boolean;
   policyScore: number;
   policyPreference: number;
   expectedRemainingMakespan: number | null;
@@ -93,10 +102,12 @@ export interface DecisionTraceStep {
   roundIndex: number;
   roundKind: string;
   selectedActionId: string;
+  executedActionId: string;
   candidateCount: number;
   shownCandidateCount: number;
   candidatesTruncated: boolean;
   modelEvaluated: boolean;
+  replayEvaluated: boolean;
   candidates: DecisionCandidate[];
 }
 
@@ -117,7 +128,7 @@ interface WorkspaceElements {
   topologyPlayback: HTMLElement;
   stage: HTMLElement;
   decisionLens: HTMLElement;
-  transitionButtons: HTMLElement | null;
+  pauseOnDecisionChangeButton: HTMLButtonElement;
   activeMoves: HTMLElement;
   source: HTMLElement;
   currentTime: HTMLElement;
@@ -152,7 +163,7 @@ const PLAYBACK_FRAME_INTERVAL_MS = 40;
 const DOOR_VISUAL_MIN_SECONDS = 0.7;
 const DEFAULT_PLAYBACK_SPEED = 4;
 const PERFORMANCE_DISPLAY_TOLERANCE = 1e-6;
-const FUTURE_DECISION_COUNT = 6;
+const DEFAULT_LOAD_PORT_CAPACITY = 25;
 
 const ACTIVITY_CATEGORIES: ActivityCategory[] = [
   "process",
@@ -259,6 +270,7 @@ export function normalizeDecisionTrace(payload: unknown): DecisionTraceStep[] {
           finishTime: finiteNumber(candidate.finishTime),
           rank: finiteNumber(candidate.rank),
           selected: Boolean(candidate.selected),
+          executed: Boolean(candidate.executed),
           policyScore: finiteNumber(candidate.policyScore),
           policyPreference: Math.max(0, Math.min(1, finiteNumber(candidate.policyPreference))),
           expectedRemainingMakespan: nullableFiniteNumber(candidate.expectedRemainingMakespan),
@@ -275,10 +287,12 @@ export function normalizeDecisionTrace(payload: unknown): DecisionTraceStep[] {
         roundIndex: finiteNumber(step.roundIndex),
         roundKind: String(step.roundKind ?? ""),
         selectedActionId: String(step.selectedActionId ?? ""),
+        executedActionId: String(step.executedActionId ?? ""),
         candidateCount: Math.max(candidates.length, finiteNumber(step.candidateCount, candidates.length)),
         shownCandidateCount: Math.max(candidates.length, finiteNumber(step.shownCandidateCount, candidates.length)),
         candidatesTruncated: Boolean(step.candidatesTruncated),
         modelEvaluated: Boolean(step.modelEvaluated),
+        replayEvaluated: Boolean(step.replayEvaluated),
         candidates,
       };
     })
@@ -359,6 +373,18 @@ function isLoadPortName(name: string, type = ""): boolean {
 /** 判断名称是否代表 LoadLock 或真空缓冲腔。 */
 function isLoadLockName(name: string, type = ""): boolean {
   return type.toLowerCase() === "loadlock" || /^LL?[A-Z]$/i.test(name) || /^BUF_/i.test(name);
+}
+
+/**
+ * 从设备定义解析 LoadLock 的初始环境。
+ * 设备文件用 LastItem 记录环境（ATR 大气 / VTR 真空，与服务端 update 输出一致）；
+ * 缺省时按大气处理——LoadLock 默认连接大气侧，且后端 state 默认 ATMOSPHERE。
+ */
+function initialLoadLockEnvironment(device: DeviceDefinition | null, name: string): string {
+  const lastItem = String(device?.Stations?.[name]?.LastItem ?? "");
+  if (/VTR|VAC|真空/i.test(lastItem)) return "真空";
+  if (/ATR|ATM|大气/i.test(lastItem)) return "大气";
+  return "大气";
 }
 
 /** 判断硬件是否没有可观察的腔室门。 */
@@ -474,6 +500,134 @@ function applyCompletedTransfer(move: NormalizedMove, locations: Map<string, str
   }
 }
 
+/** 返回列表字段中与材料下标对应的站点；单站点列表会复用于所有材料。 */
+function indexedStation(move: NormalizedMove, field: string, index: number): string {
+  const stations = listValue(move[field]).map(String);
+  return String(stations[index] ?? stations[0] ?? "");
+}
+
+/** 返回列表字段中与材料下标对应的正整数槽位。 */
+function indexedSlot(move: NormalizedMove, field: string, index: number): number {
+  const slots = listValue(move[field]);
+  const slot = finiteNumber(slots[index] ?? slots[0], 0);
+  return Number.isInteger(slot) && slot > 0 ? slot : 0;
+}
+
+/** 从设备定义读取 LoadPort 容量，并兼容只声明 Slots 的旧设备。 */
+function loadPortCapacity(
+  device: DeviceDefinition | null,
+  name: string,
+  observedMaximum: number,
+): number {
+  const definition = device?.Stations?.[name] ?? {};
+  const declaredSlots = listValue(definition.Slots).map(value => finiteNumber(value, 0));
+  const declaredCapacity = Math.max(
+    finiteNumber(definition.Capacity, 0),
+    declaredSlots.length,
+    ...declaredSlots,
+  );
+  return Math.max(
+    1,
+    declaredCapacity || DEFAULT_LOAD_PORT_CAPACITY,
+    observedMaximum,
+  );
+}
+
+/**
+ * 从完整 MoveList 重建 LoadPort 的正视槽位占用。
+ * 初始晶圆由未来第一次从 LP 取片时的 SrcSlotList 定位，已完成取放动作再逐条更新，
+ * 因此晶圆离开后原槽会保持为空，回片也会落回 DestSlotList 指定的物理槽位。
+ */
+function buildLoadPortSlots(
+  records: NormalizedMove[],
+  device: DeviceDefinition | null,
+  time: number,
+  initialLocations: Map<string, string>,
+  processedMaterials: Set<string>,
+): Map<string, LoadPortSlotSnapshot[]> {
+  const names = new Set<string>();
+  for (const [name, definition] of Object.entries(device?.Stations ?? {})) {
+    if (isLoadPortName(name, String(definition?.Type ?? ""))) names.add(name);
+  }
+  for (const location of initialLocations.values()) {
+    if (isLoadPortName(location, String(device?.Stations?.[location]?.Type ?? ""))) names.add(location);
+  }
+
+  const initialByPort = new Map<string, Map<number, string>>();
+  const observedMaximum = new Map<string, number>();
+  for (const move of records) {
+    if (!PICK_MOVE_TYPES.has(move.MoveType)) continue;
+    materialIds(move).forEach((material, index) => {
+      const source = indexedStation(move, "SrcStationList", index);
+      const type = String(device?.Stations?.[source]?.Type ?? "");
+      if (!source || !isLoadPortName(source, type)) return;
+      names.add(source);
+      const slot = indexedSlot(move, "SrcSlotList", index);
+      if (!slot) return;
+      const occupancy = initialByPort.get(source) ?? new Map<number, string>();
+      if (!occupancy.has(slot)) occupancy.set(slot, material);
+      initialByPort.set(source, occupancy);
+      observedMaximum.set(source, Math.max(observedMaximum.get(source) ?? 0, slot));
+    });
+  }
+
+  const result = new Map<string, LoadPortSlotSnapshot[]>();
+  for (const name of names) {
+    const occupancy = new Map(initialByPort.get(name) ?? []);
+    const initialMaterials = [...initialLocations.entries()]
+      .filter(([, location]) => location === name)
+      .map(([material]) => material)
+      .sort(naturalCompare);
+    const assigned = new Set(occupancy.values());
+    let fallbackSlot = 1;
+    for (const material of initialMaterials) {
+      if (assigned.has(material)) continue;
+      while (occupancy.has(fallbackSlot)) fallbackSlot += 1;
+      occupancy.set(fallbackSlot, material);
+      assigned.add(material);
+    }
+
+    for (const move of records) {
+      if (move.EndTime > time) continue;
+      const materials = materialIds(move);
+      if (PICK_MOVE_TYPES.has(move.MoveType)) {
+        materials.forEach((material, index) => {
+          if (indexedStation(move, "SrcStationList", index) !== name) return;
+          const slot = indexedSlot(move, "SrcSlotList", index);
+          if (slot) occupancy.delete(slot);
+          else {
+            const current = [...occupancy.entries()].find(([, wafer]) => wafer === material);
+            if (current) occupancy.delete(current[0]);
+          }
+        });
+      } else if (PLACE_MOVE_TYPES.has(move.MoveType)) {
+        materials.forEach((material, index) => {
+          if (indexedStation(move, "DestStationList", index) !== name) return;
+          let slot = indexedSlot(move, "DestSlotList", index);
+          if (!slot) {
+            slot = 1;
+            while (occupancy.has(slot)) slot += 1;
+          }
+          occupancy.set(slot, material);
+          observedMaximum.set(name, Math.max(observedMaximum.get(name) ?? 0, slot));
+        });
+      }
+    }
+
+    const occupiedMaximum = occupancy.size ? Math.max(...occupancy.keys()) : 0;
+    const capacity = loadPortCapacity(
+      device,
+      name,
+      Math.max(observedMaximum.get(name) ?? 0, occupiedMaximum, initialMaterials.length),
+    );
+    result.set(name, Array.from({ length: capacity }, (_, index) => {
+      const wafer = occupancy.get(index + 1) ?? "";
+      return { slot: index + 1, wafer, processed: Boolean(wafer && processedMaterials.has(wafer)) };
+    }));
+  }
+  return result;
+}
+
 /** 返回动作在给定时刻的线性进度。 */
 function moveProgress(move: NormalizedMove, time: number): number {
   const duration = move.EndTime - move.StartTime;
@@ -500,7 +654,8 @@ export function buildWorkspaceSnapshot(
   const time = Math.max(0, Math.min(finiteNumber(requestedTime), endTime));
   const definitions = collectModuleDefinitions(records, device);
   const robotNames = collectRobotNames(records, device);
-  const locations = initialMaterialLocations(records);
+  const initialLocations = initialMaterialLocations(records);
+  const locations = new Map(initialLocations);
   const doorStates = new Map<string, DoorStatus>();
   const environments = new Map<string, string>();
   const processedMaterials = new Set<string>();
@@ -509,6 +664,9 @@ export function buildWorkspaceSnapshot(
 
   for (const [name, definition] of definitions) {
     doorStates.set(name, isDoorlessModule(name, definition.type) ? "doorless" : "closed");
+    if (isLoadLockName(name, definition.type)) {
+      environments.set(name, initialLoadLockEnvironment(device, name));
+    }
   }
 
   for (const move of records) {
@@ -546,6 +704,12 @@ export function buildWorkspaceSnapshot(
   for (const move of activeMoves) {
     if (isRobotName(move.ModuleName)) robotTargets.set(move.ModuleName, activeTarget(move));
   }
+  const lastRobotTargets = new Map<string, string>();
+  for (const move of records) {
+    if (move.StartTime > time || !isRobotName(move.ModuleName)) continue;
+    const target = activeTarget(move);
+    if (target) lastRobotTargets.set(move.ModuleName, target);
+  }
 
   const wafersByLocation = new Map<string, string[]>();
   for (const [material, location] of locations) {
@@ -555,6 +719,7 @@ export function buildWorkspaceSnapshot(
     wafersByLocation.set(location, wafers);
   }
   for (const wafers of wafersByLocation.values()) wafers.sort(naturalCompare);
+  const loadPortSlots = buildLoadPortSlots(records, device, time, initialLocations, processedMaterials);
 
   const modules = [...definitions.entries()].map(([name, definition]): ModuleSnapshot => {
     const moduleMoves = activeMoves.filter(move => (
@@ -590,6 +755,7 @@ export function buildWorkspaceSnapshot(
       door: doorStates.get(name) ?? "closed",
       wafers: wafersByLocation.get(name) ?? [],
       processedWafers: (wafersByLocation.get(name) ?? []).filter(wafer => processedMaterials.has(wafer)),
+      loadPortSlots: loadPortSlots.get(name) ?? [],
       activeMoveName: primaryMove ? (MOVE_NAMES[primaryMove.MoveType] ?? `动作 ${primaryMove.MoveType}`) : "",
       progress: primaryMove ? moveProgress(primaryMove, time) : 0,
       environment: environments.get(name) ?? "",
@@ -603,9 +769,10 @@ export function buildWorkspaceSnapshot(
     return {
       name,
       wafers: wafersByLocation.get(name) ?? [],
+      processedWafers: (wafersByLocation.get(name) ?? []).filter(wafer => processedMaterials.has(wafer)),
       busy: Boolean(move),
       source: move ? firstStation(move, "SrcStationList") : "",
-      target: robotTargets.get(name) ?? "",
+      target: robotTargets.get(name) ?? lastRobotTargets.get(name) ?? "",
       activeMoveName: move ? (MOVE_NAMES[move.MoveType] ?? `动作 ${move.MoveType}`) : "",
       isPreTrans: move?.MoveType === PRE_TRANS_MOVE,
       preTransProgress: move?.MoveType === PRE_TRANS_MOVE ? moveProgress(move, time) : 1,
@@ -640,7 +807,7 @@ function collectElements(root: Document): WorkspaceElements {
     topologyPlayback: required("visualTopologyPlayback"),
     stage: required("visualDeviceStage"),
     decisionLens: required("visualDecisionLens"),
-    transitionButtons: root.getElementById("visualTransitionButtons"),
+    pauseOnDecisionChangeButton: required<HTMLButtonElement>("visualPauseOnDecisionChangeButton"),
     activeMoves: required("visualActiveMoves"),
     source: required("visualSource"),
     currentTime: required("visualCurrentTime"),
@@ -718,16 +885,18 @@ function snapshotWithCandidateModules(
   for (const candidate of decision?.candidates ?? []) {
     const name = candidate.destination;
     if (!name || isRobotName(name) || knownNames.has(name)) continue;
+    const type = String(device?.Stations?.[name]?.Type ?? "");
     modules.push({
       name,
-      type: String(device?.Stations?.[name]?.Type ?? ""),
+      type,
       status: "idle",
       door: "closed",
       wafers: [],
       processedWafers: [],
+      loadPortSlots: [],
       activeMoveName: "",
       progress: 0,
-      environment: "",
+      environment: isLoadLockName(name, type) ? initialLoadLockEnvironment(device, name) : "",
       loadLockPhase: "",
       isRobotTarget: false,
     });
@@ -740,8 +909,8 @@ function snapshotWithCandidateModules(
 }
 
 /**
- * 把设备配置中尚未被 MoveList 引用的腔室并入拓扑快照，
- * 保证回放始终完整显示设备拓扑（LoadPort、LoadLock、工艺模块与辅助腔室）。
+ * 把设备配置中尚未被 MoveList 引用的腔室并入拓扑快照。
+ * 工艺模块、LoadLock 与辅助腔室完整保留；未被 MoveList 使用的 LoadPort 不再占用画布。
  * 已存在模块保留其回放状态；新增模块以空闲、门关闭的初始状态呈现。
  */
 export function snapshotWithFullDeviceModules(
@@ -753,6 +922,7 @@ export function snapshotWithFullDeviceModules(
   for (const [name, definition] of Object.entries(device?.Stations ?? {})) {
     if (knownNames.has(name) || isRobotName(name)) continue;
     const type = String(definition?.Type ?? "");
+    if (isLoadPortName(name, type)) continue;
     modules.push({
       name,
       type,
@@ -760,9 +930,10 @@ export function snapshotWithFullDeviceModules(
       door: isDoorlessModule(name, type) ? "doorless" : "closed",
       wafers: [],
       processedWafers: [],
+      loadPortSlots: [],
       activeMoveName: "",
       progress: 0,
-      environment: "",
+      environment: isLoadLockName(name, type) ? initialLoadLockEnvironment(device, name) : "",
       loadLockPhase: "",
       isRobotTarget: false,
     });
@@ -787,26 +958,51 @@ function topologyGroups(modules: ModuleSnapshot[]): TopologyGroups {
 }
 
 /** 绘制原版风格的绿色晶圆；外圈由当前腔室加工进度驱动。 */
-function renderWaferToken(wafer: string, progress: number): string {
+function renderWaferToken(wafer: string, progress: number, processed = false): string {
   const normalizedProgress = Math.max(0, Math.min(1, progress));
-  return `<span class="wafer-token" style="--wafer-progress:${normalizedProgress * 360}deg" title="晶圆 ${escapeHtml(wafer)}"><span>${escapeHtml(wafer)}</span></span>`;
+  const state = processed ? "processed" : "unprocessed";
+  return `<span class="wafer-token wafer-${state}" style="--wafer-progress:${normalizedProgress * 360}deg" title="晶圆 ${escapeHtml(wafer)}，${processed ? "已加工" : "未加工"}"><span>${escapeHtml(wafer)}</span></span>`;
 }
 
-/** 门沿用原机台朝向；LoadLock 改由正视双层结构单独表达。 */
+/** 门始终朝向对应机械手；LoadLock 改由正视双层结构单独表达。 */
 function moduleDoorSides(
   module: ModuleSnapshot,
   role: "process" | "lock" | "port" | "auxiliary",
 ): Array<"top" | "right" | "bottom" | "left"> {
   if (module.door === "doorless") return [];
   if (role === "lock") return [];
-  if (role === "port") return ["top"];
+  if (role === "port") return [];
   const name = module.name.trim().toUpperCase();
-  if (/^PM[12]$/.test(name)) return ["left"];
-  if (/^PM[56]$/.test(name) || name === "HEATER") return ["right"];
+  if (/^PM[12]$/.test(name)) return ["right"];
+  if (/^PM[56]$/.test(name) || name === "HEATER") return ["left"];
   if (/^PM[34]$/.test(name)) return ["bottom"];
   if (["AL", "ALIGNER"].includes(name)) return ["right"];
   if (["CL", "COOLER"].includes(name)) return ["left"];
   return ["top"];
+}
+
+/** 绘制 LoadPort 正视晶圆盒；空槽、未加工和已加工均保留独立语义。 */
+function renderLoadPortCassette(module: ModuleSnapshot): string {
+  const slots = module.loadPortSlots.length
+    ? module.loadPortSlots
+    : module.wafers.map((wafer, index) => ({
+        slot: index + 1,
+        wafer,
+        processed: module.processedWafers.includes(wafer),
+      }));
+  const processed = slots.filter(slot => slot.wafer && slot.processed).length;
+  const unprocessed = slots.filter(slot => slot.wafer && !slot.processed).length;
+  const slotMarkup = slots.map(slot => {
+    const state = !slot.wafer ? "empty" : slot.processed ? "processed" : "unprocessed";
+    const label = slot.wafer
+      ? `槽位 ${slot.slot}，晶圆 ${slot.wafer}，${slot.processed ? "已加工" : "未加工"}`
+      : `槽位 ${slot.slot}，空`;
+    return `<span class="load-port-slot is-${state}" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}"></span>`;
+  }).join("");
+  return `<div class="load-port-cassette" role="group" aria-label="${escapeHtml(`${module.name} 正视晶圆盒，共 ${slots.length} 个槽位，未加工 ${unprocessed}，已加工 ${processed}`)}">
+    <span class="load-port-cassette-handle" aria-hidden="true"></span>
+    <div class="load-port-slot-bank">${slotMarkup}</div>
+  </div>`;
 }
 
 /** 绘制拓扑中的紧凑腔室；可见文字只保留腔室名称和晶圆 ID。 */
@@ -817,8 +1013,9 @@ function renderModule(
 ): string {
   const waferProgress = module.status === "processing" ? module.progress : 0;
   const visibleWaferCount = role === "lock" ? 2 : 1;
+  const processedWafers = new Set(module.processedWafers ?? []);
   const wafers = module.wafers.slice(0, visibleWaferCount)
-    .map(wafer => renderWaferToken(wafer, waferProgress))
+    .map(wafer => renderWaferToken(wafer, waferProgress, processedWafers.has(wafer)))
     .join("");
   const overflow = module.wafers.length > visibleWaferCount
     ? `<span class="wafer-more">+ ${module.wafers.length - visibleWaferCount}</span>`
@@ -839,37 +1036,56 @@ function renderModule(
           ? 100
           : 0
     : 0;
-  const processedWafers = new Set(module.processedWafers ?? []);
   const loadLockLayers = role === "lock"
     ? `<div class="loadlock-layers" aria-hidden="true">${[0, 1].map(index => {
         const wafer = module.wafers[index];
         const processed = wafer ? processedWafers.has(wafer) : false;
         const waferState = processed ? "processed" : "unprocessed";
-        return `<div class="loadlock-layer ${wafer ? "is-occupied" : "is-empty"}"><span class="loadlock-layer-index">${index + 1}</span>${wafer ? `<span class="loadlock-wafer-line wafer-${waferState}" title="晶圆 ${escapeHtml(wafer)}（${processed ? "已加工" : "未加工"}）"></span>` : ""}</div>`;
+        return `<div class="loadlock-layer ${wafer ? "is-occupied" : "is-empty"}">${wafer ? `<span class="loadlock-wafer-line wafer-${waferState}" title="晶圆 ${escapeHtml(wafer)}（${processed ? "已加工" : "未加工"}）"></span>` : ""}</div>`;
       }).join("")}${overflow}</div>`
-    : `<div class="wafer-stack">${wafers}${overflow}</div>`;
-  return `
-    <article class="equipment-card equipment-${role} status-${module.status} door-${module.door} ${module.loadLockPhase ? `loadlock-${module.loadLockPhase}` : ""} ${module.isRobotTarget ? "is-target" : ""} ${candidate ? "is-candidate-destination" : ""} ${candidate?.selected ? "is-model-selected" : ""}" style="--module-progress:${Math.round(module.progress * 100)}%;--loadlock-atmosphere:${Math.max(0, Math.min(100, atmosphereLevel)).toFixed(1)}%" aria-label="${escapeHtml(`${accessibleStatus}${candidateLabel ? `，${candidateLabel}` : ""}`)}">
-      <div class="equipment-head">
-        <strong>${escapeHtml(module.name)}</strong>
-      </div>
+    : role === "process"
+      ? `<div class="process-wafer-slot ${wafers ? "is-occupied" : "is-empty"}">${wafers}</div>`
+      : role === "port"
+        ? `<div class="load-port-dock-face" aria-hidden="true"><span></span></div>`
+        : role === "auxiliary"
+          ? `<div class="auxiliary-wafer-slot ${wafers ? "is-occupied" : "is-empty"}">${wafers}</div>`
+        : `<div class="wafer-stack">${wafers}${overflow}</div>`;
+  const article = `
+    <article class="equipment-card equipment-${role} status-${module.status} door-${module.door} ${module.loadLockPhase ? `loadlock-${module.loadLockPhase}` : ""} ${module.isRobotTarget ? "is-target" : ""} ${candidate ? "is-candidate-destination" : ""} ${candidate?.selected ? "is-model-selected" : ""}" style="--module-progress:${Math.round(module.progress * 100)}%;--loadlock-atmosphere:${Math.max(0, Math.min(100, atmosphereLevel)).toFixed(1)}%;--loadlock-atmosphere-ratio:${Math.max(0, Math.min(1, atmosphereLevel / 100)).toFixed(3)}" aria-label="${escapeHtml(`${accessibleStatus}${candidateLabel ? `，${candidateLabel}` : ""}`)}">
       <div class="equipment-body">
         ${loadLockLayers}
       </div>
-      <div class="chamber-doors" aria-hidden="true">${doors}</div>
+      <div class="chamber-doors" aria-hidden="true">${role === "lock" ? '<i class="loadlock-door loadlock-door-vacuum"></i><i class="loadlock-door loadlock-door-atmosphere"></i>' : doors}</div>
     </article>`;
+  if (role === "process" || role === "auxiliary" || role === "lock") {
+    return `<strong class="equipment-external-name">${escapeHtml(module.name)}</strong>${article}`;
+  }
+  if (role === "port") {
+    return `<strong class="equipment-external-name equipment-external-name-port">${escapeHtml(module.name)}</strong><div class="load-port-assembly">${article}${renderLoadPortCassette(module)}</div>`;
+  }
+  return article;
 }
 
-/** 绘制参考图中央的机器人传输区。 */
-function renderRobotHub(robot: RobotSnapshot, environment: "vacuum" | "atmosphere"): string {
-  const wafer = robot.wafers[0] ? renderWaferToken(robot.wafers[0], 0) : "";
-  const overflow = robot.wafers.length > 1
-    ? `<span class="wafer-more">+ ${robot.wafers.length - 1}</span>`
+/** 绘制单槽仿真机器人：圆形基座、旋转臂和勺形末端执行器。 */
+function renderRobotHub(
+  robot: RobotSnapshot,
+  environment: "vacuum" | "atmosphere",
+  angleDegrees: number,
+): string {
+  const wafer = robot.wafers[0]
+    ? renderWaferToken(robot.wafers[0], 0, robot.processedWafers.includes(robot.wafers[0]))
     : "";
   return `
-    <article class="robot-hub robot-hub-${environment} ${robot.busy ? "is-busy" : ""}" aria-label="${escapeHtml(robot.name)} ${robot.busy ? "工作中" : "待命"}">
-      <strong>${escapeHtml(robot.name)}</strong>
-      <div class="robot-wafers">${wafer}${overflow}</div>
+    <article class="robot-hub robot-hub-${environment} ${robot.busy ? "is-busy" : ""}" style="--robot-arm-angle:${angleDegrees.toFixed(1)}deg" aria-label="${escapeHtml(robot.name)}，单槽机械手，${robot.busy ? "工作中" : "待命"}${robot.wafers[0] ? `，持有晶圆 ${robot.wafers[0]}` : "，槽位为空"}">
+      <span class="robot-environment-badge">${environment === "vacuum" ? "VAC" : "ATM"}</span>
+      <div class="robot-mechanism" aria-hidden="true">
+        <span class="robot-reach-sector"></span>
+        <span class="robot-base"><i></i></span>
+        <span class="robot-arm">
+          <i class="robot-arm-beam"></i>
+          <span class="robot-end-effector ${wafer ? "is-occupied" : "is-empty"}"><i class="robot-effector-palm"></i><i class="robot-fork-tine robot-fork-tine-top"></i><i class="robot-fork-tine robot-fork-tine-bottom"></i>${wafer}</span>
+        </span>
+      </div>
     </article>`;
 }
 
@@ -880,16 +1096,29 @@ interface TopologyPosition {
   heightPixels?: number;
 }
 
+interface TopologyVerticalExtent {
+  top: number;
+  bottom: number;
+}
+
 const TOPOLOGY_COLUMN_PERCENTAGES = [26, 42, 58, 74] as const;
 const TOPOLOGY_ROW_TOP_PIXELS = [52, 154, 256, 358, 460, 562, 664, 786, 929, 1031, 1133] as const;
 const TOPOLOGY_VIEWBOX_WIDTH = 1000;
 const TOPOLOGY_ITEM_SIZE = 96;
-const TOPOLOGY_LOADLOCK_WIDTH = 136;
-const TOPOLOGY_LOADLOCK_HEIGHT = 64;
-const TOPOLOGY_LOADLOCK_ROW_TOP_PIXELS = [664, 728] as const;
+const TOPOLOGY_PROCESS_WIDTH = 112;
+const TOPOLOGY_PROCESS_HEIGHT = 104;
+const TOPOLOGY_ROBOT_SIZE = 132;
+const TOPOLOGY_LOADLOCK_WIDTH = 120;
+const TOPOLOGY_LOADLOCK_HEIGHT = 72;
+const TOPOLOGY_LOADPORT_WIDTH = 144;
+const TOPOLOGY_LOADPORT_HEIGHT = 104;
+const TOPOLOGY_LOADLOCK_ROW_TOP_PIXELS = [664, 740] as const;
 const TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS = 866;
 const TOPOLOGY_LOADPORT_ROW_TOP_PIXELS = 990;
 const TOPOLOGY_CANVAS_PADDING = 28;
+const TOPOLOGY_EXTERNAL_LABEL_CLEARANCE = 22;
+const TOPOLOGY_SINGLE_PROCESS_MIDDLE_TOP = TOPOLOGY_ROW_TOP_PIXELS[4] - 32;
+const TOPOLOGY_SINGLE_PROCESS_LOWER_TOP = TOPOLOGY_ROW_TOP_PIXELS[5] - 10;
 
 /** 返回均匀分布在四列设备网格中的横向位置。 */
 function distributedTopologyColumns(count: number): number[] {
@@ -928,28 +1157,32 @@ function moduleTopologyPosition(
     PM3: { leftPercent: column[1], topPixels: row[0] },
     PM4: { leftPercent: column[2], topPixels: row[0] },
     PM2: { leftPercent: column[0], topPixels: row[1] },
-    PM1: { leftPercent: column[0], topPixels: row[2] },
+    PM1: { leftPercent: column[0], topPixels: row[2] + TOPOLOGY_EXTERNAL_LABEL_CLEARANCE },
     PM5: { leftPercent: column[3], topPixels: row[1] },
-    PM6: { leftPercent: column[3], topPixels: row[2] },
+    PM6: { leftPercent: column[3], topPixels: row[2] + TOPOLOGY_EXTERNAL_LABEL_CLEARANCE },
     BUF_A: { leftPercent: column[1], topPixels: row[3] },
     BUFA: { leftPercent: column[1], topPixels: row[3] },
     BUF_B: { leftPercent: column[2], topPixels: row[3] },
     BUFB: { leftPercent: column[2], topPixels: row[3] },
     PM8: { leftPercent: column[0], topPixels: row[4] },
-    PM7: { leftPercent: column[0], topPixels: row[5] },
+    PM7: { leftPercent: column[0], topPixels: row[5] + TOPOLOGY_EXTERNAL_LABEL_CLEARANCE },
     PM9: { leftPercent: column[3], topPixels: row[4] },
-    PM10: { leftPercent: column[3], topPixels: row[5] },
+    PM10: { leftPercent: column[3], topPixels: row[5] + TOPOLOGY_EXTERNAL_LABEL_CLEARANCE },
   };
   const singlePositions: Record<string, TopologyPosition> = {
     PM3: { leftPercent: column[1], topPixels: row[3] },
     PM4: { leftPercent: column[2], topPixels: row[3] },
-    PM2: { leftPercent: column[0], topPixels: row[4] },
-    PM1: { leftPercent: column[0], topPixels: row[5] },
-    PM5: { leftPercent: column[3], topPixels: row[4] },
-    PM6: { leftPercent: column[3], topPixels: row[5] },
+    PM2: { leftPercent: column[0], topPixels: TOPOLOGY_SINGLE_PROCESS_MIDDLE_TOP },
+    PM1: { leftPercent: column[0], topPixels: TOPOLOGY_SINGLE_PROCESS_LOWER_TOP },
+    PM5: { leftPercent: column[3], topPixels: TOPOLOGY_SINGLE_PROCESS_MIDDLE_TOP },
+    PM6: { leftPercent: column[3], topPixels: TOPOLOGY_SINGLE_PROCESS_LOWER_TOP },
   };
   const explicit = (cascade ? cascadePositions : singlePositions)[name];
-  if (explicit) return explicit;
+  if (explicit) {
+    return role === "process"
+      ? { ...explicit, widthPixels: TOPOLOGY_PROCESS_WIDTH, heightPixels: TOPOLOGY_PROCESS_HEIGHT }
+      : explicit;
+  }
   if (role === "lock") {
     const canonicalOrder: Record<string, number> = { LA: 0, LC: 1, LB: 2, LD: 3 };
     const orderedLoadLocks = [...roleModules].sort((left, right) => {
@@ -962,7 +1195,7 @@ function moduleTopologyPosition(
     const gridIndex = Math.max(0, orderedLoadLocks.findIndex(item => item.name === module.name));
     const loadLockRowGap = TOPOLOGY_LOADLOCK_ROW_TOP_PIXELS[1] - TOPOLOGY_LOADLOCK_ROW_TOP_PIXELS[0];
     return {
-      leftPercent: gridIndex % 2 === 0 ? column[1] : column[2],
+      leftPercent: gridIndex % 2 === 0 ? 40 : 60,
       topPixels: TOPOLOGY_LOADLOCK_ROW_TOP_PIXELS[0] + Math.floor(gridIndex / 2) * loadLockRowGap,
       widthPixels: TOPOLOGY_LOADLOCK_WIDTH,
       heightPixels: TOPOLOGY_LOADLOCK_HEIGHT,
@@ -973,9 +1206,19 @@ function moduleTopologyPosition(
       LP1: column[0], LP2: column[1], LP3: column[2], LP4: column[3],
     };
     if (loadPortColumns[name] !== undefined) {
-      return { leftPercent: loadPortColumns[name], topPixels: TOPOLOGY_LOADPORT_ROW_TOP_PIXELS };
+      return {
+        leftPercent: loadPortColumns[name],
+        topPixels: TOPOLOGY_LOADPORT_ROW_TOP_PIXELS,
+        widthPixels: TOPOLOGY_LOADPORT_WIDTH,
+        heightPixels: TOPOLOGY_LOADPORT_HEIGHT,
+      };
     }
-    return { leftPercent: distributedTopologyColumns(roleCount)[index], topPixels: TOPOLOGY_LOADPORT_ROW_TOP_PIXELS };
+    return {
+      leftPercent: distributedTopologyColumns(roleCount)[index],
+      topPixels: TOPOLOGY_LOADPORT_ROW_TOP_PIXELS,
+      widthPixels: TOPOLOGY_LOADPORT_WIDTH,
+      heightPixels: TOPOLOGY_LOADPORT_HEIGHT,
+    };
   }
   if (["AL", "ALIGNER"].includes(name)) return { leftPercent: column[0], topPixels: TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS };
   if (["CL", "COOLER"].includes(name)) return { leftPercent: column[3], topPixels: TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS };
@@ -995,6 +1238,9 @@ function moduleTopologyPosition(
   return {
     leftPercent: distributedTopologyColumns(Math.max(roleCount, 1))[index] ?? 50,
     topPixels: fallbackRow,
+    ...(role === "process"
+      ? { widthPixels: TOPOLOGY_PROCESS_WIDTH, heightPixels: TOPOLOGY_PROCESS_HEIGHT }
+      : {}),
   };
 }
 
@@ -1010,21 +1256,33 @@ function robotTopologyPosition(
       return {
         leftPercent: distributedTopologyColumns(robotCount)[robotIndex] ?? 50,
         topPixels: TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS,
+        widthPixels: TOPOLOGY_ROBOT_SIZE,
+        heightPixels: TOPOLOGY_ROBOT_SIZE,
       };
     }
-    return { leftPercent: 50, topPixels: TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS };
+    return {
+      leftPercent: 50,
+      topPixels: TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS,
+      widthPixels: TOPOLOGY_ROBOT_SIZE,
+      heightPixels: TOPOLOGY_ROBOT_SIZE,
+    };
   }
   if (cascade && robotCount > 1) {
     return {
       leftPercent: 50,
       topPixels: robotIndex === 0
         ? TOPOLOGY_ROW_TOP_PIXELS[4]
-        : (TOPOLOGY_ROW_TOP_PIXELS[1] + TOPOLOGY_ROW_TOP_PIXELS[2]) / 2,
+        : (TOPOLOGY_ROW_TOP_PIXELS[1] + TOPOLOGY_ROW_TOP_PIXELS[2]) / 2
+          + TOPOLOGY_EXTERNAL_LABEL_CLEARANCE / 2,
+      widthPixels: TOPOLOGY_ROBOT_SIZE,
+      heightPixels: TOPOLOGY_ROBOT_SIZE,
     };
   }
   return {
     leftPercent: 50,
-    topPixels: (TOPOLOGY_ROW_TOP_PIXELS[4] + TOPOLOGY_ROW_TOP_PIXELS[5]) / 2,
+    topPixels: (TOPOLOGY_SINGLE_PROCESS_MIDDLE_TOP + TOPOLOGY_SINGLE_PROCESS_LOWER_TOP) / 2,
+    widthPixels: TOPOLOGY_ROBOT_SIZE,
+    heightPixels: TOPOLOGY_ROBOT_SIZE,
   };
 }
 
@@ -1033,6 +1291,19 @@ function topologySvgPoint(position: TopologyPosition): { x: number; y: number } 
   return {
     x: position.leftPercent / 100 * TOPOLOGY_VIEWBOX_WIDTH,
     y: position.topPixels,
+  };
+}
+
+/** 返回一组拓扑设备的垂直物理边界，用于绘制整机区域底板。 */
+function topologyVerticalExtent(positions: TopologyPosition[]): TopologyVerticalExtent | null {
+  if (!positions.length) return null;
+  return {
+    top: Math.min(...positions.map(position => (
+      position.topPixels - (position.heightPixels ?? TOPOLOGY_ITEM_SIZE) / 2
+    ))),
+    bottom: Math.max(...positions.map(position => (
+      position.topPixels + (position.heightPixels ?? TOPOLOGY_ITEM_SIZE) / 2
+    ))),
   };
 }
 
@@ -1083,59 +1354,57 @@ function robotLoadLockPortal(
   return modulePositions.has(preferred) ? preferred : moduleName;
 }
 
-/** 生成当前机械手目标的虚线箭头，复刻参考画布的目标提示。 */
+/** 从当前决策中找到模型选择的物理搬运意图。 */
+function selectedDecisionCandidate(decision: DecisionTraceStep | null): DecisionCandidate | null {
+  if (!decision) return null;
+  return decision.candidates.find(candidate => candidate.selected)
+    ?? decision.candidates.find(candidate => candidate.actionId === decision.selectedActionId)
+    ?? decision.candidates.find(candidate => candidate.executed)
+    ?? null;
+}
+
+/** 当前没有执行动作时，用 E2E 推荐意图补足机械手箭头目标。 */
+function decisionTargetForRobot(
+  robot: RobotSnapshot,
+  decision: DecisionTraceStep | null,
+): string {
+  const candidate = selectedDecisionCandidate(decision);
+  if (!candidate || candidate.robot !== robot.name) return "";
+  if (candidate.source === robot.name) return candidate.destination;
+  if (candidate.destination === robot.name) return candidate.source;
+  return candidate.destination || candidate.source;
+}
+
+/** 生成当前机械手目标的统一实线箭头；无执行动作时仍显示 E2E 推荐意图。 */
 function renderRobotTargetArrows(
   robots: RobotSnapshot[],
   robotPositions: Map<string, TopologyPosition>,
   modulePositions: Map<string, TopologyPosition>,
   canvasHeight: number,
+  decision: DecisionTraceStep | null,
 ): string {
-  const colors = ["var(--brand)", "var(--green)", "var(--red)", "var(--muted)"];
-  const lines = robots.map((robot, index) => {
+  const color = "var(--brand)";
+  const lines = robots.map(robot => {
     const robotPosition = robotPositions.get(robot.name);
-    const targetName = robotLoadLockPortal(robot.name, robot.target, modulePositions);
+    const liveTarget = robot.target;
+    const decisionTarget = liveTarget ? "" : decisionTargetForRobot(robot, decision);
+    const target = liveTarget || decisionTarget;
+    const targetName = robotLoadLockPortal(robot.name, target, modulePositions);
     const targetPosition = modulePositions.get(targetName);
-    if (!robotPosition || !targetPosition || !robot.target) return "";
+    if (!robotPosition || !targetPosition || !target) return "";
     const robotCenter = topologySvgPoint(robotPosition);
     const targetCenter = topologySvgPoint(targetPosition);
-    let endPoint = topologyEdgePoint(
+    const endPoint = topologyEdgePoint(
       targetCenter,
       robotCenter,
       targetPosition.widthPixels,
       targetPosition.heightPixels,
     );
-    if (robot.isPreTrans) {
-      const sourceName = robotLoadLockPortal(robot.name, robot.source, modulePositions);
-      const sourcePosition = modulePositions.get(sourceName);
-      if (sourcePosition) {
-        const sourceCenter = topologySvgPoint(sourcePosition);
-        const startAngle = Math.atan2(sourceCenter.y - robotCenter.y, sourceCenter.x - robotCenter.x);
-        const endAngle = Math.atan2(targetCenter.y - robotCenter.y, targetCenter.x - robotCenter.x);
-        const angle = interpolatedRobotAngle(startAngle, endAngle, robot.preTransProgress);
-        const sourceEdge = topologyEdgePoint(
-          sourceCenter,
-          robotCenter,
-          sourcePosition.widthPixels,
-          sourcePosition.heightPixels,
-        );
-        const sourceRadius = Math.hypot(sourceEdge.x - robotCenter.x, sourceEdge.y - robotCenter.y);
-        const targetRadius = Math.hypot(endPoint.x - robotCenter.x, endPoint.y - robotCenter.y);
-        const radius = sourceRadius + (targetRadius - sourceRadius) * robot.preTransProgress;
-        endPoint = {
-          x: robotCenter.x + Math.cos(angle) * radius,
-          y: robotCenter.y + Math.sin(angle) * radius,
-        };
-      }
-    }
     const startPoint = topologyEdgePoint(robotCenter, endPoint);
-    const color = colors[index % colors.length];
-    return `<line class="${robot.isPreTrans ? "is-pre-trans" : ""}" x1="${startPoint.x}" y1="${startPoint.y}" x2="${endPoint.x}" y2="${endPoint.y}" stroke="${color}" marker-end="url(#topology-arrowhead-${index})"/>`;
+    return `<line class="${decisionTarget ? "is-decision-target" : "is-live-target"}" data-robot="${escapeHtml(robot.name)}" data-target="${escapeHtml(target)}" x1="${startPoint.x}" y1="${startPoint.y}" x2="${endPoint.x}" y2="${endPoint.y}" stroke="${color}" marker-end="url(#topology-arrowhead)"/>`;
   }).join("");
-  const markers = robots.map((_, index) => {
-    const color = colors[index % colors.length];
-    return `<marker id="topology-arrowhead-${index}" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="${color}"/></marker>`;
-  }).join("");
-  return `<svg class="topology-target-arrows" viewBox="0 0 ${TOPOLOGY_VIEWBOX_WIDTH} ${canvasHeight}" preserveAspectRatio="none" aria-hidden="true"><defs>${markers}</defs>${lines}</svg>`;
+  const marker = `<marker id="topology-arrowhead" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="${color}"/></marker>`;
+  return `<svg class="topology-target-arrows" viewBox="0 0 ${TOPOLOGY_VIEWBOX_WIDTH} ${canvasHeight}" preserveAspectRatio="none" aria-hidden="true"><defs>${marker}</defs>${lines}</svg>`;
 }
 
 /** 按参考仓库的四列网格绘制机械手、腔室、Load Lock 与装载端口。 */
@@ -1196,6 +1465,39 @@ export function renderEquipmentTopology(
     robotPositions.set(name, { ...position, topPixels: position.topPixels + verticalOffset });
   }
 
+  const positionedModules = (modules: ModuleSnapshot[]): TopologyPosition[] => modules
+    .map(module => modulePositions.get(module.name))
+    .filter((position): position is TopologyPosition => Boolean(position));
+  const positionedRobots = (robots: RobotSnapshot[]): TopologyPosition[] => robots
+    .map(robot => robotPositions.get(robot.name))
+    .filter((position): position is TopologyPosition => Boolean(position));
+  const vacuumExtent = topologyVerticalExtent([
+    ...positionedModules(groups.processModules),
+    ...positionedRobots(vacuumRobots),
+  ]);
+  const interfaceExtent = topologyVerticalExtent(positionedModules(groups.loadLocks));
+  const atmosphereExtent = topologyVerticalExtent([
+    ...positionedModules(groups.auxiliaryModules),
+    ...positionedModules(groups.loadPorts),
+    ...positionedRobots(atmosphereRobots),
+  ]);
+  const interfaceTop = interfaceExtent ? Math.max(12, interfaceExtent.top - 12) : Math.round(canvasHeight * .48);
+  const interfaceBottom = interfaceExtent ? Math.min(canvasHeight - 12, interfaceExtent.bottom + 12) : interfaceTop;
+  const vacuumTop = vacuumExtent ? Math.max(12, vacuumExtent.top - 24) : 12;
+  const vacuumBottom = Math.max(vacuumTop + 120, interfaceTop - 12);
+  const atmosphereTop = interfaceExtent ? interfaceBottom + 12 : Math.round(canvasHeight * .52);
+  const atmosphereBottom = atmosphereExtent
+    ? Math.min(canvasHeight - 12, atmosphereExtent.bottom + 24)
+    : canvasHeight - 12;
+  const machineAreaMarkup = `
+    <div class="topology-zone topology-zone-vacuum" style="--zone-top:${vacuumTop}px;--zone-height:${Math.max(120, vacuumBottom - vacuumTop)}px" aria-hidden="true">
+      <span><strong>VACUUM PROCESS AREA</strong><small>真空加工区</small></span>
+    </div>
+    ${interfaceExtent ? `<div class="topology-interface-bay" style="--zone-top:${interfaceTop}px;--zone-height:${Math.max(96, interfaceBottom - interfaceTop)}px" aria-hidden="true"><span>VACUUM / ATM INTERFACE</span></div>` : ""}
+    <div class="topology-zone topology-zone-atmosphere" style="--zone-top:${atmosphereTop}px;--zone-height:${Math.max(120, atmosphereBottom - atmosphereTop)}px" aria-hidden="true">
+      <span><strong>ATM TRANSFER AREA</strong><small>大气传输区</small></span>
+    </div>`;
+
   const renderModuleGroup = (
     modules: ModuleSnapshot[],
     role: "process" | "lock" | "port" | "auxiliary",
@@ -1216,25 +1518,56 @@ export function renderEquipmentTopology(
   ): string => robots.map(robot => {
     const position = robotPositions.get(robot.name);
     if (!position) return "";
-    return `<div class="reference-robot-position" style="--robot-left:${position.leftPercent}%;--robot-top:${position.topPixels}px">${renderRobotHub(robot, environment)}</div>`;
+    const target = robot.target || decisionTargetForRobot(robot, decision);
+    const portal = robotLoadLockPortal(robot.name, target, modulePositions);
+    const targetPosition = modulePositions.get(portal);
+    const targetAngle = targetPosition
+      ? Math.atan2(
+          targetPosition.topPixels - position.topPixels,
+          targetPosition.leftPercent / 100 * TOPOLOGY_VIEWBOX_WIDTH
+            - position.leftPercent / 100 * TOPOLOGY_VIEWBOX_WIDTH,
+        )
+      : -Math.PI / 2;
+    let armAngle = targetAngle;
+    if (robot.isPreTrans && robot.source) {
+      const sourcePortal = robotLoadLockPortal(robot.name, robot.source, modulePositions);
+      const sourcePosition = modulePositions.get(sourcePortal);
+      if (sourcePosition) {
+        const sourceAngle = Math.atan2(
+          sourcePosition.topPixels - position.topPixels,
+          sourcePosition.leftPercent / 100 * TOPOLOGY_VIEWBOX_WIDTH
+            - position.leftPercent / 100 * TOPOLOGY_VIEWBOX_WIDTH,
+        );
+        armAngle = interpolatedRobotAngle(sourceAngle, targetAngle, robot.preTransProgress);
+      }
+    }
+    const angleDegrees = armAngle * 180 / Math.PI;
+    return `<div class="reference-robot-position" style="--robot-left:${position.leftPercent}%;--robot-top:${position.topPixels}px">${renderRobotHub(robot, environment, angleDegrees)}</div>`;
   }).join("");
   const robotMarkup = renderRobotGroup(vacuumRobots, "vacuum")
     + renderRobotGroup(atmosphereRobots, "atmosphere");
   return `
     <section class="equipment-schematic" aria-label="完整设备拓扑回放">
       <div class="schematic-canvas reference-grid-canvas" style="--topology-canvas-height:${canvasHeight}px">
+        ${machineAreaMarkup}
         ${moduleMarkup}
         ${robotMarkup}
-        ${renderRobotTargetArrows(snapshot.robots, robotPositions, modulePositions, canvasHeight)}
       </div>
     </section>`;
 }
 
-/** 把可选秒数格式化为适合紧凑决策卡片的文本。 */
+/** 把可选秒数格式化为适合紧凑决策列表的文本。 */
 function modelSeconds(value: number | null, sign = false): string {
   if (value === null) return "—";
   const prefix = sign && value > PERFORMANCE_DISPLAY_TOLERANCE ? "+" : "";
-  return `${prefix}${value.toFixed(value >= 100 ? 0 : 1)} s`;
+  return `${prefix}${value.toFixed(value >= 100 ? 0 : 1)}s`;
+}
+
+/** 避免把非零偏好四舍五入成具有误导性的 0%。 */
+function modelPreference(value: number): string {
+  const percent = Math.max(0, value) * 100;
+  if (percent > 0 && Math.round(percent) === 0) return "<1%";
+  return `${Math.round(percent)}%`;
 }
 
 /** 生成候选动作的人类可读路径标签。 */
@@ -1244,113 +1577,62 @@ function decisionCandidatePath(candidate: DecisionCandidate): string {
   return `${source} → ${destination}${candidate.destinationSlot ? ` · 槽 ${candidate.destinationSlot}` : ""}`;
 }
 
-/** 复刻原版右侧控制面板：把当前 Petri 安全候选显示成紧凑按钮组。 */
-function renderTransitionButtons(decision: DecisionTraceStep | null): string {
-  if (!decision?.candidates.length) {
-    return '<div class="transition-button-empty">当前时刻没有模型可行动作</div>';
-  }
-  return [...decision.candidates]
-    .sort((left, right) => left.rank - right.rank)
-    .map(candidate => {
-      const selected = candidate.selected || candidate.actionId === decision.selectedActionId;
-      const path = decisionCandidatePath(candidate);
-      return `
-        <button class="transition-action-button ${selected ? "is-selected" : ""}" type="button" tabindex="-1" aria-disabled="true" title="${escapeHtml(path)}">
-          <span>${escapeHtml(path)}</span>
-          <small>#${candidate.rank} · ${Math.round(candidate.policyPreference * 100)}%</small>
-        </button>`;
-    }).join("");
+/** 生成与候选排序无关的决策空间签名，只在可行动作集合变化时改变。 */
+export function decisionSpaceSignature(decision: DecisionTraceStep): string {
+  const actionIds = decision.candidates
+    .map(candidate => candidate.actionId)
+    .filter(Boolean)
+    .sort();
+  return JSON.stringify([decision.candidateCount, actionIds]);
 }
 
-/** 返回当前决策之后的有限条已选动作，作为单轨迹未来规划视图。 */
-function futureDecisionSteps(
-  trace: DecisionTraceStep[],
-  current: DecisionTraceStep,
-): DecisionTraceStep[] {
-  const index = trace.indexOf(current);
-  if (index < 0) return [current];
-  return trace.slice(index, index + FUTURE_DECISION_COUNT);
-}
-
-/** 绘制 E2E 决策透镜：候选偏好、Makespan 分布和未来单轨迹。 */
-function renderDecisionLens(
-  decision: DecisionTraceStep | null,
-  trace: DecisionTraceStep[],
-): string {
+/** 绘制统一的 E2E 可行动作列表，推荐只是普通的候选状态。 */
+function renderDecisionLens(decision: DecisionTraceStep | null): string {
   if (!decision) {
     return `
       <div class="decision-empty">
-        <strong>没有模型决策轨迹</strong>
-        <p>当前结果只包含 MoveList。请使用 E2E-CTQ 重新运行，或导入含 <code>DecisionTrace</code> 的结果 JSON。</p>
+        <strong>当前时刻暂无决策</strong>
+        <p>回放到下一设备事件后，Machine 会更新可行动作并触发实时评估。</p>
       </div>`;
   }
-  const selected = decision.candidates.find(candidate => candidate.selected)
-    ?? decision.candidates.find(candidate => candidate.actionId === decision.selectedActionId)
-    ?? decision.candidates[0];
   const shownText = decision.candidatesTruncated
     ? `展示 Top ${decision.shownCandidateCount} / ${decision.candidateCount}`
     : `${decision.candidateCount} 个可行动作`;
-  const candidates = decision.candidates.map(candidate => {
-    const preference = Math.round(candidate.policyPreference * 100);
-    const uncertainty = candidate.lowerRemainingMakespan !== null && candidate.upperRemainingMakespan !== null
-      ? `${modelSeconds(candidate.lowerRemainingMakespan)}–${modelSeconds(candidate.upperRemainingMakespan)}`
-      : "未评估";
-    const material = candidate.materialIds.length
-      ? candidate.materialIds.join(" / ")
-      : `Wafer ${candidate.waferId}`;
+  const rankedCandidates = [...decision.candidates].sort((left, right) =>
+    right.policyPreference - left.policyPreference
+      || left.rank - right.rank
+      || left.actionId.localeCompare(right.actionId));
+  const candidates = rankedCandidates.map((candidate, index) => {
+    const preference = modelPreference(candidate.policyPreference);
+    const isRecommendation = index === 0;
+    const tags = `${isRecommendation ? '<span class="decision-tag is-recommendation">E2E推荐</span>' : ""}${candidate.executed ? '<span class="decision-tag is-plan">与计划一致</span>' : ""}`;
+    const delta = isRecommendation
+      ? "Δ 基准"
+      : `Δ ${modelSeconds(candidate.makespanDelta, true)}`;
     return `
-      <li class="decision-candidate ${candidate.selected ? "is-selected" : ""}">
-        <div class="decision-candidate-rank">${candidate.rank}</div>
+      <li class="decision-candidate">
+        <div class="decision-candidate-rank" aria-label="第 ${index + 1} 名">${index + 1}</div>
         <div class="decision-candidate-main">
-          <div><strong>${escapeHtml(decisionCandidatePath(candidate))}</strong>${candidate.selected ? "<span>模型选择</span>" : ""}</div>
-          <small>${escapeHtml(material)} · ${escapeHtml(candidate.robot || "Robot")} · ${escapeHtml(candidate.flowKind || candidate.kind)}</small>
-          <div class="decision-preference-track" aria-label="模型偏好 ${preference}%"><i style="transform:scaleX(${candidate.policyPreference})"></i></div>
+          <div class="decision-candidate-title"><strong>${escapeHtml(decisionCandidatePath(candidate))}</strong>${tags}</div>
+          <small>${escapeHtml(candidate.robot || "Robot")} · ${escapeHtml(candidate.flowKind || candidate.kind)}</small>
+          <div class="decision-candidate-detail">
+            <span>剩余工期 <strong>${modelSeconds(candidate.expectedRemainingMakespan)}</strong></span>
+            <span>${delta}</span>
+          </div>
         </div>
-        <div class="decision-candidate-metrics">
-          <strong>${preference}%</strong>
-          <span>Δ ${modelSeconds(candidate.makespanDelta, true)}</span>
-          <small title="剩余 Makespan 预测区间">${uncertainty}</small>
-        </div>
+        <strong class="decision-candidate-preference" aria-label="E2E 偏好 ${preference}">${preference}</strong>
       </li>`;
   }).join("");
-  const future = futureDecisionSteps(trace, decision).map((step, index) => {
-    const action = step.candidates.find(candidate => candidate.selected)
-      ?? step.candidates.find(candidate => candidate.actionId === step.selectedActionId)
-      ?? step.candidates[0];
-    if (!action) return "";
-    return `
-      <li class="future-decision-step ${index === 0 ? "is-current" : ""}">
-        <span>${index === 0 ? "当前" : `+${index}`}</span>
-        <strong>${escapeHtml(action.destination || "—")}</strong>
-        <small>${formatSeconds(step.time)} s · ${escapeHtml(action.materialIds.join("/") || `W${action.waferId}`)}</small>
-      </li>`;
-  }).join("");
-  const selectedSummary = selected
-    ? `<div class="decision-selected-summary">
-        <span>${decision.modelEvaluated ? "E2E-CTQ 选择" : "物理约束唯一解"}</span>
-        <strong>${escapeHtml(decisionCandidatePath(selected))}</strong>
-        <dl>
-          <div><dt>模型偏好</dt><dd>${Math.round(selected.policyPreference * 100)}%</dd></div>
-          <div><dt>剩余 Makespan</dt><dd>${modelSeconds(selected.expectedRemainingMakespan)}</dd></div>
-          <div><dt>相对最优 Δ</dt><dd>${modelSeconds(selected.makespanDelta, true)}</dd></div>
-        </dl>
-      </div>`
-    : "";
   return `
     <div class="decision-lens-head">
-      <div><span>AI DECISION LENS</span><strong>决策 #${decision.decisionIndex}</strong></div>
-      <small>${escapeHtml(shownText)}</small>
+      <strong>决策 #${decision.decisionIndex}</strong>
+      <span>${escapeHtml(shownText)}</span>
     </div>
-    ${selectedSummary}
-    <section class="future-trajectory" aria-labelledby="futureTrajectoryTitle">
-      <header><strong id="futureTrajectoryTitle">未来单轨迹</strong><span>后续 ${FUTURE_DECISION_COUNT} 个决策点</span></header>
-      <ol>${future}</ol>
-    </section>
     <section class="decision-candidate-section" aria-labelledby="decisionCandidatesTitle">
-      <header><strong id="decisionCandidatesTitle">候选动作</strong><span>偏好 · Δ Makespan · 预测区间</span></header>
-      <ol>${candidates}</ol>
+      <header><strong id="decisionCandidatesTitle">可行动作</strong><span>按 E2E 偏好排序</span></header>
+      ${candidates ? `<ol>${candidates}</ol>` : '<p class="decision-alternative-empty">当前没有可行动作</p>'}
     </section>
-    <p class="decision-method-note">偏好来自策略分数的同组归一化；Δ Makespan 相对当前候选中预测均值最小者。区间来自分位价值头，不代表完成时间保证。</p>`;
+    <p class="decision-method-note">Δ 为相对 E2E 推荐动作的预测工期差值。</p>`;
 }
 
 const WAFER_COLOR_PALETTE = [
@@ -1626,6 +1908,15 @@ export class VisualizationWorkspace {
   private analysisRounds: Array<Record<string, any>> = [];
   private moves: MoveRecord[] = [];
   private decisionTrace: DecisionTraceStep[] = [];
+  private replayPlan: Record<string, any> | null = null;
+  private liveDecision: DecisionTraceStep | null = null;
+  private liveDecisionKey = "";
+  private lastDecisionSpaceSignature: string | null = null;
+  private pauseOnDecisionChange = false;
+  private pauseTriggeredByDecisionChange = false;
+  private readonly replayDecisionCache = new Map<string, DecisionTraceStep>();
+  private readonly pendingReplayDecisionKeys = new Set<string>();
+  private replayDecisionRequestVersion = 0;
   private sourceName = "";
   private resultUrl = "";
   private analysisResultId = "";
@@ -1646,6 +1937,7 @@ export class VisualizationWorkspace {
     this.elements = collectElements(root);
     this.bindEvents();
     this.updatePlayButton();
+    this.updatePauseOnDecisionChangeButton();
     this.setTopologyVisible(false);
   }
 
@@ -1688,6 +1980,15 @@ export class VisualizationWorkspace {
       const resultId = resultUrl.startsWith("/api/results/")
         ? decodeURIComponent(resultUrl.slice("/api/results/".length))
         : "";
+      if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+        const replayContext = (payload as UnknownRecord).ReplayContext;
+        if (replayContext && typeof replayContext === "object" && !Array.isArray(replayContext)) {
+          const embeddedPlan = (replayContext as UnknownRecord).plan;
+          if (embeddedPlan && typeof embeddedPlan === "object" && !Array.isArray(embeddedPlan)) {
+            this.setReplayPlan(embeddedPlan as Record<string, any>);
+          }
+        }
+      }
       await this.loadMoves(
         normalizeMovePayload(payload),
         normalizeDecisionTrace(payload),
@@ -1709,6 +2010,18 @@ export class VisualizationWorkspace {
     this.analysisRoutes = structuredClone(routes ?? []);
     this.analysisRounds = structuredClone(rounds ?? []);
     if (this.moves.length) void this.renderPerformance();
+  }
+
+  /** 保存 Machine 回放所需的完整计划；任意来源 MoveList 都使用该计划实时评分。 */
+  setReplayPlan(plan: Record<string, any> | null): void {
+    this.replayPlan = plan ? structuredClone(plan) : null;
+    this.replayDecisionCache.clear();
+    this.pendingReplayDecisionKeys.clear();
+    this.liveDecision = null;
+    this.liveDecisionKey = "";
+    this.lastDecisionSpaceSignature = null;
+    this.replayDecisionRequestVersion += 1;
+    if (this.moves.length) this.render();
   }
 
   /** 返回与诊断面板一致的稳态瓶颈候选利用率，供运行结果摘要复用。 */
@@ -1743,6 +2056,12 @@ export class VisualizationWorkspace {
     this.pause();
     this.moves = [];
     this.decisionTrace = [];
+    this.liveDecision = null;
+    this.liveDecisionKey = "";
+    this.lastDecisionSpaceSignature = null;
+    this.replayDecisionCache.clear();
+    this.pendingReplayDecisionKeys.clear();
+    this.replayDecisionRequestVersion += 1;
     this.sourceName = "";
     this.resultUrl = "";
     this.analysisResultId = "";
@@ -1784,6 +2103,12 @@ export class VisualizationWorkspace {
     this.pause();
     this.moves = moves;
     this.decisionTrace = decisionTrace;
+    this.liveDecision = null;
+    this.liveDecisionKey = "";
+    this.lastDecisionSpaceSignature = null;
+    this.replayDecisionCache.clear();
+    this.pendingReplayDecisionKeys.clear();
+    this.replayDecisionRequestVersion += 1;
     this.sourceName = sourceName;
     this.resultUrl = resultUrl;
     this.analysisResultId = analysisResultId;
@@ -1824,6 +2149,11 @@ export class VisualizationWorkspace {
       if (this.playing) this.pause();
       else this.play();
     });
+    this.elements.pauseOnDecisionChangeButton.addEventListener("click", () => {
+      this.pauseOnDecisionChange = !this.pauseOnDecisionChange;
+      this.pauseTriggeredByDecisionChange = false;
+      this.updatePauseOnDecisionChangeButton();
+    });
     this.elements.speed.addEventListener("change", () => {
       this.playbackSpeed = Math.max(0.25, finiteNumber(this.elements.speed.value, DEFAULT_PLAYBACK_SPEED));
     });
@@ -1846,6 +2176,7 @@ export class VisualizationWorkspace {
       this.elements.range.value = "0";
     }
     this.playing = true;
+    this.pauseTriggeredByDecisionChange = false;
     this.previousFrameTime = performance.now();
     this.previousRenderTime = 0;
     this.updatePlayButton();
@@ -1853,11 +2184,13 @@ export class VisualizationWorkspace {
   }
 
   /** 暂停回放并保留当前时间。 */
-  private pause(): void {
+  private pause(triggeredByDecisionChange = false): void {
     this.playing = false;
+    this.pauseTriggeredByDecisionChange = triggeredByDecisionChange;
     if (this.animationFrame) cancelAnimationFrame(this.animationFrame);
     this.animationFrame = 0;
     this.updatePlayButton();
+    this.updatePauseOnDecisionChangeButton();
   }
 
   /** 推进播放时钟，并按固定上限刷新 DOM。 */
@@ -1872,6 +2205,7 @@ export class VisualizationWorkspace {
       this.previousRenderTime = timestamp;
       this.render();
     }
+    if (!this.playing) return;
     if (this.time >= endTime) {
       this.pause();
       return;
@@ -1886,6 +2220,26 @@ export class VisualizationWorkspace {
       : `${icon("play")}<span>播放</span>`;
     this.elements.playButton.setAttribute("aria-label", this.playing ? "暂停回放" : "播放回放");
     this.elements.playButton.classList.toggle("is-playing", this.playing);
+  }
+
+  /** 同步决策空间自动暂停按钮的开关、触发状态和无障碍文本。 */
+  private updatePauseOnDecisionChangeButton(): void {
+    const state = this.pauseTriggeredByDecisionChange
+      ? "已暂停"
+      : this.pauseOnDecisionChange ? "已开启" : "已关闭";
+    this.elements.pauseOnDecisionChangeButton.innerHTML = `
+      <span class="decision-switch-copy"><span>决策变化时暂停</span><strong>${state}</strong></span>
+      <span class="decision-switch-track" aria-hidden="true"><i></i></span>`;
+    this.elements.pauseOnDecisionChangeButton.setAttribute("aria-pressed", String(this.pauseOnDecisionChange));
+    this.elements.pauseOnDecisionChangeButton.setAttribute("aria-checked", String(this.pauseOnDecisionChange));
+    this.elements.pauseOnDecisionChangeButton.setAttribute(
+      "aria-label",
+      this.pauseTriggeredByDecisionChange
+        ? "决策空间已变化，回放已暂停"
+        : `决策空间变化时自动暂停：${this.pauseOnDecisionChange ? "已开启" : "已关闭"}`,
+    );
+    this.elements.pauseOnDecisionChangeButton.classList.toggle("is-active", this.pauseOnDecisionChange);
+    this.elements.pauseOnDecisionChangeButton.classList.toggle("is-triggered", this.pauseTriggeredByDecisionChange);
   }
 
   /** 切换单例分析模式，测试组统计与单例诊断不会同时出现。 */
@@ -1919,16 +2273,36 @@ export class VisualizationWorkspace {
     this.elements.waferText.textContent = String(snapshot.waferCount);
     this.elements.range.value = String(snapshot.time);
 
-    const currentDecision = decisionAtTime(this.decisionTrace, snapshot.time);
+    const replayTime = this.replayEventTime(snapshot.time);
+    const replayKey = this.replayStateKey(snapshot, replayTime);
+    const cachedDecision = this.replayDecisionCache.get(replayKey) ?? null;
+    if (cachedDecision) {
+      this.liveDecision = cachedDecision;
+      this.liveDecisionKey = replayKey;
+    }
+    const currentDecision = cachedDecision
+      ?? (this.liveDecisionKey === replayKey ? this.liveDecision : null)
+      ?? decisionAtTime(this.decisionTrace, snapshot.time);
+    const decisionSpaceReady = Boolean(
+      cachedDecision
+      || (this.liveDecisionKey === replayKey && this.liveDecision)
+      || !this.replayPlan,
+    );
+    if (
+      this.replayPlan
+      && !cachedDecision
+      && this.liveDecisionKey !== replayKey
+      && !this.pendingReplayDecisionKeys.has(replayKey)
+    ) {
+      void this.refreshReplayDecision(replayKey, replayTime);
+    }
     const topologySnapshot = snapshotWithFullDeviceModules(
       snapshotWithCandidateModules(snapshot, currentDecision, this.device),
       this.device,
     );
+    this.observeDecisionSpace(currentDecision, decisionSpaceReady);
     this.elements.stage.innerHTML = renderEquipmentTopology(topologySnapshot, currentDecision);
-    this.elements.decisionLens.innerHTML = renderDecisionLens(currentDecision, this.decisionTrace);
-    if (this.elements.transitionButtons) {
-      this.elements.transitionButtons.innerHTML = renderTransitionButtons(currentDecision);
-    }
+    this.elements.decisionLens.innerHTML = renderDecisionLens(currentDecision);
 
     this.elements.activeMoves.innerHTML = snapshot.activeMoves.length
       ? snapshot.activeMoves.map(move => `
@@ -1939,6 +2313,66 @@ export class VisualizationWorkspace {
           <time>${formatSeconds(finiteNumber(move.StartTime))}–${formatSeconds(finiteNumber(move.EndTime))} s</time>
         </li>`).join("")
       : '<li class="active-move-empty">当前时刻没有执行中的动作</li>';
+  }
+
+  /** 观察候选动作集合；初次结果只建立基线，后续变化才触发暂停。 */
+  private observeDecisionSpace(decision: DecisionTraceStep | null, ready: boolean): void {
+    if (!decision || !ready) return;
+    const nextSignature = decisionSpaceSignature(decision);
+    const changed = this.lastDecisionSpaceSignature !== null
+      && this.lastDecisionSpaceSignature !== nextSignature;
+    this.lastDecisionSpaceSignature = nextSignature;
+    if (changed && this.pauseOnDecisionChange && this.playing) {
+      this.pause(true);
+    }
+  }
+
+  /** 返回不晚于当前时刻的最近 Move 开始/结束边界，供 Machine 读取稳定切片。 */
+  private replayEventTime(time: number): number {
+    let eventTime = 0;
+    for (const move of this.moves) {
+      const startTime = finiteNumber(move.StartTime);
+      const endTime = finiteNumber(move.EndTime);
+      if (startTime <= time + PERFORMANCE_DISPLAY_TOLERANCE) eventTime = Math.max(eventTime, startTime);
+      if (endTime <= time + PERFORMANCE_DISPLAY_TOLERANCE) eventTime = Math.max(eventTime, endTime);
+    }
+    return eventTime;
+  }
+
+  /** 生成只在设备事件变化时更新的评估键，避免动画帧重复执行 E2E 前向。 */
+  private replayStateKey(snapshot: WorkspaceSnapshot, replayTime: number): string {
+    const activeMoveIds = snapshot.activeMoves
+      .map(move => finiteNumber(move.MoveID))
+      .sort((left, right) => left - right)
+      .join(",");
+    return `${replayTime.toFixed(6)}:${snapshot.completedMoves}:${activeMoveIds}`;
+  }
+
+  /** 异步请求当前 Machine 候选；过期响应不会覆盖用户已经拖到的新时刻。 */
+  private async refreshReplayDecision(replayKey: string, replayTime: number): Promise<void> {
+    const requestVersion = ++this.replayDecisionRequestVersion;
+    this.pendingReplayDecisionKeys.add(replayKey);
+    try {
+      const rawDecision = await requestReplayDecision({
+        resultId: this.analysisResultId || undefined,
+        moves: this.analysisResultId ? undefined : this.moves,
+        plan: this.replayPlan,
+        time: replayTime,
+      });
+      const decision = normalizeDecisionTrace({ DecisionTrace: [rawDecision] })[0] ?? null;
+      if (requestVersion !== this.replayDecisionRequestVersion || !decision) return;
+      this.replayDecisionCache.set(replayKey, decision);
+      const currentSnapshot = buildWorkspaceSnapshot(this.moves, this.device, this.time);
+      const currentReplayTime = this.replayEventTime(this.time);
+      if (this.replayStateKey(currentSnapshot, currentReplayTime) !== replayKey) return;
+      this.liveDecision = decision;
+      this.liveDecisionKey = replayKey;
+      this.render();
+    } catch (_error) {
+      // 静态 DecisionTrace 仍作为旧结果和缺少完整配置的导入文件的只读兜底。
+    } finally {
+      this.pendingReplayDecisionKeys.delete(replayKey);
+    }
   }
 
   /** 请求并绘制与播放时刻无关的服务端排程性能诊断。 */

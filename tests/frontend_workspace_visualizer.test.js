@@ -120,6 +120,7 @@ class FakeElement {
 
   click() {
     this.clicked = true;
+    this.listeners.get("click")?.({ preventDefault() {} });
   }
 }
 
@@ -133,6 +134,7 @@ function fakeWorkspaceDocument() {
     "visualTopologyPlayback",
     "visualDeviceStage",
     "visualDecisionLens",
+    "visualPauseOnDecisionChangeButton",
     "visualActiveMoves",
     "visualSource",
     "visualCurrentTime",
@@ -187,6 +189,27 @@ test("回放进度、MoveList 与中文工具入口合并在顶部紧凑工具�
   assert.match(toolbar, /id="visualImportButton"[^>]*>[\s\S]*导入 MoveList/);
   assert.match(toolbar, /id="visualOpenGantt"[^>]*>打开甘特图</);
   assert.doesNotMatch(html, /petri-utils/);
+  assert.match(html, /id="visualPauseOnDecisionChangeButton"/);
+  assert.doesNotMatch(html, /id="visualTransitionButtons"|MODEL EVALUATION/);
+});
+
+test("E2E 面板保持扁平统一列表与标准开关视觉契约", () => {
+  const html = fs.readFileSync(
+    path.join(__dirname, "../realtime_scheduler/frontend/config_editor.html"),
+    "utf8",
+  );
+  const css = fs.readFileSync(
+    path.join(__dirname, "../realtime_scheduler/frontend/assets/config_editor.css"),
+    "utf8",
+  );
+
+  assert.match(html, /<h2 class="petri-panel-title">实时 E2E 评估<\/h2>/);
+  assert.match(html, /id="visualPauseOnDecisionChangeButton"[^>]*role="switch"[^>]*aria-checked="false"/);
+  assert.match(css, /\.decision-lens-panel[^\n]*border-radius: 6px[^\n]*box-shadow: none/);
+  assert.match(css, /\.decision-auto-pause[^\n]*min-height: 44px/);
+  assert.match(css, /\.decision-tag\.is-recommendation/);
+  assert.match(css, /body\.theme-dark \.decision-tag\.is-recommendation/);
+  assert.doesNotMatch(css, /decision-selected-summary|decision-preference-track|decision-auto-pause:hover|decision-candidate:hover/);
 });
 
 test("E2E 决策轨迹保留候选偏好、Makespan 增量和未来决策时刻", () => {
@@ -220,6 +243,36 @@ test("E2E 决策轨迹保留候选偏好、Makespan 增量和未来决策时刻"
   assert.equal(trace[1].candidates[1].makespanDelta, 6);
   assert.equal(logic.decisionAtTime(trace, 7).decisionIndex, 1);
   assert.equal(logic.decisionAtTime(trace, 8).decisionIndex, 2);
+});
+
+test("决策空间签名忽略排序和分数，仅关注候选集合变化", () => {
+  const [first] = logic.normalizeDecisionTrace({
+    DecisionTrace: [{
+      candidateCount: 2,
+      candidates: [
+        { actionId: "move-a", rank: 1, policyPreference: 0.8 },
+        { actionId: "move-b", rank: 2, policyPreference: 0.2 },
+      ],
+    }],
+  });
+  const [reranked] = logic.normalizeDecisionTrace({
+    DecisionTrace: [{
+      candidateCount: 2,
+      candidates: [
+        { actionId: "move-b", rank: 1, policyPreference: 0.9 },
+        { actionId: "move-a", rank: 2, policyPreference: 0.1 },
+      ],
+    }],
+  });
+  const [changed] = logic.normalizeDecisionTrace({
+    DecisionTrace: [{
+      candidateCount: 1,
+      candidates: [{ actionId: "move-a", rank: 1, policyPreference: 1 }],
+    }],
+  });
+
+  assert.equal(logic.decisionSpaceSignature(first), logic.decisionSpaceSignature(reranked));
+  assert.notEqual(logic.decisionSpaceSignature(first), logic.decisionSpaceSignature(changed));
 });
 
 test("结果分析与拓扑回放使用独立界面并共享当前 MoveList", async () => {
@@ -258,8 +311,21 @@ test("结果分析与拓扑回放使用独立界面并共享当前 MoveList", as
   assert.equal(root.elements.get("visualContent").hidden, false);
   assert.equal(topology.hidden, false);
   assert.equal(root.elements.get("visualPlaybackEmpty").hidden, true);
-  assert.match(root.elements.get("visualDecisionLens").innerHTML, /AI DECISION LENS/);
+  const lens = root.elements.get("visualDecisionLens").innerHTML;
+  assert.match(lens, /决策 #0/);
+  assert.match(lens, /可行动作/);
+  assert.match(lens, /E2E推荐/);
+  assert.match(lens, /Δ 基准/);
+  assert.doesNotMatch(lens, /实时推荐|物理约束结果|decision-selected-summary|其它可行动作|decision-preference-track/);
   assert.match(root.elements.get("visualDeviceStage").innerHTML, /PM2/);
+
+  const pauseOnChange = root.elements.get("visualPauseOnDecisionChangeButton");
+  assert.equal(pauseOnChange.getAttribute("aria-pressed"), "false");
+  assert.equal(pauseOnChange.getAttribute("aria-checked"), "false");
+  pauseOnChange.click();
+  assert.equal(pauseOnChange.getAttribute("aria-pressed"), "true");
+  assert.equal(pauseOnChange.getAttribute("aria-checked"), "true");
+  assert.match(pauseOnChange.innerHTML, /已开启/);
 
   workspace.showGroupAnalysis("<h2>组级统计</h2>");
   assert.equal(topology.hidden, false);
@@ -269,6 +335,107 @@ test("结果分析与拓扑回放使用独立界面并共享当前 MoveList", as
   assert.equal(root.elements.get("testGroupAnalysisPanel").hidden, true);
   assert.equal(root.elements.get("visualContent").hidden, false);
   assert.equal(root.workspaceTab.clicked, true);
+});
+
+test("E2E 面板统一候选结构、按偏好排序并格式化低偏好和工期差值", async () => {
+  const root = fakeWorkspaceDocument();
+  const workspace = logic.createVisualizationWorkspace(root);
+  await workspace.loadFile({
+    name: "decision-panel.json",
+    async text() {
+      return JSON.stringify({
+        MoveList: moves,
+        DecisionTrace: [{
+          decisionIndex: 65,
+          time: 0,
+          candidateCount: 3,
+          candidates: [
+            {
+              actionId: "second", rank: 1, source: "VTR", destination: "PM1",
+              robot: "VTR", flowKind: "internal", policyPreference: 0.004,
+              expectedRemainingMakespan: 19.5, makespanDelta: 10.3,
+            },
+            {
+              actionId: "recommended", rank: 2, source: "LP1", destination: "ATR",
+              robot: "ATR", flowKind: "internal", policyPreference: 0.996,
+              expectedRemainingMakespan: 2.5, makespanDelta: 0, executed: true,
+            },
+            {
+              actionId: "third", rank: 3, source: "ATR", destination: "LA",
+              robot: "ATR", flowKind: "feed", policyPreference: 0,
+              expectedRemainingMakespan: 20, makespanDelta: 11.2,
+            },
+          ],
+        }],
+      });
+    },
+  });
+
+  const lens = root.elements.get("visualDecisionLens").innerHTML;
+  assert.match(lens, /决策 #65[\s\S]*3 个可行动作/);
+  assert.ok(lens.indexOf("LP1 → ATR") < lens.indexOf("VTR → PM1"), "动作应按 E2E 偏好降序排列");
+  assert.match(lens, /LP1 → ATR[\s\S]*E2E推荐[\s\S]*与计划一致[\s\S]*99\.6%|LP1 → ATR[\s\S]*E2E推荐[\s\S]*与计划一致[\s\S]*100%/);
+  assert.match(lens, /VTR → PM1[\s\S]*VTR · internal[\s\S]*剩余工期 <strong>19\.5s<\/strong>[\s\S]*Δ \+10\.3s[\s\S]*<1%/);
+  assert.match(lens, /Δ 基准/);
+  assert.match(lens, /Δ 为相对 E2E 推荐动作的预测工期差值。/);
+  assert.equal((lens.match(/class="decision-candidate"/g) || []).length, 3);
+  assert.doesNotMatch(lens, /剩余 Makespan|预测区间|lowerRemainingMakespan|upperRemainingMakespan/);
+});
+
+test("开启保护后，决策空间变化会暂停回放并显示触发状态", async () => {
+  const originalRequestAnimationFrame = global.requestAnimationFrame;
+  const originalCancelAnimationFrame = global.cancelAnimationFrame;
+  let scheduledFrame = null;
+  global.requestAnimationFrame = callback => {
+    scheduledFrame = callback;
+    return 1;
+  };
+  global.cancelAnimationFrame = () => {};
+
+  try {
+    const root = fakeWorkspaceDocument();
+    const workspace = logic.createVisualizationWorkspace(root);
+    await workspace.loadFile({
+      name: "decision-change.json",
+      async text() {
+        return JSON.stringify({
+          MoveList: moves,
+          DecisionTrace: [
+            {
+              decisionIndex: 0,
+              time: 0,
+              candidateCount: 1,
+              candidates: [{ actionId: "move-a", rank: 1, selected: true }],
+            },
+            {
+              decisionIndex: 1,
+              time: 1,
+              candidateCount: 2,
+              candidates: [
+                { actionId: "move-b", rank: 1, selected: true },
+                { actionId: "move-c", rank: 2 },
+              ],
+            },
+          ],
+        });
+      },
+    });
+
+    const autoPause = root.elements.get("visualPauseOnDecisionChangeButton");
+    autoPause.click();
+    root.elements.get("visualPlayButton").click();
+    assert.match(root.elements.get("visualPlayButton").innerHTML, /暂停/);
+    assert.equal(typeof scheduledFrame, "function");
+
+    scheduledFrame(performance.now() + 300);
+    assert.match(root.elements.get("visualPlayButton").innerHTML, /播放/);
+    assert.match(autoPause.innerHTML, /已暂停/);
+    assert.equal(autoPause.getAttribute("aria-checked"), "true");
+    assert.equal(autoPause.getAttribute("aria-label"), "决策空间已变化，回放已暂停");
+  } finally {
+    global.requestAnimationFrame = originalRequestAnimationFrame;
+    global.cancelAnimationFrame = originalCancelAnimationFrame;
+  }
 });
 
 test("时间轴准确回放腔室门的开启和关闭过程", () => {
@@ -329,12 +496,15 @@ function positionsFromTopology(topology) {
   const pattern = /class="reference-(module|robot)-position" style="--(?:module|robot)-left:([\d.]+)%;--(?:module|robot)-top:(\d+)px">([\s\S]*?)(?=<div class="reference-|\s*<svg class="topology-target-arrows)/g;
   let match;
   while ((match = pattern.exec(topology)) !== null) {
+    const isRobot = match[1] === "robot";
     const isLoadLock = /class="equipment-card equipment-lock\b/.test(match[4]);
+    const isProcess = /class="equipment-card equipment-process\b/.test(match[4]);
+    const isLoadPort = /class="equipment-card equipment-port\b/.test(match[4]);
     positions.push({
       x: Number(match[2]) / 100 * 1000,
       y: Number(match[3]),
-      width: isLoadLock ? 136 : 96,
-      height: isLoadLock ? 64 : 96,
+      width: isRobot ? 132 : isLoadLock ? 120 : isLoadPort ? 144 : isProcess ? 112 : 96,
+      height: isRobot ? 132 : isLoadLock ? 72 : isLoadPort ? 104 : isProcess ? 122 : 96,
     });
   }
   return positions;
@@ -357,7 +527,7 @@ function assertTopologyComplete(topology, requiredNames) {
   }
 }
 
-test("单真空机械手拓扑完整显示 LP1-LP4、LA/LB 与 PM1-PM6 且不重叠", () => {
+test("单真空机械手拓扑只显示 MoveList 使用的 LP，并完整显示腔室且不重叠", () => {
   const fullDevice = {
     Stations: {
       LP1: { Type: "LoadPort" }, LP2: { Type: "LoadPort" },
@@ -374,30 +544,37 @@ test("单真空机械手拓扑完整显示 LP1-LP4、LA/LB 与 PM1-PM6 且不重
     },
     Robots: { ATR: { Type: "ATMRobot" }, VTR: { Type: "VTMRobot" } },
   };
-  const required = ["LP1", "LP2", "LP3", "LP4", "LA", "LB", "PM1", "PM2", "PM3", "PM4", "PM5", "PM6"];
+  const required = ["LP1", "LA", "LB", "PM1", "PM2", "PM3", "PM4", "PM5", "PM6"];
   const snapshot = logic.buildWorkspaceSnapshot(moves, fullDevice, 0);
   const topology = logic.renderEquipmentTopology(
     logic.snapshotWithFullDeviceModules(snapshot, fullDevice),
     null,
   );
   assertTopologyComplete(topology, required);
+  assert.doesNotMatch(topology, />LP[2-4]</);
   assert.doesNotMatch(topology, />Buffer[1-4]</);
   assert.doesNotMatch(topology, />DummyPort</);
   assert.doesNotMatch(topology, />heater</i);
   assert.doesNotMatch(topology, /DEVICE TOPOLOGY|设备配置全量模块/);
   assert.match(topology, /--module-left:26%;/);
-  assert.match(topology, /--topology-canvas-height:784px/);
+  assert.match(topology, /--topology-canvas-height:792px/);
+  assert.match(topology, /class="topology-zone topology-zone-vacuum"/);
+  assert.match(topology, /VACUUM PROCESS AREA/);
+  assert.match(topology, /class="topology-interface-bay"/);
+  assert.match(topology, /VACUUM \/ ATM INTERFACE/);
+  assert.match(topology, /class="topology-zone topology-zone-atmosphere"/);
+  assert.match(topology, /ATM TRANSFER AREA/);
 
   const modulePosition = name => {
     const match = new RegExp(
-      `class="reference-module-position" style="--module-left:([\\d.]+)%;--module-top:(\\d+)px">(?:(?!class="reference-module-position")[\\s\\S])*?<strong>${name}</strong>`,
+      `class="reference-module-position" style="--module-left:([\\d.]+)%;--module-top:(\\d+)px">(?:(?!class="reference-module-position")[\\s\\S])*?<strong[^>]*>${name}</strong>`,
     ).exec(topology);
     assert.ok(match, `应找到 ${name} 的坐标`);
     return { x: Number(match[1]), y: Number(match[2]) };
   };
   const robotPosition = name => {
     const match = new RegExp(
-      `class="reference-robot-position" style="--robot-left:([\\d.]+)%;--robot-top:(\\d+)px">(?:(?!class="reference-robot-position")[\\s\\S])*?<strong>${name}</strong>`,
+      `class="reference-robot-position" style="--robot-left:([\\d.]+)%;--robot-top:(\\d+)px">(?:(?!class="reference-robot-position")[\\s\\S])*?aria-label="${name}，`,
     ).exec(topology);
     assert.ok(match, `应找到 ${name} 的坐标`);
     return { x: Number(match[1]), y: Number(match[2]) };
@@ -407,21 +584,30 @@ test("单真空机械手拓扑完整显示 LP1-LP4、LA/LB 与 PM1-PM6 且不重
   const vtr = robotPosition("VTR");
   assert.equal(vtr.x, 50);
   assert.equal(vtr.y, (pm1.y + pm2.y) / 2);
+  const vacuumZone = /class="topology-zone topology-zone-vacuum" style="--zone-top:([\d.]+)px;--zone-height:([\d.]+)px"/.exec(topology);
+  assert.ok(vacuumZone, "应找到真空加工区边界");
+  const vacuumTop = Number(vacuumZone[1]);
+  const vacuumBottom = vacuumTop + Number(vacuumZone[2]);
+  for (const name of ["PM1", "PM2", "PM3", "PM4", "PM5", "PM6"]) {
+    const position = modulePosition(name);
+    assert.ok(position.y - 52 >= vacuumTop && position.y + 52 <= vacuumBottom, `${name} 应完整位于真空加工区内`);
+  }
+  assert.ok(vtr.y - 66 >= vacuumTop && vtr.y + 66 <= vacuumBottom, "VTR 应完整位于真空加工区内");
 
   const la = modulePosition("LA");
   const lb = modulePosition("LB");
   const lc = modulePosition("LC");
   const ld = modulePosition("LD");
-  assert.deepEqual([la.x, lc.x], [42, 58], "第一行应为 LA / LC");
-  assert.deepEqual([lb.x, ld.x], [42, 58], "第二行应为 LB / LD");
+  assert.deepEqual([la.x, lc.x], [40, 60], "第一行应为 LA / LC，并在中等画布保持清晰间距");
+  assert.deepEqual([lb.x, ld.x], [40, 60], "第二行应为 LB / LD，并在中等画布保持清晰间距");
   assert.equal(la.y, lc.y);
   assert.equal(lb.y, ld.y);
-  assert.equal(lb.y - la.y, 64, "上下两排 LoadLock 应无缝拼接");
+  assert.equal(lb.y - la.y, 76, "上下两排 LoadLock 应保留 4px 腔体间隙");
   assert.match(topology, /class="loadlock-layers"/);
   assert.equal((topology.match(/class="loadlock-layer /g) || []).length, 8, "四个 LoadLock 各显示两层");
 });
 
-test("双真空机械手级联拓扑完整显示 LP1-LP4、LA/LB 与 PM1-PM6 且不重叠", () => {
+test("双真空机械手级联拓扑隐藏未使用 LP，并完整显示腔室且不重叠", () => {
   const fullDevice = {
     Stations: {
       LP1: { Type: "LoadPort" }, LP2: { Type: "LoadPort" },
@@ -437,13 +623,14 @@ test("双真空机械手级联拓扑完整显示 LP1-LP4、LA/LB 与 PM1-PM6 且
     },
     Robots: { ATR: { Type: "ATMRobot" }, VTR_1: { Type: "VTMRobot" }, VTR_2: { Type: "HighVTMRobot" } },
   };
-  const required = ["LP1", "LP2", "LP3", "LP4", "LA", "LB", "PM1", "PM2", "PM3", "PM4", "PM5", "PM6"];
+  const required = ["LP1", "LA", "LB", "PM1", "PM2", "PM3", "PM4", "PM5", "PM6"];
   const snapshot = logic.buildWorkspaceSnapshot(moves, fullDevice, 0);
   const topology = logic.renderEquipmentTopology(
     logic.snapshotWithFullDeviceModules(snapshot, fullDevice),
     null,
   );
   assertTopologyComplete(topology, required);
+  assert.doesNotMatch(topology, />LP[2-4]</);
 });
 
 test("多个大气机械手在同一排横向分布且不重叠", () => {
@@ -467,7 +654,8 @@ test("多个大气机械手在同一排横向分布且不重叠", () => {
     logic.snapshotWithFullDeviceModules(snapshot, multiAtrDevice),
     null,
   );
-  assertTopologyComplete(topology, ["LP1", "LP2", "LA", "LB", "PM1", "PM2"]);
+  assertTopologyComplete(topology, ["LP1", "LA", "LB", "PM1", "PM2"]);
+  assert.doesNotMatch(topology, />LP2</);
   const reAtr = /class="reference-robot-position" style="--robot-left:([\d.]+)%;--robot-top:(\d+)px">\s*<article class="robot-hub[^"]*"[^>]*aria-label="(ATR_\d)[^"]*"/g;
   let match;
   const found = new Map();
@@ -478,6 +666,117 @@ test("多个大气机械手在同一排横向分布且不重叠", () => {
   const positions = [...found.values()];
   assert.ok(Math.abs(positions[0].x - positions[1].x) >= 96, "两个大气机械手应横向分开");
   assert.equal(positions[0].y, positions[1].y, "两个大气机械手应在同一排");
+});
+
+test("LoadPort 按物理槽位显示未加工、空槽与回片后的已加工状态", () => {
+  const slotDevice = {
+    Stations: {
+      LP1: { Type: "LoadPort", Capacity: 3, Slots: [1, 2, 3] },
+      PM1: { Type: "Process" },
+    },
+    Robots: { ATR: {} },
+  };
+  const slotMoves = [
+    { MoveID: 1, MoveType: 0, ModuleName: "ATR", SrcStationList: ["LP1"], SrcSlotList: [1], MatIDList: ["W1"], StartTime: 0, EndTime: 1 },
+    { MoveID: 2, MoveType: 1, ModuleName: "ATR", DestStationList: ["PM1"], DestSlotList: [1], MatIDList: ["W1"], StartTime: 1, EndTime: 2 },
+    { MoveID: 3, MoveType: 9, ModuleName: "PM1", MatIDList: ["W1"], StartTime: 2, EndTime: 3 },
+    { MoveID: 4, MoveType: 0, ModuleName: "ATR", SrcStationList: ["PM1"], SrcSlotList: [1], MatIDList: ["W1"], StartTime: 3, EndTime: 4 },
+    { MoveID: 5, MoveType: 1, ModuleName: "ATR", DestStationList: ["LP1"], DestSlotList: [1], MatIDList: ["W1"], StartTime: 4, EndTime: 5 },
+    { MoveID: 6, MoveType: 0, ModuleName: "ATR", SrcStationList: ["LP1"], SrcSlotList: [2], MatIDList: ["W2"], StartTime: 10, EndTime: 11 },
+  ];
+
+  const initial = moduleAt(logic.buildWorkspaceSnapshot(slotMoves, slotDevice, 0), "LP1");
+  assert.deepEqual(initial.loadPortSlots, [
+    { slot: 1, wafer: "W1", processed: false },
+    { slot: 2, wafer: "W2", processed: false },
+    { slot: 3, wafer: "", processed: false },
+  ]);
+
+  const departed = moduleAt(logic.buildWorkspaceSnapshot(slotMoves, slotDevice, 1), "LP1");
+  assert.equal(departed.loadPortSlots[0].wafer, "", "取出的晶圆必须留下空槽");
+  assert.equal(departed.loadPortSlots[1].wafer, "W2");
+  const departedTopology = logic.renderEquipmentTopology(
+    logic.buildWorkspaceSnapshot(slotMoves, slotDevice, 1),
+    null,
+  );
+  assert.match(departedTopology, /class="load-port-cassette"/);
+  assert.match(departedTopology, /槽位 1，空/);
+  assert.match(departedTopology, /槽位 2，晶圆 W2，未加工/);
+
+  const returned = moduleAt(logic.buildWorkspaceSnapshot(slotMoves, slotDevice, 5), "LP1");
+  assert.deepEqual(returned.loadPortSlots[0], { slot: 1, wafer: "W1", processed: true });
+  const returnedTopology = logic.renderEquipmentTopology(
+    logic.buildWorkspaceSnapshot(slotMoves, slotDevice, 5),
+    null,
+  );
+  assert.match(returnedTopology, /槽位 1，晶圆 W1，已加工/);
+  assert.match(returnedTopology, /load-port-slot is-processed/);
+  assert.match(returnedTopology, /equipment-external-name equipment-external-name-port">LP1</);
+  assert.doesNotMatch(returnedTopology, /load-port-slot-summary|>RAW\s|>DONE\s/);
+});
+
+test("E2E 决策在机器人尚未执行时驱动单槽机械臂朝向且不再绘制箭头", () => {
+  const idleSnapshot = logic.buildWorkspaceSnapshot(moves, device, 0);
+  const decision = {
+    decisionIndex: 0,
+    selectedActionId: "pick-lp1",
+    candidates: [{
+      actionId: "pick-lp1",
+      selected: true,
+      executed: false,
+      robot: "ATR",
+      source: "LP1",
+      destination: "ATR",
+    }],
+  };
+  const topology = logic.renderEquipmentTopology(idleSnapshot, decision);
+  assert.match(topology, /class="robot-hub robot-hub-atmosphere[^>]*style="--robot-arm-angle:[\d.-]+deg"[^>]*aria-label="ATR，单槽机械手/);
+  assert.match(topology, /class="robot-end-effector is-empty"/);
+  assert.match(topology, /class="robot-fork-tine robot-fork-tine-top"/);
+  assert.match(topology, /class="robot-fork-tine robot-fork-tine-bottom"/);
+  assert.match(topology, /class="robot-environment-badge">ATM</);
+  assert.doesNotMatch(topology, /topology-target-arrows|<line /);
+});
+
+test("机械手清除旧坐标偏移，并按 PRE_TRANS 进度连续旋转", () => {
+  const rotationDevice = {
+    Stations: { PM1: { Type: "Process" }, PM5: { Type: "Process" } },
+    Robots: { VTR: {} },
+  };
+  const rotationMoves = [
+    {
+      MoveID: 1, MoveType: 5, ModuleName: "VTR",
+      SrcStationList: ["PM1"], DestStationList: ["PM5"],
+      StartTime: 0, EndTime: 10,
+    },
+    { MoveID: 2, MoveType: 9, ModuleName: "PM5", StartTime: 10, EndTime: 20 },
+  ];
+  const angleAt = time => {
+    const topology = logic.renderEquipmentTopology(
+      logic.buildWorkspaceSnapshot(rotationMoves, rotationDevice, time),
+      null,
+    );
+    const match = /style="--robot-arm-angle:([\d.-]+)deg"/.exec(topology);
+    assert.ok(match);
+    return Number(match[1]);
+  };
+  assert.notEqual(angleAt(1), angleAt(5));
+  assert.notEqual(angleAt(5), angleAt(9));
+  const completedSnapshot = logic.buildWorkspaceSnapshot(rotationMoves, rotationDevice, 10);
+  assert.equal(completedSnapshot.robots[0].target, "PM5");
+  assert.equal(angleAt(10), angleAt(15));
+
+  const css = fs.readFileSync(
+    path.join(__dirname, "../realtime_scheduler/frontend/assets/config_editor.css"),
+    "utf8",
+  );
+  assert.match(css, /\.robot-hub-vacuum[^}]*top:\s*auto;\s*left:\s*auto;/);
+  assert.match(css, /\.equipment-process[^}]*border-radius:\s*3px;\s*clip-path:\s*none;/);
+  assert.match(css, /\.equipment-port[^}]*border:\s*2px solid #667b94;\s*border-radius:\s*3px;\s*clip-path:\s*none;/);
+  assert.match(css, /\.robot-arm[^}]*width:\s*88px;/);
+  assert.match(css, /\.robot-fork-tine[^}]*width:\s*27px;/);
+  assert.doesNotMatch(css, /\.robot-end-effector::after/);
+  assert.match(css, /\.equipment-card\.door-open :is\(\.chamber-door, \.loadlock-door\)[^}]*visibility:\s*hidden;\s*opacity:\s*0;/);
 });
 
 test("LoadLock 空层不画晶圆线，并区分已加工晶圆且按环境变化蓝色液位", () => {
@@ -496,6 +795,11 @@ test("LoadLock 空层不画晶圆线，并区分已加工晶圆且按环境变�
   assert.deepEqual(moduleAt(atmosphereSnapshot, "LA").processedWafers, ["W_DONE"]);
   const atmosphereTopology = logic.renderEquipmentTopology(atmosphereSnapshot, null);
   assert.match(atmosphereTopology, /--loadlock-atmosphere:100\.0%/);
+  assert.match(atmosphereTopology, /--loadlock-atmosphere-ratio:1\.000/);
+  assert.match(atmosphereTopology, /class="equipment-external-name">LA</);
+  assert.doesNotMatch(atmosphereTopology, /loadlock-environment|loadlock-layer-index/);
+  assert.match(atmosphereTopology, /class="loadlock-door loadlock-door-vacuum"/);
+  assert.match(atmosphereTopology, /class="loadlock-door loadlock-door-atmosphere"/);
   assert.match(atmosphereTopology, /loadlock-wafer-line wafer-processed/);
   assert.match(atmosphereTopology, /loadlock-wafer-line wafer-unprocessed/);
   assert.doesNotMatch(atmosphereTopology, /loadlock-empty-slot/);
@@ -521,7 +825,33 @@ test("LoadLock 空层不画晶圆线，并区分已加工晶圆且按环境变�
   assert.doesNotMatch(emptyTopology, /loadlock-wafer-line/);
 });
 
-test("ATR 箭头固定走 LoadLock 下排，VTR 箭头固定走上排", () => {
+test("初始状态按设备 LastItem 解析 LoadLock 环境，缺省按大气充满蓝色", () => {
+  const initialDevice = {
+    Stations: {
+      LP1: { Type: "LoadPort" },
+      LA: { Type: "LoadLock", LastItem: "VTR" },
+      LB: { Type: "LoadLock" },
+      LC: { Type: "LoadLock", LastItem: "ATR" },
+      LD: { Type: "LoadLock", LastItem: "ATR" },
+      PM1: { Type: "Process" },
+    },
+    Robots: { ATR: {}, VTR: {} },
+  };
+  const topology = logic.renderEquipmentTopology(
+    logic.snapshotWithFullDeviceModules(logic.buildWorkspaceSnapshot([], initialDevice, 0), initialDevice),
+    null,
+  );
+  const atmosphereOf = name => {
+    const match = new RegExp(`--loadlock-atmosphere:([\\d.]+)%;[^\"]*" aria-label="${name}`).exec(topology);
+    return match ? Number(match[1]) : null;
+  };
+  assert.equal(atmosphereOf("LA"), 0, "LastItem VTR 初始为真空，不充满蓝色");
+  assert.equal(atmosphereOf("LB"), 100, "缺少 LastItem 时按大气处理");
+  assert.equal(atmosphereOf("LC"), 100, "LastItem ATR 初始为大气，充满蓝色");
+  assert.equal(atmosphereOf("LD"), 100, "LastItem ATR 初始为大气，充满蓝色");
+});
+
+test("ATR 与 VTR 机械臂按各自 LoadLock 入口旋转，不再叠加方向箭头", () => {
   const portalDevice = {
     Stations: {
       LP1: { Type: "LoadPort" }, PM1: { Type: "Process" },
@@ -539,15 +869,14 @@ test("ATR 箭头固定走 LoadLock 下排，VTR 箭头固定走上排", () => {
     portalDevice,
   );
   const topology = logic.renderEquipmentTopology(snapshot, null);
-  const moduleY = name => {
-    const match = new RegExp(`--module-left:[\\d.]+%;--module-top:(\\d+)px">(?:(?!class="reference-module-position")[\\s\\S])*?<strong>${name}</strong>`).exec(topology);
-    assert.ok(match, `应找到 ${name} 的纵坐标`);
+  const robotAngle = name => {
+    const match = new RegExp(`class="robot-hub robot-hub-[^"]*" style="--robot-arm-angle:([\\d.-]+)deg" aria-label="${name}`).exec(topology);
+    assert.ok(match, `应找到 ${name} 的机械臂角度`);
     return Number(match[1]);
   };
-  const arrowEnds = [...topology.matchAll(/<line[^>]*\sy2="([\d.]+)"[^>]*>/g)].map(match => Number(match[1]));
-  assert.equal(arrowEnds.length, 2);
-  assert.equal(arrowEnds[0], moduleY("LB") + 32, "ATR 指向 LA/LB 时应从下排 LB 进入");
-  assert.equal(arrowEnds[1], moduleY("LA") - 32, "VTR 指向 LA/LB 时应从上排 LA 进入");
+  assert.ok(robotAngle("ATR") < -90, "ATR 应向左上方的下排 LoadLock 入口旋转");
+  assert.ok(robotAngle("VTR") > 0, "VTR 应向下方的上排 LoadLock 入口旋转");
+  assert.doesNotMatch(topology, /topology-target-arrows/);
 });
 
 test("完成取放动作后晶圆位置与机器人状态一致", () => {

@@ -144,6 +144,7 @@ from realtime_scheduler.plan_builder import (
     expand_pse300_loadlocks,
     extract_init_data,
 )
+from realtime_scheduler.replay_machine import ReplayMachine
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -3929,6 +3930,47 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         """接收控制台配置并同步运行后端策略。"""
         path = unquote(urlparse(self.path).path)
+        if path == "/api/analysis/replay-decision":
+            try:
+                if not BUILTIN_ALGORITHM_AVAILABLE:
+                    raise RuntimeError("当前部署未提供 Machine，无法评估回放动作")
+                payload = self._read_json_object()
+                result_id = str(payload.get("resultId") or "").strip()
+                saved_result = read_result(result_id) if result_id else None
+                if result_id and saved_result is None:
+                    raise ValueError("结果不存在或已过期")
+                moves = normalize_move_payload(
+                    saved_result
+                    if saved_result is not None
+                    else payload.get("moves", payload.get("result")),
+                )
+                raw_plan = payload.get("plan")
+                replay_context = (
+                    saved_result.get("ReplayContext")
+                    if isinstance(saved_result, Mapping)
+                    else None
+                )
+                if not isinstance(raw_plan, Mapping) and isinstance(replay_context, Mapping):
+                    raw_plan = replay_context.get("plan")
+                if not isinstance(raw_plan, Mapping):
+                    raise ValueError("缺少生成该 MoveList 的完整计划，无法重建 Machine")
+                decision = ReplayMachine(
+                    raw_plan,
+                    moves,
+                    E2E_CTQ_MODEL_PATH,
+                    (
+                        replay_context.get("updates") or []
+                        if isinstance(replay_context, Mapping)
+                        else []
+                    ),
+                ).evaluate(_finite_number(payload.get("time"), 0.0))
+                self._send_json({"ok": True, "decision": decision})
+            except Exception as error:  # noqa: BLE001
+                self._send_json(
+                    {"ok": False, "error": str(error)},
+                    HTTPStatus.BAD_REQUEST,
+                )
+            return
         if path == "/api/analysis/schedule":
             try:
                 payload = self._read_json_object()
@@ -4043,6 +4085,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": "Not found"}, HTTPStatus.NOT_FOUND)
             return
         payload: Any = None
+        replay_plan: Optional[Dict[str, Any]] = None
         baseline_response: Optional[Dict[str, Any]] = None
         request_started = time.perf_counter()
         try:
@@ -4067,6 +4110,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                 if isinstance(runtime_device, dict):
                     apply_robot_slot_selection(runtime_device, device.get("robotSlots"))
                     selected_plan["device"] = runtime_device
+                replay_plan = deepcopy(selected_plan)
                 result, baseline, run_error = _execute_workspace_test_with_baseline(
                     device,
                     test_case,
@@ -4079,8 +4123,15 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                     raise run_error or RuntimeError("运行未返回结果")
                 result.update(_baseline_comparison(result, baseline))
             else:
+                replay_plan = deepcopy(dict(payload))
                 result = execute_plan(payload)
             artifact = deepcopy(dict(result["output"]))
+            if replay_plan is not None:
+                artifact["ReplayContext"] = {
+                    "schema": "machine-replay-context-v1",
+                    "plan": replay_plan,
+                    "updates": deepcopy(list(result.get("updates") or [])),
+                }
             result_id = save_result(artifact)
             log_id = save_reproduction_log(result["reproductionLog"])
             response = {

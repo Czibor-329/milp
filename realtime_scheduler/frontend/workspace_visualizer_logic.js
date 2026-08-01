@@ -24,6 +24,7 @@ __export(workspace_visualizer_test_entry_exports, {
   buildWorkspaceSnapshot: () => buildWorkspaceSnapshot,
   createVisualizationWorkspace: () => createVisualizationWorkspace,
   decisionAtTime: () => decisionAtTime,
+  decisionSpaceSignature: () => decisionSpaceSignature,
   displayedPerformanceResources: () => displayedPerformanceResources,
   normalizeDecisionTrace: () => normalizeDecisionTrace,
   normalizeMovePayload: () => normalizeMovePayload,
@@ -53,6 +54,14 @@ async function requestScheduleAnalysis(input) {
     bottleneck: result.bottleneck ?? null
   };
 }
+async function requestReplayDecision(input) {
+  const result = await requestJson("/api/analysis/replay-decision", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input)
+  });
+  return result.decision;
+}
 
 // src/workspace_visualizer.ts
 var PICK_MOVE_TYPES = /* @__PURE__ */ new Set([0, 2]);
@@ -71,7 +80,7 @@ var PLAYBACK_FRAME_INTERVAL_MS = 40;
 var DOOR_VISUAL_MIN_SECONDS = 0.7;
 var DEFAULT_PLAYBACK_SPEED = 4;
 var PERFORMANCE_DISPLAY_TOLERANCE = 1e-6;
-var FUTURE_DECISION_COUNT = 6;
+var DEFAULT_LOAD_PORT_CAPACITY = 25;
 var ACTIVITY_CATEGORIES = [
   "process",
   "clean",
@@ -160,6 +169,7 @@ function normalizeDecisionTrace(payload) {
       finishTime: finiteNumber(candidate.finishTime),
       rank: finiteNumber(candidate.rank),
       selected: Boolean(candidate.selected),
+      executed: Boolean(candidate.executed),
       policyScore: finiteNumber(candidate.policyScore),
       policyPreference: Math.max(0, Math.min(1, finiteNumber(candidate.policyPreference))),
       expectedRemainingMakespan: nullableFiniteNumber(candidate.expectedRemainingMakespan),
@@ -175,10 +185,12 @@ function normalizeDecisionTrace(payload) {
       roundIndex: finiteNumber(step.roundIndex),
       roundKind: String(step.roundKind ?? ""),
       selectedActionId: String(step.selectedActionId ?? ""),
+      executedActionId: String(step.executedActionId ?? ""),
       candidateCount: Math.max(candidates.length, finiteNumber(step.candidateCount, candidates.length)),
       shownCandidateCount: Math.max(candidates.length, finiteNumber(step.shownCandidateCount, candidates.length)),
       candidatesTruncated: Boolean(step.candidatesTruncated),
       modelEvaluated: Boolean(step.modelEvaluated),
+      replayEvaluated: Boolean(step.replayEvaluated),
       candidates
     };
   }).sort((left, right) => left.time - right.time || left.decisionIndex - right.decisionIndex);
@@ -222,6 +234,12 @@ function isLoadPortName(name, type = "") {
 }
 function isLoadLockName(name, type = "") {
   return type.toLowerCase() === "loadlock" || /^LL?[A-Z]$/i.test(name) || /^BUF_/i.test(name);
+}
+function initialLoadLockEnvironment(device, name) {
+  const lastItem = String(device?.Stations?.[name]?.LastItem ?? "");
+  if (/VTR|VAC|真空/i.test(lastItem)) return "\u771F\u7A7A";
+  if (/ATR|ATM|大气/i.test(lastItem)) return "\u5927\u6C14";
+  return "\u5927\u6C14";
 }
 function isDoorlessModule(name, type = "") {
   return /^cool(er)?$/i.test(name) || type.toLowerCase() === "cooler" || isDummyPortName(name);
@@ -311,6 +329,105 @@ function applyCompletedTransfer(move, locations) {
     for (const material of materialIds(move, "SendMatList")) locations.set(material, move.ModuleName);
   }
 }
+function indexedStation(move, field, index) {
+  const stations = listValue(move[field]).map(String);
+  return String(stations[index] ?? stations[0] ?? "");
+}
+function indexedSlot(move, field, index) {
+  const slots = listValue(move[field]);
+  const slot = finiteNumber(slots[index] ?? slots[0], 0);
+  return Number.isInteger(slot) && slot > 0 ? slot : 0;
+}
+function loadPortCapacity(device, name, observedMaximum) {
+  const definition = device?.Stations?.[name] ?? {};
+  const declaredSlots = listValue(definition.Slots).map((value) => finiteNumber(value, 0));
+  const declaredCapacity = Math.max(
+    finiteNumber(definition.Capacity, 0),
+    declaredSlots.length,
+    ...declaredSlots
+  );
+  return Math.max(
+    1,
+    declaredCapacity || DEFAULT_LOAD_PORT_CAPACITY,
+    observedMaximum
+  );
+}
+function buildLoadPortSlots(records, device, time, initialLocations, processedMaterials) {
+  const names = /* @__PURE__ */ new Set();
+  for (const [name, definition] of Object.entries(device?.Stations ?? {})) {
+    if (isLoadPortName(name, String(definition?.Type ?? ""))) names.add(name);
+  }
+  for (const location of initialLocations.values()) {
+    if (isLoadPortName(location, String(device?.Stations?.[location]?.Type ?? ""))) names.add(location);
+  }
+  const initialByPort = /* @__PURE__ */ new Map();
+  const observedMaximum = /* @__PURE__ */ new Map();
+  for (const move of records) {
+    if (!PICK_MOVE_TYPES.has(move.MoveType)) continue;
+    materialIds(move).forEach((material, index) => {
+      const source = indexedStation(move, "SrcStationList", index);
+      const type = String(device?.Stations?.[source]?.Type ?? "");
+      if (!source || !isLoadPortName(source, type)) return;
+      names.add(source);
+      const slot = indexedSlot(move, "SrcSlotList", index);
+      if (!slot) return;
+      const occupancy = initialByPort.get(source) ?? /* @__PURE__ */ new Map();
+      if (!occupancy.has(slot)) occupancy.set(slot, material);
+      initialByPort.set(source, occupancy);
+      observedMaximum.set(source, Math.max(observedMaximum.get(source) ?? 0, slot));
+    });
+  }
+  const result = /* @__PURE__ */ new Map();
+  for (const name of names) {
+    const occupancy = new Map(initialByPort.get(name) ?? []);
+    const initialMaterials = [...initialLocations.entries()].filter(([, location]) => location === name).map(([material]) => material).sort(naturalCompare);
+    const assigned = new Set(occupancy.values());
+    let fallbackSlot = 1;
+    for (const material of initialMaterials) {
+      if (assigned.has(material)) continue;
+      while (occupancy.has(fallbackSlot)) fallbackSlot += 1;
+      occupancy.set(fallbackSlot, material);
+      assigned.add(material);
+    }
+    for (const move of records) {
+      if (move.EndTime > time) continue;
+      const materials = materialIds(move);
+      if (PICK_MOVE_TYPES.has(move.MoveType)) {
+        materials.forEach((material, index) => {
+          if (indexedStation(move, "SrcStationList", index) !== name) return;
+          const slot = indexedSlot(move, "SrcSlotList", index);
+          if (slot) occupancy.delete(slot);
+          else {
+            const current = [...occupancy.entries()].find(([, wafer]) => wafer === material);
+            if (current) occupancy.delete(current[0]);
+          }
+        });
+      } else if (PLACE_MOVE_TYPES.has(move.MoveType)) {
+        materials.forEach((material, index) => {
+          if (indexedStation(move, "DestStationList", index) !== name) return;
+          let slot = indexedSlot(move, "DestSlotList", index);
+          if (!slot) {
+            slot = 1;
+            while (occupancy.has(slot)) slot += 1;
+          }
+          occupancy.set(slot, material);
+          observedMaximum.set(name, Math.max(observedMaximum.get(name) ?? 0, slot));
+        });
+      }
+    }
+    const occupiedMaximum = occupancy.size ? Math.max(...occupancy.keys()) : 0;
+    const capacity = loadPortCapacity(
+      device,
+      name,
+      Math.max(observedMaximum.get(name) ?? 0, occupiedMaximum, initialMaterials.length)
+    );
+    result.set(name, Array.from({ length: capacity }, (_, index) => {
+      const wafer = occupancy.get(index + 1) ?? "";
+      return { slot: index + 1, wafer, processed: Boolean(wafer && processedMaterials.has(wafer)) };
+    }));
+  }
+  return result;
+}
 function moveProgress(move, time) {
   const duration = move.EndTime - move.StartTime;
   if (duration <= 0) return time >= move.EndTime ? 1 : 0;
@@ -325,7 +442,8 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
   const time = Math.max(0, Math.min(finiteNumber(requestedTime), endTime));
   const definitions = collectModuleDefinitions(records, device);
   const robotNames = collectRobotNames(records, device);
-  const locations = initialMaterialLocations(records);
+  const initialLocations = initialMaterialLocations(records);
+  const locations = new Map(initialLocations);
   const doorStates = /* @__PURE__ */ new Map();
   const environments = /* @__PURE__ */ new Map();
   const processedMaterials = /* @__PURE__ */ new Set();
@@ -333,6 +451,9 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
   let completedMoves = 0;
   for (const [name, definition] of definitions) {
     doorStates.set(name, isDoorlessModule(name, definition.type) ? "doorless" : "closed");
+    if (isLoadLockName(name, definition.type)) {
+      environments.set(name, initialLoadLockEnvironment(device, name));
+    }
   }
   for (const move of records) {
     const active = move.StartTime <= time && time < move.EndTime;
@@ -362,6 +483,12 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
   for (const move of activeMoves) {
     if (isRobotName(move.ModuleName)) robotTargets.set(move.ModuleName, activeTarget(move));
   }
+  const lastRobotTargets = /* @__PURE__ */ new Map();
+  for (const move of records) {
+    if (move.StartTime > time || !isRobotName(move.ModuleName)) continue;
+    const target = activeTarget(move);
+    if (target) lastRobotTargets.set(move.ModuleName, target);
+  }
   const wafersByLocation = /* @__PURE__ */ new Map();
   for (const [material, location] of locations) {
     if (!location) continue;
@@ -370,6 +497,7 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
     wafersByLocation.set(location, wafers);
   }
   for (const wafers of wafersByLocation.values()) wafers.sort(naturalCompare);
+  const loadPortSlots = buildLoadPortSlots(records, device, time, initialLocations, processedMaterials);
   const modules = [...definitions.entries()].map(([name, definition]) => {
     const moduleMoves = activeMoves.filter((move) => move.ModuleName === name || firstStation(move, "SrcStationList") === name || firstStation(move, "DestStationList") === name || listValue(move.StationList).map(String).includes(name));
     const primaryMove = moduleMoves.find((move) => move.MoveType === CLEAN_MOVE) ?? moduleMoves.find((move) => move.MoveType === PROCESS_MOVE) ?? moduleMoves.find((move) => LOADLOCK_ENVIRONMENT_MOVE_TYPES.has(move.MoveType)) ?? moduleMoves.find((move) => [PREPARE_MOVE, COMPLETE_MOVE].includes(move.MoveType)) ?? moduleMoves[0];
@@ -389,6 +517,7 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
       door: doorStates.get(name) ?? "closed",
       wafers: wafersByLocation.get(name) ?? [],
       processedWafers: (wafersByLocation.get(name) ?? []).filter((wafer) => processedMaterials.has(wafer)),
+      loadPortSlots: loadPortSlots.get(name) ?? [],
       activeMoveName: primaryMove ? MOVE_NAMES[primaryMove.MoveType] ?? `\u52A8\u4F5C ${primaryMove.MoveType}` : "",
       progress: primaryMove ? moveProgress(primaryMove, time) : 0,
       environment: environments.get(name) ?? "",
@@ -401,9 +530,10 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
     return {
       name,
       wafers: wafersByLocation.get(name) ?? [],
+      processedWafers: (wafersByLocation.get(name) ?? []).filter((wafer) => processedMaterials.has(wafer)),
       busy: Boolean(move),
       source: move ? firstStation(move, "SrcStationList") : "",
-      target: robotTargets.get(name) ?? "",
+      target: robotTargets.get(name) ?? lastRobotTargets.get(name) ?? "",
       activeMoveName: move ? MOVE_NAMES[move.MoveType] ?? `\u52A8\u4F5C ${move.MoveType}` : "",
       isPreTrans: move?.MoveType === PRE_TRANS_MOVE,
       preTransProgress: move?.MoveType === PRE_TRANS_MOVE ? moveProgress(move, time) : 1
@@ -435,7 +565,7 @@ function collectElements(root) {
     topologyPlayback: required("visualTopologyPlayback"),
     stage: required("visualDeviceStage"),
     decisionLens: required("visualDecisionLens"),
-    transitionButtons: root.getElementById("visualTransitionButtons"),
+    pauseOnDecisionChangeButton: required("visualPauseOnDecisionChangeButton"),
     activeMoves: required("visualActiveMoves"),
     source: required("visualSource"),
     currentTime: required("visualCurrentTime"),
@@ -484,16 +614,18 @@ function snapshotWithCandidateModules(snapshot, decision, device) {
   for (const candidate of decision?.candidates ?? []) {
     const name = candidate.destination;
     if (!name || isRobotName(name) || knownNames.has(name)) continue;
+    const type = String(device?.Stations?.[name]?.Type ?? "");
     modules.push({
       name,
-      type: String(device?.Stations?.[name]?.Type ?? ""),
+      type,
       status: "idle",
       door: "closed",
       wafers: [],
       processedWafers: [],
+      loadPortSlots: [],
       activeMoveName: "",
       progress: 0,
-      environment: "",
+      environment: isLoadLockName(name, type) ? initialLoadLockEnvironment(device, name) : "",
       loadLockPhase: "",
       isRobotTarget: false
     });
@@ -510,6 +642,7 @@ function snapshotWithFullDeviceModules(snapshot, device) {
   for (const [name, definition] of Object.entries(device?.Stations ?? {})) {
     if (knownNames.has(name) || isRobotName(name)) continue;
     const type = String(definition?.Type ?? "");
+    if (isLoadPortName(name, type)) continue;
     modules.push({
       name,
       type,
@@ -517,9 +650,10 @@ function snapshotWithFullDeviceModules(snapshot, device) {
       door: isDoorlessModule(name, type) ? "doorless" : "closed",
       wafers: [],
       processedWafers: [],
+      loadPortSlots: [],
       activeMoveName: "",
       progress: 0,
-      environment: "",
+      environment: isLoadLockName(name, type) ? initialLoadLockEnvironment(device, name) : "",
       loadLockPhase: "",
       isRobotTarget: false
     });
@@ -542,68 +676,106 @@ function topologyGroups(modules) {
     auxiliaryModules: modules.filter((module2) => !assignedNames.has(module2.name))
   };
 }
-function renderWaferToken(wafer, progress) {
+function renderWaferToken(wafer, progress, processed = false) {
   const normalizedProgress = Math.max(0, Math.min(1, progress));
-  return `<span class="wafer-token" style="--wafer-progress:${normalizedProgress * 360}deg" title="\u6676\u5706 ${escapeHtml(wafer)}"><span>${escapeHtml(wafer)}</span></span>`;
+  const state = processed ? "processed" : "unprocessed";
+  return `<span class="wafer-token wafer-${state}" style="--wafer-progress:${normalizedProgress * 360}deg" title="\u6676\u5706 ${escapeHtml(wafer)}\uFF0C${processed ? "\u5DF2\u52A0\u5DE5" : "\u672A\u52A0\u5DE5"}"><span>${escapeHtml(wafer)}</span></span>`;
 }
 function moduleDoorSides(module2, role) {
   if (module2.door === "doorless") return [];
   if (role === "lock") return [];
-  if (role === "port") return ["top"];
+  if (role === "port") return [];
   const name = module2.name.trim().toUpperCase();
-  if (/^PM[12]$/.test(name)) return ["left"];
-  if (/^PM[56]$/.test(name) || name === "HEATER") return ["right"];
+  if (/^PM[12]$/.test(name)) return ["right"];
+  if (/^PM[56]$/.test(name) || name === "HEATER") return ["left"];
   if (/^PM[34]$/.test(name)) return ["bottom"];
   if (["AL", "ALIGNER"].includes(name)) return ["right"];
   if (["CL", "COOLER"].includes(name)) return ["left"];
   return ["top"];
 }
+function renderLoadPortCassette(module2) {
+  const slots = module2.loadPortSlots.length ? module2.loadPortSlots : module2.wafers.map((wafer, index) => ({
+    slot: index + 1,
+    wafer,
+    processed: module2.processedWafers.includes(wafer)
+  }));
+  const processed = slots.filter((slot) => slot.wafer && slot.processed).length;
+  const unprocessed = slots.filter((slot) => slot.wafer && !slot.processed).length;
+  const slotMarkup = slots.map((slot) => {
+    const state = !slot.wafer ? "empty" : slot.processed ? "processed" : "unprocessed";
+    const label = slot.wafer ? `\u69FD\u4F4D ${slot.slot}\uFF0C\u6676\u5706 ${slot.wafer}\uFF0C${slot.processed ? "\u5DF2\u52A0\u5DE5" : "\u672A\u52A0\u5DE5"}` : `\u69FD\u4F4D ${slot.slot}\uFF0C\u7A7A`;
+    return `<span class="load-port-slot is-${state}" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}"></span>`;
+  }).join("");
+  return `<div class="load-port-cassette" role="group" aria-label="${escapeHtml(`${module2.name} \u6B63\u89C6\u6676\u5706\u76D2\uFF0C\u5171 ${slots.length} \u4E2A\u69FD\u4F4D`)}">
+    <span class="load-port-cassette-handle" aria-hidden="true"></span>
+    <div class="load-port-slot-bank">${slotMarkup}</div>
+    <div class="load-port-slot-summary"><span class="is-unprocessed">RAW ${unprocessed}</span><span class="is-processed">DONE ${processed}</span></div>
+  </div>`;
+}
 function renderModule(module2, role, candidate) {
   const waferProgress = module2.status === "processing" ? module2.progress : 0;
   const visibleWaferCount = role === "lock" ? 2 : 1;
-  const wafers = module2.wafers.slice(0, visibleWaferCount).map((wafer) => renderWaferToken(wafer, waferProgress)).join("");
+  const processedWafers = new Set(module2.processedWafers ?? []);
+  const wafers = module2.wafers.slice(0, visibleWaferCount).map((wafer) => renderWaferToken(wafer, waferProgress, processedWafers.has(wafer))).join("");
   const overflow = module2.wafers.length > visibleWaferCount ? `<span class="wafer-more">+ ${module2.wafers.length - visibleWaferCount}</span>` : "";
   const doors = moduleDoorSides(module2, role).map((side) => `<i class="chamber-door chamber-door-${side}"></i>`).join("");
   const accessibleStatus = `${module2.name}\uFF0C${STATUS_LABELS[module2.status]}\uFF0C${DOOR_LABELS[module2.door]}`;
   const candidateLabel = candidate ? `${candidate.count} \u4E2A\u53EF\u884C\u52A8\u4F5C\uFF0C\u6700\u9AD8\u6A21\u578B\u504F\u597D ${(candidate.preference * 100).toFixed(0)}%` : "";
   const atmosphereLevel = role === "lock" ? module2.loadLockPhase === "pumping" ? 100 - module2.progress * 100 : module2.loadLockPhase === "venting" ? module2.progress * 100 : /大气|ATM|ATR/i.test(module2.environment) ? 100 : 0 : 0;
-  const processedWafers = new Set(module2.processedWafers ?? []);
+  const loadLockEnvironment = module2.loadLockPhase === "pumping" ? "PUMPING" : module2.loadLockPhase === "venting" ? "VENTING" : atmosphereLevel >= 50 ? "ATM" : "VAC";
   const loadLockLayers = role === "lock" ? `<div class="loadlock-layers" aria-hidden="true">${[0, 1].map((index) => {
     const wafer = module2.wafers[index];
     const processed = wafer ? processedWafers.has(wafer) : false;
     const waferState = processed ? "processed" : "unprocessed";
     return `<div class="loadlock-layer ${wafer ? "is-occupied" : "is-empty"}"><span class="loadlock-layer-index">${index + 1}</span>${wafer ? `<span class="loadlock-wafer-line wafer-${waferState}" title="\u6676\u5706 ${escapeHtml(wafer)}\uFF08${processed ? "\u5DF2\u52A0\u5DE5" : "\u672A\u52A0\u5DE5"}\uFF09"></span>` : ""}</div>`;
-  }).join("")}${overflow}</div>` : `<div class="wafer-stack">${wafers}${overflow}</div>`;
-  return `
-    <article class="equipment-card equipment-${role} status-${module2.status} door-${module2.door} ${module2.loadLockPhase ? `loadlock-${module2.loadLockPhase}` : ""} ${module2.isRobotTarget ? "is-target" : ""} ${candidate ? "is-candidate-destination" : ""} ${candidate?.selected ? "is-model-selected" : ""}" style="--module-progress:${Math.round(module2.progress * 100)}%;--loadlock-atmosphere:${Math.max(0, Math.min(100, atmosphereLevel)).toFixed(1)}%" aria-label="${escapeHtml(`${accessibleStatus}${candidateLabel ? `\uFF0C${candidateLabel}` : ""}`)}">
-      <div class="equipment-head">
-        <strong>${escapeHtml(module2.name)}</strong>
-      </div>
+  }).join("")}${overflow}</div>` : role === "process" ? `<div class="process-wafer-slot ${wafers ? "is-occupied" : "is-empty"}">${wafers}</div>` : role === "port" ? `<div class="load-port-dock-face" aria-hidden="true"><span></span></div>` : role === "auxiliary" ? `<div class="auxiliary-wafer-slot ${wafers ? "is-occupied" : "is-empty"}">${wafers}</div>` : `<div class="wafer-stack">${wafers}${overflow}</div>`;
+  const article = `
+    <article class="equipment-card equipment-${role} status-${module2.status} door-${module2.door} ${module2.loadLockPhase ? `loadlock-${module2.loadLockPhase}` : ""} ${module2.isRobotTarget ? "is-target" : ""} ${candidate ? "is-candidate-destination" : ""} ${candidate?.selected ? "is-model-selected" : ""}" style="--module-progress:${Math.round(module2.progress * 100)}%;--loadlock-atmosphere:${Math.max(0, Math.min(100, atmosphereLevel)).toFixed(1)}%;--loadlock-atmosphere-ratio:${Math.max(0, Math.min(1, atmosphereLevel / 100)).toFixed(3)}" aria-label="${escapeHtml(`${accessibleStatus}${candidateLabel ? `\uFF0C${candidateLabel}` : ""}`)}">
+      ${role === "process" || role === "auxiliary" ? "" : `<div class="equipment-head"><strong>${escapeHtml(module2.name)}</strong>${role === "lock" ? `<span class="loadlock-environment">${loadLockEnvironment}</span>` : ""}</div>`}
       <div class="equipment-body">
         ${loadLockLayers}
       </div>
-      <div class="chamber-doors" aria-hidden="true">${doors}</div>
+      <div class="chamber-doors" aria-hidden="true">${role === "lock" ? '<i class="loadlock-door loadlock-door-vacuum"></i><i class="loadlock-door loadlock-door-atmosphere"></i>' : doors}</div>
     </article>`;
+  if (role === "process" || role === "auxiliary") {
+    return `<strong class="equipment-external-name">${escapeHtml(module2.name)}</strong>${article}`;
+  }
+  if (role === "port") {
+    return `<div class="load-port-assembly">${article}${renderLoadPortCassette(module2)}</div>`;
+  }
+  return article;
 }
-function renderRobotHub(robot, environment) {
-  const wafer = robot.wafers[0] ? renderWaferToken(robot.wafers[0], 0) : "";
-  const overflow = robot.wafers.length > 1 ? `<span class="wafer-more">+ ${robot.wafers.length - 1}</span>` : "";
+function renderRobotHub(robot, environment, angleDegrees) {
+  const wafer = robot.wafers[0] ? renderWaferToken(robot.wafers[0], 0, robot.processedWafers.includes(robot.wafers[0])) : "";
   return `
-    <article class="robot-hub robot-hub-${environment} ${robot.busy ? "is-busy" : ""}" aria-label="${escapeHtml(robot.name)} ${robot.busy ? "\u5DE5\u4F5C\u4E2D" : "\u5F85\u547D"}">
-      <strong>${escapeHtml(robot.name)}</strong>
-      <div class="robot-wafers">${wafer}${overflow}</div>
+    <article class="robot-hub robot-hub-${environment} ${robot.busy ? "is-busy" : ""}" style="--robot-arm-angle:${angleDegrees.toFixed(1)}deg" aria-label="${escapeHtml(robot.name)}\uFF0C\u5355\u69FD\u673A\u68B0\u624B\uFF0C${robot.busy ? "\u5DE5\u4F5C\u4E2D" : "\u5F85\u547D"}${robot.wafers[0] ? `\uFF0C\u6301\u6709\u6676\u5706 ${robot.wafers[0]}` : "\uFF0C\u69FD\u4F4D\u4E3A\u7A7A"}">
+      <span class="robot-environment-badge">${environment === "vacuum" ? "VAC" : "ATM"}</span>
+      <div class="robot-mechanism" aria-hidden="true">
+        <span class="robot-reach-sector"></span>
+        <span class="robot-base"><i></i></span>
+        <span class="robot-arm">
+          <i class="robot-arm-beam"></i>
+          <span class="robot-end-effector ${wafer ? "is-occupied" : "is-empty"}"><i class="robot-effector-palm"></i><i class="robot-fork-tine robot-fork-tine-top"></i><i class="robot-fork-tine robot-fork-tine-bottom"></i>${wafer}</span>
+        </span>
+      </div>
     </article>`;
 }
 var TOPOLOGY_COLUMN_PERCENTAGES = [26, 42, 58, 74];
 var TOPOLOGY_ROW_TOP_PIXELS = [52, 154, 256, 358, 460, 562, 664, 786, 929, 1031, 1133];
 var TOPOLOGY_VIEWBOX_WIDTH = 1e3;
 var TOPOLOGY_ITEM_SIZE = 96;
-var TOPOLOGY_LOADLOCK_WIDTH = 136;
-var TOPOLOGY_LOADLOCK_HEIGHT = 64;
-var TOPOLOGY_LOADLOCK_ROW_TOP_PIXELS = [664, 728];
+var TOPOLOGY_PROCESS_WIDTH = 112;
+var TOPOLOGY_PROCESS_HEIGHT = 104;
+var TOPOLOGY_ROBOT_SIZE = 132;
+var TOPOLOGY_LOADLOCK_WIDTH = 120;
+var TOPOLOGY_LOADLOCK_HEIGHT = 72;
+var TOPOLOGY_LOADPORT_WIDTH = 144;
+var TOPOLOGY_LOADPORT_HEIGHT = 104;
+var TOPOLOGY_LOADLOCK_ROW_TOP_PIXELS = [664, 740];
 var TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS = 866;
 var TOPOLOGY_LOADPORT_ROW_TOP_PIXELS = 990;
 var TOPOLOGY_CANVAS_PADDING = 28;
+var TOPOLOGY_EXTERNAL_LABEL_CLEARANCE = 22;
 function distributedTopologyColumns(count) {
   if (count <= 1) return [50];
   if (count === 2) return [40, 60];
@@ -626,28 +798,30 @@ function moduleTopologyPosition(module2, role, index, roleModules, cascade) {
     PM3: { leftPercent: column[1], topPixels: row[0] },
     PM4: { leftPercent: column[2], topPixels: row[0] },
     PM2: { leftPercent: column[0], topPixels: row[1] },
-    PM1: { leftPercent: column[0], topPixels: row[2] },
+    PM1: { leftPercent: column[0], topPixels: row[2] + TOPOLOGY_EXTERNAL_LABEL_CLEARANCE },
     PM5: { leftPercent: column[3], topPixels: row[1] },
-    PM6: { leftPercent: column[3], topPixels: row[2] },
+    PM6: { leftPercent: column[3], topPixels: row[2] + TOPOLOGY_EXTERNAL_LABEL_CLEARANCE },
     BUF_A: { leftPercent: column[1], topPixels: row[3] },
     BUFA: { leftPercent: column[1], topPixels: row[3] },
     BUF_B: { leftPercent: column[2], topPixels: row[3] },
     BUFB: { leftPercent: column[2], topPixels: row[3] },
     PM8: { leftPercent: column[0], topPixels: row[4] },
-    PM7: { leftPercent: column[0], topPixels: row[5] },
+    PM7: { leftPercent: column[0], topPixels: row[5] + TOPOLOGY_EXTERNAL_LABEL_CLEARANCE },
     PM9: { leftPercent: column[3], topPixels: row[4] },
-    PM10: { leftPercent: column[3], topPixels: row[5] }
+    PM10: { leftPercent: column[3], topPixels: row[5] + TOPOLOGY_EXTERNAL_LABEL_CLEARANCE }
   };
   const singlePositions = {
     PM3: { leftPercent: column[1], topPixels: row[3] },
     PM4: { leftPercent: column[2], topPixels: row[3] },
     PM2: { leftPercent: column[0], topPixels: row[4] },
-    PM1: { leftPercent: column[0], topPixels: row[5] },
+    PM1: { leftPercent: column[0], topPixels: row[5] + TOPOLOGY_EXTERNAL_LABEL_CLEARANCE },
     PM5: { leftPercent: column[3], topPixels: row[4] },
-    PM6: { leftPercent: column[3], topPixels: row[5] }
+    PM6: { leftPercent: column[3], topPixels: row[5] + TOPOLOGY_EXTERNAL_LABEL_CLEARANCE }
   };
   const explicit = (cascade ? cascadePositions : singlePositions)[name];
-  if (explicit) return explicit;
+  if (explicit) {
+    return role === "process" ? { ...explicit, widthPixels: TOPOLOGY_PROCESS_WIDTH, heightPixels: TOPOLOGY_PROCESS_HEIGHT } : explicit;
+  }
   if (role === "lock") {
     const canonicalOrder = { LA: 0, LC: 1, LB: 2, LD: 3 };
     const orderedLoadLocks = [...roleModules].sort((left, right) => {
@@ -660,7 +834,7 @@ function moduleTopologyPosition(module2, role, index, roleModules, cascade) {
     const gridIndex = Math.max(0, orderedLoadLocks.findIndex((item) => item.name === module2.name));
     const loadLockRowGap = TOPOLOGY_LOADLOCK_ROW_TOP_PIXELS[1] - TOPOLOGY_LOADLOCK_ROW_TOP_PIXELS[0];
     return {
-      leftPercent: gridIndex % 2 === 0 ? column[1] : column[2],
+      leftPercent: gridIndex % 2 === 0 ? 40 : 60,
       topPixels: TOPOLOGY_LOADLOCK_ROW_TOP_PIXELS[0] + Math.floor(gridIndex / 2) * loadLockRowGap,
       widthPixels: TOPOLOGY_LOADLOCK_WIDTH,
       heightPixels: TOPOLOGY_LOADLOCK_HEIGHT
@@ -674,9 +848,19 @@ function moduleTopologyPosition(module2, role, index, roleModules, cascade) {
       LP4: column[3]
     };
     if (loadPortColumns[name] !== void 0) {
-      return { leftPercent: loadPortColumns[name], topPixels: TOPOLOGY_LOADPORT_ROW_TOP_PIXELS };
+      return {
+        leftPercent: loadPortColumns[name],
+        topPixels: TOPOLOGY_LOADPORT_ROW_TOP_PIXELS,
+        widthPixels: TOPOLOGY_LOADPORT_WIDTH,
+        heightPixels: TOPOLOGY_LOADPORT_HEIGHT
+      };
     }
-    return { leftPercent: distributedTopologyColumns(roleCount)[index], topPixels: TOPOLOGY_LOADPORT_ROW_TOP_PIXELS };
+    return {
+      leftPercent: distributedTopologyColumns(roleCount)[index],
+      topPixels: TOPOLOGY_LOADPORT_ROW_TOP_PIXELS,
+      widthPixels: TOPOLOGY_LOADPORT_WIDTH,
+      heightPixels: TOPOLOGY_LOADPORT_HEIGHT
+    };
   }
   if (["AL", "ALIGNER"].includes(name)) return { leftPercent: column[0], topPixels: TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS };
   if (["CL", "COOLER"].includes(name)) return { leftPercent: column[3], topPixels: TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS };
@@ -694,7 +878,8 @@ function moduleTopologyPosition(module2, role, index, roleModules, cascade) {
   const fallbackRow = role === "process" ? row[3] : row[7];
   return {
     leftPercent: distributedTopologyColumns(Math.max(roleCount, 1))[index] ?? 50,
-    topPixels: fallbackRow
+    topPixels: fallbackRow,
+    ...role === "process" ? { widthPixels: TOPOLOGY_PROCESS_WIDTH, heightPixels: TOPOLOGY_PROCESS_HEIGHT } : {}
   };
 }
 function robotTopologyPosition(robotIndex, robotCount, environment, cascade) {
@@ -702,38 +887,39 @@ function robotTopologyPosition(robotIndex, robotCount, environment, cascade) {
     if (robotCount > 1) {
       return {
         leftPercent: distributedTopologyColumns(robotCount)[robotIndex] ?? 50,
-        topPixels: TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS
+        topPixels: TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS,
+        widthPixels: TOPOLOGY_ROBOT_SIZE,
+        heightPixels: TOPOLOGY_ROBOT_SIZE
       };
     }
-    return { leftPercent: 50, topPixels: TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS };
+    return {
+      leftPercent: 50,
+      topPixels: TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS,
+      widthPixels: TOPOLOGY_ROBOT_SIZE,
+      heightPixels: TOPOLOGY_ROBOT_SIZE
+    };
   }
   if (cascade && robotCount > 1) {
     return {
       leftPercent: 50,
-      topPixels: robotIndex === 0 ? TOPOLOGY_ROW_TOP_PIXELS[4] : (TOPOLOGY_ROW_TOP_PIXELS[1] + TOPOLOGY_ROW_TOP_PIXELS[2]) / 2
+      topPixels: robotIndex === 0 ? TOPOLOGY_ROW_TOP_PIXELS[4] : (TOPOLOGY_ROW_TOP_PIXELS[1] + TOPOLOGY_ROW_TOP_PIXELS[2]) / 2 + TOPOLOGY_EXTERNAL_LABEL_CLEARANCE / 2,
+      widthPixels: TOPOLOGY_ROBOT_SIZE,
+      heightPixels: TOPOLOGY_ROBOT_SIZE
     };
   }
   return {
     leftPercent: 50,
-    topPixels: (TOPOLOGY_ROW_TOP_PIXELS[4] + TOPOLOGY_ROW_TOP_PIXELS[5]) / 2
+    topPixels: (TOPOLOGY_ROW_TOP_PIXELS[4] + TOPOLOGY_ROW_TOP_PIXELS[5]) / 2 + TOPOLOGY_EXTERNAL_LABEL_CLEARANCE / 2,
+    widthPixels: TOPOLOGY_ROBOT_SIZE,
+    heightPixels: TOPOLOGY_ROBOT_SIZE
   };
 }
-function topologySvgPoint(position) {
+function topologyVerticalExtent(positions) {
+  if (!positions.length) return null;
   return {
-    x: position.leftPercent / 100 * TOPOLOGY_VIEWBOX_WIDTH,
-    y: position.topPixels
+    top: Math.min(...positions.map((position) => position.topPixels - (position.heightPixels ?? TOPOLOGY_ITEM_SIZE) / 2)),
+    bottom: Math.max(...positions.map((position) => position.topPixels + (position.heightPixels ?? TOPOLOGY_ITEM_SIZE) / 2))
   };
-}
-function topologyEdgePoint(center, toward, width = TOPOLOGY_ITEM_SIZE, height = TOPOLOGY_ITEM_SIZE) {
-  const halfWidth = width / 2;
-  const halfHeight = height / 2;
-  const dx = toward.x - center.x;
-  const dy = toward.y - center.y;
-  if (Math.abs(dx) < 1e-6 && Math.abs(dy) < 1e-6) return center;
-  const scaleX = Math.abs(dx) > 1e-6 ? halfWidth / Math.abs(dx) : Number.POSITIVE_INFINITY;
-  const scaleY = Math.abs(dy) > 1e-6 ? halfHeight / Math.abs(dy) : Number.POSITIVE_INFINITY;
-  const scale = Math.min(scaleX, scaleY);
-  return { x: center.x + dx * scale, y: center.y + dy * scale };
 }
 function interpolatedRobotAngle(start, end, progress) {
   let delta = (end - start) % (Math.PI * 2);
@@ -749,53 +935,16 @@ function robotLoadLockPortal(robotName, moduleName, modulePositions) {
   const preferred = ["LA", "LB"].includes(normalizedModule) ? isAtmosphereRobot ? "LB" : "LA" : ["LC", "LD"].includes(normalizedModule) ? isAtmosphereRobot ? "LD" : "LC" : moduleName;
   return modulePositions.has(preferred) ? preferred : moduleName;
 }
-function renderRobotTargetArrows(robots, robotPositions, modulePositions, canvasHeight) {
-  const colors = ["var(--brand)", "var(--green)", "var(--red)", "var(--muted)"];
-  const lines = robots.map((robot, index) => {
-    const robotPosition = robotPositions.get(robot.name);
-    const targetName = robotLoadLockPortal(robot.name, robot.target, modulePositions);
-    const targetPosition = modulePositions.get(targetName);
-    if (!robotPosition || !targetPosition || !robot.target) return "";
-    const robotCenter = topologySvgPoint(robotPosition);
-    const targetCenter = topologySvgPoint(targetPosition);
-    let endPoint = topologyEdgePoint(
-      targetCenter,
-      robotCenter,
-      targetPosition.widthPixels,
-      targetPosition.heightPixels
-    );
-    if (robot.isPreTrans) {
-      const sourceName = robotLoadLockPortal(robot.name, robot.source, modulePositions);
-      const sourcePosition = modulePositions.get(sourceName);
-      if (sourcePosition) {
-        const sourceCenter = topologySvgPoint(sourcePosition);
-        const startAngle = Math.atan2(sourceCenter.y - robotCenter.y, sourceCenter.x - robotCenter.x);
-        const endAngle = Math.atan2(targetCenter.y - robotCenter.y, targetCenter.x - robotCenter.x);
-        const angle = interpolatedRobotAngle(startAngle, endAngle, robot.preTransProgress);
-        const sourceEdge = topologyEdgePoint(
-          sourceCenter,
-          robotCenter,
-          sourcePosition.widthPixels,
-          sourcePosition.heightPixels
-        );
-        const sourceRadius = Math.hypot(sourceEdge.x - robotCenter.x, sourceEdge.y - robotCenter.y);
-        const targetRadius = Math.hypot(endPoint.x - robotCenter.x, endPoint.y - robotCenter.y);
-        const radius = sourceRadius + (targetRadius - sourceRadius) * robot.preTransProgress;
-        endPoint = {
-          x: robotCenter.x + Math.cos(angle) * radius,
-          y: robotCenter.y + Math.sin(angle) * radius
-        };
-      }
-    }
-    const startPoint = topologyEdgePoint(robotCenter, endPoint);
-    const color = colors[index % colors.length];
-    return `<line class="${robot.isPreTrans ? "is-pre-trans" : ""}" x1="${startPoint.x}" y1="${startPoint.y}" x2="${endPoint.x}" y2="${endPoint.y}" stroke="${color}" marker-end="url(#topology-arrowhead-${index})"/>`;
-  }).join("");
-  const markers = robots.map((_, index) => {
-    const color = colors[index % colors.length];
-    return `<marker id="topology-arrowhead-${index}" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="${color}"/></marker>`;
-  }).join("");
-  return `<svg class="topology-target-arrows" viewBox="0 0 ${TOPOLOGY_VIEWBOX_WIDTH} ${canvasHeight}" preserveAspectRatio="none" aria-hidden="true"><defs>${markers}</defs>${lines}</svg>`;
+function selectedDecisionCandidate(decision) {
+  if (!decision) return null;
+  return decision.candidates.find((candidate) => candidate.selected) ?? decision.candidates.find((candidate) => candidate.actionId === decision.selectedActionId) ?? decision.candidates.find((candidate) => candidate.executed) ?? null;
+}
+function decisionTargetForRobot(robot, decision) {
+  const candidate = selectedDecisionCandidate(decision);
+  if (!candidate || candidate.robot !== robot.name) return "";
+  if (candidate.source === robot.name) return candidate.destination;
+  if (candidate.destination === robot.name) return candidate.source;
+  return candidate.destination || candidate.source;
 }
 function renderEquipmentTopology(snapshot, decision) {
   const visibleModules = snapshot.modules.filter((module2) => !isTopologyHiddenModule(module2));
@@ -838,6 +987,32 @@ function renderEquipmentTopology(snapshot, decision) {
   for (const [name, position] of robotPositions) {
     robotPositions.set(name, { ...position, topPixels: position.topPixels + verticalOffset });
   }
+  const positionedModules = (modules) => modules.map((module2) => modulePositions.get(module2.name)).filter((position) => Boolean(position));
+  const positionedRobots = (robots) => robots.map((robot) => robotPositions.get(robot.name)).filter((position) => Boolean(position));
+  const vacuumExtent = topologyVerticalExtent([
+    ...positionedModules(groups.processModules),
+    ...positionedRobots(vacuumRobots)
+  ]);
+  const interfaceExtent = topologyVerticalExtent(positionedModules(groups.loadLocks));
+  const atmosphereExtent = topologyVerticalExtent([
+    ...positionedModules(groups.auxiliaryModules),
+    ...positionedModules(groups.loadPorts),
+    ...positionedRobots(atmosphereRobots)
+  ]);
+  const interfaceTop = interfaceExtent ? Math.max(12, interfaceExtent.top - 12) : Math.round(canvasHeight * 0.48);
+  const interfaceBottom = interfaceExtent ? Math.min(canvasHeight - 12, interfaceExtent.bottom + 12) : interfaceTop;
+  const vacuumTop = vacuumExtent ? Math.max(12, vacuumExtent.top - 24) : 12;
+  const vacuumBottom = Math.max(vacuumTop + 120, interfaceTop - 12);
+  const atmosphereTop = interfaceExtent ? interfaceBottom + 12 : Math.round(canvasHeight * 0.52);
+  const atmosphereBottom = atmosphereExtent ? Math.min(canvasHeight - 12, atmosphereExtent.bottom + 24) : canvasHeight - 12;
+  const machineAreaMarkup = `
+    <div class="topology-zone topology-zone-vacuum" style="--zone-top:${vacuumTop}px;--zone-height:${Math.max(120, vacuumBottom - vacuumTop)}px" aria-hidden="true">
+      <span><strong>VACUUM PROCESS AREA</strong><small>\u771F\u7A7A\u52A0\u5DE5\u533A</small></span>
+    </div>
+    ${interfaceExtent ? `<div class="topology-interface-bay" style="--zone-top:${interfaceTop}px;--zone-height:${Math.max(96, interfaceBottom - interfaceTop)}px" aria-hidden="true"><span>VACUUM / ATM INTERFACE</span></div>` : ""}
+    <div class="topology-zone topology-zone-atmosphere" style="--zone-top:${atmosphereTop}px;--zone-height:${Math.max(120, atmosphereBottom - atmosphereTop)}px" aria-hidden="true">
+      <span><strong>ATM TRANSFER AREA</strong><small>\u5927\u6C14\u4F20\u8F93\u533A</small></span>
+    </div>`;
   const renderModuleGroup = (modules, role) => modules.map((module2) => {
     const position = modulePositions.get(module2.name);
     if (!position) return "";
@@ -852,110 +1027,96 @@ function renderEquipmentTopology(snapshot, decision) {
   const renderRobotGroup = (robots, environment) => robots.map((robot) => {
     const position = robotPositions.get(robot.name);
     if (!position) return "";
-    return `<div class="reference-robot-position" style="--robot-left:${position.leftPercent}%;--robot-top:${position.topPixels}px">${renderRobotHub(robot, environment)}</div>`;
+    const target = robot.target || decisionTargetForRobot(robot, decision);
+    const portal = robotLoadLockPortal(robot.name, target, modulePositions);
+    const targetPosition = modulePositions.get(portal);
+    const targetAngle = targetPosition ? Math.atan2(
+      targetPosition.topPixels - position.topPixels,
+      targetPosition.leftPercent / 100 * TOPOLOGY_VIEWBOX_WIDTH - position.leftPercent / 100 * TOPOLOGY_VIEWBOX_WIDTH
+    ) : -Math.PI / 2;
+    let armAngle = targetAngle;
+    if (robot.isPreTrans && robot.source) {
+      const sourcePortal = robotLoadLockPortal(robot.name, robot.source, modulePositions);
+      const sourcePosition = modulePositions.get(sourcePortal);
+      if (sourcePosition) {
+        const sourceAngle = Math.atan2(
+          sourcePosition.topPixels - position.topPixels,
+          sourcePosition.leftPercent / 100 * TOPOLOGY_VIEWBOX_WIDTH - position.leftPercent / 100 * TOPOLOGY_VIEWBOX_WIDTH
+        );
+        armAngle = interpolatedRobotAngle(sourceAngle, targetAngle, robot.preTransProgress);
+      }
+    }
+    const angleDegrees = armAngle * 180 / Math.PI;
+    return `<div class="reference-robot-position" style="--robot-left:${position.leftPercent}%;--robot-top:${position.topPixels}px">${renderRobotHub(robot, environment, angleDegrees)}</div>`;
   }).join("");
   const robotMarkup = renderRobotGroup(vacuumRobots, "vacuum") + renderRobotGroup(atmosphereRobots, "atmosphere");
   return `
     <section class="equipment-schematic" aria-label="\u5B8C\u6574\u8BBE\u5907\u62D3\u6251\u56DE\u653E">
       <div class="schematic-canvas reference-grid-canvas" style="--topology-canvas-height:${canvasHeight}px">
+        ${machineAreaMarkup}
         ${moduleMarkup}
         ${robotMarkup}
-        ${renderRobotTargetArrows(snapshot.robots, robotPositions, modulePositions, canvasHeight)}
       </div>
     </section>`;
 }
 function modelSeconds(value, sign = false) {
   if (value === null) return "\u2014";
   const prefix = sign && value > PERFORMANCE_DISPLAY_TOLERANCE ? "+" : "";
-  return `${prefix}${value.toFixed(value >= 100 ? 0 : 1)} s`;
+  return `${prefix}${value.toFixed(value >= 100 ? 0 : 1)}s`;
+}
+function modelPreference(value) {
+  const percent = Math.max(0, value) * 100;
+  if (percent > 0 && Math.round(percent) === 0) return "<1%";
+  return `${Math.round(percent)}%`;
 }
 function decisionCandidatePath(candidate) {
   const source = candidate.source || "\u5F53\u524D\u4F4D\u7F6E";
   const destination = candidate.destination || "\u2014";
   return `${source} \u2192 ${destination}${candidate.destinationSlot ? ` \xB7 \u69FD ${candidate.destinationSlot}` : ""}`;
 }
-function renderTransitionButtons(decision) {
-  if (!decision?.candidates.length) {
-    return '<div class="transition-button-empty">\u5F53\u524D\u65F6\u523B\u6CA1\u6709\u6A21\u578B\u53EF\u884C\u52A8\u4F5C</div>';
-  }
-  return [...decision.candidates].sort((left, right) => left.rank - right.rank).map((candidate) => {
-    const selected = candidate.selected || candidate.actionId === decision.selectedActionId;
-    const path = decisionCandidatePath(candidate);
-    return `
-        <button class="transition-action-button ${selected ? "is-selected" : ""}" type="button" tabindex="-1" aria-disabled="true" title="${escapeHtml(path)}">
-          <span>${escapeHtml(path)}</span>
-          <small>#${candidate.rank} \xB7 ${Math.round(candidate.policyPreference * 100)}%</small>
-        </button>`;
-  }).join("");
+function decisionSpaceSignature(decision) {
+  const actionIds = decision.candidates.map((candidate) => candidate.actionId).filter(Boolean).sort();
+  return JSON.stringify([decision.candidateCount, actionIds]);
 }
-function futureDecisionSteps(trace, current) {
-  const index = trace.indexOf(current);
-  if (index < 0) return [current];
-  return trace.slice(index, index + FUTURE_DECISION_COUNT);
-}
-function renderDecisionLens(decision, trace) {
+function renderDecisionLens(decision) {
   if (!decision) {
     return `
       <div class="decision-empty">
-        <strong>\u6CA1\u6709\u6A21\u578B\u51B3\u7B56\u8F68\u8FF9</strong>
-        <p>\u5F53\u524D\u7ED3\u679C\u53EA\u5305\u542B MoveList\u3002\u8BF7\u4F7F\u7528 E2E-CTQ \u91CD\u65B0\u8FD0\u884C\uFF0C\u6216\u5BFC\u5165\u542B <code>DecisionTrace</code> \u7684\u7ED3\u679C JSON\u3002</p>
+        <strong>\u5F53\u524D\u65F6\u523B\u6682\u65E0\u51B3\u7B56</strong>
+        <p>\u56DE\u653E\u5230\u4E0B\u4E00\u8BBE\u5907\u4E8B\u4EF6\u540E\uFF0CMachine \u4F1A\u66F4\u65B0\u53EF\u884C\u52A8\u4F5C\u5E76\u89E6\u53D1\u5B9E\u65F6\u8BC4\u4F30\u3002</p>
       </div>`;
   }
-  const selected = decision.candidates.find((candidate) => candidate.selected) ?? decision.candidates.find((candidate) => candidate.actionId === decision.selectedActionId) ?? decision.candidates[0];
   const shownText = decision.candidatesTruncated ? `\u5C55\u793A Top ${decision.shownCandidateCount} / ${decision.candidateCount}` : `${decision.candidateCount} \u4E2A\u53EF\u884C\u52A8\u4F5C`;
-  const candidates = decision.candidates.map((candidate) => {
-    const preference = Math.round(candidate.policyPreference * 100);
-    const uncertainty = candidate.lowerRemainingMakespan !== null && candidate.upperRemainingMakespan !== null ? `${modelSeconds(candidate.lowerRemainingMakespan)}\u2013${modelSeconds(candidate.upperRemainingMakespan)}` : "\u672A\u8BC4\u4F30";
-    const material = candidate.materialIds.length ? candidate.materialIds.join(" / ") : `Wafer ${candidate.waferId}`;
+  const rankedCandidates = [...decision.candidates].sort((left, right) => right.policyPreference - left.policyPreference || left.rank - right.rank || left.actionId.localeCompare(right.actionId));
+  const candidates = rankedCandidates.map((candidate, index) => {
+    const preference = modelPreference(candidate.policyPreference);
+    const isRecommendation = index === 0;
+    const tags = `${isRecommendation ? '<span class="decision-tag is-recommendation">E2E\u63A8\u8350</span>' : ""}${candidate.executed ? '<span class="decision-tag is-plan">\u4E0E\u8BA1\u5212\u4E00\u81F4</span>' : ""}`;
+    const delta = isRecommendation ? "\u0394 \u57FA\u51C6" : `\u0394 ${modelSeconds(candidate.makespanDelta, true)}`;
     return `
-      <li class="decision-candidate ${candidate.selected ? "is-selected" : ""}">
-        <div class="decision-candidate-rank">${candidate.rank}</div>
+      <li class="decision-candidate">
+        <div class="decision-candidate-rank" aria-label="\u7B2C ${index + 1} \u540D">${index + 1}</div>
         <div class="decision-candidate-main">
-          <div><strong>${escapeHtml(decisionCandidatePath(candidate))}</strong>${candidate.selected ? "<span>\u6A21\u578B\u9009\u62E9</span>" : ""}</div>
-          <small>${escapeHtml(material)} \xB7 ${escapeHtml(candidate.robot || "Robot")} \xB7 ${escapeHtml(candidate.flowKind || candidate.kind)}</small>
-          <div class="decision-preference-track" aria-label="\u6A21\u578B\u504F\u597D ${preference}%"><i style="transform:scaleX(${candidate.policyPreference})"></i></div>
+          <div class="decision-candidate-title"><strong>${escapeHtml(decisionCandidatePath(candidate))}</strong>${tags}</div>
+          <small>${escapeHtml(candidate.robot || "Robot")} \xB7 ${escapeHtml(candidate.flowKind || candidate.kind)}</small>
+          <div class="decision-candidate-detail">
+            <span>\u5269\u4F59\u5DE5\u671F <strong>${modelSeconds(candidate.expectedRemainingMakespan)}</strong></span>
+            <span>${delta}</span>
+          </div>
         </div>
-        <div class="decision-candidate-metrics">
-          <strong>${preference}%</strong>
-          <span>\u0394 ${modelSeconds(candidate.makespanDelta, true)}</span>
-          <small title="\u5269\u4F59 Makespan \u9884\u6D4B\u533A\u95F4">${uncertainty}</small>
-        </div>
+        <strong class="decision-candidate-preference" aria-label="E2E \u504F\u597D ${preference}">${preference}</strong>
       </li>`;
   }).join("");
-  const future = futureDecisionSteps(trace, decision).map((step, index) => {
-    const action = step.candidates.find((candidate) => candidate.selected) ?? step.candidates.find((candidate) => candidate.actionId === step.selectedActionId) ?? step.candidates[0];
-    if (!action) return "";
-    return `
-      <li class="future-decision-step ${index === 0 ? "is-current" : ""}">
-        <span>${index === 0 ? "\u5F53\u524D" : `+${index}`}</span>
-        <strong>${escapeHtml(action.destination || "\u2014")}</strong>
-        <small>${formatSeconds(step.time)} s \xB7 ${escapeHtml(action.materialIds.join("/") || `W${action.waferId}`)}</small>
-      </li>`;
-  }).join("");
-  const selectedSummary = selected ? `<div class="decision-selected-summary">
-        <span>${decision.modelEvaluated ? "E2E-CTQ \u9009\u62E9" : "\u7269\u7406\u7EA6\u675F\u552F\u4E00\u89E3"}</span>
-        <strong>${escapeHtml(decisionCandidatePath(selected))}</strong>
-        <dl>
-          <div><dt>\u6A21\u578B\u504F\u597D</dt><dd>${Math.round(selected.policyPreference * 100)}%</dd></div>
-          <div><dt>\u5269\u4F59 Makespan</dt><dd>${modelSeconds(selected.expectedRemainingMakespan)}</dd></div>
-          <div><dt>\u76F8\u5BF9\u6700\u4F18 \u0394</dt><dd>${modelSeconds(selected.makespanDelta, true)}</dd></div>
-        </dl>
-      </div>` : "";
   return `
     <div class="decision-lens-head">
-      <div><span>AI DECISION LENS</span><strong>\u51B3\u7B56 #${decision.decisionIndex}</strong></div>
-      <small>${escapeHtml(shownText)}</small>
+      <strong>\u51B3\u7B56 #${decision.decisionIndex}</strong>
+      <span>${escapeHtml(shownText)}</span>
     </div>
-    ${selectedSummary}
-    <section class="future-trajectory" aria-labelledby="futureTrajectoryTitle">
-      <header><strong id="futureTrajectoryTitle">\u672A\u6765\u5355\u8F68\u8FF9</strong><span>\u540E\u7EED ${FUTURE_DECISION_COUNT} \u4E2A\u51B3\u7B56\u70B9</span></header>
-      <ol>${future}</ol>
-    </section>
     <section class="decision-candidate-section" aria-labelledby="decisionCandidatesTitle">
-      <header><strong id="decisionCandidatesTitle">\u5019\u9009\u52A8\u4F5C</strong><span>\u504F\u597D \xB7 \u0394 Makespan \xB7 \u9884\u6D4B\u533A\u95F4</span></header>
-      <ol>${candidates}</ol>
+      <header><strong id="decisionCandidatesTitle">\u53EF\u884C\u52A8\u4F5C</strong><span>\u6309 E2E \u504F\u597D\u6392\u5E8F</span></header>
+      ${candidates ? `<ol>${candidates}</ol>` : '<p class="decision-alternative-empty">\u5F53\u524D\u6CA1\u6709\u53EF\u884C\u52A8\u4F5C</p>'}
     </section>
-    <p class="decision-method-note">\u504F\u597D\u6765\u81EA\u7B56\u7565\u5206\u6570\u7684\u540C\u7EC4\u5F52\u4E00\u5316\uFF1B\u0394 Makespan \u76F8\u5BF9\u5F53\u524D\u5019\u9009\u4E2D\u9884\u6D4B\u5747\u503C\u6700\u5C0F\u8005\u3002\u533A\u95F4\u6765\u81EA\u5206\u4F4D\u4EF7\u503C\u5934\uFF0C\u4E0D\u4EE3\u8868\u5B8C\u6210\u65F6\u95F4\u4FDD\u8BC1\u3002</p>`;
+    <p class="decision-method-note">\u0394 \u4E3A\u76F8\u5BF9 E2E \u63A8\u8350\u52A8\u4F5C\u7684\u9884\u6D4B\u5DE5\u671F\u5DEE\u503C\u3002</p>`;
 }
 var WAFER_COLOR_PALETTE = [
   "#d81b60",
@@ -1199,6 +1360,15 @@ var VisualizationWorkspace = class {
   analysisRounds = [];
   moves = [];
   decisionTrace = [];
+  replayPlan = null;
+  liveDecision = null;
+  liveDecisionKey = "";
+  lastDecisionSpaceSignature = null;
+  pauseOnDecisionChange = false;
+  pauseTriggeredByDecisionChange = false;
+  replayDecisionCache = /* @__PURE__ */ new Map();
+  pendingReplayDecisionKeys = /* @__PURE__ */ new Set();
+  replayDecisionRequestVersion = 0;
   sourceName = "";
   resultUrl = "";
   analysisResultId = "";
@@ -1218,6 +1388,7 @@ var VisualizationWorkspace = class {
     this.elements = collectElements(root);
     this.bindEvents();
     this.updatePlayButton();
+    this.updatePauseOnDecisionChangeButton();
     this.setTopologyVisible(false);
   }
   /** 更新当前设备拓扑；已有 MoveList 会立即按新拓扑重绘。 */
@@ -1251,6 +1422,15 @@ var VisualizationWorkspace = class {
         throw new Error(message || `\u670D\u52A1\u8FD4\u56DE ${response.status}`);
       }
       const resultId = resultUrl.startsWith("/api/results/") ? decodeURIComponent(resultUrl.slice("/api/results/".length)) : "";
+      if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+        const replayContext = payload.ReplayContext;
+        if (replayContext && typeof replayContext === "object" && !Array.isArray(replayContext)) {
+          const embeddedPlan = replayContext.plan;
+          if (embeddedPlan && typeof embeddedPlan === "object" && !Array.isArray(embeddedPlan)) {
+            this.setReplayPlan(embeddedPlan);
+          }
+        }
+      }
       await this.loadMoves(
         normalizeMovePayload(payload),
         normalizeDecisionTrace(payload),
@@ -1268,6 +1448,17 @@ var VisualizationWorkspace = class {
     this.analysisRoutes = structuredClone(routes ?? []);
     this.analysisRounds = structuredClone(rounds ?? []);
     if (this.moves.length) void this.renderPerformance();
+  }
+  /** 保存 Machine 回放所需的完整计划；任意来源 MoveList 都使用该计划实时评分。 */
+  setReplayPlan(plan) {
+    this.replayPlan = plan ? structuredClone(plan) : null;
+    this.replayDecisionCache.clear();
+    this.pendingReplayDecisionKeys.clear();
+    this.liveDecision = null;
+    this.liveDecisionKey = "";
+    this.lastDecisionSpaceSignature = null;
+    this.replayDecisionRequestVersion += 1;
+    if (this.moves.length) this.render();
   }
   /** 返回与诊断面板一致的稳态瓶颈候选利用率，供运行结果摘要复用。 */
   getBottleneckUtilization() {
@@ -1297,6 +1488,12 @@ var VisualizationWorkspace = class {
     this.pause();
     this.moves = [];
     this.decisionTrace = [];
+    this.liveDecision = null;
+    this.liveDecisionKey = "";
+    this.lastDecisionSpaceSignature = null;
+    this.replayDecisionCache.clear();
+    this.pendingReplayDecisionKeys.clear();
+    this.replayDecisionRequestVersion += 1;
     this.sourceName = "";
     this.resultUrl = "";
     this.analysisResultId = "";
@@ -1331,6 +1528,12 @@ var VisualizationWorkspace = class {
     this.pause();
     this.moves = moves;
     this.decisionTrace = decisionTrace;
+    this.liveDecision = null;
+    this.liveDecisionKey = "";
+    this.lastDecisionSpaceSignature = null;
+    this.replayDecisionCache.clear();
+    this.pendingReplayDecisionKeys.clear();
+    this.replayDecisionRequestVersion += 1;
     this.sourceName = sourceName;
     this.resultUrl = resultUrl;
     this.analysisResultId = analysisResultId;
@@ -1368,6 +1571,11 @@ var VisualizationWorkspace = class {
       if (this.playing) this.pause();
       else this.play();
     });
+    this.elements.pauseOnDecisionChangeButton.addEventListener("click", () => {
+      this.pauseOnDecisionChange = !this.pauseOnDecisionChange;
+      this.pauseTriggeredByDecisionChange = false;
+      this.updatePauseOnDecisionChangeButton();
+    });
     this.elements.speed.addEventListener("change", () => {
       this.playbackSpeed = Math.max(0.25, finiteNumber(this.elements.speed.value, DEFAULT_PLAYBACK_SPEED));
     });
@@ -1389,17 +1597,20 @@ var VisualizationWorkspace = class {
       this.elements.range.value = "0";
     }
     this.playing = true;
+    this.pauseTriggeredByDecisionChange = false;
     this.previousFrameTime = performance.now();
     this.previousRenderTime = 0;
     this.updatePlayButton();
     this.animationFrame = requestAnimationFrame((timestamp) => this.tick(timestamp));
   }
   /** 暂停回放并保留当前时间。 */
-  pause() {
+  pause(triggeredByDecisionChange = false) {
     this.playing = false;
+    this.pauseTriggeredByDecisionChange = triggeredByDecisionChange;
     if (this.animationFrame) cancelAnimationFrame(this.animationFrame);
     this.animationFrame = 0;
     this.updatePlayButton();
+    this.updatePauseOnDecisionChangeButton();
   }
   /** 推进播放时钟，并按固定上限刷新 DOM。 */
   tick(timestamp) {
@@ -1413,6 +1624,7 @@ var VisualizationWorkspace = class {
       this.previousRenderTime = timestamp;
       this.render();
     }
+    if (!this.playing) return;
     if (this.time >= endTime) {
       this.pause();
       return;
@@ -1424,6 +1636,21 @@ var VisualizationWorkspace = class {
     this.elements.playButton.innerHTML = this.playing ? `${icon("pause")}<span>\u6682\u505C</span>` : `${icon("play")}<span>\u64AD\u653E</span>`;
     this.elements.playButton.setAttribute("aria-label", this.playing ? "\u6682\u505C\u56DE\u653E" : "\u64AD\u653E\u56DE\u653E");
     this.elements.playButton.classList.toggle("is-playing", this.playing);
+  }
+  /** 同步决策空间自动暂停按钮的开关、触发状态和无障碍文本。 */
+  updatePauseOnDecisionChangeButton() {
+    const state = this.pauseTriggeredByDecisionChange ? "\u5DF2\u6682\u505C" : this.pauseOnDecisionChange ? "\u5DF2\u5F00\u542F" : "\u5DF2\u5173\u95ED";
+    this.elements.pauseOnDecisionChangeButton.innerHTML = `
+      <span class="decision-switch-copy"><span>\u51B3\u7B56\u53D8\u5316\u65F6\u6682\u505C</span><strong>${state}</strong></span>
+      <span class="decision-switch-track" aria-hidden="true"><i></i></span>`;
+    this.elements.pauseOnDecisionChangeButton.setAttribute("aria-pressed", String(this.pauseOnDecisionChange));
+    this.elements.pauseOnDecisionChangeButton.setAttribute("aria-checked", String(this.pauseOnDecisionChange));
+    this.elements.pauseOnDecisionChangeButton.setAttribute(
+      "aria-label",
+      this.pauseTriggeredByDecisionChange ? "\u51B3\u7B56\u7A7A\u95F4\u5DF2\u53D8\u5316\uFF0C\u56DE\u653E\u5DF2\u6682\u505C" : `\u51B3\u7B56\u7A7A\u95F4\u53D8\u5316\u65F6\u81EA\u52A8\u6682\u505C\uFF1A${this.pauseOnDecisionChange ? "\u5DF2\u5F00\u542F" : "\u5DF2\u5173\u95ED"}`
+    );
+    this.elements.pauseOnDecisionChangeButton.classList.toggle("is-active", this.pauseOnDecisionChange);
+    this.elements.pauseOnDecisionChangeButton.classList.toggle("is-triggered", this.pauseTriggeredByDecisionChange);
   }
   /** 切换单例分析模式，测试组统计与单例诊断不会同时出现。 */
   showSingleResult() {
@@ -1451,16 +1678,27 @@ var VisualizationWorkspace = class {
     this.elements.moveText.textContent = `${snapshot.completedMoves} / ${snapshot.totalMoves}`;
     this.elements.waferText.textContent = String(snapshot.waferCount);
     this.elements.range.value = String(snapshot.time);
-    const currentDecision = decisionAtTime(this.decisionTrace, snapshot.time);
+    const replayTime = this.replayEventTime(snapshot.time);
+    const replayKey = this.replayStateKey(snapshot, replayTime);
+    const cachedDecision = this.replayDecisionCache.get(replayKey) ?? null;
+    if (cachedDecision) {
+      this.liveDecision = cachedDecision;
+      this.liveDecisionKey = replayKey;
+    }
+    const currentDecision = cachedDecision ?? (this.liveDecisionKey === replayKey ? this.liveDecision : null) ?? decisionAtTime(this.decisionTrace, snapshot.time);
+    const decisionSpaceReady = Boolean(
+      cachedDecision || this.liveDecisionKey === replayKey && this.liveDecision || !this.replayPlan
+    );
+    if (this.replayPlan && !cachedDecision && this.liveDecisionKey !== replayKey && !this.pendingReplayDecisionKeys.has(replayKey)) {
+      void this.refreshReplayDecision(replayKey, replayTime);
+    }
     const topologySnapshot = snapshotWithFullDeviceModules(
       snapshotWithCandidateModules(snapshot, currentDecision, this.device),
       this.device
     );
+    this.observeDecisionSpace(currentDecision, decisionSpaceReady);
     this.elements.stage.innerHTML = renderEquipmentTopology(topologySnapshot, currentDecision);
-    this.elements.decisionLens.innerHTML = renderDecisionLens(currentDecision, this.decisionTrace);
-    if (this.elements.transitionButtons) {
-      this.elements.transitionButtons.innerHTML = renderTransitionButtons(currentDecision);
-    }
+    this.elements.decisionLens.innerHTML = renderDecisionLens(currentDecision);
     this.elements.activeMoves.innerHTML = snapshot.activeMoves.length ? snapshot.activeMoves.map((move) => `
         <li>
           <span class="active-move-id">#${finiteNumber(move.MoveID)}</span>
@@ -1468,6 +1706,57 @@ var VisualizationWorkspace = class {
           <span>${escapeHtml(move.ModuleName || activeTarget(move) || "\u2014")}</span>
           <time>${formatSeconds(finiteNumber(move.StartTime))}\u2013${formatSeconds(finiteNumber(move.EndTime))} s</time>
         </li>`).join("") : '<li class="active-move-empty">\u5F53\u524D\u65F6\u523B\u6CA1\u6709\u6267\u884C\u4E2D\u7684\u52A8\u4F5C</li>';
+  }
+  /** 观察候选动作集合；初次结果只建立基线，后续变化才触发暂停。 */
+  observeDecisionSpace(decision, ready) {
+    if (!decision || !ready) return;
+    const nextSignature = decisionSpaceSignature(decision);
+    const changed = this.lastDecisionSpaceSignature !== null && this.lastDecisionSpaceSignature !== nextSignature;
+    this.lastDecisionSpaceSignature = nextSignature;
+    if (changed && this.pauseOnDecisionChange && this.playing) {
+      this.pause(true);
+    }
+  }
+  /** 返回不晚于当前时刻的最近 Move 开始/结束边界，供 Machine 读取稳定切片。 */
+  replayEventTime(time) {
+    let eventTime = 0;
+    for (const move of this.moves) {
+      const startTime = finiteNumber(move.StartTime);
+      const endTime = finiteNumber(move.EndTime);
+      if (startTime <= time + PERFORMANCE_DISPLAY_TOLERANCE) eventTime = Math.max(eventTime, startTime);
+      if (endTime <= time + PERFORMANCE_DISPLAY_TOLERANCE) eventTime = Math.max(eventTime, endTime);
+    }
+    return eventTime;
+  }
+  /** 生成只在设备事件变化时更新的评估键，避免动画帧重复执行 E2E 前向。 */
+  replayStateKey(snapshot, replayTime) {
+    const activeMoveIds = snapshot.activeMoves.map((move) => finiteNumber(move.MoveID)).sort((left, right) => left - right).join(",");
+    return `${replayTime.toFixed(6)}:${snapshot.completedMoves}:${activeMoveIds}`;
+  }
+  /** 异步请求当前 Machine 候选；过期响应不会覆盖用户已经拖到的新时刻。 */
+  async refreshReplayDecision(replayKey, replayTime) {
+    const requestVersion = ++this.replayDecisionRequestVersion;
+    this.pendingReplayDecisionKeys.add(replayKey);
+    try {
+      const rawDecision = await requestReplayDecision({
+        resultId: this.analysisResultId || void 0,
+        moves: this.analysisResultId ? void 0 : this.moves,
+        plan: this.replayPlan,
+        time: replayTime
+      });
+      const decision = normalizeDecisionTrace({ DecisionTrace: [rawDecision] })[0] ?? null;
+      if (requestVersion !== this.replayDecisionRequestVersion || !decision) return;
+      this.replayDecisionCache.set(replayKey, decision);
+      const currentSnapshot = buildWorkspaceSnapshot(this.moves, this.device, this.time);
+      const currentReplayTime = this.replayEventTime(this.time);
+      if (this.replayStateKey(currentSnapshot, currentReplayTime) !== replayKey) return;
+      this.liveDecision = decision;
+      this.liveDecisionKey = replayKey;
+      this.render();
+    } catch (_error) {
+    } finally {
+      this.pendingReplayDecisionKeys.delete(replayKey);
+    }
   }
   /** 请求并绘制与播放时刻无关的服务端排程性能诊断。 */
   async renderPerformance() {
@@ -2299,6 +2588,7 @@ function buildScheduleAnalysisContext(routes, rounds) {
   buildWorkspaceSnapshot,
   createVisualizationWorkspace,
   decisionAtTime,
+  decisionSpaceSignature,
   displayedPerformanceResources,
   normalizeDecisionTrace,
   normalizeMovePayload,

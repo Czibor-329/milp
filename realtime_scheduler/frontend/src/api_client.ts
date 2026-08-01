@@ -60,3 +60,18 @@ export async function requestTestGroupAnalysis(
   });
   return result.analysis as TestGroupPerformanceSummary;
 }
+
+/** 请求 Machine 按当前 Move 回放状态实时枚举并使用 E2E-CTQ 评分动作。 */
+export async function requestReplayDecision(input: {
+  resultId?: string;
+  moves?: MoveRecord[];
+  plan?: Record<string, any> | null;
+  time: number;
+}): Promise<Record<string, any>> {
+  const result = await requestJson("/api/analysis/replay-decision", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  return result.decision as Record<string, any>;
+}

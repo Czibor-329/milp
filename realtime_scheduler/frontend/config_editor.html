@@ -232,15 +232,13 @@
                 </main>
 
                 <aside class="petri-control-panel" aria-label="拓扑回放控制面板">
-                  <section class="petri-control-section">
-                    <div class="petri-section-heading"><h2 class="petri-panel-title">可行动作</h2></div>
-                    <div class="transition-button-grid" id="visualTransitionButtons" aria-label="当前可行动作"></div>
-                    <ul id="visualActiveMoves" hidden></ul>
-                  </section>
-
                   <section class="petri-control-section model-evaluation-section">
-                    <h2 class="petri-panel-title">MODEL EVALUATION</h2>
+                    <div class="decision-panel-toolbar">
+                      <h2 class="petri-panel-title">实时 E2E 评估</h2>
+                      <button class="decision-auto-pause" id="visualPauseOnDecisionChangeButton" type="button" role="switch" aria-checked="false" aria-pressed="false"></button>
+                    </div>
                     <div class="decision-lens-panel" id="visualDecisionLens" aria-live="polite"></div>
+                    <ul id="visualActiveMoves" hidden></ul>
                   </section>
                 </aside>
               </div>
