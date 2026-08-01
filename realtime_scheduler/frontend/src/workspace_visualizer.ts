@@ -128,6 +128,8 @@ interface WorkspaceElements {
   topologyPlayback: HTMLElement;
   stage: HTMLElement;
   decisionLens: HTMLElement;
+  alignerFilter: HTMLInputElement;
+  coolerFilter: HTMLInputElement;
   pauseOnDecisionChangeButton: HTMLButtonElement;
   activeMoves: HTMLElement;
   source: HTMLElement;
@@ -807,6 +809,8 @@ function collectElements(root: Document): WorkspaceElements {
     topologyPlayback: required("visualTopologyPlayback"),
     stage: required("visualDeviceStage"),
     decisionLens: required("visualDecisionLens"),
+    alignerFilter: required<HTMLInputElement>("visualFilterAligner"),
+    coolerFilter: required<HTMLInputElement>("visualFilterCooler"),
     pauseOnDecisionChangeButton: required<HTMLButtonElement>("visualPauseOnDecisionChangeButton"),
     activeMoves: required("visualActiveMoves"),
     source: required("visualSource"),
@@ -1079,11 +1083,10 @@ function renderRobotHub(
     <article class="robot-hub robot-hub-${environment} ${robot.busy ? "is-busy" : ""}" style="--robot-arm-angle:${angleDegrees.toFixed(1)}deg" aria-label="${escapeHtml(robot.name)}，单槽机械手，${robot.busy ? "工作中" : "待命"}${robot.wafers[0] ? `，持有晶圆 ${robot.wafers[0]}` : "，槽位为空"}">
       <span class="robot-environment-badge">${environment === "vacuum" ? "VAC" : "ATM"}</span>
       <div class="robot-mechanism" aria-hidden="true">
-        <span class="robot-reach-sector"></span>
         <span class="robot-base"><i></i></span>
         <span class="robot-arm">
           <i class="robot-arm-beam"></i>
-          <span class="robot-end-effector ${wafer ? "is-occupied" : "is-empty"}"><i class="robot-effector-palm"></i><i class="robot-fork-tine robot-fork-tine-top"></i><i class="robot-fork-tine robot-fork-tine-bottom"></i>${wafer}</span>
+          <span class="robot-end-effector ${wafer ? "is-occupied" : "is-empty"}"><i class="robot-fork-tine robot-fork-tine-top"></i><i class="robot-fork-tine robot-fork-tine-bottom"></i>${wafer}</span>
         </span>
       </div>
     </article>`;
@@ -1170,8 +1173,8 @@ function moduleTopologyPosition(
     PM10: { leftPercent: column[3], topPixels: row[5] + TOPOLOGY_EXTERNAL_LABEL_CLEARANCE },
   };
   const singlePositions: Record<string, TopologyPosition> = {
-    PM3: { leftPercent: column[1], topPixels: row[3] },
-    PM4: { leftPercent: column[2], topPixels: row[3] },
+    PM3: { leftPercent: column[1], topPixels: TOPOLOGY_SINGLE_PROCESS_MIDDLE_TOP - TOPOLOGY_PROCESS_HEIGHT },
+    PM4: { leftPercent: column[2], topPixels: TOPOLOGY_SINGLE_PROCESS_MIDDLE_TOP - TOPOLOGY_PROCESS_HEIGHT },
     PM2: { leftPercent: column[0], topPixels: TOPOLOGY_SINGLE_PROCESS_MIDDLE_TOP },
     PM1: { leftPercent: column[0], topPixels: TOPOLOGY_SINGLE_PROCESS_LOWER_TOP },
     PM5: { leftPercent: column[3], topPixels: TOPOLOGY_SINGLE_PROCESS_MIDDLE_TOP },
@@ -1407,12 +1410,24 @@ function renderRobotTargetArrows(
   return `<svg class="topology-target-arrows" viewBox="0 0 ${TOPOLOGY_VIEWBOX_WIDTH} ${canvasHeight}" preserveAspectRatio="none" aria-hidden="true"><defs>${marker}</defs>${lines}</svg>`;
 }
 
+/** 返回模块是否被画布下方的模块筛选隐藏（当前支持 Aligner 与 Cooler 两类辅助模块）。 */
+function isModuleFilteredOut(module: ModuleSnapshot, hiddenFilters?: ReadonlySet<string>): boolean {
+  if (!hiddenFilters?.size) return false;
+  const normalized = module.name.trim().toUpperCase();
+  const type = module.type.trim().toLowerCase();
+  return (hiddenFilters.has("aligner") && (/^(AL|ALIGNER)$/.test(normalized) || type === "aligner"))
+    || (hiddenFilters.has("cooler") && (/^(CL|COOL(?:ER)?)$/.test(normalized) || type === "cooler"));
+}
+
 /** 按参考仓库的四列网格绘制机械手、腔室、Load Lock 与装载端口。 */
 export function renderEquipmentTopology(
   snapshot: WorkspaceSnapshot,
   decision: DecisionTraceStep | null,
+  hiddenFilters?: ReadonlySet<string>,
 ): string {
-  const visibleModules = snapshot.modules.filter(module => !isTopologyHiddenModule(module));
+  const visibleModules = snapshot.modules.filter(module => (
+    !isTopologyHiddenModule(module) && !isModuleFilteredOut(module, hiddenFilters)
+  ));
   const groups = topologyGroups(visibleModules);
   const destinations = candidateDestinations(decision);
   const atmosphereRobots = snapshot.robots.filter(robot => /^(ATR|ATM)/i.test(robot.name));
@@ -1491,11 +1506,11 @@ export function renderEquipmentTopology(
     : canvasHeight - 12;
   const machineAreaMarkup = `
     <div class="topology-zone topology-zone-vacuum" style="--zone-top:${vacuumTop}px;--zone-height:${Math.max(120, vacuumBottom - vacuumTop)}px" aria-hidden="true">
-      <span><strong>VACUUM PROCESS AREA</strong><small>真空加工区</small></span>
+      <span><small>真空加工区</small></span>
     </div>
     ${interfaceExtent ? `<div class="topology-interface-bay" style="--zone-top:${interfaceTop}px;--zone-height:${Math.max(96, interfaceBottom - interfaceTop)}px" aria-hidden="true"><span>VACUUM / ATM INTERFACE</span></div>` : ""}
     <div class="topology-zone topology-zone-atmosphere" style="--zone-top:${atmosphereTop}px;--zone-height:${Math.max(120, atmosphereBottom - atmosphereTop)}px" aria-hidden="true">
-      <span><strong>ATM TRANSFER AREA</strong><small>大气传输区</small></span>
+      <span><small>大气传输区</small></span>
     </div>`;
 
   const renderModuleGroup = (
@@ -1930,15 +1945,24 @@ export class VisualizationWorkspace {
   private animationFrame = 0;
   private previousFrameTime = 0;
   private previousRenderTime = 0;
+  /** 画布下方模块筛选：勾选的模块类别（aligner/cooler）不在拓扑中显示。 */
+  private readonly hiddenModuleFilters = new Set<string>();
 
   /** 绑定页面事件并初始化空状态。 */
   constructor(root: Document) {
     this.root = root;
     this.elements = collectElements(root);
+    this.syncModuleFiltersFromUi();
     this.bindEvents();
     this.updatePlayButton();
     this.updatePauseOnDecisionChangeButton();
     this.setTopologyVisible(false);
+  }
+
+  /** 以画布下方筛选框的勾选状态初始化模块筛选集合。 */
+  private syncModuleFiltersFromUi(): void {
+    if (this.elements.alignerFilter.checked) this.hiddenModuleFilters.add("aligner");
+    if (this.elements.coolerFilter.checked) this.hiddenModuleFilters.add("cooler");
   }
 
   /** 更新当前设备拓扑；已有 MoveList 会立即按新拓扑重绘。 */
@@ -2157,6 +2181,12 @@ export class VisualizationWorkspace {
     this.elements.speed.addEventListener("change", () => {
       this.playbackSpeed = Math.max(0.25, finiteNumber(this.elements.speed.value, DEFAULT_PLAYBACK_SPEED));
     });
+    this.elements.alignerFilter.addEventListener("change", () => {
+      this.setModuleFilter("aligner", this.elements.alignerFilter.checked);
+    });
+    this.elements.coolerFilter.addEventListener("change", () => {
+      this.setModuleFilter("cooler", this.elements.coolerFilter.checked);
+    });
     this.elements.performanceWindow.addEventListener("change", () => {
       this.performanceWindowMode = this.elements.performanceWindow.value === "full" ? "full" : "steady";
       void this.renderPerformance();
@@ -2258,6 +2288,13 @@ export class VisualizationWorkspace {
     this.elements.playbackEmpty.hidden = visible;
   }
 
+  /** 切换画布模块筛选；有 MoveList 时立即按新筛选重绘拓扑。 */
+  private setModuleFilter(key: string, hidden: boolean): void {
+    if (hidden) this.hiddenModuleFilters.add(key);
+    else this.hiddenModuleFilters.delete(key);
+    if (this.moves.length) this.render();
+  }
+
   /** 绘制当前时间对应的设备快照。 */
   private render(prebuiltSnapshot?: WorkspaceSnapshot): void {
     if (!this.moves.length) return;
@@ -2301,7 +2338,7 @@ export class VisualizationWorkspace {
       this.device,
     );
     this.observeDecisionSpace(currentDecision, decisionSpaceReady);
-    this.elements.stage.innerHTML = renderEquipmentTopology(topologySnapshot, currentDecision);
+    this.elements.stage.innerHTML = renderEquipmentTopology(topologySnapshot, currentDecision, this.hiddenModuleFilters);
     this.elements.decisionLens.innerHTML = renderDecisionLens(currentDecision);
 
     this.elements.activeMoves.innerHTML = snapshot.activeMoves.length

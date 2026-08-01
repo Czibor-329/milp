@@ -85,6 +85,7 @@ class FakeElement {
   constructor() {
     this.hidden = false;
     this.disabled = false;
+    this.checked = false;
     this.href = "";
     this.value = "";
     this.min = "";
@@ -134,6 +135,8 @@ function fakeWorkspaceDocument() {
     "visualTopologyPlayback",
     "visualDeviceStage",
     "visualDecisionLens",
+    "visualFilterAligner",
+    "visualFilterCooler",
     "visualPauseOnDecisionChangeButton",
     "visualActiveMoves",
     "visualSource",
@@ -557,13 +560,15 @@ test("单真空机械手拓扑只显示 MoveList 使用的 LP，并完整显示�
   assert.doesNotMatch(topology, />heater</i);
   assert.doesNotMatch(topology, /DEVICE TOPOLOGY|设备配置全量模块/);
   assert.match(topology, /--module-left:26%;/);
-  assert.match(topology, /--topology-canvas-height:792px/);
+  assert.match(topology, /--topology-canvas-height:826px/);
   assert.match(topology, /class="topology-zone topology-zone-vacuum"/);
-  assert.match(topology, /VACUUM PROCESS AREA/);
+  assert.doesNotMatch(topology, /VACUUM PROCESS AREA/);
+  assert.match(topology, /<small>真空加工区<\/small>/);
   assert.match(topology, /class="topology-interface-bay"/);
   assert.match(topology, /VACUUM \/ ATM INTERFACE/);
   assert.match(topology, /class="topology-zone topology-zone-atmosphere"/);
-  assert.match(topology, /ATM TRANSFER AREA/);
+  assert.doesNotMatch(topology, /ATM TRANSFER AREA/);
+  assert.match(topology, /<small>大气传输区<\/small>/);
 
   const modulePosition = name => {
     const match = new RegExp(
@@ -580,10 +585,14 @@ test("单真空机械手拓扑只显示 MoveList 使用的 LP，并完整显示�
     return { x: Number(match[1]), y: Number(match[2]) };
   };
   const pm2 = modulePosition("PM2");
+  const pm3 = modulePosition("PM3");
+  const pm4 = modulePosition("PM4");
   const pm1 = modulePosition("PM1");
   const vtr = robotPosition("VTR");
   assert.equal(vtr.x, 50);
   assert.equal(vtr.y, (pm1.y + pm2.y) / 2);
+  assert.equal(pm3.y + 52, pm2.y - 52, "PM3 底边应与 PM2 顶边水平");
+  assert.equal(pm4.y + 52, pm2.y - 52, "PM4 底边应与 PM2 顶边水平");
   const vacuumZone = /class="topology-zone topology-zone-vacuum" style="--zone-top:([\d.]+)px;--zone-height:([\d.]+)px"/.exec(topology);
   assert.ok(vacuumZone, "应找到真空加工区边界");
   const vacuumTop = Number(vacuumZone[1]);
@@ -605,6 +614,87 @@ test("单真空机械手拓扑只显示 MoveList 使用的 LP，并完整显示�
   assert.equal(lb.y - la.y, 76, "上下两排 LoadLock 应保留 4px 腔体间隙");
   assert.match(topology, /class="loadlock-layers"/);
   assert.equal((topology.match(/class="loadlock-layer /g) || []).length, 8, "四个 LoadLock 各显示两层");
+});
+
+test("画布模块筛选：勾选 Aligner/Cooler 后对应模块不在拓扑中显示", () => {
+  const filterDevice = {
+    Stations: {
+      LP1: { Type: "LoadPort" },
+      LA: { Type: "LoadLock" },
+      PM1: { Type: "Process" },
+      Aligner: { Type: "Aligner" },
+      Cooler: { Type: "Cooler" },
+    },
+    Robots: { ATR: {} },
+  };
+  const snapshot = logic.buildWorkspaceSnapshot([], filterDevice, 0);
+  const full = logic.snapshotWithFullDeviceModules(snapshot, filterDevice);
+  const plain = logic.renderEquipmentTopology(full, null);
+  assert.match(plain, />Aligner</, "默认应显示 Aligner");
+  assert.match(plain, />Cooler</, "默认应显示 Cooler");
+  const noAligner = logic.renderEquipmentTopology(full, null, new Set(["aligner"]));
+  assert.doesNotMatch(noAligner, />Aligner</, "勾选 Aligner 后应隐藏 Aligner");
+  assert.match(noAligner, />Cooler</, "勾选 Aligner 不影响 Cooler");
+  const noCooler = logic.renderEquipmentTopology(full, null, new Set(["cooler"]));
+  assert.doesNotMatch(noCooler, />Cooler</, "勾选 Cooler 后应隐藏 Cooler");
+  assert.match(noCooler, />Aligner</, "勾选 Cooler 不影响 Aligner");
+  const none = logic.renderEquipmentTopology(full, null, new Set());
+  assert.match(none, />Aligner</, "空筛选集合不隐藏任何模块");
+  assert.match(none, />Cooler</);
+});
+
+test("画布模块筛选：AL/CL 别名同样被 Aligner/Cooler 筛选隐藏", () => {
+  const aliasDevice = {
+    Stations: {
+      LP1: { Type: "LoadPort" },
+      LA: { Type: "LoadLock" },
+      PM1: { Type: "Process" },
+      AL: { Type: "Aligner" },
+      CL: { Type: "Cooler" },
+    },
+    Robots: { ATR: {} },
+  };
+  const full = logic.snapshotWithFullDeviceModules(
+    logic.buildWorkspaceSnapshot([], aliasDevice, 0),
+    aliasDevice,
+  );
+  const plain = logic.renderEquipmentTopology(full, null);
+  assert.match(plain, />AL</, "默认应显示 AL");
+  assert.match(plain, />CL</, "默认应显示 CL");
+  const filtered = logic.renderEquipmentTopology(full, null, new Set(["aligner", "cooler"]));
+  assert.doesNotMatch(filtered, />AL</, "勾选 Aligner 后隐藏 AL 别名");
+  assert.doesNotMatch(filtered, />CL</, "勾选 Cooler 后隐藏 CL 别名");
+});
+
+test("模块筛选默认勾选 Aligner/Cooler，取消勾选后重新显示", async () => {
+  const root = fakeWorkspaceDocument();
+  root.elements.get("visualFilterAligner").checked = true;
+  root.elements.get("visualFilterCooler").checked = true;
+  const workspace = logic.createVisualizationWorkspace(root);
+  workspace.setDevice({
+    Stations: {
+      LP1: { Type: "LoadPort" },
+      LA: { Type: "LoadLock" },
+      PM1: { Type: "Process" },
+      Aligner: { Type: "Aligner" },
+      Cooler: { Type: "Cooler" },
+    },
+    Robots: { ATR: {} },
+  });
+  await workspace.loadFile({
+    name: "filter-default.json",
+    async text() {
+      return JSON.stringify({ MoveList: moves });
+    },
+  });
+  const stage = root.elements.get("visualDeviceStage");
+  assert.doesNotMatch(stage.innerHTML, />Aligner</, "默认勾选时 Aligner 不在画布显示");
+  assert.doesNotMatch(stage.innerHTML, />Cooler</, "默认勾选时 Cooler 不在画布显示");
+  const alignerCheckbox = root.elements.get("visualFilterAligner");
+  alignerCheckbox.checked = false;
+  alignerCheckbox.listeners.get("change")();
+  assert.match(stage.innerHTML, />Aligner</, "取消勾选 Aligner 后重新显示");
+  assert.doesNotMatch(stage.innerHTML, />Cooler</, "Cooler 仍保持默认隐藏");
 });
 
 test("双真空机械手级联拓扑隐藏未使用 LP，并完整显示腔室且不重叠", () => {
@@ -734,6 +824,7 @@ test("E2E 决策在机器人尚未执行时驱动单槽机械臂朝向且不再�
   assert.match(topology, /class="robot-end-effector is-empty"/);
   assert.match(topology, /class="robot-fork-tine robot-fork-tine-top"/);
   assert.match(topology, /class="robot-fork-tine robot-fork-tine-bottom"/);
+  assert.doesNotMatch(topology, /robot-reach-sector/);
   assert.match(topology, /class="robot-environment-badge">ATM</);
   assert.doesNotMatch(topology, /topology-target-arrows|<line /);
 });
@@ -774,9 +865,13 @@ test("机械手清除旧坐标偏移，并按 PRE_TRANS 进度连续旋转", () 
   assert.match(css, /\.equipment-process[^}]*border-radius:\s*3px;\s*clip-path:\s*none;/);
   assert.match(css, /\.equipment-port[^}]*border:\s*2px solid #667b94;\s*border-radius:\s*3px;\s*clip-path:\s*none;/);
   assert.match(css, /\.robot-arm[^}]*width:\s*88px;/);
-  assert.match(css, /\.robot-fork-tine[^}]*width:\s*27px;/);
+  assert.match(css, /\.robot-fork-tine[^}]*width:\s*22px;/);
+  assert.match(css, /\.robot-end-effector::before[^}]*left:\s*-3px;[^}]*height:\s*18px;/);
+  assert.doesNotMatch(css, /\.robot-reach-sector/);
+  assert.doesNotMatch(css, /\.robot-effector-palm/);
   assert.doesNotMatch(css, /\.robot-end-effector::after/);
   assert.match(css, /\.equipment-card\.door-open :is\(\.chamber-door, \.loadlock-door\)[^}]*visibility:\s*hidden;\s*opacity:\s*0;/);
+  assert.match(css, /\.equipment-card\.door-opening :is\(\.chamber-door, \.loadlock-door\)[^}]*visibility:\s*hidden;\s*opacity:\s*0;/);
 });
 
 test("LoadLock 空层不画晶圆线，并区分已加工晶圆且按环境变化蓝色液位", () => {

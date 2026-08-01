@@ -683,6 +683,8 @@ function collectElements(root) {
     topologyPlayback: required("visualTopologyPlayback"),
     stage: required("visualDeviceStage"),
     decisionLens: required("visualDecisionLens"),
+    alignerFilter: required("visualFilterAligner"),
+    coolerFilter: required("visualFilterCooler"),
     pauseOnDecisionChangeButton: required("visualPauseOnDecisionChangeButton"),
     activeMoves: required("visualActiveMoves"),
     source: required("visualSource"),
@@ -824,10 +826,9 @@ function renderLoadPortCassette(module) {
     const label = slot.wafer ? `\u69FD\u4F4D ${slot.slot}\uFF0C\u6676\u5706 ${slot.wafer}\uFF0C${slot.processed ? "\u5DF2\u52A0\u5DE5" : "\u672A\u52A0\u5DE5"}` : `\u69FD\u4F4D ${slot.slot}\uFF0C\u7A7A`;
     return `<span class="load-port-slot is-${state2}" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}"></span>`;
   }).join("");
-  return `<div class="load-port-cassette" role="group" aria-label="${escapeHtml(`${module.name} \u6B63\u89C6\u6676\u5706\u76D2\uFF0C\u5171 ${slots.length} \u4E2A\u69FD\u4F4D`)}">
+  return `<div class="load-port-cassette" role="group" aria-label="${escapeHtml(`${module.name} \u6B63\u89C6\u6676\u5706\u76D2\uFF0C\u5171 ${slots.length} \u4E2A\u69FD\u4F4D\uFF0C\u672A\u52A0\u5DE5 ${unprocessed}\uFF0C\u5DF2\u52A0\u5DE5 ${processed}`)}">
     <span class="load-port-cassette-handle" aria-hidden="true"></span>
     <div class="load-port-slot-bank">${slotMarkup}</div>
-    <div class="load-port-slot-summary"><span class="is-unprocessed">RAW ${unprocessed}</span><span class="is-processed">DONE ${processed}</span></div>
   </div>`;
 }
 function renderModule(module, role, candidate) {
@@ -840,26 +841,24 @@ function renderModule(module, role, candidate) {
   const accessibleStatus = `${module.name}\uFF0C${STATUS_LABELS[module.status]}\uFF0C${DOOR_LABELS[module.door]}`;
   const candidateLabel = candidate ? `${candidate.count} \u4E2A\u53EF\u884C\u52A8\u4F5C\uFF0C\u6700\u9AD8\u6A21\u578B\u504F\u597D ${(candidate.preference * 100).toFixed(0)}%` : "";
   const atmosphereLevel = role === "lock" ? module.loadLockPhase === "pumping" ? 100 - module.progress * 100 : module.loadLockPhase === "venting" ? module.progress * 100 : /大气|ATM|ATR/i.test(module.environment) ? 100 : 0 : 0;
-  const loadLockEnvironment = module.loadLockPhase === "pumping" ? "PUMPING" : module.loadLockPhase === "venting" ? "VENTING" : atmosphereLevel >= 50 ? "ATM" : "VAC";
   const loadLockLayers = role === "lock" ? `<div class="loadlock-layers" aria-hidden="true">${[0, 1].map((index) => {
     const wafer = module.wafers[index];
     const processed = wafer ? processedWafers.has(wafer) : false;
     const waferState = processed ? "processed" : "unprocessed";
-    return `<div class="loadlock-layer ${wafer ? "is-occupied" : "is-empty"}"><span class="loadlock-layer-index">${index + 1}</span>${wafer ? `<span class="loadlock-wafer-line wafer-${waferState}" title="\u6676\u5706 ${escapeHtml(wafer)}\uFF08${processed ? "\u5DF2\u52A0\u5DE5" : "\u672A\u52A0\u5DE5"}\uFF09"></span>` : ""}</div>`;
+    return `<div class="loadlock-layer ${wafer ? "is-occupied" : "is-empty"}">${wafer ? `<span class="loadlock-wafer-line wafer-${waferState}" title="\u6676\u5706 ${escapeHtml(wafer)}\uFF08${processed ? "\u5DF2\u52A0\u5DE5" : "\u672A\u52A0\u5DE5"}\uFF09"></span>` : ""}</div>`;
   }).join("")}${overflow}</div>` : role === "process" ? `<div class="process-wafer-slot ${wafers ? "is-occupied" : "is-empty"}">${wafers}</div>` : role === "port" ? `<div class="load-port-dock-face" aria-hidden="true"><span></span></div>` : role === "auxiliary" ? `<div class="auxiliary-wafer-slot ${wafers ? "is-occupied" : "is-empty"}">${wafers}</div>` : `<div class="wafer-stack">${wafers}${overflow}</div>`;
   const article = `
     <article class="equipment-card equipment-${role} status-${module.status} door-${module.door} ${module.loadLockPhase ? `loadlock-${module.loadLockPhase}` : ""} ${module.isRobotTarget ? "is-target" : ""} ${candidate ? "is-candidate-destination" : ""} ${candidate?.selected ? "is-model-selected" : ""}" style="--module-progress:${Math.round(module.progress * 100)}%;--loadlock-atmosphere:${Math.max(0, Math.min(100, atmosphereLevel)).toFixed(1)}%;--loadlock-atmosphere-ratio:${Math.max(0, Math.min(1, atmosphereLevel / 100)).toFixed(3)}" aria-label="${escapeHtml(`${accessibleStatus}${candidateLabel ? `\uFF0C${candidateLabel}` : ""}`)}">
-      ${role === "process" || role === "auxiliary" ? "" : `<div class="equipment-head"><strong>${escapeHtml(module.name)}</strong>${role === "lock" ? `<span class="loadlock-environment">${loadLockEnvironment}</span>` : ""}</div>`}
       <div class="equipment-body">
         ${loadLockLayers}
       </div>
       <div class="chamber-doors" aria-hidden="true">${role === "lock" ? '<i class="loadlock-door loadlock-door-vacuum"></i><i class="loadlock-door loadlock-door-atmosphere"></i>' : doors}</div>
     </article>`;
-  if (role === "process" || role === "auxiliary") {
+  if (role === "process" || role === "auxiliary" || role === "lock") {
     return `<strong class="equipment-external-name">${escapeHtml(module.name)}</strong>${article}`;
   }
   if (role === "port") {
-    return `<div class="load-port-assembly">${article}${renderLoadPortCassette(module)}</div>`;
+    return `<strong class="equipment-external-name equipment-external-name-port">${escapeHtml(module.name)}</strong><div class="load-port-assembly">${article}${renderLoadPortCassette(module)}</div>`;
   }
   return article;
 }
@@ -869,11 +868,10 @@ function renderRobotHub(robot, environment, angleDegrees) {
     <article class="robot-hub robot-hub-${environment} ${robot.busy ? "is-busy" : ""}" style="--robot-arm-angle:${angleDegrees.toFixed(1)}deg" aria-label="${escapeHtml(robot.name)}\uFF0C\u5355\u69FD\u673A\u68B0\u624B\uFF0C${robot.busy ? "\u5DE5\u4F5C\u4E2D" : "\u5F85\u547D"}${robot.wafers[0] ? `\uFF0C\u6301\u6709\u6676\u5706 ${robot.wafers[0]}` : "\uFF0C\u69FD\u4F4D\u4E3A\u7A7A"}">
       <span class="robot-environment-badge">${environment === "vacuum" ? "VAC" : "ATM"}</span>
       <div class="robot-mechanism" aria-hidden="true">
-        <span class="robot-reach-sector"></span>
         <span class="robot-base"><i></i></span>
         <span class="robot-arm">
           <i class="robot-arm-beam"></i>
-          <span class="robot-end-effector ${wafer ? "is-occupied" : "is-empty"}"><i class="robot-effector-palm"></i><i class="robot-fork-tine robot-fork-tine-top"></i><i class="robot-fork-tine robot-fork-tine-bottom"></i>${wafer}</span>
+          <span class="robot-end-effector ${wafer ? "is-occupied" : "is-empty"}"><i class="robot-fork-tine robot-fork-tine-top"></i><i class="robot-fork-tine robot-fork-tine-bottom"></i>${wafer}</span>
         </span>
       </div>
     </article>`;
@@ -894,6 +892,8 @@ var TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS = 866;
 var TOPOLOGY_LOADPORT_ROW_TOP_PIXELS = 990;
 var TOPOLOGY_CANVAS_PADDING = 28;
 var TOPOLOGY_EXTERNAL_LABEL_CLEARANCE = 22;
+var TOPOLOGY_SINGLE_PROCESS_MIDDLE_TOP = TOPOLOGY_ROW_TOP_PIXELS[4] - 32;
+var TOPOLOGY_SINGLE_PROCESS_LOWER_TOP = TOPOLOGY_ROW_TOP_PIXELS[5] - 10;
 function distributedTopologyColumns(count) {
   if (count <= 1) return [50];
   if (count === 2) return [40, 60];
@@ -929,12 +929,12 @@ function moduleTopologyPosition(module, role, index, roleModules, cascade) {
     PM10: { leftPercent: column[3], topPixels: row[5] + TOPOLOGY_EXTERNAL_LABEL_CLEARANCE }
   };
   const singlePositions = {
-    PM3: { leftPercent: column[1], topPixels: row[3] },
-    PM4: { leftPercent: column[2], topPixels: row[3] },
-    PM2: { leftPercent: column[0], topPixels: row[4] },
-    PM1: { leftPercent: column[0], topPixels: row[5] + TOPOLOGY_EXTERNAL_LABEL_CLEARANCE },
-    PM5: { leftPercent: column[3], topPixels: row[4] },
-    PM6: { leftPercent: column[3], topPixels: row[5] + TOPOLOGY_EXTERNAL_LABEL_CLEARANCE }
+    PM3: { leftPercent: column[1], topPixels: TOPOLOGY_SINGLE_PROCESS_MIDDLE_TOP - TOPOLOGY_PROCESS_HEIGHT },
+    PM4: { leftPercent: column[2], topPixels: TOPOLOGY_SINGLE_PROCESS_MIDDLE_TOP - TOPOLOGY_PROCESS_HEIGHT },
+    PM2: { leftPercent: column[0], topPixels: TOPOLOGY_SINGLE_PROCESS_MIDDLE_TOP },
+    PM1: { leftPercent: column[0], topPixels: TOPOLOGY_SINGLE_PROCESS_LOWER_TOP },
+    PM5: { leftPercent: column[3], topPixels: TOPOLOGY_SINGLE_PROCESS_MIDDLE_TOP },
+    PM6: { leftPercent: column[3], topPixels: TOPOLOGY_SINGLE_PROCESS_LOWER_TOP }
   };
   const explicit = (cascade ? cascadePositions : singlePositions)[name];
   if (explicit) {
@@ -1027,7 +1027,7 @@ function robotTopologyPosition(robotIndex, robotCount, environment, cascade) {
   }
   return {
     leftPercent: 50,
-    topPixels: (TOPOLOGY_ROW_TOP_PIXELS[4] + TOPOLOGY_ROW_TOP_PIXELS[5]) / 2 + TOPOLOGY_EXTERNAL_LABEL_CLEARANCE / 2,
+    topPixels: (TOPOLOGY_SINGLE_PROCESS_MIDDLE_TOP + TOPOLOGY_SINGLE_PROCESS_LOWER_TOP) / 2,
     widthPixels: TOPOLOGY_ROBOT_SIZE,
     heightPixels: TOPOLOGY_ROBOT_SIZE
   };
@@ -1064,8 +1064,14 @@ function decisionTargetForRobot(robot, decision) {
   if (candidate.destination === robot.name) return candidate.source;
   return candidate.destination || candidate.source;
 }
-function renderEquipmentTopology(snapshot, decision) {
-  const visibleModules = snapshot.modules.filter((module) => !isTopologyHiddenModule(module));
+function isModuleFilteredOut(module, hiddenFilters) {
+  if (!hiddenFilters?.size) return false;
+  const normalized = module.name.trim().toUpperCase();
+  const type = module.type.trim().toLowerCase();
+  return hiddenFilters.has("aligner") && (/^(AL|ALIGNER)$/.test(normalized) || type === "aligner") || hiddenFilters.has("cooler") && (/^(CL|COOL(?:ER)?)$/.test(normalized) || type === "cooler");
+}
+function renderEquipmentTopology(snapshot, decision, hiddenFilters) {
+  const visibleModules = snapshot.modules.filter((module) => !isTopologyHiddenModule(module) && !isModuleFilteredOut(module, hiddenFilters));
   const groups = topologyGroups(visibleModules);
   const destinations = candidateDestinations(decision);
   const atmosphereRobots = snapshot.robots.filter((robot) => /^(ATR|ATM)/i.test(robot.name));
@@ -1125,11 +1131,11 @@ function renderEquipmentTopology(snapshot, decision) {
   const atmosphereBottom = atmosphereExtent ? Math.min(canvasHeight - 12, atmosphereExtent.bottom + 24) : canvasHeight - 12;
   const machineAreaMarkup = `
     <div class="topology-zone topology-zone-vacuum" style="--zone-top:${vacuumTop}px;--zone-height:${Math.max(120, vacuumBottom - vacuumTop)}px" aria-hidden="true">
-      <span><strong>VACUUM PROCESS AREA</strong><small>\u771F\u7A7A\u52A0\u5DE5\u533A</small></span>
+      <span><small>\u771F\u7A7A\u52A0\u5DE5\u533A</small></span>
     </div>
     ${interfaceExtent ? `<div class="topology-interface-bay" style="--zone-top:${interfaceTop}px;--zone-height:${Math.max(96, interfaceBottom - interfaceTop)}px" aria-hidden="true"><span>VACUUM / ATM INTERFACE</span></div>` : ""}
     <div class="topology-zone topology-zone-atmosphere" style="--zone-top:${atmosphereTop}px;--zone-height:${Math.max(120, atmosphereBottom - atmosphereTop)}px" aria-hidden="true">
-      <span><strong>ATM TRANSFER AREA</strong><small>\u5927\u6C14\u4F20\u8F93\u533A</small></span>
+      <span><small>\u5927\u6C14\u4F20\u8F93\u533A</small></span>
     </div>`;
   const renderModuleGroup = (modules, role) => modules.map((module) => {
     const position = modulePositions.get(module.name);
@@ -1500,14 +1506,22 @@ var VisualizationWorkspace = class {
   animationFrame = 0;
   previousFrameTime = 0;
   previousRenderTime = 0;
+  /** 画布下方模块筛选：勾选的模块类别（aligner/cooler）不在拓扑中显示。 */
+  hiddenModuleFilters = /* @__PURE__ */ new Set();
   /** 绑定页面事件并初始化空状态。 */
   constructor(root) {
     this.root = root;
     this.elements = collectElements(root);
+    this.syncModuleFiltersFromUi();
     this.bindEvents();
     this.updatePlayButton();
     this.updatePauseOnDecisionChangeButton();
     this.setTopologyVisible(false);
+  }
+  /** 以画布下方筛选框的勾选状态初始化模块筛选集合。 */
+  syncModuleFiltersFromUi() {
+    if (this.elements.alignerFilter.checked) this.hiddenModuleFilters.add("aligner");
+    if (this.elements.coolerFilter.checked) this.hiddenModuleFilters.add("cooler");
   }
   /** 更新当前设备拓扑；已有 MoveList 会立即按新拓扑重绘。 */
   setDevice(device) {
@@ -1697,6 +1711,12 @@ var VisualizationWorkspace = class {
     this.elements.speed.addEventListener("change", () => {
       this.playbackSpeed = Math.max(0.25, finiteNumber(this.elements.speed.value, DEFAULT_PLAYBACK_SPEED));
     });
+    this.elements.alignerFilter.addEventListener("change", () => {
+      this.setModuleFilter("aligner", this.elements.alignerFilter.checked);
+    });
+    this.elements.coolerFilter.addEventListener("change", () => {
+      this.setModuleFilter("cooler", this.elements.coolerFilter.checked);
+    });
     this.elements.performanceWindow.addEventListener("change", () => {
       this.performanceWindowMode = this.elements.performanceWindow.value === "full" ? "full" : "steady";
       void this.renderPerformance();
@@ -1784,6 +1804,12 @@ var VisualizationWorkspace = class {
     this.elements.topologyPlayback.hidden = !visible;
     this.elements.playbackEmpty.hidden = visible;
   }
+  /** 切换画布模块筛选；有 MoveList 时立即按新筛选重绘拓扑。 */
+  setModuleFilter(key, hidden) {
+    if (hidden) this.hiddenModuleFilters.add(key);
+    else this.hiddenModuleFilters.delete(key);
+    if (this.moves.length) this.render();
+  }
   /** 绘制当前时间对应的设备快照。 */
   render(prebuiltSnapshot) {
     if (!this.moves.length) return;
@@ -1815,7 +1841,7 @@ var VisualizationWorkspace = class {
       this.device
     );
     this.observeDecisionSpace(currentDecision, decisionSpaceReady);
-    this.elements.stage.innerHTML = renderEquipmentTopology(topologySnapshot, currentDecision);
+    this.elements.stage.innerHTML = renderEquipmentTopology(topologySnapshot, currentDecision, this.hiddenModuleFilters);
     this.elements.decisionLens.innerHTML = renderDecisionLens(currentDecision);
     this.elements.activeMoves.innerHTML = snapshot.activeMoves.length ? snapshot.activeMoves.map((move) => `
         <li>

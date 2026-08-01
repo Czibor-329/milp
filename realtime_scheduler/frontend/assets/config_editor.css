@@ -649,8 +649,6 @@
     .door-closing .equipment-gate span { background: #c47a09; transform: scaleX(.78); }
     .door-doorless .equipment-gate { background: repeating-linear-gradient(135deg, #d7dee8 0 3px, #f4f6f9 3px 6px); }
     .door-doorless .equipment-gate span { display: none; }
-    .equipment-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 9px 9px 4px; }
-    .equipment-head strong { overflow: hidden; color: #17233a; font: 800 12px/1.2 "Fira Code", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
     .equipment-status { display: inline-flex; align-items: center; gap: 4px; color: #64748b; font-size: 8px; font-weight: 800; white-space: nowrap; }
     .equipment-status i { width: 6px; height: 6px; border-radius: 50%; background: #94a3b8; }
     .status-processing .equipment-status i, .status-transfer .equipment-status i { background: #315fc2; }
@@ -1011,6 +1009,15 @@
     .petri-control-panel .visual-legend h3 { font: 800 10px/1.3 "Fira Code", Consolas, monospace; letter-spacing: .06em; }
 
     .petri-center-column .equipment-schematic { border-radius: 0; box-shadow: 0 1px 2px rgba(32,47,81,.04); }
+    .topology-module-filter { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 8px 12px; border: 1px solid #d7e0eb; border-top: 0; background: #fbfcfe; font-size: 12px; }
+    .topology-module-filter-title { color: #617187; font: 800 10px/1.2 "Fira Code", Consolas, monospace; letter-spacing: .06em; }
+    .topology-module-filter-option { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; border: 1px solid #cdd7e4; border-radius: 999px; color: #26364d; background: #fff; cursor: pointer; user-select: none; }
+    .topology-module-filter-option input { width: 13px; height: 13px; margin: 0; accent-color: #315fc2; cursor: pointer; }
+    .topology-module-filter-hint { margin-left: auto; color: #8190a2; font-size: 11px; }
+    body.theme-dark .topology-module-filter { border-color: #3a4a5f; background: #1f2937; }
+    body.theme-dark .topology-module-filter-title { color: #aab7c8; }
+    body.theme-dark .topology-module-filter-option { border-color: #4a5b72; color: var(--ink); background: #2a3748; }
+    body.theme-dark .topology-module-filter-hint { color: #7f8da1; }
     .reference-grid-canvas { --sim-shell: #e7edf4; --sim-shell-highlight: #f8fafc; --sim-stroke: #667b94; --sim-stroke-soft: #9aa9ba; --sim-transfer: #315fc2; --sim-raw: #c47a09; --sim-done: #087f5b; --sim-environment: #1688a8; --sim-waiting: #d97706; --sim-fault: #c93636; position: relative !important; display: block !important; height: var(--topology-canvas-height, 640px) !important; min-height: 0 !important; padding: 0 !important; overflow: hidden; background-color: #f6f8fb; background-image: linear-gradient(rgba(112,132,156,.09) 1px, transparent 1px), linear-gradient(90deg, rgba(112,132,156,.09) 1px, transparent 1px), linear-gradient(rgba(112,132,156,.035) 1px, transparent 1px), linear-gradient(90deg, rgba(112,132,156,.035) 1px, transparent 1px); background-size: 75px 75px, 75px 75px, 15px 15px, 15px 15px; }
     .reference-grid-canvas::before { display: none; }
     .topology-zone, .topology-interface-bay { position: absolute; z-index: 0; top: var(--zone-top); right: 2.5%; left: 2.5%; height: var(--zone-height); border: 1px solid rgba(102,123,148,.32); background: rgba(226,233,241,.40); box-shadow: 2px 3px 7px rgba(47,62,82,.035); pointer-events: none; }
@@ -1054,10 +1061,8 @@
     .load-port-slot.is-unprocessed::after { background: #b86b08; }
     .load-port-slot.is-processed::after { background: #087f5b; }
     .load-port-slot.is-processed::before { position: absolute; z-index: 1; top: 50%; right: 5px; width: 3px; height: 3px; border-radius: 50%; background: #e9fff6; content: ""; transform: translateY(-50%); }
-    .reference-grid-canvas .equipment-lock::before { position: absolute; z-index: 0; inset: 6px; height: auto; border-radius: 1px; background: rgba(22,136,168,.34); content: ""; transform: scaleY(var(--loadlock-atmosphere-ratio, 0)); transform-origin: bottom; transition: transform .18s ease-out; }
+    .reference-grid-canvas .equipment-lock::before { position: absolute; z-index: 0; inset: 6px; height: auto; border-radius: 1px; background: rgba(22,136,168,.58); content: ""; transform: scaleY(var(--loadlock-atmosphere-ratio, 0)); transform-origin: bottom; transition: transform .18s ease-out; }
     .reference-grid-canvas .equipment-lock.loadlock-pumping, .reference-grid-canvas .equipment-lock.loadlock-venting { border-color: var(--sim-environment); }
-    .reference-grid-canvas .equipment-head { display: block; padding: 7px 8px 2px; }
-    .reference-grid-canvas .equipment-head strong { font-size: 12px; }
     .reference-grid-canvas .equipment-body { position: relative; min-height: 0; justify-content: center; padding: 0 6px 6px; }
     .reference-grid-canvas .wafer-stack { position: relative; width: 100%; height: 100%; align-content: center; justify-content: center; gap: 4px; }
     .reference-grid-canvas .wafer-token { display: inline-grid; width: 56px; min-width: 56px; height: 56px; place-items: center; padding: 4px; border: 0; border-radius: 50%; color: #3d2906; background: conic-gradient(from -90deg, var(--wafer-state-color) 0 var(--wafer-progress), #d7e0eb var(--wafer-progress) 360deg); box-shadow: 1px 2px 5px rgba(32,47,81,.16); font: 900 10px/1 "Fira Code", Consolas, monospace; }
@@ -1087,7 +1092,8 @@
     .reference-grid-canvas .chamber-door-right { right: 1px; border-radius: 4px 0 0 4px; }
     .reference-grid-canvas .chamber-door-bottom { bottom: 1px; border-radius: 4px 4px 0 0; }
     .reference-grid-canvas .chamber-door-left { left: 1px; border-radius: 0 4px 4px 0; }
-    .reference-grid-canvas .equipment-card.door-open :is(.chamber-door, .loadlock-door) { visibility: hidden; opacity: 0; }
+    .reference-grid-canvas .equipment-card.door-open :is(.chamber-door, .loadlock-door),
+    .reference-grid-canvas .equipment-card.door-opening :is(.chamber-door, .loadlock-door) { visibility: hidden; opacity: 0; }
     .reference-grid-canvas .equipment-auxiliary { width: 112px; height: 104px; grid-template-rows: 1fr; overflow: hidden; border: 2px solid #667b94; border-radius: 3px; clip-path: none; background: linear-gradient(145deg, var(--sim-shell-highlight), var(--sim-shell)); box-shadow: inset 0 0 0 1px rgba(255,255,255,.64), 2px 3px 7px rgba(32,47,81,.10); }
     .reference-grid-canvas .equipment-auxiliary .equipment-body { display: grid; place-items: center; padding: 0; }
     .auxiliary-wafer-slot { display: grid; width: 84px; height: 84px; place-items: center; border: 1px solid #71859e; border-radius: 50%; background: radial-gradient(circle at 42% 36%, #f8fbff 0, #dce5ee 70%, #bdcad8 100%); box-shadow: inset 0 3px 7px rgba(48,65,87,.18), 0 0 0 3px rgba(255,255,255,.50); }
@@ -1097,22 +1103,19 @@
     .reference-grid-canvas .robot-hub, .reference-grid-canvas .robot-hub-vacuum, .reference-grid-canvas .robot-hub-atmosphere { position: relative; top: auto; left: auto; display: block; width: 132px; height: 132px; min-height: 132px; overflow: visible; border: 0; border-radius: 0; clip-path: none; color: #334155; background: transparent; box-shadow: none; transform: none; }
     .robot-environment-badge { position: absolute; z-index: 6; top: calc(50% - 44px); left: 50%; padding: 2px 4px; border: 1px solid rgba(73,99,130,.42); border-radius: 2px; color: #5b6d83; background: rgba(248,250,252,.90); font: 800 7px/1 "Fira Code", Consolas, monospace; letter-spacing: .06em; transform: translateX(-50%); }
     .robot-mechanism { position: absolute; inset: 8px; }
-    .robot-reach-sector { position: absolute; z-index: 0; top: 50%; left: 50%; width: 116px; height: 116px; opacity: 0; border-radius: 50%; background: conic-gradient(from 62deg, rgba(49,95,194,.11) 0 56deg, transparent 56deg 360deg); transform: translate(-50%, -50%) rotate(var(--robot-arm-angle, -90deg)); transition: opacity .18s ease-out, transform .22s ease-out; }
-    .robot-hub.is-busy .robot-reach-sector { opacity: 1; }
     .robot-base { position: absolute; z-index: 3; top: 50%; left: 50%; display: grid; width: 58px; height: 58px; place-items: center; border: 2px solid #667b94; border-radius: 50%; background: radial-gradient(circle at 38% 32%, #fbfdff 0, #d9e3ed 58%, #aebdcd 100%); box-shadow: inset 0 0 0 3px rgba(255,255,255,.58), 2px 3px 7px rgba(32,47,81,.14); transform: translate(-50%, -50%); }
     .robot-base i { width: 18px; height: 18px; border: 2px solid #52677f; border-radius: 50%; background: #9fb0c2; box-shadow: inset 0 2px 3px rgba(28,43,61,.28); }
     .robot-arm { position: absolute; z-index: 2; top: 50%; left: 50%; display: block; width: 88px; height: 38px; transform: translateY(-50%) rotate(var(--robot-arm-angle, -90deg)); transform-origin: 0 50%; transition: transform .22s ease-out; }
-    .robot-arm-beam { position: absolute; top: 15px; left: 20px; width: 38px; height: 7px; border: 2px solid #52677f; border-radius: 999px; background: linear-gradient(180deg, #eef3f8 0, #aebdcd 100%); box-shadow: inset 0 1px 0 rgba(255,255,255,.78), 1px 2px 4px rgba(32,47,81,.16); }
-    .robot-end-effector { position: absolute; top: 4px; left: 56px; display: block; width: 40px; height: 30px; background: transparent; }
-    .robot-effector-palm { position: absolute; top: 11px; left: 0; width: 16px; height: 7px; border: 2px solid #52677f; border-radius: 4px; background: linear-gradient(180deg, #eef3f8, #aebdcd); }
-    .robot-fork-tine { position: absolute; left: 14px; width: 27px; height: 5px; border: 2px solid #52677f; border-left: 0; border-radius: 0 999px 999px 0; background: #c4d0dc; box-shadow: inset 0 1px 0 rgba(255,255,255,.72); }
+    .robot-arm-beam { position: absolute; top: 15px; left: 20px; width: 32px; height: 7px; border: 2px solid #52677f; border-radius: 999px; background: linear-gradient(180deg, #eef3f8 0, #aebdcd 100%); box-shadow: inset 0 1px 0 rgba(255,255,255,.78), 1px 2px 4px rgba(32,47,81,.16); }
+    .robot-end-effector { position: absolute; top: 4px; left: 52px; display: block; width: 22px; height: 30px; background: transparent; }
+    .robot-end-effector::before { position: absolute; z-index: 1; top: 6px; left: -3px; width: 8px; height: 18px; border: 2px solid #52677f; border-right: 0; border-radius: 4px 0 0 4px; background: linear-gradient(180deg, #eef3f8 0, #aebdcd 100%); box-shadow: inset 0 1px 0 rgba(255,255,255,.72); content: ""; }
+    .robot-fork-tine { position: absolute; left: 0; width: 22px; height: 5px; border: 2px solid #52677f; border-left: 0; border-radius: 0 999px 999px 0; background: #c4d0dc; box-shadow: inset 0 1px 0 rgba(255,255,255,.72); }
     .robot-fork-tine-top { top: 3px; transform: rotate(-4deg); transform-origin: left center; }
     .robot-fork-tine-bottom { bottom: 3px; transform: rotate(4deg); transform-origin: left center; }
     .reference-grid-canvas .robot-hub-vacuum::before, .reference-grid-canvas .robot-hub-vacuum::after { content: none; }
-    .robot-end-effector.is-empty::before { content: none; }
-    .robot-end-effector .wafer-token { position: absolute; z-index: 2; top: 1px; left: 13px; width: 28px; min-width: 28px; height: 28px; padding: 2px; font-size: 7px; }
+    .robot-end-effector .wafer-token { position: absolute; z-index: 2; top: 1px; left: 0; width: 28px; min-width: 28px; height: 28px; padding: 2px; font-size: 7px; }
     .reference-grid-canvas .robot-hub.is-busy .robot-base { border-color: var(--sim-transfer); box-shadow: inset 0 0 0 3px rgba(255,255,255,.62), 0 0 0 3px rgba(49,95,194,.12), 2px 3px 7px rgba(32,47,81,.14); }
-    .reference-grid-canvas .robot-hub.is-busy :is(.robot-arm-beam, .robot-effector-palm, .robot-fork-tine) { border-color: var(--sim-transfer); }
+    .reference-grid-canvas .robot-hub.is-busy :is(.robot-arm-beam, .robot-end-effector::before, .robot-fork-tine) { border-color: var(--sim-transfer); }
 
     body.theme-dark .petri-control-panel { border-color: var(--line); color: var(--ink); background: var(--surface); box-shadow: none; }
     body.theme-dark .decision-auto-pause { color: var(--ink); background: transparent; }
@@ -1136,7 +1139,8 @@
     body.theme-dark .reference-grid-canvas .equipment-auxiliary { border-color: #60738c; background: linear-gradient(145deg, #2a3748 0, #202b39 100%); }
     body.theme-dark .auxiliary-wafer-slot, body.theme-dark .robot-base { border-color: #60738c; background: radial-gradient(circle at 38% 32%, #405168 0, #29374a 62%, #1d2938 100%); }
     body.theme-dark .robot-arm-beam { border-color: #60738c; background: linear-gradient(180deg, #43536a 0, #263448 100%); }
-    body.theme-dark :is(.robot-effector-palm, .robot-fork-tine) { border-color: #60738c; background: linear-gradient(180deg, #43536a 0, #263448 100%); }
+    body.theme-dark .robot-end-effector::before { border-color: #60738c; background: linear-gradient(180deg, #43536a 0, #263448 100%); }
+    body.theme-dark :is(.robot-fork-tine) { border-color: #60738c; background: linear-gradient(180deg, #43536a 0, #263448 100%); }
     body.theme-dark .robot-environment-badge { border-color: #60738c; color: #b7c4d5; background: rgba(24,33,46,.92); }
     body.theme-dark .load-port-cassette { border-color: #60738c; background: linear-gradient(180deg, #2a3748 0, #202b39 100%); }
     body.theme-dark .load-port-slot-bank { border-color: #52657b; background: rgba(15,23,42,.68); }
