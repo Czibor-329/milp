@@ -1,4 +1,4 @@
-# 拓扑回放：E2E 决策透镜
+# 拓扑回放：合法动作空间
 
 ## 目标
 
@@ -8,9 +8,10 @@
 2. 模型更偏好哪一个动作，以及每个动作的剩余 Makespan 分布；
 3. E2E 当前推荐与原 MoveList 实际执行的意图是否一致。
 
-界面明确区分三类信息：MoveList 是已经生成的计划事实；候选集合是 Machine 的
-物理可行性事实；偏好、Makespan 和区间是模型预测。面板中的候选按当前下一条
-物理运输 Move 合并，不把完整站到站事务的后续落点误写成当前动作。预测不能显示为
+右侧面板只保留合法动作空间，避免把同一组偏好、工期与计划一致性重复组织成统计卡、
+解释段落和对比表。MoveList 是已经生成的计划事实；候选集合是 Machine 的物理可行性
+事实；偏好、Makespan 和区间是模型预测。面板中的每个候选都是一次完整的
+Pick + Place 或原子 Swap，不把 Pick、Place 拆成两个决策。预测不能显示为
 “保证”或“真实增量”。MoveList 可以来自启发式、MILP、外部算法或 E2E 本身；其来源不
 改变实时评估所使用的 Machine 状态和 E2E checkpoint。
 
@@ -30,22 +31,22 @@
 - 调度领域已经证明可以在析取图状态上逐步学习派工，并直接以 Makespan 为目标构造
   一条解；这与当前资源流图策略的在线边界一致。参考
   [Learning to Dispatch for Job Shop Scheduling](https://proceedings.neurips.cc/paper/2020/hash/11958dfee29b6709f48a9ba0387a2431-Abstract.html)。
-- 分位价值头比单一均值更适合表达长程风险，因此界面同时给出均值和稳健区间，并保留
-  “不确定性不是置信保证”的说明。参考
+- 分位价值头比单一均值更适合表达长程风险，因此协议继续保留均值和分位区间，供离线
+  分析使用；当前侧栏不再为这些字段建立重复卡片。参考
   [Distributional Reinforcement Learning with Quantile Regression](https://arxiv.org/abs/1710.10044)。
 
 ## 实时 Machine 回放
 
 运行结果会保存生成该 MoveList 的完整计划和逐轮实际 update。时间轴到达新的 Move
 开始/结束边界时，服务端从当前代 update 建立 ``Machine``，只回放该边界之前已经
-发生的 Move，然后调用生产 E2E-CTQ 模型评分当前全部合法完整搬运意图。服务端再按
-每个意图的下一条 Pick / Place / Swap Move 合并结果：同一次 Pick 的不同后续落点
-只显示为一个当前动作，组内策略概率求和，价值分位数按组内概率加权。模型按 checkpoint
+发生的 Move，然后调用生产 E2E-CTQ 模型评分当前全部合法完整搬运意图。候选保留
+RobotAction 的源站、目标站、完整起止时间和动作 ID；相同 Pick 但 Place 目标不同的
+事务仍是两个独立候选。模型按 checkpoint
 修改时间缓存；浏览器按设备事件缓存结果，不会在每个动画帧重复前向。
 
-接口返回的 ``selectedActionId`` 表示 E2E 实时推荐的当前物理动作，``executedActionId``
-表示原计划下一条物理动作；``selectedIntentActionId`` 和 ``executedIntentActionId``
-保留对应的完整事务 ID 供诊断。界面用绿色表示模型推荐，用橙色虚线和“原计划”标记
+接口返回的 ``selectedActionId`` 表示 E2E 实时推荐的完整事务，``executedActionId``
+表示原计划下一条完整事务；兼容字段 ``selectedIntentActionId`` 和
+``executedIntentActionId`` 返回相同 ID。界面用绿色表示模型推荐，用橙色虚线和“原计划”标记
 实际执行；二者可以是同一候选，也可以不同。
 
 ## DecisionTrace v1
@@ -53,7 +54,7 @@
 E2E-CTQ 每个决策点记录：
 
 - `time`、`decisionIndex`、`roundIndex`；
-- `candidateCount`、是否因体积限制截断；实时回放中该数量为合并后的当前物理动作数；
+- `candidateCount`、是否因体积限制截断；实时回放中该数量为完整合法事务数；
 - 每个候选的 wafer、Robot、源/目标站点、槽位和预计起止时间；
 - 同一候选集合内归一化的 `policyPreference`；
 - `expected/median/lower/upperRemainingMakespan`；
@@ -61,8 +62,7 @@ E2E-CTQ 每个决策点记录：
 - `selected` 和 `selectedActionId`。
 
 实时回放切片额外包含 ``replayEvaluated``、``executedActionId``，候选中用
-``executed`` 标识原计划实际选择，并用 ``intentCount``、``intentActionIds`` 记录该
-物理动作合并了哪些完整事务。E2E 排程自带的静态 ``DecisionTrace`` 仍保留，
+``executed`` 标识原计划实际选择。E2E 排程自带的静态 ``DecisionTrace`` 仍保留，
 在旧结果缺少 Machine 回放上下文或实时接口不可用时作为只读兜底。
 
 为控制 1000 片场景的内存和结果文件体积，每轮最多记录 2048 个决策点，每个决策点
@@ -73,12 +73,12 @@ E2E-CTQ 每个决策点记录：
 
 - 拓扑腔室右上角显示候选落点：圆内数字为排名，百分比为该目标下最高模型偏好；
   绿色描边表示模型最终选择，蓝色描边表示其他可行目标。
-- 右侧“决策评估”只显示一次实时推荐；候选明细排除已经置顶的推荐动作，避免与顶部
-  可行动作卡片或未来轨迹重复。
-- `Δ Makespan` 只在同一决策点内比较；分位区间来自模型价值头。
+- 右侧“合法动作空间”只显示一个候选列表；模型推荐、原计划一致性、偏好和预测工期
+  都附着在对应候选行上，不再额外生成摘要、解释、对比、证据或翻页区块。
+- 候选行中的剩余工期和 `Δ Makespan` 只在同一决策点内比较。
 - 拖动时间轴时，拓扑热区、决策卡片与正在执行的 MoveList 同步更新。
-- “决策变化暂停”默认关闭；开启后以当前候选动作集合为基线，候选总数或动作 ID
-  集合变化时立即暂停。首次实时评估和仅偏好分数变化不会触发暂停。
+- “下一决策时暂停”默认关闭；开启后继续播放到下一次 Place 或原子 Swap 完成时，
+  精确停在该完整事务结束时间。Pick 结束和事务内部的其他 Move 不会触发暂停。
 - 普通策略不需要预先生成 `DecisionTrace`；只要有完整计划上下文，就由 Machine 和
   真实 E2E 模型实时生成。缺少计划上下文的旧文件保持可恢复空状态，不生成启发式假数据。
 

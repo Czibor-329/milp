@@ -153,6 +153,7 @@ interface WorkspaceElements {
 const PICK_MOVE_TYPES = new Set([0, 2]);
 const PLACE_MOVE_TYPES = new Set([1, 3]);
 const SWAP_MOVE = 4;
+const DECISION_COMPLETION_MOVE_TYPES = new Set([...PLACE_MOVE_TYPES, SWAP_MOVE]);
 const PRE_TRANS_MOVE = 5;
 const PREPARE_MOVE = 6;
 const COMPLETE_MOVE = 7;
@@ -1745,13 +1746,23 @@ export function decisionSpaceSignature(decision: DecisionTraceStep): string {
   return JSON.stringify([decision.candidateCount, actionIds]);
 }
 
-/** 绘制统一的 E2E 可行动作列表，推荐只是普通的候选状态。 */
+/** 返回完整搬运事务完成后的决策边界；Pick 结束不是新的决策点。 */
+export function decisionBoundaryTimes(moves: MoveRecord[]): number[] {
+  return [...new Set(
+    moves
+      .filter(move => DECISION_COMPLETION_MOVE_TYPES.has(finiteNumber(move.MoveType, -1)))
+      .map(move => finiteNumber(move.EndTime))
+      .filter(time => time >= 0),
+  )].sort((left, right) => left - right);
+}
+
+/** 绘制当前合法动作空间；模型推荐和原计划只作为候选自身的状态标签。 */
 function renderDecisionLens(decision: DecisionTraceStep | null): string {
   if (!decision) {
     return `
       <div class="decision-empty">
-        <strong>当前时刻暂无决策</strong>
-        <p>回放到下一设备事件后，Machine 会更新可行动作并触发实时评估。</p>
+        <strong>当前时刻暂无合法动作</strong>
+        <p>回放到下一设备事件后更新。</p>
       </div>`;
   }
   const shownText = decision.candidatesTruncated
@@ -1783,15 +1794,13 @@ function renderDecisionLens(decision: DecisionTraceStep | null): string {
       </li>`;
   }).join("");
   return `
-    <div class="decision-lens-head">
-      <strong>决策 #${decision.decisionIndex}</strong>
-      <span>${escapeHtml(shownText)}</span>
-    </div>
     <section class="decision-candidate-section" aria-labelledby="decisionCandidatesTitle">
-      <header><strong id="decisionCandidatesTitle">可行动作</strong><span>按 E2E 偏好排序</span></header>
-      ${candidates ? `<ol>${candidates}</ol>` : '<p class="decision-alternative-empty">当前没有可行动作</p>'}
-    </section>
-    <p class="decision-method-note">Δ 为相对 E2E 推荐动作的预测工期差值。</p>`;
+      <header>
+        <strong id="decisionCandidatesTitle">决策 #${decision.decisionIndex} <small>@ ${formatSeconds(decision.time)}s</small></strong>
+        <span>${escapeHtml(shownText)} · E2E 排序</span>
+      </header>
+      ${candidates ? `<ol>${candidates}</ol>` : '<p class="decision-alternative-empty">当前没有合法动作</p>'}
+    </section>`;
 }
 
 const WAFER_COLOR_PALETTE = [
@@ -2070,7 +2079,7 @@ export class VisualizationWorkspace {
   private replayPlan: Record<string, any> | null = null;
   private liveDecision: DecisionTraceStep | null = null;
   private liveDecisionKey = "";
-  private lastDecisionSpaceSignature: string | null = null;
+  private decisionBoundaries: number[] = [];
   private pauseOnDecisionChange = false;
   private pauseTriggeredByDecisionChange = false;
   private readonly replayDecisionCache = new Map<string, DecisionTraceStep>();
@@ -2187,7 +2196,7 @@ export class VisualizationWorkspace {
     this.pendingReplayDecisionKeys.clear();
     this.liveDecision = null;
     this.liveDecisionKey = "";
-    this.lastDecisionSpaceSignature = null;
+    this.decisionBoundaries = decisionBoundaryTimes(this.moves);
     this.replayDecisionRequestVersion += 1;
     if (this.moves.length) this.render();
   }
@@ -2226,7 +2235,7 @@ export class VisualizationWorkspace {
     this.decisionTrace = [];
     this.liveDecision = null;
     this.liveDecisionKey = "";
-    this.lastDecisionSpaceSignature = null;
+    this.decisionBoundaries = [];
     this.replayDecisionCache.clear();
     this.pendingReplayDecisionKeys.clear();
     this.replayDecisionRequestVersion += 1;
@@ -2270,10 +2279,10 @@ export class VisualizationWorkspace {
     if (!moves.length) throw new Error("MoveList 为空，无法建立可视化回放");
     this.pause();
     this.moves = moves;
+    this.decisionBoundaries = decisionBoundaryTimes(moves);
     this.decisionTrace = decisionTrace;
     this.liveDecision = null;
     this.liveDecisionKey = "";
-    this.lastDecisionSpaceSignature = null;
     this.replayDecisionCache.clear();
     this.pendingReplayDecisionKeys.clear();
     this.replayDecisionRequestVersion += 1;
@@ -2373,8 +2382,22 @@ export class VisualizationWorkspace {
     const elapsedSeconds = Math.max(0, timestamp - this.previousFrameTime) / 1000;
     this.previousFrameTime = timestamp;
     const endTime = finiteNumber(this.elements.range.max);
-    this.time = Math.min(endTime, this.time + elapsedSeconds * this.playbackSpeed);
+    const previousTime = this.time;
+    const advancedTime = Math.min(endTime, previousTime + elapsedSeconds * this.playbackSpeed);
+    const nextDecisionBoundary = this.pauseOnDecisionChange
+      ? this.decisionBoundaries.find(boundary => (
+          boundary > previousTime + PERFORMANCE_DISPLAY_TOLERANCE
+          && boundary <= advancedTime + PERFORMANCE_DISPLAY_TOLERANCE
+        ))
+      : undefined;
+    this.time = nextDecisionBoundary ?? advancedTime;
     this.elements.range.value = String(this.time);
+    if (nextDecisionBoundary !== undefined) {
+      this.previousRenderTime = timestamp;
+      this.render();
+      this.pause(true);
+      return;
+    }
     if (timestamp - this.previousRenderTime >= PLAYBACK_FRAME_INTERVAL_MS || this.time >= endTime) {
       this.previousRenderTime = timestamp;
       this.render();
@@ -2402,15 +2425,15 @@ export class VisualizationWorkspace {
       ? "已暂停"
       : this.pauseOnDecisionChange ? "已开启" : "已关闭";
     this.elements.pauseOnDecisionChangeButton.innerHTML = `
-      <span class="decision-switch-copy"><span>决策变化时暂停</span><strong>${state}</strong></span>
+      <span class="decision-switch-copy"><span>下一决策时暂停</span><strong>${state}</strong></span>
       <span class="decision-switch-track" aria-hidden="true"><i></i></span>`;
     this.elements.pauseOnDecisionChangeButton.setAttribute("aria-pressed", String(this.pauseOnDecisionChange));
     this.elements.pauseOnDecisionChangeButton.setAttribute("aria-checked", String(this.pauseOnDecisionChange));
     this.elements.pauseOnDecisionChangeButton.setAttribute(
       "aria-label",
       this.pauseTriggeredByDecisionChange
-        ? "决策空间已变化，回放已暂停"
-        : `决策空间变化时自动暂停：${this.pauseOnDecisionChange ? "已开启" : "已关闭"}`,
+        ? "已到达下一个完整决策，回放已暂停"
+        : `到下一个完整决策时自动暂停：${this.pauseOnDecisionChange ? "已开启" : "已关闭"}`,
     );
     this.elements.pauseOnDecisionChangeButton.classList.toggle("is-active", this.pauseOnDecisionChange);
     this.elements.pauseOnDecisionChangeButton.classList.toggle("is-triggered", this.pauseTriggeredByDecisionChange);
@@ -2455,8 +2478,8 @@ export class VisualizationWorkspace {
     this.elements.waferText.textContent = String(snapshot.waferCount);
     this.elements.range.value = String(snapshot.time);
 
-    const replayTime = this.replayEventTime(snapshot.time);
-    const replayKey = this.replayStateKey(snapshot, replayTime);
+    const replayTime = this.replayDecisionTime(snapshot.time);
+    const replayKey = this.replayStateKey(replayTime);
     const cachedDecision = this.replayDecisionCache.get(replayKey) ?? null;
     if (cachedDecision) {
       this.liveDecision = cachedDecision;
@@ -2465,11 +2488,6 @@ export class VisualizationWorkspace {
     const currentDecision = cachedDecision
       ?? (this.liveDecisionKey === replayKey ? this.liveDecision : null)
       ?? decisionAtTime(this.decisionTrace, snapshot.time);
-    const decisionSpaceReady = Boolean(
-      cachedDecision
-      || (this.liveDecisionKey === replayKey && this.liveDecision)
-      || !this.replayPlan,
-    );
     if (
       this.replayPlan
       && !cachedDecision
@@ -2482,7 +2500,6 @@ export class VisualizationWorkspace {
       snapshotWithCandidateModules(snapshot, currentDecision, this.device),
       this.device,
     );
-    this.observeDecisionSpace(currentDecision, decisionSpaceReady);
     this.elements.stage.innerHTML = renderEquipmentTopology(topologySnapshot, currentDecision, this.hiddenModuleFilters);
     this.elements.decisionLens.innerHTML = renderDecisionLens(currentDecision);
 
@@ -2497,37 +2514,19 @@ export class VisualizationWorkspace {
       : '<li class="active-move-empty">当前时刻没有执行中的动作</li>';
   }
 
-  /** 观察候选动作集合；初次结果只建立基线，后续变化才触发暂停。 */
-  private observeDecisionSpace(decision: DecisionTraceStep | null, ready: boolean): void {
-    if (!decision || !ready) return;
-    const nextSignature = decisionSpaceSignature(decision);
-    const changed = this.lastDecisionSpaceSignature !== null
-      && this.lastDecisionSpaceSignature !== nextSignature;
-    this.lastDecisionSpaceSignature = nextSignature;
-    if (changed && this.pauseOnDecisionChange && this.playing) {
-      this.pause(true);
+  /** 返回不晚于当前时刻的最近完整事务边界，事务执行期间沿用上一决策。 */
+  private replayDecisionTime(time: number): number {
+    let decisionTime = 0;
+    for (const boundary of this.decisionBoundaries) {
+      if (boundary > time + PERFORMANCE_DISPLAY_TOLERANCE) break;
+      decisionTime = boundary;
     }
+    return decisionTime;
   }
 
-  /** 返回不晚于当前时刻的最近 Move 开始/结束边界，供 Machine 读取稳定切片。 */
-  private replayEventTime(time: number): number {
-    let eventTime = 0;
-    for (const move of this.moves) {
-      const startTime = finiteNumber(move.StartTime);
-      const endTime = finiteNumber(move.EndTime);
-      if (startTime <= time + PERFORMANCE_DISPLAY_TOLERANCE) eventTime = Math.max(eventTime, startTime);
-      if (endTime <= time + PERFORMANCE_DISPLAY_TOLERANCE) eventTime = Math.max(eventTime, endTime);
-    }
-    return eventTime;
-  }
-
-  /** 生成只在设备事件变化时更新的评估键，避免动画帧重复执行 E2E 前向。 */
-  private replayStateKey(snapshot: WorkspaceSnapshot, replayTime: number): string {
-    const activeMoveIds = snapshot.activeMoves
-      .map(move => finiteNumber(move.MoveID))
-      .sort((left, right) => left - right)
-      .join(",");
-    return `${replayTime.toFixed(6)}:${snapshot.completedMoves}:${activeMoveIds}`;
+  /** 每个完整事务边界只执行一次 E2E 前向。 */
+  private replayStateKey(replayTime: number): string {
+    return replayTime.toFixed(6);
   }
 
   /** 异步请求当前 Machine 候选；过期响应不会覆盖用户已经拖到的新时刻。 */
@@ -2544,9 +2543,8 @@ export class VisualizationWorkspace {
       const decision = normalizeDecisionTrace({ DecisionTrace: [rawDecision] })[0] ?? null;
       if (requestVersion !== this.replayDecisionRequestVersion || !decision) return;
       this.replayDecisionCache.set(replayKey, decision);
-      const currentSnapshot = buildWorkspaceSnapshot(this.moves, this.device, this.time);
-      const currentReplayTime = this.replayEventTime(this.time);
-      if (this.replayStateKey(currentSnapshot, currentReplayTime) !== replayKey) return;
+      const currentReplayTime = this.replayDecisionTime(this.time);
+      if (this.replayStateKey(currentReplayTime) !== replayKey) return;
       this.liveDecision = decision;
       this.liveDecisionKey = replayKey;
       this.render();

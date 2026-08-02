@@ -49,20 +49,19 @@ def _heuristic_replay_plan() -> dict:
     reason="生产 E2E-CTQ checkpoint 不存在",
 )
 def test_heuristic_movelist_is_evaluated_by_live_e2e_machine() -> None:
-    """非 E2E 输出也应从初始 Machine 状态得到可行意图和真实模型分数。"""
+    """非 E2E 输出也应在完整事务边界得到合法意图和真实模型分数。"""
     plan = _heuristic_replay_plan()
     result = execute_plan(plan)
     assert "DecisionTrace" not in result["output"]
+    moves = result["output"]["MoveList"]
+    machine = ReplayMachine(plan, moves, E2E_CTQ_MODEL_PATH)
 
-    decision = ReplayMachine(
-        plan,
-        result["output"]["MoveList"],
-        E2E_CTQ_MODEL_PATH,
-    ).evaluate(0.0)
+    decision = machine.evaluate(0.0)
 
     assert decision["replayEvaluated"] is True
     assert decision["modelEvaluated"] is True
-    assert decision["candidateCount"] == 1
+    assert decision["decisionIndex"] == 0
+    assert decision["candidateCount"] == 2
     assert decision["selectedActionId"]
     assert decision["executedActionId"]
     assert sum(
@@ -72,88 +71,71 @@ def test_heuristic_movelist_is_evaluated_by_live_e2e_machine() -> None:
     assert {
         (candidate["source"], candidate["destination"])
         for candidate in decision["candidates"]
-    } == {("LP1", "ATR")}
+    } == {("LP1", "LA"), ("LP1", "LB")}
     assert all(
-        candidate["destinationSlot"] == 0
+        candidate["source"] != candidate["robot"]
+        and candidate["destination"] != candidate["robot"]
+        and candidate["destinationSlot"] > 0
         for candidate in decision["candidates"]
     )
 
-    first_pick = next(
-        move for move in result["output"]["MoveList"]
-        if int(move.get("MoveType", -1)) == 0
+    first_pick = min(
+        (
+            move for move in moves
+            if int(move.get("MoveType", -1)) in {0, 2}
+        ),
+        key=lambda move: float(move.get("EndTime") or 0.0),
     )
-    updated_decision = ReplayMachine(
-        plan,
-        result["output"]["MoveList"],
-        E2E_CTQ_MODEL_PATH,
-    ).evaluate(float(first_pick["EndTime"]))
-    assert updated_decision["time"] == pytest.approx(first_pick["EndTime"])
-    assert updated_decision["modelEvaluated"] is True
+    first_place = min(
+        (
+            move for move in moves
+            if int(move.get("MoveType", -1)) in {1, 3}
+        ),
+        key=lambda move: float(move.get("EndTime") or 0.0),
+    )
+    during_transaction = machine.evaluate(float(first_pick["EndTime"]))
+    next_decision = machine.evaluate(float(first_place["EndTime"]))
+
+    assert during_transaction["decisionIndex"] == 0
+    assert next_decision["decisionIndex"] == 1
+    assert next_decision["time"] == pytest.approx(first_place["EndTime"])
     assert {
         (candidate["source"], candidate["destination"])
-        for candidate in updated_decision["candidates"]
-    } == {("ATR", "LA"), ("ATR", "LB")}
-    assert updated_decision["candidateCount"] == 2
-    assert all(
-        candidate["destination"] != "ATR"
-        and candidate["destinationSlot"] == 0
-        for candidate in updated_decision["candidates"]
-    )
+        for candidate in next_decision["candidates"]
+    } == {("LP1", "LA"), ("LB", "PM1"), ("LB", "PM2")}
 
 
 @pytest.mark.skipif(
     not E2E_CTQ_MODEL_PATH.is_file(),
     reason="生产 E2E-CTQ checkpoint 不存在",
 )
-def test_live_candidates_merge_full_intents_by_current_physical_move() -> None:
-    """后续落点不同但当前 Pick 相同的完整事务只能显示为一个物理动作。"""
+def test_live_candidates_keep_full_intents_with_distinct_place_targets() -> None:
+    """相同 Pick 但 Place 目标不同的完整事务必须保留为独立候选。"""
     plan = _heuristic_replay_plan()
     result = execute_plan(plan)
-    moves = result["output"]["MoveList"]
-    machine = ReplayMachine(plan, moves, E2E_CTQ_MODEL_PATH)
-    event_times = sorted({
-        float(move.get("EndTime") or 0.0)
-        for move in moves
-        if int(move.get("MoveType", -1)) in {0, 1, 2, 3, 4}
-    })
+    decision = ReplayMachine(
+        plan,
+        result["output"]["MoveList"],
+        E2E_CTQ_MODEL_PATH,
+    ).evaluate(0.0)
 
-    concurrent_decision = None
-    for event_time in event_times:
-        decision = machine.evaluate(event_time)
-        paths = {
-            (candidate["source"], candidate["destination"])
-            for candidate in decision["candidates"]
-        }
-        if ("LP1", "ATR") in paths and any(
-            destination == "VTR" for _, destination in paths
-        ):
-            concurrent_decision = decision
-            break
-
-    assert concurrent_decision is not None
     assert {
         (candidate["source"], candidate["destination"])
-        for candidate in concurrent_decision["candidates"]
-    } == {("LB", "VTR"), ("LP1", "ATR")}
-    physical_keys = {
-        (
-            candidate["physicalMoveType"],
-            candidate["robot"],
-            tuple(candidate["materialIds"]),
-            candidate["source"],
-            candidate["destination"],
-            candidate["stationSlot"],
-        )
-        for candidate in concurrent_decision["candidates"]
-    }
-    assert concurrent_decision["candidateCount"] == len(physical_keys)
-    assert not any(
-        candidate["source"] == "LA" and candidate["destination"] == "LB"
-        for candidate in concurrent_decision["candidates"]
+        for candidate in decision["candidates"]
+    } == {("LP1", "LA"), ("LP1", "LB")}
+    assert decision["candidateCount"] == 2
+    assert len({
+        candidate["actionId"]
+        for candidate in decision["candidates"]
+    }) == 2
+    assert all(
+        "physicalMoveType" not in candidate
+        and "intentCount" not in candidate
+        for candidate in decision["candidates"]
     )
     assert sum(
         candidate["policyPreference"]
-        for candidate in concurrent_decision["candidates"]
+        for candidate in decision["candidates"]
     ) == pytest.approx(1.0)
 
 

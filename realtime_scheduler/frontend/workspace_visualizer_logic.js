@@ -24,6 +24,7 @@ __export(workspace_visualizer_test_entry_exports, {
   buildWorkspaceSnapshot: () => buildWorkspaceSnapshot,
   createVisualizationWorkspace: () => createVisualizationWorkspace,
   decisionAtTime: () => decisionAtTime,
+  decisionBoundaryTimes: () => decisionBoundaryTimes,
   decisionSpaceSignature: () => decisionSpaceSignature,
   displayedPerformanceResources: () => displayedPerformanceResources,
   normalizeDecisionTrace: () => normalizeDecisionTrace,
@@ -67,6 +68,7 @@ async function requestReplayDecision(input) {
 var PICK_MOVE_TYPES = /* @__PURE__ */ new Set([0, 2]);
 var PLACE_MOVE_TYPES = /* @__PURE__ */ new Set([1, 3]);
 var SWAP_MOVE = 4;
+var DECISION_COMPLETION_MOVE_TYPES = /* @__PURE__ */ new Set([...PLACE_MOVE_TYPES, SWAP_MOVE]);
 var PRE_TRANS_MOVE = 5;
 var PREPARE_MOVE = 6;
 var COMPLETE_MOVE = 7;
@@ -1194,12 +1196,17 @@ function decisionSpaceSignature(decision) {
   const actionIds = decision.candidates.map((candidate) => candidate.actionId).filter(Boolean).sort();
   return JSON.stringify([decision.candidateCount, actionIds]);
 }
+function decisionBoundaryTimes(moves) {
+  return [...new Set(
+    moves.filter((move) => DECISION_COMPLETION_MOVE_TYPES.has(finiteNumber(move.MoveType, -1))).map((move) => finiteNumber(move.EndTime)).filter((time) => time >= 0)
+  )].sort((left, right) => left - right);
+}
 function renderDecisionLens(decision) {
   if (!decision) {
     return `
       <div class="decision-empty">
-        <strong>\u5F53\u524D\u65F6\u523B\u6682\u65E0\u51B3\u7B56</strong>
-        <p>\u56DE\u653E\u5230\u4E0B\u4E00\u8BBE\u5907\u4E8B\u4EF6\u540E\uFF0CMachine \u4F1A\u66F4\u65B0\u53EF\u884C\u52A8\u4F5C\u5E76\u89E6\u53D1\u5B9E\u65F6\u8BC4\u4F30\u3002</p>
+        <strong>\u5F53\u524D\u65F6\u523B\u6682\u65E0\u5408\u6CD5\u52A8\u4F5C</strong>
+        <p>\u56DE\u653E\u5230\u4E0B\u4E00\u8BBE\u5907\u4E8B\u4EF6\u540E\u66F4\u65B0\u3002</p>
       </div>`;
   }
   const shownText = decision.candidatesTruncated ? `\u5C55\u793A Top ${decision.shownCandidateCount} / ${decision.candidateCount}` : `${decision.candidateCount} \u4E2A\u53EF\u884C\u52A8\u4F5C`;
@@ -1224,15 +1231,13 @@ function renderDecisionLens(decision) {
       </li>`;
   }).join("");
   return `
-    <div class="decision-lens-head">
-      <strong>\u51B3\u7B56 #${decision.decisionIndex}</strong>
-      <span>${escapeHtml(shownText)}</span>
-    </div>
     <section class="decision-candidate-section" aria-labelledby="decisionCandidatesTitle">
-      <header><strong id="decisionCandidatesTitle">\u53EF\u884C\u52A8\u4F5C</strong><span>\u6309 E2E \u504F\u597D\u6392\u5E8F</span></header>
-      ${candidates ? `<ol>${candidates}</ol>` : '<p class="decision-alternative-empty">\u5F53\u524D\u6CA1\u6709\u53EF\u884C\u52A8\u4F5C</p>'}
-    </section>
-    <p class="decision-method-note">\u0394 \u4E3A\u76F8\u5BF9 E2E \u63A8\u8350\u52A8\u4F5C\u7684\u9884\u6D4B\u5DE5\u671F\u5DEE\u503C\u3002</p>`;
+      <header>
+        <strong id="decisionCandidatesTitle">\u51B3\u7B56 #${decision.decisionIndex} <small>@ ${formatSeconds(decision.time)}s</small></strong>
+        <span>${escapeHtml(shownText)} \xB7 E2E \u6392\u5E8F</span>
+      </header>
+      ${candidates ? `<ol>${candidates}</ol>` : '<p class="decision-alternative-empty">\u5F53\u524D\u6CA1\u6709\u5408\u6CD5\u52A8\u4F5C</p>'}
+    </section>`;
 }
 var WAFER_COLOR_PALETTE = [
   "#d81b60",
@@ -1479,7 +1484,7 @@ var VisualizationWorkspace = class {
   replayPlan = null;
   liveDecision = null;
   liveDecisionKey = "";
-  lastDecisionSpaceSignature = null;
+  decisionBoundaries = [];
   pauseOnDecisionChange = false;
   pauseTriggeredByDecisionChange = false;
   replayDecisionCache = /* @__PURE__ */ new Map();
@@ -1580,7 +1585,7 @@ var VisualizationWorkspace = class {
     this.pendingReplayDecisionKeys.clear();
     this.liveDecision = null;
     this.liveDecisionKey = "";
-    this.lastDecisionSpaceSignature = null;
+    this.decisionBoundaries = decisionBoundaryTimes(this.moves);
     this.replayDecisionRequestVersion += 1;
     if (this.moves.length) this.render();
   }
@@ -1614,7 +1619,7 @@ var VisualizationWorkspace = class {
     this.decisionTrace = [];
     this.liveDecision = null;
     this.liveDecisionKey = "";
-    this.lastDecisionSpaceSignature = null;
+    this.decisionBoundaries = [];
     this.replayDecisionCache.clear();
     this.pendingReplayDecisionKeys.clear();
     this.replayDecisionRequestVersion += 1;
@@ -1651,10 +1656,10 @@ var VisualizationWorkspace = class {
     if (!moves.length) throw new Error("MoveList \u4E3A\u7A7A\uFF0C\u65E0\u6CD5\u5EFA\u7ACB\u53EF\u89C6\u5316\u56DE\u653E");
     this.pause();
     this.moves = moves;
+    this.decisionBoundaries = decisionBoundaryTimes(moves);
     this.decisionTrace = decisionTrace;
     this.liveDecision = null;
     this.liveDecisionKey = "";
-    this.lastDecisionSpaceSignature = null;
     this.replayDecisionCache.clear();
     this.pendingReplayDecisionKeys.clear();
     this.replayDecisionRequestVersion += 1;
@@ -1748,8 +1753,17 @@ var VisualizationWorkspace = class {
     const elapsedSeconds = Math.max(0, timestamp - this.previousFrameTime) / 1e3;
     this.previousFrameTime = timestamp;
     const endTime = finiteNumber(this.elements.range.max);
-    this.time = Math.min(endTime, this.time + elapsedSeconds * this.playbackSpeed);
+    const previousTime = this.time;
+    const advancedTime = Math.min(endTime, previousTime + elapsedSeconds * this.playbackSpeed);
+    const nextDecisionBoundary = this.pauseOnDecisionChange ? this.decisionBoundaries.find((boundary) => boundary > previousTime + PERFORMANCE_DISPLAY_TOLERANCE && boundary <= advancedTime + PERFORMANCE_DISPLAY_TOLERANCE) : void 0;
+    this.time = nextDecisionBoundary ?? advancedTime;
     this.elements.range.value = String(this.time);
+    if (nextDecisionBoundary !== void 0) {
+      this.previousRenderTime = timestamp;
+      this.render();
+      this.pause(true);
+      return;
+    }
     if (timestamp - this.previousRenderTime >= PLAYBACK_FRAME_INTERVAL_MS || this.time >= endTime) {
       this.previousRenderTime = timestamp;
       this.render();
@@ -1771,13 +1785,13 @@ var VisualizationWorkspace = class {
   updatePauseOnDecisionChangeButton() {
     const state = this.pauseTriggeredByDecisionChange ? "\u5DF2\u6682\u505C" : this.pauseOnDecisionChange ? "\u5DF2\u5F00\u542F" : "\u5DF2\u5173\u95ED";
     this.elements.pauseOnDecisionChangeButton.innerHTML = `
-      <span class="decision-switch-copy"><span>\u51B3\u7B56\u53D8\u5316\u65F6\u6682\u505C</span><strong>${state}</strong></span>
+      <span class="decision-switch-copy"><span>\u4E0B\u4E00\u51B3\u7B56\u65F6\u6682\u505C</span><strong>${state}</strong></span>
       <span class="decision-switch-track" aria-hidden="true"><i></i></span>`;
     this.elements.pauseOnDecisionChangeButton.setAttribute("aria-pressed", String(this.pauseOnDecisionChange));
     this.elements.pauseOnDecisionChangeButton.setAttribute("aria-checked", String(this.pauseOnDecisionChange));
     this.elements.pauseOnDecisionChangeButton.setAttribute(
       "aria-label",
-      this.pauseTriggeredByDecisionChange ? "\u51B3\u7B56\u7A7A\u95F4\u5DF2\u53D8\u5316\uFF0C\u56DE\u653E\u5DF2\u6682\u505C" : `\u51B3\u7B56\u7A7A\u95F4\u53D8\u5316\u65F6\u81EA\u52A8\u6682\u505C\uFF1A${this.pauseOnDecisionChange ? "\u5DF2\u5F00\u542F" : "\u5DF2\u5173\u95ED"}`
+      this.pauseTriggeredByDecisionChange ? "\u5DF2\u5230\u8FBE\u4E0B\u4E00\u4E2A\u5B8C\u6574\u51B3\u7B56\uFF0C\u56DE\u653E\u5DF2\u6682\u505C" : `\u5230\u4E0B\u4E00\u4E2A\u5B8C\u6574\u51B3\u7B56\u65F6\u81EA\u52A8\u6682\u505C\uFF1A${this.pauseOnDecisionChange ? "\u5DF2\u5F00\u542F" : "\u5DF2\u5173\u95ED"}`
     );
     this.elements.pauseOnDecisionChangeButton.classList.toggle("is-active", this.pauseOnDecisionChange);
     this.elements.pauseOnDecisionChangeButton.classList.toggle("is-triggered", this.pauseTriggeredByDecisionChange);
@@ -1815,17 +1829,14 @@ var VisualizationWorkspace = class {
     this.elements.moveText.textContent = `${snapshot.completedMoves} / ${snapshot.totalMoves}`;
     this.elements.waferText.textContent = String(snapshot.waferCount);
     this.elements.range.value = String(snapshot.time);
-    const replayTime = this.replayEventTime(snapshot.time);
-    const replayKey = this.replayStateKey(snapshot, replayTime);
+    const replayTime = this.replayDecisionTime(snapshot.time);
+    const replayKey = this.replayStateKey(replayTime);
     const cachedDecision = this.replayDecisionCache.get(replayKey) ?? null;
     if (cachedDecision) {
       this.liveDecision = cachedDecision;
       this.liveDecisionKey = replayKey;
     }
     const currentDecision = cachedDecision ?? (this.liveDecisionKey === replayKey ? this.liveDecision : null) ?? decisionAtTime(this.decisionTrace, snapshot.time);
-    const decisionSpaceReady = Boolean(
-      cachedDecision || this.liveDecisionKey === replayKey && this.liveDecision || !this.replayPlan
-    );
     if (this.replayPlan && !cachedDecision && this.liveDecisionKey !== replayKey && !this.pendingReplayDecisionKeys.has(replayKey)) {
       void this.refreshReplayDecision(replayKey, replayTime);
     }
@@ -1833,7 +1844,6 @@ var VisualizationWorkspace = class {
       snapshotWithCandidateModules(snapshot, currentDecision, this.device),
       this.device
     );
-    this.observeDecisionSpace(currentDecision, decisionSpaceReady);
     this.elements.stage.innerHTML = renderEquipmentTopology(topologySnapshot, currentDecision, this.hiddenModuleFilters);
     this.elements.decisionLens.innerHTML = renderDecisionLens(currentDecision);
     this.elements.activeMoves.innerHTML = snapshot.activeMoves.length ? snapshot.activeMoves.map((move) => `
@@ -1844,31 +1854,18 @@ var VisualizationWorkspace = class {
           <time>${formatSeconds(finiteNumber(move.StartTime))}\u2013${formatSeconds(finiteNumber(move.EndTime))} s</time>
         </li>`).join("") : '<li class="active-move-empty">\u5F53\u524D\u65F6\u523B\u6CA1\u6709\u6267\u884C\u4E2D\u7684\u52A8\u4F5C</li>';
   }
-  /** 观察候选动作集合；初次结果只建立基线，后续变化才触发暂停。 */
-  observeDecisionSpace(decision, ready) {
-    if (!decision || !ready) return;
-    const nextSignature = decisionSpaceSignature(decision);
-    const changed = this.lastDecisionSpaceSignature !== null && this.lastDecisionSpaceSignature !== nextSignature;
-    this.lastDecisionSpaceSignature = nextSignature;
-    if (changed && this.pauseOnDecisionChange && this.playing) {
-      this.pause(true);
+  /** 返回不晚于当前时刻的最近完整事务边界，事务执行期间沿用上一决策。 */
+  replayDecisionTime(time) {
+    let decisionTime = 0;
+    for (const boundary of this.decisionBoundaries) {
+      if (boundary > time + PERFORMANCE_DISPLAY_TOLERANCE) break;
+      decisionTime = boundary;
     }
+    return decisionTime;
   }
-  /** 返回不晚于当前时刻的最近 Move 开始/结束边界，供 Machine 读取稳定切片。 */
-  replayEventTime(time) {
-    let eventTime = 0;
-    for (const move of this.moves) {
-      const startTime = finiteNumber(move.StartTime);
-      const endTime = finiteNumber(move.EndTime);
-      if (startTime <= time + PERFORMANCE_DISPLAY_TOLERANCE) eventTime = Math.max(eventTime, startTime);
-      if (endTime <= time + PERFORMANCE_DISPLAY_TOLERANCE) eventTime = Math.max(eventTime, endTime);
-    }
-    return eventTime;
-  }
-  /** 生成只在设备事件变化时更新的评估键，避免动画帧重复执行 E2E 前向。 */
-  replayStateKey(snapshot, replayTime) {
-    const activeMoveIds = snapshot.activeMoves.map((move) => finiteNumber(move.MoveID)).sort((left, right) => left - right).join(",");
-    return `${replayTime.toFixed(6)}:${snapshot.completedMoves}:${activeMoveIds}`;
+  /** 每个完整事务边界只执行一次 E2E 前向。 */
+  replayStateKey(replayTime) {
+    return replayTime.toFixed(6);
   }
   /** 异步请求当前 Machine 候选；过期响应不会覆盖用户已经拖到的新时刻。 */
   async refreshReplayDecision(replayKey, replayTime) {
@@ -1884,9 +1881,8 @@ var VisualizationWorkspace = class {
       const decision = normalizeDecisionTrace({ DecisionTrace: [rawDecision] })[0] ?? null;
       if (requestVersion !== this.replayDecisionRequestVersion || !decision) return;
       this.replayDecisionCache.set(replayKey, decision);
-      const currentSnapshot = buildWorkspaceSnapshot(this.moves, this.device, this.time);
-      const currentReplayTime = this.replayEventTime(this.time);
-      if (this.replayStateKey(currentSnapshot, currentReplayTime) !== replayKey) return;
+      const currentReplayTime = this.replayDecisionTime(this.time);
+      if (this.replayStateKey(currentReplayTime) !== replayKey) return;
       this.liveDecision = decision;
       this.liveDecisionKey = replayKey;
       this.render();
@@ -2725,6 +2721,7 @@ function buildScheduleAnalysisContext(routes, rounds) {
   buildWorkspaceSnapshot,
   createVisualizationWorkspace,
   decisionAtTime,
+  decisionBoundaryTimes,
   decisionSpaceSignature,
   displayedPerformanceResources,
   normalizeDecisionTrace,

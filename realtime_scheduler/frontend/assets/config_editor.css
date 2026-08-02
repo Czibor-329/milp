@@ -699,12 +699,10 @@
     .additional-robot-bank .robot-hub { width: 150px; min-height: 82px; }
     .playback-inspector { position: sticky; top: 18px; display: grid; min-width: 0; gap: 12px; }
     .decision-lens-panel, .active-moves-panel { overflow: hidden; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); box-shadow: none; }
-    .decision-lens-head { display: flex; min-height: 44px; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--soft); }
-    .decision-lens-head strong { color: var(--ink); font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; }
-    .decision-lens-head span { color: var(--muted); font-size: 12px; font-weight: 600; text-align: right; }
-    .decision-candidate-section { border-bottom: 1px solid var(--line); }
+    .decision-candidate-section { min-width: 0; }
     .decision-candidate-section header { display: flex; min-height: 44px; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; }
     .decision-candidate-section header strong { color: var(--ink); font-size: 13px; font-weight: 700; }
+    .decision-candidate-section header strong small { color: var(--muted); font-size: 11px; font-weight: 600; }
     .decision-candidate-section header span { color: var(--muted); font-size: 12px; }
     .decision-candidate-section ol { display: grid; max-height: 430px; margin: 0; padding: 0; overflow: auto; list-style: none; }
     .decision-candidate { display: grid; min-height: 92px; grid-template-columns: 24px minmax(0, 1fr) 54px; align-items: start; gap: 8px; padding: 10px 12px; background: transparent; }
@@ -720,7 +718,7 @@
     .decision-candidate-detail { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 8px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
     .decision-candidate-detail strong, .decision-candidate-detail > span:last-child { color: var(--ink); font-size: 12px; font-weight: 700; white-space: nowrap; }
     .decision-candidate-preference { padding-top: 1px; color: var(--ink); font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
-    .decision-method-note, .decision-alternative-empty { margin: 0; padding: 10px 12px; color: var(--muted); background: var(--soft); font-size: 12px; line-height: 1.5; }
+    .decision-alternative-empty { margin: 0; padding: 10px 12px; color: var(--muted); background: var(--soft); font-size: 12px; line-height: 1.5; }
     .decision-alternative-empty { text-align: center; }
     .decision-empty { padding: 22px 16px; color: var(--muted); text-align: center; }
     .decision-empty strong { color: #263650; font-size: 14px; }
@@ -907,7 +905,7 @@
     body.theme-dark .device-config-nav-item { border-color: #3f5d9b; color: #a9c1ff; background: #25365f; }
     body.theme-dark .device-config-nav-item small { color: #aeb9d2; }
     body.theme-dark .app-content :is(.workspace-device-controls > select, .workspace-icon-button, .clean-type-group, .clean-card, .round-card, .cjob-card, .cjob-head, .cjob-controls, .route-process-group, .route-type-group, .route-type-head, .route-summary-card, .route-summary-head, .candidate-picker summary, .candidate-picker-menu, .algorithm-hover-info, .test-group-analysis, .group-kpi-grid article, .group-chart-card, .group-analysis-table-wrap, .visual-content, .visual-overview, .timeline-console, .result-card, .performance-summary, .bottleneck-analysis-head, .bottleneck-analysis-list li, .bl-candidate-bars, .other-resources-section, .loadlock-card-head, .next-opt-head, .diagnostic-card, .diagnostic-card dl > div, .diagnostic-experiment, .equipment-schematic, .schematic-head, .decision-lens-panel, .active-moves-panel, .visual-legend, .drawer, .step-overview-card, .step-editor-card, .step-system-details, .step-meta-list, .step-number-control, .clean-choice, .robot-slot-card, .robot-slot-notice, .robot-slot-empty) { border-color: var(--line); color: var(--ink); background: var(--surface); box-shadow: none; }
-    body.theme-dark .app-content :is(.cjob-controls, .route-type-head, .route-summary-head, .test-group-analysis, .visual-content, .bottleneck-analysis-head, .bl-candidate-bars, .other-resources-section, .loadlock-card-head, .next-opt-head, .diagnostic-card dl > div, .schematic-head, .decision-lens-head, .decision-method-note, .decision-alternative-empty, .visual-legend, .step-meta-list) { background: var(--soft); }
+    body.theme-dark .app-content :is(.cjob-controls, .route-type-head, .route-summary-head, .test-group-analysis, .visual-content, .bottleneck-analysis-head, .bl-candidate-bars, .other-resources-section, .loadlock-card-head, .next-opt-head, .diagnostic-card dl > div, .schematic-head, .decision-alternative-empty, .visual-legend, .step-meta-list) { background: var(--soft); }
     body.theme-dark .decision-tag.is-recommendation { border-color: #4c5f78; color: #b9c9df; background: #273344; }
     body.theme-dark .decision-tag.is-plan { border-color: #495f54; color: #b7c9bf; background: #293831; }
     body.theme-dark .candidate-landing { border-color: #526da8; color: #c8d8ff; background: #25365f; }
@@ -1027,10 +1025,8 @@
     .decision-auto-pause.is-triggered .decision-switch-track { border-color: #ad741b; background: #c78a2d; }
     .decision-auto-pause.is-triggered .decision-switch-copy > strong { color: #8b5c15; }
     .petri-control-panel .decision-lens-panel, .petri-control-panel .active-moves-panel { border: 1px solid var(--line); border-radius: 6px; background: var(--surface); box-shadow: none; }
-    .petri-control-panel .decision-lens-head { background: var(--soft); }
     .petri-control-panel .decision-candidate-section ol { max-height: 360px; }
     .petri-control-panel .decision-candidate { min-height: 92px; padding: 10px 12px; }
-    .petri-control-panel .decision-method-note { padding: 10px 12px; }
     .petri-control-panel .active-moves-panel ul { max-height: 170px; }
     .petri-control-panel .active-moves-panel li { min-height: 44px; padding: 7px 9px; background: var(--surface); }
     .petri-control-panel .active-moves-panel li:hover { background: var(--brand-soft); }

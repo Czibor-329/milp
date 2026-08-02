@@ -20,9 +20,6 @@ from realtime_scheduler.plan_builder import BuildState, build_round_update
 
 TIME_TOLERANCE_SECONDS = 1e-6
 TRANSPORT_MOVE_TYPES = frozenset({0, 1, 2, 3, 4})
-PICK_MOVE_TYPES = frozenset({0, 2})
-PLACE_MOVE_TYPES = frozenset({1, 3})
-SWAP_MOVE_TYPE = 4
 COMPLETED_INTENT_MOVE_TYPES = frozenset({1, 3, 4})
 VISIBLE_CANDIDATE_LIMIT = 24
 QUANTILE_MARGIN = 1
@@ -80,9 +77,9 @@ class ReplayMachine:
         """返回目标回放时刻的全部合法意图、E2E 评分和原计划选择。
 
         ``cutoff`` 为绝对秒数。返回值遵循前端 ``DecisionTraceStep`` 契约；
-        ``selectedActionId`` 是 E2E 当前推荐的下一条物理运输动作，
-        ``executedActionId`` 是 MoveList 接下来实际执行的物理动作；完整事务 ID
-        另存于 ``selectedIntentActionId`` 和 ``executedIntentActionId``。
+        ``selectedActionId`` 是 E2E 推荐的完整 Pick + Place / Swap 事务，
+        ``executedActionId`` 是 MoveList 接下来实际执行的完整事务。兼容字段
+        ``selectedIntentActionId`` 和 ``executedIntentActionId`` 返回相同 ID。
         """
         from src.schedule.e2e_ctq import (
             build_resource_flow_context,
@@ -174,100 +171,6 @@ class ReplayMachine:
         )
         return decision
 
-    @classmethod
-    def _physical_action_descriptor(cls, action: Any) -> Dict[str, Any]:
-        """把完整搬运事务投影为当前下一条真实运输 Move。
-
-        ``RobotAction`` 为了排程质量会预览 Pick、转位和 Place 的完整事务；回放
-        面板需要展示的却是用户此刻能观察到的下一步。多个仅后续落点不同、但
-        当前都执行同一次 Pick 的事务因此共享同一个物理动作键。
-        """
-        move = next(
-            (
-                candidate
-                for candidate in action.move_preview
-                if int(candidate.get("MoveType", -1)) in TRANSPORT_MOVE_TYPES
-            ),
-            None,
-        )
-        if move is None:
-            source = str(action.source_station or action.robot)
-            destination = str(action.destination_station)
-            move_type = -1
-            station_slot = int(action.destination_slot or 0)
-            material_ids = tuple(str(value) for value in action.material_ids)
-            kind = str(action.kind)
-        else:
-            move_type = int(move.get("MoveType", -1))
-            robot = str(move.get("Robot") or move.get("ModuleName") or action.robot)
-            material_ids = tuple(str(value) for value in cls._move_material_ids(move))
-            if not material_ids:
-                material_ids = tuple(str(value) for value in action.material_ids)
-            if move_type in PICK_MOVE_TYPES:
-                source = str((move.get("SrcStationList") or [action.source_station or ""])[0])
-                destination = robot
-                station_slot = int(
-                    (move.get("SrcSlotList") or [action.source_slot or 0])[0]
-                )
-                kind = "pick"
-            elif move_type in PLACE_MOVE_TYPES:
-                source = robot
-                destination = str(
-                    (move.get("DestStationList") or [action.destination_station])[0]
-                )
-                station_slot = int(
-                    (move.get("DestSlotList") or [action.destination_slot or 0])[0]
-                )
-                kind = "place"
-            else:
-                source = robot
-                destination = str(
-                    (move.get("StationList") or [action.destination_station])[0]
-                )
-                station_slot = int(
-                    (move.get("StnRecvSlotList") or [action.destination_slot or 0])[0]
-                )
-                kind = "swap"
-        robot_name = str(action.robot)
-        group_key = (
-            move_type,
-            robot_name,
-            material_ids,
-            source,
-            destination,
-            station_slot,
-        )
-        action_id = ":".join((
-            "physical",
-            str(move_type),
-            robot_name,
-            source,
-            destination,
-            str(station_slot),
-            ",".join(material_ids),
-        ))
-        return {
-            "groupKey": group_key,
-            "actionId": action_id,
-            "kind": kind,
-            "physicalMoveType": move_type,
-            "robot": robot_name,
-            "materialIds": material_ids,
-            "source": source,
-            "destination": destination,
-            "stationSlot": station_slot,
-            "earliestStart": float(
-                move.get("StartTime", action.earliest_start)
-                if move is not None
-                else action.earliest_start
-            ),
-            "finishTime": float(
-                move.get("EndTime", action.finish_time)
-                if move is not None
-                else action.finish_time
-            ),
-        }
-
     def _decision_payload(
         self,
         state: Any,
@@ -278,7 +181,7 @@ class ReplayMachine:
         replay_time: float,
         executed_action_id: str,
     ) -> Dict[str, Any]:
-        """把完整事务评分按当前物理动作合并为稳定、有界的前端协议。"""
+        """把完整 Pick + Place / Swap 事务输出为稳定、有界的前端协议。"""
         score_values = np.asarray(logits, dtype=np.float64)
         shifted_scores = score_values - float(np.max(score_values))
         weights = np.exp(np.clip(shifted_scores, -60.0, 0.0))
@@ -288,54 +191,19 @@ class ReplayMachine:
             if np.isfinite(denominator) and denominator > 0.0
             else np.full(len(actions), 1.0 / len(actions), dtype=np.float64)
         )
-        descriptors = [self._physical_action_descriptor(action) for action in actions]
-        grouped_indices: Dict[tuple[Any, ...], list[int]] = {}
-        for index, descriptor in enumerate(descriptors):
-            grouped_indices.setdefault(descriptor["groupKey"], []).append(index)
-
-        groups = []
-        action_group_indices: Dict[int, int] = {}
-        for indices in grouped_indices.values():
-            group_index = len(groups)
-            for action_index in indices:
-                action_group_indices[action_index] = group_index
-            group_probability = float(sum(probabilities[index] for index in indices))
-            local_weights = np.asarray(
-                [float(probabilities[index]) for index in indices],
-                dtype=np.float64,
-            )
-            local_denominator = float(np.sum(local_weights))
-            if not np.isfinite(local_denominator) or local_denominator <= 0.0:
-                local_weights = np.full(len(indices), 1.0 / len(indices))
-            else:
-                local_weights /= local_denominator
-            group_quantiles = np.average(
-                np.asarray([quantiles[index] for index in indices], dtype=np.float64),
-                axis=0,
-                weights=local_weights,
-            )
-            representative_index = (
-                selected_index
-                if selected_index in indices
-                else max(indices, key=lambda index: float(probabilities[index]))
-            )
-            maximum_score = max(float(score_values[index]) for index in indices)
-            group_score = maximum_score + float(np.log(sum(
-                np.exp(float(score_values[index]) - maximum_score)
-                for index in indices
-            )))
-            groups.append({
-                "indices": indices,
-                "descriptor": descriptors[representative_index],
-                "representativeIndex": representative_index,
-                "probability": group_probability,
-                "policyScore": group_score,
-                "quantiles": group_quantiles,
-                "remainingMean": float(np.mean(group_quantiles)),
-            })
-
-        selected_group_index = action_group_indices[selected_index]
-        executed_raw_index = next(
+        remaining_means = [
+            float(np.mean(np.asarray(values, dtype=np.float64)))
+            for values in quantiles
+        ]
+        ranked_indices = sorted(
+            range(len(actions)),
+            key=lambda index: (
+                -float(probabilities[index]),
+                float(actions[index].earliest_start),
+                str(actions[index].action_id),
+            ),
+        )
+        executed_index = next(
             (
                 index
                 for index, action in enumerate(actions)
@@ -343,90 +211,67 @@ class ReplayMachine:
             ),
             None,
         )
-        executed_group_index = (
-            action_group_indices[executed_raw_index]
-            if executed_raw_index is not None
-            else None
-        )
-        best_remaining = min(group["remainingMean"] for group in groups)
-        ranked_group_indices = sorted(
-            range(len(groups)),
-            key=lambda index: (
-                -float(groups[index]["probability"]),
-                float(groups[index]["descriptor"]["earliestStart"]),
-                str(groups[index]["descriptor"]["actionId"]),
-            ),
-        )
-        visible_group_indices = ranked_group_indices[:VISIBLE_CANDIDATE_LIMIT]
-        required_group_indices = {selected_group_index}
-        if executed_group_index is not None:
-            required_group_indices.add(executed_group_index)
-        for required_index in required_group_indices:
-            if required_index in visible_group_indices:
+        visible_indices = ranked_indices[:VISIBLE_CANDIDATE_LIMIT]
+        required_indices = {selected_index}
+        if executed_index is not None:
+            required_indices.add(executed_index)
+        for required_index in required_indices:
+            if required_index in visible_indices:
                 continue
-            if len(visible_group_indices) >= VISIBLE_CANDIDATE_LIMIT:
+            if len(visible_indices) >= VISIBLE_CANDIDATE_LIMIT:
                 removable_index = next(
                     (
                         index
-                        for index in reversed(visible_group_indices)
-                        if index not in required_group_indices
+                        for index in reversed(visible_indices)
+                        if index not in required_indices
                     ),
-                    visible_group_indices[-1],
+                    visible_indices[-1],
                 )
-                visible_group_indices[
-                    visible_group_indices.index(removable_index)
+                visible_indices[
+                    visible_indices.index(removable_index)
                 ] = required_index
             else:
-                visible_group_indices.append(required_index)
-        visible_group_indices = sorted(
-            set(visible_group_indices),
-            key=lambda index: ranked_group_indices.index(index),
+                visible_indices.append(required_index)
+        visible_indices = sorted(
+            set(visible_indices),
+            key=lambda index: ranked_indices.index(index),
         )
 
+        best_remaining = min(remaining_means)
         candidates = []
-        for group_index in visible_group_indices:
-            group = groups[group_index]
-            descriptor = group["descriptor"]
-            representative_index = int(group["representativeIndex"])
-            action = actions[representative_index]
-            values = np.asarray(group["quantiles"], dtype=np.float64)
+        for action_index in visible_indices:
+            action = actions[action_index]
+            values = np.asarray(quantiles[action_index], dtype=np.float64)
             margin = min(QUANTILE_MARGIN, max(len(values) - 1, 0))
-            action_id = str(descriptor["actionId"])
+            action_id = str(action.action_id)
             candidates.append({
                 "actionId": action_id,
-                "kind": str(descriptor["kind"]),
+                "kind": str(action.kind),
                 "flowKind": str(action.flow_kind),
-                "physicalMoveType": int(descriptor["physicalMoveType"]),
-                "robot": str(descriptor["robot"]),
-                "materialIds": list(descriptor["materialIds"]),
+                "robot": str(action.robot),
+                "materialIds": [
+                    str(value) for value in action.material_ids
+                ],
                 "waferId": int(action.wafer_id),
                 "stageIndex": int(action.stage_index),
-                "source": str(descriptor["source"]),
-                "sourceSlot": 0,
-                "destination": str(descriptor["destination"]),
-                "destinationSlot": 0,
-                "stationSlot": int(descriptor["stationSlot"]),
-                "intentCount": len(group["indices"]),
-                "intentActionIds": [
-                    str(actions[index].action_id) for index in group["indices"]
-                ],
-                "intentSource": str(action.source_station or ""),
-                "intentDestination": str(action.destination_station),
-                "intentDestinationSlot": int(action.destination_slot),
-                "earliestStart": float(descriptor["earliestStart"]),
-                "finishTime": float(descriptor["finishTime"]),
-                "rank": ranked_group_indices.index(group_index) + 1,
-                "selected": group_index == selected_group_index,
-                "executed": group_index == executed_group_index,
-                "policyScore": float(group["policyScore"]),
-                "policyPreference": float(group["probability"]),
-                "expectedRemainingMakespan": float(np.mean(values)),
+                "source": str(action.source_station or action.robot),
+                "sourceSlot": int(action.source_slot or 0),
+                "destination": str(action.destination_station),
+                "destinationSlot": int(action.destination_slot or 0),
+                "earliestStart": float(action.earliest_start),
+                "finishTime": float(action.finish_time),
+                "rank": ranked_indices.index(action_index) + 1,
+                "selected": action_index == selected_index,
+                "executed": action_index == executed_index,
+                "policyScore": float(score_values[action_index]),
+                "policyPreference": float(probabilities[action_index]),
+                "expectedRemainingMakespan": remaining_means[action_index],
                 "medianRemainingMakespan": float(np.median(values)),
                 "lowerRemainingMakespan": float(values[margin]),
                 "upperRemainingMakespan": float(values[-margin - 1]),
                 "makespanDelta": max(
                     0.0,
-                    float(group["remainingMean"]) - best_remaining,
+                    remaining_means[action_index] - best_remaining,
                 ),
             })
         completed_intents = sum(
@@ -438,23 +283,23 @@ class ReplayMachine:
                 <= replay_time + TIME_TOLERANCE_SECONDS
             )
         )
+        selected_action_id = str(actions[selected_index].action_id)
+        matched_executed_action_id = (
+            str(actions[executed_index].action_id)
+            if executed_index is not None
+            else ""
+        )
         return {
             "decisionIndex": completed_intents,
             "time": replay_time,
             "revision": int(state.revision),
-            "selectedActionId": str(
-                groups[selected_group_index]["descriptor"]["actionId"]
-            ),
-            "executedActionId": (
-                str(groups[executed_group_index]["descriptor"]["actionId"])
-                if executed_group_index is not None
-                else ""
-            ),
-            "selectedIntentActionId": str(actions[selected_index].action_id),
-            "executedIntentActionId": executed_action_id,
-            "candidateCount": len(groups),
+            "selectedActionId": selected_action_id,
+            "executedActionId": matched_executed_action_id,
+            "selectedIntentActionId": selected_action_id,
+            "executedIntentActionId": matched_executed_action_id,
+            "candidateCount": len(actions),
             "shownCandidateCount": len(candidates),
-            "candidatesTruncated": len(groups) > len(candidates),
+            "candidatesTruncated": len(actions) > len(candidates),
             "modelEvaluated": True,
             "replayEvaluated": True,
             "candidates": candidates,

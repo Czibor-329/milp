@@ -206,7 +206,7 @@ test("回放进度、MoveList 与中文工具入口合并在顶部紧凑工具�
   assert.doesNotMatch(html, /id="visualTransitionButtons"|MODEL EVALUATION/);
 });
 
-test("E2E 面板保持扁平统一列表与标准开关视觉契约", () => {
+test("合法动作空间面板保持单一候选列表与标准开关视觉契约", () => {
   const html = fs.readFileSync(
     path.join(__dirname, "../realtime_scheduler/frontend/config_editor.html"),
     "utf8",
@@ -216,7 +216,7 @@ test("E2E 面板保持扁平统一列表与标准开关视觉契约", () => {
     "utf8",
   );
 
-  assert.match(html, /<h2 class="petri-panel-title">实时 E2E 评估<\/h2>/);
+  assert.match(html, /<h2 class="petri-panel-title">合法动作空间<\/h2>/);
   assert.match(html, /id="visualPauseOnDecisionChangeButton"[^>]*role="switch"[^>]*aria-checked="false"/);
   assert.match(css, /\.decision-lens-panel[^\n]*border-radius: 6px[^\n]*box-shadow: none/);
   assert.match(css, /\.decision-auto-pause[^\n]*min-height: 44px/);
@@ -288,6 +288,14 @@ test("决策空间签名忽略排序和分数，仅关注候选集合变化", ()
   assert.notEqual(logic.decisionSpaceSignature(first), logic.decisionSpaceSignature(changed));
 });
 
+test("完整 Pick + Place 只在 Place 结束时形成下一决策边界", () => {
+  assert.deepEqual(logic.decisionBoundaryTimes(moves), [3]);
+  assert.deepEqual(logic.decisionBoundaryTimes([
+    ...moves,
+    { MoveID: 5, MoveType: 4, StartTime: 5, EndTime: 7 },
+  ]), [3, 7]);
+});
+
 test("结果分析与拓扑回放使用独立界面并共享当前 MoveList", async () => {
   const root = fakeWorkspaceDocument();
   const workspace = logic.createVisualizationWorkspace(root);
@@ -351,7 +359,7 @@ test("结果分析与拓扑回放使用独立界面并共享当前 MoveList", as
   assert.equal(root.workspaceTab.clicked, true);
 });
 
-test("E2E 面板统一候选结构、按偏好排序并格式化低偏好和工期差值", async () => {
+test("合法动作空间按偏好排序并格式化低偏好和工期差值", async () => {
   const root = fakeWorkspaceDocument();
   const workspace = logic.createVisualizationWorkspace(root);
   await workspace.loadFile({
@@ -386,17 +394,16 @@ test("E2E 面板统一候选结构、按偏好排序并格式化低偏好和工�
   });
 
   const lens = root.elements.get("visualDecisionLens").innerHTML;
-  assert.match(lens, /决策 #65[\s\S]*3 个可行动作/);
+  assert.match(lens, /决策 #65[\s\S]*3 个可行动作 · E2E 排序/);
   assert.ok(lens.indexOf("LP1 → ATR") < lens.indexOf("VTR → PM1"), "动作应按 E2E 偏好降序排列");
   assert.match(lens, /LP1 → ATR[\s\S]*E2E推荐[\s\S]*与计划一致[\s\S]*99\.6%|LP1 → ATR[\s\S]*E2E推荐[\s\S]*与计划一致[\s\S]*100%/);
   assert.match(lens, /VTR → PM1[\s\S]*VTR · internal[\s\S]*剩余工期 <strong>19\.5s<\/strong>[\s\S]*Δ \+10\.3s[\s\S]*<1%/);
   assert.match(lens, /Δ 基准/);
-  assert.match(lens, /Δ 为相对 E2E 推荐动作的预测工期差值。/);
   assert.equal((lens.match(/class="decision-candidate"/g) || []).length, 3);
-  assert.doesNotMatch(lens, /剩余 Makespan|预测区间|lowerRemainingMakespan|upperRemainingMakespan/);
+  assert.doesNotMatch(lens, /为什么推荐|候选对比|动作证据|已观察切片|Top-2|上一决策|下一决策|导出决策样本|剩余 Makespan|预测区间|lowerRemainingMakespan|upperRemainingMakespan/);
 });
 
-test("开启保护后，决策空间变化会暂停回放并显示触发状态", async () => {
+test("开启保护后，回放越过完整事务边界时精确暂停在下一决策", async () => {
   const originalRequestAnimationFrame = global.requestAnimationFrame;
   const originalCancelAnimationFrame = global.cancelAnimationFrame;
   let scheduledFrame = null;
@@ -423,7 +430,7 @@ test("开启保护后，决策空间变化会暂停回放并显示触发状态",
             },
             {
               decisionIndex: 1,
-              time: 1,
+              time: 3,
               candidateCount: 2,
               candidates: [
                 { actionId: "move-b", rank: 1, selected: true },
@@ -441,11 +448,12 @@ test("开启保护后，决策空间变化会暂停回放并显示触发状态",
     assert.match(root.elements.get("visualPlayButton").innerHTML, /暂停/);
     assert.equal(typeof scheduledFrame, "function");
 
-    scheduledFrame(performance.now() + 300);
+    scheduledFrame(performance.now() + 800);
     assert.match(root.elements.get("visualPlayButton").innerHTML, /播放/);
     assert.match(autoPause.innerHTML, /已暂停/);
+    assert.equal(root.elements.get("visualCurrentTime").textContent, "3.0");
     assert.equal(autoPause.getAttribute("aria-checked"), "true");
-    assert.equal(autoPause.getAttribute("aria-label"), "决策空间已变化，回放已暂停");
+    assert.equal(autoPause.getAttribute("aria-label"), "已到达下一个完整决策，回放已暂停");
   } finally {
     global.requestAnimationFrame = originalRequestAnimationFrame;
     global.cancelAnimationFrame = originalCancelAnimationFrame;
