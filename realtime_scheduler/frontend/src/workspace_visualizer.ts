@@ -797,6 +797,15 @@ export function buildWorkspaceSnapshot(
   const locations = new Map(initialLocations);
   const doorStates = new Map<string, DoorStatus>();
   const environments = new Map<string, string>();
+  // 每片晶圆在整个计划中需要完成的加工工序数；只有全部工序完成才视为已加工。
+  const requiredProcesses = new Map<string, number>();
+  for (const move of records) {
+    if (move.MoveType !== PROCESS_MOVE) continue;
+    for (const material of materialIds(move)) {
+      requiredProcesses.set(material, (requiredProcesses.get(material) ?? 0) + 1);
+    }
+  }
+  const completedProcesses = new Map<string, number>();
   const processedMaterials = new Set<string>();
   const activeMoves: NormalizedMove[] = [];
   let completedMoves = 0;
@@ -816,7 +825,13 @@ export function buildWorkspaceSnapshot(
       completedMoves += 1;
       applyCompletedTransfer(move, locations);
       if (move.MoveType === PROCESS_MOVE) {
-        for (const material of materialIds(move)) processedMaterials.add(material);
+        for (const material of materialIds(move)) {
+          const completed = (completedProcesses.get(material) ?? 0) + 1;
+          completedProcesses.set(material, completed);
+          if (completed >= (requiredProcesses.get(material) ?? 1)) {
+            processedMaterials.add(material);
+          }
+        }
       }
     }
 
@@ -1201,11 +1216,12 @@ function renderModule(
         : role === "auxiliary"
           ? `<div class="auxiliary-wafer-slot ${wafers ? "is-occupied" : "is-empty"}">${wafers}</div>`
         : `<div class="wafer-stack">${wafers}${overflow}</div>`;
+  const bodyMarkup = role === "process"
+    ? `<div class="equipment-process-shell"><div class="equipment-body">${loadLockLayers}</div></div>`
+    : `<div class="equipment-body">${loadLockLayers}</div>`;
   const article = `
     <article class="equipment-card equipment-${role} status-${module.status} door-${module.door} ${module.loadLockPhase ? `loadlock-${module.loadLockPhase}` : ""} ${module.isRobotTarget ? "is-target" : ""} ${candidate ? "is-candidate-destination" : ""} ${candidate?.selected ? "is-model-selected" : ""}" style="--module-progress:${Math.round(module.progress * 100)}%;--loadlock-atmosphere:${Math.max(0, Math.min(100, atmosphereLevel)).toFixed(1)}%;--loadlock-atmosphere-ratio:${Math.max(0, Math.min(1, atmosphereLevel / 100)).toFixed(3)}" aria-label="${escapeHtml(`${accessibleStatus}${candidateLabel ? `，${candidateLabel}` : ""}`)}">
-      <div class="equipment-body">
-        ${loadLockLayers}
-      </div>
+      ${bodyMarkup}
       <div class="chamber-doors" aria-hidden="true">${role === "lock" ? '<i class="loadlock-door loadlock-door-vacuum"></i><i class="loadlock-door loadlock-door-atmosphere"></i>' : doors}</div>
     </article>`;
   if (role === "process" || role === "auxiliary" || role === "lock") {
@@ -1255,7 +1271,7 @@ const TOPOLOGY_COLUMN_PERCENTAGES = [26, 42, 58, 74] as const;
 const TOPOLOGY_ROW_TOP_PIXELS = [52, 154, 256, 358, 460, 562, 664, 786, 929, 1031, 1133] as const;
 const TOPOLOGY_VIEWBOX_WIDTH = 1000;
 const TOPOLOGY_ITEM_SIZE = 96;
-const TOPOLOGY_PROCESS_WIDTH = 112;
+const TOPOLOGY_PROCESS_WIDTH = 104;
 const TOPOLOGY_PROCESS_HEIGHT = 104;
 const TOPOLOGY_ROBOT_SIZE = 132;
 const TOPOLOGY_LOADLOCK_WIDTH = 120;

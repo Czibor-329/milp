@@ -919,7 +919,8 @@ test("机械手清除旧坐标偏移，并按 PRE_TRANS 进度连续旋转", () 
     "utf8",
   );
   assert.match(css, /\.robot-hub-vacuum[^}]*top:\s*auto;\s*left:\s*auto;/);
-  assert.match(css, /\.equipment-process[^}]*border-radius:\s*3px;\s*clip-path:\s*none;/);
+  assert.match(css, /\.equipment-process \{[^}]*border-radius:\s*0;\s*clip-path:\s*polygon\(29\.29% 0, 70\.71% 0, 100% 29\.29%, 100% 70\.71%, 70\.71% 100%, 29\.29% 100%, 0 70\.71%, 0 29\.29%\)/);
+  assert.match(css, /\.equipment-process \.equipment-process-shell \{[^}]*clip-path:\s*polygon\(29\.29% 0, 70\.71% 0, 100% 29\.29%, 100% 70\.71%, 70\.71% 100%, 29\.29% 100%, 0 70\.71%, 0 29\.29%\)/);
   assert.match(css, /\.equipment-port[^}]*border:\s*2px solid #667b94;\s*border-radius:\s*3px;\s*clip-path:\s*none;/);
   assert.match(css, /\.robot-arm[^}]*width:\s*88px;/);
   assert.match(css, /\.robot-fork-tine[^}]*width:\s*24px;/);
@@ -1437,4 +1438,56 @@ test("独立抽气和充气 MoveType 也能组成 LoadLock 循环", () => {
   assert.deepEqual(performance.loadLockCycles, [
     { index: 1, loadLock: "LA", vacuumWafers: ["W5"], ventWafers: ["W6"], startTime: 1, pumpEndTime: 5, ventStartTime: 10, ventEndTime: 14 },
   ]);
+});
+
+test("晶圆必须完成全部加工工序后才标记为已加工", () => {
+  const multiProcessDevice = {
+    Stations: {
+      LP1: { Type: "LoadPort" },
+      LA: { Type: "LoadLock" },
+      PM1: { Type: "Process" },
+      PM2: { Type: "Process" },
+    },
+    Robots: { ATR: {}, VTR: {} },
+  };
+  const multiProcessMoves = [
+    { MoveID: 1, MoveType: 0, ModuleName: "ATR", SrcStationList: ["LP1"], MatIDList: ["W1"], StartTime: 0, EndTime: 1 },
+    { MoveID: 2, MoveType: 1, ModuleName: "ATR", DestStationList: ["PM1"], MatIDList: ["W1"], StartTime: 1, EndTime: 2 },
+    { MoveID: 3, MoveType: 9, ModuleName: "PM1", MatIDList: ["W1"], StartTime: 2, EndTime: 4 },
+    { MoveID: 4, MoveType: 0, ModuleName: "ATR", SrcStationList: ["PM1"], MatIDList: ["W1"], StartTime: 4, EndTime: 5 },
+    { MoveID: 5, MoveType: 1, ModuleName: "ATR", DestStationList: ["PM2"], MatIDList: ["W1"], StartTime: 5, EndTime: 6 },
+    { MoveID: 6, MoveType: 9, ModuleName: "PM2", MatIDList: ["W1"], StartTime: 6, EndTime: 8 },
+    { MoveID: 7, MoveType: 0, ModuleName: "ATR", SrcStationList: ["PM2"], MatIDList: ["W1"], StartTime: 8, EndTime: 9 },
+  ];
+
+  // 第一道工序（PM1）已完成的时刻，W1 尚未完成全部工序，必须保持未加工。
+  const firstDone = logic.buildWorkspaceSnapshot(multiProcessMoves, multiProcessDevice, 5);
+  const firstRobot = firstDone.robots.find(robot => robot.name === "ATR");
+  assert.deepEqual(firstRobot.wafers, ["W1"]);
+  assert.deepEqual(firstRobot.processedWafers, []);
+  const firstTopology = logic.renderEquipmentTopology(firstDone, null);
+  assert.match(firstTopology, /wafer-token wafer-unprocessed/);
+  assert.doesNotMatch(firstTopology, /wafer-token wafer-processed/);
+
+  // 第二道工序（PM2）也完成之后，W1 才标记为已加工。
+  const allDone = logic.buildWorkspaceSnapshot(multiProcessMoves, multiProcessDevice, 8.5);
+  const pm2Module = moduleAt(allDone, "PM2");
+  assert.deepEqual(pm2Module.wafers, ["W1"]);
+  assert.deepEqual(pm2Module.processedWafers, ["W1"]);
+  const secondTopology = logic.renderEquipmentTopology(allDone, null);
+  assert.match(secondTopology, /wafer-token wafer-processed/);
+  assert.doesNotMatch(secondTopology, /wafer-token wafer-unprocessed/);
+});
+
+test("工艺腔渲染为正八边形 shell 结构，清洁状态使用浅粉色样式", () => {
+  const topology = logic.renderEquipmentTopology(logic.buildWorkspaceSnapshot(moves, device, 0), null);
+  assert.match(topology, /class="equipment-card equipment-process[^"]*"[^>]*>\s*<div class="equipment-process-shell"><div class="equipment-body"/);
+  assert.doesNotMatch(topology, /class="equipment-card equipment-lock[^"]*"[^>]*>\s*<div class="equipment-process-shell"/);
+  const css = fs.readFileSync(
+    path.join(__dirname, "../realtime_scheduler/frontend/assets/config_editor.css"),
+    "utf8",
+  );
+  assert.match(css, /\.reference-grid-canvas \.equipment-process \.equipment-process-shell \{[^}]*clip-path:\s*polygon\(29\.29% 0, 70\.71% 0, 100% 29\.29%, 100% 70\.71%, 70\.71% 100%, 29\.29% 100%, 0 70\.71%, 0 29\.29%\)/);
+  assert.match(css, /\.reference-grid-canvas \.equipment-process\.status-cleaning \.equipment-process-shell \{ background: #fdeef1; \}/);
+  assert.match(css, /\.reference-grid-canvas \.equipment-process\.status-cleaning \{ background: #d98a97; \}/);
 });

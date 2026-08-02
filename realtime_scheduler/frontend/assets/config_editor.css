@@ -641,7 +641,7 @@
     .is-model-selected .candidate-landing b { background: #087f5b; }
     .equipment-card.status-processing, .equipment-card.status-transfer { border-color: #6f91dd; background: #f4f7ff; }
     .equipment-card.status-door, .equipment-card.status-environment { border-color: #d6a84d; background: #fff9ed; }
-    .equipment-card.status-cleaning { border-color: #64b694; background: #f1faf6; }
+    .equipment-card.status-cleaning { border-color: #d98a97; background: #fdeef1; }
     .equipment-gate { position: absolute; right: 12px; bottom: 0; left: 12px; z-index: 2; height: 5px; overflow: hidden; border-radius: 4px 4px 0 0; background: #d3dae4; }
     .equipment-gate span { position: absolute; inset: 0; background: #59687b; transform-origin: left; transition: transform .2s ease, background-color .2s ease; }
     .door-open .equipment-gate span { background: var(--green); transform: scaleX(.18); }
@@ -653,7 +653,7 @@
     .equipment-status i { width: 6px; height: 6px; border-radius: 50%; background: #94a3b8; }
     .status-processing .equipment-status i, .status-transfer .equipment-status i { background: #315fc2; }
     .status-door .equipment-status i, .status-environment .equipment-status i { background: #c47a09; }
-    .status-cleaning .equipment-status i { background: #16845f; }
+    .status-cleaning .equipment-status i { background: #d96a7c; }
     .door-state { display: inline-flex; align-items: center; gap: 5px; padding: 3px 6px; border-radius: 999px; color: #475569; background: #edf1f6; font-size: 8px; font-weight: 800; white-space: nowrap; }
     .door-state i { width: 6px; height: 6px; border: 1px solid #475569; border-radius: 1px; background: #475569; }
     .door-open .door-state { color: #087f5b; background: var(--green-soft); }
@@ -673,7 +673,7 @@
     .equipment-progress { position: absolute; right: 0; bottom: 0; left: 0; height: 3px; overflow: hidden; background: #e7edf5; }
     .equipment-progress span { display: block; width: 100%; height: 100%; background: var(--brand); transform-origin: left; transition: transform .08s linear; }
     .status-door .equipment-progress span, .status-environment .equipment-progress span { background: #d28a13; }
-    .status-cleaning .equipment-progress span { background: var(--green); }
+    .status-cleaning .equipment-progress span { background: #d96a7c; }
     .robot-hub { z-index: 2; display: grid; place-items: center; align-content: center; color: #334155; background: #edf1f5; box-shadow: inset 0 0 0 1px #9ca9b8, 0 8px 24px rgba(15,23,42,.08); }
     .robot-hub-vacuum { position: absolute; top: 176px; left: 50%; width: 250px; height: 202px; clip-path: polygon(25% 0, 75% 0, 100% 34%, 86% 100%, 14% 100%, 0 34%); transform: translateX(-50%); }
     .robot-hub-atmosphere { width: 238px; min-height: 106px; border-radius: 5px; }
@@ -1061,16 +1061,26 @@
     .topology-interface-bay > span { position: absolute; top: -16px; left: 50%; padding: 2px 7px; color: #50637b; background: #f6f8fb; font: 700 8px/1 "Fira Code", Consolas, monospace; letter-spacing: .07em; white-space: nowrap; transform: translateX(-50%); }
     .reference-module-position, .reference-robot-position { position: absolute; z-index: 3; left: var(--module-left); top: var(--module-top); width: 96px; transform: translate(-50%, -50%); }
     .reference-module-position:has(.equipment-lock) { width: 120px; }
-    .reference-module-position:has(.equipment-process) { width: 112px; }
+    .reference-module-position:has(.equipment-process) { width: 104px; }
     .reference-module-position:has(.equipment-auxiliary) { width: 112px; }
     .reference-module-position:has(.equipment-port) { width: 144px; }
     .reference-robot-position { z-index: 4; left: var(--robot-left); top: var(--robot-top); }
     .reference-grid-canvas .equipment-card, .reference-grid-canvas .equipment-lock, .reference-grid-canvas .equipment-port, .reference-grid-canvas .equipment-auxiliary { display: grid; width: 96px; height: 96px; grid-template-rows: auto 1fr; overflow: hidden; border-radius: 0; color: var(--ink); background: rgba(255,255,255,.97); box-shadow: 2px 3px 7px rgba(32,47,81,.09); }
-    .reference-grid-canvas .equipment-process { width: 112px; height: 104px; grid-template-rows: 1fr; overflow: hidden; border: 2px solid #667b94; border-radius: 3px; clip-path: none; background: linear-gradient(145deg, var(--sim-shell-highlight), var(--sim-shell)); box-shadow: inset 0 0 0 1px rgba(255,255,255,.64), 2px 3px 7px rgba(32,47,81,.10); }
-    .reference-grid-canvas .equipment-process.status-processing { border-color: var(--sim-transfer); background: linear-gradient(145deg, #f5f8ff, #dfe8f8); }
-    .reference-grid-canvas .equipment-process::after, .reference-grid-canvas .equipment-auxiliary::after { position: absolute; z-index: 5; top: 7px; right: 7px; width: 7px; height: 7px; border: 1px solid #fff; border-radius: 50%; background: #8291a4; box-shadow: 0 0 0 1px rgba(54,72,94,.42); content: ""; }
+    /* 工艺腔外层：正八边形外框（背景色即 2px 实线轮廓），内部 shell 等距内缩形成八边形主体。
+       切角 29.29% = 1/(2+√2)，使顶边与斜边等长，是正方形内切正八边形的标准比例。 */
+    .reference-grid-canvas .equipment-process { width: 104px; height: 104px; grid-template-rows: 1fr; overflow: hidden; border: 0; border-radius: 0; clip-path: polygon(29.29% 0, 70.71% 0, 100% 29.29%, 100% 70.71%, 70.71% 100%, 29.29% 100%, 0 70.71%, 0 29.29%); background: var(--sim-stroke); filter: drop-shadow(2px 3px 7px rgba(32,47,81,.10)); }
+    .reference-grid-canvas .equipment-process .equipment-process-shell { position: absolute; inset: 2px; display: grid; grid-template-rows: 1fr; clip-path: polygon(29.29% 0, 70.71% 0, 100% 29.29%, 100% 70.71%, 70.71% 100%, 29.29% 100%, 0 70.71%, 0 29.29%); background: linear-gradient(145deg, var(--sim-shell-highlight), var(--sim-shell)); box-shadow: inset 0 0 0 1px rgba(255,255,255,.64); }
+    .reference-grid-canvas .equipment-process.status-processing { background: var(--sim-transfer); }
+    .reference-grid-canvas .equipment-process.status-processing .equipment-process-shell { background: linear-gradient(145deg, #f5f8ff, #dfe8f8); }
+    .reference-grid-canvas .equipment-process.status-cleaning { background: #d98a97; }
+    .reference-grid-canvas .equipment-process.status-cleaning .equipment-process-shell { background: #fdeef1; }
+    .reference-grid-canvas .equipment-process::after { position: absolute; z-index: 5; top: 18px; right: 20px; width: 7px; height: 7px; border: 1px solid #fff; border-radius: 50%; background: #8291a4; box-shadow: 0 0 0 1px rgba(54,72,94,.42); content: ""; }
+    .reference-grid-canvas .equipment-auxiliary::after { position: absolute; z-index: 5; top: 7px; right: 7px; width: 7px; height: 7px; border: 1px solid #fff; border-radius: 50%; background: #8291a4; box-shadow: 0 0 0 1px rgba(54,72,94,.42); content: ""; }
     .reference-grid-canvas .equipment-process.status-processing::after, .reference-grid-canvas .equipment-process.status-transfer::after, .reference-grid-canvas .equipment-auxiliary.status-transfer::after { background: var(--sim-transfer); box-shadow: 0 0 0 1px #254b99, 0 0 0 3px rgba(49,95,194,.13); }
-    .reference-grid-canvas .equipment-process.status-cleaning::after { background: var(--sim-done); }
+    .reference-grid-canvas .equipment-process.status-cleaning::after { background: #d96a7c; animation: reference-chamber-clean-pulse 1.1s ease-in-out infinite; }
+    .reference-grid-canvas .equipment-process.status-cleaning::before { position: absolute; z-index: 4; top: 50%; left: 50%; width: 150%; aspect-ratio: 1; border-radius: 50%; background: conic-gradient(from 0deg, rgba(217,106,124,0) 0 288deg, rgba(217,106,124,.32) 322deg, rgba(217,106,124,0) 356deg), radial-gradient(circle, rgba(217,106,124,.08) 0 44%, transparent 46%); content: ""; pointer-events: none; transform: translate(-50%, -50%) rotate(0deg); animation: reference-chamber-clean-sweep 1.8s linear infinite; }
+    @keyframes reference-chamber-clean-sweep { to { transform: translate(-50%, -50%) rotate(360deg); } }
+    @keyframes reference-chamber-clean-pulse { 0%, 100% { box-shadow: 0 0 0 1px #d96a7c, 0 0 0 3px rgba(217,106,124,.14); } 50% { box-shadow: 0 0 0 1px #d96a7c, 0 0 0 6px rgba(217,106,124,.30); } }
     .reference-grid-canvas .equipment-process.status-door::after, .reference-grid-canvas .equipment-auxiliary.status-door::after { background: var(--sim-waiting); }
     .reference-grid-canvas .equipment-process .equipment-body { display: grid; min-height: 0; place-items: center; padding: 0; }
     .equipment-external-name { position: absolute; z-index: 5; top: -18px; left: 50%; color: #17233a; font: 800 12px/1 "Fira Code", Consolas, monospace; letter-spacing: .03em; transform: translateX(-50%); }
@@ -1163,7 +1173,12 @@
     body.theme-dark .topology-zone > span small { color: #7f8da1; }
     body.theme-dark .topology-interface-bay > span { color: #aebdd0; background: var(--soft); }
     body.theme-dark .equipment-external-name { color: var(--ink); }
-    body.theme-dark .reference-grid-canvas .equipment-process { border-color: #60738c; background: linear-gradient(145deg, #2a3443 0, #202a37 58%, #1a2431 100%); }
+    body.theme-dark .reference-grid-canvas .equipment-process { background: #60738c; }
+    body.theme-dark .reference-grid-canvas .equipment-process .equipment-process-shell { background: linear-gradient(145deg, #2a3443 0, #202a37 58%, #1a2431 100%); }
+    body.theme-dark .reference-grid-canvas .equipment-process.status-processing { background: var(--sim-transfer); }
+    body.theme-dark .reference-grid-canvas .equipment-process.status-processing .equipment-process-shell { background: linear-gradient(145deg, #2a3443 0, #202a37 58%, #1a2431 100%); }
+    body.theme-dark .reference-grid-canvas .equipment-process.status-cleaning { background: #c96a7c; }
+    body.theme-dark .reference-grid-canvas .equipment-process.status-cleaning .equipment-process-shell { background: #fdeef1; }
     body.theme-dark .process-wafer-slot { border-color: #64778f; background: radial-gradient(circle at 42% 36%, #37465a 0, #243143 72%, #1b2635 100%); }
     body.theme-dark .reference-grid-canvas .equipment-port { border-color: #60738c; background: linear-gradient(145deg, #2a3748 0, #202b39 100%); }
     body.theme-dark .reference-grid-canvas .equipment-lock { border-color: #60738c; background: linear-gradient(145deg, #2a3748 0, #202b39 100%); }

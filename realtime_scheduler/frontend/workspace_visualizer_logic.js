@@ -553,6 +553,14 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
   const locations = new Map(initialLocations);
   const doorStates = /* @__PURE__ */ new Map();
   const environments = /* @__PURE__ */ new Map();
+  const requiredProcesses = /* @__PURE__ */ new Map();
+  for (const move of records) {
+    if (move.MoveType !== PROCESS_MOVE) continue;
+    for (const material of materialIds(move)) {
+      requiredProcesses.set(material, (requiredProcesses.get(material) ?? 0) + 1);
+    }
+  }
+  const completedProcesses = /* @__PURE__ */ new Map();
   const processedMaterials = /* @__PURE__ */ new Set();
   const activeMoves = [];
   let completedMoves = 0;
@@ -570,7 +578,13 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
       completedMoves += 1;
       applyCompletedTransfer(move, locations);
       if (move.MoveType === PROCESS_MOVE) {
-        for (const material of materialIds(move)) processedMaterials.add(material);
+        for (const material of materialIds(move)) {
+          const completed2 = (completedProcesses.get(material) ?? 0) + 1;
+          completedProcesses.set(material, completed2);
+          if (completed2 >= (requiredProcesses.get(material) ?? 1)) {
+            processedMaterials.add(material);
+          }
+        }
       }
     }
     const doorVisualActive = move.StartTime <= time && time < Math.max(move.EndTime, move.StartTime + DOOR_VISUAL_MIN_SECONDS);
@@ -842,11 +856,10 @@ function renderModule(module2, role, candidate) {
     const waferState = processed ? "processed" : "unprocessed";
     return `<div class="loadlock-layer ${wafer ? "is-occupied" : "is-empty"}">${wafer ? `<span class="loadlock-wafer-line wafer-${waferState}" title="\u6676\u5706 ${escapeHtml(wafer)}\uFF08${processed ? "\u5DF2\u52A0\u5DE5" : "\u672A\u52A0\u5DE5"}\uFF09"></span>` : ""}</div>`;
   }).join("")}${overflow}</div>` : role === "process" ? `<div class="process-wafer-slot ${wafers ? "is-occupied" : "is-empty"}">${wafers}</div>` : role === "port" ? `<div class="load-port-dock-face" aria-hidden="true"><span></span></div>` : role === "auxiliary" ? `<div class="auxiliary-wafer-slot ${wafers ? "is-occupied" : "is-empty"}">${wafers}</div>` : `<div class="wafer-stack">${wafers}${overflow}</div>`;
+  const bodyMarkup = role === "process" ? `<div class="equipment-process-shell"><div class="equipment-body">${loadLockLayers}</div></div>` : `<div class="equipment-body">${loadLockLayers}</div>`;
   const article = `
     <article class="equipment-card equipment-${role} status-${module2.status} door-${module2.door} ${module2.loadLockPhase ? `loadlock-${module2.loadLockPhase}` : ""} ${module2.isRobotTarget ? "is-target" : ""} ${candidate ? "is-candidate-destination" : ""} ${candidate?.selected ? "is-model-selected" : ""}" style="--module-progress:${Math.round(module2.progress * 100)}%;--loadlock-atmosphere:${Math.max(0, Math.min(100, atmosphereLevel)).toFixed(1)}%;--loadlock-atmosphere-ratio:${Math.max(0, Math.min(1, atmosphereLevel / 100)).toFixed(3)}" aria-label="${escapeHtml(`${accessibleStatus}${candidateLabel ? `\uFF0C${candidateLabel}` : ""}`)}">
-      <div class="equipment-body">
-        ${loadLockLayers}
-      </div>
+      ${bodyMarkup}
       <div class="chamber-doors" aria-hidden="true">${role === "lock" ? '<i class="loadlock-door loadlock-door-vacuum"></i><i class="loadlock-door loadlock-door-atmosphere"></i>' : doors}</div>
     </article>`;
   if (role === "process" || role === "auxiliary" || role === "lock") {
@@ -875,7 +888,7 @@ var TOPOLOGY_COLUMN_PERCENTAGES = [26, 42, 58, 74];
 var TOPOLOGY_ROW_TOP_PIXELS = [52, 154, 256, 358, 460, 562, 664, 786, 929, 1031, 1133];
 var TOPOLOGY_VIEWBOX_WIDTH = 1e3;
 var TOPOLOGY_ITEM_SIZE = 96;
-var TOPOLOGY_PROCESS_WIDTH = 112;
+var TOPOLOGY_PROCESS_WIDTH = 104;
 var TOPOLOGY_PROCESS_HEIGHT = 104;
 var TOPOLOGY_ROBOT_SIZE = 132;
 var TOPOLOGY_LOADLOCK_WIDTH = 120;
