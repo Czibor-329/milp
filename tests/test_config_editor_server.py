@@ -121,13 +121,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         """页面应提供算法选择，但不显示宏周期的旧兼容参数。"""
         source = _editor_source()
         for marker in (
-            "neuralucbStrategyInput",
-            "neuralUCBTopK",
-            "neuralUCBExploration",
             "loadlockMacroStrategyInput",
-            "nnSAEAStrategyInput",
-            "nnSAEASearchSeconds",
-            "nnSAEARollouts",
         ):
             self.assertIn(marker, source)
         self.assertNotIn('data-option="loadLockMacroSearchSeconds"', source)
@@ -1281,9 +1275,6 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn('id="milpStrategyInput"', html)
         self.assertIn('value="milp"', html)
         self.assertIn("status.strategies?.milp", html)
-        self.assertIn('id="setrankStrategyInput"', html)
-        self.assertIn('value="setrank"', html)
-        self.assertIn("status.strategies?.setrank", html)
         self.assertIn("algorithm-hover-info", html)
         self.assertIn("metadata.introduction", html)
         self.assertNotIn('data-tab-target="algorithm-history"', html)
@@ -2636,8 +2627,8 @@ class ConfigEditorServerTests(unittest.TestCase):
         """算法展示信息只保留名称和介绍，不再包含版本记录字段。"""
         metadata = config_server.read_algorithm_metadata()
 
-        self.assertIn("集合网络", metadata["setrank"]["introduction"])
-        self.assertEqual({"name", "introduction"}, set(metadata["setrank"]))
+        self.assertIn("端到端资源流", metadata["e2e-ctq"]["introduction"])
+        self.assertEqual({"name", "introduction"}, set(metadata["e2e-ctq"]))
 
 
 if __name__ == "__main__":
