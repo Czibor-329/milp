@@ -19,7 +19,6 @@ from realtime_scheduler.plan_builder import BuildState, build_round_update
 
 
 TIME_TOLERANCE_SECONDS = 1e-6
-TRANSPORT_MOVE_TYPES = frozenset({0, 1, 2, 3, 4})
 COMPLETED_INTENT_MOVE_TYPES = frozenset({1, 3, 4})
 VISIBLE_CANDIDATE_LIMIT = 24
 QUANTILE_MARGIN = 1
@@ -85,6 +84,7 @@ class ReplayMachine:
             build_resource_flow_context,
             build_resource_flow_observation,
         )
+        from src.schedule.machine_policy import ReentrantFlowPriority
         from src.validation import Machine, MoveStateReplay
         from src.validation.state import MachineState
 
@@ -147,9 +147,13 @@ class ReplayMachine:
             context,
         )
         logits, quantiles = policy.score(observation)
+        deferred_action_ids = ReentrantFlowPriority(
+            problem
+        ).deferred_action_ids(state, actions)
         selected_index = min(
             range(len(actions)),
             key=lambda index: (
+                int(str(actions[index].action_id) in deferred_action_ids),
                 -float(logits[index]),
                 float(np.mean(quantiles[index])),
                 float(actions[index].earliest_start),
@@ -168,6 +172,7 @@ class ReplayMachine:
             quantiles,
             replay_time,
             executed_action_id,
+            deferred_action_ids,
         )
         return decision
 
@@ -180,6 +185,7 @@ class ReplayMachine:
         quantiles: np.ndarray,
         replay_time: float,
         executed_action_id: str,
+        deferred_action_ids: set[str],
     ) -> Dict[str, Any]:
         """把完整 Pick + Place / Swap 事务输出为稳定、有界的前端协议。"""
         score_values = np.asarray(logits, dtype=np.float64)
@@ -198,6 +204,7 @@ class ReplayMachine:
         ranked_indices = sorted(
             range(len(actions)),
             key=lambda index: (
+                int(str(actions[index].action_id) in deferred_action_ids),
                 -float(probabilities[index]),
                 float(actions[index].earliest_start),
                 str(actions[index].action_id),
@@ -262,6 +269,7 @@ class ReplayMachine:
                 "finishTime": float(action.finish_time),
                 "rank": ranked_indices.index(action_index) + 1,
                 "selected": action_index == selected_index,
+                "priorityDeferred": action_id in deferred_action_ids,
                 "executed": action_index == executed_index,
                 "policyScore": float(score_values[action_index]),
                 "policyPreference": float(probabilities[action_index]),
@@ -373,44 +381,41 @@ class ReplayMachine:
         )
 
     def _match_next_action(self, actions: Sequence[Any], cutoff: float) -> str:
-        """用后续运输 Move 序列识别原 MoveList 在当前状态选择的联合意图。"""
-        future_moves = [
+        """用紧邻的完整事务终点识别原 MoveList 当前选择的联合意图。"""
+        future_completions = [
             move
             for move in sorted(
                 self.moves,
                 key=lambda item: (
-                    float(item.get("StartTime") or 0.0),
+                    float(item.get("EndTime") or 0.0),
                     int(item.get("MoveID") or 0),
                 ),
             )
             if (
-                int(move.get("MoveType", -1)) in TRANSPORT_MOVE_TYPES
-                and float(move.get("StartTime") or 0.0)
-                >= cutoff - TIME_TOLERANCE_SECONDS
+                int(move.get("MoveType", -1)) in COMPLETED_INTENT_MOVE_TYPES
+                and float(move.get("EndTime") or 0.0)
+                > cutoff + TIME_TOLERANCE_SECONDS
             )
         ]
+        if not future_completions:
+            return ""
+        expected_signature = self._transport_signature(future_completions[0])
         for action in actions:
-            preview = [
+            preview_completions = [
                 dict(move)
                 for move in action.move_preview
-                if int(move.get("MoveType", -1)) in TRANSPORT_MOVE_TYPES
+                if int(move.get("MoveType", -1)) in COMPLETED_INTENT_MOVE_TYPES
             ]
-            if not preview:
+            if not preview_completions:
                 continue
-            action_materials = {str(value) for value in action.material_ids}
-            related_future = [
-                move
-                for move in future_moves
-                if action_materials.intersection(
-                    str(value) for value in self._move_material_ids(move)
-                )
-            ]
-            comparison_count = min(2, len(preview), len(related_future))
-            if comparison_count and all(
-                self._transport_signature(preview[index])
-                == self._transport_signature(related_future[index])
-                for index in range(comparison_count)
-            ):
+            terminal_preview = max(
+                preview_completions,
+                key=lambda move: (
+                    float(move.get("EndTime") or 0.0),
+                    int(move.get("MoveID") or 0),
+                ),
+            )
+            if self._transport_signature(terminal_preview) == expected_signature:
                 return str(action.action_id)
         return ""
 
@@ -432,4 +437,7 @@ class ReplayMachine:
             tuple(str(value) for value in cls._move_material_ids(move)),
             tuple(str(value) for value in move.get("SrcStationList") or ()),
             tuple(str(value) for value in move.get("DestStationList") or ()),
+            tuple(str(value) for value in move.get("StationList") or ()),
+            tuple(str(value) for value in move.get("RecvMatList") or ()),
+            tuple(str(value) for value in move.get("SendMatList") or ()),
         )

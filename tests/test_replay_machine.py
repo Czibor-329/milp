@@ -7,6 +7,7 @@ DecisionTrace，同时覆盖生产 checkpoint 的真实前向。
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,6 +15,63 @@ from realtime_scheduler.replay_machine import ReplayMachine
 from realtime_scheduler.plan_builder import extract_init_data
 from realtime_scheduler.server import E2E_CTQ_MODEL_PATH, execute_plan
 from tests.test_config_editor_server import DEVICE_PATH, _job, _route
+
+
+def test_plan_match_uses_immediately_next_complete_transaction() -> None:
+    """原计划标签不得越过紧邻 PM 换片而误匹配更晚的 LoadLock 发片。"""
+    machine = ReplayMachine.__new__(ReplayMachine)
+    machine.moves = [
+        {
+            "MoveID": 10,
+            "MoveType": 4,
+            "StartTime": 20.0,
+            "EndTime": 25.0,
+            "Robot": "VTR",
+            "MatIDList": [1, 2],
+            "StationList": ["PM2", "PM2"],
+            "RecvMatList": [1],
+            "SendMatList": [2],
+        },
+        {
+            "MoveID": 20,
+            "MoveType": 1,
+            "StartTime": 40.0,
+            "EndTime": 45.0,
+            "Robot": "ATR",
+            "MatIDList": [3],
+            "DestStationList": ["LB"],
+        },
+    ]
+    actions = [
+        SimpleNamespace(
+            action_id="feed-later",
+            move_preview=({
+                "MoveID": 0,
+                "MoveType": 1,
+                "StartTime": 12.0,
+                "EndTime": 17.0,
+                "Robot": "ATR",
+                "MatIDList": [3],
+                "DestStationList": ["LB"],
+            },),
+        ),
+        SimpleNamespace(
+            action_id="pm-swap-next",
+            move_preview=({
+                "MoveID": 0,
+                "MoveType": 4,
+                "StartTime": 12.0,
+                "EndTime": 17.0,
+                "Robot": "VTR",
+                "MatIDList": [1, 2],
+                "StationList": ["PM2", "PM2"],
+                "RecvMatList": [1],
+                "SendMatList": [2],
+            },),
+        ),
+    ]
+
+    assert machine._match_next_action(actions, 10.0) == "pm-swap-next"
 
 
 def _heuristic_replay_plan() -> dict:

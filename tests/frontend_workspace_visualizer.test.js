@@ -403,6 +403,43 @@ test("合法动作空间按偏好排序并格式化低偏好和工期差值", as
   assert.doesNotMatch(lens, /为什么推荐|候选对比|动作证据|已观察切片|Top-2|上一决策|下一决策|导出决策样本|剩余 Makespan|预测区间|lowerRemainingMakespan|upperRemainingMakespan/);
 });
 
+test("重入让位候选按最终调度优先级展示且计划标签指向紧邻事务", async () => {
+  const root = fakeWorkspaceDocument();
+  const workspace = logic.createVisualizationWorkspace(root);
+  await workspace.loadFile({
+    name: "reentrant-priority.json",
+    async text() {
+      return JSON.stringify({
+        MoveList: moves,
+        DecisionTrace: [{
+          decisionIndex: 7,
+          time: 188.7,
+          selectedActionId: "pm-reentry",
+          executedActionId: "pm-reentry",
+          candidateCount: 2,
+          candidates: [
+            {
+              actionId: "feed-later", rank: 2, source: "LP1", destination: "LB",
+              robot: "ATR", flowKind: "feed", policyPreference: 0.9,
+              priorityDeferred: true,
+            },
+            {
+              actionId: "pm-reentry", rank: 1, source: "PM3", destination: "PM2",
+              robot: "VTR", flowKind: "internal", policyPreference: 0.1,
+              selected: true, executed: true,
+            },
+          ],
+        }],
+      });
+    },
+  });
+
+  const lens = root.elements.get("visualDecisionLens").innerHTML;
+  assert.ok(lens.indexOf("PM3 → PM2") < lens.indexOf("LP1 → LB"));
+  assert.match(lens, /PM3 → PM2[\s\S]*E2E推荐[\s\S]*与计划一致/);
+  assert.doesNotMatch(lens, /LP1 → LB[\s\S]*E2E推荐/);
+});
+
 test("开启保护后，回放越过完整事务边界时精确暂停在下一决策", async () => {
   const originalRequestAnimationFrame = global.requestAnimationFrame;
   const originalCancelAnimationFrame = global.cancelAnimationFrame;

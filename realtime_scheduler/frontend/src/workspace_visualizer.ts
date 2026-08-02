@@ -87,6 +87,7 @@ export interface DecisionCandidate {
   rank: number;
   selected: boolean;
   executed: boolean;
+  priorityDeferred: boolean;
   policyScore: number;
   policyPreference: number;
   expectedRemainingMakespan: number | null;
@@ -275,6 +276,7 @@ export function normalizeDecisionTrace(payload: unknown): DecisionTraceStep[] {
           rank: finiteNumber(candidate.rank),
           selected: Boolean(candidate.selected),
           executed: Boolean(candidate.executed),
+          priorityDeferred: Boolean(candidate.priorityDeferred),
           policyScore: finiteNumber(candidate.policyScore),
           policyPreference: Math.max(0, Math.min(1, finiteNumber(candidate.policyPreference))),
           expectedRemainingMakespan: nullableFiniteNumber(candidate.expectedRemainingMakespan),
@@ -1768,13 +1770,18 @@ function renderDecisionLens(decision: DecisionTraceStep | null): string {
   const shownText = decision.candidatesTruncated
     ? `展示 Top ${decision.shownCandidateCount} / ${decision.candidateCount}`
     : `${decision.candidateCount} 个可行动作`;
+  const hasExplicitRecommendation = decision.candidates.some(candidate => candidate.selected)
+    || Boolean(decision.selectedActionId);
   const rankedCandidates = [...decision.candidates].sort((left, right) =>
-    right.policyPreference - left.policyPreference
+    Number(left.priorityDeferred) - Number(right.priorityDeferred)
+      || right.policyPreference - left.policyPreference
       || left.rank - right.rank
       || left.actionId.localeCompare(right.actionId));
   const candidates = rankedCandidates.map((candidate, index) => {
     const preference = modelPreference(candidate.policyPreference);
-    const isRecommendation = index === 0;
+    const isRecommendation = hasExplicitRecommendation
+      ? candidate.selected || candidate.actionId === decision.selectedActionId
+      : index === 0;
     const tags = `${isRecommendation ? '<span class="decision-tag is-recommendation">E2E推荐</span>' : ""}${candidate.executed ? '<span class="decision-tag is-plan">与计划一致</span>' : ""}`;
     const delta = isRecommendation
       ? "Δ 基准"

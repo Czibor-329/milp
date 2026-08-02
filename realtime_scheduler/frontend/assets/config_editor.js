@@ -289,6 +289,7 @@ function normalizeDecisionTrace(payload) {
       rank: finiteNumber(candidate.rank),
       selected: Boolean(candidate.selected),
       executed: Boolean(candidate.executed),
+      priorityDeferred: Boolean(candidate.priorityDeferred),
       policyScore: finiteNumber(candidate.policyScore),
       policyPreference: Math.max(0, Math.min(1, finiteNumber(candidate.policyPreference))),
       expectedRemainingMakespan: nullableFiniteNumber(candidate.expectedRemainingMakespan),
@@ -1323,10 +1324,11 @@ function renderDecisionLens(decision) {
       </div>`;
   }
   const shownText = decision.candidatesTruncated ? `\u5C55\u793A Top ${decision.shownCandidateCount} / ${decision.candidateCount}` : `${decision.candidateCount} \u4E2A\u53EF\u884C\u52A8\u4F5C`;
-  const rankedCandidates = [...decision.candidates].sort((left, right) => right.policyPreference - left.policyPreference || left.rank - right.rank || left.actionId.localeCompare(right.actionId));
+  const hasExplicitRecommendation = decision.candidates.some((candidate) => candidate.selected) || Boolean(decision.selectedActionId);
+  const rankedCandidates = [...decision.candidates].sort((left, right) => Number(left.priorityDeferred) - Number(right.priorityDeferred) || right.policyPreference - left.policyPreference || left.rank - right.rank || left.actionId.localeCompare(right.actionId));
   const candidates = rankedCandidates.map((candidate, index) => {
     const preference = modelPreference(candidate.policyPreference);
-    const isRecommendation = index === 0;
+    const isRecommendation = hasExplicitRecommendation ? candidate.selected || candidate.actionId === decision.selectedActionId : index === 0;
     const tags = `${isRecommendation ? '<span class="decision-tag is-recommendation">E2E\u63A8\u8350</span>' : ""}${candidate.executed ? '<span class="decision-tag is-plan">\u4E0E\u8BA1\u5212\u4E00\u81F4</span>' : ""}`;
     const delta = isRecommendation ? "\u0394 \u57FA\u51C6" : `\u0394 ${modelSeconds(candidate.makespanDelta, true)}`;
     return `
