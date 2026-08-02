@@ -2925,10 +2925,10 @@ def get_workspace_device(device_id: str, path: Path = WORKSPACE_STORE_PATH) -> D
 
 
 def robot_available_slots(robot: Mapping[str, Any]) -> List[int]:
-    """返回设备声明的机器手可用槽位。
+    """返回机器手可配置的 Arm 槽位编号。
 
-    优先合并 ``Slot/Slots/SlotIDs`` 与 ``ArmInfo.*.SlotIDs``；旧设备只声明
-    ``Capacity`` 或通过 ``CanMultiTrans`` 隐式表达双臂能力时，也会补出连续槽位。
+    ``ArmInfo.*.SlotIDs`` 是实际 Arm 定义。只要存在 ArmInfo，编辑器就允许在单臂与
+    双臂间切换；``CanMultiTrans`` 不参与臂数判断，Robot 本身也不写入 Slot。
     """
     slots: set[int] = set()
 
@@ -2955,51 +2955,76 @@ def robot_available_slots(robot: Mapping[str, Any]) -> List[int]:
             if slot_id >= FIRST_ROBOT_SLOT_ID:
                 slots.add(slot_id)
 
-    add_slots(robot.get("Slot"), scalar_is_capacity=True)
-    add_slots(robot.get("Slots"))
-    add_slots(robot.get("SlotIDs"))
     arm_info = robot.get("ArmInfo")
     if isinstance(arm_info, Mapping):
         for arm in arm_info.values():
             if isinstance(arm, Mapping):
                 add_slots(arm.get("SlotIDs"))
+        if any(isinstance(arm, Mapping) for arm in arm_info.values()):
+            slots.update(range(FIRST_ROBOT_SLOT_ID, DUAL_ARM_SLOT_COUNT + FIRST_ROBOT_SLOT_ID))
     add_slots(robot.get("Capacity"), scalar_is_capacity=True)
-    if robot.get("CanMultiTrans") is True:
-        slots.update(range(FIRST_ROBOT_SLOT_ID, DUAL_ARM_SLOT_COUNT + FIRST_ROBOT_SLOT_ID))
     return sorted(slots or {FIRST_ROBOT_SLOT_ID})
 
 
 def robot_default_slots(robot: Mapping[str, Any]) -> List[int]:
-    """返回机器手初次加载时应启用的槽位。
-
-    设备显式提供 ``Slot`` 时以其为当前模式；未提供时沿用全部已声明能力，兼容旧版
-    仅通过 ``Capacity/CanMultiTrans/ArmInfo`` 表达双臂的设备。
-    """
-    raw_slots = robot.get("Slot")
+    """按原始 ``ArmInfo`` 返回设备文件默认启用的 Arm 槽位。"""
     selected: set[int] = set()
-    if isinstance(raw_slots, bool):
-        raw_slots = None
-    if isinstance(raw_slots, int):
-        selected.update(range(FIRST_ROBOT_SLOT_ID, raw_slots + FIRST_ROBOT_SLOT_ID))
-    elif isinstance(raw_slots, Mapping):
-        for value in raw_slots.keys():
-            try:
-                selected.add(int(value))
-            except (TypeError, ValueError):
-                continue
-    elif isinstance(raw_slots, Sequence) and not isinstance(raw_slots, (str, bytes)):
-        for value in raw_slots:
-            try:
-                selected.add(int(value))
-            except (TypeError, ValueError):
-                continue
     available = robot_available_slots(robot)
+    arm_info = robot.get("ArmInfo")
+    if isinstance(arm_info, Mapping):
+        for arm in arm_info.values():
+            if not isinstance(arm, Mapping) or arm.get("IsEnable") is False:
+                continue
+            raw_slots = arm.get("SlotIDs")
+            if not isinstance(raw_slots, Sequence) or isinstance(raw_slots, (str, bytes)):
+                continue
+            for value in raw_slots:
+                try:
+                    selected.add(int(value))
+                except (TypeError, ValueError):
+                    continue
     explicit = sorted(
         slot_id
         for slot_id in selected
         if slot_id >= FIRST_ROBOT_SLOT_ID and slot_id in available
     )
-    return explicit or available
+    return explicit or available[:1]
+
+
+def _project_robot_arm_to_slot(
+    arm_name: str,
+    source_arm: Mapping[str, Any],
+    slot_id: int,
+) -> Dict[str, Any]:
+    """复制一个 Arm 并将其规范为独占指定 RobotSlot。"""
+    arm = deepcopy(dict(source_arm))
+    arm["Name"] = arm_name
+    arm["IsEnable"] = True
+    arm["SlotIDs"] = [slot_id]
+    slot_station_map = arm.get("SlotsStationMap")
+    if isinstance(slot_station_map, dict):
+        for station_name, station_slots in list(slot_station_map.items()):
+            if not isinstance(station_slots, Mapping) or not station_slots:
+                continue
+            preferred = station_slots.get(str(slot_id))
+            template = preferred if preferred is not None else next(iter(station_slots.values()))
+            slot_station_map[station_name] = {str(slot_id): deepcopy(template)}
+    return arm
+
+
+def _generated_robot_arm_name(existing_names: Iterable[str], slot_id: int) -> str:
+    """为设备文件缺少的第二个 Arm 生成稳定且不冲突的名称。"""
+    occupied = {str(name) for name in existing_names}
+    alphabetic_name = f"Arm{chr(ord('A') + slot_id - FIRST_ROBOT_SLOT_ID)}"
+    if alphabetic_name not in occupied:
+        return alphabetic_name
+    numeric_name = f"Arm{slot_id}"
+    if numeric_name not in occupied:
+        return numeric_name
+    suffix = slot_id
+    while f"{numeric_name}_{suffix}" in occupied:
+        suffix += 1
+    return f"{numeric_name}_{suffix}"
 
 
 def normalize_robot_slot_selection(
@@ -3008,7 +3033,7 @@ def normalize_robot_slot_selection(
 ) -> Dict[str, List[int]]:
     """校验并补齐每台机器手的槽位选择。
 
-    未显式配置的机器手沿用设备声明的全部槽位。配置必须至少保留一个槽位，且不能
+    未显式配置的机器手沿用原始 ``ArmInfo`` 默认模式。配置必须至少保留一个槽位，且不能
     引用设备能力之外的槽位或未知机器手。
     """
     robots = device_data.get("Robots")
@@ -3048,10 +3073,10 @@ def apply_robot_slot_selection(
     device_data: Dict[str, Any],
     raw_selection: Any,
 ) -> Dict[str, List[int]]:
-    """将设备级槽位选择投影到运行时机器手配置并返回规范化结果。
+    """将 Arm 槽位选择投影到运行时 ``ArmInfo`` 并返回规范化结果。
 
-    除写入 ``Robots.*.Slot`` 外，还同步 ``Capacity``、``CanMultiTrans`` 与
-    ``ArmInfo.*.IsEnable/SlotIDs``，保证新旧算法都能识别单臂或双臂状态。
+    每个启用 Arm 独占一个递增 SlotID。投影只调整 ``Capacity`` 与 ``ArmInfo``，不会
+    创建 Robot.Slot，也不会改写与 Arm 数量无关的 ``CanMultiTrans``。
     """
     normalized = normalize_robot_slot_selection(device_data, raw_selection)
     robots = device_data.get("Robots")
@@ -3061,52 +3086,39 @@ def apply_robot_slot_selection(
         robot = robots.get(robot_name)
         if not isinstance(robot, dict):
             continue
-        original_slot = robot.get("Slot")
-        robot["Slot"] = len(selected) if isinstance(original_slot, int) else list(selected)
-        if "Slots" in robot:
-            robot["Slots"] = list(selected)
-        if "SlotIDs" in robot:
-            robot["SlotIDs"] = list(selected)
         robot["Capacity"] = len(selected)
-        robot["CanMultiTrans"] = len(selected) >= DUAL_ARM_SLOT_COUNT
-
         arm_info = robot.get("ArmInfo")
         if not isinstance(arm_info, dict):
             continue
-        assigned_slots: set[int] = set()
-        first_arm: Optional[Dict[str, Any]] = None
-        for arm in arm_info.values():
-            if not isinstance(arm, dict):
-                continue
-            if first_arm is None:
-                first_arm = arm
-            arm_slots = [
-                int(slot_id)
-                for slot_id in (arm.get("SlotIDs") or [])
-                if isinstance(slot_id, int) and slot_id in selected
-            ]
-            arm["SlotIDs"] = arm_slots
-            arm["IsEnable"] = bool(arm_slots)
-            assigned_slots.update(arm_slots)
-        missing_slots = [slot_id for slot_id in selected if slot_id not in assigned_slots]
-        if first_arm is not None and missing_slots:
-            first_arm["SlotIDs"] = sorted({
-                *(
-                    int(slot_id)
-                    for slot_id in (first_arm.get("SlotIDs") or [])
-                    if isinstance(slot_id, int)
-                ),
-                *missing_slots,
-            })
-            first_arm["IsEnable"] = True
-            slot_station_map = first_arm.get("SlotsStationMap")
-            if isinstance(slot_station_map, dict):
-                for station_slots in slot_station_map.values():
-                    if not isinstance(station_slots, dict) or not station_slots:
-                        continue
-                    template = next(iter(station_slots.values()))
-                    for slot_id in missing_slots:
-                        station_slots.setdefault(str(slot_id), deepcopy(template))
+        source_arms = [
+            (str(arm_name), arm)
+            for arm_name, arm in arm_info.items()
+            if isinstance(arm, Mapping)
+        ]
+        if not source_arms:
+            continue
+        projected_arms: Dict[str, Dict[str, Any]] = {}
+        for slot_id in selected:
+            matched = next((
+                (arm_name, arm)
+                for arm_name, arm in source_arms
+                if slot_id in {
+                    int(value)
+                    for value in (arm.get("SlotIDs") or [])
+                    if isinstance(value, int) and not isinstance(value, bool)
+                }
+            ), None)
+            if matched is None:
+                arm_name = _generated_robot_arm_name(
+                    [*arm_info.keys(), *projected_arms.keys()], slot_id,
+                )
+                source_arm = source_arms[0][1]
+            else:
+                arm_name, source_arm = matched
+            projected_arms[arm_name] = _project_robot_arm_to_slot(
+                arm_name, source_arm, slot_id,
+            )
+        robot["ArmInfo"] = projected_arms
     return normalized
 
 

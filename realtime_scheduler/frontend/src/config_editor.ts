@@ -305,7 +305,7 @@ async function loadDevice(file) {
   document.getElementById("deviceFile").value = "";
 }
 
-/** 从新旧设备字段中收集机器手声明的全部可用槽位。 */
+/** 从 ArmInfo 收集槽位，并允许具有 ArmInfo 的机器手切换为双臂。 */
 function robotAvailableSlots(robot) {
   const slots = new Set();
   const addSlots = (rawSlots, scalarIsCapacity = false) => {
@@ -321,31 +321,25 @@ function robotAvailableSlots(robot) {
       if (Number.isInteger(slotId) && slotId >= FIRST_ROBOT_SLOT_ID) slots.add(slotId);
     });
   };
-  addSlots(robot?.Slot, true);
-  addSlots(robot?.Slots);
-  addSlots(robot?.SlotIDs);
   Object.values(robot?.ArmInfo || {}).forEach(arm => addSlots(arm?.SlotIDs));
-  addSlots(robot?.Capacity, true);
-  if (robot?.CanMultiTrans === true) {
+  if (Object.values(robot?.ArmInfo || {}).some(arm => arm && typeof arm === "object")) {
     for (let slotId = FIRST_ROBOT_SLOT_ID; slotId < FIRST_ROBOT_SLOT_ID + DUAL_ARM_SLOT_COUNT; slotId += 1) slots.add(slotId);
   }
+  addSlots(robot?.Capacity, true);
   return [...(slots.size ? slots : new Set([FIRST_ROBOT_SLOT_ID]))].sort((left, right) => left - right);
 }
 
-/** 设备显式提供 Slot 时保持其初始单/双臂模式，否则沿用全部声明能力。 */
+/** 按原始 ArmInfo 中启用的 Arm 返回设备文件默认模式。 */
 function robotDefaultSlots(robot) {
   const available = robotAvailableSlots(robot);
-  const rawSlots = robot?.Slot;
-  let requested = [];
-  if (Number.isInteger(rawSlots) && typeof rawSlots !== "boolean") {
-    requested = Array.from({ length: Math.max(0, rawSlots) }, (_, index) => index + FIRST_ROBOT_SLOT_ID);
-  } else if (Array.isArray(rawSlots)) requested = rawSlots.map(Number);
-  else if (rawSlots && typeof rawSlots === "object") requested = Object.keys(rawSlots).map(Number);
+  const requested = Object.values(robot?.ArmInfo || {})
+    .filter(arm => arm && typeof arm === "object" && arm.IsEnable !== false)
+    .flatMap(arm => Array.isArray(arm.SlotIDs) ? arm.SlotIDs.map(Number) : []);
   const selected = [...new Set(requested.filter(slotId => Number.isInteger(slotId) && available.includes(slotId)))].sort((left, right) => left - right);
-  return selected.length ? selected : available;
+  return selected.length ? selected : available.slice(0, 1);
 }
 
-/** 规范化设备级机器手槽位选择；缺失项沿用设备声明的全部槽位。 */
+/** 规范化设备级 Arm 槽位选择；缺失项沿用原始 ArmInfo 默认模式。 */
 function normalizeRobotSlotSelections(device, rawSelections = {}) {
   const selections = rawSelections && typeof rawSelections === "object" ? rawSelections : {};
   return Object.fromEntries(Object.entries(device?.Robots || {}).map(([robotName, robot]) => {
@@ -356,30 +350,52 @@ function normalizeRobotSlotSelections(device, rawSelections = {}) {
   }));
 }
 
-/** 把槽位选择同步到前端运行时设备，后端保存时会执行同样的投影和校验。 */
+/** 为设备文件缺少的第二个 Arm 生成稳定名称。 */
+function generatedRobotArmName(existingNames, slotId) {
+  const occupied = new Set(existingNames.map(String));
+  const alphabeticName = `Arm${String.fromCharCode("A".charCodeAt(0) + slotId - FIRST_ROBOT_SLOT_ID)}`;
+  if (!occupied.has(alphabeticName)) return alphabeticName;
+  const numericName = `Arm${slotId}`;
+  if (!occupied.has(numericName)) return numericName;
+  let suffix = slotId;
+  while (occupied.has(`${numericName}_${suffix}`)) suffix += 1;
+  return `${numericName}_${suffix}`;
+}
+
+/** 复制一个 Arm，并将它规范为独占指定 RobotSlot。 */
+function projectRobotArmToSlot(armName, sourceArm, slotId) {
+  const arm = structuredClone(sourceArm);
+  arm.Name = armName;
+  arm.IsEnable = true;
+  arm.SlotIDs = [slotId];
+  Object.entries(arm.SlotsStationMap || {}).forEach(([stationName, stationSlots]) => {
+    if (!stationSlots || typeof stationSlots !== "object") return;
+    const entries = Object.entries(stationSlots);
+    if (!entries.length) return;
+    const template = stationSlots[String(slotId)] ?? entries[0][1];
+    arm.SlotsStationMap[stationName] = { [String(slotId)]: structuredClone(template) };
+  });
+  return arm;
+}
+
+/** 把 Arm 槽位选择同步到前端运行时设备，后端保存时会执行同样的投影和校验。 */
 function configuredDeviceForRobotSlots(baseDevice, rawSelections) {
   const device = structuredClone(baseDevice);
   const selections = normalizeRobotSlotSelections(device, rawSelections);
   Object.entries(device?.Robots || {}).forEach(([robotName, robot]) => {
     const selected = selections[robotName];
-    robot.Slot = Number.isInteger(robot.Slot) ? selected.length : [...selected];
-    if ("Slots" in robot) robot.Slots = [...selected];
-    if ("SlotIDs" in robot) robot.SlotIDs = [...selected];
     robot.Capacity = selected.length;
-    robot.CanMultiTrans = selected.length >= DUAL_ARM_SLOT_COUNT;
-    const arms = Object.values(robot.ArmInfo || {}).filter(arm => arm && typeof arm === "object");
-    const assignedSlots = new Set();
-    arms.forEach(arm => {
-      const armSlots = (arm.SlotIDs || []).map(Number).filter(slotId => selected.includes(slotId));
-      arm.SlotIDs = armSlots;
-      arm.IsEnable = armSlots.length > 0;
-      armSlots.forEach(slotId => assignedSlots.add(slotId));
+    const sourceArms = Object.entries(robot.ArmInfo || {}).filter(([, arm]) => arm && typeof arm === "object");
+    if (!sourceArms.length) return;
+    const projectedArms = {};
+    selected.forEach(slotId => {
+      const matched = sourceArms.find(([, arm]) => (arm.SlotIDs || []).map(Number).includes(slotId));
+      const armName = matched?.[0] || generatedRobotArmName(
+        [...Object.keys(robot.ArmInfo || {}), ...Object.keys(projectedArms)], slotId
+      );
+      projectedArms[armName] = projectRobotArmToSlot(armName, matched?.[1] || sourceArms[0][1], slotId);
     });
-    const missingSlots = selected.filter(slotId => !assignedSlots.has(slotId));
-    if (arms[0] && missingSlots.length) {
-      arms[0].SlotIDs = [...new Set([...(arms[0].SlotIDs || []), ...missingSlots])].sort((left, right) => left - right);
-      arms[0].IsEnable = true;
-    }
+    robot.ArmInfo = projectedArms;
   });
   return { device, selections };
 }
@@ -1439,8 +1455,10 @@ function renderRobotSlots() {
     const robot = state.baseDevice.Robots[robotName] || {};
     const available = robotAvailableSlots(robot);
     const selected = state.robotSlots[robotName] || available;
+    const defaults = robotDefaultSlots(robot);
     const isDualArm = selected.length >= DUAL_ARM_SLOT_COUNT;
     const supportsDualArm = available.length >= DUAL_ARM_SLOT_COUNT;
+    const isDefault = JSON.stringify(selected) === JSON.stringify(defaults);
     const isSaving = state.robotSlotsSaving.has(robotName);
     const accessibleStationCount = new Set(
       Object.values(robot.ArmInfo || {}).flatMap(arm => arm?.AccessibleStations || [])
@@ -1468,6 +1486,7 @@ function renderRobotSlots() {
         <div class="robot-slot-controls" role="group" aria-label="${escapeHtml(robotName)} 工作模式">
           <button class="robot-slot-choice" type="button" data-robot-slot-name="${escapeHtml(robotName)}" data-robot-slot-count="1" aria-pressed="${String(!isDualArm)}" ${isSaving ? "disabled" : ""}>单臂</button>
           <button class="robot-slot-choice" type="button" data-robot-slot-name="${escapeHtml(robotName)}" data-robot-slot-count="2" aria-pressed="${String(isDualArm)}" ${!supportsDualArm || isSaving ? "disabled" : ""}>双臂</button>
+          <button class="robot-slot-choice robot-slot-default" type="button" data-robot-slot-default="${escapeHtml(robotName)}" ${isDefault || isSaving ? "disabled" : ""}>恢复默认</button>
         </div>
         <p class="robot-slot-card-note">${supportsDualArm ? "切换后立即保存，并用于该设备下的所有测试。" : "设备文件仅声明一个可用槽位，当前只能使用单臂。"}</p>
       </article>
@@ -1504,6 +1523,15 @@ async function setRobotSlotCount(robotName, slotCount) {
     state.robotSlotsSaving.delete(robotName);
     renderRobotSlots();
   }
+}
+
+/** 将一台机器手恢复为导入设备文件中的原始 ArmInfo 模式。 */
+async function restoreRobotSlotDefault(robotName) {
+  const robot = state.baseDevice?.Robots?.[robotName];
+  if (!robot) return;
+  const defaults = robotDefaultSlots(robot);
+  await setRobotSlotCount(robotName, defaults.length);
+  setWorkspaceStatus(`已恢复 ${robotName} 的设备文件默认配置`, "saved");
 }
 
 /** 渲染所有依赖状态的区域。 */
@@ -2760,6 +2788,12 @@ document.addEventListener("click", event => {
   if (robotSlotChoice && !robotSlotChoice.disabled) {
     setRobotSlotCount(robotSlotChoice.dataset.robotSlotName, Number(robotSlotChoice.dataset.robotSlotCount))
       .catch(error => writeTerminal(`$ 机器手槽位保存失败\n  ${error.message}`, true));
+    return;
+  }
+  const robotSlotDefault = event.target.closest("[data-robot-slot-default]");
+  if (robotSlotDefault && !robotSlotDefault.disabled) {
+    restoreRobotSlotDefault(robotSlotDefault.dataset.robotSlotDefault)
+      .catch(error => writeTerminal(`$ 机器手默认配置恢复失败\n  ${error.message}`, true));
     return;
   }
   const batchResultCard = event.target.closest("[data-batch-item-index]");

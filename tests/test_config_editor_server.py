@@ -147,49 +147,78 @@ class ConfigEditorServerTests(unittest.TestCase):
             'id="robotSlotList"',
             'data-robot-slot-count="1"',
             'data-robot-slot-count="2"',
+            'data-robot-slot-default=',
+            "恢复默认",
             "/robot-slots",
-            "Robots.Slot",
+            "ArmInfo",
         ):
             self.assertIn(marker, source)
 
     def test_robot_slot_selection_projects_single_and_dual_arm_fields(self) -> None:
-        """槽位选择应同步影响 Slot、Capacity、CanMultiTrans 与 ArmInfo。"""
+        """单/双臂只投影为独立 Arm，不创建 Robot.Slot 或改写 CanMultiTrans。"""
         single_arm_device = json.loads(json.dumps(self.device))
+        original_vtr_multi_trans = single_arm_device["Robots"]["VTR"]["CanMultiTrans"]
         selected = config_server.apply_robot_slot_selection(
             single_arm_device,
             {"ATR": [1], "VTR": [1]},
         )
         self.assertEqual([1], selected["VTR"])
-        self.assertEqual([1], single_arm_device["Robots"]["VTR"]["Slot"])
+        self.assertNotIn("Slot", single_arm_device["Robots"]["VTR"])
         self.assertEqual(1, single_arm_device["Robots"]["VTR"]["Capacity"])
-        self.assertFalse(single_arm_device["Robots"]["VTR"]["CanMultiTrans"])
-        enabled_single_slots = [
-            slot_id
-            for arm in single_arm_device["Robots"]["VTR"]["ArmInfo"].values()
-            if arm["IsEnable"]
-            for slot_id in arm["SlotIDs"]
-        ]
-        self.assertEqual([1], enabled_single_slots)
+        self.assertEqual(
+            original_vtr_multi_trans,
+            single_arm_device["Robots"]["VTR"]["CanMultiTrans"],
+        )
+        self.assertEqual(
+            {"ArmA": [1]},
+            {
+                arm_name: arm["SlotIDs"]
+                for arm_name, arm in single_arm_device["Robots"]["VTR"]["ArmInfo"].items()
+            },
+        )
 
         dual_arm_device = json.loads(json.dumps(self.device))
         config_server.apply_robot_slot_selection(
             dual_arm_device,
-            {"ATR": config_server.robot_available_slots(self.device["Robots"]["ATR"]), "VTR": [1, 2]},
+            {"ATR": [1, 2], "VTR": [1, 2]},
         )
-        self.assertEqual([1, 2], dual_arm_device["Robots"]["VTR"]["Slot"])
-        self.assertEqual(2, dual_arm_device["Robots"]["VTR"]["Capacity"])
-        self.assertTrue(dual_arm_device["Robots"]["VTR"]["CanMultiTrans"])
-        self.assertTrue(all(
-            arm["IsEnable"]
-            for arm in dual_arm_device["Robots"]["VTR"]["ArmInfo"].values()
-        ))
-        explicit_single_device = json.loads(json.dumps(self.device))
-        explicit_single_device["Robots"]["VTR"]["Slot"] = [1]
+        dual_atr = dual_arm_device["Robots"]["ATR"]
+        self.assertNotIn("Slot", dual_atr)
+        self.assertEqual(2, dual_atr["Capacity"])
+        self.assertEqual(self.device["Robots"]["ATR"]["CanMultiTrans"], dual_atr["CanMultiTrans"])
+        self.assertEqual(
+            {"ArmA": [1], "ArmB": [2]},
+            {arm_name: arm["SlotIDs"] for arm_name, arm in dual_atr["ArmInfo"].items()},
+        )
+        dual_false_device = json.loads(json.dumps(self.device))
+        dual_false_device["Robots"]["VTR"]["CanMultiTrans"] = False
+        config_server.apply_robot_slot_selection(
+            dual_false_device,
+            {"ATR": [1], "VTR": [1, 2]},
+        )
+        self.assertFalse(dual_false_device["Robots"]["VTR"]["CanMultiTrans"])
+        self.assertEqual(
+            {"ArmA": [1], "ArmB": [2]},
+            {
+                arm_name: arm["SlotIDs"]
+                for arm_name, arm in dual_false_device["Robots"]["VTR"]["ArmInfo"].items()
+            },
+        )
+
         defaults = config_server.normalize_robot_slot_selection(
-            explicit_single_device,
+            self.device,
             {},
         )
-        self.assertEqual([1], defaults["VTR"])
+        self.assertEqual([1], defaults["ATR"])
+        self.assertEqual([1, 2], defaults["VTR"])
+
+        restored_device = json.loads(json.dumps(self.device))
+        config_server.apply_robot_slot_selection(restored_device, defaults)
+        for robot_name, original_robot in self.device["Robots"].items():
+            self.assertEqual(
+                original_robot["ArmInfo"],
+                restored_device["Robots"][robot_name]["ArmInfo"],
+            )
 
     def test_workspace_robot_slot_selection_is_persisted_and_used_by_batch_plan(self) -> None:
         """设备级槽位设置应持久保存，并进入批量计划与 Baseline 指纹输入。"""
@@ -216,8 +245,17 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual(selection, saved)
         self.assertEqual(selection, reloaded["robotSlots"])
         for robot_name, selected_slots in selection.items():
-            self.assertEqual(selected_slots, plan["device"]["Robots"][robot_name]["Slot"])
-            self.assertEqual(1, plan["device"]["Robots"][robot_name]["Capacity"])
+            planned_robot = plan["device"]["Robots"][robot_name]
+            self.assertNotIn("Slot", planned_robot)
+            self.assertEqual(1, planned_robot["Capacity"])
+            self.assertEqual(
+                self.device["Robots"][robot_name]["CanMultiTrans"],
+                planned_robot["CanMultiTrans"],
+            )
+            self.assertEqual(
+                selected_slots,
+                [slot_id for arm in planned_robot["ArmInfo"].values() for slot_id in arm["SlotIDs"]],
+            )
         with self.assertRaisesRegex(ValueError, "不支持槽位"):
             config_server.normalize_robot_slot_selection(
                 self.device,

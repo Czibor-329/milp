@@ -777,6 +777,7 @@
     .robot-slot-choice { min-height: 40px; padding: 7px 10px; border: 1px solid transparent; border-radius: 9px; color: #5c6b80; background: transparent; font-weight: 800; transition: border-color .18s ease, color .18s ease, background .18s ease, box-shadow .18s ease; }
     .robot-slot-choice:hover:not(:disabled) { color: var(--ink); background: #fff; }
     .robot-slot-choice[aria-pressed="true"] { border-color: #b9c9ed; color: #1d49ae; background: #fff; box-shadow: 0 3px 10px rgba(36,87,214,.10); }
+    .robot-slot-default { grid-column: 1 / -1; border-color: #d7deea; background: rgba(255,255,255,.64); }
     .robot-slot-choice:disabled { cursor: not-allowed; opacity: .52; }
     .robot-slot-card-note { margin: -8px 0 0; color: var(--muted); font-size: 11px; }
     .btn:focus-visible, .tab:focus-visible, .decision-auto-pause:focus-visible, .robot-slot-choice:focus-visible, .clean-type-head:focus-visible, .route-process-head:focus-visible, .route-type-head:focus-visible, .route-summary-toggle:focus-visible, .clean-choice:focus-visible, .step-system-details summary:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible { outline: 3px solid var(--accent-ring); outline-offset: 2px; }
