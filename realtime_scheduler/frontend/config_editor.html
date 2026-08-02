@@ -308,9 +308,6 @@
             <div class="strategy-options">
               <label class="strategy-card" data-strategy-card="heuristic"><input type="radio" name="strategy" value="heuristic" checked><b>启发式</b></label>
               <label class="strategy-card" data-strategy-card="loadlock-macro"><input id="loadlockMacroStrategyInput" type="radio" name="strategy" value="loadlock-macro"><b>LoadLock 宏周期</b></label>
-              <label class="strategy-card" data-strategy-card="nn-saea"><input id="nnSAEAStrategyInput" type="radio" name="strategy" value="nn-saea"><b>NN-SAEA</b></label>
-              <label class="strategy-card" data-strategy-card="setrank"><input id="setrankStrategyInput" type="radio" name="strategy" value="setrank"><b>SetRank-PIAC</b></label>
-              <label class="strategy-card" data-strategy-card="neuralucb"><input id="neuralucbStrategyInput" type="radio" name="strategy" value="neuralucb"><b>Safe NeuralUCB</b></label>
               <label class="strategy-card" data-strategy-card="e2e-ctq"><input id="e2eCTQStrategyInput" type="radio" name="strategy" value="e2e-ctq"><b>E2E-CTQ</b></label>
               <label class="strategy-card" data-strategy-card="milp"><input id="milpStrategyInput" type="radio" name="strategy" value="milp"><b>MILP 最优求解</b></label>
               <div class="other-algorithm-options" id="otherAlgorithmOptions"></div>
@@ -324,16 +321,6 @@
               <div class="field span-4"><label>Robot 最大持片（秒）</label><input data-option="maximumRobotHoldingSeconds" type="number" min="0" step="0.1" value="0"><div class="hint">从 Pick 完成到 Place 开始，包含显式运输；0 表示不限制。</div></div>
               <div class="field span-4"><label>系统停留时间 CV 上限</label><input data-option="maximumSystemResidenceCv" type="number" min="0" step="0.01" value="0"><div class="hint">CV = 标准差 ÷ 均值；例如 0.10 表示目标波动约 10%，0 表示不限制。</div></div>
               <div class="field span-12"><div class="hint">多指标模式会比较多套可执行启发式方案：优先减少驻留超限，再尽量达到持片和 CV 目标，最后比较 makespan。目标用于探索选优，不保证一定满足；运行时间也会比默认模式更长。</div></div>
-            </div>
-            <div id="nnSAEAOptions" class="grid is-hidden" style="margin-top:14px">
-              <div class="field span-6"><label>NN-SAEA 搜索秒数</label><input data-option="nnSAEASearchSeconds" type="number" min="0" max="4.5" step="0.1" value="4"></div>
-              <div class="field span-6"><label>额外 Machine 精评数</label><input data-option="nnSAEARollouts" type="number" min="0" max="256" step="1" value="64"></div>
-              <div class="field span-12"><div class="hint">先完整运行 LoadLock 宏周期作为精确质量地板，再由 PyTorch 神经代理辅助进化发片交织、停片偏好和连续启发式参数；只有超过保守收益门槛的真实精评结果才会替换地板。</div></div>
-            </div>
-            <div id="neuralucbOptions" class="grid is-hidden" style="margin-top:14px">
-              <div class="field span-6"><label>精评候选数</label><input data-option="neuralUCBTopK" type="number" min="1" max="13" step="1" value="2"></div>
-              <div class="field span-6"><label>探索系数 α</label><input data-option="neuralUCBExploration" type="number" min="0" step="0.25" value="5"></div>
-              <div class="field span-12"><div class="hint">始终精确运行 legacy 作为质量地板，再按 NeuralUCB 下置信界精评候选，因此 makespan 不会劣于启发式基线。</div></div>
             </div>
             <div id="milpOptions" class="grid is-hidden" style="margin-top:14px">
               <div class="field span-6"><label>求解时限（秒）</label><input data-option="milpTimeLimit" type="number" min="0.1" step="1" value="120"></div>

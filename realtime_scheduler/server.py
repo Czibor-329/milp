@@ -176,8 +176,6 @@ VIEWER_PATH = FRONTEND_DIR / "movelist_gantt_viewer.html"
 ROUTE_EDITOR_LOGIC_PATH = FRONTEND_DIR / "route_editor_logic.js"
 FRONTEND_ASSET_DIR = FRONTEND_DIR / "assets"
 E2E_CTQ_MODEL_PATH = ALGORITHM_ROOT / "src" / "schedule" / "e2e_ctq_policy.npz"
-SETRANK_MODEL_PATH = ALGORITHM_ROOT / "src" / "schedule" / "heuristic_config_policy.npz"
-NEURAL_UCB_MODEL_PATH = ALGORITHM_ROOT / "src" / "schedule" / "neural_ucb_policy.npz"
 WORKSPACE_STORE_PATH = DATA_DIR / "workspaces.json"
 LEGACY_WORKSPACE_STORE_PATH = ALGORITHM_ROOT / "results" / "config_editor_workspaces.json"
 DEVICE_INIT_DIR = DATA_DIR / "devices"
@@ -201,18 +199,6 @@ BUILTIN_ALGORITHM_METADATA: Dict[str, Dict[str, str]] = {
     "loadlock-macro": {
         "name": "LoadLock 宏周期",
         "introduction": "面向真空设备的宏周期规划策略，统一安排 LoadLock 抽气、充气和携片节奏，再由底层安全规则完成动作落地。",
-    },
-    "nn-saea": {
-        "name": "NN-SAEA",
-        "introduction": "以完整 LoadLock 宏周期为质量地板，用 PyTorch 神经代理辅助进化发片交织和底层连续参数。",
-    },
-    "setrank": {
-        "name": "SetRank-PIAC",
-        "introduction": "使用集合网络理解不同规模的晶圆与工艺组合，为每个实例推荐更合适的启发式参数，并通过候选精评保障结果质量。",
-    },
-    "neuralucb": {
-        "name": "Safe NeuralUCB",
-        "introduction": "结合神经上下文表示与置信下界进行在线策略选择，在探索潜在优解的同时保留安全质量基线。",
     },
     "e2e-ctq": {
         "name": "E2E-CTQ",
@@ -2376,17 +2362,14 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
     builtin_strategies = {
         "heuristic",
         "loadlock-macro",
-        "nn-saea",
-        "setrank",
-        "neuralucb",
         "e2e-ctq",
         "milp",
     }
     if normalized_strategy not in builtin_strategies:
         if other_algorithm_id is None:
             raise ValueError(
-                "策略只支持 heuristic、loadlock-macro、nn-saea、setrank、"
-                "neuralucb、e2e-ctq、milp，"
+                "策略只支持 heuristic、loadlock-macro、"
+                "e2e-ctq、milp，"
                 "或 other_alg 下已发现的标准算法"
             )
         discovered_ids = {
@@ -2395,8 +2378,8 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
         }
         if other_algorithm_id.casefold() not in discovered_ids:
             raise ValueError(
-                "策略只支持 heuristic、loadlock-macro、nn-saea、setrank、"
-                "neuralucb、e2e-ctq、milp，"
+                "策略只支持 heuristic、loadlock-macro、"
+                "e2e-ctq、milp，"
                 "或 other_alg 下已发现的标准算法"
             )
     strategy = normalized_strategy if normalized_strategy in builtin_strategies else strategy
@@ -3841,15 +3824,6 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                 "strategies": {
                     "heuristic": BUILTIN_ALGORITHM_AVAILABLE,
                     "loadlock-macro": BUILTIN_ALGORITHM_AVAILABLE,
-                    "nn-saea": BUILTIN_ALGORITHM_AVAILABLE,
-                    "setrank": (
-                        BUILTIN_ALGORITHM_AVAILABLE
-                        and SETRANK_MODEL_PATH.is_file()
-                    ),
-                    "neuralucb": (
-                        BUILTIN_ALGORITHM_AVAILABLE
-                        and NEURAL_UCB_MODEL_PATH.is_file()
-                    ),
                     "e2e-ctq": (
                         BUILTIN_ALGORITHM_AVAILABLE
                         and E2E_CTQ_MODEL_PATH.is_file()
@@ -3857,8 +3831,6 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                     "milp": BUILTIN_ALGORITHM_AVAILABLE,
                 },
                 "strategyModels": {
-                    "setrank": str(SETRANK_MODEL_PATH) if SETRANK_MODEL_PATH.is_file() else "",
-                    "neuralucb": str(NEURAL_UCB_MODEL_PATH) if NEURAL_UCB_MODEL_PATH.is_file() else "",
                     "e2e-ctq": str(E2E_CTQ_MODEL_PATH) if E2E_CTQ_MODEL_PATH.is_file() else "",
                 },
                 "strategyErrors": builtin_strategy_errors,
