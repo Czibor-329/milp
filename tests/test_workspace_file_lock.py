@@ -28,7 +28,7 @@ def _create_test_after_signal(
         {
             "name": test_name,
             "group": "跨进程锁",
-            "strategy": "neural",
+            "strategy": "heuristic",
             "roundCount": 1,
             "rounds": [{"currentTime": 0, "cjobs": []}],
         },

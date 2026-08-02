@@ -479,94 +479,6 @@ class ConfigEditorServerTests(unittest.TestCase):
                 )
                 last_event_type = move["MoveType"]
 
-    def test_neural_strategy_runs_single_pass_inference_and_recompute(self) -> None:
-        """前端提交 neural 后应加载 NumPy 模型并完成首次排程与实时重算。"""
-        from src.schedule.neural import (
-            DEFAULT_MODEL_PATH,
-            MODEL_SCHEMA_VERSION,
-            load_neural_policy,
-        )
-
-        plan = {
-            "deviceName": DEVICE_PATH.name,
-            "device": self.device,
-            "strategy": "neural",
-            "roundCount": 2,
-            "options": {},
-            "recipes": [{
-                "name": "NeuralRecipe",
-                "time": 60,
-                "modules": ["PM1", "PM2"],
-                "weight": {},
-            }],
-            "cleans": [],
-            "routes": [_route("NeuralRoute", "PM1,PM2", "NeuralRecipe")],
-            "rounds": [
-                {
-                    "currentTime": 0,
-                    "jobs": [{
-                        **_job("NeuralJob1", "NeuralRoute", "LP1"),
-                        "waferCount": 3,
-                    }],
-                },
-                {
-                    "currentTime": 70,
-                    "jobs": [{
-                        **_job("NeuralJob2", "NeuralRoute", "LP2"),
-                        "waferCount": 3,
-                    }],
-                },
-            ],
-        }
-        policy = load_neural_policy(DEFAULT_MODEL_PATH)
-
-        with patch(
-            "infer.function._load_policy",
-            return_value=policy,
-        ) as loader, patch(
-            "src.schedule.realtime.start_schedule",
-            side_effect=AssertionError("Neural 实时路径不得调用 Heuristic"),
-        ), patch(
-            "src.schedule.api.start_schedule",
-            side_effect=AssertionError("Neural 推理不得调用 Heuristic"),
-        ):
-            result = execute_plan(plan)
-
-        loader.assert_called_once_with("neural")
-        self.assertTrue(result["ok"])
-        self.assertEqual("neural", result["strategy"])
-        self.assertEqual("passed", result["validation"])
-        self.assertGreater(result["moveCount"], 0)
-        self.assertEqual(2, len(result["rounds"]))
-        self.assertEqual(1, len(result["output"]["RecomputePoints"]))
-        for round_result in result["rounds"]:
-            diagnostics = round_result["strategyDiagnostics"]
-            self.assertEqual(MODEL_SCHEMA_VERSION, diagnostics["architecture"])
-            self.assertIn(
-                diagnostics["actionMask"],
-                {
-                    "complete-path-certificate",
-                    "petri-reachability",
-                    "structural-physics-shield",
-                    "failure-fallback",
-                    "quality-floor-fallback",
-                    "baseline-fallback",
-                },
-            )
-            self.assertIn(
-                diagnostics["decisionSpace"],
-                {
-                    "hop-and-loadlock",
-                    "hop-and-loadlock-physics-repair",
-                    "baseline-fallback",
-                },
-            )
-        for round_result in result["rounds"]:
-            self.assertIn(
-                round_result["strategyDiagnostics"]["selectedSource"],
-                {"neural", "neural-safe-retry"},
-            )
-
     def test_e2e_ctq_persists_decision_trace_for_topology_playback(self) -> None:
         """E2E 候选评分应进入结果文件，运行摘要只保留轨迹计数。"""
         from src.schedule.e2e_ctq import DEFAULT_MODEL_PATH, load_e2e_ctq_policy
@@ -611,120 +523,6 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertNotIn("decisionTrace", diagnostics)
         self.assertEqual(len(trace), diagnostics["decisionTraceCount"])
 
-    def test_neural_recompute_allows_required_cross_plan_empty_pressure_reversal(self) -> None:
-        """旧段在途空充收尾后，新段应能为真空侧任务执行必要的反向空抽。"""
-        from src.schedule.neural import DEFAULT_MODEL_PATH, load_neural_policy
-
-        plan = {
-            "deviceName": PSE300_PATH.name,
-            "device": json.loads(PSE300_PATH.read_text(encoding="utf-8")),
-            "strategy": "neural",
-            "roundCount": 2,
-            "options": {},
-            "recipes": [{
-                "name": "PressureBoundaryRecipe",
-                "time": 40,
-                "modules": ["PM1"],
-                "weight": {},
-            }],
-            "cleans": [],
-            "routes": [_route(
-                "PressureBoundaryRoute",
-                "PM1",
-                "PressureBoundaryRecipe",
-            )],
-            "rounds": [
-                {
-                    "currentTime": 0,
-                    "jobs": [{
-                        **_job(
-                            "PressureBoundaryJob1",
-                            "PressureBoundaryRoute",
-                            "LP1",
-                        ),
-                        "waferCount": 10,
-                    }],
-                },
-                {
-                    "currentTime": 200,
-                    "jobs": [{
-                        **_job(
-                            "PressureBoundaryJob2",
-                            "PressureBoundaryRoute",
-                            "LP2",
-                        ),
-                        "waferCount": 15,
-                    }],
-                },
-            ],
-        }
-        policy = load_neural_policy(DEFAULT_MODEL_PATH)
-
-        with patch(
-            "infer.function._load_policy",
-            return_value=policy,
-        ):
-            result = execute_plan(plan)
-
-        self.assertTrue(result["ok"])
-        self.assertEqual("passed", result["validation"])
-        self.assertEqual(2, len(result["rounds"]))
-        self.assertEqual(1, len(result["output"]["RecomputePoints"]))
-
-    def test_neural_nested_recompute_keeps_committed_recovery_end_monotonic(self) -> None:
-        """后一请求落在前次收尾内时，EffectiveTime 不得回退或遗失旧恢复链。"""
-        from src.schedule.neural import DEFAULT_MODEL_PATH, load_neural_policy
-
-        plan = {
-            "deviceName": PSE300_PATH.name,
-            "device": json.loads(PSE300_PATH.read_text(encoding="utf-8")),
-            "strategy": "neural",
-            "roundCount": 3,
-            "options": {},
-            "recipes": [{
-                "name": "NestedRecoveryRecipe",
-                "time": 80,
-                "modules": ["PM1"],
-                "weight": {},
-            }],
-            "cleans": [],
-            "routes": [_route(
-                "NestedRecoveryRoute",
-                "PM1",
-                "NestedRecoveryRecipe",
-            )],
-            "rounds": [
-                {
-                    "currentTime": current_time,
-                    "jobs": [{
-                        **_job(
-                            f"NestedRecoveryJob{index}",
-                            "NestedRecoveryRoute",
-                            f"LP{index}",
-                        ),
-                        "waferCount": 10,
-                    }],
-                }
-                for index, current_time in enumerate((0, 50, 100), start=1)
-            ],
-        }
-        policy = load_neural_policy(DEFAULT_MODEL_PATH)
-
-        with patch(
-            "infer.function._load_policy",
-            return_value=policy,
-        ):
-            result = execute_plan(plan)
-
-        effective_times = [
-            float(round_result["effectiveTime"])
-            for round_result in result["rounds"]
-        ]
-        self.assertTrue(result["ok"])
-        self.assertEqual("passed", result["validation"])
-        self.assertEqual(sorted(effective_times), effective_times)
-        self.assertGreater(effective_times[1], 50.0)
-        self.assertGreaterEqual(effective_times[2], effective_times[1])
 
     def test_milp_strategy_runs_once_and_reports_optimality(self) -> None:
         """MILP 单轮策略应调用独立求解器，并把最优性诊断返回前端。"""
@@ -1873,7 +1671,7 @@ class ConfigEditorServerTests(unittest.TestCase):
             patch.object(config_server, "save_reproduction_log", return_value="log-id"),
         ):
             result = config_server.run_workspace_test_batch(
-                "device-batch", "回归", "rl", {"seed": 9}, maximum_workers=2,
+                "device-batch", "回归", "e2e-ctq", {"seed": 9}, maximum_workers=2,
             )
 
         self.assertEqual(2, result["testCount"])
@@ -1881,7 +1679,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual({"案例 A", "案例 B"}, {item["testName"] for item in result["items"]})
         self.assertEqual(4, len(submitted))
         self.assertEqual(2, sum(plan["strategy"] == "heuristic" for plan in submitted))
-        self.assertEqual(2, sum(plan["strategy"] == "rl" for plan in submitted))
+        self.assertEqual(2, sum(plan["strategy"] == "e2e-ctq" for plan in submitted))
         self.assertTrue(all(plan["options"]["seed"] == 9 for plan in submitted))
         self.assertTrue(all([route["name"] for route in plan["routes"]] == ["BatchRoute"] for plan in submitted))
         self.assertTrue(all(item["baseline"]["status"] == "succeeded" for item in result["items"]))
@@ -1999,7 +1797,7 @@ class ConfigEditorServerTests(unittest.TestCase):
             patch.object(config_server, "save_reproduction_log", return_value="log-id"),
         ):
             result = config_server.run_workspace_test_batch(
-                "device-baseline", "回归", "rl", {}, maximum_workers=1,
+                "device-baseline", "回归", "e2e-ctq", {}, maximum_workers=1,
             )
 
         item = result["items"][0]
@@ -2148,7 +1946,7 @@ class ConfigEditorServerTests(unittest.TestCase):
             patch.object(config_server, "save_reproduction_log", return_value="log-id"),
         ):
             result = config_server.run_workspace_test_batch(
-                "device-failed-base", "回归", "rl", {}, maximum_workers=1,
+                "device-failed-base", "回归", "e2e-ctq", {}, maximum_workers=1,
             )
 
         item = result["items"][0]
@@ -2320,7 +2118,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         plan = config_server.build_workspace_batch_plan(
             device,
             test_case,
-            "neural",
+            "heuristic",
             {},
         )
 

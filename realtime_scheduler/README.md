@@ -4,7 +4,7 @@
 
 - `server.py`：本地调度服务、工作区接口、分析 API 与静态资源入口，不承载页面分析实现。
 - `backend/analysis.py`：服务端唯一的 MoveList、瓶颈、诊断和测试组分析实现。
-- 内置 `heuristic/neural/rl/milp`：统一调用独立算法仓库
+- 内置 `heuristic/milp`：统一调用独立算法仓库
   `alg/infer/scheduler.py` 的 `init/update`，`update` 的可选 `algorithm`
   参数决定算法。
 - `batch_service.py`：批量运行、Heuristic Baseline、并发进度与取消状态。
@@ -60,9 +60,7 @@ npm run build
 ## 运行策略
 
 - `启发式`：使用默认实时排程器。
-- `深层神经派工`：离线多场景长训练，在线 NumPy 联合派工；实时入口只接受网络打分轨迹及同一网络的 Petri 安全重试，不调用启发式、物理专家或质量地板保底；网络无法产生可执行计划时明确报错。
-- `LoadLock 管理器`：Heuristic 与 RL 默认共用 Petri-ETA 管理器；上层策略只决定发哪片和工艺顺序，管理器在 Petri 安全候选内按动态完成时刻绑定 LA/LB。现有深层神经 checkpoint 暂以 `joint` 为默认，仍可显式切到 manager 供下一阶段重训与 A/B。
-- `RL 搜索`：使用已有的行为克隆/RL模型做限时搜索。
+- `LoadLock 管理器`：Heuristic 默认共用 Petri-ETA 管理器；上层策略只决定发哪片和工艺顺序，管理器在 Petri 安全候选内按动态完成时刻绑定 LA/LB。
 - `MILP 最优求解`：独立调用 Gurobi，只允许首次排程且所有 PJob 产品晶圆总数不超过12片；页面显示是否已证明最优和最终 gap。
 - `other_alg 标准算法`：自动扫描算法仓库 `alg/other_alg/<算法名>`，通过包内正式 `CT.infer.scheduler.init/update` 入口运行。每次重算前使用算法仓库的状态回放能力生成全量物料、机台、机器人快照以及 `RemoveList`，支持连续多轮重算；结果中的 `updates` 保留每次实际发送的数据。
 
@@ -72,7 +70,7 @@ npm run build
 from infer.scheduler import init, update
 
 init(topo_data_json)
-output_json = update(tool_json, algorithm="neural")
+output_json = update(tool_json, algorithm="heuristic")
 ```
 
 同一次 `init` 后不能在连续 update 之间切换算法；切换前需重新初始化设备。

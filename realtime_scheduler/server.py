@@ -175,8 +175,6 @@ EDITOR_PATH = FRONTEND_DIR / "config_editor.html"
 VIEWER_PATH = FRONTEND_DIR / "movelist_gantt_viewer.html"
 ROUTE_EDITOR_LOGIC_PATH = FRONTEND_DIR / "route_editor_logic.js"
 FRONTEND_ASSET_DIR = FRONTEND_DIR / "assets"
-RL_MODEL_PATH = MODELS_DIR / "bc_policy_rl.pt"
-NEURAL_MODEL_PATH = ALGORITHM_ROOT / "src" / "schedule" / "neural_policy.npz"
 E2E_CTQ_MODEL_PATH = ALGORITHM_ROOT / "src" / "schedule" / "e2e_ctq_policy.npz"
 SETRANK_MODEL_PATH = ALGORITHM_ROOT / "src" / "schedule" / "heuristic_config_policy.npz"
 NEURAL_UCB_MODEL_PATH = ALGORITHM_ROOT / "src" / "schedule" / "neural_ucb_policy.npz"
@@ -216,17 +214,9 @@ BUILTIN_ALGORITHM_METADATA: Dict[str, Dict[str, str]] = {
         "name": "Safe NeuralUCB",
         "introduction": "结合神经上下文表示与置信下界进行在线策略选择，在探索潜在优解的同时保留安全质量基线。",
     },
-    "neural": {
-        "name": "深层神经派工",
-        "introduction": "使用已训练的深层神经网络根据实时设备与任务状态直接做出派工决策，适合需要快速响应的连续调度。",
-    },
     "e2e-ctq": {
         "name": "E2E-CTQ",
         "introduction": "使用异构资源流图和剩余工期分位价值，从当前设备状态直接生成唯一调度轨迹。",
-    },
-    "rl": {
-        "name": "RL 搜索",
-        "introduction": "在限定的时间与 rollout 预算内搜索后续动作，通过强化学习价值评估选择更有潜力的排程方案。",
     },
     "milp": {
         "name": "MILP 最优求解",
@@ -2389,16 +2379,14 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
         "nn-saea",
         "setrank",
         "neuralucb",
-        "neural",
         "e2e-ctq",
-        "rl",
         "milp",
     }
     if normalized_strategy not in builtin_strategies:
         if other_algorithm_id is None:
             raise ValueError(
                 "策略只支持 heuristic、loadlock-macro、nn-saea、setrank、"
-                "neuralucb、neural、e2e-ctq、rl、milp，"
+                "neuralucb、e2e-ctq、milp，"
                 "或 other_alg 下已发现的标准算法"
             )
         discovered_ids = {
@@ -2408,7 +2396,7 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
         if other_algorithm_id.casefold() not in discovered_ids:
             raise ValueError(
                 "策略只支持 heuristic、loadlock-macro、nn-saea、setrank、"
-                "neuralucb、neural、e2e-ctq、rl、milp，"
+                "neuralucb、e2e-ctq、milp，"
                 "或 other_alg 下已发现的标准算法"
             )
     strategy = normalized_strategy if normalized_strategy in builtin_strategies else strategy
@@ -2426,7 +2414,7 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
 
     options = plan.get("options") if isinstance(plan.get("options"), Mapping) else {}
     default_loadlock_manager_mode = (
-        "joint" if strategy in {"neural", "e2e-ctq"} else "petri-look"
+        "joint" if strategy in {"e2e-ctq"} else "petri-look"
     )
     loadlock_manager_mode = str(
         options.get("loadLockManager") or default_loadlock_manager_mode
@@ -3862,24 +3850,15 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                         BUILTIN_ALGORITHM_AVAILABLE
                         and NEURAL_UCB_MODEL_PATH.is_file()
                     ),
-                    "neural": (
-                        BUILTIN_ALGORITHM_AVAILABLE
-                        and NEURAL_MODEL_PATH.is_file()
-                    ),
                     "e2e-ctq": (
                         BUILTIN_ALGORITHM_AVAILABLE
                         and E2E_CTQ_MODEL_PATH.is_file()
-                    ),
-                    "rl": (
-                        BUILTIN_ALGORITHM_AVAILABLE
-                        and RL_MODEL_PATH.is_file()
                     ),
                     "milp": BUILTIN_ALGORITHM_AVAILABLE,
                 },
                 "strategyModels": {
                     "setrank": str(SETRANK_MODEL_PATH) if SETRANK_MODEL_PATH.is_file() else "",
                     "neuralucb": str(NEURAL_UCB_MODEL_PATH) if NEURAL_UCB_MODEL_PATH.is_file() else "",
-                    "neural": str(NEURAL_MODEL_PATH) if NEURAL_MODEL_PATH.is_file() else "",
                     "e2e-ctq": str(E2E_CTQ_MODEL_PATH) if E2E_CTQ_MODEL_PATH.is_file() else "",
                 },
                 "strategyErrors": builtin_strategy_errors,

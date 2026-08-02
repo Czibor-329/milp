@@ -2433,7 +2433,7 @@ var state = {
   algorithmMetadata: {},
   roundCount: 2,
   times: [0, 70],
-  options: { loadLockManager: "petri-look", residencyGuardSeconds: 0, maximumRobotHoldingSeconds: 0, maximumSystemResidenceCv: 0, loadLockMacroSearchSeconds: 4, loadLockMacroRollouts: 96, nnSAEASearchSeconds: 4, nnSAEARollouts: 64, neuralUCBTopK: 2, neuralUCBExploration: 5, rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
+  options: { loadLockManager: "petri-look", residencyGuardSeconds: 0, maximumRobotHoldingSeconds: 0, maximumSystemResidenceCv: 0, loadLockMacroSearchSeconds: 4, loadLockMacroRollouts: 96, nnSAEASearchSeconds: 4, nnSAEARollouts: 64, neuralUCBTopK: 2, neuralUCBExploration: 5, milpTimeLimit: 120, seed: 0 },
   cleans: [],
   routes: [{ name: "RouteA", group: "RouteA", bufferOption: 0, prePJobCleanRefs: [], postPJobCleanRefs: [], postCJobCleanRefs: [], stages: linkRouteSteps([makeStage("LP1"), makeStage("Robot"), makeStage("PM1,PM2", true, "RouteA_Step2"), makeStage("Robot"), makeStage("LP1")]) }],
   rounds: [makeRound(1, 0, "RouteA", "LP1"), makeRound(2, 70, "RouteA", "LP2")],
@@ -2773,7 +2773,7 @@ function makeDefaultTestCase(name = "\u9ED8\u8BA4\u6D4B\u8BD5\u96C6") {
     strategy: "heuristic",
     roundCount: 2,
     times: [0, 70],
-    options: { loadLockManager: "petri-look", residencyGuardSeconds: 0, maximumRobotHoldingSeconds: 0, maximumSystemResidenceCv: 0, loadLockMacroSearchSeconds: 4, loadLockMacroRollouts: 96, nnSAEASearchSeconds: 4, nnSAEARollouts: 64, rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 },
+    options: { loadLockManager: "petri-look", residencyGuardSeconds: 0, maximumRobotHoldingSeconds: 0, maximumSystemResidenceCv: 0, loadLockMacroSearchSeconds: 4, loadLockMacroRollouts: 96, nnSAEASearchSeconds: 4, nnSAEARollouts: 64, milpTimeLimit: 120, seed: 0 },
     cleans: state.cleans,
     routes: state.routes,
     rounds: [
@@ -2999,7 +2999,7 @@ function applyTestCase(testCase) {
   state.strategy = value.strategy || "heuristic";
   state.roundCount = Math.max(1, Number(value.roundCount) || 1);
   state.times = Array.isArray(value.times) ? value.times : [0];
-  state.options = value.options || { loadLockManager: "petri-look", residencyGuardSeconds: 0, maximumRobotHoldingSeconds: 0, maximumSystemResidenceCv: 0, loadLockMacroSearchSeconds: 4, loadLockMacroRollouts: 96, nnSAEASearchSeconds: 4, nnSAEARollouts: 64, neuralUCBTopK: 2, neuralUCBExploration: 5, rlSearchSeconds: 4, rlRollouts: 256, rlTemperature: 0.7, milpTimeLimit: 120, seed: 0 };
+  state.options = value.options || { loadLockManager: "petri-look", residencyGuardSeconds: 0, maximumRobotHoldingSeconds: 0, maximumSystemResidenceCv: 0, loadLockMacroSearchSeconds: 4, loadLockMacroRollouts: 96, nnSAEASearchSeconds: 4, nnSAEARollouts: 64, neuralUCBTopK: 2, neuralUCBExploration: 5, milpTimeLimit: 120, seed: 0 };
   state.options.loadLockManager = state.options.loadLockManager || "petri-look";
   delete state.options.loadLockExchange;
   for (const key of ["residencyGuardSeconds", "maximumRobotHoldingSeconds", "maximumSystemResidenceCv"]) {
@@ -3047,11 +3047,10 @@ function applyTestCase(testCase) {
   document.querySelectorAll("[data-option]").forEach((input) => {
     input.value = state.options[input.dataset.option] ?? input.value;
   });
-  document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro", "nn-saea", "setrank", "neuralucb", "neural", "e2e-ctq", "rl"].includes(state.strategy));
+  document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro", "nn-saea", "setrank", "neuralucb", "e2e-ctq"].includes(state.strategy));
   document.getElementById("heuristicObjectiveOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro"].includes(state.strategy));
   document.getElementById("nnSAEAOptions").classList.toggle("is-hidden", state.strategy !== "nn-saea");
   document.getElementById("neuralucbOptions").classList.toggle("is-hidden", state.strategy !== "neuralucb");
-  document.getElementById("rlOptions").classList.toggle("is-hidden", state.strategy !== "rl");
   document.getElementById("milpOptions").classList.toggle("is-hidden", state.strategy !== "milp");
   document.getElementById("roundCount").disabled = state.strategy === "milp";
   if (Object.keys(state.algorithmMetadata).length) showAlgorithmDetails(state.strategy);
@@ -4119,9 +4118,6 @@ function batchParameterSummary(options, strategy) {
     ["nnSAEARollouts", "SAEA \u91C7\u6837", "", ["nn-saea"]],
     ["neuralUCBTopK", "UCB Top-K", "", ["neuralucb"]],
     ["neuralUCBExploration", "UCB \u63A2\u7D22", "", ["neuralucb"]],
-    ["rlSearchSeconds", "RL \u641C\u7D22", "s", ["rl"]],
-    ["rlRollouts", "RL \u91C7\u6837", "", ["rl"]],
-    ["rlTemperature", "RL \u6E29\u5EA6", "", ["rl"]],
     ["milpTimeLimit", "MILP \u65F6\u9650", "s", ["milp"]]
   ];
   const labels = definitions.flatMap(([key, label, suffix, strategies]) => strategies.length && !strategies.includes(normalizedStrategy) ? [] : values[key] === void 0 || values[key] === null || values[key] === "" ? [] : [`${label} ${values[key]}${suffix}`]);
@@ -4716,7 +4712,6 @@ function renderParameterComparisonStrategyFields(strategy, options = {}) {
     "loadlock-macro": [["loadLockMacroSearchSeconds", "\u5B8F\u641C\u7D22\u65F6\u95F4\uFF08\u79D2\uFF09", "number", "0.1"], ["loadLockMacroRollouts", "\u5B8F\u91C7\u6837\u6B21\u6570", "number", "1"]],
     "nn-saea": [["nnSAEASearchSeconds", "SAEA \u641C\u7D22\u65F6\u95F4\uFF08\u79D2\uFF09", "number", "0.1"], ["nnSAEARollouts", "SAEA \u91C7\u6837\u6B21\u6570", "number", "1"]],
     neuralucb: [["neuralUCBTopK", "UCB Top-K", "number", "1"], ["neuralUCBExploration", "UCB \u63A2\u7D22\u5F3A\u5EA6", "number", "0.1"]],
-    rl: [["rlSearchSeconds", "RL \u641C\u7D22\u65F6\u95F4\uFF08\u79D2\uFF09", "number", "0.1"], ["rlRollouts", "RL \u91C7\u6837\u6B21\u6570", "number", "1"], ["rlTemperature", "RL \u6E29\u5EA6", "number", "0.01"]],
     milp: [["milpTimeLimit", "MILP \u65F6\u95F4\u4E0A\u9650\uFF08\u79D2\uFF09", "number", "0.1"]]
   };
   const fields = definitions[strategy] || [];
@@ -4910,15 +4905,13 @@ async function checkService() {
     if (!response.ok) throw new Error();
     const status = await response.json(), compatible = status.schemaVersion === EXPECTED_API_SCHEMA;
     state.serviceCompatible = compatible;
-    const loadlockMacroAvailable = status.strategies?.["loadlock-macro"] === true, nnSAEAAvailable = status.strategies?.["nn-saea"] === true, setrankAvailable = status.strategies?.setrank === true, neuralucbAvailable = status.strategies?.neuralucb === true, neuralAvailable = status.strategies?.neural === true, e2eCTQAvailable = status.strategies?.["e2e-ctq"] === true, rlAvailable = status.strategies?.rl !== false, milpAvailable = status.strategies?.milp === true;
+    const loadlockMacroAvailable = status.strategies?.["loadlock-macro"] === true, nnSAEAAvailable = status.strategies?.["nn-saea"] === true, setrankAvailable = status.strategies?.setrank === true, neuralucbAvailable = status.strategies?.neuralucb === true, e2eCTQAvailable = status.strategies?.["e2e-ctq"] === true, milpAvailable = status.strategies?.milp === true;
     state.algorithmMetadata = status.algorithmMetadata || {};
     document.getElementById("loadlockMacroStrategyInput").disabled = !loadlockMacroAvailable;
     document.getElementById("nnSAEAStrategyInput").disabled = !nnSAEAAvailable;
     document.getElementById("setrankStrategyInput").disabled = !setrankAvailable;
     document.getElementById("neuralucbStrategyInput").disabled = !neuralucbAvailable;
-    document.getElementById("neuralStrategyInput").disabled = !neuralAvailable;
     document.getElementById("e2eCTQStrategyInput").disabled = !e2eCTQAvailable;
-    document.getElementById("rlStrategyInput").disabled = !rlAvailable;
     document.getElementById("milpStrategyInput").disabled = !milpAvailable;
     renderOtherAlgorithmOptions(status.otherAlgorithms || []);
     runButton.disabled = !compatible;
@@ -5060,18 +5053,17 @@ document.addEventListener("change", (event) => {
   }
   if (event.target.name === "strategy") {
     state.strategy = event.target.value;
-    if (["neural", "e2e-ctq"].includes(state.strategy)) state.options.loadLockManager = "joint";
-    else if (["heuristic", "loadlock-macro", "nn-saea", "setrank", "neuralucb", "rl"].includes(state.strategy)) state.options.loadLockManager = "petri-look";
+    if (["e2e-ctq"].includes(state.strategy)) state.options.loadLockManager = "joint";
+    else if (["heuristic", "loadlock-macro", "nn-saea", "setrank", "neuralucb"].includes(state.strategy)) state.options.loadLockManager = "petri-look";
     if (state.strategy === "milp") {
       resizeRounds(1);
       document.getElementById("roundCount").value = 1;
     }
     document.getElementById("roundCount").disabled = state.strategy === "milp";
-    document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro", "nn-saea", "setrank", "neuralucb", "neural", "e2e-ctq", "rl"].includes(state.strategy));
+    document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro", "nn-saea", "setrank", "neuralucb", "e2e-ctq"].includes(state.strategy));
     document.getElementById("heuristicObjectiveOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro"].includes(state.strategy));
     document.getElementById("nnSAEAOptions").classList.toggle("is-hidden", state.strategy !== "nn-saea");
     document.getElementById("neuralucbOptions").classList.toggle("is-hidden", state.strategy !== "neuralucb");
-    document.getElementById("rlOptions").classList.toggle("is-hidden", state.strategy !== "rl");
     document.getElementById("milpOptions").classList.toggle("is-hidden", state.strategy !== "milp");
     showAlgorithmDetails(state.strategy);
     markTestDirty();
