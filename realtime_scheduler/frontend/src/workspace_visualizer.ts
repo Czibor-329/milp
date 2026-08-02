@@ -33,6 +33,7 @@ export interface ModuleSnapshot {
   wafers: string[];
   processedWafers: string[];
   loadPortSlots: LoadPortSlotSnapshot[];
+  loadLockSlots: LoadPortSlotSnapshot[];
   activeMoveName: string;
   progress: number;
   environment: string;
@@ -460,11 +461,13 @@ function initialMaterialLocations(moves: NormalizedMove[]): Map<string, string> 
   for (const move of moves) {
     if (move.MoveType === SWAP_MOVE) {
       const station = String(listValue(move.StationList)[0] ?? "");
+      // RecvMatList 是交换前停在站上的旧片（被机器人收回），SendMatList
+      // 是机器人原持片（送入站），因此初始位置与站/机器人方向相反。
       for (const material of materialIds(move, "RecvMatList")) {
-        if (!locations.has(material)) locations.set(material, move.ModuleName);
+        if (!locations.has(material)) locations.set(material, station);
       }
       for (const material of materialIds(move, "SendMatList")) {
-        if (!locations.has(material)) locations.set(material, station);
+        if (!locations.has(material)) locations.set(material, move.ModuleName);
       }
       continue;
     }
@@ -497,8 +500,9 @@ function applyCompletedTransfer(move: NormalizedMove, locations: Map<string, str
   }
   if (move.MoveType === SWAP_MOVE) {
     const station = String(listValue(move.StationList)[0] ?? "");
-    for (const material of materialIds(move, "RecvMatList")) locations.set(material, station);
-    for (const material of materialIds(move, "SendMatList")) locations.set(material, move.ModuleName);
+    // RecvMatList 被机器人从站收回，SendMatList 由机器人送入站。
+    for (const material of materialIds(move, "RecvMatList")) locations.set(material, move.ModuleName);
+    for (const material of materialIds(move, "SendMatList")) locations.set(material, station);
   }
 }
 
@@ -630,6 +634,136 @@ function buildLoadPortSlots(
   return result;
 }
 
+/**
+ * 从完整 MoveList 重建 LoadLock 正视双层的槽位占用。
+ *
+ * LoadPort 已有 buildLoadPortSlots 按 SrcSlotList/DestSlotList 精确跟踪；
+ * LoadLock 双层同样携带槽位字段（PICK/PLACE 的 Src/DestSlotList，SWAP 的
+ * StnSendSlotList/StnRecvSlotList）。这里按槽位号重建占用：槽位 1 对应上层、
+ * 槽位 2 对应下层。只有时间零点确实位于 LoadLock 的晶圆，才会借助未来第一次
+ * 取片/换片动作定位初始槽位；已完成动作再逐条更新，因此后续进入的晶圆不会提前
+ * 出现在初始画面，真空交换后新片也会落在真实物理槽位而不受名称排序影响。
+ */
+function buildLoadLockSlots(
+  records: NormalizedMove[],
+  device: DeviceDefinition | null,
+  time: number,
+  initialLocations: Map<string, string>,
+  processedMaterials: Set<string>,
+): Map<string, LoadPortSlotSnapshot[]> {
+  const names = new Set<string>();
+  for (const [name, definition] of Object.entries(device?.Stations ?? {})) {
+    if (isLoadLockName(name, String(definition?.Type ?? ""))) names.add(name);
+  }
+  for (const location of initialLocations.values()) {
+    if (isLoadLockName(location, String(device?.Stations?.[location]?.Type ?? ""))) names.add(location);
+  }
+
+  const initialByLock = new Map<string, Map<number, string>>();
+  const observedMaximum = new Map<string, number>();
+  /** 仅为时间零点已经位于指定 LoadLock 的晶圆记录初始槽位。 */
+  const occupyInitial = (lock: string, slot: number, material: string): void => {
+    if (!lock || !slot || !material || initialLocations.get(material) !== lock) return;
+    names.add(lock);
+    const occupancy = initialByLock.get(lock) ?? new Map<number, string>();
+    if (!occupancy.has(slot)) occupancy.set(slot, material);
+    initialByLock.set(lock, occupancy);
+    observedMaximum.set(lock, Math.max(observedMaximum.get(lock) ?? 0, slot));
+  };
+  for (const move of records) {
+    if (PICK_MOVE_TYPES.has(move.MoveType)) {
+      materialIds(move).forEach((material, index) => {
+        const source = indexedStation(move, "SrcStationList", index);
+        if (!isLoadLockName(source, String(device?.Stations?.[source]?.Type ?? ""))) return;
+        occupyInitial(source, indexedSlot(move, "SrcSlotList", index), material);
+      });
+    } else if (move.MoveType === SWAP_MOVE) {
+      materialIds(move, "RecvMatList").forEach((material, index) => {
+        const station = indexedStation(move, "StationList", index);
+        if (!isLoadLockName(station, String(device?.Stations?.[station]?.Type ?? ""))) return;
+        occupyInitial(station, indexedSlot(move, "StnSendSlotList", index), material);
+      });
+    }
+  }
+
+  const result = new Map<string, LoadPortSlotSnapshot[]>();
+  for (const name of names) {
+    const occupancy = new Map(initialByLock.get(name) ?? []);
+    const initialMaterials = [...initialLocations.entries()]
+      .filter(([, location]) => location === name)
+      .map(([material]) => material)
+      .sort(naturalCompare);
+    const assigned = new Set(occupancy.values());
+    let fallbackSlot = 1;
+    for (const material of initialMaterials) {
+      if (assigned.has(material)) continue;
+      while (occupancy.has(fallbackSlot)) fallbackSlot += 1;
+      occupancy.set(fallbackSlot, material);
+      assigned.add(material);
+    }
+
+    for (const move of records) {
+      if (move.EndTime > time) continue;
+      const materials = materialIds(move);
+      if (PICK_MOVE_TYPES.has(move.MoveType)) {
+        materials.forEach((material, index) => {
+          if (indexedStation(move, "SrcStationList", index) !== name) return;
+          const slot = indexedSlot(move, "SrcSlotList", index);
+          if (slot) occupancy.delete(slot);
+          else {
+            const current = [...occupancy.entries()].find(([, wafer]) => wafer === material);
+            if (current) occupancy.delete(current[0]);
+          }
+        });
+      } else if (PLACE_MOVE_TYPES.has(move.MoveType)) {
+        materials.forEach((material, index) => {
+          if (indexedStation(move, "DestStationList", index) !== name) return;
+          let slot = indexedSlot(move, "DestSlotList", index);
+          if (!slot) {
+            slot = 1;
+            while (occupancy.has(slot)) slot += 1;
+          }
+          occupancy.set(slot, material);
+          observedMaximum.set(name, Math.max(observedMaximum.get(name) ?? 0, slot));
+        });
+      } else if (move.MoveType === SWAP_MOVE) {
+        // 先移除被取走的旧片，再写入送入的新片，避免同槽换片互相覆盖。
+        materialIds(move, "RecvMatList").forEach((material, index) => {
+          if (indexedStation(move, "StationList", index) !== name) return;
+          const slot = indexedSlot(move, "StnSendSlotList", index);
+          if (slot) occupancy.delete(slot);
+          else {
+            const current = [...occupancy.entries()].find(([, wafer]) => wafer === material);
+            if (current) occupancy.delete(current[0]);
+          }
+        });
+        materialIds(move, "SendMatList").forEach((material, index) => {
+          if (indexedStation(move, "StationList", index) !== name) return;
+          let slot = indexedSlot(move, "StnRecvSlotList", index);
+          if (!slot) {
+            slot = 1;
+            while (occupancy.has(slot)) slot += 1;
+          }
+          occupancy.set(slot, material);
+          observedMaximum.set(name, Math.max(observedMaximum.get(name) ?? 0, slot));
+        });
+      }
+    }
+
+    const occupiedMaximum = occupancy.size ? Math.max(...occupancy.keys()) : 0;
+    const capacity = loadPortCapacity(
+      device,
+      name,
+      Math.max(observedMaximum.get(name) ?? 0, occupiedMaximum, initialMaterials.length),
+    );
+    result.set(name, Array.from({ length: capacity }, (_, index) => {
+      const wafer = occupancy.get(index + 1) ?? "";
+      return { slot: index + 1, wafer, processed: Boolean(wafer && processedMaterials.has(wafer)) };
+    }));
+  }
+  return result;
+}
+
 /** 返回动作在给定时刻的线性进度。 */
 function moveProgress(move: NormalizedMove, time: number): number {
   const duration = move.EndTime - move.StartTime;
@@ -722,6 +856,7 @@ export function buildWorkspaceSnapshot(
   }
   for (const wafers of wafersByLocation.values()) wafers.sort(naturalCompare);
   const loadPortSlots = buildLoadPortSlots(records, device, time, initialLocations, processedMaterials);
+  const loadLockSlots = buildLoadLockSlots(records, device, time, initialLocations, processedMaterials);
 
   const modules = [...definitions.entries()].map(([name, definition]): ModuleSnapshot => {
     const moduleMoves = activeMoves.filter(move => (
@@ -758,6 +893,7 @@ export function buildWorkspaceSnapshot(
       wafers: wafersByLocation.get(name) ?? [],
       processedWafers: (wafersByLocation.get(name) ?? []).filter(wafer => processedMaterials.has(wafer)),
       loadPortSlots: loadPortSlots.get(name) ?? [],
+      loadLockSlots: loadLockSlots.get(name) ?? [],
       activeMoveName: primaryMove ? (MOVE_NAMES[primaryMove.MoveType] ?? `动作 ${primaryMove.MoveType}`) : "",
       progress: primaryMove ? moveProgress(primaryMove, time) : 0,
       environment: environments.get(name) ?? "",
@@ -898,6 +1034,7 @@ function snapshotWithCandidateModules(
       wafers: [],
       processedWafers: [],
       loadPortSlots: [],
+      loadLockSlots: [],
       activeMoveName: "",
       progress: 0,
       environment: isLoadLockName(name, type) ? initialLoadLockEnvironment(device, name) : "",
@@ -935,6 +1072,7 @@ export function snapshotWithFullDeviceModules(
       wafers: [],
       processedWafers: [],
       loadPortSlots: [],
+      loadLockSlots: [],
       activeMoveName: "",
       progress: 0,
       environment: isLoadLockName(name, type) ? initialLoadLockEnvironment(device, name) : "",
@@ -1021,8 +1159,11 @@ function renderModule(
   const wafers = module.wafers.slice(0, visibleWaferCount)
     .map(wafer => renderWaferToken(wafer, waferProgress, processedWafers.has(wafer)))
     .join("");
-  const overflow = module.wafers.length > visibleWaferCount
-    ? `<span class="wafer-more">+ ${module.wafers.length - visibleWaferCount}</span>`
+  const layerCount = role === "lock" && module.loadLockSlots.length
+    ? module.loadLockSlots.filter(slot => slot.wafer).length
+    : module.wafers.length;
+  const overflow = layerCount > visibleWaferCount
+    ? `<span class="wafer-more">+ ${layerCount - visibleWaferCount}</span>`
     : "";
   const doors = moduleDoorSides(module, role)
     .map(side => `<i class="chamber-door chamber-door-${side}"></i>`)
@@ -1041,9 +1182,12 @@ function renderModule(
           : 0
     : 0;
   const loadLockLayers = role === "lock"
-    ? `<div class="loadlock-layers" aria-hidden="true">${[0, 1].map(index => {
-        const wafer = module.wafers[index];
-        const processed = wafer ? processedWafers.has(wafer) : false;
+      ? `<div class="loadlock-layers" aria-hidden="true">${[0, 1].map(index => {
+        const layer = module.loadLockSlots[index];
+        // 槽位快照中的空字符串表示该物理层确实为空，不能再回退到按名称排序的
+        // module.wafers，否则交换后被取空的上层会重复画出仍留在下层的晶圆。
+        const wafer = layer ? layer.wafer : module.wafers[index];
+        const processed = layer ? layer.processed : (wafer ? processedWafers.has(wafer) : false);
         const waferState = processed ? "processed" : "unprocessed";
         return `<div class="loadlock-layer ${wafer ? "is-occupied" : "is-empty"}">${wafer ? `<span class="loadlock-wafer-line wafer-${waferState}" title="晶圆 ${escapeHtml(wafer)}（${processed ? "已加工" : "未加工"}）"></span>` : ""}</div>`;
       }).join("")}${overflow}</div>`
@@ -1187,7 +1331,7 @@ function moduleTopologyPosition(
       : explicit;
   }
   if (role === "lock") {
-    const canonicalOrder: Record<string, number> = { LA: 0, LC: 1, LB: 2, LD: 3 };
+    const canonicalOrder: Record<string, number> = { LA: 0, LB: 1, LC: 2, LD: 3 };
     const orderedLoadLocks = [...roleModules].sort((left, right) => {
       const leftName = left.name.trim().toUpperCase();
       const rightName = right.name.trim().toUpperCase();
@@ -1338,7 +1482,7 @@ function interpolatedRobotAngle(start: number, end: number, progress: number): n
 
 /**
  * LoadLock 田字布局使用靠近对应机械手的一排作为箭头入口：
- * ATR/ATM 固定进入下排 LB/LD，VTR 固定进入上排 LA/LC。
+ * ATR/ATM 固定进入下排 LC/LD，VTR 固定进入上排 LA/LB。
  */
 function robotLoadLockPortal(
   robotName: string,
@@ -1349,10 +1493,10 @@ function robotLoadLockPortal(
   const isAtmosphereRobot = /^(ATR|ATM)/i.test(robotName);
   const isVacuumRobot = /^(VTR|VTM)/i.test(robotName);
   if (!isAtmosphereRobot && !isVacuumRobot) return moduleName;
-  const preferred = ["LA", "LB"].includes(normalizedModule)
-    ? (isAtmosphereRobot ? "LB" : "LA")
-    : ["LC", "LD"].includes(normalizedModule)
-      ? (isAtmosphereRobot ? "LD" : "LC")
+  const preferred = ["LA", "LC"].includes(normalizedModule)
+    ? (isAtmosphereRobot ? "LC" : "LA")
+    : ["LB", "LD"].includes(normalizedModule)
+      ? (isAtmosphereRobot ? "LD" : "LB")
       : moduleName;
   return modulePositions.has(preferred) ? preferred : moduleName;
 }
@@ -2301,6 +2445,7 @@ export class VisualizationWorkspace {
     const snapshot = prebuiltSnapshot ?? buildWorkspaceSnapshot(this.moves, this.device, this.time);
     this.time = snapshot.time;
     this.elements.source.textContent = this.sourceName;
+    this.elements.source.title = this.sourceName;
     this.elements.currentTime.textContent = formatSeconds(snapshot.time);
     this.elements.totalTime.textContent = formatSeconds(snapshot.endTime);
     this.elements.progressText.textContent = snapshot.endTime > 0

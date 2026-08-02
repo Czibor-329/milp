@@ -413,10 +413,10 @@ function initialMaterialLocations(moves) {
     if (move.MoveType === SWAP_MOVE) {
       const station = String(listValue(move.StationList)[0] ?? "");
       for (const material of materialIds(move, "RecvMatList")) {
-        if (!locations.has(material)) locations.set(material, move.ModuleName);
+        if (!locations.has(material)) locations.set(material, station);
       }
       for (const material of materialIds(move, "SendMatList")) {
-        if (!locations.has(material)) locations.set(material, station);
+        if (!locations.has(material)) locations.set(material, move.ModuleName);
       }
       continue;
     }
@@ -443,8 +443,8 @@ function applyCompletedTransfer(move, locations) {
   }
   if (move.MoveType === SWAP_MOVE) {
     const station = String(listValue(move.StationList)[0] ?? "");
-    for (const material of materialIds(move, "RecvMatList")) locations.set(material, station);
-    for (const material of materialIds(move, "SendMatList")) locations.set(material, move.ModuleName);
+    for (const material of materialIds(move, "RecvMatList")) locations.set(material, move.ModuleName);
+    for (const material of materialIds(move, "SendMatList")) locations.set(material, station);
   }
 }
 function indexedStation(move, field, index) {
@@ -546,6 +546,110 @@ function buildLoadPortSlots(records, device, time, initialLocations, processedMa
   }
   return result;
 }
+function buildLoadLockSlots(records, device, time, initialLocations, processedMaterials) {
+  const names = /* @__PURE__ */ new Set();
+  for (const [name, definition] of Object.entries(device?.Stations ?? {})) {
+    if (isLoadLockName(name, String(definition?.Type ?? ""))) names.add(name);
+  }
+  for (const location of initialLocations.values()) {
+    if (isLoadLockName(location, String(device?.Stations?.[location]?.Type ?? ""))) names.add(location);
+  }
+  const initialByLock = /* @__PURE__ */ new Map();
+  const observedMaximum = /* @__PURE__ */ new Map();
+  const occupyInitial = (lock, slot, material) => {
+    if (!lock || !slot || !material || initialLocations.get(material) !== lock) return;
+    names.add(lock);
+    const occupancy = initialByLock.get(lock) ?? /* @__PURE__ */ new Map();
+    if (!occupancy.has(slot)) occupancy.set(slot, material);
+    initialByLock.set(lock, occupancy);
+    observedMaximum.set(lock, Math.max(observedMaximum.get(lock) ?? 0, slot));
+  };
+  for (const move of records) {
+    if (PICK_MOVE_TYPES.has(move.MoveType)) {
+      materialIds(move).forEach((material, index) => {
+        const source = indexedStation(move, "SrcStationList", index);
+        if (!isLoadLockName(source, String(device?.Stations?.[source]?.Type ?? ""))) return;
+        occupyInitial(source, indexedSlot(move, "SrcSlotList", index), material);
+      });
+    } else if (move.MoveType === SWAP_MOVE) {
+      materialIds(move, "RecvMatList").forEach((material, index) => {
+        const station = indexedStation(move, "StationList", index);
+        if (!isLoadLockName(station, String(device?.Stations?.[station]?.Type ?? ""))) return;
+        occupyInitial(station, indexedSlot(move, "StnSendSlotList", index), material);
+      });
+    }
+  }
+  const result = /* @__PURE__ */ new Map();
+  for (const name of names) {
+    const occupancy = new Map(initialByLock.get(name) ?? []);
+    const initialMaterials = [...initialLocations.entries()].filter(([, location]) => location === name).map(([material]) => material).sort(naturalCompare);
+    const assigned = new Set(occupancy.values());
+    let fallbackSlot = 1;
+    for (const material of initialMaterials) {
+      if (assigned.has(material)) continue;
+      while (occupancy.has(fallbackSlot)) fallbackSlot += 1;
+      occupancy.set(fallbackSlot, material);
+      assigned.add(material);
+    }
+    for (const move of records) {
+      if (move.EndTime > time) continue;
+      const materials = materialIds(move);
+      if (PICK_MOVE_TYPES.has(move.MoveType)) {
+        materials.forEach((material, index) => {
+          if (indexedStation(move, "SrcStationList", index) !== name) return;
+          const slot = indexedSlot(move, "SrcSlotList", index);
+          if (slot) occupancy.delete(slot);
+          else {
+            const current = [...occupancy.entries()].find(([, wafer]) => wafer === material);
+            if (current) occupancy.delete(current[0]);
+          }
+        });
+      } else if (PLACE_MOVE_TYPES.has(move.MoveType)) {
+        materials.forEach((material, index) => {
+          if (indexedStation(move, "DestStationList", index) !== name) return;
+          let slot = indexedSlot(move, "DestSlotList", index);
+          if (!slot) {
+            slot = 1;
+            while (occupancy.has(slot)) slot += 1;
+          }
+          occupancy.set(slot, material);
+          observedMaximum.set(name, Math.max(observedMaximum.get(name) ?? 0, slot));
+        });
+      } else if (move.MoveType === SWAP_MOVE) {
+        materialIds(move, "RecvMatList").forEach((material, index) => {
+          if (indexedStation(move, "StationList", index) !== name) return;
+          const slot = indexedSlot(move, "StnSendSlotList", index);
+          if (slot) occupancy.delete(slot);
+          else {
+            const current = [...occupancy.entries()].find(([, wafer]) => wafer === material);
+            if (current) occupancy.delete(current[0]);
+          }
+        });
+        materialIds(move, "SendMatList").forEach((material, index) => {
+          if (indexedStation(move, "StationList", index) !== name) return;
+          let slot = indexedSlot(move, "StnRecvSlotList", index);
+          if (!slot) {
+            slot = 1;
+            while (occupancy.has(slot)) slot += 1;
+          }
+          occupancy.set(slot, material);
+          observedMaximum.set(name, Math.max(observedMaximum.get(name) ?? 0, slot));
+        });
+      }
+    }
+    const occupiedMaximum = occupancy.size ? Math.max(...occupancy.keys()) : 0;
+    const capacity = loadPortCapacity(
+      device,
+      name,
+      Math.max(observedMaximum.get(name) ?? 0, occupiedMaximum, initialMaterials.length)
+    );
+    result.set(name, Array.from({ length: capacity }, (_, index) => {
+      const wafer = occupancy.get(index + 1) ?? "";
+      return { slot: index + 1, wafer, processed: Boolean(wafer && processedMaterials.has(wafer)) };
+    }));
+  }
+  return result;
+}
 function moveProgress(move, time) {
   const duration = move.EndTime - move.StartTime;
   if (duration <= 0) return time >= move.EndTime ? 1 : 0;
@@ -616,6 +720,7 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
   }
   for (const wafers of wafersByLocation.values()) wafers.sort(naturalCompare);
   const loadPortSlots = buildLoadPortSlots(records, device, time, initialLocations, processedMaterials);
+  const loadLockSlots = buildLoadLockSlots(records, device, time, initialLocations, processedMaterials);
   const modules = [...definitions.entries()].map(([name, definition]) => {
     const moduleMoves = activeMoves.filter((move) => move.ModuleName === name || firstStation(move, "SrcStationList") === name || firstStation(move, "DestStationList") === name || listValue(move.StationList).map(String).includes(name));
     const primaryMove = moduleMoves.find((move) => move.MoveType === CLEAN_MOVE) ?? moduleMoves.find((move) => move.MoveType === PROCESS_MOVE) ?? moduleMoves.find((move) => LOADLOCK_ENVIRONMENT_MOVE_TYPES.has(move.MoveType)) ?? moduleMoves.find((move) => [PREPARE_MOVE, COMPLETE_MOVE].includes(move.MoveType)) ?? moduleMoves[0];
@@ -636,6 +741,7 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
       wafers: wafersByLocation.get(name) ?? [],
       processedWafers: (wafersByLocation.get(name) ?? []).filter((wafer) => processedMaterials.has(wafer)),
       loadPortSlots: loadPortSlots.get(name) ?? [],
+      loadLockSlots: loadLockSlots.get(name) ?? [],
       activeMoveName: primaryMove ? MOVE_NAMES[primaryMove.MoveType] ?? `\u52A8\u4F5C ${primaryMove.MoveType}` : "",
       progress: primaryMove ? moveProgress(primaryMove, time) : 0,
       environment: environments.get(name) ?? "",
@@ -743,6 +849,7 @@ function snapshotWithCandidateModules(snapshot, decision, device) {
       wafers: [],
       processedWafers: [],
       loadPortSlots: [],
+      loadLockSlots: [],
       activeMoveName: "",
       progress: 0,
       environment: isLoadLockName(name, type) ? initialLoadLockEnvironment(device, name) : "",
@@ -771,6 +878,7 @@ function snapshotWithFullDeviceModules(snapshot, device) {
       wafers: [],
       processedWafers: [],
       loadPortSlots: [],
+      loadLockSlots: [],
       activeMoveName: "",
       progress: 0,
       environment: isLoadLockName(name, type) ? initialLoadLockEnvironment(device, name) : "",
@@ -836,14 +944,16 @@ function renderModule(module, role, candidate) {
   const visibleWaferCount = role === "lock" ? 2 : 1;
   const processedWafers = new Set(module.processedWafers ?? []);
   const wafers = module.wafers.slice(0, visibleWaferCount).map((wafer) => renderWaferToken(wafer, waferProgress, processedWafers.has(wafer))).join("");
-  const overflow = module.wafers.length > visibleWaferCount ? `<span class="wafer-more">+ ${module.wafers.length - visibleWaferCount}</span>` : "";
+  const layerCount = role === "lock" && module.loadLockSlots.length ? module.loadLockSlots.filter((slot) => slot.wafer).length : module.wafers.length;
+  const overflow = layerCount > visibleWaferCount ? `<span class="wafer-more">+ ${layerCount - visibleWaferCount}</span>` : "";
   const doors = moduleDoorSides(module, role).map((side) => `<i class="chamber-door chamber-door-${side}"></i>`).join("");
   const accessibleStatus = `${module.name}\uFF0C${STATUS_LABELS[module.status]}\uFF0C${DOOR_LABELS[module.door]}`;
   const candidateLabel = candidate ? `${candidate.count} \u4E2A\u53EF\u884C\u52A8\u4F5C\uFF0C\u6700\u9AD8\u6A21\u578B\u504F\u597D ${(candidate.preference * 100).toFixed(0)}%` : "";
   const atmosphereLevel = role === "lock" ? module.loadLockPhase === "pumping" ? 100 - module.progress * 100 : module.loadLockPhase === "venting" ? module.progress * 100 : /大气|ATM|ATR/i.test(module.environment) ? 100 : 0 : 0;
   const loadLockLayers = role === "lock" ? `<div class="loadlock-layers" aria-hidden="true">${[0, 1].map((index) => {
-    const wafer = module.wafers[index];
-    const processed = wafer ? processedWafers.has(wafer) : false;
+    const layer = module.loadLockSlots[index];
+    const wafer = layer ? layer.wafer : module.wafers[index];
+    const processed = layer ? layer.processed : wafer ? processedWafers.has(wafer) : false;
     const waferState = processed ? "processed" : "unprocessed";
     return `<div class="loadlock-layer ${wafer ? "is-occupied" : "is-empty"}">${wafer ? `<span class="loadlock-wafer-line wafer-${waferState}" title="\u6676\u5706 ${escapeHtml(wafer)}\uFF08${processed ? "\u5DF2\u52A0\u5DE5" : "\u672A\u52A0\u5DE5"}\uFF09"></span>` : ""}</div>`;
   }).join("")}${overflow}</div>` : role === "process" ? `<div class="process-wafer-slot ${wafers ? "is-occupied" : "is-empty"}">${wafers}</div>` : role === "port" ? `<div class="load-port-dock-face" aria-hidden="true"><span></span></div>` : role === "auxiliary" ? `<div class="auxiliary-wafer-slot ${wafers ? "is-occupied" : "is-empty"}">${wafers}</div>` : `<div class="wafer-stack">${wafers}${overflow}</div>`;
@@ -941,7 +1051,7 @@ function moduleTopologyPosition(module, role, index, roleModules, cascade) {
     return role === "process" ? { ...explicit, widthPixels: TOPOLOGY_PROCESS_WIDTH, heightPixels: TOPOLOGY_PROCESS_HEIGHT } : explicit;
   }
   if (role === "lock") {
-    const canonicalOrder = { LA: 0, LC: 1, LB: 2, LD: 3 };
+    const canonicalOrder = { LA: 0, LB: 1, LC: 2, LD: 3 };
     const orderedLoadLocks = [...roleModules].sort((left, right) => {
       const leftName = left.name.trim().toUpperCase();
       const rightName = right.name.trim().toUpperCase();
@@ -1050,7 +1160,7 @@ function robotLoadLockPortal(robotName, moduleName, modulePositions) {
   const isAtmosphereRobot = /^(ATR|ATM)/i.test(robotName);
   const isVacuumRobot = /^(VTR|VTM)/i.test(robotName);
   if (!isAtmosphereRobot && !isVacuumRobot) return moduleName;
-  const preferred = ["LA", "LB"].includes(normalizedModule) ? isAtmosphereRobot ? "LB" : "LA" : ["LC", "LD"].includes(normalizedModule) ? isAtmosphereRobot ? "LD" : "LC" : moduleName;
+  const preferred = ["LA", "LC"].includes(normalizedModule) ? isAtmosphereRobot ? "LC" : "LA" : ["LB", "LD"].includes(normalizedModule) ? isAtmosphereRobot ? "LD" : "LB" : moduleName;
   return modulePositions.has(preferred) ? preferred : moduleName;
 }
 function selectedDecisionCandidate(decision) {
@@ -1816,6 +1926,7 @@ var VisualizationWorkspace = class {
     const snapshot = prebuiltSnapshot ?? buildWorkspaceSnapshot(this.moves, this.device, this.time);
     this.time = snapshot.time;
     this.elements.source.textContent = this.sourceName;
+    this.elements.source.title = this.sourceName;
     this.elements.currentTime.textContent = formatSeconds2(snapshot.time);
     this.elements.totalTime.textContent = formatSeconds2(snapshot.endTime);
     this.elements.progressText.textContent = snapshot.endTime > 0 ? `${Math.round(snapshot.time / snapshot.endTime * 100)}%` : "0%";

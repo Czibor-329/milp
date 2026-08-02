@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>调度平台</title>
-  <link rel="stylesheet" href="/assets/config_editor.css?v=1.1.9">
+  <link rel="stylesheet" href="/assets/config_editor.css?v=1.1.10">
 </head>
 <body>
   <a class="skip-link" href="#mainContent">跳到主要内容</a>
@@ -40,7 +40,7 @@
         </button>
         <span class="sidebar-footer-label">系统状态</span>
         <div class="service-pill" id="serviceState">本地服务</div>
-        <span class="frontend-version">前端 v1.1.9</span>
+        <span class="frontend-version">前端 v1.1.10</span>
       </div>
     </aside>
 
@@ -190,39 +190,45 @@
 
             <section class="topology-playback" id="visualTopologyPlayback" hidden aria-label="设备拓扑回放">
               <section class="timeline-console petri-top-playback-controls" aria-label="MoveList 时间轴控制">
-                <button class="btn primary timeline-play" id="visualPlayButton" type="button" aria-label="播放回放"></button>
-                <div class="timeline-movelist" aria-label="当前 MoveList">
-                  <span>MOVE LIST</span>
-                  <strong id="visualSource">—</strong>
+                <div class="timeline-primary-zone">
+                  <button class="btn primary timeline-play" id="visualPlayButton" type="button" aria-label="播放回放"></button>
+                  <div class="timeline-movelist" aria-label="当前 MoveList">
+                    <span>MOVE LIST</span>
+                    <strong id="visualSource" title="—">—</strong>
+                  </div>
                 </div>
                 <div class="timeline-range">
                   <input id="visualTimeline" type="range" min="0" max="0" step="0.1" value="0" aria-label="回放时间进度">
                   <div class="timeline-scale">
-                    <span>0 s</span>
+                    <time class="timeline-bound timeline-current"><b id="visualCurrentTime">0.0</b><span>s</span></time>
                     <div class="petri-route-metrics">
-                      <span>TIME <b id="visualCurrentTime">0.0</b> / <b id="visualTotalTime">0.0</b> s</span>
-                      <span>PROGRESS <b id="visualProgressText">0%</b></span>
-                      <span>MOVE <b id="visualMoveText">0 / 0</b></span>
-                      <span>WAFERS <b id="visualWaferText">0</b></span>
+                      <span><small>进度</small><b id="visualProgressText">0%</b></span>
+                      <span><small>MOVE</small><b id="visualMoveText">0 / 0</b></span>
+                      <span><small>晶圆</small><b id="visualWaferText">0</b><i>片</i></span>
                     </div>
-                    <span>结束</span>
+                    <time class="timeline-bound timeline-total"><b id="visualTotalTime">0.0</b><span>s</span></time>
                   </div>
                 </div>
-                <label class="timeline-speed">速度
-                  <select id="visualSpeed">
-                    <option value="1">1×</option>
-                    <option value="2">2×</option>
-                    <option value="4" selected>4×</option>
-                    <option value="8">8×</option>
-                    <option value="16">16×</option>
-                  </select>
-                </label>
-                <div class="topology-toolbar-actions" aria-label="回放工具">
-                  <button class="btn" id="visualImportButton" type="button">
-                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L7 9m5-5 5 5M5 15v5h14v-5"/></svg>
-                    导入 MoveList
-                  </button>
-                  <a class="btn" id="visualOpenGantt" href="#" target="_blank" aria-disabled="true">打开甘特图</a>
+                <div class="timeline-tools-zone">
+                  <label class="timeline-speed"><span>速度</span>
+                    <select id="visualSpeed" aria-label="回放速度">
+                      <option value="1">1×</option>
+                      <option value="2">2×</option>
+                      <option value="4" selected>4×</option>
+                      <option value="8">8×</option>
+                      <option value="16">16×</option>
+                    </select>
+                  </label>
+                  <div class="topology-toolbar-actions" aria-label="回放工具">
+                    <button class="btn toolbar-import" id="visualImportButton" type="button" aria-label="导入 MoveList">
+                      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L7 9m5-5 5 5M5 15v5h14v-5"/></svg>
+                      <span class="toolbar-label-full">导入 MoveList</span><span class="toolbar-label-compact">导入</span>
+                    </button>
+                    <a class="btn toolbar-gantt" id="visualOpenGantt" href="#" target="_blank" aria-label="打开甘特图" aria-disabled="true">
+                      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5v14h16M8 15v-3m4 3V8m4 7v-5"/></svg>
+                      <span class="toolbar-label-full">打开甘特图</span><span class="toolbar-label-compact">甘特图</span>
+                    </a>
+                  </div>
                 </div>
               </section>
 
@@ -414,6 +420,6 @@
     </aside>
   </div>
 
-  <script type="module" src="/assets/config_editor.js?v=1.1.9"></script>
+  <script type="module" src="/assets/config_editor.js?v=1.1.10"></script>
 </body>
 </html>
