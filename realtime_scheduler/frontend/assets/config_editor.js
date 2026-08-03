@@ -4194,7 +4194,15 @@ function buildPayload() {
   expandVisitSlotIds();
   const routes = selectReferencedRoutes2(state.routes, state.rounds).map((route) => ({ ...normalizeRoute(route), stages: route.stages.map((stage) => ({ ...stage, visits: stage.visits.map((visit) => structuredClone(visit)) })) }));
   const cleans = state.cleans.map(runtimeClean);
-  return { schemaVersion: EXPECTED_API_SCHEMA, workspaceDeviceId: state.workspaceDeviceId, workspaceTestId: state.testCaseId, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options: state.options, recipes: collectRecipes(routes), cleans, routes, rounds: structuredClone(state.rounds) };
+  return { schemaVersion: EXPECTED_API_SCHEMA, workspaceDeviceId: state.workspaceDeviceId, workspaceTestId: state.testCaseId, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options: state.options, skipValidation: skipValidationEnabled(), recipes: collectRecipes(routes), cleans, routes, rounds: structuredClone(state.rounds) };
+}
+function skipValidationEnabled() {
+  return document.getElementById("skipValidationInput")?.checked === true;
+}
+function validationDisplay(value) {
+  if (value === "passed") return "\u901A\u8FC7";
+  if (value === "skipped") return "\u8DF3\u8FC7";
+  return value ? String(value) : "";
 }
 function configuredWaferCount() {
   return state.rounds.reduce((roundTotal, round) => roundTotal + round.cjobs.reduce(
@@ -4354,7 +4362,7 @@ async function runPlan() {
       ...ganttReady ? ["  \u5931\u8D25 MoveList \u5DF2\u4FDD\u7559\uFF0C\u53EF\u70B9\u51FB\u201C\u6253\u5F00\u7518\u7279\u56FE\u201D\u67E5\u770B\u7EA2\u8272\u95EE\u9898 Move"] : [],
       ...logReady ? ["  \u590D\u73B0\u65E5\u5FD7\u5DF2\u751F\u6210\uFF0C\u53EF\u70B9\u51FB\u201C\u5BFC\u51FA\u590D\u73B0\u65E5\u5FD7\u201D"] : []
     ].join("\n"), true);
-    document.getElementById("metricValidation").textContent = runResult?.metricsAvailable ? runResult.validation === "failed" ? "\u672A\u901A\u8FC7" : String(runResult.validation || "\u5931\u8D25") : "\u5931\u8D25";
+    document.getElementById("metricValidation").textContent = runResult?.metricsAvailable ? runResult.validation === "failed" ? "\u672A\u901A\u8FC7" : validationDisplay(runResult.validation) || "\u5931\u8D25" : "\u5931\u8D25";
   } finally {
     button.disabled = false;
     button.classList.remove("running");
@@ -4414,7 +4422,7 @@ async function runCurrentTestGroup() {
     const response = await fetch("/api/run-batch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ deviceId: state.workspaceDeviceId, group: state.activeTestGroup, strategy: state.strategy, options: state.options })
+      body: JSON.stringify({ deviceId: state.workspaceDeviceId, group: state.activeTestGroup, strategy: state.strategy, options: state.options, skipValidation: skipValidationEnabled() })
     });
     let result = await response.json();
     if (!response.ok || !result.batchId || !Array.isArray(result.items)) throw new Error(result.error || `\u670D\u52A1\u8FD4\u56DE ${response.status}`);
@@ -4513,7 +4521,7 @@ function showBatchItemOverview(item, index) {
   const elapsedTime = Number(item.totalElapsedMs);
   const makespan = Number(item.makespan);
   const improvement = Number(item.improvementPercent);
-  const validationText = item.validation === "passed" ? "\u901A\u8FC7" : item.validation ? String(item.validation) : item.status === "failed" ? "\u8FD0\u884C\u5931\u8D25" : item.status === "cancelled" ? "\u5DF2\u7EC8\u6B62" : "\u7B49\u5F85\u5B8C\u6210";
+  const validationText = item.validation === "passed" ? "\u901A\u8FC7" : item.validation === "skipped" ? "\u8DF3\u8FC7" : item.validation ? String(item.validation) : item.status === "failed" ? "\u8FD0\u884C\u5931\u8D25" : item.status === "cancelled" ? "\u5DF2\u7EC8\u6B62" : "\u7B49\u5F85\u5B8C\u6210";
   const comparisonDetail = baselineReady && Number.isFinite(improvement) ? `${improvement >= 0 ? "\u63D0\u5347" : "\u9000\u5316"} ${Math.abs(improvement).toFixed(2)}%` : baseline.status && baseline.status !== "succeeded" ? `Baseline ${baseline.status === "failed" ? "\u5931\u8D25" : "\u5931\u6548"}` : "";
   const resultUrl = String(item.resultUrl || "");
   const bottleneckReady = resultUrl && batchBottleneckSummaries.has(resultUrl);
@@ -4723,8 +4731,8 @@ function showBatchResult(result) {
     if (item.status === "failed") {
       return [`t${index + 1} ${item.testName || ""}\uFF1A${item.error || "\u8FD0\u884C\u5931\u8D25"}`];
     }
-    if (item.status === "succeeded" && item.validation && item.validation !== "passed") {
-      return [`t${index + 1} ${item.testName || ""}\uFF1AMoveList \u6821\u9A8C ${item.validation}${item.error ? `\uFF1B${item.error}` : ""}`];
+    if (item.status === "succeeded" && item.validation && item.validation !== "passed" && item.validation !== "skipped") {
+      return [`t${index + 1} ${item.testName || ""}\uFF1AMoveList \u6821\u9A8C ${validationDisplay(item.validation)}${item.error ? `\uFF1B${item.error}` : ""}`];
     }
     return [];
   });
@@ -4808,7 +4816,7 @@ function renderParameterComparisonRows(baseline, experiment) {
 }
 function renderParameterComparisonCard(index, baseline, experiment) {
   const makespanDelta = comparisonDelta(baseline.result?.makespan, experiment.result?.makespan, 2, " s");
-  const validation = experiment.result?.validation === "passed" ? "\u6821\u9A8C\u901A\u8FC7" : `\u6821\u9A8C ${experiment.result?.validation || "\u672A\u77E5"}`;
+  const validation = experiment.result?.validation === "passed" ? "\u6821\u9A8C\u901A\u8FC7" : experiment.result?.validation === "skipped" ? "\u6821\u9A8C\u8DF3\u8FC7" : `\u6821\u9A8C ${experiment.result?.validation || "\u672A\u77E5"}`;
   return `<article class="comparison-experiment">
     <header class="comparison-experiment-head"><div><strong>\u57FA\u51C6 vs \u5BF9\u6BD4 ${index + 1}</strong><span> ${escapeHtml3(displayStrategyName(baseline.plan.strategy))} \u2192 ${escapeHtml3(displayStrategyName(experiment.plan.strategy))}</span></div><div><span class="comparison-delta ${escapeHtml3(makespanDelta.kind)}">Makespan ${escapeHtml3(makespanDelta.text)}</span>${experiment.result?.ganttUrl ? `<a class="btn" href="${escapeHtml3(experiment.result.ganttUrl)}" target="_blank">\u7518\u7279\u56FE</a>` : ""}</div></header>
     <div class="comparison-table"><div class="comparison-row comparison-row-head"><span>\u6307\u6807</span><strong>\u57FA\u51C6</strong><strong>\u5BF9\u6BD4</strong><strong>\u5DEE\u503C</strong></div>${renderParameterComparisonRows(baseline, experiment)}</div>
@@ -4952,9 +4960,10 @@ function showResult(result) {
   document.getElementById("metricValidationLabel").textContent = "\u6821\u9A8C";
   document.getElementById("metricTime").textContent = `${cpuTime.toFixed(1)} ms`;
   document.getElementById("metricMakespan").textContent = `${result.makespan.toFixed(2)} / ${baselineReady ? Number(baseline.makespan).toFixed(2) : "\u2014"} s`;
-  document.getElementById("metricValidation").textContent = result.validation === "passed" ? "\u901A\u8FC7" : result.validation;
+  const validationValue = validationDisplay(result.validation);
+  document.getElementById("metricValidation").textContent = validationValue;
   document.getElementById("metricValidation").closest(".metric").classList.toggle("is-success", result.validation === "passed");
-  document.getElementById("metricValidation").closest(".metric").classList.toggle("is-error", result.validation !== "passed");
+  document.getElementById("metricValidation").closest(".metric").classList.toggle("is-error", result.validation !== "passed" && result.validation !== "skipped");
   const objectiveDiagnostics = [...result.rounds || []].reverse().map((round) => round.strategyDiagnostics).find((diagnostics) => diagnostics?.metrics);
   if (objectiveDiagnostics) {
     const metrics = objectiveDiagnostics.metrics;

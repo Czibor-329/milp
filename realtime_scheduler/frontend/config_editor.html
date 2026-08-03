@@ -329,7 +329,10 @@
           </div>
           <div class="run-box">
             <h2>开始运行</h2>
-            <label class="export-option"><input id="autoExportLog" type="checkbox">运行结束后自动下载 input_data 复现日志（失败也会生成）</label>
+            <div class="run-options">
+              <label class="export-option"><input id="autoExportLog" type="checkbox">自动下载日志</label>
+              <label class="export-option"><input id="skipValidationInput" type="checkbox">跳过输出校验</label>
+            </div>
             <div class="run-actions"><button class="btn" id="runButton">▶ 运行当前测试</button><button class="btn batch" id="batchRunButton">▦ 运行当前测试组</button><button class="btn batch" id="openParameterComparisonDialogButton" title="先运行当前测试，再选择策略和参数创建对比实验" disabled>⇄ 运行对比测试</button></div>
           </div>
         </article>

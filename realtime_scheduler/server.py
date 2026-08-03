@@ -344,17 +344,28 @@ class StandardAlgorithmRuntime:
         tool_topo: Mapping[str, Any],
         update_params: Mapping[str, Any],
         output: Mapping[str, Any],
+        *,
+        skip_validation: bool = False,
     ) -> None:
-        """解析首轮完整 update，并把外部 MoveList 挂到实时状态回放器。"""
+        """解析首轮完整 update，并把外部 MoveList 挂到实时状态回放器。
+
+        ``skip_validation`` 为 True 时跳过 MoveList 合法性校验，直接回放算法
+        原始输出（用户显式选择“跳过输出校验”）。
+        """
         self.tool_topo = deepcopy(dict(tool_topo))
         self.current_update = deepcopy(dict(update_params))
+        self.skip_validation = bool(skip_validation)
         self.problem = parse_task(self.tool_topo, self.current_update)
         initial_state = MachineState.from_sources(self.problem, self.current_update)
         initial_moves = list(output.get("MoveList") or [])
-        validation_issues = validate_move_list(
-            self.problem,
-            initial_moves,
-            initial_state,
+        validation_issues = (
+            []
+            if self.skip_validation
+            else validate_move_list(
+                self.problem,
+                initial_moves,
+                initial_state,
+            )
         )
         if validation_issues:
             message = (
@@ -578,10 +589,14 @@ class StandardAlgorithmRuntime:
         next_update = deepcopy(dict(update_params))
         next_problem = parse_task(self.tool_topo, next_update)
         next_moves = list(output.get("MoveList") or [])
-        validation_issues = validate_move_list(
-            next_problem,
-            next_moves,
-            next_state,
+        validation_issues = (
+            []
+            if self.skip_validation
+            else validate_move_list(
+                next_problem,
+                next_moves,
+                next_state,
+            )
         )
         if validation_issues:
             message = f"{reason} MoveList 状态校验失败：{validation_issues[0]}"
@@ -2011,6 +2026,7 @@ def _execute_standard_algorithm(
     algorithm_id: Optional[str] = None,
     *,
     builtin_strategy: Optional[str] = None,
+    skip_validation: bool = False,
 ) -> Dict[str, Any]:
     """通过同一次标准 ``init/update`` 会话执行首排和多次实时重算。
 
@@ -2090,6 +2106,7 @@ def _execute_standard_algorithm(
                 plan["device"],
                 prepared_first_update,
                 output,
+                skip_validation=skip_validation,
             )
             state_source = "src.validation.state.MachineState"
         else:
@@ -2318,7 +2335,7 @@ def _execute_standard_algorithm(
         "totalElapsedMs": total_ms,
         "makespan": makespan,
         "moveCount": len(combined_output["MoveList"]),
-        "validation": "passed",
+        "validation": "skipped" if skip_validation else "passed",
         "logs": logs,
         "updates": update_snapshots,
         "output": combined_output,
@@ -2429,6 +2446,7 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
                 f"MILP 策略总晶圆数量不能超过 {MAX_MILP_WAFERS} 片，当前为 {wafer_count} 片"
             )
     reproduction.add("AlgSchedule", _schedule_log_info(plan["device"], first_update))
+    skip_validation = bool(plan.get("skipValidation"))
     if other_algorithm_id is not None:
         return _execute_standard_algorithm(
             plan,
@@ -2439,6 +2457,7 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
             reproduction,
             started,
             other_algorithm_id,
+            skip_validation=skip_validation,
         )
     return _execute_standard_algorithm(
         plan,
@@ -2449,6 +2468,7 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
         reproduction,
         started,
         builtin_strategy=strategy,
+        skip_validation=skip_validation,
     )
 
 def execute_plan(raw_plan: Mapping[str, Any]) -> Dict[str, Any]:
@@ -4008,6 +4028,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                     str(payload.get("group") or ""),
                     str(payload.get("strategy") or "heuristic"),
                     options,
+                    skip_validation=bool(payload.get("skipValidation")),
                 )
                 self._send_json(result, HTTPStatus.ACCEPTED)
             except Exception as error:  # noqa: BLE001
@@ -4080,6 +4101,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                     str(payload.get("strategy") or "heuristic"),
                     dict(payload.get("options") or {}),
                     selected_plan=selected_plan,
+                    skip_validation=bool(payload.get("skipValidation")),
                 )
                 baseline_response = deepcopy(baseline)
                 if run_error is not None or result is None:

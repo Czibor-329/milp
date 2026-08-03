@@ -1765,7 +1765,19 @@ function buildPayload() {
   expandVisitSlotIds();
   const routes = selectReferencedRoutes(state.routes, state.rounds).map(route => ({ ...normalizeRoute(route), stages: route.stages.map(stage => ({ ...stage, visits: stage.visits.map(visit => structuredClone(visit)) })) }));
   const cleans = state.cleans.map(runtimeClean);
-  return { schemaVersion: EXPECTED_API_SCHEMA, workspaceDeviceId: state.workspaceDeviceId, workspaceTestId: state.testCaseId, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options: state.options, recipes: collectRecipes(routes), cleans, routes, rounds: structuredClone(state.rounds) };
+  return { schemaVersion: EXPECTED_API_SCHEMA, workspaceDeviceId: state.workspaceDeviceId, workspaceTestId: state.testCaseId, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options: state.options, skipValidation: skipValidationEnabled(), recipes: collectRecipes(routes), cleans, routes, rounds: structuredClone(state.rounds) };
+}
+
+/** 返回“跳过输出校验”是否已勾选。 */
+function skipValidationEnabled() {
+  return document.getElementById("skipValidationInput")?.checked === true;
+}
+
+/** 把后端校验状态转换成前端中文文案（passed→通过，skipped→跳过）。 */
+function validationDisplay(value) {
+  if (value === "passed") return "通过";
+  if (value === "skipped") return "跳过";
+  return value ? String(value) : "";
 }
 
 /** 统计所有轮次 PJob 的产品晶圆总数，用于 MILP 前端硬限制。 */
@@ -1931,7 +1943,7 @@ async function runPlan() {
       ...(logReady ? ["  复现日志已生成，可点击“导出复现日志”"] : []),
     ].join("\n"), true);
     document.getElementById("metricValidation").textContent = runResult?.metricsAvailable
-      ? (runResult.validation === "failed" ? "未通过" : String(runResult.validation || "失败"))
+      ? (runResult.validation === "failed" ? "未通过" : validationDisplay(runResult.validation) || "失败")
       : "失败";
   }
   finally { button.disabled = false; button.classList.remove("running"); button.textContent = "▶ 运行当前测试"; renderWorkspaceControls(); }
@@ -1972,7 +1984,7 @@ async function runCurrentTestGroup() {
     const response = await fetch("/api/run-batch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ deviceId: state.workspaceDeviceId, group: state.activeTestGroup, strategy: state.strategy, options: state.options }),
+      body: JSON.stringify({ deviceId: state.workspaceDeviceId, group: state.activeTestGroup, strategy: state.strategy, options: state.options, skipValidation: skipValidationEnabled() }),
     });
     let result = await response.json();
     if (!response.ok || !result.batchId || !Array.isArray(result.items)) throw new Error(result.error || `服务返回 ${response.status}`);
@@ -2085,7 +2097,7 @@ function showBatchItemOverview(item, index) {
   const elapsedTime = Number(item.totalElapsedMs);
   const makespan = Number(item.makespan);
   const improvement = Number(item.improvementPercent);
-  const validationText = item.validation === "passed" ? "通过" : item.validation ? String(item.validation) : item.status === "failed" ? "运行失败" : item.status === "cancelled" ? "已终止" : "等待完成";
+  const validationText = item.validation === "passed" ? "通过" : item.validation === "skipped" ? "跳过" : item.validation ? String(item.validation) : item.status === "failed" ? "运行失败" : item.status === "cancelled" ? "已终止" : "等待完成";
   const comparisonDetail = baselineReady && Number.isFinite(improvement)
     ? `${improvement >= 0 ? "提升" : "退化"} ${Math.abs(improvement).toFixed(2)}%`
     : baseline.status && baseline.status !== "succeeded" ? `Baseline ${baseline.status === "failed" ? "失败" : "失效"}` : "";
@@ -2333,8 +2345,8 @@ function showBatchResult(result) {
     if (item.status === "failed") {
       return [`t${index + 1} ${item.testName || ""}：${item.error || "运行失败"}`];
     }
-    if (item.status === "succeeded" && item.validation && item.validation !== "passed") {
-      return [`t${index + 1} ${item.testName || ""}：MoveList 校验 ${item.validation}${item.error ? `；${item.error}` : ""}`];
+    if (item.status === "succeeded" && item.validation && item.validation !== "passed" && item.validation !== "skipped") {
+      return [`t${index + 1} ${item.testName || ""}：MoveList 校验 ${validationDisplay(item.validation)}${item.error ? `；${item.error}` : ""}`];
     }
     return [];
   });
@@ -2424,7 +2436,7 @@ function renderParameterComparisonRows(baseline, experiment) {
 /** 将每条对比实验渲染为可直接读出差值的结果预览区块。 */
 function renderParameterComparisonCard(index, baseline, experiment) {
   const makespanDelta = comparisonDelta(baseline.result?.makespan, experiment.result?.makespan, 2, " s");
-  const validation = experiment.result?.validation === "passed" ? "校验通过" : `校验 ${experiment.result?.validation || "未知"}`;
+  const validation = experiment.result?.validation === "passed" ? "校验通过" : experiment.result?.validation === "skipped" ? "校验跳过" : `校验 ${experiment.result?.validation || "未知"}`;
   return `<article class="comparison-experiment">
     <header class="comparison-experiment-head"><div><strong>基准 vs 对比 ${index + 1}</strong><span> ${escapeHtml(displayStrategyName(baseline.plan.strategy))} → ${escapeHtml(displayStrategyName(experiment.plan.strategy))}</span></div><div><span class="comparison-delta ${escapeHtml(makespanDelta.kind)}">Makespan ${escapeHtml(makespanDelta.text)}</span>${experiment.result?.ganttUrl ? `<a class="btn" href="${escapeHtml(experiment.result.ganttUrl)}" target="_blank">甘特图</a>` : ""}</div></header>
     <div class="comparison-table"><div class="comparison-row comparison-row-head"><span>指标</span><strong>基准</strong><strong>对比</strong><strong>差值</strong></div>${renderParameterComparisonRows(baseline, experiment)}</div>
@@ -2577,9 +2589,10 @@ function showResult(result) {
   document.getElementById("metricValidationLabel").textContent = "校验";
   document.getElementById("metricTime").textContent = `${cpuTime.toFixed(1)} ms`;
   document.getElementById("metricMakespan").textContent = `${result.makespan.toFixed(2)} / ${baselineReady ? Number(baseline.makespan).toFixed(2) : "—"} s`;
-  document.getElementById("metricValidation").textContent = result.validation === "passed" ? "通过" : result.validation;
+  const validationValue = validationDisplay(result.validation);
+  document.getElementById("metricValidation").textContent = validationValue;
   document.getElementById("metricValidation").closest(".metric").classList.toggle("is-success", result.validation === "passed");
-  document.getElementById("metricValidation").closest(".metric").classList.toggle("is-error", result.validation !== "passed");
+  document.getElementById("metricValidation").closest(".metric").classList.toggle("is-error", result.validation !== "passed" && result.validation !== "skipped");
   const objectiveDiagnostics = [...(result.rounds || [])].reverse().map(round => round.strategyDiagnostics).find(diagnostics => diagnostics?.metrics);
   if (objectiveDiagnostics) {
     const metrics = objectiveDiagnostics.metrics;

@@ -373,6 +373,8 @@ def build_workspace_batch_plan(
     test_case: Mapping[str, Any],
     strategy: str,
     options: Mapping[str, Any],
+    *,
+    skip_validation: bool = False,
 ) -> Dict[str, Any]:
     """将持久化测试与设备共享库组合成可直接执行的单次请求。"""
     rounds = [
@@ -403,7 +405,7 @@ def build_workspace_batch_plan(
             runtime_device,
             device.get("robotSlots"),
         )
-    return {
+    plan = {
         "schemaVersion": API_SCHEMA_VERSION,
         "deviceName": str(device.get("name") or "selected init"),
         "device": runtime_device,
@@ -415,6 +417,10 @@ def build_workspace_batch_plan(
         "routes": routes,
         "rounds": rounds,
     }
+    if skip_validation:
+        # 仅在显式跳过校验时写入该键，避免改变 Baseline 指纹并使其全部失效。
+        plan["skipValidation"] = True
+    return plan
 
 
 def _workspace_baseline_fingerprint(
@@ -518,6 +524,7 @@ def _execute_workspace_test_with_baseline(
     options: Mapping[str, Any],
     *,
     selected_plan: Optional[Mapping[str, Any]] = None,
+    skip_validation: bool = False,
 ) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any], Optional[Exception]]:
     """确保 Baseline 有效并执行所选策略；Baseline 失败不复用旧值。"""
     fingerprint = _workspace_baseline_fingerprint(device, test_case, options)
@@ -542,7 +549,7 @@ def _execute_workspace_test_with_baseline(
 
     if strategy == "heuristic":
         plan = dict(selected_plan) if selected_plan is not None else build_workspace_batch_plan(
-            device, test_case, "heuristic", options,
+            device, test_case, "heuristic", options, skip_validation=skip_validation,
         )
         try:
             result = execute_plan(plan)
@@ -554,14 +561,14 @@ def _execute_workspace_test_with_baseline(
     if baseline is None:
         try:
             baseline_result = execute_plan(build_workspace_batch_plan(
-                device, test_case, "heuristic", options,
+                device, test_case, "heuristic", options, skip_validation=skip_validation,
             ))
             baseline = record(_successful_baseline(fingerprint, baseline_result))
         except Exception as error:  # noqa: BLE001
             baseline = record(_failed_baseline(fingerprint, error))
 
     plan = dict(selected_plan) if selected_plan is not None else build_workspace_batch_plan(
-        device, test_case, strategy, options,
+        device, test_case, strategy, options, skip_validation=skip_validation,
     )
     try:
         return execute_plan(plan), baseline, None
@@ -592,6 +599,7 @@ def _execute_workspace_test_batch(
     strategy: str,
     options: Mapping[str, Any],
     *,
+    skip_validation: bool = False,
     maximum_workers: int = 4,
     progress_callback: Optional[Any] = None,
     cancel_event: Optional[threading.Event] = None,
@@ -617,6 +625,7 @@ def _execute_workspace_test_batch(
         try:
             selected_plan = build_workspace_batch_plan(
                 device, test_case, strategy, options,
+                skip_validation=skip_validation,
             )
             result, baseline, run_error = _execute_workspace_test_with_baseline(
                 device,
@@ -624,6 +633,7 @@ def _execute_workspace_test_batch(
                 strategy,
                 options,
                 selected_plan=selected_plan,
+                skip_validation=skip_validation,
             )
             if run_error is not None or result is None:
                 error = run_error or RuntimeError("运行未返回结果")
@@ -753,6 +763,7 @@ def run_workspace_test_batch(
     strategy: str,
     options: Mapping[str, Any],
     *,
+    skip_validation: bool = False,
     maximum_workers: int = 4,
 ) -> Dict[str, Any]:
     """同步运行当前测试组；保留给测试和非 HTTP 调用方。"""
@@ -764,6 +775,7 @@ def run_workspace_test_batch(
         normalized_group,
         strategy,
         options,
+        skip_validation=skip_validation,
         maximum_workers=maximum_workers,
     )
     result.update({
@@ -814,6 +826,7 @@ def start_workspace_test_batch(
     strategy: str,
     options: Mapping[str, Any],
     *,
+    skip_validation: bool = False,
     maximum_workers: int = 4,
 ) -> Dict[str, Any]:
     """创建后台批量任务并立即返回可轮询的初始状态。"""
@@ -878,6 +891,7 @@ def start_workspace_test_batch(
                 normalized_group,
                 strategy,
                 options,
+                skip_validation=skip_validation,
                 maximum_workers=worker_count,
                 progress_callback=update_item,
                 cancel_event=cancel_event,

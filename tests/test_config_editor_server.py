@@ -1845,6 +1845,65 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual(20.0, item["improvementPercent"])
         self.assertEqual("/api/results/result-id", item["resultUrl"])
 
+    def test_skip_validation_bypasses_move_list_checks(self) -> None:
+        """勾选“跳过输出校验”后不再调用 MoveList 校验，结果标记为 skipped。"""
+        pse300 = json.loads(PSE300_PATH.read_text(encoding="utf-8"))
+        plan = {
+            "deviceName": PSE300_PATH.name,
+            "device": pse300,
+            "strategy": "heuristic",
+            "roundCount": 1,
+            "options": {},
+            "recipes": [{"name": "R1", "time": 20, "modules": "PM1,PM2", "weight": {}}],
+            "cleans": [],
+            "routes": [_route("R1", "PM1,PM2", "R1")],
+            "rounds": [{"currentTime": 0, "cjobs": [{"taskId": "1", "jobType": "NormalLot", "priority": 1, "taskMode": "Smart", "pjobs": [
+                {"jobName": "P1", "routeRef": "R1", "loadPort": "LP1", "waferCount": 2, "priority": 1},
+            ]}]}],
+        }
+        with patch.object(config_server, "validate_move_list", return_value=["Mock 无效动作"]):
+            with self.assertRaisesRegex(LoggedPlanError, "MoveList 状态校验失败"):
+                execute_plan(plan)
+        with patch.object(config_server, "validate_move_list", return_value=["Mock 无效动作"]) as mocked:
+            result = execute_plan({**plan, "skipValidation": True})
+        self.assertTrue(result["ok"])
+        self.assertEqual("skipped", result["validation"])
+        self.assertEqual(1, len(result["rounds"]))
+        mocked.assert_not_called()
+
+    def test_batch_skip_validation_bypasses_move_list_checks(self) -> None:
+        """批量运行勾选“跳过输出校验”后，每项结果标记为 skipped 且不再校验。"""
+        pse300 = json.loads(PSE300_PATH.read_text(encoding="utf-8"))
+        test_case = {
+            "id": "test-skip-batch", "name": "跳过校验批量案例", "group": "回归",
+            "roundCount": 1, "options": {},
+            "rounds": [{"currentTime": 0, "cjobs": [{"taskId": "1", "jobType": "NormalLot", "priority": 1, "taskMode": "Smart", "pjobs": [
+                {"jobName": "P1", "routeRef": "R1", "loadPort": "LP1", "waferCount": 2, "priority": 1},
+            ]}]}],
+        }
+        device = {
+            "id": "device-skip-batch", "name": "fixture.json", "device": pse300,
+            "routes": [_route("R1", "PM1,PM2", "R1")],
+            "cleans": [], "tests": [test_case],
+        }
+        # 默认不写 skipValidation 键，保证 Baseline 指纹与旧版本一致。
+        default_plan = config_server.build_workspace_batch_plan(device, test_case, "heuristic", {})
+        self.assertNotIn("skipValidation", default_plan)
+        with (
+            patch.object(config_server, "get_workspace_device", return_value=device),
+            patch.object(config_server, "validate_move_list", return_value=["Mock 无效动作"]) as mocked,
+            patch.object(config_server, "_persist_workspace_baseline", return_value=True),
+            patch.object(config_server, "save_result", return_value="result-id"),
+            patch.object(config_server, "save_reproduction_log", return_value="log-id"),
+        ):
+            result = config_server.run_workspace_test_batch(
+                "device-skip-batch", "回归", "heuristic", {}, skip_validation=True, maximum_workers=1,
+            )
+        item = result["items"][0]
+        self.assertEqual("succeeded", item["status"])
+        self.assertEqual("skipped", item["validation"])
+        mocked.assert_not_called()
+
     def test_robot_wafer_dwell_time_tracks_pick_place_and_swap_waits(self) -> None:
         """机器人持片驻留应统计 Pick/Place 间隙，并正确衔接 Swap 的收发晶圆。"""
         moves = [

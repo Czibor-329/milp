@@ -300,8 +300,9 @@
     .run-actions .btn.batch:hover { background: rgba(255,255,255,.12); }
     .run-actions .btn.batch.cancel { border-color: #ffd1d6; color: #fff; background: rgba(168, 27, 43, .42); }
     .run-actions .btn.batch.cancel:hover { background: rgba(168, 27, 43, .62); }
-    .export-option { display: flex; align-items: center; gap: 8px; margin: 14px 0; color: #e5ecff; font-size: 12px; cursor: pointer; }
-    .export-option input { width: 16px; height: 16px; margin: 0; accent-color: #fff; }
+    .run-options { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; margin: 14px 0; }
+    .export-option { display: inline-flex; align-items: center; gap: 8px; color: #e5ecff; font-size: 12px; cursor: pointer; margin: 0; }
+    .export-option input { width: 16px; height: 16px; margin: 0; accent-color: #fff; flex: none; }
     .run-box .btn.running::before { content: ""; width: 14px; height: 14px; border: 2px solid #b9c7eb; border-top-color: var(--brand); border-radius: 50%; animation: spin .8s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
     .strategy-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 10px; }

@@ -63,6 +63,7 @@ npm run build
 - `LoadLock 管理器`：Heuristic 默认共用 Petri-ETA 管理器；上层策略只决定发哪片和工艺顺序，管理器在 Petri 安全候选内按动态完成时刻绑定 LA/LB。
 - `MILP 最优求解`：独立调用 Gurobi，只允许首次排程且所有 PJob 产品晶圆总数不超过12片；页面显示是否已证明最优和最终 gap。
 - `other_alg 标准算法`：自动扫描算法仓库 `alg/other_alg/<算法名>`，通过包内正式 `CT.infer.scheduler.init/update` 入口运行。每次重算前使用算法仓库的状态回放能力生成全量物料、机台、机器人快照以及 `RemoveList`，支持连续多轮重算；结果中的 `updates` 保留每次实际发送的数据。
+- `跳过输出校验`：运行策略面板可勾选“跳过输出校验”，此时不再对 MoveList 做平台侧状态校验（首排与重算均跳过），直接展示算法原始输出，结果校验状态标记为 `skipped`；批量运行同样生效。
 
 内置算法与 `other_alg` 现在共用同一套标准 update 数据流。内置入口示例：
 
