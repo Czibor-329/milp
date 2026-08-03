@@ -78,6 +78,12 @@ export interface DurationMetricSummary {
   coefficientOfVariation: number;
   sampleCount: number;
 }
+export interface WaferResidenceTime {
+  wafer: string;
+  enteredAt: number;
+  completedAt: number;
+  duration: number;
+}
 export interface SchedulePerformance {
   window: PerformanceWindow;
   resources: ResourcePerformance[];
@@ -90,6 +96,7 @@ export interface SchedulePerformance {
   processChamberDwellTime: DurationMetricSummary;
   robotWaferDwellTime: DurationMetricSummary;
   waferSystemResidenceTime: DurationMetricSummary;
+  waferSystemResidenceTimes: WaferResidenceTime[];
   loadLockCycles: LoadLockCycle[];
 }
 export interface BottleneckUtilizationSummary {
@@ -654,24 +661,29 @@ function robotWaferDwellTime(
   return summarizeDurations(durations);
 }
 
-/** 统计晶圆离开 LoadPort 到返回 LoadPort 的单片系统停留时间。 */
-function waferSystemResidenceTime(
+/** 返回完整结果中每片晶圆离开 LoadPort 到返回 LoadPort 的系统停留时间。 */
+function waferSystemResidenceTimes(
   moves: NormalizedMove[],
   device: DeviceDefinition | null,
-  window: PerformanceWindow,
-): DurationMetricSummary {
+): WaferResidenceTime[] {
   const boundaries = waferBoundaryTimes(moves, device);
-  const durations: number[] = [];
+  const samples: WaferResidenceTime[] = [];
   for (const [material, completedAt] of boundaries.completions) {
     const enteredAt = boundaries.entries.get(material);
     if (
       enteredAt === undefined
       || completedAt < enteredAt - PERFORMANCE_TIME_TOLERANCE
-      || !completionInsideWindow(completedAt, window)
     ) continue;
-    durations.push(completedAt - enteredAt);
+    samples.push({
+      wafer: material,
+      enteredAt,
+      completedAt,
+      duration: completedAt - enteredAt,
+    });
   }
-  return summarizeDurations(durations);
+  return samples.sort((left, right) => (
+    left.completedAt - right.completedAt || naturalCompare(left.wafer, right.wafer)
+  ));
 }
 
 interface PendingLoadLockCycle extends LoadLockCycle {
@@ -1052,7 +1064,12 @@ export function analyzeSchedulePerformance(
     : 0;
   const chamberDwellTime = processChamberDwellTime(records, device, window);
   const robotDwellTime = robotWaferDwellTime(records, window);
-  const systemResidenceTime = waferSystemResidenceTime(records, device, window);
+  const systemResidenceTimes = waferSystemResidenceTimes(records, device);
+  const systemResidenceTime = summarizeDurations(
+    systemResidenceTimes
+      .filter(sample => completionInsideWindow(sample.completedAt, window))
+      .map(sample => sample.duration),
+  );
   const loadLockCycles = buildLoadLockCycles(records, device);
   return {
     window,
@@ -1067,6 +1084,7 @@ export function analyzeSchedulePerformance(
     processChamberDwellTime: chamberDwellTime,
     robotWaferDwellTime: robotDwellTime,
     waferSystemResidenceTime: systemResidenceTime,
+    waferSystemResidenceTimes: systemResidenceTimes,
     loadLockCycles,
   };
 }

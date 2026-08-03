@@ -58,6 +58,17 @@ class BackendAnalysisTests(unittest.TestCase):
         self.assertEqual("full", result["window"]["method"])
         self.assertEqual(1, result["completedWaferCount"])
         self.assertIn("PM1", {resource["name"] for resource in result["resources"]})
+        self.assertEqual(
+            [
+                {
+                    "wafer": "1",
+                    "enteredAt": 1.0,
+                    "completedAt": 5.0,
+                    "duration": 4.0,
+                }
+            ],
+            result["waferSystemResidenceTimes"],
+        )
         self.assertIn("diagnostics", result)
 
     def test_context_is_built_on_backend_from_routes_and_rounds(self) -> None:

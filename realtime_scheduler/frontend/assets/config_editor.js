@@ -996,7 +996,7 @@ function renderRobotHub(robot, environment, angleDegrees) {
         <span class="robot-base"><i></i></span>
         <span class="robot-arm">
           <i class="robot-arm-beam"></i>
-          <span class="robot-end-effector ${wafer ? "is-occupied" : "is-empty"}"><i class="robot-fork-tine robot-fork-tine-top"></i><i class="robot-fork-tine robot-fork-tine-bottom"></i>${wafer}</span>
+          <span class="robot-end-effector ${wafer ? "is-occupied" : "is-empty"}">${wafer}</span>
         </span>
       </div>
     </article>`;
@@ -1464,8 +1464,83 @@ function renderCategoryBars(resource, windowDuration) {
     return `<span class="category-${category}" style="width:${width.toFixed(3)}%" title="${ACTIVITY_CATEGORY_LABELS[category]} ${formatSeconds2(duration)} s"></span>`;
   }).join("");
 }
+function groupedBottleneckResources(performance2) {
+  const resources = performance2.resources;
+  const byName = new Map(resources.map((resource) => [resource.name, resource]));
+  const assigned = /* @__PURE__ */ new Set();
+  const memberGroups = [];
+  const addGroup = (members) => {
+    const uniqueMembers = members.filter((member) => !assigned.has(member.name));
+    if (!uniqueMembers.length) return;
+    uniqueMembers.forEach((member) => assigned.add(member.name));
+    memberGroups.push(uniqueMembers);
+  };
+  for (const candidate of performance2.bottleneckCandidates) {
+    if (candidate.kind !== "process-group") continue;
+    addGroup(candidate.resourceNames.map((name) => byName.get(name)).filter((resource) => Boolean(resource)));
+  }
+  const remainingProcess = resources.filter((resource) => resource.kind === "process" && !assigned.has(resource.name));
+  addGroup(remainingProcess);
+  addGroup(resources.filter((resource) => resource.kind === "loadlock" && resource.busyTime > PERFORMANCE_DISPLAY_TOLERANCE));
+  addGroup(resources.filter((resource) => resource.kind === "loadport" && resource.busyTime > PERFORMANCE_DISPLAY_TOLERANCE));
+  for (const resource of resources.filter((resource2) => resource2.kind === "robot" || resource2.kind === "auxiliary")) addGroup([resource]);
+  const sameMembers = (candidate, names) => candidate.resourceNames.length === names.length && candidate.resourceNames.every((name) => names.includes(name));
+  return memberGroups.map((members) => {
+    const memberNames = members.map((member) => member.name).sort((left, right) => left.localeCompare(right, void 0, { numeric: true, sensitivity: "base" }));
+    const memberCount = members.length;
+    const categoryTimes = Object.fromEntries(ACTIVITY_CATEGORIES.map((category) => [
+      category,
+      members.reduce((sum, member) => sum + member.categoryTimes[category], 0) / memberCount
+    ]));
+    return {
+      name: memberNames.join(" / "),
+      memberNames,
+      kind: members[0].kind,
+      utilization: members.reduce((sum, member) => sum + member.utilization, 0) / memberCount,
+      busyTime: members.reduce((sum, member) => sum + member.busyTime, 0) / memberCount,
+      categoryTimes,
+      candidate: performance2.bottleneckCandidates.find((candidate) => sameMembers(candidate, memberNames)) ?? null
+    };
+  }).filter((group) => group.busyTime > PERFORMANCE_DISPLAY_TOLERANCE).sort((left, right) => right.utilization - left.utilization || left.name.localeCompare(right.name, void 0, { numeric: true, sensitivity: "base" })).slice(0, 4);
+}
+function withWaferResidenceTimes(performance2, moves, device) {
+  if (performance2.waferSystemResidenceTimes?.length || !moves.length) return performance2;
+  const entries = /* @__PURE__ */ new Map();
+  const completions = /* @__PURE__ */ new Map();
+  const stationType = (name) => String(device?.Stations?.[name]?.Type ?? "");
+  for (const move of normalizeMoves(moves)) {
+    if (PICK_MOVE_TYPES.has(move.MoveType)) {
+      const source = firstStation(move, "SrcStationList");
+      if (!isLoadPortName(source, stationType(source))) continue;
+      for (const material of materialIds(move)) {
+        if (!entries.has(material)) entries.set(material, move.EndTime);
+      }
+    } else if (PLACE_MOVE_TYPES.has(move.MoveType)) {
+      const destination = firstStation(move, "DestStationList");
+      if (!isLoadPortName(destination, stationType(destination))) continue;
+      for (const material of materialIds(move)) completions.set(material, move.EndTime);
+    } else if (move.MoveType === SWAP_MOVE) {
+      const station = firstStation(move, "StationList");
+      if (!isLoadPortName(station, stationType(station))) continue;
+      for (const material of materialIds(move, "SendMatList")) {
+        if (!entries.has(material)) entries.set(material, move.EndTime);
+      }
+      for (const material of materialIds(move, "RecvMatList")) {
+        completions.set(material, move.EndTime);
+      }
+    }
+  }
+  const samples = [];
+  for (const [wafer, completedAt] of completions) {
+    const enteredAt = entries.get(wafer);
+    if (enteredAt === void 0 || completedAt < enteredAt - PERFORMANCE_DISPLAY_TOLERANCE) continue;
+    samples.push({ wafer, enteredAt, completedAt, duration: completedAt - enteredAt });
+  }
+  samples.sort((left, right) => left.completedAt - right.completedAt || naturalCompare(left.wafer, right.wafer));
+  return samples.length ? { ...performance2, waferSystemResidenceTimes: samples } : performance2;
+}
 function renderBottleneckAnalysis(performance2) {
-  const { window: window2, bottleneckCandidates, resources } = performance2;
+  const { window: window2 } = performance2;
   const confidenceLabels = { high: "\u8BC1\u636E\u8F83\u5F3A", medium: "\u8BC1\u636E\u4E2D\u7B49", low: "\u8BC1\u636E\u8F83\u5F31" };
   const resourceKindLabels = {
     robot: "\u673A\u68B0\u624B",
@@ -1474,18 +1549,17 @@ function renderBottleneckAnalysis(performance2) {
     loadport: "LoadPort",
     auxiliary: "\u8F85\u52A9\u6A21\u5757"
   };
-  const activeResources = resources.filter((resource) => resource.busyTime > PERFORMANCE_DISPLAY_TOLERANCE).sort((left, right) => right.utilization - left.utilization);
-  const displayedResources = activeResources.slice(0, 6);
-  const remainingResources = activeResources.slice(displayedResources.length);
+  const displayedResources = groupedBottleneckResources(performance2);
   const resourceRows = (items) => items.map((resource, index) => {
-    const candidate = bottleneckCandidates.filter((item) => item.resourceNames.includes(resource.name)).sort((left, right) => right.score - left.score)[0];
+    const candidate = resource.candidate;
     const evidenceScore = candidate ? Math.round(candidate.score * 100) : null;
     const evidenceLabel = candidate ? confidenceLabels[candidate.confidence] : "\u672A\u5165\u9009\u5019\u9009";
+    const resourceLabel = resource.memberNames.length > 1 ? `${resourceKindLabels[resource.kind]} \xB7 ${resource.memberNames.length} \u53F0\u5E73\u5747` : resourceKindLabels[resource.kind];
     return `
       <li class="resource-utilization-row">
         <div class="resource-utilization-name">
           <span>${index + 1}</span>
-          <div><strong>${escapeHtml(resource.name)}</strong><small>${escapeHtml(resourceKindLabels[resource.kind])}</small></div>
+          <div><strong>${escapeHtml(resource.name)}</strong><small>${escapeHtml(resourceLabel)}</small></div>
         </div>
         <strong class="resource-utilization-percent">${formatPercent(resource.utilization)}</strong>
         <div class="utilization-track" aria-label="${escapeHtml(resource.name)} \u5360\u7528\u7387 ${formatPercent(resource.utilization)}">${renderCategoryBars(resource, window2.duration)}</div>
@@ -1498,17 +1572,59 @@ function renderBottleneckAnalysis(performance2) {
     <header class="bottleneck-analysis-head">
       <div>
         <strong>\u74F6\u9888\u5206\u6790</strong>
-        <span>\u9ED8\u8BA4\u663E\u793A\u5229\u7528\u7387\u6700\u9AD8\u7684 6 \u4E2A\u6D3B\u8DC3\u8D44\u6E90\uFF0C\u5E76\u7ED9\u51FA\u5BF9\u5E94\u7684\u74F6\u9888\u8BC1\u636E\u5F97\u5206\u3002</span>
       </div>
-      <label class="bottleneck-window-control">\u7EDF\u8BA1\u53E3\u5F84<span class="bottleneck-window-slot"></span></label>
+      <label class="bottleneck-window-control"><span class="visually-hidden">\u7EDF\u8BA1\u53E3\u5F84</span><div class="bottleneck-window-slot"></div></label>
     </header>
     <div class="resource-utilization-head" aria-hidden="true"><span>\u8D44\u6E90</span><span>\u5229\u7528\u7387</span><span>\u5360\u7528\u7EC4\u6210</span><span>\u6D3B\u8DC3\u65F6\u957F</span><span>\u74F6\u9888\u8BC1\u636E\u5F97\u5206</span></div>
     <ol class="resource-utilization-list">
       ${resourceRows(displayedResources)}
     </ol>
     <div class="performance-legend" aria-label="\u5360\u7528\u7EC4\u6210\u56FE\u4F8B">${legend}</div>
-    ${remainingResources.length ? `<details class="additional-resource-details"><summary>\u67E5\u770B\u5176\u4ED6\u6D3B\u8DC3\u8D44\u6E90\uFF08${remainingResources.length} \u4E2A\uFF09</summary><ol class="resource-utilization-list">${resourceRows(remainingResources)}</ol></details>` : ""}
-    <p class="performance-window-note">${escapeHtml(window2.detail)}</p>`;
+  `;
+}
+function renderWaferResidenceChart(performance2) {
+  const samples = performance2.waferSystemResidenceTimes ?? [];
+  if (!samples.length) {
+    return `
+      <header class="residence-chart-head"><strong>\u7CFB\u7EDF\u9A7B\u7559\u65F6\u95F4\u5206\u6790</strong></header>
+      <div class="residence-chart-empty">\u5F53\u524D\u7ED3\u679C\u4E2D\u6CA1\u6709\u5B8C\u6210\u5F80\u8FD4 LoadPort \u7684\u6676\u5706\u3002</div>`;
+  }
+  const meanSeconds = samples.reduce((sum, sample) => sum + sample.duration, 0) / samples.length;
+  const maximumSeconds = Math.max(...samples.map((sample) => sample.duration));
+  const minimumSeconds = Math.min(...samples.map((sample) => sample.duration));
+  const rangeToMinimumPercent = minimumSeconds > PERFORMANCE_DISPLAY_TOLERANCE ? (maximumSeconds - minimumSeconds) / minimumSeconds * 100 : null;
+  const plotHeight = 170;
+  const scaleMaximum = Math.max(maximumSeconds, 1) * 1.08;
+  const meanHeight = Math.min(meanSeconds / scaleMaximum * plotHeight, plotHeight);
+  const bars = samples.map((sample) => {
+    const height = Math.max(sample.duration / scaleMaximum * plotHeight, 2);
+    const wafer = escapeHtml(String(sample.wafer));
+    const duration = formatSeconds2(sample.duration);
+    return `
+      <li class="residence-bar-item" role="img" aria-label="\u6676\u5706 ${wafer}\uFF0C\u7CFB\u7EDF\u9A7B\u7559 ${duration} \u79D2" title="\u6676\u5706 ${wafer} \xB7 \u79BB\u5F00 ${formatSeconds2(sample.enteredAt)} s \xB7 \u8FD4\u56DE ${formatSeconds2(sample.completedAt)} s \xB7 \u9A7B\u7559 ${duration} s">
+        <strong>${duration}</strong>
+        <span class="residence-bar-track"><i style="height:${height.toFixed(2)}px"></i></span>
+        <small>${wafer}</small>
+      </li>`;
+  }).join("");
+  return `
+    <header class="residence-chart-head">
+      <strong>\u7CFB\u7EDF\u9A7B\u7559\u65F6\u95F4\u5206\u6790</strong>
+      <div class="residence-chart-summary">
+        <span>\u5E73\u5747 <b>${formatSeconds2(meanSeconds)} s</b></span>
+        <span>\u6700\u5927 <b>${formatSeconds2(maximumSeconds)} s</b></span>
+        <span>\u6781\u5DEE/\u6700\u5C0F\u503C <b>${rangeToMinimumPercent === null ? "\u2014" : `${rangeToMinimumPercent.toFixed(1)}%`}</b></span>
+        <span>\u6837\u672C <b>${samples.length} \u7247</b></span>
+      </div>
+    </header>
+    <div class="residence-chart-body">
+      <div class="residence-chart-scroll" tabindex="0" aria-label="\u9010\u7247\u6676\u5706\u7CFB\u7EDF\u9A7B\u7559\u65F6\u95F4\u67F1\u72B6\u56FE\uFF0C\u53EF\u6A2A\u5411\u6EDA\u52A8">
+        <div class="residence-chart-plot">
+          <div class="residence-mean-line" style="bottom:${(28 + meanHeight).toFixed(2)}px"><span>\u5E73\u5747 ${formatSeconds2(meanSeconds)} s</span></div>
+          <ol class="residence-bars">${bars}</ol>
+        </div>
+      </div>
+    </div>`;
 }
 function renderLoadLockCard(performance2) {
   const ganttCycles = normalizeGanttCycles(performance2.loadLockCycles);
@@ -1585,6 +1701,10 @@ function renderSchedulePerformance(performance2) {
           <small>\u79BB\u5F00 LP \u2192 \u8FD4\u56DE LP \xB7 CV ${performance2.waferSystemResidenceTime.coefficientOfVariation.toFixed(2)} \xB7 \u6700\u5927 ${formatSeconds2(performance2.waferSystemResidenceTime.maxSeconds)} s \xB7 ${performance2.waferSystemResidenceTime.sampleCount} \u7247</small>
         </div>
       </div>
+    </section>
+
+    <section class="result-card wafer-residence-card">
+      ${renderWaferResidenceChart(performance2)}
     </section>
 
     <section class="result-card bottleneck-analysis-card">
@@ -2033,9 +2153,10 @@ var VisualizationWorkspace = class {
         rounds: this.analysisRounds
       });
       if (requestVersion !== this.analysisRequestVersion) return;
-      this.analysis = result.analysis;
+      const analysis = withWaferResidenceTimes(result.analysis, this.moves, this.device);
+      this.analysis = analysis;
       this.bottleneckSummary = result.bottleneck;
-      this.elements.performance.innerHTML = renderSchedulePerformance(result.analysis);
+      this.elements.performance.innerHTML = renderSchedulePerformance(analysis);
       const windowSlot = this.elements.performance.querySelector(".bottleneck-window-slot");
       if (windowSlot) {
         this.elements.performanceWindow.tabIndex = 0;

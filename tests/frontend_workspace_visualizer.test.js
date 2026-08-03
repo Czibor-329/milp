@@ -879,8 +879,7 @@ test("E2E 决策在机器人尚未执行时驱动单槽机械臂朝向且不再�
   assert.match(topology, /class="robot-hub robot-hub-atmosphere[^>]*style="--robot-arm-angle:[\d.-]+deg"[^>]*aria-label="ATR，单槽机械手/);
   assert.match(topology, /class="robot-end-effector is-empty"/);
   assert.doesNotMatch(topology, /class="robot-wrist-joint"/);
-  assert.match(topology, /class="robot-fork-tine robot-fork-tine-top"/);
-  assert.match(topology, /class="robot-fork-tine robot-fork-tine-bottom"/);
+  assert.doesNotMatch(topology, /robot-fork-tine/);
   assert.doesNotMatch(topology, /robot-reach-sector/);
   assert.match(topology, /class="robot-environment-badge">ATM</);
   assert.doesNotMatch(topology, /topology-target-arrows|<line /);
@@ -923,8 +922,8 @@ test("机械手清除旧坐标偏移，并按 PRE_TRANS 进度连续旋转", () 
   assert.match(css, /\.equipment-process \.equipment-process-shell \{[^}]*clip-path:\s*polygon\(29\.29% 0, 70\.71% 0, 100% 29\.29%, 100% 70\.71%, 70\.71% 100%, 29\.29% 100%, 0 70\.71%, 0 29\.29%\)/);
   assert.match(css, /\.equipment-port[^}]*border:\s*2px solid #667b94;\s*border-radius:\s*3px;\s*clip-path:\s*none;/);
   assert.match(css, /\.robot-arm[^}]*width:\s*88px;/);
-  assert.match(css, /\.robot-fork-tine[^}]*width:\s*24px;/);
-  assert.match(css, /\.robot-end-effector::before[^}]*left:\s*-6px;[^}]*height:\s*12px;/);
+  assert.match(css, /\.robot-end-effector \{[^}]*width:\s*26px;[^}]*border-radius:\s*50%;/);
+  assert.doesNotMatch(css, /\.robot-fork-tine/);
   assert.match(css, /\.robot-environment-badge[^}]*top:\s*calc\(50% - 44px\);[^}]*padding:\s*2px 4px;/);
   assert.doesNotMatch(css, /\.robot-environment-badge[^}]*min-width:/);
   assert.match(css, /\.topology-interface-bay[^}]*right:\s*30%;\s*left:\s*30%;/);
@@ -1205,7 +1204,39 @@ test("性能分析用首片完工到末片投料剔除启动与收尾", () => {
   assert.equal(performance.waferSystemResidenceTime.sampleCount, 2);
   assert.equal(performance.waferSystemResidenceTime.meanSeconds, 31.5);
   assert.ok(Math.abs(performance.waferSystemResidenceTime.coefficientOfVariation - (1 / 9)) < 1e-9);
+  assert.deepEqual(performance.waferSystemResidenceTimes, [
+    { wafer: "W1", enteredAt: 2, completedAt: 30, duration: 28 },
+    { wafer: "W2", enteredAt: 10, completedAt: 45, duration: 35 },
+    { wafer: "W3", enteredAt: 40, completedAt: 60, duration: 20 },
+    { wafer: "W4", enteredAt: 50, completedAt: 75, duration: 25 },
+  ]);
   assert.equal(logic.analyzeSchedulePerformance(performanceMoves, device, "full").completedWaferCount, 4);
+});
+
+test("逐片晶圆系统驻留图展示柱、均值线和每片时长", () => {
+  const performance = logic.analyzeSchedulePerformance(performanceMoves, device, "steady");
+  const chart = logic.renderWaferResidenceChart(performance);
+  assert.match(chart, /系统驻留时间分析/);
+  assert.match(chart, /平均 27\.0 s/);
+  assert.match(chart, /极差\/最小值 <b>75\.0%<\/b>/);
+  assert.match(chart, /晶圆 W1，系统驻留 28\.0 秒/);
+  assert.match(chart, /晶圆 W2，系统驻留 35\.0 秒/);
+  assert.equal((chart.match(/class="residence-bar-item"/g) ?? []).length, 4);
+});
+
+test("旧分析响应缺少逐片字段时从当前 MoveList 补齐驻留图", () => {
+  const current = logic.analyzeSchedulePerformance(performanceMoves, device, "steady");
+  const legacy = { ...current };
+  delete legacy.waferSystemResidenceTimes;
+
+  const hydrated = logic.withWaferResidenceTimes(legacy, performanceMoves, device);
+  assert.deepEqual(hydrated.waferSystemResidenceTimes, [
+    { wafer: "W1", enteredAt: 2, completedAt: 30, duration: 28 },
+    { wafer: "W2", enteredAt: 10, completedAt: 45, duration: 35 },
+    { wafer: "W3", enteredAt: 40, completedAt: 60, duration: 20 },
+    { wafer: "W4", enteredAt: 50, completedAt: 75, duration: 25 },
+  ]);
+  assert.doesNotMatch(logic.renderWaferResidenceChart(hydrated), /没有完成往返 LoadPort/);
 });
 
 test("性能分析统计加工腔、机器手非运输驻留和晶圆系统停留", () => {
@@ -1313,6 +1344,53 @@ test("并行工艺腔按完整工序容量组识别，即使其中一台没有�
   assert.equal(performance.primaryBottleneck.label, "工序容量组 · PM1 / PM2");
   assert.deepEqual(performance.primaryBottleneck.resourceNames, ["PM1", "PM2"]);
   assert.equal(performance.primaryBottleneck.utilization, 0.5);
+});
+
+test("瓶颈分析合并同工序设备、取组平均且最多显示四行", () => {
+  const categoryTimes = (process, transfer = 0, environment = 0) => ({
+    process,
+    clean: 0,
+    door: 0,
+    transfer,
+    environment,
+    other: 0,
+  });
+  const resource = (name, kind, utilization, times) => ({
+    name,
+    kind,
+    utilization,
+    busyTime: utilization * 100,
+    categoryTimes: times,
+  });
+  const performance = {
+    resources: [
+      resource("PM1", "process", 0.9, categoryTimes(90)),
+      resource("PM2", "process", 0.7, categoryTimes(70)),
+      resource("LA", "loadlock", 0.6, categoryTimes(0, 10, 50)),
+      resource("LB", "loadlock", 0.4, categoryTimes(0, 10, 30)),
+      resource("LC", "loadlock", 0, categoryTimes(0)),
+      resource("LD", "loadlock", 0, categoryTimes(0)),
+      resource("VTR", "robot", 0.3, categoryTimes(0, 30)),
+      resource("ATR", "robot", 0.2, categoryTimes(0, 20)),
+      resource("LP1", "loadport", 0.1, categoryTimes(0, 10)),
+    ],
+    bottleneckCandidates: [{
+      kind: "process-group",
+      resourceNames: ["PM1", "PM2"],
+      score: 0.88,
+      confidence: "high",
+    }],
+  };
+
+  const groups = logic.groupedBottleneckResources(performance);
+  assert.deepEqual(groups.map(group => group.name), ["PM1 / PM2", "LA / LB", "VTR", "ATR"]);
+  assert.equal(groups.length, 4);
+  assert.equal(groups[0].utilization, 0.8);
+  assert.equal(groups[0].busyTime, 80);
+  assert.equal(groups[0].categoryTimes.process, 80);
+  assert.equal(groups[0].candidate.score, 0.88);
+  assert.equal(groups[1].utilization, 0.5);
+  assert.equal(groups[1].categoryTimes.environment, 40);
 });
 
 test("路径配置可独立提取并行工序容量组", () => {
@@ -1490,4 +1568,15 @@ test("工艺腔渲染为正八边形 shell 结构，清洁状态使用浅粉色�
   assert.match(css, /\.reference-grid-canvas \.equipment-process \.equipment-process-shell \{[^}]*clip-path:\s*polygon\(29\.29% 0, 70\.71% 0, 100% 29\.29%, 100% 70\.71%, 70\.71% 100%, 29\.29% 100%, 0 70\.71%, 0 29\.29%\)/);
   assert.match(css, /\.reference-grid-canvas \.equipment-process\.status-cleaning \.equipment-process-shell \{ background: #fdeef1; \}/);
   assert.match(css, /\.reference-grid-canvas \.equipment-process\.status-cleaning \{ background: #d98a97; \}/);
+});
+
+test("瓶颈分析隐藏说明、窗口详情和统计口径可见标签", () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, "../realtime_scheduler/frontend/src/workspace_visualizer.ts"),
+    "utf8",
+  );
+  assert.doesNotMatch(source, /同一道工序的设备合并取平均，按平均利用率最多显示 4 行。/);
+  assert.doesNotMatch(source, /class="performance-window-note"/);
+  assert.doesNotMatch(source, /class="bottleneck-window-control">统计口径/);
+  assert.match(source, /class="visually-hidden">统计口径<\/span>/);
 });

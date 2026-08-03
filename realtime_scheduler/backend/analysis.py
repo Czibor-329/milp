@@ -622,19 +622,29 @@ def _robot_wafer_dwell_time(
     return _summarize_durations(durations)
 
 
-def _wafer_system_residence_time(
+def _wafer_system_residence_times(
     moves: Sequence[Mapping[str, Any]],
     device: Optional[Mapping[str, Any]],
-    window: Mapping[str, Any],
-) -> Dict[str, Any]:
-    """统计晶圆离开 LoadPort 到返回 LoadPort 的系统停留时间。"""
+) -> List[Dict[str, Any]]:
+    """返回完整结果中每片晶圆离开 LoadPort 到返回 LoadPort 的停留时间。"""
     entries, completions = _wafer_boundary_times(moves, device)
-    return _summarize_durations(
-        completed_at - entries[material]
+    samples = [
+        {
+            "wafer": material,
+            "enteredAt": entries[material],
+            "completedAt": completed_at,
+            "duration": completed_at - entries[material],
+        }
         for material, completed_at in completions.items()
         if material in entries
         and completed_at >= entries[material] - PERFORMANCE_TIME_TOLERANCE
-        and _completion_inside_window(completed_at, window)
+    ]
+    return sorted(
+        samples,
+        key=lambda sample: (
+            sample["completedAt"],
+            _natural_key(str(sample["wafer"])),
+        ),
     )
 
 
@@ -1155,6 +1165,9 @@ def analyze_schedule_performance(
         if departure_intervals
         else 0.0
     )
+    wafer_system_residence_times = _wafer_system_residence_times(
+        records, device,
+    )
     performance = {
         "window": window,
         "resources": resources,
@@ -1173,9 +1186,12 @@ def analyze_schedule_performance(
             records, device, window,
         ),
         "robotWaferDwellTime": _robot_wafer_dwell_time(records, window),
-        "waferSystemResidenceTime": _wafer_system_residence_time(
-            records, device, window,
+        "waferSystemResidenceTime": _summarize_durations(
+            sample["duration"]
+            for sample in wafer_system_residence_times
+            if _completion_inside_window(sample["completedAt"], window)
         ),
+        "waferSystemResidenceTimes": wafer_system_residence_times,
         "loadLockCycles": _build_load_lock_cycles(records, device),
     }
     performance["diagnostics"] = _diagnose_schedule(performance)

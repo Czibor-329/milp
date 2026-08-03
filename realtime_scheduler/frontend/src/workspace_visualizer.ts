@@ -18,6 +18,7 @@ import type {
   ResourcePerformance,
   ResourceKind,
   SchedulePerformance,
+  WaferResidenceTime,
 } from "./analysis_contracts";
 
 type UnknownRecord = Record<string, unknown>;
@@ -1249,7 +1250,7 @@ function renderRobotHub(
         <span class="robot-base"><i></i></span>
         <span class="robot-arm">
           <i class="robot-arm-beam"></i>
-          <span class="robot-end-effector ${wafer ? "is-occupied" : "is-empty"}"><i class="robot-fork-tine robot-fork-tine-top"></i><i class="robot-fork-tine robot-fork-tine-bottom"></i>${wafer}</span>
+          <span class="robot-end-effector ${wafer ? "is-occupied" : "is-empty"}">${wafer}</span>
         </span>
       </div>
     </article>`;
@@ -1926,7 +1927,7 @@ function formatPercent(value: number): string {
 }
 
 /** 为单个资源生成分类色条。 */
-function renderCategoryBars(resource: ResourcePerformance, windowDuration: number): string {
+function renderCategoryBars(resource: Pick<ResourcePerformance, "categoryTimes">, windowDuration: number): string {
   return ACTIVITY_CATEGORIES.map(category => {
     const duration = resource.categoryTimes[category];
     if (duration <= PERFORMANCE_DISPLAY_TOLERANCE || windowDuration <= PERFORMANCE_DISPLAY_TOLERANCE) return "";
@@ -1935,9 +1936,140 @@ function renderCategoryBars(resource: ResourcePerformance, windowDuration: numbe
   }).join("");
 }
 
+export interface BottleneckResourceGroup {
+  name: string;
+  memberNames: string[];
+  kind: ResourceKind;
+  utilization: number;
+  busyTime: number;
+  categoryTimes: Record<ActivityCategory, number>;
+  candidate: BottleneckCandidate | null;
+}
+
+/**
+ * 将并行工序设备合并为一条展示记录。
+ *
+ * 工艺腔优先沿用服务端识别出的工序容量组；LoadLock、LoadPort 按同类设备合并，
+ * 机器人和辅助模块仍各自展示。所有时长与利用率均按组内设备数取算术平均。
+ */
+export function groupedBottleneckResources(
+  performance: SchedulePerformance,
+): BottleneckResourceGroup[] {
+  const resources = performance.resources;
+  const byName = new Map(resources.map(resource => [resource.name, resource]));
+  const assigned = new Set<string>();
+  const memberGroups: ResourcePerformance[][] = [];
+
+  const addGroup = (members: ResourcePerformance[]): void => {
+    const uniqueMembers = members.filter(member => !assigned.has(member.name));
+    if (!uniqueMembers.length) return;
+    uniqueMembers.forEach(member => assigned.add(member.name));
+    memberGroups.push(uniqueMembers);
+  };
+
+  for (const candidate of performance.bottleneckCandidates) {
+    if (candidate.kind !== "process-group") continue;
+    addGroup(candidate.resourceNames
+      .map(name => byName.get(name))
+      .filter((resource): resource is ResourcePerformance => Boolean(resource)));
+  }
+
+  const remainingProcess = resources.filter(resource => (
+    resource.kind === "process" && !assigned.has(resource.name)
+  ));
+  addGroup(remainingProcess);
+  addGroup(resources.filter(resource => (
+    resource.kind === "loadlock" && resource.busyTime > PERFORMANCE_DISPLAY_TOLERANCE
+  )));
+  addGroup(resources.filter(resource => (
+    resource.kind === "loadport" && resource.busyTime > PERFORMANCE_DISPLAY_TOLERANCE
+  )));
+  for (const resource of resources.filter(resource => (
+    resource.kind === "robot" || resource.kind === "auxiliary"
+  ))) addGroup([resource]);
+
+  const sameMembers = (candidate: BottleneckCandidate, names: string[]): boolean => (
+    candidate.resourceNames.length === names.length
+    && candidate.resourceNames.every(name => names.includes(name))
+  );
+
+  return memberGroups.map(members => {
+    const memberNames = members.map(member => member.name)
+      .sort((left, right) => left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" }));
+    const memberCount = members.length;
+    const categoryTimes = Object.fromEntries(ACTIVITY_CATEGORIES.map(category => [
+      category,
+      members.reduce((sum, member) => sum + member.categoryTimes[category], 0) / memberCount,
+    ])) as Record<ActivityCategory, number>;
+    return {
+      name: memberNames.join(" / "),
+      memberNames,
+      kind: members[0].kind,
+      utilization: members.reduce((sum, member) => sum + member.utilization, 0) / memberCount,
+      busyTime: members.reduce((sum, member) => sum + member.busyTime, 0) / memberCount,
+      categoryTimes,
+      candidate: performance.bottleneckCandidates.find(candidate => sameMembers(candidate, memberNames)) ?? null,
+    };
+  }).filter(group => group.busyTime > PERFORMANCE_DISPLAY_TOLERANCE)
+    .sort((left, right) => (
+      right.utilization - left.utilization
+      || left.name.localeCompare(right.name, undefined, { numeric: true, sensitivity: "base" })
+    ))
+    .slice(0, 4);
+}
+
+/** 从当前 MoveList 补齐旧版分析响应缺少的逐片系统驻留明细。 */
+export function withWaferResidenceTimes(
+  performance: SchedulePerformance,
+  moves: MoveRecord[],
+  device: DeviceDefinition | null,
+): SchedulePerformance {
+  if (performance.waferSystemResidenceTimes?.length || !moves.length) return performance;
+  const entries = new Map<string, number>();
+  const completions = new Map<string, number>();
+  const stationType = (name: string): string => String(device?.Stations?.[name]?.Type ?? "");
+
+  for (const move of normalizeMoves(moves)) {
+    if (PICK_MOVE_TYPES.has(move.MoveType)) {
+      const source = firstStation(move, "SrcStationList");
+      if (!isLoadPortName(source, stationType(source))) continue;
+      for (const material of materialIds(move)) {
+        if (!entries.has(material)) entries.set(material, move.EndTime);
+      }
+    } else if (PLACE_MOVE_TYPES.has(move.MoveType)) {
+      const destination = firstStation(move, "DestStationList");
+      if (!isLoadPortName(destination, stationType(destination))) continue;
+      for (const material of materialIds(move)) completions.set(material, move.EndTime);
+    } else if (move.MoveType === SWAP_MOVE) {
+      const station = firstStation(move, "StationList");
+      if (!isLoadPortName(station, stationType(station))) continue;
+      for (const material of materialIds(move, "SendMatList")) {
+        if (!entries.has(material)) entries.set(material, move.EndTime);
+      }
+      for (const material of materialIds(move, "RecvMatList")) {
+        completions.set(material, move.EndTime);
+      }
+    }
+  }
+
+  const samples: WaferResidenceTime[] = [];
+  for (const [wafer, completedAt] of completions) {
+    const enteredAt = entries.get(wafer);
+    if (
+      enteredAt === undefined
+      || completedAt < enteredAt - PERFORMANCE_DISPLAY_TOLERANCE
+    ) continue;
+    samples.push({ wafer, enteredAt, completedAt, duration: completedAt - enteredAt });
+  }
+  samples.sort((left, right) => (
+    left.completedAt - right.completedAt || naturalCompare(left.wafer, right.wafer)
+  ));
+  return samples.length ? { ...performance, waferSystemResidenceTimes: samples } : performance;
+}
+
 /** 渲染合并后的瓶颈分析区域：候选排序 + 各资源占用比例。 */
 function renderBottleneckAnalysis(performance: SchedulePerformance): string {
-  const { window, bottleneckCandidates, resources } = performance;
+  const { window } = performance;
   const confidenceLabels = { high: "证据较强", medium: "证据中等", low: "证据较弱" };
   const resourceKindLabels: Record<ResourceKind, string> = {
     robot: "机械手",
@@ -1947,22 +2079,19 @@ function renderBottleneckAnalysis(performance: SchedulePerformance): string {
     auxiliary: "辅助模块",
   };
 
-  const activeResources = resources
-    .filter(resource => resource.busyTime > PERFORMANCE_DISPLAY_TOLERANCE)
-    .sort((left, right) => right.utilization - left.utilization);
-  const displayedResources = activeResources.slice(0, 6);
-  const remainingResources = activeResources.slice(displayedResources.length);
-  const resourceRows = (items: ResourcePerformance[]): string => items.map((resource, index) => {
-    const candidate = bottleneckCandidates
-      .filter(item => item.resourceNames.includes(resource.name))
-      .sort((left, right) => right.score - left.score)[0];
+  const displayedResources = groupedBottleneckResources(performance);
+  const resourceRows = (items: BottleneckResourceGroup[]): string => items.map((resource, index) => {
+    const candidate = resource.candidate;
     const evidenceScore = candidate ? Math.round(candidate.score * 100) : null;
     const evidenceLabel = candidate ? confidenceLabels[candidate.confidence] : "未入选候选";
+    const resourceLabel = resource.memberNames.length > 1
+      ? `${resourceKindLabels[resource.kind]} · ${resource.memberNames.length} 台平均`
+      : resourceKindLabels[resource.kind];
     return `
       <li class="resource-utilization-row">
         <div class="resource-utilization-name">
           <span>${index + 1}</span>
-          <div><strong>${escapeHtml(resource.name)}</strong><small>${escapeHtml(resourceKindLabels[resource.kind])}</small></div>
+          <div><strong>${escapeHtml(resource.name)}</strong><small>${escapeHtml(resourceLabel)}</small></div>
         </div>
         <strong class="resource-utilization-percent">${formatPercent(resource.utilization)}</strong>
         <div class="utilization-track" aria-label="${escapeHtml(resource.name)} 占用率 ${formatPercent(resource.utilization)}">${renderCategoryBars(resource, window.duration)}</div>
@@ -1979,17 +2108,65 @@ function renderBottleneckAnalysis(performance: SchedulePerformance): string {
     <header class="bottleneck-analysis-head">
       <div>
         <strong>瓶颈分析</strong>
-        <span>默认显示利用率最高的 6 个活跃资源，并给出对应的瓶颈证据得分。</span>
       </div>
-      <label class="bottleneck-window-control">统计口径<span class="bottleneck-window-slot"></span></label>
+      <label class="bottleneck-window-control"><span class="visually-hidden">统计口径</span><div class="bottleneck-window-slot"></div></label>
     </header>
     <div class="resource-utilization-head" aria-hidden="true"><span>资源</span><span>利用率</span><span>占用组成</span><span>活跃时长</span><span>瓶颈证据得分</span></div>
     <ol class="resource-utilization-list">
       ${resourceRows(displayedResources)}
     </ol>
     <div class="performance-legend" aria-label="占用组成图例">${legend}</div>
-    ${remainingResources.length ? `<details class="additional-resource-details"><summary>查看其他活跃资源（${remainingResources.length} 个）</summary><ol class="resource-utilization-list">${resourceRows(remainingResources)}</ol></details>` : ""}
-    <p class="performance-window-note">${escapeHtml(window.detail)}</p>`;
+  `;
+}
+
+/** 渲染逐片晶圆的系统驻留时间柱状图。 */
+export function renderWaferResidenceChart(performance: SchedulePerformance): string {
+  const samples = performance.waferSystemResidenceTimes ?? [];
+  if (!samples.length) {
+    return `
+      <header class="residence-chart-head"><strong>系统驻留时间分析</strong></header>
+      <div class="residence-chart-empty">当前结果中没有完成往返 LoadPort 的晶圆。</div>`;
+  }
+
+  const meanSeconds = samples.reduce((sum, sample) => sum + sample.duration, 0) / samples.length;
+  const maximumSeconds = Math.max(...samples.map(sample => sample.duration));
+  const minimumSeconds = Math.min(...samples.map(sample => sample.duration));
+  const rangeToMinimumPercent = minimumSeconds > PERFORMANCE_DISPLAY_TOLERANCE
+    ? (maximumSeconds - minimumSeconds) / minimumSeconds * 100
+    : null;
+  const plotHeight = 170;
+  const scaleMaximum = Math.max(maximumSeconds, 1) * 1.08;
+  const meanHeight = Math.min(meanSeconds / scaleMaximum * plotHeight, plotHeight);
+  const bars = samples.map(sample => {
+    const height = Math.max(sample.duration / scaleMaximum * plotHeight, 2);
+    const wafer = escapeHtml(String(sample.wafer));
+    const duration = formatSeconds(sample.duration);
+    return `
+      <li class="residence-bar-item" role="img" aria-label="晶圆 ${wafer}，系统驻留 ${duration} 秒" title="晶圆 ${wafer} · 离开 ${formatSeconds(sample.enteredAt)} s · 返回 ${formatSeconds(sample.completedAt)} s · 驻留 ${duration} s">
+        <strong>${duration}</strong>
+        <span class="residence-bar-track"><i style="height:${height.toFixed(2)}px"></i></span>
+        <small>${wafer}</small>
+      </li>`;
+  }).join("");
+
+  return `
+    <header class="residence-chart-head">
+      <strong>系统驻留时间分析</strong>
+      <div class="residence-chart-summary">
+        <span>平均 <b>${formatSeconds(meanSeconds)} s</b></span>
+        <span>最大 <b>${formatSeconds(maximumSeconds)} s</b></span>
+        <span>极差/最小值 <b>${rangeToMinimumPercent === null ? "—" : `${rangeToMinimumPercent.toFixed(1)}%`}</b></span>
+        <span>样本 <b>${samples.length} 片</b></span>
+      </div>
+    </header>
+    <div class="residence-chart-body">
+      <div class="residence-chart-scroll" tabindex="0" aria-label="逐片晶圆系统驻留时间柱状图，可横向滚动">
+        <div class="residence-chart-plot">
+          <div class="residence-mean-line" style="bottom:${(28 + meanHeight).toFixed(2)}px"><span>平均 ${formatSeconds(meanSeconds)} s</span></div>
+          <ol class="residence-bars">${bars}</ol>
+        </div>
+      </div>
+    </div>`;
 }
 
 /** 渲染 LoadLock 交换时序独立卡片。 */
@@ -2032,7 +2209,7 @@ function renderNextOptimization(performance: SchedulePerformance): string {
     </div>`;
 }
 
-/** 绘制排程诊断面板 —— 总览、瓶颈分析、LoadLock 时序、下一步优化共四张卡片。 */
+/** 绘制排程诊断面板 —— 总览、逐片驻留、瓶颈分析、LoadLock 时序与下一步优化。 */
 function renderSchedulePerformance(performance: SchedulePerformance): string {
   const window = performance.window;
   const bottleneck = performance.primaryBottleneck;
@@ -2073,6 +2250,10 @@ function renderSchedulePerformance(performance: SchedulePerformance): string {
           <small>离开 LP → 返回 LP · CV ${performance.waferSystemResidenceTime.coefficientOfVariation.toFixed(2)} · 最大 ${formatSeconds(performance.waferSystemResidenceTime.maxSeconds)} s · ${performance.waferSystemResidenceTime.sampleCount} 片</small>
         </div>
       </div>
+    </section>
+
+    <section class="result-card wafer-residence-card">
+      ${renderWaferResidenceChart(performance)}
     </section>
 
     <section class="result-card bottleneck-analysis-card">
@@ -2594,9 +2775,10 @@ export class VisualizationWorkspace {
         rounds: this.analysisRounds,
       });
       if (requestVersion !== this.analysisRequestVersion) return;
-      this.analysis = result.analysis;
+      const analysis = withWaferResidenceTimes(result.analysis, this.moves, this.device);
+      this.analysis = analysis;
       this.bottleneckSummary = result.bottleneck;
-      this.elements.performance.innerHTML = renderSchedulePerformance(result.analysis);
+      this.elements.performance.innerHTML = renderSchedulePerformance(analysis);
       const windowSlot = this.elements.performance.querySelector(".bottleneck-window-slot");
       if (windowSlot) {
         this.elements.performanceWindow.tabIndex = 0;

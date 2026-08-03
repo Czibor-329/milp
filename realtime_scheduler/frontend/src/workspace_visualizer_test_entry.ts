@@ -12,10 +12,13 @@ export {
   decisionAtTime,
   decisionBoundaryTimes,
   decisionSpaceSignature,
+  groupedBottleneckResources,
   normalizeDecisionTrace,
   normalizeMovePayload,
   renderEquipmentTopology,
+  renderWaferResidenceChart,
   snapshotWithFullDeviceModules,
+  withWaferResidenceTimes,
 } from "./workspace_visualizer";
 export {
   analyzeSchedulePerformance,

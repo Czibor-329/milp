@@ -58,6 +58,13 @@ export interface DurationMetricSummary {
   sampleCount: number;
 }
 
+export interface WaferResidenceTime {
+  wafer: string;
+  enteredAt: number;
+  completedAt: number;
+  duration: number;
+}
+
 export interface ResourcePerformance {
   name: string;
   type: string;
@@ -112,6 +119,7 @@ export interface SchedulePerformance {
   processChamberDwellTime: DurationMetricSummary;
   robotWaferDwellTime: DurationMetricSummary;
   waferSystemResidenceTime: DurationMetricSummary;
+  waferSystemResidenceTimes: WaferResidenceTime[];
   loadLockCycles: Array<{
     index: number;
     loadLock: string;
