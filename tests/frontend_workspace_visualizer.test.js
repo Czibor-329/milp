@@ -452,11 +452,71 @@ test("双 Actor 推荐按大气端和真空端分开显示且不跨域混排", a
   modelSelect.value = "dual-actor-e2e";
   modelSelect.listeners.get("change")();
   const lens = root.elements.get("visualDecisionLens").innerHTML;
-  assert.match(lens, /决策 #12[\s\S]*双 Actor · 分域独立推荐/);
+  assert.match(lens, /决策 #12[\s\S]*双 Actor · 原始模型决策/);
   assert.match(lens, /大气端 Actor[\s\S]*大气端推荐[\s\S]*真空端 Actor[\s\S]*真空端推荐/);
-  assert.ok(lens.indexOf("LP1 → Robot hand") < lens.indexOf("ATR → LA"), "大气端应在自己的榜单内排序");
+  assert.ok(lens.indexOf("LP1 → ATR 手上") < lens.indexOf("ATR 手上 → LA"), "大气端应在自己的榜单内排序");
   assert.equal((lens.match(/data-recommendation-actor=/g) || []).length, 2);
-  assert.match(root.elements.get("visualRecommendationModelHint").textContent, /分别推荐原子动作/);
+  assert.match(root.elements.get("visualRecommendationModelHint").textContent, /原始提案/);
+});
+
+test("双 Actor 原始决策按最终定时 MoveList 的物理动作时刻对齐", () => {
+  const trace = logic.normalizeDecisionTrace({
+    DecisionTraceMeta: {
+      schema: "dual-actor-primitive-decision-trace-v1",
+      model: "双 Actor 原子调度",
+    },
+    DecisionTrace: [
+      {
+        model: "dual-actor-e2e",
+        decisionIndex: 1,
+        time: 0,
+        selectedActionId: "atr:pick:W1:LP1",
+        proposals: [{
+          actor: "atmosphere",
+          actionId: "atr:pick:W1:LP1",
+          kind: "pick",
+          robot: "ATR",
+          materialIds: ["W1"],
+          source: "LP1",
+          selected: true,
+        }],
+      },
+      {
+        model: "dual-actor-e2e",
+        decisionIndex: 2,
+        time: 0,
+        selectedActionId: "atr:place:W1:LA",
+        proposals: [{
+          actor: "atmosphere",
+          actionId: "atr:place:W1:LA",
+          kind: "place",
+          robot: "ATR",
+          materialIds: ["W1"],
+          source: "LP1",
+          destination: "LA",
+          selected: true,
+        }],
+      },
+    ],
+  });
+  const aligned = logic.alignOriginalDecisionTraceToMoves(trace, [
+    {
+      MoveID: 10, MoveType: 0, StartTime: 12.5, EndTime: 14,
+      Robot: "ATR", ModuleName: "ATR", MatIDList: ["W1"], SrcStationList: ["LP1"],
+    },
+    {
+      MoveID: 11, MoveType: 1, StartTime: 18.75, EndTime: 20,
+      Robot: "ATR", ModuleName: "ATR", MatIDList: ["W1"], DestStationList: ["LA"],
+    },
+  ]);
+
+  assert.deepEqual(aligned.map(step => step.time), [12.5, 18.75]);
+  assert.deepEqual(
+    aligned.map(step => step.executedActionId),
+    ["atr:pick:W1:LP1", "atr:place:W1:LA"],
+  );
+  assert.ok(aligned.every(step => step.modelEvaluated && !step.replayEvaluated));
+  assert.ok(aligned.every(step => step.candidates.some(candidate => candidate.executed)));
 });
 
 test("重入让位候选按最终调度优先级展示且计划标签指向紧邻事务", async () => {

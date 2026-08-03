@@ -2701,7 +2701,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn('id="visualRecommendationModel"', html)
         self.assertIn('双 Actor · 分域原子动作', html)
         self.assertIn('candidateGroups', workspace_source)
-        self.assertIn('双 Actor · 分域独立推荐', workspace_source)
+        self.assertIn('双 Actor · ${decision.replayEvaluated ? "回放重评估" : "原始模型决策"}', workspace_source)
         self.assertIn("Pick、Place、Swap", metadata["dual-actor-e2e"]["introduction"])
         self.assertEqual(
             {"name", "introduction"},

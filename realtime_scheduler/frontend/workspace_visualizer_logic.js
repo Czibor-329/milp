@@ -19,6 +19,7 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // src/workspace_visualizer_test_entry.ts
 var workspace_visualizer_test_entry_exports = {};
 __export(workspace_visualizer_test_entry_exports, {
+  alignOriginalDecisionTraceToMoves: () => alignOriginalDecisionTraceToMoves,
   analyzeSchedulePerformance: () => analyzeSchedulePerformance,
   buildScheduleAnalysisContext: () => buildScheduleAnalysisContext,
   buildWorkspaceSnapshot: () => buildWorkspaceSnapshot,
@@ -258,6 +259,82 @@ function normalizeDecisionTrace(payload) {
       candidateGroups
     };
   }).sort((left, right) => left.time - right.time || left.decisionIndex - right.decisionIndex);
+}
+function primitiveMoveKind(move) {
+  const moveType = finiteNumber(move.MoveType, -1);
+  if (PICK_MOVE_TYPES.has(moveType)) return "pick";
+  if (PLACE_MOVE_TYPES.has(moveType)) return "place";
+  if (moveType === SWAP_MOVE) return "swap";
+  return "";
+}
+function moveStringList(move, field) {
+  return listValue(move[field]).map(String);
+}
+function candidateMatchesPrimitiveMove(candidate, move) {
+  if (candidate.kind !== primitiveMoveKind(move)) return false;
+  const robot = String(move.Robot ?? move.ModuleName ?? "");
+  if (candidate.robot && candidate.robot !== robot) return false;
+  const moveMaterials = moveStringList(move, "MatIDList");
+  if (candidate.kind === "swap") {
+    const exchangedMaterials = /* @__PURE__ */ new Set([
+      ...moveMaterials,
+      ...moveStringList(move, "SentMatList"),
+      ...moveStringList(move, "RecvMatList")
+    ]);
+    if (!candidate.materialIds.every((material) => exchangedMaterials.has(material))) {
+      return false;
+    }
+    const stations = moveStringList(move, "StationList");
+    return !candidate.destination || stations.includes(candidate.destination);
+  }
+  if (candidate.materialIds[0] && candidate.materialIds[0] !== moveMaterials[0]) return false;
+  if (candidate.kind === "pick") {
+    const sources = moveStringList(move, "SrcStationList");
+    return !candidate.source || sources.includes(candidate.source);
+  }
+  const destinations = moveStringList(move, "DestStationList");
+  return !candidate.destination || destinations.includes(candidate.destination);
+}
+function alignOriginalDecisionTraceToMoves(trace, moves) {
+  const primitiveMoves = moves.filter((move) => Boolean(primitiveMoveKind(move))).sort((left, right) => finiteNumber(left.StartTime) - finiteNumber(right.StartTime) || finiteNumber(left.MoveID) - finiteNumber(right.MoveID));
+  const usedMoveIds = /* @__PURE__ */ new Set();
+  const aligned = trace.map((step) => {
+    if (step.model !== "dual-actor-e2e") return step;
+    const selectedCandidate = step.candidates.find((candidate) => candidate.actionId === step.selectedActionId || candidate.selected);
+    if (!selectedCandidate) return step;
+    const matchedMove = primitiveMoves.find((move) => {
+      const moveId = finiteNumber(move.MoveID, -1);
+      return !usedMoveIds.has(moveId) && candidateMatchesPrimitiveMove(selectedCandidate, move);
+    });
+    if (!matchedMove) return step;
+    usedMoveIds.add(finiteNumber(matchedMove.MoveID, -1));
+    const executedActionId = selectedCandidate.actionId;
+    const candidateGroups = step.candidateGroups.map((group) => {
+      const containsExecuted = group.candidates.some((candidate) => candidate.actionId === executedActionId);
+      return {
+        ...group,
+        executedActionId: containsExecuted ? executedActionId : group.executedActionId,
+        candidates: group.candidates.map((candidate) => ({
+          ...candidate,
+          executed: candidate.actionId === executedActionId
+        }))
+      };
+    });
+    const candidates = candidateGroups.length ? candidateGroups.flatMap((group) => group.candidates) : step.candidates.map((candidate) => ({
+      ...candidate,
+      executed: candidate.actionId === executedActionId
+    }));
+    return {
+      ...step,
+      time: finiteNumber(matchedMove.StartTime),
+      executedActionId,
+      modelEvaluated: true,
+      replayEvaluated: false,
+      candidates,
+      candidateGroups
+    };
+  });
+  return aligned.sort((left, right) => left.time - right.time || left.decisionIndex - right.decisionIndex);
 }
 function decisionAtTime(trace, time) {
   let selected = null;
@@ -1265,6 +1342,16 @@ function modelPreference(value) {
   return `${Math.round(percent)}%`;
 }
 function decisionCandidatePath(candidate) {
+  const robotHand = `${candidate.robot || "Robot"} \u624B\u4E0A`;
+  if (candidate.kind === "pick") {
+    return `${candidate.source || "\u2014"} \u2192 ${robotHand}`;
+  }
+  if (candidate.kind === "place") {
+    return `${robotHand} \u2192 ${candidate.destination || "\u2014"}${candidate.destinationSlot ? ` \xB7 \u69FD ${candidate.destinationSlot}` : ""}`;
+  }
+  if (candidate.kind === "swap") {
+    return `${robotHand} \u2194 ${candidate.destination || "\u2014"}${candidate.destinationSlot ? ` \xB7 \u69FD ${candidate.destinationSlot}` : ""}`;
+  }
   const source = candidate.source || "\u5F53\u524D\u4F4D\u7F6E";
   const destination = candidate.destination || "\u2014";
   return `${source} \u2192 ${destination}${candidate.destinationSlot ? ` \xB7 \u69FD ${candidate.destinationSlot}` : ""}`;
@@ -1388,7 +1475,7 @@ function renderDualActorDecisionLens(decision) {
     <section class="dual-actor-decision" aria-labelledby="dualActorDecisionTitle">
       <header class="dual-actor-decision-head">
         <strong id="dualActorDecisionTitle">\u51B3\u7B56 #${decision.decisionIndex} <small>@ ${formatSeconds(decision.time)}s</small></strong>
-        <span>\u53CC Actor \xB7 \u5206\u57DF\u72EC\u7ACB\u63A8\u8350</span>
+        <span>\u53CC Actor \xB7 ${decision.replayEvaluated ? "\u56DE\u653E\u91CD\u8BC4\u4F30" : "\u539F\u59CB\u6A21\u578B\u51B3\u7B56"}</span>
       </header>
       <div class="dual-actor-recommendation-list">${groupMarkup}</div>
     </section>`;
@@ -1912,7 +1999,7 @@ var VisualizationWorkspace = class {
     this.moves = moves;
     this.decisionBoundaries = decisionBoundaryTimes(moves);
     this.primitiveDecisionBoundaries = primitiveDecisionBoundaryTimes(moves);
-    this.decisionTrace = decisionTrace;
+    this.decisionTrace = alignOriginalDecisionTraceToMoves(decisionTrace, moves);
     this.liveDecision = null;
     this.liveDecisionKey = "";
     this.replayDecisionCache.clear();
@@ -1936,6 +2023,7 @@ var VisualizationWorkspace = class {
     this.elements.resultButton.disabled = false;
     this.showSingleResult();
     this.setTopologyVisible(true);
+    this.updateRecommendationModelControl();
     this.render(snapshot);
     await this.renderPerformance();
   }
@@ -2108,8 +2196,9 @@ var VisualizationWorkspace = class {
     }
     const traceDecision = decisionAtTime(this.decisionTrace, snapshot.time);
     const compatibleTraceDecision = traceDecision?.model === this.recommendationModel ? traceDecision : null;
-    const currentDecision = cachedDecision ?? (this.liveDecisionKey === replayKey ? this.liveDecision : null) ?? compatibleTraceDecision;
-    if (this.replayPlan && !cachedDecision && this.liveDecisionKey !== replayKey && !this.pendingReplayDecisionKeys.has(replayKey) && this.replayDecisionErrorKey !== replayKey) {
+    const originalDecisionTraceAvailable = this.hasOriginalDecisionTrace();
+    const currentDecision = originalDecisionTraceAvailable ? compatibleTraceDecision : cachedDecision ?? (this.liveDecisionKey === replayKey ? this.liveDecision : null) ?? compatibleTraceDecision;
+    if (this.replayPlan && !originalDecisionTraceAvailable && !cachedDecision && this.liveDecisionKey !== replayKey && !this.pendingReplayDecisionKeys.has(replayKey) && this.replayDecisionErrorKey !== replayKey) {
       void this.refreshReplayDecision(replayKey, replayTime);
     }
     const topologySnapshot = snapshotWithFullDeviceModules(
@@ -2134,7 +2223,17 @@ var VisualizationWorkspace = class {
   /** 同步推荐模型选择说明；双 Actor 明确提示两端互不混排。 */
   updateRecommendationModelControl() {
     this.elements.recommendationModel.value = this.recommendationModel;
-    this.elements.recommendationModelHint.textContent = this.recommendationModel === "dual-actor-e2e" ? "\u5927\u6C14\u7AEF\u4E0E\u771F\u7A7A\u7AEF\u5206\u522B\u63A8\u8350\u539F\u5B50\u52A8\u4F5C\uFF0C\u5404\u81EA\u5728\u672C\u57DF\u5185\u6392\u5E8F\u3002" : "\u5BF9\u5B8C\u6574 Pick + Place / Swap \u4E8B\u52A1\u7EDF\u4E00\u6392\u5E8F\u3002";
+    if (this.hasOriginalDecisionTrace()) {
+      this.elements.recommendationModelHint.textContent = this.recommendationModel === "dual-actor-e2e" ? "\u663E\u793A\u672C\u6B21\u8C03\u5EA6\u4FDD\u5B58\u7684\u5927\u6C14\u7AEF\u3001\u771F\u7A7A\u7AEF\u539F\u59CB\u63D0\u6848\u548C\u6700\u7EC8\u6267\u884C\u52A8\u4F5C\u3002" : "\u663E\u793A\u672C\u6B21\u8C03\u5EA6\u4FDD\u5B58\u7684\u539F\u59CB E2E \u8054\u5408\u52A8\u4F5C\u51B3\u7B56\u3002";
+      return;
+    }
+    this.elements.recommendationModelHint.textContent = this.recommendationModel === "dual-actor-e2e" ? "\u6309\u5F53\u524D\u7269\u7406\u65F6\u523B\u91CD\u65B0\u8BC4\u4F30\u4E24\u7AEF\u539F\u5B50\u52A8\u4F5C\uFF1B\u8FD9\u662F\u56DE\u653E\u91CD\u8BC4\u4F30\uFF0C\u4E0D\u4EE3\u8868\u539F\u8BA1\u5212\u5F53\u65F6\u9009\u62E9\u3002" : "\u6309\u5F53\u524D\u7269\u7406\u65F6\u523B\u91CD\u65B0\u8BC4\u4F30\u5B8C\u6574 Pick + Place / Swap \u4E8B\u52A1\u3002";
+  }
+  /** 当前结果是否保存了与所选策略一致、可审计的原始模型轨迹。 */
+  hasOriginalDecisionTrace() {
+    const planStrategy = String(this.replayPlan?.strategy ?? "");
+    const strategyCompatible = !planStrategy || planStrategy === this.recommendationModel;
+    return strategyCompatible && this.decisionTrace.some((step) => step.model === this.recommendationModel && !step.replayEvaluated);
   }
   /** 返回不晚于当前时刻、符合当前模型决策粒度的最近边界。 */
   replayDecisionTime(time) {
@@ -3026,6 +3125,7 @@ function buildScheduleAnalysisContext(routes, rounds) {
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  alignOriginalDecisionTraceToMoves,
   analyzeSchedulePerformance,
   buildScheduleAnalysisContext,
   buildWorkspaceSnapshot,

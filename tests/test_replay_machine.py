@@ -196,6 +196,7 @@ def test_heuristic_movelist_is_evaluated_by_separate_dual_actors() -> None:
     decision = machine.evaluate(first_place_end)
 
     assert during_transaction["model"] == "dual-actor-e2e"
+    assert during_transaction["decisionIndex"] >= 1
     assert during_transaction["candidateCount"] >= 1
     assert any(
         candidate["kind"] == "place"
@@ -203,6 +204,7 @@ def test_heuristic_movelist_is_evaluated_by_separate_dual_actors() -> None:
     )
 
     assert decision["model"] == "dual-actor-e2e"
+    assert decision["decisionIndex"] > during_transaction["decisionIndex"]
     groups = {group["actor"]: group for group in decision["candidateGroups"]}
     assert set(groups) == {"atmosphere", "vacuum"}
     for actor, group in groups.items():

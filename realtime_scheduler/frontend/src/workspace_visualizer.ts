@@ -404,6 +404,112 @@ export function normalizeDecisionTrace(payload: unknown): DecisionTraceStep[] {
     .sort((left, right) => left.time - right.time || left.decisionIndex - right.decisionIndex);
 }
 
+/** 返回 MoveList 核心机器人动作对应的双 Actor 原子类型。 */
+function primitiveMoveKind(move: MoveRecord): "pick" | "place" | "swap" | "" {
+  const moveType = finiteNumber(move.MoveType, -1);
+  if (PICK_MOVE_TYPES.has(moveType)) return "pick";
+  if (PLACE_MOVE_TYPES.has(moveType)) return "place";
+  if (moveType === SWAP_MOVE) return "swap";
+  return "";
+}
+
+function moveStringList(move: MoveRecord, field: string): string[] {
+  return listValue(move[field]).map(String);
+}
+
+/** 判断原始模型选中的原子动作是否对应最终定时 MoveList 中的一条物理动作。 */
+function candidateMatchesPrimitiveMove(
+  candidate: DecisionCandidate,
+  move: MoveRecord,
+): boolean {
+  if (candidate.kind !== primitiveMoveKind(move)) return false;
+  const robot = String(move.Robot ?? move.ModuleName ?? "");
+  if (candidate.robot && candidate.robot !== robot) return false;
+  const moveMaterials = moveStringList(move, "MatIDList");
+  if (candidate.kind === "swap") {
+    const exchangedMaterials = new Set([
+      ...moveMaterials,
+      ...moveStringList(move, "SentMatList"),
+      ...moveStringList(move, "RecvMatList"),
+    ]);
+    if (!candidate.materialIds.every(material => exchangedMaterials.has(material))) {
+      return false;
+    }
+    const stations = moveStringList(move, "StationList");
+    return !candidate.destination || stations.includes(candidate.destination);
+  }
+  if (candidate.materialIds[0] && candidate.materialIds[0] !== moveMaterials[0]) return false;
+  if (candidate.kind === "pick") {
+    const sources = moveStringList(move, "SrcStationList");
+    return !candidate.source || sources.includes(candidate.source);
+  }
+  const destinations = moveStringList(move, "DestStationList");
+  return !candidate.destination || destinations.includes(candidate.destination);
+}
+
+/**
+ * 把调度时保存的双 Actor 决策映射到最终 timing MoveList 的物理开始时刻。
+ *
+ * 原始 trace 的逻辑状态时间通常都为轮次起点；回放若直接按该字段选择，会把
+ * 事后重评估误当成原始模型选择。每个已选原子动作与最终 Pick/Place/Swap
+ * 一一对应，因此以 Robot、物料、端点和动作类型做稳定匹配。
+ */
+export function alignOriginalDecisionTraceToMoves(
+  trace: DecisionTraceStep[],
+  moves: MoveRecord[],
+): DecisionTraceStep[] {
+  const primitiveMoves = moves
+    .filter(move => Boolean(primitiveMoveKind(move)))
+    .sort((left, right) => finiteNumber(left.StartTime) - finiteNumber(right.StartTime)
+      || finiteNumber(left.MoveID) - finiteNumber(right.MoveID));
+  const usedMoveIds = new Set<number>();
+  const aligned = trace.map(step => {
+    if (step.model !== "dual-actor-e2e") return step;
+    const selectedCandidate = step.candidates.find(candidate => (
+      candidate.actionId === step.selectedActionId || candidate.selected
+    ));
+    if (!selectedCandidate) return step;
+    const matchedMove = primitiveMoves.find(move => {
+      const moveId = finiteNumber(move.MoveID, -1);
+      return !usedMoveIds.has(moveId)
+        && candidateMatchesPrimitiveMove(selectedCandidate, move);
+    });
+    if (!matchedMove) return step;
+    usedMoveIds.add(finiteNumber(matchedMove.MoveID, -1));
+    const executedActionId = selectedCandidate.actionId;
+    const candidateGroups = step.candidateGroups.map(group => {
+      const containsExecuted = group.candidates.some(candidate => (
+        candidate.actionId === executedActionId
+      ));
+      return {
+        ...group,
+        executedActionId: containsExecuted ? executedActionId : group.executedActionId,
+        candidates: group.candidates.map(candidate => ({
+          ...candidate,
+          executed: candidate.actionId === executedActionId,
+        })),
+      };
+    });
+    const candidates = candidateGroups.length
+      ? candidateGroups.flatMap(group => group.candidates)
+      : step.candidates.map(candidate => ({
+          ...candidate,
+          executed: candidate.actionId === executedActionId,
+        }));
+    return {
+      ...step,
+      time: finiteNumber(matchedMove.StartTime),
+      executedActionId,
+      modelEvaluated: true,
+      replayEvaluated: false,
+      candidates,
+      candidateGroups,
+    };
+  });
+  return aligned.sort((left, right) => left.time - right.time
+    || left.decisionIndex - right.decisionIndex);
+}
+
 /** 返回播放时刻最近一次已经发生的模型决策。 */
 export function decisionAtTime(
   trace: DecisionTraceStep[],
@@ -1851,6 +1957,16 @@ function modelPreference(value: number): string {
 
 /** 生成候选动作的人类可读路径标签。 */
 function decisionCandidatePath(candidate: DecisionCandidate): string {
+  const robotHand = `${candidate.robot || "Robot"} 手上`;
+  if (candidate.kind === "pick") {
+    return `${candidate.source || "—"} → ${robotHand}`;
+  }
+  if (candidate.kind === "place") {
+    return `${robotHand} → ${candidate.destination || "—"}${candidate.destinationSlot ? ` · 槽 ${candidate.destinationSlot}` : ""}`;
+  }
+  if (candidate.kind === "swap") {
+    return `${robotHand} ↔ ${candidate.destination || "—"}${candidate.destinationSlot ? ` · 槽 ${candidate.destinationSlot}` : ""}`;
+  }
   const source = candidate.source || "当前位置";
   const destination = candidate.destination || "—";
   return `${source} → ${destination}${candidate.destinationSlot ? ` · 槽 ${candidate.destinationSlot}` : ""}`;
@@ -2022,7 +2138,7 @@ function renderDualActorDecisionLens(decision: DecisionTraceStep): string {
     <section class="dual-actor-decision" aria-labelledby="dualActorDecisionTitle">
       <header class="dual-actor-decision-head">
         <strong id="dualActorDecisionTitle">决策 #${decision.decisionIndex} <small>@ ${formatSeconds(decision.time)}s</small></strong>
-        <span>双 Actor · 分域独立推荐</span>
+        <span>双 Actor · ${decision.replayEvaluated ? "回放重评估" : "原始模型决策"}</span>
       </header>
       <div class="dual-actor-recommendation-list">${groupMarkup}</div>
     </section>`;
@@ -2664,7 +2780,7 @@ export class VisualizationWorkspace {
     this.moves = moves;
     this.decisionBoundaries = decisionBoundaryTimes(moves);
     this.primitiveDecisionBoundaries = primitiveDecisionBoundaryTimes(moves);
-    this.decisionTrace = decisionTrace;
+    this.decisionTrace = alignOriginalDecisionTraceToMoves(decisionTrace, moves);
     this.liveDecision = null;
     this.liveDecisionKey = "";
     this.replayDecisionCache.clear();
@@ -2690,6 +2806,7 @@ export class VisualizationWorkspace {
     this.elements.resultButton.disabled = false;
     this.showSingleResult();
     this.setTopologyVisible(true);
+    this.updateRecommendationModelControl();
     this.render(snapshot);
     await this.renderPerformance();
   }
@@ -2892,11 +3009,15 @@ export class VisualizationWorkspace {
     const compatibleTraceDecision = traceDecision?.model === this.recommendationModel
       ? traceDecision
       : null;
-    const currentDecision = cachedDecision
-      ?? (this.liveDecisionKey === replayKey ? this.liveDecision : null)
-      ?? compatibleTraceDecision;
+    const originalDecisionTraceAvailable = this.hasOriginalDecisionTrace();
+    const currentDecision = originalDecisionTraceAvailable
+      ? compatibleTraceDecision
+      : cachedDecision
+        ?? (this.liveDecisionKey === replayKey ? this.liveDecision : null)
+        ?? compatibleTraceDecision;
     if (
       this.replayPlan
+      && !originalDecisionTraceAvailable
       && !cachedDecision
       && this.liveDecisionKey !== replayKey
       && !this.pendingReplayDecisionKeys.has(replayKey)
@@ -2932,9 +3053,26 @@ export class VisualizationWorkspace {
   /** 同步推荐模型选择说明；双 Actor 明确提示两端互不混排。 */
   private updateRecommendationModelControl(): void {
     this.elements.recommendationModel.value = this.recommendationModel;
+    if (this.hasOriginalDecisionTrace()) {
+      this.elements.recommendationModelHint.textContent = this.recommendationModel === "dual-actor-e2e"
+        ? "显示本次调度保存的大气端、真空端原始提案和最终执行动作。"
+        : "显示本次调度保存的原始 E2E 联合动作决策。";
+      return;
+    }
     this.elements.recommendationModelHint.textContent = this.recommendationModel === "dual-actor-e2e"
-      ? "大气端与真空端分别推荐原子动作，各自在本域内排序。"
-      : "对完整 Pick + Place / Swap 事务统一排序。";
+      ? "按当前物理时刻重新评估两端原子动作；这是回放重评估，不代表原计划当时选择。"
+      : "按当前物理时刻重新评估完整 Pick + Place / Swap 事务。";
+  }
+
+  /** 当前结果是否保存了与所选策略一致、可审计的原始模型轨迹。 */
+  private hasOriginalDecisionTrace(): boolean {
+    const planStrategy = String(this.replayPlan?.strategy ?? "");
+    const strategyCompatible = !planStrategy
+      || planStrategy === this.recommendationModel;
+    return strategyCompatible && this.decisionTrace.some(step => (
+      step.model === this.recommendationModel
+      && !step.replayEvaluated
+    ));
   }
 
   /** 返回不晚于当前时刻、符合当前模型决策粒度的最近边界。 */

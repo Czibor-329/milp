@@ -20,6 +20,7 @@ from realtime_scheduler.plan_builder import BuildState, build_round_update
 
 TIME_TOLERANCE_SECONDS = 1e-6
 COMPLETED_INTENT_MOVE_TYPES = frozenset({1, 3, 4})
+COMPLETED_PRIMITIVE_MOVE_TYPES = frozenset({0, 1, 2, 3, 4})
 VISIBLE_CANDIDATE_LIMIT = 24
 QUANTILE_MARGIN = 1
 E2E_RECOMMENDATION_MODEL = "e2e-ctq"
@@ -363,11 +364,11 @@ class ReplayMachine:
                 "candidatesTruncated": len(actor_actions) > len(candidates),
                 "candidates": candidates,
             })
-        completed_intents = sum(
+        completed_primitives = sum(
             1
             for move in self.moves
             if (
-                int(move.get("MoveType", -1)) in COMPLETED_INTENT_MOVE_TYPES
+                int(move.get("MoveType", -1)) in COMPLETED_PRIMITIVE_MOVE_TYPES
                 and float(move.get("EndTime") or 0.0)
                 <= replay_time + TIME_TOLERANCE_SECONDS
             )
@@ -375,7 +376,7 @@ class ReplayMachine:
         return {
             "model": DUAL_ACTOR_RECOMMENDATION_MODEL,
             "modelLabel": "双 Actor 原子调度",
-            "decisionIndex": completed_intents,
+            "decisionIndex": completed_primitives,
             "time": replay_time,
             "revision": int(state.revision),
             "selectedActionId": "",

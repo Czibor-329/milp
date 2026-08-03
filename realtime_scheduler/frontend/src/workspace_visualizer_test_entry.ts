@@ -7,6 +7,7 @@
  */
 
 export {
+  alignOriginalDecisionTraceToMoves,
   buildWorkspaceSnapshot,
   createVisualizationWorkspace,
   decisionAtTime,
