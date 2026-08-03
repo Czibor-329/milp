@@ -61,11 +61,12 @@ export async function requestTestGroupAnalysis(
   return result.analysis as TestGroupPerformanceSummary;
 }
 
-/** 请求 Machine 按当前 Move 回放状态实时枚举并使用 E2E-CTQ 评分动作。 */
+/** 请求 Machine 按当前 Move 回放状态实时枚举并使用所选模型评分动作。 */
 export async function requestReplayDecision(input: {
   resultId?: string;
   moves?: MoveRecord[];
   plan?: Record<string, any> | null;
+  recommendationModel: "e2e-ctq" | "dual-actor-e2e";
   time: number;
 }): Promise<Record<string, any>> {
   const result = await requestJson("/api/analysis/replay-decision", {

@@ -249,6 +249,14 @@
                       <h2 class="petri-panel-title">合法动作空间</h2>
                       <button class="decision-auto-pause" id="visualPauseOnDecisionChangeButton" type="button" role="switch" aria-checked="false" aria-pressed="false"></button>
                     </div>
+                    <label class="decision-model-control" for="visualRecommendationModel">
+                      <span>推荐模型</span>
+                      <select id="visualRecommendationModel" aria-describedby="visualRecommendationModelHint">
+                        <option value="e2e-ctq">E2E-CTQ · 联合动作</option>
+                        <option value="dual-actor-e2e">双 Actor · 分域原子动作</option>
+                      </select>
+                      <small id="visualRecommendationModelHint">对完整 Pick + Place / Swap 事务统一排序。</small>
+                    </label>
                     <div class="decision-lens-panel" id="visualDecisionLens" aria-live="polite"></div>
                     <ul id="visualActiveMoves" hidden></ul>
                   </section>
@@ -309,12 +317,13 @@
               <label class="strategy-card" data-strategy-card="heuristic"><input type="radio" name="strategy" value="heuristic" checked><b>启发式</b></label>
               <label class="strategy-card" data-strategy-card="loadlock-macro"><input id="loadlockMacroStrategyInput" type="radio" name="strategy" value="loadlock-macro"><b>LoadLock 宏周期</b></label>
               <label class="strategy-card" data-strategy-card="e2e-ctq"><input id="e2eCTQStrategyInput" type="radio" name="strategy" value="e2e-ctq"><b>E2E-CTQ</b></label>
+              <label class="strategy-card" data-strategy-card="dual-actor-e2e"><input id="dualActorE2EStrategyInput" type="radio" name="strategy" value="dual-actor-e2e"><b>双 Actor 原子调度</b></label>
               <label class="strategy-card" data-strategy-card="milp"><input id="milpStrategyInput" type="radio" name="strategy" value="milp"><b>MILP 最优求解</b></label>
               <div class="other-algorithm-options" id="otherAlgorithmOptions"></div>
             </div>
             <div class="algorithm-hover-info" id="algorithmHoverInfo" aria-live="polite"></div>
             <div id="loadlockOptions" class="grid" style="margin-top:14px">
-              <div class="field span-12"><label>LoadLock 管理器</label><select data-option="loadLockManager"><option value="petri-look">Petri-ETA 通用管理器（Heuristic 推荐）</option><option value="collective-look">集选 LOOK（压力方向优先）</option><option value="round-robin">轮询（服务次数均衡）</option><option value="dedicated-direction">方向分区（LA 进、LB 出）</option><option value="exchange-look">交换优先 LOOK（成品/生片配对）</option><option value="joint">当前策略联合选择 LA/LB（E2E-CTQ 默认）</option></select><div class="hint">上层策略决定发哪片；这里可比较 ETA、集选、轮询、方向分区和交换优先。所有 manager 只在 Petri 安全候选内绑定具体锁；双槽交换仍由门、压力和槽位互锁复核。</div></div>
+              <div class="field span-12"><label>LoadLock 管理器</label><select data-option="loadLockManager"><option value="petri-look">Petri-ETA 通用管理器（Heuristic 推荐）</option><option value="collective-look">集选 LOOK（压力方向优先）</option><option value="round-robin">轮询（服务次数均衡）</option><option value="dedicated-direction">方向分区（LA 进、LB 出）</option><option value="exchange-look">交换优先 LOOK（成品/生片配对）</option><option value="joint">当前策略联合选择 LA/LB（端到端模型默认）</option></select><div class="hint">上层策略决定发哪片；这里可比较 ETA、集选、轮询、方向分区和交换优先。所有 manager 只在 Petri 安全候选内绑定具体锁；双槽交换仍由门、压力和槽位互锁复核。</div></div>
             </div>
             <div id="heuristicObjectiveOptions" class="grid" style="margin-top:14px">
               <div class="field span-4"><label>驻留安全余量（秒）</label><input data-option="residencyGuardSeconds" type="number" min="0" step="0.1" value="0"><div class="hint">在每个 Route 驻留上限内提前该秒数取片；0 表示只按原始上限。</div></div>

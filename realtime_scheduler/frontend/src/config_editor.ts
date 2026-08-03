@@ -721,7 +721,7 @@ function applyTestCase(testCase) {
   document.getElementById("roundCount").value = state.roundCount;
   document.querySelectorAll('input[name="strategy"]').forEach(input => { input.checked = input.value === state.strategy; });
   document.querySelectorAll("[data-option]").forEach(input => { input.value = state.options[input.dataset.option] ?? input.value; });
-  document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro", "e2e-ctq"].includes(state.strategy));
+  document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro", "e2e-ctq", "dual-actor-e2e"].includes(state.strategy));
   document.getElementById("heuristicObjectiveOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro"].includes(state.strategy));
   document.getElementById("milpOptions").classList.toggle("is-hidden", state.strategy !== "milp");
   document.getElementById("roundCount").disabled = state.strategy === "milp";
@@ -2599,6 +2599,20 @@ function showResult(result) {
     document.getElementById("metricValidationLabel").textContent = "校验 / 多指标";
     document.getElementById("metricValidationDetail").textContent = `驻留超限 ${Number(metrics.residencyViolationCount) || 0} 次 · 最大持片 ${Number(metrics.maximumRobotHoldingSeconds || 0).toFixed(2)} s · 系统停留 CV ${Number(metrics.systemResidenceCv || 0).toFixed(3)}`;
   }
+  const dualActorDiagnostics = (result.rounds || [])
+    .map(round => round.strategyDiagnostics)
+    .filter(diagnostics => diagnostics?.selectedSource === "dual-actor-e2e");
+  if (dualActorDiagnostics.length) {
+    const totals = dualActorDiagnostics.reduce((summary, diagnostics) => ({
+      atmosphere: summary.atmosphere + (Number(diagnostics.actorDecisionCounts?.atmosphere) || 0),
+      vacuum: summary.vacuum + (Number(diagnostics.actorDecisionCounts?.vacuum) || 0),
+      pick: summary.pick + (Number(diagnostics.primitiveActionCounts?.pick) || 0),
+      place: summary.place + (Number(diagnostics.primitiveActionCounts?.place) || 0),
+      swap: summary.swap + (Number(diagnostics.primitiveActionCounts?.swap) || 0),
+    }), { atmosphere: 0, vacuum: 0, pick: 0, place: 0, swap: 0 });
+    document.getElementById("metricValidationLabel").textContent = "校验 / 双 Actor";
+    document.getElementById("metricValidationDetail").textContent = `决策：大气 ${totals.atmosphere} · 真空 ${totals.vacuum}；原子动作：Pick ${totals.pick} · Place ${totals.place} · Swap ${totals.swap}`;
+  }
   const baselinePlan = structuredClone(buildPayload());
   state.parameterComparison = {
     baseline: { plan: baselinePlan, options: baselinePlan.options, result },
@@ -2675,11 +2689,19 @@ async function checkService() {
     if (!response.ok) throw new Error();
     const status = await response.json(), compatible = status.schemaVersion === EXPECTED_API_SCHEMA;
     state.serviceCompatible = compatible;
-    const loadlockMacroAvailable = status.strategies?.["loadlock-macro"] === true, e2eCTQAvailable = status.strategies?.["e2e-ctq"] === true, milpAvailable = status.strategies?.milp === true;
+    const loadlockMacroAvailable = status.strategies?.["loadlock-macro"] === true, e2eCTQAvailable = status.strategies?.["e2e-ctq"] === true, dualActorE2EAvailable = status.strategies?.["dual-actor-e2e"] === true, milpAvailable = status.strategies?.milp === true;
     state.algorithmMetadata = status.algorithmMetadata || {};
     document.getElementById("loadlockMacroStrategyInput").disabled = !loadlockMacroAvailable;
     document.getElementById("e2eCTQStrategyInput").disabled = !e2eCTQAvailable;
+    document.getElementById("dualActorE2EStrategyInput").disabled = !dualActorE2EAvailable;
     document.getElementById("milpStrategyInput").disabled = !milpAvailable;
+    const replayModelSelect = document.getElementById("visualRecommendationModel");
+    replayModelSelect.querySelector('option[value="e2e-ctq"]').disabled = !e2eCTQAvailable;
+    replayModelSelect.querySelector('option[value="dual-actor-e2e"]').disabled = !dualActorE2EAvailable;
+    if (replayModelSelect.selectedOptions[0]?.disabled) {
+      replayModelSelect.value = dualActorE2EAvailable ? "dual-actor-e2e" : "e2e-ctq";
+      replayModelSelect.dispatchEvent(new Event("change"));
+    }
     renderOtherAlgorithmOptions(status.otherAlgorithms || []);
     runButton.disabled = !compatible;
     batchRunButton.disabled = !compatible;
@@ -2757,11 +2779,11 @@ document.addEventListener("change", event => {
   }
   if (event.target.name === "strategy") {
     state.strategy = event.target.value;
-    if (["e2e-ctq"].includes(state.strategy)) state.options.loadLockManager = "joint";
+    if (["e2e-ctq", "dual-actor-e2e"].includes(state.strategy)) state.options.loadLockManager = "joint";
     else if (["heuristic", "loadlock-macro"].includes(state.strategy)) state.options.loadLockManager = "petri-look";
     if (state.strategy === "milp") { resizeRounds(1); document.getElementById("roundCount").value = 1; }
     document.getElementById("roundCount").disabled = state.strategy === "milp";
-    document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro", "e2e-ctq"].includes(state.strategy));
+    document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro", "e2e-ctq", "dual-actor-e2e"].includes(state.strategy));
     document.getElementById("heuristicObjectiveOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro"].includes(state.strategy));
     document.getElementById("milpOptions").classList.toggle("is-hidden", state.strategy !== "milp");
     showAlgorithmDetails(state.strategy);

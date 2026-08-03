@@ -2682,6 +2682,32 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("AlgUpdateMove", descriptions)
         self.assertTrue(all(set(entry) == {"Time", "Describe", "SimTime", "Info"} for entry in reproduction))
 
+    def test_frontend_exposes_available_dual_actor_strategy(self) -> None:
+        """双 Actor 卡片、健康检查和介绍必须使用同一个稳定策略名。"""
+        html = _editor_source()
+        workspace_source = (
+            ROOT
+            / "realtime_scheduler"
+            / "frontend"
+            / "src"
+            / "workspace_visualizer.ts"
+        ).read_text(encoding="utf-8")
+        metadata = config_server.read_algorithm_metadata()
+
+        self.assertIn('id="dualActorE2EStrategyInput"', html)
+        self.assertIn('value="dual-actor-e2e"', html)
+        self.assertIn('status.strategies?.["dual-actor-e2e"]', html)
+        self.assertIn('"校验 / 双 Actor"', html)
+        self.assertIn('id="visualRecommendationModel"', html)
+        self.assertIn('双 Actor · 分域原子动作', html)
+        self.assertIn('candidateGroups', workspace_source)
+        self.assertIn('双 Actor · 分域独立推荐', workspace_source)
+        self.assertIn("Pick、Place、Swap", metadata["dual-actor-e2e"]["introduction"])
+        self.assertEqual(
+            {"name", "introduction"},
+            set(metadata["dual-actor-e2e"]),
+        )
+
     def test_algorithm_metadata_only_contains_name_and_introduction(self) -> None:
         """算法展示信息只保留名称和介绍，不再包含版本记录字段。"""
         metadata = config_server.read_algorithm_metadata()

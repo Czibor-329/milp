@@ -73,6 +73,7 @@ export interface LoadPortSlotSnapshot {
 
 export interface DecisionCandidate {
   actionId: string;
+  actor: string;
   kind: string;
   flowKind: string;
   robot: string;
@@ -92,13 +93,29 @@ export interface DecisionCandidate {
   policyScore: number;
   policyPreference: number;
   expectedRemainingMakespan: number | null;
+  expectedRemainingCost: number | null;
   medianRemainingMakespan: number | null;
   lowerRemainingMakespan: number | null;
   upperRemainingMakespan: number | null;
   makespanDelta: number | null;
 }
 
+export interface DecisionCandidateGroup {
+  actor: string;
+  label: string;
+  selectedActionId: string;
+  executedActionId: string;
+  candidateCount: number;
+  shownCandidateCount: number;
+  candidatesTruncated: boolean;
+  candidates: DecisionCandidate[];
+}
+
+type RecommendationModel = "e2e-ctq" | "dual-actor-e2e";
+
 export interface DecisionTraceStep {
+  model: RecommendationModel;
+  modelLabel: string;
   decisionIndex: number;
   time: number;
   revision: number;
@@ -112,6 +129,7 @@ export interface DecisionTraceStep {
   modelEvaluated: boolean;
   replayEvaluated: boolean;
   candidates: DecisionCandidate[];
+  candidateGroups: DecisionCandidateGroup[];
 }
 
 interface NormalizedMove extends MoveRecord {
@@ -131,6 +149,8 @@ interface WorkspaceElements {
   topologyPlayback: HTMLElement;
   stage: HTMLElement;
   decisionLens: HTMLElement;
+  recommendationModel: HTMLSelectElement;
+  recommendationModelHint: HTMLElement;
   alignerFilter: HTMLInputElement;
   coolerFilter: HTMLInputElement;
   pauseOnDecisionChangeButton: HTMLButtonElement;
@@ -156,6 +176,11 @@ const PICK_MOVE_TYPES = new Set([0, 2]);
 const PLACE_MOVE_TYPES = new Set([1, 3]);
 const SWAP_MOVE = 4;
 const DECISION_COMPLETION_MOVE_TYPES = new Set([...PLACE_MOVE_TYPES, SWAP_MOVE]);
+const PRIMITIVE_DECISION_COMPLETION_MOVE_TYPES = new Set([
+  ...PICK_MOVE_TYPES,
+  ...PLACE_MOVE_TYPES,
+  SWAP_MOVE,
+]);
 const PRE_TRANS_MOVE = 5;
 const PREPARE_MOVE = 6;
 const COMPLETE_MOVE = 7;
@@ -247,47 +272,119 @@ export function normalizeMovePayload(payload: unknown): MoveRecord[] {
     .map(record => ({ ...record }));
 }
 
-/** 从运行结果中提取有界的 E2E 候选动作与剩余 Makespan 预测。 */
+/** 规范单个模型候选；双 Actor 的 actor 可由所属候选组补齐。 */
+function normalizeDecisionCandidate(
+  candidate: UnknownRecord,
+  actor = "",
+): DecisionCandidate {
+  return {
+    actionId: String(candidate.actionId ?? ""),
+    actor: String(candidate.actor ?? actor),
+    kind: String(candidate.kind ?? ""),
+    flowKind: String(candidate.flowKind ?? candidate.kind ?? ""),
+    robot: String(candidate.robot ?? ""),
+    materialIds: listValue(candidate.materialIds).map(String),
+    waferId: finiteNumber(candidate.waferId),
+    stageIndex: finiteNumber(candidate.stageIndex),
+    source: String(candidate.source ?? ""),
+    sourceSlot: finiteNumber(candidate.sourceSlot),
+    destination: String(candidate.destination ?? ""),
+    destinationSlot: finiteNumber(candidate.destinationSlot),
+    earliestStart: finiteNumber(candidate.earliestStart),
+    finishTime: finiteNumber(candidate.finishTime),
+    rank: finiteNumber(candidate.rank),
+    selected: Boolean(candidate.selected),
+    executed: Boolean(candidate.executed),
+    priorityDeferred: Boolean(candidate.priorityDeferred),
+    policyScore: finiteNumber(candidate.policyScore),
+    policyPreference: Math.max(0, Math.min(1, finiteNumber(candidate.policyPreference))),
+    expectedRemainingMakespan: nullableFiniteNumber(candidate.expectedRemainingMakespan),
+    expectedRemainingCost: nullableFiniteNumber(candidate.expectedRemainingCost),
+    medianRemainingMakespan: nullableFiniteNumber(candidate.medianRemainingMakespan),
+    lowerRemainingMakespan: nullableFiniteNumber(candidate.lowerRemainingMakespan),
+    upperRemainingMakespan: nullableFiniteNumber(candidate.upperRemainingMakespan),
+    makespanDelta: nullableFiniteNumber(candidate.makespanDelta),
+  };
+}
+
+/** 从运行结果中提取 E2E 联合推荐或双 Actor 分域原子推荐。 */
 export function normalizeDecisionTrace(payload: unknown): DecisionTraceStep[] {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return [];
-  const rawTrace = (payload as UnknownRecord).DecisionTrace;
+  const record = payload as UnknownRecord;
+  const rawTrace = record.DecisionTrace;
   if (!Array.isArray(rawTrace)) return [];
+  const traceMeta = record.DecisionTraceMeta;
+  const meta = traceMeta && typeof traceMeta === "object" && !Array.isArray(traceMeta)
+    ? traceMeta as UnknownRecord
+    : {};
   return rawTrace
     .filter((step): step is UnknownRecord => Boolean(step) && typeof step === "object" && !Array.isArray(step))
     .map((step): DecisionTraceStep => {
-      const rawCandidates = Array.isArray(step.candidates) ? step.candidates : [];
-      const candidates = rawCandidates
+      const modelSignature = `${String(step.model ?? "")} ${String(meta.schema ?? "")} ${String(meta.model ?? "")}`.toLowerCase();
+      const model: RecommendationModel = modelSignature.includes("dual-actor") || modelSignature.includes("双 actor")
+        ? "dual-actor-e2e"
+        : "e2e-ctq";
+      const rawCandidates = Array.isArray(step.candidates)
+        ? step.candidates
+        : model === "dual-actor-e2e" && Array.isArray(step.proposals)
+          ? step.proposals
+          : [];
+      let candidates = rawCandidates
         .filter((candidate): candidate is UnknownRecord => (
           Boolean(candidate) && typeof candidate === "object" && !Array.isArray(candidate)
         ))
-        .map((candidate): DecisionCandidate => ({
-          actionId: String(candidate.actionId ?? ""),
-          kind: String(candidate.kind ?? ""),
-          flowKind: String(candidate.flowKind ?? ""),
-          robot: String(candidate.robot ?? ""),
-          materialIds: listValue(candidate.materialIds).map(String),
-          waferId: finiteNumber(candidate.waferId),
-          stageIndex: finiteNumber(candidate.stageIndex),
-          source: String(candidate.source ?? ""),
-          sourceSlot: finiteNumber(candidate.sourceSlot),
-          destination: String(candidate.destination ?? ""),
-          destinationSlot: finiteNumber(candidate.destinationSlot),
-          earliestStart: finiteNumber(candidate.earliestStart),
-          finishTime: finiteNumber(candidate.finishTime),
-          rank: finiteNumber(candidate.rank),
-          selected: Boolean(candidate.selected),
-          executed: Boolean(candidate.executed),
-          priorityDeferred: Boolean(candidate.priorityDeferred),
-          policyScore: finiteNumber(candidate.policyScore),
-          policyPreference: Math.max(0, Math.min(1, finiteNumber(candidate.policyPreference))),
-          expectedRemainingMakespan: nullableFiniteNumber(candidate.expectedRemainingMakespan),
-          medianRemainingMakespan: nullableFiniteNumber(candidate.medianRemainingMakespan),
-          lowerRemainingMakespan: nullableFiniteNumber(candidate.lowerRemainingMakespan),
-          upperRemainingMakespan: nullableFiniteNumber(candidate.upperRemainingMakespan),
-          makespanDelta: nullableFiniteNumber(candidate.makespanDelta),
-        }))
+        .map(candidate => normalizeDecisionCandidate(candidate))
         .sort((left, right) => left.rank - right.rank || right.policyPreference - left.policyPreference);
+      const rawGroups = Array.isArray(step.candidateGroups) ? step.candidateGroups : [];
+      let candidateGroups = rawGroups
+        .filter((group): group is UnknownRecord => Boolean(group) && typeof group === "object" && !Array.isArray(group))
+        .map((group): DecisionCandidateGroup => {
+          const actor = String(group.actor ?? "");
+          const groupCandidates = listValue(group.candidates)
+            .filter((candidate): candidate is UnknownRecord => Boolean(candidate) && typeof candidate === "object" && !Array.isArray(candidate))
+            .map(candidate => normalizeDecisionCandidate(candidate, actor))
+            .sort((left, right) => left.rank - right.rank || right.policyPreference - left.policyPreference)
+            .map((candidate, index, rows) => ({
+              ...candidate,
+              rank: candidate.rank || index + 1,
+              policyPreference: rows.length === 1 && candidate.policyPreference === 0 ? 1 : candidate.policyPreference,
+            }));
+          return {
+            actor,
+            label: String(group.label ?? (actor === "atmosphere" ? "大气端 Actor" : "真空端 Actor")),
+            selectedActionId: String(group.selectedActionId ?? ""),
+            executedActionId: String(group.executedActionId ?? ""),
+            candidateCount: Math.max(groupCandidates.length, finiteNumber(group.candidateCount, groupCandidates.length)),
+            shownCandidateCount: Math.max(groupCandidates.length, finiteNumber(group.shownCandidateCount, groupCandidates.length)),
+            candidatesTruncated: Boolean(group.candidatesTruncated),
+            candidates: groupCandidates,
+          };
+        });
+      if (model === "dual-actor-e2e" && !candidateGroups.length && candidates.length) {
+        candidateGroups = ["atmosphere", "vacuum"].map(actor => {
+          const groupCandidates = candidates
+            .filter(candidate => candidate.actor === actor)
+            .map((candidate, index, rows) => ({
+              ...candidate,
+              rank: candidate.rank || index + 1,
+              policyPreference: rows.length === 1 && candidate.policyPreference === 0 ? 1 : candidate.policyPreference,
+            }));
+          return {
+            actor,
+            label: actor === "atmosphere" ? "大气端 Actor" : "真空端 Actor",
+            selectedActionId: groupCandidates.find(candidate => candidate.selected)?.actionId ?? "",
+            executedActionId: groupCandidates.find(candidate => candidate.executed)?.actionId ?? "",
+            candidateCount: groupCandidates.length,
+            shownCandidateCount: groupCandidates.length,
+            candidatesTruncated: false,
+            candidates: groupCandidates,
+          };
+        }).filter(group => group.candidates.length);
+      }
+      if (candidateGroups.length) candidates = candidateGroups.flatMap(group => group.candidates);
       return {
+        model,
+        modelLabel: String(step.modelLabel ?? (model === "dual-actor-e2e" ? "双 Actor 原子调度" : "E2E-CTQ")),
         decisionIndex: finiteNumber(step.decisionIndex),
         time: finiteNumber(step.time),
         revision: finiteNumber(step.revision),
@@ -301,6 +398,7 @@ export function normalizeDecisionTrace(payload: unknown): DecisionTraceStep[] {
         modelEvaluated: Boolean(step.modelEvaluated),
         replayEvaluated: Boolean(step.replayEvaluated),
         candidates,
+        candidateGroups,
       };
     })
     .sort((left, right) => left.time - right.time || left.decisionIndex - right.decisionIndex);
@@ -964,6 +1062,8 @@ function collectElements(root: Document): WorkspaceElements {
     topologyPlayback: required("visualTopologyPlayback"),
     stage: required("visualDeviceStage"),
     decisionLens: required("visualDecisionLens"),
+    recommendationModel: required<HTMLSelectElement>("visualRecommendationModel"),
+    recommendationModelHint: required("visualRecommendationModelHint"),
     alignerFilter: required<HTMLInputElement>("visualFilterAligner"),
     coolerFilter: required<HTMLInputElement>("visualFilterCooler"),
     pauseOnDecisionChangeButton: required<HTMLButtonElement>("visualPauseOnDecisionChangeButton"),
@@ -1775,14 +1875,46 @@ export function decisionBoundaryTimes(moves: MoveRecord[]): number[] {
   )].sort((left, right) => left - right);
 }
 
+/** 双 Actor 每完成一个 Pick / Place / Swap 都会进入下一次原子决策。 */
+export function primitiveDecisionBoundaryTimes(moves: MoveRecord[]): number[] {
+  return [...new Set(
+    moves
+      .filter(move => PRIMITIVE_DECISION_COMPLETION_MOVE_TYPES.has(finiteNumber(move.MoveType, -1)))
+      .map(move => finiteNumber(move.EndTime))
+      .filter(time => time >= 0),
+  )].sort((left, right) => left - right);
+}
+
 /** 绘制当前合法动作空间；模型推荐和原计划只作为候选自身的状态标签。 */
-function renderDecisionLens(decision: DecisionTraceStep | null): string {
+function renderDecisionLens(
+  decision: DecisionTraceStep | null,
+  requestState: "idle" | "loading" | "error" = "idle",
+  requestError = "",
+): string {
   if (!decision) {
+    if (requestState === "loading") {
+      return `
+        <div class="decision-empty is-loading" role="status" aria-live="polite">
+          <div class="visual-loader" aria-hidden="true"></div>
+          <strong>正在评估当前合法动作</strong>
+          <p>正在重建机器状态并运行推荐模型。</p>
+        </div>`;
+    }
+    if (requestState === "error") {
+      return `
+        <div class="decision-empty is-error" role="alert">
+          <strong>推荐模型评估失败</strong>
+          <p>${escapeHtml(requestError || "无法获取当前合法动作，请检查服务状态。")}</p>
+        </div>`;
+    }
     return `
       <div class="decision-empty">
         <strong>当前时刻暂无合法动作</strong>
         <p>回放到下一设备事件后更新。</p>
       </div>`;
+  }
+  if (decision.model === "dual-actor-e2e") {
+    return renderDualActorDecisionLens(decision);
   }
   const shownText = decision.candidatesTruncated
     ? `展示 Top ${decision.shownCandidateCount} / ${decision.candidateCount}`
@@ -1824,6 +1956,75 @@ function renderDecisionLens(decision: DecisionTraceStep | null): string {
         <span>${escapeHtml(shownText)} · E2E 排序</span>
       </header>
       ${candidates ? `<ol>${candidates}</ol>` : '<p class="decision-alternative-empty">当前没有合法动作</p>'}
+    </section>`;
+}
+
+/** 双 Actor 候选严格按大气端、真空端拆成两张独立榜单。 */
+function renderDualActorDecisionLens(decision: DecisionTraceStep): string {
+  const groupsByActor = new Map(
+    decision.candidateGroups.map(group => [group.actor, group]),
+  );
+  const groups = [
+    { actor: "atmosphere", label: "大气端 Actor", hint: "LoadPort ↔ LoadLock" },
+    { actor: "vacuum", label: "真空端 Actor", hint: "LoadLock ↔ 工艺腔" },
+  ].map(definition => ({
+    ...definition,
+    group: groupsByActor.get(definition.actor) ?? null,
+  }));
+  const groupMarkup = groups.map(({ actor, label, hint, group }) => {
+    const rankedCandidates = [...(group?.candidates ?? [])].sort((left, right) =>
+      right.policyPreference - left.policyPreference
+        || left.rank - right.rank
+        || left.actionId.localeCompare(right.actionId));
+    const shownText = group?.candidatesTruncated
+      ? `Top ${group.shownCandidateCount} / ${group.candidateCount}`
+      : `${group?.candidateCount ?? 0} 个原子动作`;
+    const candidates = rankedCandidates.map((candidate, index) => {
+      const preference = modelPreference(candidate.policyPreference);
+      const isRecommendation = candidate.selected
+        || candidate.actionId === group?.selectedActionId
+        || (!group?.selectedActionId && index === 0);
+      const recommendationTag = isRecommendation
+        ? `<span class="decision-tag is-recommendation is-${actor}">${actor === "atmosphere" ? "大气端推荐" : "真空端推荐"}</span>`
+        : "";
+      const planTag = candidate.executed
+        ? '<span class="decision-tag is-plan">与计划一致</span>'
+        : "";
+      const remainingCost = candidate.expectedRemainingCost
+        ?? candidate.expectedRemainingMakespan;
+      const delta = isRecommendation
+        ? "Δ 基准"
+        : `Δ ${modelSeconds(candidate.makespanDelta, true)}`;
+      return `
+        <li class="decision-candidate">
+          <div class="decision-candidate-rank" aria-label="第 ${index + 1} 名">${index + 1}</div>
+          <div class="decision-candidate-main">
+            <div class="decision-candidate-title"><strong>${escapeHtml(decisionCandidatePath(candidate))}</strong>${recommendationTag}${planTag}</div>
+            <small>${escapeHtml(candidate.robot || "Robot")} · ${escapeHtml(candidate.kind || "原子动作")}</small>
+            <div class="decision-candidate-detail">
+              <span>剩余成本 <strong>${modelSeconds(remainingCost)}</strong></span>
+              <span>${delta}</span>
+            </div>
+          </div>
+          <strong class="decision-candidate-preference" aria-label="${escapeHtml(label)}偏好 ${preference}">${preference}</strong>
+        </li>`;
+    }).join("");
+    return `
+      <article class="dual-actor-recommendation is-${actor}" data-recommendation-actor="${actor}">
+        <header>
+          <div><strong>${label}</strong><small>${hint}</small></div>
+          <span>${shownText} · 独立排序</span>
+        </header>
+        ${candidates ? `<ol>${candidates}</ol>` : '<p class="decision-alternative-empty">当前控制域没有合法原子动作</p>'}
+      </article>`;
+  }).join("");
+  return `
+    <section class="dual-actor-decision" aria-labelledby="dualActorDecisionTitle">
+      <header class="dual-actor-decision-head">
+        <strong id="dualActorDecisionTitle">决策 #${decision.decisionIndex} <small>@ ${formatSeconds(decision.time)}s</small></strong>
+        <span>双 Actor · 分域独立推荐</span>
+      </header>
+      <div class="dual-actor-recommendation-list">${groupMarkup}</div>
     </section>`;
 }
 
@@ -2181,35 +2382,7 @@ function renderLoadLockCard(performance: SchedulePerformance): string {
     <div class="loadlock-card-body">${gantt}</div>`;
 }
 
-/** 渲染下一步优化区域。 */
-function renderNextOptimization(performance: SchedulePerformance): string {
-  const diagnostics = performance.diagnostics ?? [];
-  if (!diagnostics.length) return "";
-  return `
-    <header class="next-opt-head">
-      <div><span>证据 → 假设 → 实验</span><strong>下一步优化</strong></div>
-      <small>结论来自执行轨迹重建，不冒充算法内部打分</small>
-    </header>
-    <div class="diagnostic-list">
-      ${diagnostics.map((diagnostic, index) => `
-        <article class="diagnostic-card">
-          <header><span class="diagnostic-rank">${index + 1}</span><div><strong>${escapeHtml(diagnostic.title)}</strong><small>${({ strong: "证据较强", moderate: "证据中等", exploratory: "探索性线索" })[diagnostic.confidence]}</small></div></header>
-          <p>${escapeHtml(diagnostic.finding)}</p>
-          <dl>${diagnostic.evidence.map(evidence => `
-            <div><dt>${escapeHtml(evidence.label)}</dt><dd><b>${escapeHtml(evidence.value)}</b><span>${escapeHtml(evidence.interpretation)}</span></dd></div>
-          `).join("")}</dl>
-          <div class="diagnostic-experiment">
-            <span>可证伪的下一步</span>
-            <strong>${escapeHtml(diagnostic.nextExperiment.label)}</strong>
-            <p>${escapeHtml(diagnostic.nextExperiment.change)}</p>
-            <small>预期信号：${escapeHtml(diagnostic.nextExperiment.expectedSignal)}</small>
-          </div>
-          <aside>${escapeHtml(diagnostic.limitation)}</aside>
-        </article>`).join("")}
-    </div>`;
-}
-
-/** 绘制排程诊断面板 —— 总览、逐片驻留、瓶颈分析、LoadLock 时序与下一步优化。 */
+/** 绘制排程诊断面板 —— 总览、逐片驻留、瓶颈分析与 LoadLock 时序。 */
 function renderSchedulePerformance(performance: SchedulePerformance): string {
   const window = performance.window;
   const bottleneck = performance.primaryBottleneck;
@@ -2263,11 +2436,6 @@ function renderSchedulePerformance(performance: SchedulePerformance): string {
     <section class="result-card loadlock-swap-card">
       ${renderLoadLockCard(performance)}
     </section>
-
-    ${performance.diagnostics?.length ? `
-    <section class="result-card next-optimization-card">
-      ${renderNextOptimization(performance)}
-    </section>` : ""}
     `;
 }
 
@@ -2281,13 +2449,17 @@ export class VisualizationWorkspace {
   private moves: MoveRecord[] = [];
   private decisionTrace: DecisionTraceStep[] = [];
   private replayPlan: Record<string, any> | null = null;
+  private recommendationModel: RecommendationModel = "e2e-ctq";
   private liveDecision: DecisionTraceStep | null = null;
   private liveDecisionKey = "";
   private decisionBoundaries: number[] = [];
+  private primitiveDecisionBoundaries: number[] = [];
   private pauseOnDecisionChange = false;
   private pauseTriggeredByDecisionChange = false;
   private readonly replayDecisionCache = new Map<string, DecisionTraceStep>();
   private readonly pendingReplayDecisionKeys = new Set<string>();
+  private replayDecisionErrorKey = "";
+  private replayDecisionErrorMessage = "";
   private replayDecisionRequestVersion = 0;
   private sourceName = "";
   private resultUrl = "";
@@ -2313,6 +2485,7 @@ export class VisualizationWorkspace {
     this.bindEvents();
     this.updatePlayButton();
     this.updatePauseOnDecisionChangeButton();
+    this.updateRecommendationModelControl();
     this.setTopologyVisible(false);
   }
 
@@ -2398,9 +2571,12 @@ export class VisualizationWorkspace {
     this.replayPlan = plan ? structuredClone(plan) : null;
     this.replayDecisionCache.clear();
     this.pendingReplayDecisionKeys.clear();
+    this.replayDecisionErrorKey = "";
+    this.replayDecisionErrorMessage = "";
     this.liveDecision = null;
     this.liveDecisionKey = "";
     this.decisionBoundaries = decisionBoundaryTimes(this.moves);
+    this.primitiveDecisionBoundaries = primitiveDecisionBoundaryTimes(this.moves);
     this.replayDecisionRequestVersion += 1;
     if (this.moves.length) this.render();
   }
@@ -2440,8 +2616,11 @@ export class VisualizationWorkspace {
     this.liveDecision = null;
     this.liveDecisionKey = "";
     this.decisionBoundaries = [];
+    this.primitiveDecisionBoundaries = [];
     this.replayDecisionCache.clear();
     this.pendingReplayDecisionKeys.clear();
+    this.replayDecisionErrorKey = "";
+    this.replayDecisionErrorMessage = "";
     this.replayDecisionRequestVersion += 1;
     this.sourceName = "";
     this.resultUrl = "";
@@ -2484,11 +2663,14 @@ export class VisualizationWorkspace {
     this.pause();
     this.moves = moves;
     this.decisionBoundaries = decisionBoundaryTimes(moves);
+    this.primitiveDecisionBoundaries = primitiveDecisionBoundaryTimes(moves);
     this.decisionTrace = decisionTrace;
     this.liveDecision = null;
     this.liveDecisionKey = "";
     this.replayDecisionCache.clear();
     this.pendingReplayDecisionKeys.clear();
+    this.replayDecisionErrorKey = "";
+    this.replayDecisionErrorMessage = "";
     this.replayDecisionRequestVersion += 1;
     this.sourceName = sourceName;
     this.resultUrl = resultUrl;
@@ -2534,6 +2716,20 @@ export class VisualizationWorkspace {
       this.pauseOnDecisionChange = !this.pauseOnDecisionChange;
       this.pauseTriggeredByDecisionChange = false;
       this.updatePauseOnDecisionChangeButton();
+    });
+    this.elements.recommendationModel.addEventListener("change", () => {
+      this.recommendationModel = this.elements.recommendationModel.value === "dual-actor-e2e"
+        ? "dual-actor-e2e"
+        : "e2e-ctq";
+      this.liveDecision = null;
+      this.liveDecisionKey = "";
+      this.pendingReplayDecisionKeys.clear();
+      this.replayDecisionErrorKey = "";
+      this.replayDecisionErrorMessage = "";
+      this.replayDecisionRequestVersion += 1;
+      this.updateRecommendationModelControl();
+      this.updatePauseOnDecisionChangeButton();
+      this.render();
     });
     this.elements.speed.addEventListener("change", () => {
       this.playbackSpeed = Math.max(0.25, finiteNumber(this.elements.speed.value, DEFAULT_PLAYBACK_SPEED));
@@ -2589,7 +2785,7 @@ export class VisualizationWorkspace {
     const previousTime = this.time;
     const advancedTime = Math.min(endTime, previousTime + elapsedSeconds * this.playbackSpeed);
     const nextDecisionBoundary = this.pauseOnDecisionChange
-      ? this.decisionBoundaries.find(boundary => (
+      ? this.currentDecisionBoundaries().find(boundary => (
           boundary > previousTime + PERFORMANCE_DISPLAY_TOLERANCE
           && boundary <= advancedTime + PERFORMANCE_DISPLAY_TOLERANCE
         ))
@@ -2628,6 +2824,9 @@ export class VisualizationWorkspace {
     const state = this.pauseTriggeredByDecisionChange
       ? "已暂停"
       : this.pauseOnDecisionChange ? "已开启" : "已关闭";
+    const decisionKind = this.recommendationModel === "dual-actor-e2e"
+      ? "原子动作决策"
+      : "完整事务决策";
     this.elements.pauseOnDecisionChangeButton.innerHTML = `
       <span class="decision-switch-copy"><span>下一决策时暂停</span><strong>${state}</strong></span>
       <span class="decision-switch-track" aria-hidden="true"><i></i></span>`;
@@ -2636,8 +2835,8 @@ export class VisualizationWorkspace {
     this.elements.pauseOnDecisionChangeButton.setAttribute(
       "aria-label",
       this.pauseTriggeredByDecisionChange
-        ? "已到达下一个完整决策，回放已暂停"
-        : `到下一个完整决策时自动暂停：${this.pauseOnDecisionChange ? "已开启" : "已关闭"}`,
+        ? `已到达下一个${decisionKind}，回放已暂停`
+        : `到下一个${decisionKind}时自动暂停：${this.pauseOnDecisionChange ? "已开启" : "已关闭"}`,
     );
     this.elements.pauseOnDecisionChangeButton.classList.toggle("is-active", this.pauseOnDecisionChange);
     this.elements.pauseOnDecisionChangeButton.classList.toggle("is-triggered", this.pauseTriggeredByDecisionChange);
@@ -2689,14 +2888,19 @@ export class VisualizationWorkspace {
       this.liveDecision = cachedDecision;
       this.liveDecisionKey = replayKey;
     }
+    const traceDecision = decisionAtTime(this.decisionTrace, snapshot.time);
+    const compatibleTraceDecision = traceDecision?.model === this.recommendationModel
+      ? traceDecision
+      : null;
     const currentDecision = cachedDecision
       ?? (this.liveDecisionKey === replayKey ? this.liveDecision : null)
-      ?? decisionAtTime(this.decisionTrace, snapshot.time);
+      ?? compatibleTraceDecision;
     if (
       this.replayPlan
       && !cachedDecision
       && this.liveDecisionKey !== replayKey
       && !this.pendingReplayDecisionKeys.has(replayKey)
+      && this.replayDecisionErrorKey !== replayKey
     ) {
       void this.refreshReplayDecision(replayKey, replayTime);
     }
@@ -2705,7 +2909,14 @@ export class VisualizationWorkspace {
       this.device,
     );
     this.elements.stage.innerHTML = renderEquipmentTopology(topologySnapshot, currentDecision, this.hiddenModuleFilters);
-    this.elements.decisionLens.innerHTML = renderDecisionLens(currentDecision);
+    const requestState = this.pendingReplayDecisionKeys.has(replayKey)
+      ? "loading"
+      : this.replayDecisionErrorKey === replayKey ? "error" : "idle";
+    this.elements.decisionLens.innerHTML = renderDecisionLens(
+      currentDecision,
+      requestState,
+      this.replayDecisionErrorMessage,
+    );
 
     this.elements.activeMoves.innerHTML = snapshot.activeMoves.length
       ? snapshot.activeMoves.map(move => `
@@ -2718,30 +2929,51 @@ export class VisualizationWorkspace {
       : '<li class="active-move-empty">当前时刻没有执行中的动作</li>';
   }
 
-  /** 返回不晚于当前时刻的最近完整事务边界，事务执行期间沿用上一决策。 */
+  /** 同步推荐模型选择说明；双 Actor 明确提示两端互不混排。 */
+  private updateRecommendationModelControl(): void {
+    this.elements.recommendationModel.value = this.recommendationModel;
+    this.elements.recommendationModelHint.textContent = this.recommendationModel === "dual-actor-e2e"
+      ? "大气端与真空端分别推荐原子动作，各自在本域内排序。"
+      : "对完整 Pick + Place / Swap 事务统一排序。";
+  }
+
+  /** 返回不晚于当前时刻、符合当前模型决策粒度的最近边界。 */
   private replayDecisionTime(time: number): number {
     let decisionTime = 0;
-    for (const boundary of this.decisionBoundaries) {
+    for (const boundary of this.currentDecisionBoundaries()) {
       if (boundary > time + PERFORMANCE_DISPLAY_TOLERANCE) break;
       decisionTime = boundary;
     }
     return decisionTime;
   }
 
-  /** 每个完整事务边界只执行一次 E2E 前向。 */
+  /** E2E 按完整事务，双 Actor 按原子机器人动作选择各自的回放边界。 */
+  private currentDecisionBoundaries(): number[] {
+    return this.recommendationModel === "dual-actor-e2e"
+      ? this.primitiveDecisionBoundaries
+      : this.decisionBoundaries;
+  }
+
+  /** 每个模型在自身决策边界只执行一次前向。 */
   private replayStateKey(replayTime: number): string {
-    return replayTime.toFixed(6);
+    return `${this.recommendationModel}@${replayTime.toFixed(6)}`;
   }
 
   /** 异步请求当前 Machine 候选；过期响应不会覆盖用户已经拖到的新时刻。 */
   private async refreshReplayDecision(replayKey: string, replayTime: number): Promise<void> {
     const requestVersion = ++this.replayDecisionRequestVersion;
     this.pendingReplayDecisionKeys.add(replayKey);
+    if (this.replayDecisionErrorKey === replayKey) {
+      this.replayDecisionErrorKey = "";
+      this.replayDecisionErrorMessage = "";
+    }
+    let renderFailure = false;
     try {
       const rawDecision = await requestReplayDecision({
         resultId: this.analysisResultId || undefined,
         moves: this.analysisResultId ? undefined : this.moves,
         plan: this.replayPlan,
+        recommendationModel: this.recommendationModel,
         time: replayTime,
       });
       const decision = normalizeDecisionTrace({ DecisionTrace: [rawDecision] })[0] ?? null;
@@ -2752,10 +2984,22 @@ export class VisualizationWorkspace {
       this.liveDecision = decision;
       this.liveDecisionKey = replayKey;
       this.render();
-    } catch (_error) {
-      // 静态 DecisionTrace 仍作为旧结果和缺少完整配置的导入文件的只读兜底。
+    } catch (error) {
+      if (requestVersion === this.replayDecisionRequestVersion) {
+        this.replayDecisionErrorKey = replayKey;
+        this.replayDecisionErrorMessage = error instanceof Error
+          ? error.message
+          : String(error);
+        renderFailure = true;
+      }
     } finally {
       this.pendingReplayDecisionKeys.delete(replayKey);
+      if (
+        renderFailure
+        && this.replayStateKey(this.replayDecisionTime(this.time)) === replayKey
+      ) {
+        this.render();
+      }
     }
   }
 

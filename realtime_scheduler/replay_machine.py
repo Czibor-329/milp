@@ -1,9 +1,9 @@
-"""拓扑回放使用的整机状态重建与 E2E 动作评估。
+"""拓扑回放使用的整机状态重建与端到端模型动作评估。
 
 本模块把编辑器计划、任意来源的 MoveList 和回放时刻组合成算法层 ``Machine``。
 它只重放已经发生的物理 Move，不沿用结果文件中的静态决策轨迹；随后枚举当前
-合法搬运意图并调用生产 E2E-CTQ checkpoint 评分。这样启发式、MILP 或外部算法
-的结果也能在同一物理状态下获得可比较的模型解释。
+合法搬运意图，并按用户选择调用 E2E-CTQ 联合动作模型或双 Actor 原子动作模型。
+这样启发式、MILP 或外部算法结果也能在同一物理状态下获得可比较的模型解释。
 """
 
 from __future__ import annotations
@@ -22,21 +22,35 @@ TIME_TOLERANCE_SECONDS = 1e-6
 COMPLETED_INTENT_MOVE_TYPES = frozenset({1, 3, 4})
 VISIBLE_CANDIDATE_LIMIT = 24
 QUANTILE_MARGIN = 1
+E2E_RECOMMENDATION_MODEL = "e2e-ctq"
+DUAL_ACTOR_RECOMMENDATION_MODEL = "dual-actor-e2e"
+SUPPORTED_RECOMMENDATION_MODELS = frozenset({
+    E2E_RECOMMENDATION_MODEL,
+    DUAL_ACTOR_RECOMMENDATION_MODEL,
+})
 _POLICY_CACHE: Dict[str, tuple[int, Any]] = {}
 _POLICY_LOCK = threading.RLock()
 
 
-def _load_cached_policy(model_path: Path) -> Any:
+def _load_cached_policy(model_path: Path, recommendation_model: str) -> Any:
     """按 checkpoint 修改时间缓存生产模型，避免回放事件重复读取磁盘。"""
-    from src.schedule.e2e_ctq import load_e2e_ctq_policy
-
     resolved_path = model_path.resolve()
     modified_time = resolved_path.stat().st_mtime_ns
-    cache_key = str(resolved_path)
+    cache_key = f"{recommendation_model}:{resolved_path}"
     with _POLICY_LOCK:
         cached = _POLICY_CACHE.get(cache_key)
         if cached is None or cached[0] != modified_time:
-            cached = (modified_time, load_e2e_ctq_policy(resolved_path))
+            if recommendation_model == DUAL_ACTOR_RECOMMENDATION_MODEL:
+                from src.schedule.strategies.dual_actor_e2e import (
+                    load_dual_actor_policy,
+                )
+
+                policy = load_dual_actor_policy(resolved_path)
+            else:
+                from src.schedule.strategies.e2e_ctq import load_e2e_ctq_policy
+
+                policy = load_e2e_ctq_policy(resolved_path)
+            cached = (modified_time, policy)
             _POLICY_CACHE[cache_key] = cached
         return cached[1]
 
@@ -47,8 +61,9 @@ class ReplayMachine:
     参数:
         plan: 编辑器完整计划，必须包含 device、routes、recipes 和 rounds。
         moves: 任意调度策略输出的标准 MoveList。
-        model_path: 生产 E2E-CTQ checkpoint 路径。
+        model_path: 所选推荐模型的生产 checkpoint 路径。
         updates: 可选的逐轮实际 Machine update，用于精确恢复多轮重算切点。
+        recommendation_model: ``e2e-ctq`` 或 ``dual-actor-e2e``。
 
     实例不修改输入对象。每次 ``evaluate`` 都以目标时刻之前已发布的轮次构造
     Problem，避免尚未上线的后续批次提前出现在候选集合中。
@@ -60,31 +75,36 @@ class ReplayMachine:
         moves: Sequence[Mapping[str, Any]],
         model_path: Path,
         updates: Sequence[Mapping[str, Any]] = (),
+        *,
+        recommendation_model: str = E2E_RECOMMENDATION_MODEL,
     ) -> None:
         if not isinstance(plan.get("device"), Mapping):
             raise ValueError("回放 E2E 评估缺少设备配置 device")
         if not isinstance(plan.get("rounds"), Sequence):
             raise ValueError("回放 E2E 评估缺少轮次配置 rounds")
+        normalized_model = str(recommendation_model).strip().lower()
+        if normalized_model not in SUPPORTED_RECOMMENDATION_MODELS:
+            raise ValueError(f"拓扑回放不支持推荐模型：{recommendation_model}")
         if not Path(model_path).is_file():
-            raise RuntimeError("E2E-CTQ 模型不存在，无法实时评估动作")
+            raise RuntimeError(f"{normalized_model} 模型不存在，无法实时评估动作")
         self.plan = deepcopy(dict(plan))
         self.moves = [deepcopy(dict(move)) for move in moves]
         self.model_path = Path(model_path)
         self.updates = [deepcopy(dict(update)) for update in updates]
+        self.recommendation_model = normalized_model
 
     def evaluate(self, cutoff: float) -> Dict[str, Any]:
-        """返回目标回放时刻的全部合法意图、E2E 评分和原计划选择。
+        """返回目标回放时刻的合法候选、所选模型评分和原计划选择。
 
         ``cutoff`` 为绝对秒数。返回值遵循前端 ``DecisionTraceStep`` 契约；
-        ``selectedActionId`` 是 E2E 推荐的完整 Pick + Place / Swap 事务，
-        ``executedActionId`` 是 MoveList 接下来实际执行的完整事务。兼容字段
-        ``selectedIntentActionId`` 和 ``executedIntentActionId`` 返回相同 ID。
+        E2E 返回一张完整 Pick + Place / Swap 联合候选榜；双 Actor 返回互不
+        混排的大气端与真空端原子候选组，每组拥有独立推荐和偏好概率。
         """
-        from src.schedule.e2e_ctq import (
+        from src.schedule.strategies.e2e_ctq import (
             build_resource_flow_context,
             build_resource_flow_observation,
         )
-        from src.schedule.machine_policy import ReentrantFlowPriority
+        from src.schedule.strategies.machine_policy import ReentrantFlowPriority
         from src.validation import Machine, MoveStateReplay
         from src.validation.state import MachineState
 
@@ -123,8 +143,36 @@ class ReplayMachine:
         machine = Machine(problem, replay.state, current_time=replay_time)
         state = machine.get_state()
         actions = machine.get_robot_actions()
+        if self.recommendation_model == DUAL_ACTOR_RECOMMENDATION_MODEL:
+            # 双 Actor 的决策粒度是单个 Pick / Place / Swap。机器人已经完成
+            # Pick、手上持片时，完整事务候选可能为空，但 Place 原子动作仍然合法，
+            # 因此不能复用下方 E2E 的完整事务空判断。
+            primitive_actions = machine.get_primitive_robot_actions()
+            if not primitive_actions:
+                return self._dual_actor_decision_payload(
+                    problem,
+                    state,
+                    actions,
+                    primitive_actions,
+                    None,
+                    replay_time,
+                )
+            policy = _load_cached_policy(
+                self.model_path,
+                self.recommendation_model,
+            )
+            return self._dual_actor_decision_payload(
+                problem,
+                state,
+                actions,
+                primitive_actions,
+                policy,
+                replay_time,
+            )
+
         if not actions:
             return {
+                "model": self.recommendation_model,
                 "decisionIndex": int(state.completed_action_count),
                 "time": replay_time,
                 "revision": int(state.revision),
@@ -136,9 +184,13 @@ class ReplayMachine:
                 "modelEvaluated": False,
                 "replayEvaluated": True,
                 "candidates": [],
+                "candidateGroups": [],
             }
 
-        policy = _load_cached_policy(self.model_path)
+        policy = _load_cached_policy(
+            self.model_path,
+            self.recommendation_model,
+        )
         context = build_resource_flow_context(problem)
         observation = build_resource_flow_observation(
             problem,
@@ -175,6 +227,169 @@ class ReplayMachine:
             deferred_action_ids,
         )
         return decision
+
+    @staticmethod
+    def _policy_probabilities(logits: np.ndarray) -> np.ndarray:
+        """把同一模型、同一控制域内的 logits 稳定转换为偏好概率。"""
+        score_values = np.asarray(logits, dtype=np.float64)
+        shifted_scores = score_values - float(np.max(score_values))
+        weights = np.exp(np.clip(shifted_scores, -60.0, 0.0))
+        denominator = float(np.sum(weights))
+        if np.isfinite(denominator) and denominator > 0.0:
+            return weights / denominator
+        return np.full(
+            len(score_values),
+            1.0 / len(score_values),
+            dtype=np.float64,
+        )
+
+    def _dual_actor_decision_payload(
+        self,
+        problem: Any,
+        state: Any,
+        full_actions: Sequence[Any],
+        primitive_actions: Sequence[Any],
+        policy: Any,
+        replay_time: float,
+    ) -> Dict[str, Any]:
+        """分别生成大气端和真空端原子候选榜，不做跨域排序。"""
+        from src.schedule.strategies.dual_actor_e2e import (
+            ACTOR_NAMES,
+            build_primitive_resource_flow_observation,
+        )
+        from src.schedule.strategies.e2e_ctq import build_resource_flow_context
+
+        context = build_resource_flow_context(problem)
+        groups = []
+        flattened_candidates = []
+        for actor in ACTOR_NAMES:
+            actor_actions = [
+                action for action in primitive_actions if action.actor == actor
+            ]
+            if not actor_actions:
+                continue
+            observation = build_primitive_resource_flow_observation(
+                problem,
+                state,
+                full_actions,
+                primitive_actions,
+                actor=actor,
+                context=context,
+            )
+            logits, quantiles = policy.score(actor, observation)
+            probabilities = self._policy_probabilities(logits)
+            selected_index = min(
+                range(len(actor_actions)),
+                key=lambda index: (
+                    -float(logits[index]),
+                    float(np.mean(quantiles[index])),
+                    float(actor_actions[index].earliest_start),
+                    float(actor_actions[index].finish_time),
+                    str(actor_actions[index].action_id),
+                ),
+            )
+            ranked_indices = sorted(
+                range(len(actor_actions)),
+                key=lambda index: (
+                    -float(probabilities[index]),
+                    float(actor_actions[index].earliest_start),
+                    str(actor_actions[index].action_id),
+                ),
+            )
+            executed_action_id = self._match_next_primitive_action(
+                actor_actions,
+                replay_time,
+            )
+            executed_index = next(
+                (
+                    index
+                    for index, action in enumerate(actor_actions)
+                    if str(action.action_id) == executed_action_id
+                ),
+                None,
+            )
+            visible_indices = ranked_indices[:VISIBLE_CANDIDATE_LIMIT]
+            required_indices = {selected_index}
+            if executed_index is not None:
+                required_indices.add(executed_index)
+            for required_index in required_indices:
+                if required_index not in visible_indices:
+                    visible_indices[-1:] = [required_index]
+            visible_indices = sorted(
+                set(visible_indices),
+                key=lambda index: ranked_indices.index(index),
+            )
+            best_remaining = min(
+                float(np.mean(quantiles[index]))
+                for index in range(len(actor_actions))
+            )
+            candidates = []
+            for action_index in visible_indices:
+                action = actor_actions[action_index]
+                remaining_cost = float(np.mean(quantiles[action_index]))
+                candidate = {
+                    "actionId": str(action.action_id),
+                    "actor": actor,
+                    "kind": str(action.kind),
+                    "flowKind": str(action.kind),
+                    "robot": str(action.robot),
+                    "materialIds": [str(value) for value in action.material_ids],
+                    "waferId": int(action.wafer_id),
+                    "stageIndex": int(action.stage_index),
+                    "source": str(action.source_station or action.robot),
+                    "sourceSlot": int(action.source_slot or 0),
+                    "destination": str(action.destination_station or "Robot hand"),
+                    "destinationSlot": int(action.destination_slot or 0),
+                    "earliestStart": float(action.earliest_start),
+                    "finishTime": float(action.finish_time),
+                    "rank": ranked_indices.index(action_index) + 1,
+                    "selected": action_index == selected_index,
+                    "executed": action_index == executed_index,
+                    "policyScore": float(logits[action_index]),
+                    "policyPreference": float(probabilities[action_index]),
+                    "expectedRemainingCost": remaining_cost,
+                    "makespanDelta": max(0.0, remaining_cost - best_remaining),
+                }
+                candidates.append(candidate)
+                flattened_candidates.append(candidate)
+            selected_action_id = str(actor_actions[selected_index].action_id)
+            groups.append({
+                "actor": actor,
+                "label": "大气端 Actor" if actor == "atmosphere" else "真空端 Actor",
+                "selectedActionId": selected_action_id,
+                "executedActionId": executed_action_id,
+                "candidateCount": len(actor_actions),
+                "shownCandidateCount": len(candidates),
+                "candidatesTruncated": len(actor_actions) > len(candidates),
+                "candidates": candidates,
+            })
+        completed_intents = sum(
+            1
+            for move in self.moves
+            if (
+                int(move.get("MoveType", -1)) in COMPLETED_INTENT_MOVE_TYPES
+                and float(move.get("EndTime") or 0.0)
+                <= replay_time + TIME_TOLERANCE_SECONDS
+            )
+        )
+        return {
+            "model": DUAL_ACTOR_RECOMMENDATION_MODEL,
+            "modelLabel": "双 Actor 原子调度",
+            "decisionIndex": completed_intents,
+            "time": replay_time,
+            "revision": int(state.revision),
+            "selectedActionId": "",
+            "executedActionId": "",
+            "candidateCount": len(primitive_actions),
+            "shownCandidateCount": len(flattened_candidates),
+            "candidatesTruncated": any(
+                bool(group["candidatesTruncated"]) for group in groups
+            ),
+            "modelEvaluated": bool(groups),
+            "replayEvaluated": True,
+            "candidates": flattened_candidates,
+            "candidateGroups": groups,
+        }
 
     def _decision_payload(
         self,
@@ -298,6 +513,8 @@ class ReplayMachine:
             else ""
         )
         return {
+            "model": E2E_RECOMMENDATION_MODEL,
+            "modelLabel": "E2E-CTQ",
             "decisionIndex": completed_intents,
             "time": replay_time,
             "revision": int(state.revision),
@@ -311,6 +528,7 @@ class ReplayMachine:
             "modelEvaluated": True,
             "replayEvaluated": True,
             "candidates": candidates,
+            "candidateGroups": [],
         }
 
     def _problem_at(self, cutoff: float):
@@ -417,6 +635,39 @@ class ReplayMachine:
             )
             if self._transport_signature(terminal_preview) == expected_signature:
                 return str(action.action_id)
+        return ""
+
+    def _match_next_primitive_action(
+        self,
+        actions: Sequence[Any],
+        cutoff: float,
+    ) -> str:
+        """用紧邻的物理 Pick、Place 或 Swap 匹配本域原计划原子动作。"""
+        primitive_move_types = {0, 1, 2, 3, 4}
+        future_moves = [
+            move
+            for move in sorted(
+                self.moves,
+                key=lambda item: (
+                    float(item.get("StartTime") or 0.0),
+                    int(item.get("MoveID") or 0),
+                ),
+            )
+            if (
+                int(move.get("MoveType", -1)) in primitive_move_types
+                and float(move.get("EndTime") or 0.0)
+                > cutoff + TIME_TOLERANCE_SECONDS
+            )
+        ]
+        for expected_move in future_moves:
+            expected_signature = self._transport_signature(expected_move)
+            for action in actions:
+                if any(
+                    self._transport_signature(preview) == expected_signature
+                    for preview in action.move_preview
+                    if int(preview.get("MoveType", -1)) in primitive_move_types
+                ):
+                    return str(action.action_id)
         return ""
 
     @staticmethod

@@ -176,6 +176,9 @@ VIEWER_PATH = FRONTEND_DIR / "movelist_gantt_viewer.html"
 ROUTE_EDITOR_LOGIC_PATH = FRONTEND_DIR / "route_editor_logic.js"
 FRONTEND_ASSET_DIR = FRONTEND_DIR / "assets"
 E2E_CTQ_MODEL_PATH = ALGORITHM_ROOT / "results" / "models" / "e2e_ctq_policy.npz"
+DUAL_ACTOR_MODEL_PATH = (
+    ALGORITHM_ROOT / "results" / "dual_actor_primitive_v1_candidate.npz"
+)
 WORKSPACE_STORE_PATH = DATA_DIR / "workspaces.json"
 LEGACY_WORKSPACE_STORE_PATH = ALGORITHM_ROOT / "results" / "config_editor_workspaces.json"
 DEVICE_INIT_DIR = DATA_DIR / "devices"
@@ -203,6 +206,10 @@ BUILTIN_ALGORITHM_METADATA: Dict[str, Dict[str, str]] = {
     "e2e-ctq": {
         "name": "E2E-CTQ",
         "introduction": "使用异构资源流图和剩余工期分位价值，从当前设备状态直接生成唯一调度轨迹。",
+    },
+    "dual-actor-e2e": {
+        "name": "双 Actor 原子调度",
+        "introduction": "大气端与真空端两个模型并行形成决策，以 Pick、Place、Swap 为粒度协调 LoadLock 准入、晶圆重入、清洁停靠与系统停留时间波动。",
     },
     "milp": {
         "name": "MILP 最优求解",
@@ -2315,10 +2322,15 @@ def _execute_standard_algorithm(
             len(round_trace) if isinstance(round_trace, list) else 0
         )
     if decision_trace:
+        dual_actor_trace = strategy == "dual-actor-e2e"
         combined_output["DecisionTrace"] = decision_trace
         combined_output["DecisionTraceMeta"] = {
-            "schema": "e2e-ctq-decision-trace-v1",
-            "model": "E2E-CTQ",
+            "schema": (
+                "dual-actor-primitive-decision-trace-v1"
+                if dual_actor_trace
+                else "e2e-ctq-decision-trace-v1"
+            ),
+            "model": "双 Actor 原子调度" if dual_actor_trace else "E2E-CTQ",
             "decisionCount": len(decision_trace),
             "truncated": decision_trace_truncated,
         }
@@ -2380,13 +2392,14 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
         "heuristic",
         "loadlock-macro",
         "e2e-ctq",
+        "dual-actor-e2e",
         "milp",
     }
     if normalized_strategy not in builtin_strategies:
         if other_algorithm_id is None:
             raise ValueError(
                 "策略只支持 heuristic、loadlock-macro、"
-                "e2e-ctq、milp，"
+                "e2e-ctq、dual-actor-e2e、milp，"
                 "或 other_alg 下已发现的标准算法"
             )
         discovered_ids = {
@@ -2396,7 +2409,7 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
         if other_algorithm_id.casefold() not in discovered_ids:
             raise ValueError(
                 "策略只支持 heuristic、loadlock-macro、"
-                "e2e-ctq、milp，"
+                "e2e-ctq、dual-actor-e2e、milp，"
                 "或 other_alg 下已发现的标准算法"
             )
     strategy = normalized_strategy if normalized_strategy in builtin_strategies else strategy
@@ -2414,7 +2427,9 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
 
     options = plan.get("options") if isinstance(plan.get("options"), Mapping) else {}
     default_loadlock_manager_mode = (
-        "joint" if strategy in {"e2e-ctq"} else "petri-look"
+        "joint"
+        if strategy in {"e2e-ctq", "dual-actor-e2e"}
+        else "petri-look"
     )
     loadlock_manager_mode = str(
         options.get("loadLockManager") or default_loadlock_manager_mode
@@ -3848,10 +3863,19 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                         BUILTIN_ALGORITHM_AVAILABLE
                         and E2E_CTQ_MODEL_PATH.is_file()
                     ),
+                    "dual-actor-e2e": (
+                        BUILTIN_ALGORITHM_AVAILABLE
+                        and DUAL_ACTOR_MODEL_PATH.is_file()
+                    ),
                     "milp": BUILTIN_ALGORITHM_AVAILABLE,
                 },
                 "strategyModels": {
                     "e2e-ctq": str(E2E_CTQ_MODEL_PATH) if E2E_CTQ_MODEL_PATH.is_file() else "",
+                    "dual-actor-e2e": (
+                        str(DUAL_ACTOR_MODEL_PATH)
+                        if DUAL_ACTOR_MODEL_PATH.is_file()
+                        else ""
+                    ),
                 },
                 "strategyErrors": builtin_strategy_errors,
                 "algorithmMetadata": algorithm_metadata_for_health(),
@@ -3937,15 +3961,27 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                     raw_plan = replay_context.get("plan")
                 if not isinstance(raw_plan, Mapping):
                     raise ValueError("缺少生成该 MoveList 的完整计划，无法重建 Machine")
+                recommendation_model = str(
+                    payload.get("recommendationModel") or "e2e-ctq"
+                ).strip().lower()
+                recommendation_models = {
+                    "e2e-ctq": E2E_CTQ_MODEL_PATH,
+                    "dual-actor-e2e": DUAL_ACTOR_MODEL_PATH,
+                }
+                if recommendation_model not in recommendation_models:
+                    raise ValueError(
+                        f"拓扑回放不支持推荐模型：{recommendation_model}"
+                    )
                 decision = ReplayMachine(
                     raw_plan,
                     moves,
-                    E2E_CTQ_MODEL_PATH,
+                    recommendation_models[recommendation_model],
                     (
                         replay_context.get("updates") or []
                         if isinstance(replay_context, Mapping)
                         else []
                     ),
+                    recommendation_model=recommendation_model,
                 ).evaluate(_finite_number(payload.get("time"), 0.0))
                 self._send_json({"ok": True, "decision": decision})
             except Exception as error:  # noqa: BLE001

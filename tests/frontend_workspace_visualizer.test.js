@@ -135,6 +135,8 @@ function fakeWorkspaceDocument() {
     "visualTopologyPlayback",
     "visualDeviceStage",
     "visualDecisionLens",
+    "visualRecommendationModel",
+    "visualRecommendationModelHint",
     "visualFilterAligner",
     "visualFilterCooler",
     "visualPauseOnDecisionChangeButton",
@@ -290,6 +292,7 @@ test("决策空间签名忽略排序和分数，仅关注候选集合变化", ()
 
 test("完整 Pick + Place 只在 Place 结束时形成下一决策边界", () => {
   assert.deepEqual(logic.decisionBoundaryTimes(moves), [3]);
+  assert.deepEqual(logic.primitiveDecisionBoundaryTimes(moves), [2, 3]);
   assert.deepEqual(logic.decisionBoundaryTimes([
     ...moves,
     { MoveID: 5, MoveType: 4, StartTime: 5, EndTime: 7 },
@@ -403,6 +406,59 @@ test("合法动作空间按偏好排序并格式化低偏好和工期差值", as
   assert.doesNotMatch(lens, /为什么推荐|候选对比|动作证据|已观察切片|Top-2|上一决策|下一决策|导出决策样本|剩余 Makespan|预测区间|lowerRemainingMakespan|upperRemainingMakespan/);
 });
 
+test("双 Actor 推荐按大气端和真空端分开显示且不跨域混排", async () => {
+  const root = fakeWorkspaceDocument();
+  const workspace = logic.createVisualizationWorkspace(root);
+  await workspace.loadFile({
+    name: "dual-actor-decision.json",
+    async text() {
+      return JSON.stringify({
+        MoveList: moves,
+        DecisionTraceMeta: {
+          schema: "dual-actor-primitive-decision-trace-v1",
+          model: "双 Actor 原子调度",
+        },
+        DecisionTrace: [{
+          model: "dual-actor-e2e",
+          decisionIndex: 12,
+          time: 0,
+          candidateGroups: [
+            {
+              actor: "atmosphere",
+              label: "大气端 Actor",
+              selectedActionId: "atr-pick",
+              candidateCount: 2,
+              candidates: [
+                { actionId: "atr-place", actor: "atmosphere", kind: "place", robot: "ATR", source: "ATR", destination: "LA", rank: 2, policyPreference: 0.2, expectedRemainingCost: 18 },
+                { actionId: "atr-pick", actor: "atmosphere", kind: "pick", robot: "ATR", source: "LP1", destination: "Robot hand", rank: 1, selected: true, policyPreference: 0.8, expectedRemainingCost: 11 },
+              ],
+            },
+            {
+              actor: "vacuum",
+              label: "真空端 Actor",
+              selectedActionId: "vtr-swap",
+              candidateCount: 1,
+              candidates: [
+                { actionId: "vtr-swap", actor: "vacuum", kind: "swap", robot: "VTR", source: "PM1", destination: "PM2", rank: 1, selected: true, policyPreference: 1, expectedRemainingCost: 9 },
+              ],
+            },
+          ],
+        }],
+      });
+    },
+  });
+
+  const modelSelect = root.elements.get("visualRecommendationModel");
+  modelSelect.value = "dual-actor-e2e";
+  modelSelect.listeners.get("change")();
+  const lens = root.elements.get("visualDecisionLens").innerHTML;
+  assert.match(lens, /决策 #12[\s\S]*双 Actor · 分域独立推荐/);
+  assert.match(lens, /大气端 Actor[\s\S]*大气端推荐[\s\S]*真空端 Actor[\s\S]*真空端推荐/);
+  assert.ok(lens.indexOf("LP1 → Robot hand") < lens.indexOf("ATR → LA"), "大气端应在自己的榜单内排序");
+  assert.equal((lens.match(/data-recommendation-actor=/g) || []).length, 2);
+  assert.match(root.elements.get("visualRecommendationModelHint").textContent, /分别推荐原子动作/);
+});
+
 test("重入让位候选按最终调度优先级展示且计划标签指向紧邻事务", async () => {
   const root = fakeWorkspaceDocument();
   const workspace = logic.createVisualizationWorkspace(root);
@@ -490,7 +546,7 @@ test("开启保护后，回放越过完整事务边界时精确暂停在下一�
     assert.match(autoPause.innerHTML, /已暂停/);
     assert.equal(root.elements.get("visualCurrentTime").textContent, "3.0");
     assert.equal(autoPause.getAttribute("aria-checked"), "true");
-    assert.equal(autoPause.getAttribute("aria-label"), "已到达下一个完整决策，回放已暂停");
+    assert.equal(autoPause.getAttribute("aria-label"), "已到达下一个完整事务决策，回放已暂停");
   } finally {
     global.requestAnimationFrame = originalRequestAnimationFrame;
     global.cancelAnimationFrame = originalCancelAnimationFrame;
@@ -1211,6 +1267,42 @@ test("性能分析用首片完工到末片投料剔除启动与收尾", () => {
     { wafer: "W4", enteredAt: 50, completedAt: 75, duration: 25 },
   ]);
   assert.equal(logic.analyzeSchedulePerformance(performanceMoves, device, "full").completedWaferCount, 4);
+});
+
+test("双 Actor 回放在 Pick 结束后的原子决策边界暂停", async () => {
+  const originalRequestAnimationFrame = global.requestAnimationFrame;
+  const originalCancelAnimationFrame = global.cancelAnimationFrame;
+  let scheduledFrame = null;
+  global.requestAnimationFrame = callback => {
+    scheduledFrame = callback;
+    return 1;
+  };
+  global.cancelAnimationFrame = () => {};
+
+  try {
+    const root = fakeWorkspaceDocument();
+    const workspace = logic.createVisualizationWorkspace(root);
+    await workspace.loadFile({
+      name: "dual-actor-primitive-boundary.json",
+      async text() {
+        return JSON.stringify({ MoveList: moves });
+      },
+    });
+    const modelSelect = root.elements.get("visualRecommendationModel");
+    modelSelect.value = "dual-actor-e2e";
+    modelSelect.listeners.get("change")();
+
+    const autoPause = root.elements.get("visualPauseOnDecisionChangeButton");
+    autoPause.click();
+    root.elements.get("visualPlayButton").click();
+    scheduledFrame(performance.now() + 800);
+
+    assert.equal(root.elements.get("visualCurrentTime").textContent, "2.0");
+    assert.equal(autoPause.getAttribute("aria-label"), "已到达下一个原子动作决策，回放已暂停");
+  } finally {
+    global.requestAnimationFrame = originalRequestAnimationFrame;
+    global.cancelAnimationFrame = originalCancelAnimationFrame;
+  }
 });
 
 test("逐片晶圆系统驻留图展示柱、均值线和每片时长", () => {

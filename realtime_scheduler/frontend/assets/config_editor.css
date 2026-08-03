@@ -609,33 +609,6 @@
     .gantt-wafer-dot { width: 12px; height: 12px; flex-shrink: 0; border: 2px solid rgba(255,255,255,.94); border-radius: 50%; box-shadow: 0 0 0 1px rgba(15,23,42,.28), 0 1px 2px rgba(15,23,42,.22); }
     .loadlock-cycle-empty { padding: 24px 18px; color: var(--performance-muted); font-size: 12px; text-align: center; }
 
-    /* -------- 4. 下一步优化卡片 -------- */
-    .next-opt-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; padding: 18px 24px; border-bottom: 1px solid var(--performance-line); background: #f8faff; }
-    .next-opt-head span, .next-opt-head strong { display: block; }
-    .next-opt-head span { color: var(--brand); font-size: 11px; font-weight: 900; letter-spacing: .08em; }
-    .next-opt-head strong { margin-top: 3px; color: var(--performance-text); font-size: 18px; }
-    .next-opt-head small { max-width: 380px; color: var(--performance-muted); font-size: 11px; text-align: right; }
-    .diagnostic-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; padding: 22px 24px; }
-    .diagnostic-card { display: flex; min-width: 0; flex-direction: column; padding: 15px; border: 1px solid #d8e2f2; border-radius: 12px; background: #fff; }
-    .diagnostic-card header { display: flex; gap: 9px; align-items: flex-start; }
-    .diagnostic-card header strong, .diagnostic-card header small { display: block; }
-    .diagnostic-card header small { margin-top: 2px; color: var(--brand); font-size: 10px; font-weight: 800; }
-    .diagnostic-rank { display: grid; width: 24px; height: 24px; flex: 0 0 auto; place-items: center; border-radius: 7px; color: #fff; background: var(--brand); font-size: 11px; font-weight: 900; }
-    .diagnostic-card > p { margin: 10px 0; color: #42526b; font-size: 12px; line-height: 1.55; }
-    .diagnostic-card dl { display: grid; gap: 6px; margin: 0; }
-    .diagnostic-card dl > div { display: grid; grid-template-columns: 90px 1fr; gap: 8px; padding: 8px; border-radius: 8px; background: #f8fafc; }
-    .diagnostic-card dt { color: var(--muted); font-size: 10px; font-weight: 800; }
-    .diagnostic-card dd { margin: 0; }
-    .diagnostic-card dd b, .diagnostic-card dd span { display: block; }
-    .diagnostic-card dd b { font-size: 12px; }
-    .diagnostic-card dd span { margin-top: 2px; color: var(--muted); font-size: 10px; line-height: 1.45; }
-    .diagnostic-experiment { margin-top: 10px; padding: 11px; border: 1px solid #bcd0f4; border-radius: 9px; background: #f5f8ff; }
-    .diagnostic-experiment > span { color: var(--brand); font-size: 10px; font-weight: 850; }
-    .diagnostic-experiment > strong { display: block; margin-top: 2px; font-size: 12px; }
-    .diagnostic-experiment p { margin: 5px 0; color: #42526b; font-size: 10px; line-height: 1.5; }
-    .diagnostic-experiment small { display: block; color: var(--muted); font-size: 10px; line-height: 1.45; }
-    .diagnostic-experiment .btn { margin-top: 8px; }
-    .diagnostic-card > aside { margin-top: 9px; color: #7b5f31; font-size: 10px; line-height: 1.45; }
     .visual-workspace-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(340px, 380px); gap: 14px; align-items: start; }
     .device-stage { min-width: 0; }
     .equipment-schematic { overflow: hidden; border: 1px solid #d7e0eb; border-radius: 14px; background: #fff; box-shadow: 0 1px 2px rgba(15,23,42,.04); }
@@ -925,8 +898,8 @@
     body.theme-dark .device-config-nav { border-color: var(--line); background: var(--surface); box-shadow: none; }
     body.theme-dark .device-config-nav-item { border-color: #3f5d9b; color: #a9c1ff; background: #25365f; }
     body.theme-dark .device-config-nav-item small { color: #aeb9d2; }
-    body.theme-dark .app-content :is(.workspace-device-controls > select, .workspace-icon-button, .clean-type-group, .clean-card, .round-card, .cjob-card, .cjob-head, .cjob-controls, .route-process-group, .route-type-group, .route-type-head, .route-summary-card, .route-summary-head, .candidate-picker summary, .candidate-picker-menu, .algorithm-hover-info, .test-group-analysis, .group-kpi-grid article, .group-chart-card, .group-analysis-table-wrap, .visual-content, .visual-overview, .timeline-console, .result-card, .performance-summary, .bottleneck-analysis-head, .bottleneck-analysis-list li, .bl-candidate-bars, .other-resources-section, .loadlock-card-head, .next-opt-head, .diagnostic-card, .diagnostic-card dl > div, .diagnostic-experiment, .equipment-schematic, .schematic-head, .decision-lens-panel, .active-moves-panel, .visual-legend, .drawer, .step-overview-card, .step-editor-card, .step-system-details, .step-meta-list, .step-number-control, .clean-choice, .robot-slot-card, .robot-slot-notice, .robot-slot-empty) { border-color: var(--line); color: var(--ink); background: var(--surface); box-shadow: none; }
-    body.theme-dark .app-content :is(.cjob-controls, .route-type-head, .route-summary-head, .test-group-analysis, .visual-content, .bottleneck-analysis-head, .bl-candidate-bars, .other-resources-section, .loadlock-card-head, .next-opt-head, .diagnostic-card dl > div, .schematic-head, .decision-alternative-empty, .visual-legend, .step-meta-list) { background: var(--soft); }
+    body.theme-dark .app-content :is(.workspace-device-controls > select, .workspace-icon-button, .clean-type-group, .clean-card, .round-card, .cjob-card, .cjob-head, .cjob-controls, .route-process-group, .route-type-group, .route-type-head, .route-summary-card, .route-summary-head, .candidate-picker summary, .candidate-picker-menu, .algorithm-hover-info, .test-group-analysis, .group-kpi-grid article, .group-chart-card, .group-analysis-table-wrap, .visual-content, .visual-overview, .timeline-console, .result-card, .performance-summary, .bottleneck-analysis-head, .bottleneck-analysis-list li, .bl-candidate-bars, .other-resources-section, .loadlock-card-head, .equipment-schematic, .schematic-head, .decision-lens-panel, .active-moves-panel, .visual-legend, .drawer, .step-overview-card, .step-editor-card, .step-system-details, .step-meta-list, .step-number-control, .clean-choice, .robot-slot-card, .robot-slot-notice, .robot-slot-empty) { border-color: var(--line); color: var(--ink); background: var(--surface); box-shadow: none; }
+    body.theme-dark .app-content :is(.cjob-controls, .route-type-head, .route-summary-head, .test-group-analysis, .visual-content, .bottleneck-analysis-head, .bl-candidate-bars, .other-resources-section, .loadlock-card-head, .schematic-head, .decision-alternative-empty, .visual-legend, .step-meta-list) { background: var(--soft); }
     body.theme-dark .decision-tag.is-recommendation { border-color: #4c5f78; color: #b9c9df; background: #273344; }
     body.theme-dark .decision-tag.is-plan { border-color: #495f54; color: #b7c9bf; background: #293831; }
     body.theme-dark .candidate-landing { border-color: #526da8; color: #c8d8ff; background: #25365f; }
@@ -1034,6 +1007,11 @@
     .petri-section-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
     .petri-section-heading > span { color: var(--muted); font: 800 var(--decision-text-sm)/1.3 "Fira Code", Consolas, monospace; letter-spacing: .06em; }
     .decision-panel-toolbar { display: flex; min-height: 52px; align-items: center; justify-content: space-between; gap: 10px; }
+    .decision-model-control { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 6px 10px; padding: 10px 11px; border: 1px solid var(--line); border-radius: 6px; background: var(--soft); }
+    .decision-model-control > span { color: var(--muted); font: 800 10px/1.2 "Fira Code", Consolas, monospace; letter-spacing: .06em; }
+    .decision-model-control select { width: 100%; min-width: 0; min-height: 36px; padding: 0 30px 0 10px; border: 1px solid #b9c6d6; border-radius: 5px; color: var(--ink); background-color: var(--surface); font: 700 12px/1.2 "Fira Sans", "Microsoft YaHei", "Segoe UI", sans-serif; cursor: pointer; }
+    .decision-model-control select:focus-visible { outline: 3px solid rgba(36,87,214,.24); outline-offset: 2px; }
+    .decision-model-control small { grid-column: 1 / -1; color: var(--muted); font-size: 11px; line-height: 1.45; }
     .decision-auto-pause { display: flex; min-width: 0; min-height: 44px; align-items: center; gap: 8px; padding: 3px 0; border: 0; border-radius: 6px; color: var(--ink); background: transparent; font: 600 var(--decision-text-sm)/1.25 "Fira Sans", "Microsoft YaHei", "Segoe UI", sans-serif; text-align: right; cursor: pointer; touch-action: manipulation; }
     .decision-switch-copy { display: grid; justify-items: end; gap: 1px; }
     .decision-switch-copy > span { color: var(--ink); white-space: nowrap; }
@@ -1047,6 +1025,23 @@
     .decision-auto-pause.is-triggered .decision-switch-copy > strong { color: #8b5c15; }
     .petri-control-panel .decision-lens-panel, .petri-control-panel .active-moves-panel { border: 1px solid var(--line); border-radius: 6px; background: var(--surface); box-shadow: none; }
     .petri-control-panel .decision-candidate-section ol { max-height: 360px; }
+    .dual-actor-decision { display: grid; min-width: 0; }
+    .dual-actor-decision-head { display: grid; gap: 2px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+    .dual-actor-decision-head strong { color: var(--ink); font-size: 13px; }
+    .dual-actor-decision-head strong small { color: var(--muted); font-size: 11px; font-weight: 600; }
+    .dual-actor-decision-head > span { color: var(--muted); font-size: 11px; }
+    .dual-actor-recommendation-list { display: grid; gap: 8px; padding: 8px; }
+    .dual-actor-recommendation { overflow: hidden; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); }
+    .dual-actor-recommendation > header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 9px; border-bottom: 1px solid var(--line); background: var(--soft); }
+    .dual-actor-recommendation > header > div { display: grid; min-width: 0; gap: 1px; }
+    .dual-actor-recommendation > header strong { color: var(--ink); font-size: 12px; }
+    .dual-actor-recommendation > header small, .dual-actor-recommendation > header > span { color: var(--muted); font-size: 10px; white-space: nowrap; }
+    .dual-actor-recommendation.is-atmosphere { border-left: 3px solid #c47a09; }
+    .dual-actor-recommendation.is-vacuum { border-left: 3px solid #315fc2; }
+    .dual-actor-recommendation ol { max-height: 270px; margin: 0; padding: 0; overflow: auto; list-style: none; }
+    .dual-actor-recommendation .decision-candidate { min-height: 86px; }
+    .decision-tag.is-recommendation.is-atmosphere { border-color: #dfbd83; color: #85520a; background: #fff7e8; }
+    .decision-tag.is-recommendation.is-vacuum { border-color: #afc3ec; color: #294f9d; background: #edf3ff; }
     .petri-control-panel .decision-candidate { min-height: 92px; padding: 10px 12px; }
     .petri-control-panel .active-moves-panel ul { max-height: 170px; }
     .petri-control-panel .active-moves-panel li { min-height: 44px; padding: 7px 9px; background: var(--surface); }
@@ -1071,6 +1066,11 @@
     body.theme-dark .topology-module-filter-title { color: #aab7c8; }
     body.theme-dark .topology-module-filter-option { border-color: #4a5b72; color: var(--ink); background: #2a3748; }
     body.theme-dark .topology-module-filter-hint { color: #7f8da1; }
+    body.theme-dark .decision-model-control { background: var(--soft); }
+    body.theme-dark .decision-model-control select { border-color: #515c6b; color: var(--ink); background-color: #22262c; }
+    body.theme-dark .dual-actor-recommendation > header { background: var(--soft); }
+    body.theme-dark .decision-tag.is-recommendation.is-atmosphere { border-color: #765b30; color: #f1c879; background: #41331f; }
+    body.theme-dark .decision-tag.is-recommendation.is-vacuum { border-color: #49649c; color: #b9ccff; background: #263658; }
     .reference-grid-canvas { --sim-shell: #e7edf4; --sim-shell-highlight: #f8fafc; --sim-stroke: #667b94; --sim-stroke-soft: #9aa9ba; --sim-transfer: #315fc2; --sim-raw: #c47a09; --sim-done: #087f5b; --sim-environment: #1688a8; --sim-waiting: #d97706; --sim-fault: #c93636; position: relative !important; display: block !important; height: var(--topology-canvas-height, 640px) !important; min-height: 0 !important; padding: 0 !important; overflow: hidden; background-color: #f6f8fb; background-image: linear-gradient(rgba(112,132,156,.09) 1px, transparent 1px), linear-gradient(90deg, rgba(112,132,156,.09) 1px, transparent 1px), linear-gradient(rgba(112,132,156,.035) 1px, transparent 1px), linear-gradient(90deg, rgba(112,132,156,.035) 1px, transparent 1px); background-size: 75px 75px, 75px 75px, 15px 15px, 15px 15px; }
     .reference-grid-canvas::before { display: none; }
     .topology-zone, .topology-interface-bay { position: absolute; z-index: 0; top: var(--zone-top); right: 2.5%; left: 2.5%; height: var(--zone-height); border: 1px solid rgba(102,123,148,.32); background: rgba(226,233,241,.40); box-shadow: 2px 3px 7px rgba(47,62,82,.035); pointer-events: none; }

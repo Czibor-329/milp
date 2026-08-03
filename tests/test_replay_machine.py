@@ -13,7 +13,11 @@ import pytest
 
 from realtime_scheduler.replay_machine import ReplayMachine
 from realtime_scheduler.plan_builder import extract_init_data
-from realtime_scheduler.server import E2E_CTQ_MODEL_PATH, execute_plan
+from realtime_scheduler.server import (
+    DUAL_ACTOR_MODEL_PATH,
+    E2E_CTQ_MODEL_PATH,
+    execute_plan,
+)
 from tests.test_config_editor_server import DEVICE_PATH, _job, _route
 
 
@@ -161,6 +165,58 @@ def test_heuristic_movelist_is_evaluated_by_live_e2e_machine() -> None:
         (candidate["source"], candidate["destination"])
         for candidate in next_decision["candidates"]
     } == {("LP1", "LA"), ("LB", "PM1"), ("LB", "PM2")}
+
+
+@pytest.mark.skipif(
+    not DUAL_ACTOR_MODEL_PATH.is_file(),
+    reason="未部署双 Actor checkpoint",
+)
+def test_heuristic_movelist_is_evaluated_by_separate_dual_actors() -> None:
+    """双 Actor 回放推荐必须按控制域返回两张独立原子动作榜。"""
+    plan = _heuristic_replay_plan()
+    result = execute_plan(plan)
+    moves = result["output"]["MoveList"]
+    first_pick_end = min(
+        float(move.get("EndTime") or 0.0)
+        for move in moves
+        if int(move.get("MoveType", -1)) in {0, 2}
+    )
+    first_place_end = min(
+        float(move.get("EndTime") or 0.0)
+        for move in moves
+        if int(move.get("MoveType", -1)) in {1, 3}
+    )
+    machine = ReplayMachine(
+        plan,
+        moves,
+        DUAL_ACTOR_MODEL_PATH,
+        recommendation_model="dual-actor-e2e",
+    )
+    during_transaction = machine.evaluate(first_pick_end)
+    decision = machine.evaluate(first_place_end)
+
+    assert during_transaction["model"] == "dual-actor-e2e"
+    assert during_transaction["candidateCount"] >= 1
+    assert any(
+        candidate["kind"] == "place"
+        for candidate in during_transaction["candidates"]
+    )
+
+    assert decision["model"] == "dual-actor-e2e"
+    groups = {group["actor"]: group for group in decision["candidateGroups"]}
+    assert set(groups) == {"atmosphere", "vacuum"}
+    for actor, group in groups.items():
+        assert group["candidateCount"] >= 1
+        assert group["selectedActionId"]
+        assert all(candidate["actor"] == actor for candidate in group["candidates"])
+        assert sum(
+            candidate["policyPreference"]
+            for candidate in group["candidates"]
+        ) == pytest.approx(1.0)
+    assert all(
+        candidate["kind"] in {"pick", "place", "swap"}
+        for candidate in decision["candidates"]
+    )
 
 
 @pytest.mark.skipif(

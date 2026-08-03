@@ -15,6 +15,7 @@ export {
   groupedBottleneckResources,
   normalizeDecisionTrace,
   normalizeMovePayload,
+  primitiveDecisionBoundaryTimes,
   renderEquipmentTopology,
   renderWaferResidenceChart,
   snapshotWithFullDeviceModules,
