@@ -130,6 +130,17 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertNotIn('data-option="loadLockExchange"', source)
         self.assertNotIn("禁用交换", source)
 
+    def test_frontend_does_not_expose_removed_milp_strategy(self) -> None:
+        """页面、状态和健康检查不再暴露已移除的 MILP 策略。"""
+        source = _editor_source()
+
+        self.assertNotIn('id="milpStrategyInput"', source)
+        self.assertNotIn('value="milp"', source)
+        self.assertNotIn("status.strategies?.milp", source)
+        self.assertNotIn("configuredWaferCount", source)
+        self.assertNotIn("milpTimeLimit", source)
+        self.assertNotIn("milp", config_server.BUILTIN_ALGORITHM_METADATA)
+
     def test_frontend_contains_extensible_device_config_and_robot_slot_save(self) -> None:
         """页面应提供可扩展设备配置入口，并独立保存机器手单臂/双臂配置。"""
         source = _editor_source()
@@ -517,75 +528,6 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertNotIn("decisionTrace", diagnostics)
         self.assertEqual(len(trace), diagnostics["decisionTraceCount"])
 
-
-    def test_milp_strategy_runs_once_and_reports_optimality(self) -> None:
-        """MILP 单轮策略应调用独立求解器，并把最优性诊断返回前端。"""
-        from src.schedule import start_schedule
-
-        plan = {
-            "deviceName": PSE300_PATH.name,
-            "device": json.loads(PSE300_PATH.read_text(encoding="utf-8")),
-            "strategy": "milp",
-            "roundCount": 1,
-            "options": {"milpTimeLimit": 30},
-            "recipes": [{
-                "name": "MilpRecipe", "time": 60,
-                "modules": ["PM1", "PM2", "PM3"], "weight": {},
-            }],
-            "cleans": [],
-            "routes": [_route("MilpRoute", "PM1,PM2,PM3", "MilpRecipe")],
-            "rounds": [{
-                "currentTime": 0,
-                "jobs": [{**_job("MilpJob", "MilpRoute", "LP1"), "waferCount": 3}],
-            }],
-        }
-
-        def fake_milp(problem, *, time_limit, verbose):
-            """用可行 timing 结果替代测试环境中的商业求解器。"""
-            self.assertEqual(time_limit, 30)
-            self.assertFalse(verbose)
-            return start_schedule(problem, verbose=False)
-
-        with patch("src.schedule.milp.solve_milp", side_effect=fake_milp) as solver:
-            result = execute_plan(plan)
-
-        solver.assert_called_once()
-        self.assertEqual(result["strategy"], "milp")
-        diagnostics = result["rounds"][0]["strategyDiagnostics"]
-        self.assertTrue(diagnostics["optimal"])
-        self.assertEqual(diagnostics["gap"], 0.0)
-
-    def test_milp_strategy_rejects_recompute_and_more_than_twelve_wafers(self) -> None:
-        """MILP 后端必须拒绝多轮重算以及总计超过 12 片的请求。"""
-        base = {
-            "deviceName": PSE300_PATH.name,
-            "device": json.loads(PSE300_PATH.read_text(encoding="utf-8")),
-            "strategy": "milp",
-            "options": {},
-            "recipes": [{
-                "name": "MilpRecipe", "time": 60,
-                "modules": ["PM1", "PM2", "PM3"], "weight": {},
-            }],
-            "cleans": [],
-            "routes": [_route("MilpRoute", "PM1,PM2,PM3", "MilpRecipe")],
-        }
-        first_round = {
-            "currentTime": 0,
-            "jobs": [{**_job("MilpJob", "MilpRoute", "LP1"), "waferCount": 3}],
-        }
-        second_round = {
-            "currentTime": 70,
-            "jobs": [{**_job("MilpJob2", "MilpRoute", "LP2"), "waferCount": 2}],
-        }
-        with self.assertRaisesRegex(LoggedPlanError, "不能选择多次重算"):
-            execute_plan({**base, "roundCount": 2, "rounds": [first_round, second_round]})
-
-        oversized_round = {
-            "currentTime": 0,
-            "jobs": [{**_job("MilpJob", "MilpRoute", "LP1"), "waferCount": 13}],
-        }
-        with self.assertRaisesRegex(LoggedPlanError, "不能超过 12 片"):
-            execute_plan({**base, "roundCount": 1, "rounds": [oversized_round]})
 
     def test_local_standard_algorithm_calls_formal_init_and_update(self) -> None:
         """前端选择 other_alg 算法后应通过本地正式 init/update 入口完成首排。"""
@@ -1272,9 +1214,6 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("state.stationNames", html)
         self.assertIn('id="autoExportLog"', html)
         self.assertIn('id="logButton"', html)
-        self.assertIn('id="milpStrategyInput"', html)
-        self.assertIn('value="milp"', html)
-        self.assertIn("status.strategies?.milp", html)
         self.assertIn("algorithm-hover-info", html)
         self.assertIn("metadata.introduction", html)
         self.assertNotIn('data-tab-target="algorithm-history"', html)
@@ -1285,7 +1224,6 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertNotIn('id="rlStrategyHint"', html)
         self.assertIn('id="otherAlgorithmOptions"', html)
         self.assertIn("status.otherAlgorithms", html)
-        self.assertIn("configuredWaferCount() > 12", html)
         self.assertIn('id="deviceSelect"', html)
         self.assertIn('id="testCaseSelect"', html)
         self.assertIn('id="copyTestButton"', html)

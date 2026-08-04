@@ -2778,6 +2778,22 @@ var batchBottleneckSummaries = /* @__PURE__ */ new Map();
 var batchBottleneckRequests = /* @__PURE__ */ new Map();
 var batchBottleneckErrors = /* @__PURE__ */ new Map();
 var EXPECTED_API_SCHEMA = "cjob-pjob-v3";
+var BUILTIN_STRATEGIES = /* @__PURE__ */ new Set([
+  "heuristic",
+  "loadlock-macro",
+  "e2e-ctq",
+  "dual-actor-e2e"
+]);
+var DEFAULT_SCHEDULE_OPTIONS = Object.freeze({
+  loadLockManager: "petri-look",
+  residencyGuardSeconds: 0,
+  maximumRobotHoldingSeconds: 0,
+  maximumSystemResidenceCv: 0,
+  loadLockMacroSearchSeconds: 4,
+  loadLockMacroRollouts: 96,
+  seed: 0
+});
+var SCHEDULE_OPTION_KEYS = new Set(Object.keys(DEFAULT_SCHEDULE_OPTIONS));
 var CLEAN_TYPE_DEFINITIONS = [
   { key: "preclean", label: "PreClean" },
   { key: "postclean", label: "PostClean" },
@@ -2826,7 +2842,7 @@ var state = {
   algorithmMetadata: {},
   roundCount: 2,
   times: [0, 70],
-  options: { loadLockManager: "petri-look", residencyGuardSeconds: 0, maximumRobotHoldingSeconds: 0, maximumSystemResidenceCv: 0, loadLockMacroSearchSeconds: 4, loadLockMacroRollouts: 96, milpTimeLimit: 120, seed: 0 },
+  options: { ...DEFAULT_SCHEDULE_OPTIONS },
   cleans: [],
   routes: [{ name: "RouteA", group: "RouteA", bufferOption: 0, prePJobCleanRefs: [], postPJobCleanRefs: [], postCJobCleanRefs: [], stages: linkRouteSteps([makeStage("LP1"), makeStage("Robot"), makeStage("PM1,PM2", true, "RouteA_Step2"), makeStage("Robot"), makeStage("LP1")]) }],
   rounds: [makeRound(1, 0, "RouteA", "LP1"), makeRound(2, 70, "RouteA", "LP2")],
@@ -3166,7 +3182,7 @@ function makeDefaultTestCase(name = "\u9ED8\u8BA4\u6D4B\u8BD5\u96C6") {
     strategy: "heuristic",
     roundCount: 2,
     times: [0, 70],
-    options: { loadLockManager: "petri-look", residencyGuardSeconds: 0, maximumRobotHoldingSeconds: 0, maximumSystemResidenceCv: 0, loadLockMacroSearchSeconds: 4, loadLockMacroRollouts: 96, milpTimeLimit: 120, seed: 0 },
+    options: { ...DEFAULT_SCHEDULE_OPTIONS },
     cleans: state.cleans,
     routes: state.routes,
     rounds: [
@@ -3389,10 +3405,17 @@ function applyTestCase(testCase) {
   state.testCaseName = value.name;
   state.testCaseGroup = String(value.group || "");
   state.activeTestGroup = state.testCaseGroup;
-  state.strategy = value.strategy || "heuristic";
+  const requestedStrategy = String(value.strategy || "heuristic");
+  state.strategy = BUILTIN_STRATEGIES.has(requestedStrategy) || requestedStrategy.startsWith("other_alg:") ? requestedStrategy : "heuristic";
   state.roundCount = Math.max(1, Number(value.roundCount) || 1);
   state.times = Array.isArray(value.times) ? value.times : [0];
-  state.options = value.options || { loadLockManager: "petri-look", residencyGuardSeconds: 0, maximumRobotHoldingSeconds: 0, maximumSystemResidenceCv: 0, loadLockMacroSearchSeconds: 4, loadLockMacroRollouts: 96, milpTimeLimit: 120, seed: 0 };
+  const persistedOptions = value.options && typeof value.options === "object" ? value.options : {};
+  state.options = {
+    ...DEFAULT_SCHEDULE_OPTIONS,
+    ...Object.fromEntries(
+      Object.entries(persistedOptions).filter(([key]) => SCHEDULE_OPTION_KEYS.has(key))
+    )
+  };
   state.options.loadLockManager = state.options.loadLockManager || "petri-look";
   delete state.options.loadLockExchange;
   for (const key of ["residencyGuardSeconds", "maximumRobotHoldingSeconds", "maximumSystemResidenceCv"]) {
@@ -3403,7 +3426,6 @@ function applyTestCase(testCase) {
   state.options.loadLockMacroSearchSeconds = Number.isFinite(macroSearchSeconds) && macroSearchSeconds >= 0 ? macroSearchSeconds : 4;
   const macroRollouts = Number(state.options.loadLockMacroRollouts);
   state.options.loadLockMacroRollouts = Number.isFinite(macroRollouts) && macroRollouts >= 0 ? Math.floor(macroRollouts) : 96;
-  state.options.milpTimeLimit = Number(state.options.milpTimeLimit) || 120;
   if (!state.routes.length && Array.isArray(value.routes)) state.routes = value.routes;
   if (!state.cleans.length && Array.isArray(value.cleans)) state.cleans = value.cleans.map(normalizeClean);
   state.routes.forEach(normalizeRoute);
@@ -3411,7 +3433,6 @@ function applyTestCase(testCase) {
   state.expandedRouteGroups.clear();
   state.expandedRoutes.clear();
   state.rounds = Array.isArray(value.rounds) ? value.rounds : [];
-  if (state.strategy === "milp") state.roundCount = 1;
   while (state.times.length < state.roundCount) state.times.push((Number(state.times.at(-1)) || 0) + 70);
   while (state.rounds.length < state.roundCount) {
     const index = state.rounds.length;
@@ -3436,8 +3457,7 @@ function applyTestCase(testCase) {
   });
   document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro", "e2e-ctq", "dual-actor-e2e"].includes(state.strategy));
   document.getElementById("heuristicObjectiveOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro"].includes(state.strategy));
-  document.getElementById("milpOptions").classList.toggle("is-hidden", state.strategy !== "milp");
-  document.getElementById("roundCount").disabled = state.strategy === "milp";
+  document.getElementById("roundCount").disabled = false;
   if (Object.keys(state.algorithmMetadata).length) showAlgorithmDetails(state.strategy);
   renderAll();
   renderWorkspaceControls();
@@ -3673,7 +3693,7 @@ function initializeThemeToggle() {
 }
 function resizeRounds(count) {
   normalizeRounds();
-  const safe = state.strategy === "milp" ? 1 : Math.max(1, Math.min(8, Number(count) || 1));
+  const safe = Math.max(1, Math.min(8, Number(count) || 1));
   state.roundCount = safe;
   while (state.rounds.length < safe) {
     const index = state.rounds.length, priorTime = Number(state.rounds.at(-1)?.currentTime || 0);
@@ -3992,7 +4012,7 @@ function renderRounds() {
       const normalLot = cjob.jobType === "NormalLot";
       const pjobRows = cjob.pjobs.map((pjob, pjobIndex) => `<tr>
         <td><span class="readonly-pill">${escapeHtml3(pjob.jobName)}</span></td>
-        <td><input class="pjob-number" type="number" min="1" max="${state.strategy === "milp" ? 12 : 25}" data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="waferCount" value="${Number(pjob.waferCount)}"></td>
+        <td><input class="pjob-number" type="number" min="1" max="25" data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="waferCount" value="${Number(pjob.waferCount)}"></td>
         <td>${renderPJobRoutePicker(pjob, roundIndex, cjobIndex, pjobIndex)}</td>
         <td><input class="pjob-number" type="number" min="1" data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="priority" value="${Number(pjob.priority)}"></td>
         <td><button class="btn danger icon small" aria-label="\u5220\u9664 ${escapeHtml3(pjob.jobName)}" data-action="remove-pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" ${cjob.pjobs.length <= 1 ? "disabled" : ""}>\xD7</button></td>
@@ -4463,15 +4483,6 @@ function validationDisplay(value) {
   if (value === "skipped") return "\u8DF3\u8FC7";
   return value ? String(value) : "";
 }
-function configuredWaferCount() {
-  return state.rounds.reduce((roundTotal, round) => roundTotal + round.cjobs.reduce(
-    (cjobTotal, cjob) => cjobTotal + cjob.pjobs.reduce(
-      (pjobTotal, pjob) => pjobTotal + Number(pjob.waferCount || 0),
-      0
-    ),
-    0
-  ), 0);
-}
 function renderOtherAlgorithmOptions(algorithms) {
   state.availableOtherAlgorithms = Array.isArray(algorithms) ? algorithms : [];
   const container = document.getElementById("otherAlgorithmOptions");
@@ -4506,8 +4517,7 @@ function batchParameterSummary(options, strategy) {
     ["maximumSystemResidenceCv", "\u505C\u7559 CV", "", []],
     ["seed", "\u968F\u673A\u79CD\u5B50", "", []],
     ["loadLockMacroSearchSeconds", "\u5B8F\u641C\u7D22", "s", ["loadlock-macro"]],
-    ["loadLockMacroRollouts", "\u5B8F\u91C7\u6837", "", ["loadlock-macro"]],
-    ["milpTimeLimit", "MILP \u65F6\u9650", "s", ["milp"]]
+    ["loadLockMacroRollouts", "\u5B8F\u91C7\u6837", "", ["loadlock-macro"]]
   ];
   const labels = definitions.flatMap(([key, label, suffix, strategies]) => strategies.length && !strategies.includes(normalizedStrategy) ? [] : values[key] === void 0 || values[key] === null || values[key] === "" ? [] : [`${label} ${values[key]}${suffix}`]);
   return labels.length ? labels.join(" \xB7 ") : "\u9ED8\u8BA4\u53C2\u6570";
@@ -4570,8 +4580,6 @@ async function runPlan() {
     } else if (health.strategies?.[state.strategy] === false) {
       throw new Error(health.strategyErrors?.[state.strategy] || `${state.strategy} \u7B56\u7565\u5F53\u524D\u4E0D\u53EF\u7528`);
     }
-    if (state.strategy === "milp" && state.roundCount !== 1) throw new Error("MILP \u7B56\u7565\u53EA\u80FD\u8FD0\u884C\u9996\u6B21\u6392\u7A0B\uFF0C\u4E0D\u80FD\u9009\u62E9\u591A\u6B21\u91CD\u7B97");
-    if (state.strategy === "milp" && configuredWaferCount() > 12) throw new Error(`MILP \u7B56\u7565\u603B\u6676\u5706\u6570\u91CF\u4E0D\u80FD\u8D85\u8FC7 12 \u7247\uFF0C\u5F53\u524D\u4E3A ${configuredWaferCount()} \u7247`);
     if (state.testCaseId) await saveCurrentTest(true);
     const payload = buildPayload();
     button.disabled = true;
@@ -5098,8 +5106,7 @@ function renderParameterComparison() {
 }
 function renderParameterComparisonStrategyFields(strategy, options = {}) {
   const definitions = {
-    "loadlock-macro": [["loadLockMacroSearchSeconds", "\u5B8F\u641C\u7D22\u65F6\u95F4\uFF08\u79D2\uFF09", "number", "0.1"], ["loadLockMacroRollouts", "\u5B8F\u91C7\u6837\u6B21\u6570", "number", "1"]],
-    milp: [["milpTimeLimit", "MILP \u65F6\u95F4\u4E0A\u9650\uFF08\u79D2\uFF09", "number", "0.1"]]
+    "loadlock-macro": [["loadLockMacroSearchSeconds", "\u5B8F\u641C\u7D22\u65F6\u95F4\uFF08\u79D2\uFF09", "number", "0.1"], ["loadLockMacroRollouts", "\u5B8F\u91C7\u6837\u6B21\u6570", "number", "1"]]
   };
   const fields = definitions[strategy] || [];
   document.getElementById("parameterComparisonStrategyOptions").innerHTML = fields.length ? `<div class="grid">${fields.map(([key, label, type, step]) => `<div class="field span-4"><label>${escapeHtml3(label)}<input data-comparison-option="${escapeHtml3(key)}" type="${type}" min="0" step="${step}" value="${escapeHtml3(String(options[key] ?? 0))}" required></label></div>`).join("")}</div>` : `<div class="hint">\u8BE5\u7B56\u7565\u6CA1\u6709\u989D\u5916\u7684\u7B56\u7565\u4E13\u5C5E\u53C2\u6570\uFF1B\u4E0A\u65B9\u901A\u7528\u7EA6\u675F\u53C2\u6570\u4ECD\u4F1A\u751F\u6548\u3002</div>`;
@@ -5305,12 +5312,11 @@ async function checkService() {
     if (!response.ok) throw new Error();
     const status = await response.json(), compatible = status.schemaVersion === EXPECTED_API_SCHEMA;
     state.serviceCompatible = compatible;
-    const loadlockMacroAvailable = status.strategies?.["loadlock-macro"] === true, e2eCTQAvailable = status.strategies?.["e2e-ctq"] === true, dualActorE2EAvailable = status.strategies?.["dual-actor-e2e"] === true, milpAvailable = status.strategies?.milp === true;
+    const loadlockMacroAvailable = status.strategies?.["loadlock-macro"] === true, e2eCTQAvailable = status.strategies?.["e2e-ctq"] === true, dualActorE2EAvailable = status.strategies?.["dual-actor-e2e"] === true;
     state.algorithmMetadata = status.algorithmMetadata || {};
     document.getElementById("loadlockMacroStrategyInput").disabled = !loadlockMacroAvailable;
     document.getElementById("e2eCTQStrategyInput").disabled = !e2eCTQAvailable;
     document.getElementById("dualActorE2EStrategyInput").disabled = !dualActorE2EAvailable;
-    document.getElementById("milpStrategyInput").disabled = !milpAvailable;
     const replayModelSelect = document.getElementById("visualRecommendationModel");
     replayModelSelect.querySelector('option[value="e2e-ctq"]').disabled = !e2eCTQAvailable;
     replayModelSelect.querySelector('option[value="dual-actor-e2e"]').disabled = !dualActorE2EAvailable;
@@ -5460,14 +5466,9 @@ document.addEventListener("change", (event) => {
     state.strategy = event.target.value;
     if (["e2e-ctq", "dual-actor-e2e"].includes(state.strategy)) state.options.loadLockManager = "joint";
     else if (["heuristic", "loadlock-macro"].includes(state.strategy)) state.options.loadLockManager = "petri-look";
-    if (state.strategy === "milp") {
-      resizeRounds(1);
-      document.getElementById("roundCount").value = 1;
-    }
-    document.getElementById("roundCount").disabled = state.strategy === "milp";
+    document.getElementById("roundCount").disabled = false;
     document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro", "e2e-ctq", "dual-actor-e2e"].includes(state.strategy));
     document.getElementById("heuristicObjectiveOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro"].includes(state.strategy));
-    document.getElementById("milpOptions").classList.toggle("is-hidden", state.strategy !== "milp");
     showAlgorithmDetails(state.strategy);
     markTestDirty();
     renderAll();

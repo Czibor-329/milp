@@ -37,6 +37,22 @@ const batchBottleneckRequests = new Map();
 const batchBottleneckErrors = new Map();
 
 const EXPECTED_API_SCHEMA = "cjob-pjob-v3";
+const BUILTIN_STRATEGIES = new Set([
+  "heuristic",
+  "loadlock-macro",
+  "e2e-ctq",
+  "dual-actor-e2e",
+]);
+const DEFAULT_SCHEDULE_OPTIONS = Object.freeze({
+  loadLockManager: "petri-look",
+  residencyGuardSeconds: 0,
+  maximumRobotHoldingSeconds: 0,
+  maximumSystemResidenceCv: 0,
+  loadLockMacroSearchSeconds: 4,
+  loadLockMacroRollouts: 96,
+  seed: 0,
+});
+const SCHEDULE_OPTION_KEYS = new Set(Object.keys(DEFAULT_SCHEDULE_OPTIONS));
 
 const CLEAN_TYPE_DEFINITIONS = [
   { key: "preclean", label: "PreClean" },
@@ -59,7 +75,7 @@ const state = {
   workspaceDevices: [], workspaceDevice: null, workspaceDeviceId: "", testCaseId: "", testCaseName: "", testCaseGroup: "", activeTestGroup: "", serviceCompatible: false, dirty: false,
   activeBatchId: "", batchRunning: false, batchCancelRequested: false, batchCancelSent: false, batchResult: null, selectedBatchTestId: "", parameterComparison: null,
   deviceName: "", baseDevice: null, device: null, stationNames: [], loadPorts: [], processModules: [], robotNames: [], robotScopes: {}, robotSlots: {}, robotSlotsSaving: new Set(),
-  strategy: "heuristic", availableOtherAlgorithms: [], algorithmMetadata: {}, roundCount: 2, times: [0, 70], options: { loadLockManager: "petri-look", residencyGuardSeconds: 0, maximumRobotHoldingSeconds: 0, maximumSystemResidenceCv: 0, loadLockMacroSearchSeconds: 4, loadLockMacroRollouts: 96, milpTimeLimit: 120, seed: 0 },
+  strategy: "heuristic", availableOtherAlgorithms: [], algorithmMetadata: {}, roundCount: 2, times: [0, 70], options: { ...DEFAULT_SCHEDULE_OPTIONS },
   cleans: [],
   routes: [{ name: "RouteA", group: "RouteA", bufferOption: 0, prePJobCleanRefs: [], postPJobCleanRefs: [], postCJobCleanRefs: [], stages: linkRouteSteps([makeStage("LP1"), makeStage("Robot"), makeStage("PM1,PM2", true, "RouteA_Step2"), makeStage("Robot"), makeStage("LP1")]) }],
   rounds: [makeRound(1, 0, "RouteA", "LP1"), makeRound(2, 70, "RouteA", "LP2")],
@@ -451,7 +467,7 @@ function makeDefaultTestCase(name = "默认测试集") {
   const routeName = state.routes[0]?.name || "";
   return {
     name, group: state.activeTestGroup || "", strategy: "heuristic", roundCount: 2, times: [0, 70],
-    options: { loadLockManager: "petri-look", residencyGuardSeconds: 0, maximumRobotHoldingSeconds: 0, maximumSystemResidenceCv: 0, loadLockMacroSearchSeconds: 4, loadLockMacroRollouts: 96, milpTimeLimit: 120, seed: 0 },
+    options: { ...DEFAULT_SCHEDULE_OPTIONS },
     cleans: state.cleans, routes: state.routes,
     rounds: [
       makeRound(1, 0, routeName, state.loadPorts[0] || ""),
@@ -685,9 +701,17 @@ function resetRunResult() {
 function applyTestCase(testCase) {
   const value = structuredClone(testCase);
   state.routeNameChanges.clear();
-  state.testCaseId = value.id; state.testCaseName = value.name; state.testCaseGroup = String(value.group || ""); state.activeTestGroup = state.testCaseGroup; state.strategy = value.strategy || "heuristic";
+  state.testCaseId = value.id; state.testCaseName = value.name; state.testCaseGroup = String(value.group || ""); state.activeTestGroup = state.testCaseGroup;
+  const requestedStrategy = String(value.strategy || "heuristic");
+  state.strategy = BUILTIN_STRATEGIES.has(requestedStrategy) || requestedStrategy.startsWith("other_alg:") ? requestedStrategy : "heuristic";
   state.roundCount = Math.max(1, Number(value.roundCount) || 1); state.times = Array.isArray(value.times) ? value.times : [0];
-  state.options = value.options || { loadLockManager: "petri-look", residencyGuardSeconds: 0, maximumRobotHoldingSeconds: 0, maximumSystemResidenceCv: 0, loadLockMacroSearchSeconds: 4, loadLockMacroRollouts: 96, milpTimeLimit: 120, seed: 0 };
+  const persistedOptions = value.options && typeof value.options === "object" ? value.options : {};
+  state.options = {
+    ...DEFAULT_SCHEDULE_OPTIONS,
+    ...Object.fromEntries(
+      Object.entries(persistedOptions).filter(([key]) => SCHEDULE_OPTION_KEYS.has(key))
+    ),
+  };
   state.options.loadLockManager = state.options.loadLockManager || "petri-look";
   delete state.options.loadLockExchange;
   for (const key of ["residencyGuardSeconds", "maximumRobotHoldingSeconds", "maximumSystemResidenceCv"]) {
@@ -698,14 +722,12 @@ function applyTestCase(testCase) {
   state.options.loadLockMacroSearchSeconds = Number.isFinite(macroSearchSeconds) && macroSearchSeconds >= 0 ? macroSearchSeconds : 4;
   const macroRollouts = Number(state.options.loadLockMacroRollouts);
   state.options.loadLockMacroRollouts = Number.isFinite(macroRollouts) && macroRollouts >= 0 ? Math.floor(macroRollouts) : 96;
-  state.options.milpTimeLimit = Number(state.options.milpTimeLimit) || 120;
   // v2：Route/Clean 来自设备共享库；仅在加载尚未迁移的旧数据时使用测试集副本兜底。
   if (!state.routes.length && Array.isArray(value.routes)) state.routes = value.routes;
   if (!state.cleans.length && Array.isArray(value.cleans)) state.cleans = value.cleans.map(normalizeClean);
   state.routes.forEach(normalizeRoute);
   state.expandedRouteProcessGroups.clear(); state.expandedRouteGroups.clear(); state.expandedRoutes.clear();
   state.rounds = Array.isArray(value.rounds) ? value.rounds : [];
-  if (state.strategy === "milp") state.roundCount = 1;
   while (state.times.length < state.roundCount) state.times.push((Number(state.times.at(-1)) || 0) + 70);
   while (state.rounds.length < state.roundCount) {
     const index = state.rounds.length;
@@ -723,8 +745,7 @@ function applyTestCase(testCase) {
   document.querySelectorAll("[data-option]").forEach(input => { input.value = state.options[input.dataset.option] ?? input.value; });
   document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro", "e2e-ctq", "dual-actor-e2e"].includes(state.strategy));
   document.getElementById("heuristicObjectiveOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro"].includes(state.strategy));
-  document.getElementById("milpOptions").classList.toggle("is-hidden", state.strategy !== "milp");
-  document.getElementById("roundCount").disabled = state.strategy === "milp";
+  document.getElementById("roundCount").disabled = false;
   if (Object.keys(state.algorithmMetadata).length) showAlgorithmDetails(state.strategy);
   renderAll(); renderWorkspaceControls(); resetRunResult();
   if (state.dirty) { setWorkspaceStatus("正在保存统一生成的路径与 Clean 名称…", "dirty"); scheduleAutoSave(); }
@@ -942,7 +963,7 @@ function initializeThemeToggle() {
 /** 同步轮数、时间和每轮 CJob/PJob 容器；缩放只裁剪尾部，已有轮次保持原位。 */
 function resizeRounds(count) {
   normalizeRounds();
-  const safe = state.strategy === "milp" ? 1 : Math.max(1, Math.min(8, Number(count) || 1)); state.roundCount = safe;
+  const safe = Math.max(1, Math.min(8, Number(count) || 1)); state.roundCount = safe;
   while (state.rounds.length < safe) {
     const index = state.rounds.length, priorTime = Number(state.rounds.at(-1)?.currentTime || 0);
     state.rounds.push(makeRound(index + 1, priorTime + 70, state.routes[0]?.name || "", state.loadPorts[index] || state.loadPorts[0] || ""));
@@ -1320,7 +1341,7 @@ function renderRounds() {
       const normalLot = cjob.jobType === "NormalLot";
       const pjobRows = cjob.pjobs.map((pjob, pjobIndex) => `<tr>
         <td><span class="readonly-pill">${escapeHtml(pjob.jobName)}</span></td>
-        <td><input class="pjob-number" type="number" min="1" max="${state.strategy === "milp" ? 12 : 25}" data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="waferCount" value="${Number(pjob.waferCount)}"></td>
+        <td><input class="pjob-number" type="number" min="1" max="25" data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="waferCount" value="${Number(pjob.waferCount)}"></td>
         <td>${renderPJobRoutePicker(pjob, roundIndex, cjobIndex, pjobIndex)}</td>
         <td><input class="pjob-number" type="number" min="1" data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="priority" value="${Number(pjob.priority)}"></td>
         <td><button class="btn danger icon small" aria-label="删除 ${escapeHtml(pjob.jobName)}" data-action="remove-pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" ${cjob.pjobs.length <= 1 ? "disabled" : ""}>×</button></td>
@@ -1780,15 +1801,6 @@ function validationDisplay(value) {
   return value ? String(value) : "";
 }
 
-/** 统计所有轮次 PJob 的产品晶圆总数，用于 MILP 前端硬限制。 */
-function configuredWaferCount() {
-  return state.rounds.reduce((roundTotal, round) => roundTotal + round.cjobs.reduce(
-    (cjobTotal, cjob) => cjobTotal + cjob.pjobs.reduce(
-      (pjobTotal, pjob) => pjobTotal + Number(pjob.waferCount || 0), 0
-    ), 0
-  ), 0);
-}
-
 /** 根据健康检查返回值绘制 other_alg 下动态发现的标准算法。 */
 function renderOtherAlgorithmOptions(algorithms) {
   state.availableOtherAlgorithms = Array.isArray(algorithms) ? algorithms : [];
@@ -1831,7 +1843,6 @@ function batchParameterSummary(options, strategy) {
     ["seed", "随机种子", "", []],
     ["loadLockMacroSearchSeconds", "宏搜索", "s", ["loadlock-macro"]],
     ["loadLockMacroRollouts", "宏采样", "", ["loadlock-macro"]],
-    ["milpTimeLimit", "MILP 时限", "s", ["milp"]],
   ];
   const labels = definitions.flatMap(([key, label, suffix, strategies]) => strategies.length && !strategies.includes(normalizedStrategy)
     ? []
@@ -1900,8 +1911,6 @@ async function runPlan() {
     } else if (health.strategies?.[state.strategy] === false) {
       throw new Error(health.strategyErrors?.[state.strategy] || `${state.strategy} 策略当前不可用`);
     }
-    if (state.strategy === "milp" && state.roundCount !== 1) throw new Error("MILP 策略只能运行首次排程，不能选择多次重算");
-    if (state.strategy === "milp" && configuredWaferCount() > 12) throw new Error(`MILP 策略总晶圆数量不能超过 12 片，当前为 ${configuredWaferCount()} 片`);
     if (state.testCaseId) await saveCurrentTest(true);
     const payload = buildPayload(); button.disabled = true; batchButton.disabled = true; comparisonButton.disabled = true; button.classList.add("running"); button.textContent = "正在运行策略…";
     resetRunResult();
@@ -2465,7 +2474,6 @@ function renderParameterComparison() {
 function renderParameterComparisonStrategyFields(strategy, options = {}) {
   const definitions = {
     "loadlock-macro": [["loadLockMacroSearchSeconds", "宏搜索时间（秒）", "number", "0.1"], ["loadLockMacroRollouts", "宏采样次数", "number", "1"]],
-    milp: [["milpTimeLimit", "MILP 时间上限（秒）", "number", "0.1"]],
   };
   const fields = definitions[strategy] || [];
   document.getElementById("parameterComparisonStrategyOptions").innerHTML = fields.length
@@ -2689,12 +2697,11 @@ async function checkService() {
     if (!response.ok) throw new Error();
     const status = await response.json(), compatible = status.schemaVersion === EXPECTED_API_SCHEMA;
     state.serviceCompatible = compatible;
-    const loadlockMacroAvailable = status.strategies?.["loadlock-macro"] === true, e2eCTQAvailable = status.strategies?.["e2e-ctq"] === true, dualActorE2EAvailable = status.strategies?.["dual-actor-e2e"] === true, milpAvailable = status.strategies?.milp === true;
+    const loadlockMacroAvailable = status.strategies?.["loadlock-macro"] === true, e2eCTQAvailable = status.strategies?.["e2e-ctq"] === true, dualActorE2EAvailable = status.strategies?.["dual-actor-e2e"] === true;
     state.algorithmMetadata = status.algorithmMetadata || {};
     document.getElementById("loadlockMacroStrategyInput").disabled = !loadlockMacroAvailable;
     document.getElementById("e2eCTQStrategyInput").disabled = !e2eCTQAvailable;
     document.getElementById("dualActorE2EStrategyInput").disabled = !dualActorE2EAvailable;
-    document.getElementById("milpStrategyInput").disabled = !milpAvailable;
     const replayModelSelect = document.getElementById("visualRecommendationModel");
     replayModelSelect.querySelector('option[value="e2e-ctq"]').disabled = !e2eCTQAvailable;
     replayModelSelect.querySelector('option[value="dual-actor-e2e"]').disabled = !dualActorE2EAvailable;
@@ -2781,11 +2788,9 @@ document.addEventListener("change", event => {
     state.strategy = event.target.value;
     if (["e2e-ctq", "dual-actor-e2e"].includes(state.strategy)) state.options.loadLockManager = "joint";
     else if (["heuristic", "loadlock-macro"].includes(state.strategy)) state.options.loadLockManager = "petri-look";
-    if (state.strategy === "milp") { resizeRounds(1); document.getElementById("roundCount").value = 1; }
-    document.getElementById("roundCount").disabled = state.strategy === "milp";
+    document.getElementById("roundCount").disabled = false;
     document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro", "e2e-ctq", "dual-actor-e2e"].includes(state.strategy));
     document.getElementById("heuristicObjectiveOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro"].includes(state.strategy));
-    document.getElementById("milpOptions").classList.toggle("is-hidden", state.strategy !== "milp");
     showAlgorithmDetails(state.strategy);
     markTestDirty(); renderAll();
   }

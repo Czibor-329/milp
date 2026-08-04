@@ -155,8 +155,6 @@ MAX_SAVED_BATCH_RUNS = 8
 WORKSPACE_STORE_VERSION = 3
 API_SCHEMA_VERSION = "cjob-pjob-v3"
 HEURISTIC_BASELINE_SCHEMA_VERSION = "petri-look-dynamic-v1"
-MAX_MILP_WAFERS = 12
-DEFAULT_MILP_TIME_LIMIT_SECONDS = 120.0
 FIRST_ROBOT_SLOT_ID = 1
 DUAL_ARM_SLOT_COUNT = 2
 PROCESSING_STATION_TYPES = frozenset({
@@ -210,10 +208,6 @@ BUILTIN_ALGORITHM_METADATA: Dict[str, Dict[str, str]] = {
     "dual-actor-e2e": {
         "name": "双 Actor 原子调度",
         "introduction": "大气端与真空端两个模型并行形成决策，以 Pick、Place、Swap 为粒度协调 LoadLock 准入、晶圆重入、清洁停靠与系统停留时间波动。",
-    },
-    "milp": {
-        "name": "MILP 最优求解",
-        "introduction": "将排程约束建模为混合整数规划并调用求解器寻找全局最优方案，适合规模较小且重视最优性的首次排程。",
     },
 }
 
@@ -2393,13 +2387,12 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
         "loadlock-macro",
         "e2e-ctq",
         "dual-actor-e2e",
-        "milp",
     }
     if normalized_strategy not in builtin_strategies:
         if other_algorithm_id is None:
             raise ValueError(
                 "策略只支持 heuristic、loadlock-macro、"
-                "e2e-ctq、dual-actor-e2e、milp，"
+                "e2e-ctq、dual-actor-e2e，"
                 "或 other_alg 下已发现的标准算法"
             )
         discovered_ids = {
@@ -2409,7 +2402,7 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
         if other_algorithm_id.casefold() not in discovered_ids:
             raise ValueError(
                 "策略只支持 heuristic、loadlock-macro、"
-                "e2e-ctq、dual-actor-e2e、milp，"
+                "e2e-ctq、dual-actor-e2e，"
                 "或 other_alg 下已发现的标准算法"
             )
     strategy = normalized_strategy if normalized_strategy in builtin_strategies else strategy
@@ -2417,8 +2410,6 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
     round_count = int(_finite_number(plan.get("roundCount"), len(rounds)))
     if round_count < 1 or len(rounds) != round_count:
         raise ValueError("轮次数量与 roundCount 不一致")
-    if strategy == "milp" and round_count != 1:
-        raise ValueError("MILP 策略只支持首次排程，不能选择多次重算")
     times = [_finite_number(row.get("currentTime"), 0.0) for row in rounds]
     if abs(times[0]) > TIME_TOLERANCE:
         raise ValueError("首次排程时间必须为 0")
@@ -2451,15 +2442,6 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
     build_state = BuildState()
 
     first_update = build_round_update(plan, rounds[0], 0.0, build_state)
-    if strategy == "milp":
-        wafer_count = sum(
-            len(process_job.get("MatList") or [])
-            for process_job in (first_update.get("ProcessJobs") or [])
-        )
-        if wafer_count > MAX_MILP_WAFERS:
-            raise ValueError(
-                f"MILP 策略总晶圆数量不能超过 {MAX_MILP_WAFERS} 片，当前为 {wafer_count} 片"
-            )
     reproduction.add("AlgSchedule", _schedule_log_info(plan["device"], first_update))
     skip_validation = bool(plan.get("skipValidation"))
     if other_algorithm_id is not None:
@@ -3867,7 +3849,6 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                         BUILTIN_ALGORITHM_AVAILABLE
                         and DUAL_ACTOR_MODEL_PATH.is_file()
                     ),
-                    "milp": BUILTIN_ALGORITHM_AVAILABLE,
                 },
                 "strategyModels": {
                     "e2e-ctq": str(E2E_CTQ_MODEL_PATH) if E2E_CTQ_MODEL_PATH.is_file() else "",
