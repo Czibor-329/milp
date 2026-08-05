@@ -206,7 +206,7 @@ function cloneVisitParameters(visit) {
 }
 
 /** 统一补全 Step 的派生字段，避免 StepID、PostStepID、NeedProcess 被手工改坏。 */
-function normalizeRoute(route) {
+function normalizeRoute(route, normalizationChanges = null) {
   route.stages = Array.isArray(route.stages) ? route.stages : [];
   ROUTE_CLEAN_KEYS.forEach(key => { route[key] = stringList(route[key]); });
   route.postCJobCleanRefs = [];
@@ -217,10 +217,8 @@ function normalizeRoute(route) {
     stage.kind = stageUsesRobot(stage, index) ? "robot" : "station";
     stage.needProcess = stage.kind === "station" && stage.visits.some(visit => state.processModules.includes(visit.stationName));
     const recipeName = stage.needProcess ? `${route.group || route.name || "Route"}_Step${stage.stepId}` : "";
-    stage.visits.forEach(visit => {
-      normalizeVisit(visit, recipeName);
-      if (stage.needProcess) visit.recipeTime = Number(visit.processTime);
-    });
+    const recipesChanged = RouteEditorLogic.normalizeStageProcessRecipes(stage, recipeName, normalizeVisit);
+    if (recipesChanged && normalizationChanges) normalizationChanges.changed = true;
   });
   return route;
 }
@@ -767,7 +765,8 @@ function applyTestCase(testCase) {
   // v2：Route/Clean 来自设备共享库；仅在加载尚未迁移的旧数据时使用测试集副本兜底。
   if (!state.routes.length && Array.isArray(value.routes)) state.routes = value.routes;
   if (!state.cleans.length && Array.isArray(value.cleans)) state.cleans = value.cleans.map(normalizeClean);
-  state.routes.forEach(normalizeRoute);
+  const routeNormalizationChanges = { changed: false };
+  state.routes.forEach(route => normalizeRoute(route, routeNormalizationChanges));
   state.expandedRouteProcessGroups.clear(); state.expandedRouteGroups.clear(); state.expandedRoutes.clear();
   state.rounds = Array.isArray(value.rounds) ? value.rounds : [];
   while (state.times.length < state.roundCount) state.times.push((Number(state.times.at(-1)) || 0) + 70);
@@ -781,7 +780,7 @@ function applyTestCase(testCase) {
   visualizationWorkspace.setReplayPlan(buildPayload());
   const cleanNamesChanged = synchronizeCleanNames();
   const routeNamesChanged = synchronizeRouteNames();
-  state.dirty = cleanNamesChanged || routeNamesChanged;
+  state.dirty = routeNormalizationChanges.changed || cleanNamesChanged || routeNamesChanged;
   document.getElementById("roundCount").value = state.roundCount;
   document.querySelectorAll('input[name="strategy"]').forEach(input => { input.checked = input.value === state.strategy; });
   document.querySelectorAll("[data-option]").forEach(input => { input.value = state.options[input.dataset.option] ?? input.value; });

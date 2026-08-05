@@ -25,6 +25,7 @@ __export(route_editor_logic_exports, {
   compareProfiles: () => compareProfiles,
   differenceFields: () => differenceFields,
   minimumResidencyConstraint: () => minimumResidencyConstraint,
+  normalizeStageProcessRecipes: () => normalizeStageProcessRecipes,
   processProfile: () => processProfile,
   processRecipeName: () => processRecipeName,
   replaceCandidates: () => replaceCandidates,
@@ -156,6 +157,26 @@ function processRecipeName(value, fallback) {
   const explicitName = String(value ?? "").trim();
   return explicitName || String(fallback ?? "").trim();
 }
+function normalizeStageProcessRecipes(stage, recipeName, normalizeVisit = (value) => value) {
+  const needsProcess = stage.needProcess === true;
+  let changed = false;
+  for (const visit of stage.visits || []) {
+    normalizeVisit(visit);
+    const normalizedRecipe = needsProcess ? processRecipeName(visit.processRecipe, recipeName) : "";
+    if (visit.processRecipe !== normalizedRecipe) {
+      visit.processRecipe = normalizedRecipe;
+      changed = true;
+    }
+    if (needsProcess) {
+      const normalizedRecipeTime = Number(visit.processTime);
+      if (visit.recipeTime !== normalizedRecipeTime) {
+        visit.recipeTime = normalizedRecipeTime;
+        changed = true;
+      }
+    }
+  }
+  return changed;
+}
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   VISIT_SHARED_FIELDS,
@@ -164,6 +185,7 @@ function processRecipeName(value, fallback) {
   compareProfiles,
   differenceFields,
   minimumResidencyConstraint,
+  normalizeStageProcessRecipes,
   processProfile,
   processRecipeName,
   replaceCandidates,

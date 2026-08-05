@@ -235,3 +235,38 @@ export function processRecipeName(value: unknown, fallback: unknown): string {
   const explicitName = String(value ?? "").trim();
   return explicitName || String(fallback ?? "").trim();
 }
+
+/**
+ * 按 Step 的加工语义统一 Visit 配方；非加工 Step 必须清除从旧候选继承的配方。
+ *
+ * @param stage 当前 Route Step；函数会原地更新其中的 Visit。
+ * @param recipeName 加工 Step 缺少显式配方时使用的稳定派生名称。
+ * @param normalizeVisit Visit 默认字段归一化函数。
+ * @returns 是否修改了任一配方字段或 Recipe Time，供页面加载历史数据时触发自动保存。
+ */
+export function normalizeStageProcessRecipes(
+  stage: RouteStage,
+  recipeName: string,
+  normalizeVisit: (visit: RouteVisit) => RouteVisit = (value) => value,
+): boolean {
+  const needsProcess = stage.needProcess === true;
+  let changed = false;
+  for (const visit of stage.visits || []) {
+    normalizeVisit(visit);
+    const normalizedRecipe = needsProcess
+      ? processRecipeName(visit.processRecipe, recipeName)
+      : "";
+    if (visit.processRecipe !== normalizedRecipe) {
+      visit.processRecipe = normalizedRecipe;
+      changed = true;
+    }
+    if (needsProcess) {
+      const normalizedRecipeTime = Number(visit.processTime);
+      if (visit.recipeTime !== normalizedRecipeTime) {
+        visit.recipeTime = normalizedRecipeTime;
+        changed = true;
+      }
+    }
+  }
+  return changed;
+}

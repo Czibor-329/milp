@@ -13,6 +13,7 @@ __export(route_editor_logic_exports, {
   compareProfiles: () => compareProfiles,
   differenceFields: () => differenceFields,
   minimumResidencyConstraint: () => minimumResidencyConstraint,
+  normalizeStageProcessRecipes: () => normalizeStageProcessRecipes,
   processProfile: () => processProfile,
   processRecipeName: () => processRecipeName,
   replaceCandidates: () => replaceCandidates,
@@ -142,6 +143,26 @@ function selectReferencedRoutes(routes, rounds) {
 function processRecipeName(value, fallback) {
   const explicitName = String(value ?? "").trim();
   return explicitName || String(fallback ?? "").trim();
+}
+function normalizeStageProcessRecipes(stage, recipeName, normalizeVisit2 = (value) => value) {
+  const needsProcess = stage.needProcess === true;
+  let changed = false;
+  for (const visit of stage.visits || []) {
+    normalizeVisit2(visit);
+    const normalizedRecipe = needsProcess ? processRecipeName(visit.processRecipe, recipeName) : "";
+    if (visit.processRecipe !== normalizedRecipe) {
+      visit.processRecipe = normalizedRecipe;
+      changed = true;
+    }
+    if (needsProcess) {
+      const normalizedRecipeTime = Number(visit.processTime);
+      if (visit.recipeTime !== normalizedRecipeTime) {
+        visit.recipeTime = normalizedRecipeTime;
+        changed = true;
+      }
+    }
+  }
+  return changed;
 }
 
 // src/api_client.ts
@@ -3007,7 +3028,7 @@ function stageUsesRobot(stage, index) {
   const names = (stage.visits || []).map((visit) => visit.stationName).filter(Boolean);
   return stage.kind === "robot" || (names.length ? names.every((name) => state.robotNames.includes(name)) : index % 2 === 1);
 }
-function normalizeRoute(route) {
+function normalizeRoute(route, normalizationChanges = null) {
   route.stages = Array.isArray(route.stages) ? route.stages : [];
   ROUTE_CLEAN_KEYS.forEach((key) => {
     route[key] = stringList(route[key]);
@@ -3020,10 +3041,8 @@ function normalizeRoute(route) {
     stage.kind = stageUsesRobot(stage, index) ? "robot" : "station";
     stage.needProcess = stage.kind === "station" && stage.visits.some((visit) => state.processModules.includes(visit.stationName));
     const recipeName = stage.needProcess ? `${route.group || route.name || "Route"}_Step${stage.stepId}` : "";
-    stage.visits.forEach((visit) => {
-      normalizeVisit(visit, recipeName);
-      if (stage.needProcess) visit.recipeTime = Number(visit.processTime);
-    });
+    const recipesChanged = normalizeStageProcessRecipes(stage, recipeName, normalizeVisit);
+    if (recipesChanged && normalizationChanges) normalizationChanges.changed = true;
   });
   return route;
 }
@@ -3519,7 +3538,8 @@ function applyTestCase(testCase) {
   state.options.loadLockMacroRollouts = Number.isFinite(macroRollouts) && macroRollouts >= 0 ? Math.floor(macroRollouts) : 96;
   if (!state.routes.length && Array.isArray(value.routes)) state.routes = value.routes;
   if (!state.cleans.length && Array.isArray(value.cleans)) state.cleans = value.cleans.map(normalizeClean);
-  state.routes.forEach(normalizeRoute);
+  const routeNormalizationChanges = { changed: false };
+  state.routes.forEach((route) => normalizeRoute(route, routeNormalizationChanges));
   state.expandedRouteProcessGroups.clear();
   state.expandedRouteGroups.clear();
   state.expandedRoutes.clear();
@@ -3538,7 +3558,7 @@ function applyTestCase(testCase) {
   visualizationWorkspace.setReplayPlan(buildPayload());
   const cleanNamesChanged = synchronizeCleanNames();
   const routeNamesChanged = synchronizeRouteNames();
-  state.dirty = cleanNamesChanged || routeNamesChanged;
+  state.dirty = routeNormalizationChanges.changed || cleanNamesChanged || routeNamesChanged;
   document.getElementById("roundCount").value = state.roundCount;
   document.querySelectorAll('input[name="strategy"]').forEach((input) => {
     input.checked = input.value === state.strategy;
