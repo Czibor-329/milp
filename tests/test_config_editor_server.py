@@ -1842,6 +1842,127 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual("skipped", item["validation"])
         mocked.assert_not_called()
 
+    def test_batch_skip_baseline_skips_heuristic(self) -> None:
+        """勾选“跳过Baseline”后批量运行不再连带执行本地 heuristic。"""
+        test_case = {
+            "id": "test-skip-baseline", "name": "跳过基线案例", "group": "回归",
+            "roundCount": 1, "options": {},
+            "rounds": [{"currentTime": 0, "jobs": [_job("A", "BatchRoute", "LP1")]}],
+        }
+        device = {
+            "id": "device-skip-baseline", "name": "fixture.json", "device": self.device,
+            "routes": [_route("BatchRoute", "PM1,PM2", "BatchRecipe")],
+            "cleans": [], "tests": [test_case],
+        }
+        executed_strategies: list = []
+
+        def fake_execute(plan):
+            executed_strategies.append(str(plan["strategy"]))
+            return {
+                "ok": True, "totalElapsedMs": 12.0, "cpuTimeMs": 7.0,
+                "makespan": 80.0, "moveCount": 3, "validation": "passed",
+                "output": {"MoveList": []}, "reproductionLog": [],
+            }
+
+        with (
+            patch.object(config_server, "get_workspace_device", return_value=device),
+            patch.object(config_server, "execute_plan", side_effect=fake_execute),
+            patch.object(config_server, "_persist_workspace_baseline", return_value=True),
+            patch.object(config_server, "save_result", return_value="result-id"),
+            patch.object(config_server, "save_reproduction_log", return_value="log-id"),
+        ):
+            result = config_server.run_workspace_test_batch(
+                "device-skip-baseline", "回归", "other_alg:demo", {},
+                skip_baseline=True, maximum_workers=1,
+            )
+
+        # 只执行主策略，不再补算 heuristic baseline。
+        self.assertEqual(["other_alg:demo"], executed_strategies)
+        item = result["items"][0]
+        self.assertEqual("succeeded", item["status"])
+        self.assertEqual("skipped", item["baseline"]["status"])
+        self.assertNotIn("improvementPercent", item)
+        self.assertNotIn("baseline", test_case)
+
+    def test_skip_baseline_ignores_existing_baseline(self) -> None:
+        """跳过 Baseline 时不读取已有基线记录，统一返回 skipped 占位。"""
+        test_case = {
+            "id": "test-skip-baseline-existing", "name": "已有基线跳过案例", "group": "回归",
+            "roundCount": 1, "options": {},
+            "rounds": [{"currentTime": 0, "jobs": [_job("A", "BatchRoute", "LP1")]}],
+        }
+        device = {
+            "id": "device-skip-baseline-existing", "name": "fixture.json", "device": self.device,
+            "routes": [_route("BatchRoute", "PM1,PM2", "BatchRecipe")],
+            "cleans": [], "tests": [test_case],
+        }
+        # 放入指纹匹配的有效旧基线，验证跳过时不读取它。
+        matching_fingerprint = config_server._workspace_baseline_fingerprint(device, test_case)
+        test_case["baseline"] = {
+            "status": "succeeded", "fingerprint": matching_fingerprint, "makespan": 1.0,
+        }
+        executed_strategies: list = []
+
+        def fake_execute(plan):
+            executed_strategies.append(str(plan["strategy"]))
+            return {
+                "ok": True, "totalElapsedMs": 12.0, "cpuTimeMs": 7.0,
+                "makespan": 80.0, "moveCount": 3, "validation": "passed",
+                "output": {"MoveList": []}, "reproductionLog": [],
+            }
+
+        with (
+            patch.object(config_server, "execute_plan", side_effect=fake_execute),
+            patch.object(config_server, "_persist_workspace_baseline", return_value=True),
+        ):
+            result, baseline, error = config_server._execute_workspace_test_with_baseline(
+                device, test_case, "other_alg:demo", {}, skip_baseline=True,
+            )
+
+        self.assertEqual(["other_alg:demo"], executed_strategies)
+        self.assertIsNotNone(result)
+        self.assertIsNone(error)
+        self.assertEqual("skipped", baseline["status"])
+        self.assertEqual(matching_fingerprint, test_case["baseline"]["fingerprint"])
+
+    def test_skip_baseline_heuristic_keeps_result_without_persisting(self) -> None:
+        """heuristic 主策略 + 跳过 Baseline：照常执行，但不回写基线记录。"""
+        test_case = {
+            "id": "test-skip-baseline-heuristic", "name": "启发式跳过基线案例", "group": "回归",
+            "roundCount": 1, "options": {},
+            "rounds": [{"currentTime": 0, "jobs": [_job("A", "BatchRoute", "LP1")]}],
+        }
+        device = {
+            "id": "device-skip-baseline-heuristic", "name": "fixture.json", "device": self.device,
+            "routes": [_route("BatchRoute", "PM1,PM2", "BatchRecipe")],
+            "cleans": [], "tests": [test_case],
+        }
+        executed_strategies: list = []
+
+        def fake_execute(plan):
+            executed_strategies.append(str(plan["strategy"]))
+            return {
+                "ok": True, "totalElapsedMs": 12.0, "cpuTimeMs": 7.0,
+                "makespan": 80.0, "moveCount": 3, "validation": "passed",
+                "output": {"MoveList": []}, "reproductionLog": [],
+            }
+
+        with (
+            patch.object(config_server, "execute_plan", side_effect=fake_execute),
+            patch.object(config_server, "_persist_workspace_baseline", return_value=True) as persist_mock,
+        ):
+            result, baseline, error = config_server._execute_workspace_test_with_baseline(
+                device, test_case, "heuristic", {}, skip_baseline=True,
+            )
+
+        self.assertIsNotNone(result)
+        self.assertIsNone(error)
+        # 只执行一次 heuristic 主策略；结果不落库、不写入工作区基线。
+        self.assertEqual(["heuristic"], executed_strategies)
+        self.assertEqual("skipped", baseline["status"])
+        persist_mock.assert_not_called()
+        self.assertNotIn("baseline", test_case)
+
     def test_robot_wafer_dwell_time_tracks_pick_place_and_swap_waits(self) -> None:
         """机器人持片驻留应统计 Pick/Place 间隙，并正确衔接 Swap 的收发晶圆。"""
         moves = [

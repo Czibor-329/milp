@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>调度平台</title>
-  <link rel="stylesheet" href="/assets/config_editor.css?v=1.1.10">
+  <link rel="stylesheet" href="/assets/config_editor.css?v=1.1.11">
 </head>
 <body>
   <a class="skip-link" href="#mainContent">跳到主要内容</a>
@@ -336,7 +336,8 @@
             <h2>开始运行</h2>
             <div class="run-options">
               <label class="export-option"><input id="autoExportLog" type="checkbox">自动下载日志</label>
-              <label class="export-option"><input id="skipValidationInput" type="checkbox">跳过输出校验</label>
+              <label class="export-option"><input id="skipValidationInput" type="checkbox" checked>跳过输出校验</label>
+              <label class="export-option"><input id="skipBaselineInput" type="checkbox" checked>跳过Baseline</label>
             </div>
             <div class="run-actions"><button class="btn" id="runButton">▶ 运行当前测试</button><button class="btn batch" id="batchRunButton">▦ 运行当前测试组</button><button class="btn batch" id="openParameterComparisonDialogButton" title="先运行当前测试，再选择策略和参数创建对比实验" disabled>⇄ 运行对比测试</button></div>
           </div>
@@ -407,6 +408,6 @@
     </aside>
   </div>
 
-  <script type="module" src="/assets/config_editor.js?v=1.1.10"></script>
+  <script type="module" src="/assets/config_editor.js?v=1.1.11"></script>
 </body>
 </html>

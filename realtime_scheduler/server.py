@@ -4046,6 +4046,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                     str(payload.get("strategy") or "heuristic"),
                     options,
                     skip_validation=bool(payload.get("skipValidation")),
+                    skip_baseline=bool(payload.get("skipBaseline")),
                 )
                 self._send_json(result, HTTPStatus.ACCEPTED)
             except Exception as error:  # noqa: BLE001
@@ -4119,6 +4120,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                     dict(payload.get("options") or {}),
                     selected_plan=selected_plan,
                     skip_validation=bool(payload.get("skipValidation")),
+                    skip_baseline=bool(payload.get("skipBaseline")),
                 )
                 baseline_response = deepcopy(baseline)
                 if run_error is not None or result is None:

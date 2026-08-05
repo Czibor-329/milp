@@ -1786,12 +1786,17 @@ function buildPayload() {
   expandVisitSlotIds();
   const routes = selectReferencedRoutes(state.routes, state.rounds).map(route => ({ ...normalizeRoute(route), stages: route.stages.map(stage => ({ ...stage, visits: stage.visits.map(visit => structuredClone(visit)) })) }));
   const cleans = state.cleans.map(runtimeClean);
-  return { schemaVersion: EXPECTED_API_SCHEMA, workspaceDeviceId: state.workspaceDeviceId, workspaceTestId: state.testCaseId, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options: state.options, skipValidation: skipValidationEnabled(), recipes: collectRecipes(routes), cleans, routes, rounds: structuredClone(state.rounds) };
+  return { schemaVersion: EXPECTED_API_SCHEMA, workspaceDeviceId: state.workspaceDeviceId, workspaceTestId: state.testCaseId, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options: state.options, skipValidation: skipValidationEnabled(), skipBaseline: skipBaselineEnabled(), recipes: collectRecipes(routes), cleans, routes, rounds: structuredClone(state.rounds) };
 }
 
 /** 返回“跳过输出校验”是否已勾选。 */
 function skipValidationEnabled() {
   return document.getElementById("skipValidationInput")?.checked === true;
+}
+
+/** 返回“跳过Baseline”是否已勾选。 */
+function skipBaselineEnabled() {
+  return document.getElementById("skipBaselineInput")?.checked === true;
 }
 
 /** 把后端校验状态转换成前端中文文案（passed→通过，skipped→跳过）。 */
@@ -1993,7 +1998,7 @@ async function runCurrentTestGroup() {
     const response = await fetch("/api/run-batch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ deviceId: state.workspaceDeviceId, group: state.activeTestGroup, strategy: state.strategy, options: state.options, skipValidation: skipValidationEnabled() }),
+      body: JSON.stringify({ deviceId: state.workspaceDeviceId, group: state.activeTestGroup, strategy: state.strategy, options: state.options, skipValidation: skipValidationEnabled(), skipBaseline: skipBaselineEnabled() }),
     });
     let result = await response.json();
     if (!response.ok || !result.batchId || !Array.isArray(result.items)) throw new Error(result.error || `服务返回 ${response.status}`);
@@ -2109,6 +2114,7 @@ function showBatchItemOverview(item, index) {
   const validationText = item.validation === "passed" ? "通过" : item.validation === "skipped" ? "跳过" : item.validation ? String(item.validation) : item.status === "failed" ? "运行失败" : item.status === "cancelled" ? "已终止" : "等待完成";
   const comparisonDetail = baselineReady && Number.isFinite(improvement)
     ? `${improvement >= 0 ? "提升" : "退化"} ${Math.abs(improvement).toFixed(2)}%`
+    : baseline.status === "skipped" ? "Baseline 已跳过"
     : baseline.status && baseline.status !== "succeeded" ? `Baseline ${baseline.status === "failed" ? "失败" : "失效"}` : "";
   const resultUrl = String(item.resultUrl || "");
   const bottleneckReady = resultUrl && batchBottleneckSummaries.has(resultUrl);
@@ -2289,10 +2295,12 @@ function renderBatchItems(items) {
     const improvement = Number(item.improvementPercent);
     const improvementText = hasMetrics && baselineReady && Number.isFinite(improvement)
       ? `${improvement >= 0 ? "提升" : "退化"} ${Math.abs(improvement).toFixed(2)}%`
-      : baseline.status && baseline.status !== "succeeded" ? "无有效基线" : "提升 —";
-    const baselineReason = baseline.status && baseline.status !== "succeeded"
-      ? `Baseline ${baseline.status === "failed" ? "失败" : "失效"}：${baseline.error || "等待重新计算"}`
-      : "";
+      : baseline.status === "skipped" ? "已跳过基线" : baseline.status && baseline.status !== "succeeded" ? "无有效基线" : "提升 —";
+    const baselineReason = baseline.status === "skipped"
+      ? "Baseline 已跳过"
+      : baseline.status && baseline.status !== "succeeded"
+        ? `Baseline ${baseline.status === "failed" ? "失败" : "失效"}：${baseline.error || "等待重新计算"}`
+        : "";
     const summaryError = baseline.status === "failed" ? baselineReason : item.status === "failed" ? `${hasMetrics ? "校验失败" : "运行失败"}：${item.error || "未知错误"}` : item.status === "cancelled" ? "调度已终止" : baselineReason;
     const displayId = `t${index + 1}`;
     const itemSelectionId = String(item.testId || `index-${index}`);
@@ -2597,6 +2605,7 @@ function showResult(result) {
   document.getElementById("metricValidationLabel").textContent = "校验";
   document.getElementById("metricTime").textContent = `${cpuTime.toFixed(1)} ms`;
   document.getElementById("metricMakespan").textContent = `${result.makespan.toFixed(2)} / ${baselineReady ? Number(baseline.makespan).toFixed(2) : "—"} s`;
+  if (baseline.status === "skipped") document.getElementById("metricMakespanDetail").textContent = "Baseline 已跳过";
   const validationValue = validationDisplay(result.validation);
   document.getElementById("metricValidation").textContent = validationValue;
   document.getElementById("metricValidation").closest(".metric").classList.toggle("is-success", result.validation === "passed");
@@ -2657,9 +2666,11 @@ function showFailedResultMetrics(result) {
   const makespanText = `${Number.isFinite(makespan) ? makespan.toFixed(2) : "—"} / ${Number.isFinite(baselineMakespan) ? baselineMakespan.toFixed(2) : "—"} s`;
   const comparisonDetail = Number.isFinite(improvement)
     ? `${improvement >= 0 ? "提升" : "退化"} ${Math.abs(improvement).toFixed(2)}% · 结果校验未通过`
-    : baseline.status && baseline.status !== "succeeded"
-      ? `Baseline ${baseline.status === "failed" ? "失败" : "失效"}`
-      : "外部算法未返回可比较的完整 Makespan";
+    : baseline.status === "skipped"
+      ? "Baseline 已跳过"
+      : baseline.status && baseline.status !== "succeeded"
+        ? `Baseline ${baseline.status === "failed" ? "失败" : "失效"}`
+        : "外部算法未返回可比较的完整 Makespan";
 
   document.getElementById("metricContext").textContent = "当前测试 · 外部算法失败结果";
   document.getElementById("batchOverviewButton").hidden = true;

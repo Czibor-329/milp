@@ -517,6 +517,15 @@ def _is_external_algorithm(strategy: str) -> bool:
     return str(strategy or "").strip().casefold().startswith("other_alg:")
 
 
+def _skipped_baseline(fingerprint: str) -> Dict[str, Any]:
+    """构造用户显式跳过 Baseline 时的占位记录。"""
+    return {
+        "status": "skipped",
+        "fingerprint": fingerprint,
+        "updatedAt": _workspace_timestamp(),
+    }
+
+
 def _execute_workspace_test_with_baseline(
     device: Mapping[str, Any],
     test_case: Mapping[str, Any],
@@ -525,17 +534,26 @@ def _execute_workspace_test_with_baseline(
     *,
     selected_plan: Optional[Mapping[str, Any]] = None,
     skip_validation: bool = False,
+    skip_baseline: bool = False,
 ) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any], Optional[Exception]]:
-    """确保 Baseline 有效并执行所选策略；Baseline 失败不复用旧值。"""
+    """确保 Baseline 有效并执行所选策略；Baseline 失败不复用旧值。
+
+    ``skip_baseline`` 为 True 时既不计算也不复用 Baseline，返回 ``skipped``
+    占位记录，避免因缺失 Baseline 连带运行本地 heuristic 触发其自身校验。
+    """
     fingerprint = _workspace_baseline_fingerprint(device, test_case, options)
     existing = test_case.get("baseline")
-    baseline = (
-        deepcopy(dict(existing))
-        if isinstance(existing, Mapping)
-        and existing.get("status") == "succeeded"
-        and str(existing.get("fingerprint") or "") == fingerprint
-        else None
-    )
+    if skip_baseline:
+        # 显式跳过：即使存在指纹匹配的旧基线也不读取，统一按缺失处理。
+        baseline = None
+    else:
+        baseline = (
+            deepcopy(dict(existing))
+            if isinstance(existing, Mapping)
+            and existing.get("status") == "succeeded"
+            and str(existing.get("fingerprint") or "") == fingerprint
+            else None
+        )
     device_id = str(device.get("id") or "")
     test_id = str(test_case.get("id") or "")
 
@@ -555,10 +573,12 @@ def _execute_workspace_test_with_baseline(
             result = execute_plan(plan)
         except Exception as error:  # noqa: BLE001
             return None, record(_failed_baseline(fingerprint, error)), error
+        if skip_baseline:
+            return result, _skipped_baseline(fingerprint), None
         baseline = record(_successful_baseline(fingerprint, result))
         return result, baseline, None
 
-    if baseline is None:
+    if baseline is None and not skip_baseline:
         try:
             baseline_result = execute_plan(build_workspace_batch_plan(
                 device, test_case, "heuristic", options, skip_validation=skip_validation,
@@ -566,6 +586,8 @@ def _execute_workspace_test_with_baseline(
             baseline = record(_successful_baseline(fingerprint, baseline_result))
         except Exception as error:  # noqa: BLE001
             baseline = record(_failed_baseline(fingerprint, error))
+    if baseline is None:
+        baseline = _skipped_baseline(fingerprint)
 
     plan = dict(selected_plan) if selected_plan is not None else build_workspace_batch_plan(
         device, test_case, strategy, options, skip_validation=skip_validation,
@@ -600,6 +622,7 @@ def _execute_workspace_test_batch(
     options: Mapping[str, Any],
     *,
     skip_validation: bool = False,
+    skip_baseline: bool = False,
     maximum_workers: int = 4,
     progress_callback: Optional[Any] = None,
     cancel_event: Optional[threading.Event] = None,
@@ -634,6 +657,7 @@ def _execute_workspace_test_batch(
                 options,
                 selected_plan=selected_plan,
                 skip_validation=skip_validation,
+                skip_baseline=skip_baseline,
             )
             if run_error is not None or result is None:
                 error = run_error or RuntimeError("运行未返回结果")
@@ -764,6 +788,7 @@ def run_workspace_test_batch(
     options: Mapping[str, Any],
     *,
     skip_validation: bool = False,
+    skip_baseline: bool = False,
     maximum_workers: int = 4,
 ) -> Dict[str, Any]:
     """同步运行当前测试组；保留给测试和非 HTTP 调用方。"""
@@ -776,6 +801,7 @@ def run_workspace_test_batch(
         strategy,
         options,
         skip_validation=skip_validation,
+        skip_baseline=skip_baseline,
         maximum_workers=maximum_workers,
     )
     result.update({
@@ -827,6 +853,7 @@ def start_workspace_test_batch(
     options: Mapping[str, Any],
     *,
     skip_validation: bool = False,
+    skip_baseline: bool = False,
     maximum_workers: int = 4,
 ) -> Dict[str, Any]:
     """创建后台批量任务并立即返回可轮询的初始状态。"""
@@ -892,6 +919,7 @@ def start_workspace_test_batch(
                 strategy,
                 options,
                 skip_validation=skip_validation,
+                skip_baseline=skip_baseline,
                 maximum_workers=worker_count,
                 progress_callback=update_item,
                 cancel_event=cancel_event,
