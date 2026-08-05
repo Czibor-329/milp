@@ -170,3 +170,54 @@ def test_dual_chamber_process_updates_both_physical_slots() -> None:
         SlotPhase.COMPLETED,
         SlotPhase.COMPLETED,
     ]
+
+
+def test_empty_pretrans_may_carry_future_pick_material_id() -> None:
+    """Pick 明确引用的空载 PreTrans 可用 MatIDList 标注将要运输的晶圆。"""
+    moves = [
+        _move(1, 6, 0, 1, ModuleName="PM1", RelatedRobotType=1, MatIDList=[101]),
+        _move(
+            2, 5, 1, 1, ModuleName="VACRobot", MatIDList=[101],
+            SrcStationList=["PM1"], DestStationList=["PM1"],
+            DestSlotList=[1], RobotSlotList=[1],
+        ),
+        _move(
+            3, 0, 1, 2, ModuleName="VACRobot", MatIDList=[101],
+            SrcStationList=["PM1"], SrcSlotList=[1], RobotSlotList=[1],
+            PreMoveID=[1, 2],
+        ),
+    ]
+
+    assert validate_move_list(None, moves, _dual_chamber_update()) == []
+
+    replay = MoveStateReplay(None, moves, _dual_chamber_update())
+    for move in moves:
+        replay.update_move_state(
+            {"MoveID": move["MoveID"], "MoveState": MoveStateReplay.RUNNING},
+            snapshot=False,
+        )
+        replay.update_move_state(
+            {"MoveID": move["MoveID"], "MoveState": MoveStateReplay.DONE},
+            snapshot=False,
+        )
+    assert replay.state.robots["VACRobot"].hands[1].material_id == 101
+
+
+def test_empty_pretrans_material_annotation_requires_matching_linked_pick() -> None:
+    """没有匹配后继 Pick 的物料标注仍按带片 PreTrans 校验并报错。"""
+    moves = [
+        _move(1, 6, 0, 1, ModuleName="PM1", RelatedRobotType=1, MatIDList=[101]),
+        _move(
+            2, 5, 1, 1, ModuleName="VACRobot", MatIDList=[101],
+            SrcStationList=["PM1"], DestStationList=["PM1"],
+            DestSlotList=[1], RobotSlotList=[1],
+        ),
+        _move(
+            3, 0, 1, 2, ModuleName="VACRobot", MatIDList=[102],
+            SrcStationList=["PM1"], SrcSlotList=[2], RobotSlotList=[1],
+            PreMoveID=[1, 2],
+        ),
+    ]
+
+    issues = validate_move_list(None, moves, _dual_chamber_update())
+    assert issues == ["MoveID=2 MoveType=5：VACRobot#1 持有物料与 Move 不匹配"]

@@ -593,8 +593,8 @@ def _start_place(state: MachineState, move: Mapping[str, Any], end_time: float, 
     return None
 
 
-def _start_pretrans(state: MachineState, move: Mapping[str, Any], end_time: float, _all_moves: Sequence[Mapping[str, Any]], scheduled: List[_ScheduledCompletion]) -> Optional[str]:
-    """校验机器人转位；允许其多个已占用手槽共同随动。"""
+def _start_pretrans(state: MachineState, move: Mapping[str, Any], end_time: float, all_moves: Sequence[Mapping[str, Any]], scheduled: List[_ScheduledCompletion]) -> Optional[str]:
+    """校验机器人转位；兼容以未来晶圆 ID 标注的 Pick 前空载转位。"""
     robot = _robot(state, move)
     if isinstance(robot, str):
         return robot
@@ -615,11 +615,73 @@ def _start_pretrans(state: MachineState, move: Mapping[str, Any], end_time: floa
         return _issue(move, "MatIDList 与 RobotSlotList 数量不一致")
     for index, material_id in enumerate(material_ids):
         material = robot.hands.get(robot_slots[index])
-        if material is None or not _material_matches(material, material_id):
+        if material is None and _pretrans_is_linked_empty_pick(
+            move,
+            all_moves,
+            index,
+            robot_slots[index],
+            material_id,
+        ):
+            continue
+        if not _material_matches(material, material_id):
             return _issue(move, f"{robot.name}#{robot_slots[index]} 持有物料与 Move 不匹配")
     robot.busy_until = end_time
     _schedule(scheduled, move, end_time, lambda: setattr(robot, "position", destination))
     return None
+
+
+def _pretrans_is_linked_empty_pick(
+    pretrans: Mapping[str, Any],
+    all_moves: Sequence[Mapping[str, Any]],
+    index: int,
+    robot_slot_id: int,
+    material_id: Any,
+) -> bool:
+    """判断带物料标注的 PreTrans 是否是同片后继 Pick 的空载前置转位。"""
+    pretrans_id = pretrans.get("MoveID")
+    robot_name = str(pretrans.get("Robot") or pretrans.get("ModuleName") or "")
+    destinations = [str(value) for value in _values(pretrans, "DestStationList")]
+    destination_slots = _integer_values(pretrans, "DestSlotList")
+    if pretrans_id is None or not robot_name or not destinations:
+        return False
+    destination = destinations[index] if index < len(destinations) else destinations[0]
+    destination_slot = (
+        destination_slots[index]
+        if index < len(destination_slots)
+        else destination_slots[0] if len(destination_slots) == 1 else None
+    )
+    pretrans_end = _number(pretrans.get("EndTime"))
+    if pretrans_end is None:
+        return False
+
+    for candidate in all_moves:
+        if candidate.get("MoveType") != PICK_MOVE:
+            continue
+        if str(candidate.get("Robot") or candidate.get("ModuleName") or "") != robot_name:
+            continue
+        if not any(str(value) == str(pretrans_id) for value in _values(candidate, "PreMoveID")):
+            continue
+        candidate_start = _number(candidate.get("StartTime"))
+        if candidate_start is None or candidate_start + TIME_TOLERANCE < pretrans_end:
+            continue
+        rows = _transport_rows(
+            candidate,
+            "SrcStationList",
+            "SrcSlotList",
+            "RobotSlotList",
+            "MatIDList",
+        )
+        if isinstance(rows, str):
+            continue
+        for station_name, station_slot_id, candidate_robot_slot, candidate_material_id, _ in rows:
+            if (
+                station_name == destination
+                and candidate_robot_slot == robot_slot_id
+                and str(candidate_material_id) == str(material_id)
+                and (destination_slot is None or station_slot_id == destination_slot)
+            ):
+                return True
+    return False
 
 
 def _start_prepare(state: MachineState, move: Mapping[str, Any], end_time: float, all_moves: Sequence[Mapping[str, Any]], scheduled: List[_ScheduledCompletion]) -> Optional[str]:

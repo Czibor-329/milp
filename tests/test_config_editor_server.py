@@ -103,6 +103,20 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.recording = _device_recording()
         self.device = extract_init_data(self.recording)
 
+    def test_zero_duration_move_finishes_before_next_same_time_move_starts(self) -> None:
+        """零时长动作应在同刻更大 MoveID 的动作开始前完成。"""
+        groups = config_server._planned_event_groups([
+            {"MoveID": 59, "MoveType": 7, "StartTime": 103.65, "EndTime": 103.65},
+            {"MoveID": 60, "MoveType": 6, "StartTime": 103.65, "EndTime": 103.78},
+        ])
+        group = next(item for item in groups if abs(item["time"] - 103.65) < 1e-9)
+
+        events = [
+            (event_kind, notification["MoveID"])
+            for event_kind, _, notification in config_server._planned_start_events(group)
+        ]
+        self.assertEqual([("start", 59), ("finish", 59), ("start", 60)], events)
+
     def test_extract_init_data_from_recording(self) -> None:
         """input_data 录制数组应只提取 AlgInit 的设备字段。"""
         self.assertIn("Stations", self.device)
@@ -1347,6 +1361,25 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("function isCleaningProcess(raw)", viewer)
         self.assertIn("explicitlyEmpty || cleanMetadata", viewer)
         self.assertIn("if (isCleaningProcess(bar.rec.raw))", viewer)
+
+    def test_gantt_keeps_and_renders_zero_duration_moves(self) -> None:
+        """甘特图应保留零时长动作，并将其绘制为边界内可点击的最小宽度标记。"""
+        viewer = (
+            ROOT / "realtime_scheduler" / "frontend" / "movelist_gantt_viewer.html"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("rec.end >= rec.start", viewer)
+        self.assertNotIn(
+            "let records = dataset.records.filter((rec) => Number.isFinite(rec.start) "
+            "&& Number.isFinite(rec.end) && rec.end > rec.start + 1e-9);",
+            viewer,
+        )
+        self.assertIn("const ZERO_DURATION_MARKER_WIDTH = 3;", viewer)
+        self.assertIn(
+            "Math.abs(bar.end - bar.start) <= ZERO_DURATION_EPSILON_SECONDS",
+            viewer,
+        )
+        self.assertIn("markerCenter - w / 2", viewer)
 
     def test_result_preview_and_group_analysis_use_main_area(self) -> None:
         """结果预览应保持简洁，并提供独立的测试组分析入口。"""

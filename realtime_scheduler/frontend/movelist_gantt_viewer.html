@@ -1250,6 +1250,8 @@
     const CL_GROUP_SUB_KEY = "CL" + SUBLANE_SUFFIX;
     const NO_SLOT_SPLIT_MODULES = new Set(["LP", "LP_done"]);
     const CLEAN_PROCESS_COLOR = "#38BDF8";
+    const ZERO_DURATION_EPSILON_SECONDS = 1e-9;
+    const ZERO_DURATION_MARKER_WIDTH = 3;
 
     const S = {
       MOVETYPE_NAMES: {
@@ -1589,7 +1591,8 @@
       const cacheKey = hideDoor ? "hidden" : "all";
       if (dataset.models.has(cacheKey)) return dataset.models.get(cacheKey);
 
-      let records = dataset.records.filter((rec) => Number.isFinite(rec.start) && Number.isFinite(rec.end) && rec.end > rec.start + 1e-9);
+      // 零时长动作仍然代表真实状态边界和校验对象，必须进入绘制、搜索和详情模型。
+      let records = dataset.records.filter((rec) => Number.isFinite(rec.start) && Number.isFinite(rec.end) && rec.end >= rec.start);
       if (hideDoor) records = records.filter((rec) => !isHiddenDoorPreTranRecord(rec.raw));
       if (!records.length) {
         const empty = {
@@ -2435,8 +2438,14 @@
         const h = laneHeightFor(bar.lane);
         const x0 = labelW + (bar.start - dataset.view.t0) * xScale;
         const x1 = labelW + (bar.end - dataset.view.t0) * xScale;
-        const x = Math.max(labelW, x0);
-        const w = Math.max(1, Math.min(labelW + plotW, x1) - x);
+        let x = Math.max(labelW, x0);
+        let w = Math.max(1, Math.min(labelW + plotW, x1) - x);
+        if (Math.abs(bar.end - bar.start) <= ZERO_DURATION_EPSILON_SECONDS) {
+          // 以动作时刻为中心绘制最小宽度标记；视窗边界处向内收，避免被 clip-path 裁掉。
+          const markerCenter = Math.max(labelW, Math.min(labelW + plotW, x0));
+          w = Math.min(ZERO_DURATION_MARKER_WIDTH, plotW);
+          x = Math.max(labelW, Math.min(labelW + plotW - w, markerCenter - w / 2));
+        }
         const color = effectiveMoveColor(bar);
         const selected = dataset.view.selected && dataset.view.selected.rawIndex === bar.rec.rawIndex ? " selected" : "";
         const searchHit = searchHitRawIndexes.has(bar.rec.rawIndex) ? " search-hit" : "";
