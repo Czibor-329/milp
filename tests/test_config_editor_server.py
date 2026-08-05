@@ -150,12 +150,14 @@ class ConfigEditorServerTests(unittest.TestCase):
             "设备配置分类",
             "机器手槽位",
             'id="robotSlotList"',
-            'data-robot-slot-count="1"',
-            'data-robot-slot-count="2"',
+            'data-robot-arm-count="1"',
+            'data-robot-arm-count="2"',
             'data-robot-slot-default=',
             "恢复默认",
             "/robot-slots",
             "ArmInfo",
+            "parseDeviceFileText",
+            "JSON.parse(`[${records}]`)",
         ):
             self.assertIn(marker, source)
 
@@ -224,6 +226,42 @@ class ConfigEditorServerTests(unittest.TestCase):
                 original_robot["ArmInfo"],
                 restored_device["Robots"][robot_name]["ArmInfo"],
             )
+
+    def test_multi_slot_arm_is_not_split_when_projecting_dual_chamber_robot(self) -> None:
+        """双腔设备的一条物理 Arm 可保留两个槽位，不能被投影成两条假 Arm。"""
+        device = {
+            "Robots": {
+                "VACRobot": {
+                    "Capacity": 4,
+                    "CanMultiTrans": False,
+                    "ArmInfo": {
+                        "ArmA": {"Name": "ArmA", "IsEnable": True, "SlotIDs": [1, 2]},
+                        "ArmB": {"Name": "ArmB", "IsEnable": True, "SlotIDs": [3, 4]},
+                    },
+                },
+            },
+        }
+        single_arm = json.loads(json.dumps(device))
+        config_server.apply_robot_slot_selection(single_arm, {"VACRobot": [1, 2]})
+        self.assertEqual(2, single_arm["Robots"]["VACRobot"]["Capacity"])
+        self.assertEqual(
+            {"ArmA": [1, 2]},
+            {
+                name: arm["SlotIDs"]
+                for name, arm in single_arm["Robots"]["VACRobot"]["ArmInfo"].items()
+            },
+        )
+
+        dual_arm = json.loads(json.dumps(device))
+        config_server.apply_robot_slot_selection(dual_arm, {"VACRobot": [1, 2, 3, 4]})
+        self.assertEqual(4, dual_arm["Robots"]["VACRobot"]["Capacity"])
+        self.assertEqual(
+            {"ArmA": [1, 2], "ArmB": [3, 4]},
+            {
+                name: arm["SlotIDs"]
+                for name, arm in dual_arm["Robots"]["VACRobot"]["ArmInfo"].items()
+            },
+        )
 
     def test_workspace_robot_slot_selection_is_persisted_and_used_by_batch_plan(self) -> None:
         """设备级槽位设置应持久保存，并进入批量计划与 Baseline 指纹输入。"""
@@ -893,6 +931,28 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual({"2": 1.5}, process_visit["MoveTimeOffset"])
         self.assertEqual(12, process_visit["QTimeLimit"])
         self.assertEqual(34, process_visit["ResidencyConstraint"])
+
+    def test_route_default_slot_expands_for_dual_chamber_and_multi_slot_robot(self) -> None:
+        """手动 Route 的默认槽位应按 PM 容量和 Arm 手槽容量一并展开。"""
+        route = {
+            "name": "TwinRoute",
+            "stages": [
+                {"stepId": 0, "needProcess": False, "visits": [{"stationName": "LP1", "slotIds": "1"}]},
+                {"stepId": 1, "needProcess": False, "visits": [{"stationName": "VACRobot", "slotIds": "1"}]},
+                {"stepId": 2, "needProcess": True, "visits": [{"stationName": "PM1", "slotIds": "1", "processRecipe": "TwinRecipe"}]},
+                {"stepId": 3, "needProcess": False, "visits": [{"stationName": "VACRobot", "slotIds": "1"}]},
+                {"stepId": 4, "needProcess": False, "visits": [{"stationName": "LP1", "slotIds": "1"}]},
+            ],
+        }
+        built = build_route(
+            route,
+            {"TwinRecipe": {"name": "TwinRecipe"}},
+            {},
+            {"VACRobot"},
+            {"VACRobot": [1, 2, 3, 4], "PM1": [1, 2]},
+        )
+        self.assertEqual([1, 2, 3, 4], built["RouteSteps"][1]["Visits"][0]["SlotID"])
+        self.assertEqual([1, 2], built["RouteSteps"][2]["Visits"][0]["SlotID"])
 
     def test_route_rejects_buffer_option_outside_interface_range(self) -> None:
         """BufferOption 只接受算法接口定义的 0~4 整数。"""
