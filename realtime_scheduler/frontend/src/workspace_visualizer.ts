@@ -25,6 +25,7 @@ type UnknownRecord = Record<string, unknown>;
 
 export type DoorStatus = "closed" | "opening" | "open" | "closing" | "doorless";
 export type ModuleStatus = "idle" | "occupied" | "door" | "transfer" | "processing" | "cleaning" | "environment";
+type RobotEnvironment = "vacuum" | "atmosphere";
 
 export interface ModuleSnapshot {
   name: string;
@@ -44,6 +45,9 @@ export interface ModuleSnapshot {
 
 export interface RobotSnapshot {
   name: string;
+  type: string;
+  capacity: number;
+  environment: RobotEnvironment;
   wafers: string[];
   processedWafers: string[];
   busy: boolean;
@@ -553,9 +557,26 @@ function firstStation(move: MoveRecord, field: string): string {
   return String(listValue(move[field])[0] ?? "");
 }
 
-/** 判断名称是否代表机器人。 */
-function isRobotName(name: string): boolean {
-  return /^(ATR|VTR|TM\d*|ROBOT)/i.test(name);
+/** 判断名称是否代表机器人；配置中的精确名称优先于历史前缀兼容规则。 */
+function isRobotName(name: string, configuredRobotNames?: ReadonlySet<string>): boolean {
+  return Boolean(configuredRobotNames?.has(name)) || /^(ATR|VTR|ATM|VTM|VAC|TM\d*|ROBOT)/i.test(name);
+}
+
+/** 根据 init 中的 Type 和名称确定机器手所在的气体环境。 */
+function robotEnvironment(name: string, definition: UnknownRecord = {}): RobotEnvironment {
+  const type = String(definition.Type ?? "");
+  if (/ATM|ATR|大气/i.test(type) || /^(ATR|ATM)/i.test(name)) return "atmosphere";
+  return "vacuum";
+}
+
+/** 从 init 的 Capacity/ArmInfo 读取机器手可持片数，并兼容旧设备定义。 */
+function robotCapacity(definition: UnknownRecord, holdingCount = 0): number {
+  const declaredCapacity = finiteNumber(definition.Capacity, 0);
+  const armSlotCount = Object.values(definition.ArmInfo ?? {}).reduce((maximum, arm) => {
+    if (!arm || typeof arm !== "object") return maximum;
+    return Math.max(maximum, listValue((arm as UnknownRecord).SlotIDs).length);
+  }, 0);
+  return Math.max(1, declaredCapacity, armSlotCount, holdingCount);
 }
 
 /** 判断名称是否代表参考拓扑中的 Dummy Port，而不是正常装载端口。 */
@@ -633,9 +654,11 @@ function normalizeMoves(moves: MoveRecord[]): NormalizedMove[] {
 function collectModuleDefinitions(
   moves: NormalizedMove[],
   device: DeviceDefinition | null,
+  configuredRobotNames: ReadonlySet<string> = new Set(),
 ): Map<string, { type: string }> {
   const modules = new Map<string, { type: string }>();
   const stationDefinitions = device?.Stations ?? {};
+  const hasConfiguredStations = Object.keys(stationDefinitions).length > 0;
   for (const move of moves) {
     const candidates = [
       move.ModuleName,
@@ -644,7 +667,8 @@ function collectModuleDefinitions(
       ...listValue(move.StationList),
     ].map(String).filter(Boolean);
     for (const name of candidates) {
-      if (!isRobotName(name) && !modules.has(name)) {
+      if (hasConfiguredStations && !stationDefinitions[name]) continue;
+      if (!isRobotName(name, configuredRobotNames) && !modules.has(name)) {
         modules.set(name, { type: String(stationDefinitions[name]?.Type ?? "") });
       }
     }
@@ -654,9 +678,10 @@ function collectModuleDefinitions(
 
 /** 收集设备定义和 MoveList 中出现过的机器人。 */
 function collectRobotNames(moves: NormalizedMove[], device: DeviceDefinition | null): string[] {
-  const names = new Set(Object.keys(device?.Robots ?? {}));
+  const configuredRobotNames = new Set(Object.keys(device?.Robots ?? {}));
+  const names = new Set(configuredRobotNames);
   for (const move of moves) {
-    if (isRobotName(move.ModuleName)) names.add(move.ModuleName);
+    if (isRobotName(move.ModuleName, configuredRobotNames)) names.add(move.ModuleName);
     const robot = String(move.Robot ?? "");
     if (robot) names.add(robot);
   }
@@ -996,8 +1021,9 @@ export function buildWorkspaceSnapshot(
   const records = normalizeMoves(moves);
   const endTime = records.reduce((maximum, move) => Math.max(maximum, move.EndTime), 0);
   const time = Math.max(0, Math.min(finiteNumber(requestedTime), endTime));
-  const definitions = collectModuleDefinitions(records, device);
   const robotNames = collectRobotNames(records, device);
+  const robotNameSet = new Set(robotNames);
+  const definitions = collectModuleDefinitions(records, device, robotNameSet);
   const initialLocations = initialMaterialLocations(records);
   const locations = new Map(initialLocations);
   const doorStates = new Map<string, DoorStatus>();
@@ -1061,11 +1087,11 @@ export function buildWorkspaceSnapshot(
 
   const robotTargets = new Map<string, string>();
   for (const move of activeMoves) {
-    if (isRobotName(move.ModuleName)) robotTargets.set(move.ModuleName, activeTarget(move));
+    if (isRobotName(move.ModuleName, robotNameSet)) robotTargets.set(move.ModuleName, activeTarget(move));
   }
   const lastRobotTargets = new Map<string, string>();
   for (const move of records) {
-    if (move.StartTime > time || !isRobotName(move.ModuleName)) continue;
+    if (move.StartTime > time || !isRobotName(move.ModuleName, robotNameSet)) continue;
     const target = activeTarget(move);
     if (target) lastRobotTargets.set(move.ModuleName, target);
   }
@@ -1127,10 +1153,15 @@ export function buildWorkspaceSnapshot(
 
   const robots = robotNames.map((name): RobotSnapshot => {
     const move = activeMoves.find(record => record.ModuleName === name);
+    const definition = device?.Robots?.[name] ?? {};
+    const wafers = wafersByLocation.get(name) ?? [];
     return {
       name,
-      wafers: wafersByLocation.get(name) ?? [],
-      processedWafers: (wafersByLocation.get(name) ?? []).filter(wafer => processedMaterials.has(wafer)),
+      type: String(definition.Type ?? ""),
+      capacity: robotCapacity(definition, wafers.length),
+      environment: robotEnvironment(name, definition),
+      wafers,
+      processedWafers: wafers.filter(wafer => processedMaterials.has(wafer)),
       busy: Boolean(move),
       source: move ? firstStation(move, "SrcStationList") : "",
       target: robotTargets.get(name) ?? lastRobotTargets.get(name) ?? "",
@@ -1247,10 +1278,14 @@ function snapshotWithCandidateModules(
 ): WorkspaceSnapshot {
   const modules = [...snapshot.modules];
   const knownNames = new Set(modules.map(module => module.name));
+  const configuredRobotNames = new Set(Object.keys(device?.Robots ?? {}));
+  const stationDefinitions = device?.Stations ?? {};
+  const hasConfiguredStations = Object.keys(stationDefinitions).length > 0;
   for (const candidate of decision?.candidates ?? []) {
     const name = candidate.destination;
-    if (!name || isRobotName(name) || knownNames.has(name)) continue;
-    const type = String(device?.Stations?.[name]?.Type ?? "");
+    if (!name || isRobotName(name, configuredRobotNames) || knownNames.has(name)) continue;
+    if (hasConfiguredStations && !stationDefinitions[name]) continue;
+    const type = String(stationDefinitions[name]?.Type ?? "");
     modules.push({
       name,
       type,
@@ -1285,8 +1320,9 @@ export function snapshotWithFullDeviceModules(
 ): WorkspaceSnapshot {
   const modules = [...snapshot.modules];
   const knownNames = new Set(modules.map(module => module.name));
+  const configuredRobotNames = new Set(Object.keys(device?.Robots ?? {}));
   for (const [name, definition] of Object.entries(device?.Stations ?? {})) {
-    if (knownNames.has(name) || isRobotName(name)) continue;
+    if (knownNames.has(name) || isRobotName(name, configuredRobotNames)) continue;
     const type = String(definition?.Type ?? "");
     if (isLoadPortName(name, type)) continue;
     modules.push({
@@ -1428,7 +1464,7 @@ function renderModule(
     : `<div class="equipment-body">${loadLockLayers}</div>`;
   const article = `
     <article class="equipment-card equipment-${role} status-${module.status} door-${module.door} ${module.loadLockPhase ? `loadlock-${module.loadLockPhase}` : ""} ${module.isRobotTarget ? "is-target" : ""} ${candidate ? "is-candidate-destination" : ""} ${candidate?.selected ? "is-model-selected" : ""}" style="--module-progress:${Math.round(module.progress * 100)}%;--loadlock-atmosphere:${Math.max(0, Math.min(100, atmosphereLevel)).toFixed(1)}%;--loadlock-atmosphere-ratio:${Math.max(0, Math.min(1, atmosphereLevel / 100)).toFixed(3)}" aria-label="${escapeHtml(`${accessibleStatus}${candidateLabel ? `，${candidateLabel}` : ""}`)}">
-      ${bodyMarkup}
+       ${bodyMarkup}
       <div class="chamber-doors" aria-hidden="true">${role === "lock" ? '<i class="loadlock-door loadlock-door-vacuum"></i><i class="loadlock-door loadlock-door-atmosphere"></i>' : doors}</div>
     </article>`;
   if (role === "process" || role === "auxiliary" || role === "lock") {
@@ -1440,23 +1476,35 @@ function renderModule(
   return article;
 }
 
-/** 绘制单槽仿真机器人：圆形基座、旋转臂和勺形末端执行器。 */
+const ROBOT_DOUBLE_HOLD_CAPACITY = 2;
+const ROBOT_DISPLAY_WAFER_LIMIT = 2;
+
+/** 绘制机器手：双片仅用轻微错层区分，不额外显示数量标签。 */
 function renderRobotHub(
   robot: RobotSnapshot,
-  environment: "vacuum" | "atmosphere",
+  environment: RobotEnvironment,
   angleDegrees: number,
 ): string {
-  const wafer = robot.wafers[0]
-    ? renderWaferToken(robot.wafers[0], 0, robot.processedWafers.includes(robot.wafers[0]))
+  const visibleWafers = robot.wafers.slice(0, ROBOT_DISPLAY_WAFER_LIMIT);
+  const capacityLabel = robot.capacity >= ROBOT_DOUBLE_HOLD_CAPACITY ? "双片机械手" : "单槽机械手";
+  const holdingLabel = robot.wafers.length
+    ? `，持有 ${robot.wafers.length} 片晶圆 ${robot.wafers.join("、")}`
+    : "，槽位为空";
+  const waferMarkup = visibleWafers.map((wafer, index) => `
+    <span class="robot-held-wafer robot-held-wafer-${index}">${renderWaferToken(wafer, 0, robot.processedWafers.includes(wafer))}</span>`).join("");
+  const overflow = robot.wafers.length > ROBOT_DISPLAY_WAFER_LIMIT
+    ? `<span class="robot-held-overflow">+${robot.wafers.length - ROBOT_DISPLAY_WAFER_LIMIT}</span>`
     : "";
   return `
-    <article class="robot-hub robot-hub-${environment} ${robot.busy ? "is-busy" : ""}" style="--robot-arm-angle:${angleDegrees.toFixed(1)}deg" aria-label="${escapeHtml(robot.name)}，单槽机械手，${robot.busy ? "工作中" : "待命"}${robot.wafers[0] ? `，持有晶圆 ${robot.wafers[0]}` : "，槽位为空"}">
-      <span class="robot-environment-badge">${environment === "vacuum" ? "VAC" : "ATM"}</span>
+    <article class="robot-hub robot-hub-${environment} ${robot.busy ? "is-busy" : ""}" style="--robot-arm-angle:${angleDegrees.toFixed(1)}deg" aria-label="${escapeHtml(robot.name)}，${capacityLabel}，${robot.busy ? "工作中" : "待命"}${holdingLabel}">
+      <span class="robot-environment-badge">${escapeHtml(robot.name)}</span>
       <div class="robot-mechanism" aria-hidden="true">
         <span class="robot-base"><i></i></span>
         <span class="robot-arm">
           <i class="robot-arm-beam"></i>
-          <span class="robot-end-effector ${wafer ? "is-occupied" : "is-empty"}">${wafer}</span>
+          <span class="robot-end-effector ${visibleWafers.length ? "is-occupied" : "is-empty"}">
+            <span class="robot-held-wafers">${waferMarkup}${overflow}</span>
+          </span>
         </span>
       </div>
     </article>`;
@@ -1708,16 +1756,22 @@ function interpolatedRobotAngle(start: number, end: number, progress: number): n
 
 /**
  * LoadLock 田字布局使用靠近对应机械手的一排作为箭头入口：
- * ATR/ATM 固定进入下排 LC/LD，VTR 固定进入上排 LA/LB。
+ * init Type 为 ATM/ATR 的机械手进入下排 LC/LD，VTM/VTR 进入上排 LA/LB；
+ * 没有 init 类型时才回退到历史名称前缀判断。
  */
 function robotLoadLockPortal(
   robotName: string,
   moduleName: string,
   modulePositions: Map<string, TopologyPosition>,
+  environment?: RobotEnvironment,
 ): string {
   const normalizedModule = moduleName.trim().toUpperCase();
-  const isAtmosphereRobot = /^(ATR|ATM)/i.test(robotName);
-  const isVacuumRobot = /^(VTR|VTM)/i.test(robotName);
+  const isAtmosphereRobot = environment
+    ? environment === "atmosphere"
+    : /^(ATR|ATM)/i.test(robotName);
+  const isVacuumRobot = environment
+    ? environment === "vacuum"
+    : /^(VTR|VTM|VAC)/i.test(robotName);
   if (!isAtmosphereRobot && !isVacuumRobot) return moduleName;
   const preferred = ["LA", "LC"].includes(normalizedModule)
     ? (isAtmosphereRobot ? "LC" : "LA")
@@ -1725,6 +1779,29 @@ function robotLoadLockPortal(
       ? (isAtmosphereRobot ? "LD" : "LB")
       : moduleName;
   return modulePositions.has(preferred) ? preferred : moduleName;
+}
+
+/** 真空机器手面向 LA/LB 时取两腔中心，其余目标仍指向具体模块。 */
+function robotTargetTopologyPosition(
+  robot: RobotSnapshot,
+  moduleName: string,
+  modulePositions: Map<string, TopologyPosition>,
+): TopologyPosition | undefined {
+  const normalizedModule = moduleName.trim().toUpperCase();
+  if (robot.environment === "vacuum" && ["LA", "LB"].includes(normalizedModule)) {
+    const leftLoadLock = modulePositions.get("LA");
+    const rightLoadLock = modulePositions.get("LB");
+    if (leftLoadLock && rightLoadLock) {
+      return {
+        leftPercent: (leftLoadLock.leftPercent + rightLoadLock.leftPercent) / 2,
+        topPixels: (leftLoadLock.topPixels + rightLoadLock.topPixels) / 2,
+        widthPixels: 0,
+        heightPixels: 0,
+      };
+    }
+  }
+  const portal = robotLoadLockPortal(robot.name, moduleName, modulePositions, robot.environment);
+  return modulePositions.get(portal);
 }
 
 /** 从当前决策中找到模型选择的物理搬运意图。 */
@@ -1762,8 +1839,7 @@ function renderRobotTargetArrows(
     const liveTarget = robot.target;
     const decisionTarget = liveTarget ? "" : decisionTargetForRobot(robot, decision);
     const target = liveTarget || decisionTarget;
-    const targetName = robotLoadLockPortal(robot.name, target, modulePositions);
-    const targetPosition = modulePositions.get(targetName);
+    const targetPosition = robotTargetTopologyPosition(robot, target, modulePositions);
     if (!robotPosition || !targetPosition || !target) return "";
     const robotCenter = topologySvgPoint(robotPosition);
     const targetCenter = topologySvgPoint(targetPosition);
@@ -1800,7 +1876,10 @@ export function renderEquipmentTopology(
   ));
   const groups = topologyGroups(visibleModules);
   const destinations = candidateDestinations(decision);
-  const atmosphereRobots = snapshot.robots.filter(robot => /^(ATR|ATM)/i.test(robot.name));
+  const atmosphereRobots = snapshot.robots.filter(robot => (
+    robot.environment === "atmosphere"
+      || (!robot.environment && /^(ATR|ATM)/i.test(robot.name))
+  ));
   const atmosphereNames = new Set(atmosphereRobots.map(robot => robot.name));
   const vacuumRobots = snapshot.robots.filter(robot => !atmosphereNames.has(robot.name));
   const cascade = usesCascadeTopology(visibleModules, vacuumRobots.length);
@@ -1904,8 +1983,7 @@ export function renderEquipmentTopology(
     const position = robotPositions.get(robot.name);
     if (!position) return "";
     const target = robot.target || decisionTargetForRobot(robot, decision);
-    const portal = robotLoadLockPortal(robot.name, target, modulePositions);
-    const targetPosition = modulePositions.get(portal);
+    const targetPosition = robotTargetTopologyPosition(robot, target, modulePositions);
     const targetAngle = targetPosition
       ? Math.atan2(
           targetPosition.topPixels - position.topPixels,
@@ -1915,7 +1993,7 @@ export function renderEquipmentTopology(
       : -Math.PI / 2;
     let armAngle = targetAngle;
     if (robot.isPreTrans && robot.source) {
-      const sourcePortal = robotLoadLockPortal(robot.name, robot.source, modulePositions);
+      const sourcePortal = robotLoadLockPortal(robot.name, robot.source, modulePositions, robot.environment);
       const sourcePosition = modulePositions.get(sourcePortal);
       if (sourcePosition) {
         const sourceAngle = Math.atan2(

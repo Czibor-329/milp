@@ -491,8 +491,6 @@ def _start_pick(state: MachineState, move: Mapping[str, Any], end_time: float, _
     if error:
         return error
     station_names = {row[0] for row in rows}
-    if len(station_names) != 1:
-        return _issue(move, "一次 PickMove 只能访问一个站点")
     start_time = _start_time(move)
     if not _available(robot.busy_until, start_time):
         return _issue(move, f"{robot.name} 正在执行其他动作")
@@ -516,11 +514,11 @@ def _start_pick(state: MachineState, move: Mapping[str, Any], end_time: float, _
         if slot.phase is not SlotPhase.COMPLETED or not _material_matches(slot.material, material_id):
             return _issue(move, f"{station_name}#{station_slot_id} 没有匹配的已完成物料")
         transfers.append((station, slot, station_slot_id, robot_slot_id, _material_with_metadata(slot.material, move, index)))
-    station = transfers[0][0]
-    if robot.position is not None and robot.position != station.name:
-        return _issue(move, f"{robot.name} 当前指向 {robot.position}，不是 {station.name}")
+    if robot.position is not None and robot.position not in station_names:
+        return _issue(move, f"{robot.name} 当前指向 {robot.position}，不在取片组合站点 {sorted(station_names)}")
     robot.busy_until = end_time
-    station.transfer_busy_until = end_time
+    for station in {row[0].name: row[0] for row in transfers}.values():
+        station.transfer_busy_until = end_time
     for _, slot, _, _, _ in transfers:
         _reserve_slot(slot, end_time, "取片")
 
@@ -529,7 +527,7 @@ def _start_pick(state: MachineState, move: Mapping[str, Any], end_time: float, _
         for _, slot, _, robot_slot_id, material in transfers:
             _set_slot(slot, SlotPhase.EMPTY, None)
             robot.hands[robot_slot_id] = material
-        robot.position = station.name
+        robot.position = transfers[-1][0].name
 
     _schedule(scheduled, move, end_time, complete)
     return None
@@ -548,8 +546,6 @@ def _start_place(state: MachineState, move: Mapping[str, Any], end_time: float, 
     if error:
         return error
     station_names = {row[0] for row in rows}
-    if len(station_names) != 1:
-        return _issue(move, "一次 PlaceMove 只能访问一个站点")
     start_time = _start_time(move)
     if not _available(robot.busy_until, start_time):
         return _issue(move, f"{robot.name} 正在执行其他动作")
@@ -574,11 +570,11 @@ def _start_place(state: MachineState, move: Mapping[str, Any], end_time: float, 
         if not _available(slot.busy_until, start_time):
             return _issue(move, f"{station_name}#{station_slot_id} 正在{slot.busy_action}")
         transfers.append((station, slot, station_slot_id, robot_slot_id, _material_with_metadata(material, move, index)))
-    station = transfers[0][0]
-    if robot.position is not None and robot.position != station.name:
-        return _issue(move, f"{robot.name} 当前指向 {robot.position}，不是 {station.name}")
+    if robot.position is not None and robot.position not in station_names:
+        return _issue(move, f"{robot.name} 当前指向 {robot.position}，不在放片组合站点 {sorted(station_names)}")
     robot.busy_until = end_time
-    station.transfer_busy_until = end_time
+    for station in {row[0].name: row[0] for row in transfers}.values():
+        station.transfer_busy_until = end_time
     for _, slot, _, _, _ in transfers:
         _reserve_slot(slot, end_time, "放片")
 
@@ -587,7 +583,7 @@ def _start_place(state: MachineState, move: Mapping[str, Any], end_time: float, 
         for _, slot, _, robot_slot_id, material in transfers:
             _set_slot(slot, SlotPhase.UNPROCESSED, material)
             robot.hands[robot_slot_id] = None
-        robot.position = station.name
+        robot.position = transfers[-1][0].name
 
     _schedule(scheduled, move, end_time, complete)
     return None
@@ -844,30 +840,41 @@ def _start_swap(state: MachineState, move: Mapping[str, Any], end_time: float, _
     if isinstance(robot, str):
         return robot
     stations = [str(value) for value in _values(move, "StationList")]
-    if not stations or len(set(stations)) != 1:
-        return _issue(move, "SwapMove 必须引用同一个站点")
-    station = state.stations.get(stations[0])
-    if station is None:
-        return _issue(move, f"未知站点 {stations[0]}")
+    if not stations:
+        return _issue(move, "SwapMove 缺少 StationList")
     receive_materials = _values(move, "RecvMatList")
     send_materials = _values(move, "SendMatList")
     station_send_slots = _integer_values(move, "StnSendSlotList")
     station_receive_slots = _integer_values(move, "StnRecvSlotList")
     robot_receive_slots = _integer_values(move, "RecvSlotList")
     robot_send_slots = _integer_values(move, "SendSlotList")
-    count = len(receive_materials)
-    if not count or any(len(values) != count for values in (send_materials, station_send_slots, station_receive_slots, robot_receive_slots, robot_send_slots)):
-        return _issue(move, "SwapMove 的物料与槽位数组数量不一致")
+    count = max(len(receive_materials), len(send_materials))
+    if not count or len(stations) != count or any(len(values) != count for values in (station_send_slots, station_receive_slots, robot_receive_slots, robot_send_slots)):
+        lengths = (
+            len(stations), len(receive_materials), len(send_materials),
+            len(station_send_slots), len(station_receive_slots),
+            len(robot_receive_slots), len(robot_send_slots),
+        )
+        return _issue(move, f"SwapMove 的物料与槽位数组数量不一致：{lengths}")
     start_time = _start_time(move)
-    error = _station_access_error(robot, station, start_time, move)
-    if error:
-        return error
+    physical_stations: List[StationState] = []
+    for station_name in stations:
+        station = state.stations.get(station_name)
+        if station is None:
+            return _issue(move, f"未知站点 {station_name}")
+        error = _station_access_error(robot, station, start_time, move)
+        if error:
+            return error
+        physical_stations.append(station)
     if not _available(robot.busy_until, start_time):
         return _issue(move, f"{robot.name} 正在执行其他动作")
-    if robot.position is not None and robot.position != station.name:
-        return _issue(move, f"{robot.name} 当前指向 {robot.position}，不是 {station.name}")
+    if robot.position is not None and robot.position not in set(stations):
+        return _issue(move, f"{robot.name} 当前指向 {robot.position}，不在换片组合站点 {sorted(set(stations))}")
     exchanges = []
     for index in range(count):
+        station = physical_stations[index]
+        receive_material_id = receive_materials[index] if index < len(receive_materials) else None
+        send_material_id = send_materials[index] if index < len(send_materials) else None
         receive_robot_slot = robot_receive_slots[index]
         send_robot_slot = robot_send_slots[index]
         error = robot.swap_slot_error(receive_robot_slot, send_robot_slot)
@@ -879,31 +886,43 @@ def _start_swap(state: MachineState, move: Mapping[str, Any], end_time: float, _
             return _issue(move, f"{station.name} 的 SwapMove 引用了无效槽位")
         outgoing = send_station_slot.material
         incoming = robot.hands.get(send_robot_slot)
-        if send_station_slot.phase is not SlotPhase.COMPLETED or not _material_matches(outgoing, receive_materials[index]):
-            return _issue(move, f"{station.name}#{station_send_slots[index]} 没有可换出的物料")
-        if robot.hands.get(receive_robot_slot) is not None:
-            return _issue(move, f"{robot.name}#{receive_robot_slot} 不是空手")
-        if incoming is None or not _material_matches(incoming, send_materials[index]):
-            return _issue(move, f"{robot.name}#{send_robot_slot} 没有可换入的物料")
-        if receive_station_slot is not send_station_slot and receive_station_slot.phase not in {SlotPhase.EMPTY, SlotPhase.CLEANED}:
+        if receive_material_id is not None:
+            if send_station_slot.phase is not SlotPhase.COMPLETED or not _material_matches(outgoing, receive_material_id):
+                return _issue(move, f"{station.name}#{station_send_slots[index]} 没有可换出的物料")
+            if robot.hands.get(receive_robot_slot) is not None:
+                return _issue(move, f"{robot.name}#{receive_robot_slot} 不是空手")
+        elif send_station_slot.phase not in {SlotPhase.EMPTY, SlotPhase.CLEANED}:
+            return _issue(move, f"{station.name}#{station_send_slots[index]} 不是可直接放片的空槽")
+        if send_material_id is not None:
+            if incoming is None or not _material_matches(incoming, send_material_id):
+                return _issue(move, f"{robot.name}#{send_robot_slot} 没有可换入的物料")
+        elif incoming is not None:
+            return _issue(move, f"{robot.name}#{send_robot_slot} 存在未声明的换入物料")
+        if send_material_id is not None and receive_station_slot is not send_station_slot and receive_station_slot.phase not in {SlotPhase.EMPTY, SlotPhase.CLEANED}:
             return _issue(move, f"{station.name}#{station_receive_slots[index]} 不是可换入空槽")
-        exchanges.append((send_station_slot, receive_station_slot, receive_robot_slot, send_robot_slot, outgoing, incoming, index))
+        exchanges.append((station, send_station_slot, receive_station_slot, receive_robot_slot, send_robot_slot, outgoing, incoming, receive_material_id, send_material_id, index))
     robot.busy_until = end_time
-    station.transfer_busy_until = end_time
-    for send_station_slot, receive_station_slot, *_ in exchanges:
+    for station in {value.name: value for value in physical_stations}.values():
+        station.transfer_busy_until = end_time
+    for _, send_station_slot, receive_station_slot, *_ in exchanges:
         _reserve_slot(send_station_slot, end_time, "换片")
         if receive_station_slot is not send_station_slot:
             _reserve_slot(receive_station_slot, end_time, "换片")
 
     def complete() -> None:
         """同时落地 Swap 中所有进出晶圆。"""
-        for send_station_slot, receive_station_slot, receive_robot_slot, send_robot_slot, outgoing, incoming, index in exchanges:
-            _set_slot(receive_station_slot, SlotPhase.UNPROCESSED, _material_with_metadata(incoming, move, index, "SendMatStepIDList"))
+        for _, send_station_slot, receive_station_slot, receive_robot_slot, send_robot_slot, outgoing, incoming, receive_material_id, send_material_id, index in exchanges:
+            if send_material_id is not None:
+                _set_slot(receive_station_slot, SlotPhase.UNPROCESSED, _material_with_metadata(incoming, move, index, "SendMatStepIDList"))
+            else:
+                _set_slot(receive_station_slot, SlotPhase.EMPTY, None)
             if receive_station_slot is not send_station_slot:
                 _set_slot(send_station_slot, SlotPhase.EMPTY, None)
-            robot.hands[send_robot_slot] = None
-            robot.hands[receive_robot_slot] = _material_with_metadata(outgoing, move, index, "RecvMatStepIDList")
-        robot.position = station.name
+            if send_material_id is not None:
+                robot.hands[send_robot_slot] = None
+            if receive_material_id is not None:
+                robot.hands[receive_robot_slot] = _material_with_metadata(outgoing, move, index, "RecvMatStepIDList")
+        robot.position = physical_stations[-1].name
 
     _schedule(scheduled, move, end_time, complete)
     return None
