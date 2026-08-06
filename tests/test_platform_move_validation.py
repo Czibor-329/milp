@@ -83,7 +83,7 @@ def _move(move_id: int, move_type: int, start: float, end: float, **fields) -> d
 def _dual_transfer_moves() -> list[dict]:
     """创建双片从 PM 搬到 LL、满载充气并由大气手取出的完整动作链。"""
     return [
-        _move(1, 10, 0, 1, ModuleName="LL1", LastState=ATMOSPHERE, CurState=VACUUM, MatIDList=[]),
+        _move(1, 10, 0, 1, ModuleName="LL1", LastState="ATMRobot", CurState="VACRobot", MatIDList=[]),
         _move(2, 6, 0, 1, ModuleName="PM1", RelatedRobotType=1),
         _move(
             3, 0, 1, 2, ModuleName="VACRobot", MatIDList=[101, 102],
@@ -103,7 +103,7 @@ def _dual_transfer_moves() -> list[dict]:
         ),
         _move(8, 7, 6, 7, ModuleName="LL1"),
         _move(
-            9, 10, 7, 8, ModuleName="LL1", LastState=VACUUM, CurState=ATMOSPHERE,
+            9, 10, 7, 8, ModuleName="LL1", LastState="VACRobot", CurState="ATMRobot",
             MatIDList=[101, 102], SlotList=[1, 2],
         ),
         _move(10, 6, 8, 9, ModuleName="LL1", RelatedRobotType=0),
@@ -309,6 +309,91 @@ def test_cascade_loadlock_first_prepare_transitions_atr_to_vtr() -> None:
         replay.update_move_state({"MoveID": move["MoveID"], "MoveState": MoveStateReplay.RUNNING}, snapshot=False)
         replay.update_move_state({"MoveID": move["MoveID"], "MoveState": MoveStateReplay.DONE}, snapshot=False)
     assert replay.state.stations["LL1"].environment == VACUUM
+
+
+def test_first_environment_move_exemption_allows_atr_start() -> None:
+    """级联 LoadLock 的首条切换可从未声明的初始大气手 ATR_1 起始（豁免放行）。
+
+    第一条 ATR_1→VTR_1 不在 PrePrepareTime 状态空间 {VTR_1, VTR_2} 内，平台豁免
+    该条校验但照常执行；第二条 VTR_1→VTR_2 属合法状态空间，正常执行并把环境切到真空。
+    """
+    moves = [
+        _move(1, 10, 0, 2, ModuleName="LL1", LastState="ATR_1", CurState="VTR_1", MatIDList=[]),
+        _move(2, 10, 2, 4, ModuleName="LL1", LastState="VTR_1", CurState="VTR_2", MatIDList=[]),
+    ]
+    assert validate_move_list(None, moves, _cascade_loadlock_update()) == []
+
+    replay = MoveStateReplay(None, moves, _cascade_loadlock_update())
+    for move in moves:
+        replay.update_move_state({"MoveID": move["MoveID"], "MoveState": MoveStateReplay.RUNNING}, snapshot=False)
+        replay.update_move_state({"MoveID": move["MoveID"], "MoveState": MoveStateReplay.DONE}, snapshot=False)
+    assert replay.state.stations["LL1"].environment == VACUUM
+
+
+def test_first_environment_move_exemption_executes_and_updates_state() -> None:
+    """豁免的首条越界切换不再跳过，而是执行并把 LoadLock 状态更新为 CurState。
+
+    首条 ATR_1→VTR_2 的 LastState 不在状态空间，但 CurState=VTR_2 对应真空侧；
+    豁免执行后环境应立即更新为 VACUUM（而不是停留在初始大气）。
+    """
+    moves = [
+        _move(1, 10, 0, 2, ModuleName="LL1", LastState="ATR_1", CurState="VTR_2", MatIDList=[]),
+    ]
+    assert validate_move_list(None, moves, _cascade_loadlock_update()) == []
+
+    replay = MoveStateReplay(None, moves, _cascade_loadlock_update())
+    for move in moves:
+        replay.update_move_state({"MoveID": move["MoveID"], "MoveState": MoveStateReplay.RUNNING}, snapshot=False)
+        replay.update_move_state({"MoveID": move["MoveID"], "MoveState": MoveStateReplay.DONE}, snapshot=False)
+    assert replay.state.stations["LL1"].environment == VACUUM
+
+
+def test_exempted_first_switch_with_material_marks_slot_completed() -> None:
+    """豁免的首条越界切换带片时，照常完成槽位物料转换并更新环境。"""
+    update = _cascade_loadlock_update()
+    update["Materials"] = [{"ID": 1, "CurrentModuleName": "LL1", "SlotID": 1, "StepID": 4}]
+    moves = [
+        _move(1, 10, 0, 2, ModuleName="LL1", LastState="ATR_1", CurState="VTR_2", MatIDList=[1], SlotList=[1]),
+    ]
+    assert validate_move_list(None, moves, update) == []
+
+    replay = MoveStateReplay(None, moves, update)
+    for move in moves:
+        replay.update_move_state({"MoveID": move["MoveID"], "MoveState": MoveStateReplay.RUNNING}, snapshot=False)
+        replay.update_move_state({"MoveID": move["MoveID"], "MoveState": MoveStateReplay.DONE}, snapshot=False)
+    assert replay.state.stations["LL1"].environment == VACUUM
+    assert replay.state.stations["LL1"].slots[1].phase == SlotPhase.COMPLETED
+
+
+def test_exempted_first_switch_rejects_unresolvable_curstate() -> None:
+    """豁免不适用于 CurState 无法解析为压力态的陌生标签（避免污染环境）。"""
+    moves = [
+        _move(1, 10, 0, 2, ModuleName="LL1", LastState="ATR_1", CurState="Foo", MatIDList=[]),
+    ]
+    issues = validate_move_list(None, moves, _cascade_loadlock_update())
+    assert issues and "状态空间" in issues[0]
+    """豁免只覆盖第一条；第二条起 LastState/CurState 不在状态空间仍报错。"""
+    moves = [
+        _move(1, 10, 0, 2, ModuleName="LL1", LastState="ATR_1", CurState="VTR_1", MatIDList=[]),
+        _move(2, 10, 2, 4, ModuleName="LL1", LastState="ATR_1", CurState="VTR_1", MatIDList=[]),
+    ]
+    issues = validate_move_list(None, moves, _cascade_loadlock_update())
+    assert issues and "状态空间" in issues[0]
+
+
+def test_environment_exemption_is_per_loadlock_and_once_only() -> None:
+    """豁免机会按 LoadLock 独立且只生效一次：两个级联 LL 各可豁免首条。"""
+    update = _cascade_loadlock_update()
+    update["Stations"]["LL2"] = dict(update["Stations"]["LL1"])
+    moves = [
+        _move(1, 10, 0, 2, ModuleName="LL1", LastState="ATR_1", CurState="VTR_1", MatIDList=[]),
+        _move(2, 10, 0, 2, ModuleName="LL2", LastState="ATR_1", CurState="VTR_1", MatIDList=[]),
+    ]
+    assert validate_move_list(None, moves, update) == []
+    # 两个 LL 的豁免都已消耗，第三条任意 LL 的越界切换仍报错。
+    moves.append(_move(3, 10, 2, 4, ModuleName="LL1", LastState="ATR_1", CurState="VTR_1", MatIDList=[]))
+    issues = validate_move_list(None, moves, update)
+    assert issues and "状态空间" in issues[0]
 
 
 def _cascade_dbr_update() -> dict:

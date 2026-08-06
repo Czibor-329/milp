@@ -92,6 +92,10 @@ class LoadLockState(StationState):
     environment: str = ATMOSPHERE
     last_environment_transition_was_empty: bool = False
     environment_aliases: Dict[str, str] = field(default_factory=dict)
+    #: ``PrePrepareTime`` 声明的合法状态标签集合（归一化大写）；空集表示未声明，退回宽松解析。
+    environment_state_space: frozenset[str] = frozenset()
+    #: 是否已行使“首条不匹配环境切换”豁免（外部算法首个抽真空可从大气手 ATR_1 起始）。
+    environment_exemption_used: bool = False
 
 
 @dataclass
@@ -161,6 +165,7 @@ class MachineState:
                     slots=slots,
                     environment=_environment_from_last_item(str(config.get("LastItem") or ""), aliases),
                     environment_aliases=aliases,
+                    environment_state_space=_environment_state_space(config),
                 )
             else:
                 state.stations[name] = StationState(name, station_type, slots)
@@ -699,7 +704,10 @@ def _start_prepare(state: MachineState, move: Mapping[str, Any], end_time: float
         related = _related_move(move, all_moves)
         expected = _required_environment(state, station, move, related)
         if expected is not None and station.environment != expected:
-            return _issue(move, f"{station.name} 当前环境为 {station.environment}，不是 {expected}")
+            return _issue(
+                move,
+                f"{station.name}.CurState为{_environment_label(station, expected)}，不是{_environment_label(station, station.environment)}",
+            )
         station.last_environment_transition_was_empty = False
     station.door_busy_until = end_time
     _schedule(scheduled, move, end_time, lambda: setattr(station, "door", DoorState.OPEN))
@@ -794,10 +802,39 @@ def _start_preprepare(state: MachineState, move: Mapping[str, Any], end_time: fl
         return _issue(move, f"{station.name} 正在切换环境")
     last_state = _environment_state(station, move.get("LastState"))
     current_state = _environment_state(station, move.get("CurState"))
-    if last_state not in {ATMOSPHERE, VACUUM} or current_state not in {ATMOSPHERE, VACUUM}:
-        return _issue(move, "LastState 和 CurState 必须是有效压力态")
-    if station.environment != last_state:
-        return _issue(move, f"{station.name} 当前环境为 {station.environment}，不是 {last_state}")
+    raw_last = str(move.get("LastState") or "").strip().upper()
+    raw_current = str(move.get("CurState") or "").strip().upper()
+    # 严格状态空间：配置了 PrePrepareTime 时，LastState/CurState 原始标签必须在该 LoadLock 声明内。
+    state_space_violation = bool(
+        station.environment_state_space
+        and (
+            raw_last not in station.environment_state_space
+            or raw_current not in station.environment_state_space
+        )
+    )
+    violation: Optional[str] = None
+    if state_space_violation:
+        violation = _issue(
+            move,
+            f"{station.name} 的 LastState/CurState 不在其 PrePrepareTime 状态空间内：({raw_last}, {raw_current})",
+        )
+    elif last_state not in {ATMOSPHERE, VACUUM} or current_state not in {ATMOSPHERE, VACUUM}:
+        violation = _issue(move, "LastState 和 CurState 必须是有效压力态")
+    elif station.environment != last_state:
+        violation = _issue(
+            move,
+            f"{station.name}.CurState为{_environment_label(station, last_state)}，不是{_environment_label(station, station.environment)}",
+        )
+    if violation is not None:
+        if not station.environment_exemption_used and state_space_violation:
+            # 豁免：每个 LoadLock 仅放行第一条不在 PrePrepareTime 状态空间内的环境切换，
+            # 但照常执行该 move，把 LoadLock 状态更新为对应的 CurState；后续违例照常报错。
+            station.environment_exemption_used = True
+            # CurState 必须可解析为标准压力态才能安全落地环境；陌生标签不豁免。
+            if current_state in {ATMOSPHERE, VACUUM}:
+                violation = None
+        if violation is not None:
+            return violation
     material_ids = _values(move, "MatIDList")
     slot_ids = _integer_values(move, "SlotList")
     if material_ids and slot_ids and len(material_ids) != len(slot_ids):
@@ -1153,6 +1190,57 @@ def _environment_aliases(config: Mapping[str, Any]) -> Dict[str, str]:
             if alias:
                 aliases[alias] = environment
     return aliases
+
+
+def _environment_state_space(config: Mapping[str, Any]) -> frozenset[str]:
+    """从 ``PrePrepareTime`` 提取该 LoadLock 的合法状态标签集合（归一化大写）。
+
+    只统计 pump/vent 压力切换条目的 ``LastItem/CurrentItem``；``PrePrepareTime``
+    缺失或为空时返回空集，由调用方退回“可解析为标准压力态”的宽松校验。
+    """
+    labels: Set[str] = set()
+    transitions = config.get("PrePrepareTime")
+    if not isinstance(transitions, Sequence) or isinstance(transitions, (str, bytes)):
+        return frozenset()
+    for transition in transitions:
+        if not isinstance(transition, Mapping):
+            continue
+        transition_type = str(transition.get("PrePrepareType") or "").strip().lower()
+        if not (transition_type.startswith("pump") or transition_type.startswith("vent")):
+            continue
+        for key in ("LastItem", "CurrentItem"):
+            alias = str(transition.get(key) or "").strip().upper()
+            if alias:
+                labels.add(alias)
+    return frozenset(labels)
+
+
+def _environment_side_labels(aliases: Mapping[str, str]) -> Tuple[str, str]:
+    """由 LoadLock 的“标签→标准压力态”映射反推输出侧名称。
+
+    每侧存在多个候选标签时按名称排序取第一个；未声明标签时回退标准压力态。
+    """
+    by_environment: Dict[str, List[str]] = {}
+    for alias, environment in dict(aliases or {}).items():
+        by_environment.setdefault(str(environment), []).append(str(alias))
+    atmosphere = sorted(by_environment.get(ATMOSPHERE, ()))
+    vacuum = sorted(by_environment.get(VACUUM, ()))
+    return (
+        atmosphere[0] if atmosphere else ATMOSPHERE,
+        vacuum[0] if vacuum else VACUUM,
+    )
+
+
+def _environment_label(station: StationState, environment: str) -> str:
+    """把标准压力态映射回该 LoadLock 的配置标签（无配置时保持标准态）。"""
+    atmosphere_label, vacuum_label = _environment_side_labels(
+        getattr(station, "environment_aliases", {})
+    )
+    if environment == ATMOSPHERE:
+        return atmosphere_label
+    if environment == VACUUM:
+        return vacuum_label
+    return environment
 
 
 def _environment_from_last_item(last_item: str, aliases: Mapping[str, str]) -> str:
