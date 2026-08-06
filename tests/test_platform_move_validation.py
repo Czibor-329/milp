@@ -221,3 +221,155 @@ def test_empty_pretrans_material_annotation_requires_matching_linked_pick() -> N
 
     issues = validate_move_list(None, moves, _dual_chamber_update())
     assert issues == ["MoveID=2 MoveType=5：VACRobot#1 持有物料与 Move 不匹配"]
+
+
+def test_standard_algorithm_swap_move_with_repeated_station_passes() -> None:
+    """标准算法导出的 SwapMove（StationList 同一站点重复两条、物料槽位单组）应通过校验。
+
+    双臂 PM 换片导出为 StationList=[chamber, chamber]（一进一出各占一条），而
+    RecvMatList/SendMatList/槽位数组都只有一组；站点数量不得参与数组数量判定。
+    """
+    moves = [
+        _move(1, 6, 0, 1, ModuleName="PM1", RelatedRobotType=1),
+        _move(2, 0, 1, 2, ModuleName="VACRobot", MatIDList=[101], SrcStationList=["PM1"], SrcSlotList=[1], RobotSlotList=[1]),
+        _move(3, 1, 2, 3, ModuleName="VACRobot", MatIDList=[101], DestStationList=["PM1"], DestSlotList=[1], RobotSlotList=[1]),
+        _move(4, 7, 3, 4, ModuleName="PM1"),
+        _move(5, 9, 4, 8, ModuleName="PM1", MatIDList=[101], SlotList=[1]),
+        _move(6, 6, 8, 9, ModuleName="PM1", RelatedRobotType=1),
+        _move(7, 0, 9, 10, ModuleName="VACRobot", MatIDList=[102], SrcStationList=["PM1"], SrcSlotList=[2], RobotSlotList=[2]),
+        _move(8, 4, 10, 11, ModuleName="VACRobot",
+              StationList=["PM1", "PM1"], StnRecvSlotList=[1], StnSendSlotList=[1],
+              RecvSlotList=[1], SendSlotList=[2], RecvMatList=[101], SendMatList=[102]),
+    ]
+    assert validate_move_list(None, moves, _dual_chamber_update()) == []
+
+
+def test_swap_move_rejects_distinct_stations() -> None:
+    """原子 Swap 必须作用于同一个站点，跨站组合应报错。"""
+    moves = [
+        _move(1, 6, 0, 1, ModuleName="PM1", RelatedRobotType=1),
+        _move(2, 4, 1, 2, ModuleName="VACRobot",
+              StationList=["PM1", "LL1"], StnRecvSlotList=[1], StnSendSlotList=[1],
+              RecvSlotList=[1], SendSlotList=[2], RecvMatList=[101], SendMatList=[102]),
+    ]
+    issues = validate_move_list(None, moves, _dual_chamber_update())
+    assert issues == ["MoveID=2 MoveType=4：SwapMove 必须引用同一个站点"]
+
+
+def _cascade_loadlock_update() -> dict:
+    """级联 LoadLock：连接 VTR_1/VTR_2 两个真空手，初始 LastItem 为空、State=0（大气态）。"""
+    return {
+        "Stations": {
+            "PM1": {"Type": "MultiProcessChamber", "Capacity": 2},
+            "LL1": {
+                "Type": "LoadLock",
+                "Capacity": 2,
+                "LastItem": "",
+                "State": 0,
+                "PrePrepareTime": [
+                    {"PrePrepareType": "PumpTime", "LastItem": "VTR_1", "CurrentItem": "VTR_2"},
+                    {"PrePrepareType": "VentTime", "LastItem": "VTR_2", "CurrentItem": "VTR_1"},
+                ],
+            },
+        },
+        "Robots": {
+            robot_name: {
+                "Type": "VTMRobot",
+                "Capacity": 2,
+                "ArmInfo": {
+                    "ArmA": {
+                        "Name": "ArmA",
+                        "IsEnable": True,
+                        "SlotIDs": [1, 2],
+                        "AccessibleStations": ["PM1", "LL1"],
+                    },
+                },
+            }
+            for robot_name in ("VTR_1", "VTR_2")
+        },
+        "Materials": [],
+    }
+
+
+def test_cascade_loadlock_first_prepare_transitions_atr_to_vtr() -> None:
+    """级联 LoadLock 初始 LastItem 为空判定大气；首条 pre_prepare 从 ATR_1 切到 VTR_1。
+
+    设备只配置 VTR_1/VTR_2 两侧，但第一个抽真空动作可以从大气手 ATR_1 起始
+    （对应 State=0/LastItem="" 的初始大气态），LastState=ATR_1 应被识别为大气；
+    之后才在 VTR_1（pump 前侧）与 VTR_2（pump 后侧）之间切换。
+    """
+    moves = [
+        _move(1, 10, 0, 2, ModuleName="LL1", LastState="ATR_1", CurState="VTR_1", MatIDList=[]),
+        _move(2, 10, 2, 4, ModuleName="LL1", LastState="VTR_1", CurState="VTR_2", MatIDList=[]),
+    ]
+    assert validate_move_list(None, moves, _cascade_loadlock_update()) == []
+
+    replay = MoveStateReplay(None, moves, _cascade_loadlock_update())
+    for move in moves:
+        replay.update_move_state({"MoveID": move["MoveID"], "MoveState": MoveStateReplay.RUNNING}, snapshot=False)
+        replay.update_move_state({"MoveID": move["MoveID"], "MoveState": MoveStateReplay.DONE}, snapshot=False)
+    assert replay.state.stations["LL1"].environment == VACUUM
+
+
+def _cascade_dbr_update() -> dict:
+    """12kChamber 的 DBR 桥接 LoadLock：连接 VTR_1/VTR_2 两个真空手，初始大气。"""
+    return {
+        "Stations": {
+            "PM1": {"Type": "MultiProcessChamber", "Capacity": 2},
+            "DBR": {
+                "Type": "LoadLock",
+                "Capacity": 2,
+                "LastItem": "",
+                "State": 0,
+                "PrePrepareTime": [
+                    {"PrePrepareType": "PumpTime", "LastItem": "VTR_1", "CurrentItem": "VTR_2"},
+                    {"PrePrepareType": "VentTime", "LastItem": "VTR_2", "CurrentItem": "VTR_1"},
+                ],
+            },
+        },
+        "Robots": {
+            robot_name: {
+                "Type": "VTMRobot",
+                "Capacity": 2,
+                "ArmInfo": {
+                    "ArmA": {
+                        "Name": "ArmA",
+                        "IsEnable": True,
+                        "SlotIDs": [1, 2],
+                        "AccessibleStations": ["PM1", "DBR"],
+                    },
+                },
+            }
+            for robot_name in ("VTR_1", "VTR_2")
+        },
+        "Materials": [
+            {"ID": 1, "CurrentModuleName": "DBR", "SlotID": 1, "StepID": 4},
+            {"ID": 2, "CurrentModuleName": "DBR", "SlotID": 2, "StepID": 4},
+        ],
+    }
+
+
+def test_cascade_dbr_open_pressure_uses_preprepare_side_mapping() -> None:
+    """DBR 开门压力判定应使用 PrePrepareTime 侧映射，而非 RelatedRobotType 全局分类。
+
+    复现真实 12kChamber MoveList：首个空抽 ATR_1→VTR_1 后，VTR_1 开门
+    （RelatedRobotType=1）要求抽气来源侧（内部 ATM）；VTR_1→VTR_2 带片转换后，
+    VTR_2 开门（RelatedRobotType=2）要求抽气目标侧（内部 VAC）。
+    """
+    moves = [
+        _move(1, 10, 0, 2, ModuleName="DBR", LastState="ATR_1", CurState="VTR_1", MatIDList=[]),
+        _move(2, 6, 2, 3, ModuleName="DBR", RelatedRobotType=1),
+        _move(3, 0, 3, 8, ModuleName="VTR_1", MatIDList=[1], SrcStationList=["DBR"], SrcSlotList=[1], RobotSlotList=[1], StepIDList=[5]),
+        _move(4, 7, 8, 10, ModuleName="DBR"),
+        _move(5, 10, 10, 12, ModuleName="DBR", LastState="VTR_1", CurState="VTR_2", MatIDList=[]),
+        _move(6, 6, 12, 13, ModuleName="DBR", RelatedRobotType=2),
+        _move(7, 0, 13, 18, ModuleName="VTR_2", MatIDList=[2], SrcStationList=["DBR"], SrcSlotList=[2], RobotSlotList=[1], StepIDList=[6]),
+        _move(8, 7, 18, 20, ModuleName="DBR"),
+    ]
+    assert validate_move_list(None, moves, _cascade_dbr_update()) == []
+
+    replay = MoveStateReplay(None, moves, _cascade_dbr_update())
+    for move in moves:
+        replay.update_move_state({"MoveID": move["MoveID"], "MoveState": MoveStateReplay.RUNNING}, snapshot=False)
+        replay.update_move_state({"MoveID": move["MoveID"], "MoveState": MoveStateReplay.DONE}, snapshot=False)
+    assert replay.state.stations["DBR"].environment == VACUUM

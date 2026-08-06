@@ -835,13 +835,15 @@ def _start_preprepare(state: MachineState, move: Mapping[str, Any], end_time: fl
 
 
 def _start_swap(state: MachineState, move: Mapping[str, Any], end_time: float, _all_moves: Sequence[Mapping[str, Any]], scheduled: List[_ScheduledCompletion]) -> Optional[str]:
-    """校验同站原子 Swap；单次动作可并行交换多组槽位。"""
+    """校验同站原子 Swap；StationList 可重复声明同一站点（双臂一进一出），单次动作可并行交换多组槽位。"""
     robot = _robot(state, move)
     if isinstance(robot, str):
         return robot
     stations = [str(value) for value in _values(move, "StationList")]
     if not stations:
         return _issue(move, "SwapMove 缺少 StationList")
+    if len(set(stations)) != 1:
+        return _issue(move, "SwapMove 必须引用同一个站点")
     receive_materials = _values(move, "RecvMatList")
     send_materials = _values(move, "SendMatList")
     station_send_slots = _integer_values(move, "StnSendSlotList")
@@ -849,7 +851,7 @@ def _start_swap(state: MachineState, move: Mapping[str, Any], end_time: float, _
     robot_receive_slots = _integer_values(move, "RecvSlotList")
     robot_send_slots = _integer_values(move, "SendSlotList")
     count = max(len(receive_materials), len(send_materials))
-    if not count or len(stations) != count or any(len(values) != count for values in (station_send_slots, station_receive_slots, robot_receive_slots, robot_send_slots)):
+    if not count or any(len(values) != count for values in (station_send_slots, station_receive_slots, robot_receive_slots, robot_send_slots)):
         lengths = (
             len(stations), len(receive_materials), len(send_materials),
             len(station_send_slots), len(station_receive_slots),
@@ -872,7 +874,7 @@ def _start_swap(state: MachineState, move: Mapping[str, Any], end_time: float, _
         return _issue(move, f"{robot.name} 当前指向 {robot.position}，不在换片组合站点 {sorted(set(stations))}")
     exchanges = []
     for index in range(count):
-        station = physical_stations[index]
+        station = physical_stations[0]
         receive_material_id = receive_materials[index] if index < len(receive_materials) else None
         send_material_id = send_materials[index] if index < len(send_materials) else None
         receive_robot_slot = robot_receive_slots[index]
@@ -991,7 +993,18 @@ def _related_move(move: Mapping[str, Any], moves: Sequence[Mapping[str, Any]]) -
 
 
 def _required_environment(state: MachineState, station: LoadLockState, move: Mapping[str, Any], related: Optional[Mapping[str, Any]]) -> Optional[str]:
-    """从关联机器人和协议枚举推导 LoadLock 开门侧。"""
+    """从关联机器人和协议枚举推导 LoadLock 开门侧。
+
+    RelatedRobotType 是机器人的全局分类，无法表达 VTR_1 在 LA 中位于真空侧、
+    在 UBR/DBR 中又位于抽气来源侧的串联真空腔结构；因此优先用当前 LoadLock
+    的 PrePrepareTime 映射解析关联机器人，旧设备没有映射时再退回全局分类。
+    """
+    if related is not None:
+        robot = state.resolve_robot(str(related.get("Robot") or related.get("ModuleName") or ""))
+        if robot is not None:
+            configured = _environment_state(station, robot.name)
+            if configured in {ATMOSPHERE, VACUUM}:
+                return configured
     related_type = move.get("RelatedRobotType")
     if related_type == 0:
         return ATMOSPHERE
@@ -1002,9 +1015,6 @@ def _required_environment(state: MachineState, station: LoadLockState, move: Map
     robot = state.resolve_robot(str(related.get("Robot") or related.get("ModuleName") or ""))
     if robot is None:
         return None
-    configured = _environment_state(station, robot.name)
-    if configured in {ATMOSPHERE, VACUUM}:
-        return configured
     upper_name = robot.name.upper()
     if "ATM" in upper_name or "ATR" in upper_name:
         return ATMOSPHERE
@@ -1160,7 +1170,16 @@ def _environment_state(station: LoadLockState, value: Any) -> str:
         return ATMOSPHERE
     if raw in {VACUUM, "VTR", "VACROBOT"}:
         return VACUUM
-    return station.environment_aliases.get(raw, raw)
+    configured = station.environment_aliases.get(raw)
+    if configured in {ATMOSPHERE, VACUUM}:
+        return configured
+    # PrePrepareTime 未声明的设备标签按手类型启发式归类：级联 LoadLock 只配置
+    # VTR_1/VTR_2 两侧，但首个抽真空可从大气手 ATR_1 起始（对应 State=0/LastItem=""）。
+    if "VAC" in raw or "VTR" in raw:
+        return VACUUM
+    if "ATM" in raw or "ATR" in raw:
+        return ATMOSPHERE
+    return raw
 
 
 def _initial_materials(task: Any, payload: Mapping[str, Any]) -> Iterable[Tuple[str, int, MaterialState]]:
