@@ -256,6 +256,80 @@ def test_swap_move_rejects_distinct_stations() -> None:
     assert issues == ["MoveID=2 MoveType=4：SwapMove 必须引用同一个站点"]
 
 
+def _three_slot_robot_update() -> dict:
+    """三槽 VACRobot（SlotIDs=[1,2,3]）连接 PM1 与 LoadPort LP1，用于不对称换片测试。"""
+    return {
+        "Stations": {
+            "PM1": {"Type": "MultiProcessChamber", "Capacity": 2},
+            "LP1": {"Type": "LoadPort", "Capacity": 25},
+        },
+        "Robots": {
+            "VTR": {
+                "Type": "VTMRobot",
+                "Capacity": 3,
+                "ArmInfo": {
+                    "ArmA": {
+                        "Name": "ArmA",
+                        "IsEnable": True,
+                        "SlotIDs": [1, 2, 3],
+                        "AccessibleStations": ["PM1", "LP1"],
+                        "SlotAtStation": "PM1",
+                        "SlotsStationMap": {
+                            "PM1": {
+                                "1": [{"Key": "PM1", "Value": 1}],
+                                "2": [{"Key": "PM1", "Value": 2}],
+                                "3": [{"Key": "PM1", "Value": 1}],
+                            },
+                            "LP1": {
+                                "1": [{"Key": "LP1", "Value": 1}, {"Key": "LP1", "Value": 2}],
+                                "2": [{"Key": "LP1", "Value": 1}, {"Key": "LP1", "Value": 2}],
+                                "3": [{"Key": "LP1", "Value": 1}, {"Key": "LP1", "Value": 2}],
+                            },
+                        },
+                    },
+                },
+            },
+        },
+        "Materials": [
+            {"ID": 101, "CurrentModuleName": "PM1", "SlotID": 2, "StepID": 4},
+            {"ID": 102, "CurrentModuleName": "PM1", "SlotID": 1, "StepID": 4},
+            {"ID": 103, "CurrentModuleName": "LP1", "SlotID": 1, "StepID": 0},
+        ],
+    }
+
+
+def test_swap_move_supports_asymmetric_exchange() -> None:
+    """不对称换片：Send 1 片进腔室、Recv 2 片出腔室，两组长度不同合法。
+
+    StnSendSlotList 是离开腔室晶圆用的站槽位（Recv 组），StnRecvSlotList 是
+    进入腔室晶圆用的站槽位（Send 组）；同一槽位可同时承载一组 Send 与一组
+    Recv（换片槽位，先取后放），具体槽位号信任算法声明。
+    """
+    update = _three_slot_robot_update()
+    moves = [
+        _move(1, 6, 0, 1, ModuleName="PM1", RelatedRobotType=1),
+        _move(2, 5, 1, 2, ModuleName="VTR", SrcStationList=["PM1"], DestStationList=["LP1"], RobotSlotList=[2]),
+        _move(3, 0, 2, 3, ModuleName="VTR", MatIDList=[103], SrcStationList=["LP1"], SrcSlotList=[1], RobotSlotList=[2]),
+        _move(4, 5, 3, 4, ModuleName="VTR", SrcStationList=["LP1"], DestStationList=["PM1", "PM1"], RobotSlotList=[2, 3]),
+        _move(5, 4, 4, 5, ModuleName="VTR",
+              StationList=["PM1"], StnSendSlotList=[2, 1], StnRecvSlotList=[1],
+              RecvSlotList=[1, 3], SendSlotList=[2], RecvMatList=[101, 102], SendMatList=[103]),
+        _move(6, 7, 5, 6, ModuleName="PM1"),
+    ]
+    assert validate_move_list(None, moves, update) == []
+
+
+def test_swap_move_rejects_internal_field_length_mismatch() -> None:
+    """Recv 组内部数组长度不一致仍报错（StnSendSlotList 数量与 RecvMatList 不符）。"""
+    moves = [
+        _move(1, 4, 0, 1, ModuleName="VACRobot",
+              StationList=["PM1"], StnSendSlotList=[1, 2], StnRecvSlotList=[1],
+              RecvSlotList=[1], SendSlotList=[2], RecvMatList=[101], SendMatList=[102]),
+    ]
+    issues = validate_move_list(None, moves, _dual_chamber_update())
+    assert issues and "Recv 组数组数量不一致" in issues[0]
+
+
 def _cascade_loadlock_update() -> dict:
     """级联 LoadLock：连接 VTR_1/VTR_2 两个真空手，初始 LastItem 为空、State=0（大气态）。"""
     return {
@@ -394,6 +468,155 @@ def test_environment_exemption_is_per_loadlock_and_once_only() -> None:
     moves.append(_move(3, 10, 2, 4, ModuleName="LL1", LastState="ATR_1", CurState="VTR_1", MatIDList=[]))
     issues = validate_move_list(None, moves, update)
     assert issues and "状态空间" in issues[0]
+
+
+def _atm_vac_robot_loadlock_update() -> dict:
+    """LA 型 LoadLock：PrePrepareTime 声明 ATMRobot/VACRobot 两侧，初始 LastItem 为空（大气）。"""
+    return {
+        "Stations": {
+            "LL1": {
+                "Type": "LoadLock",
+                "Capacity": 2,
+                "LastItem": "",
+                "PrePrepareTime": [
+                    {"PrePrepareType": "PumpTime", "LastItem": "ATMRobot", "CurrentItem": "VACRobot"},
+                    {"PrePrepareType": "VentTime", "LastItem": "VACRobot", "CurrentItem": "ATMRobot"},
+                ],
+            },
+        },
+        "Robots": {},
+        "Materials": [],
+    }
+
+
+def test_first_environment_move_exemption_covers_internal_state_mismatch() -> None:
+    """首条切换的 LastState 与 LoadLock 实际压力态不符、但标签合法时，豁免照常放行。
+
+    复刻真实报错场景：LA 初始大气（LastItem=""），算法首条发出 VentTime
+    （LastState=VACRobot→CurState=ATMRobot），LastState 声称真空与初始大气矛盾；
+    但 VACROBOT/ATMROBOT 均在 PrePrepareTime 状态空间内（非越界），扩宽后的首条
+    豁免应放行并把环境落地到 CurState（大气）。
+    """
+    update = _atm_vac_robot_loadlock_update()
+    moves = [
+        _move(1, 10, 0, 2, ModuleName="LL1", LastState="VACRobot", CurState="ATMRobot", MatIDList=[]),
+    ]
+    assert validate_move_list(None, moves, update) == []
+
+    replay = MoveStateReplay(None, moves, update)
+    for move in moves:
+        replay.update_move_state({"MoveID": move["MoveID"], "MoveState": MoveStateReplay.RUNNING}, snapshot=False)
+        replay.update_move_state({"MoveID": move["MoveID"], "MoveState": MoveStateReplay.DONE}, snapshot=False)
+    assert replay.state.stations["LL1"].environment == ATMOSPHERE
+
+
+def test_first_environment_move_exemption_internal_mismatch_lands_curstate() -> None:
+    """首条不匹配切换豁免后照常执行，环境落地为 CurState 对应压力态（而非停在初始大气）。"""
+    update = _atm_vac_robot_loadlock_update()
+    moves = [
+        _move(1, 10, 0, 2, ModuleName="LL1", LastState="VACRobot", CurState="VACRobot", MatIDList=[]),
+    ]
+    assert validate_move_list(None, moves, update) == []
+
+    replay = MoveStateReplay(None, moves, update)
+    for move in moves:
+        replay.update_move_state({"MoveID": move["MoveID"], "MoveState": MoveStateReplay.RUNNING}, snapshot=False)
+        replay.update_move_state({"MoveID": move["MoveID"], "MoveState": MoveStateReplay.DONE}, snapshot=False)
+    assert replay.state.stations["LL1"].environment == VACUUM
+
+
+def test_environment_exemption_internal_mismatch_only_once() -> None:
+    """首条不匹配切换豁免只生效一次；第二条同款 LastState 不符仍报错。"""
+    update = _atm_vac_robot_loadlock_update()
+    moves = [
+        _move(1, 10, 0, 2, ModuleName="LL1", LastState="VACRobot", CurState="ATMRobot", MatIDList=[]),
+        _move(2, 10, 2, 4, ModuleName="LL1", LastState="VACRobot", CurState="ATMRobot", MatIDList=[]),
+    ]
+    issues = validate_move_list(None, moves, update)
+    assert issues and "不是" in issues[0]
+
+
+def _dual_arm_slot_map_update() -> dict:
+    """双臂机器人带 SlotsStationMap：站组 PM1（单站）与 P1P2（横跨两个 LoadPort）。"""
+    return {
+        "Stations": {
+            "PM1": {"Type": "MultiProcessChamber", "Capacity": 2},
+            "P1": {"Type": "LoadPort", "Capacity": 25},
+            "P2": {"Type": "LoadPort", "Capacity": 25},
+        },
+        "Robots": {
+            "ATM": {
+                "Type": "ATMRobot",
+                "Capacity": 2,
+                "ArmInfo": {
+                    "ArmA": {
+                        "Name": "ArmA",
+                        "IsEnable": True,
+                        "SlotIDs": [1, 2],
+                        "AccessibleStations": ["PM1", "P1", "P2"],
+                        "SlotAtStation": "P1",
+                        "SlotsStationMap": {
+                            "PM1": {
+                                "1": [{"Key": "PM1", "Value": 1}],
+                                "2": [{"Key": "PM1", "Value": 2}],
+                            },
+                            "P1P2": {
+                                "1": [{"Key": "P1", "Value": 1}, {"Key": "P1", "Value": 2}],
+                                "2": [{"Key": "P2", "Value": 1}, {"Key": "P2", "Value": 2}],
+                            },
+                        },
+                    },
+                },
+            },
+        },
+        "Materials": [
+            {"ID": 1, "CurrentModuleName": "P1", "SlotID": 1, "StepID": 0},
+            {"ID": 2, "CurrentModuleName": "P2", "SlotID": 1, "StepID": 0},
+        ],
+    }
+
+
+def test_dual_arm_cross_station_pick_uses_slot_level_alignment() -> None:
+    """双臂跨站取放按手槽候选集校验：一个臂的两个槽位可分别对准不同站。
+
+    初始 SlotAtStation=P1 时手槽 1/2 候选均为 P1 槽位；转位到 P1P2 站组后
+    手槽 1 只能对准 P1、手槽 2 只能对准 P2，跨站 Pick 逐行校验通过；
+    转位回 PM1 后手槽候选恢复为 PM1 槽位，顺配对 Place 通过。
+    """
+    update = _dual_arm_slot_map_update()
+    moves = [
+        _move(1, 5, 0, 1, ModuleName="ATM", SrcStationList=["P1"], DestStationList=["P1", "P2"], RobotSlotList=[1, 2]),
+        _move(2, 0, 1, 2, ModuleName="ATM", MatIDList=[1, 2], SrcStationList=["P1", "P2"], SrcSlotList=[1, 1], RobotSlotList=[1, 2]),
+        _move(3, 5, 2, 3, ModuleName="ATM", SrcStationList=["P1"], DestStationList=["PM1", "PM1"], RobotSlotList=[1, 2]),
+        _move(4, 6, 3, 4, ModuleName="PM1", RelatedRobotType=1),
+        _move(5, 1, 4, 5, ModuleName="ATM", MatIDList=[1, 2], DestStationList=["PM1", "PM1"], DestSlotList=[1, 2], RobotSlotList=[1, 2]),
+        _move(6, 7, 5, 6, ModuleName="PM1"),
+    ]
+    assert validate_move_list(None, moves, update) == []
+
+    replay = MoveStateReplay(None, moves, update)
+    for move in moves:
+        replay.update_move_state({"MoveID": move["MoveID"], "MoveState": MoveStateReplay.RUNNING}, snapshot=False)
+        replay.update_move_state({"MoveID": move["MoveID"], "MoveState": MoveStateReplay.DONE}, snapshot=False)
+    robot = replay.state.robots["ATM"]
+    assert robot.slot_targets == {1: ("PM1", 1), 2: ("PM1", 2)}
+    assert robot.slot_options[1] == {("PM1", 1)}
+    assert robot.slot_options[2] == {("PM1", 2)}
+
+
+def test_dual_arm_cross_station_rejects_misaligned_slot() -> None:
+    """槽位级校验下，手槽候选未覆盖目标槽位时报错（转位到 P1P2 后手槽 2 够不到 P1）。"""
+    update = _dual_arm_slot_map_update()
+    update["Materials"] = [
+        {"ID": 1, "CurrentModuleName": "P1", "SlotID": 1, "StepID": 0},
+        {"ID": 2, "CurrentModuleName": "P1", "SlotID": 2, "StepID": 0},
+    ]
+    moves = [
+        _move(1, 5, 0, 1, ModuleName="ATM", SrcStationList=["P1"], DestStationList=["P1", "P2"], RobotSlotList=[1, 2]),
+        _move(2, 0, 1, 2, ModuleName="ATM", MatIDList=[1, 2], SrcStationList=["P1", "P1"], SrcSlotList=[1, 2], RobotSlotList=[1, 2]),
+    ]
+    issues = validate_move_list(None, moves, update)
+    assert issues and "无法对准" in issues[0]
 
 
 def _cascade_dbr_update() -> dict:

@@ -94,18 +94,34 @@ class LoadLockState(StationState):
     environment_aliases: Dict[str, str] = field(default_factory=dict)
     #: ``PrePrepareTime`` 声明的合法状态标签集合（归一化大写）；空集表示未声明，退回宽松解析。
     environment_state_space: frozenset[str] = frozenset()
-    #: 是否已行使“首条不匹配环境切换”豁免（外部算法首个抽真空可从大气手 ATR_1 起始）。
+    #: 是否已行使“首条环境不匹配切换”豁免：外部算法的首条环境切换其 LastState
+    #: 可与其初始压力态不符（如初始大气却先发 VentTime，或级联 LL 从 ATR_1 起始），
+    #: 豁免放行并照常执行、落地到 CurState；后续违例照常报错。
     environment_exemption_used: bool = False
 
 
 @dataclass
 class RobotState:
-    """记录机器人全部手槽、可达范围、指向与占用窗口。"""
+    """记录机器人全部手槽、可达范围、指向与占用窗口。
+
+    ``position`` 是站级兼容字段（外部 API/快照回写仍消费）；槽位级拓扑启用后
+    各手槽的精确指向与候选集才是权威状态：双臂设备的一个臂可横跨两个站
+    （如 ``SlotsStationMap`` 的 ``LALB`` 站组：槽位 1 伸 LA、槽位 2 伸 LB）。
+    """
 
     name: str
     hands: Dict[int, Optional[MaterialState]] = field(default_factory=dict)
     scope: Set[str] = field(default_factory=set)
     position: Optional[str] = None
+    #: 手槽当前精确指向的站槽位 ``(站名, 站槽位号)``；未对准时为 None。
+    slot_targets: Dict[int, Optional[Tuple[str, int]]] = field(default_factory=dict)
+    #: 手槽在当前站组下可对准的站槽位候选集；机器人配置了 ``SlotsStationMap``
+    #: 时按候选集校验取放，空集表示该手槽当前够不到任何槽位。
+    slot_options: Dict[int, Set[Tuple[str, int]]] = field(default_factory=dict)
+    #: 静态拓扑：手槽 → 站组名 → 该站组下可对准的站槽位候选集（来自 ArmInfo.SlotsStationMap）。
+    slot_map: Dict[int, Dict[str, Set[Tuple[str, int]]]] = field(default_factory=dict)
+    #: 静态拓扑：Arm 名 → 该 Arm 的物理手槽（用于按臂回写 SlotAtStation）。
+    arm_slots: Dict[str, Set[int]] = field(default_factory=dict)
     busy_until: float = 0.0
     can_swap: bool = False
 
@@ -401,6 +417,95 @@ def release_completed_load_port_materials(
     return released_ids, empty_ports
 
 
+def _robot_target_stations(robot: RobotState) -> Set[str]:
+    """机器人当前可对准的站集合（槽位级模式）。"""
+    stations: Set[str] = set()
+    for options in robot.slot_options.values():
+        stations.update(station for station, _ in options)
+    return stations
+
+
+def _robot_derived_position(robot: RobotState) -> Optional[str]:
+    """从槽位候选派生站级 position（兼容外部 API 与快照回写）。"""
+    stations = _robot_target_stations(robot)
+    return min(stations) if stations else robot.position
+
+
+def _robot_alignment_issue(
+    robot: RobotState,
+    move: Mapping[str, Any],
+    station_refs: Sequence[Tuple[str, int, int]],
+) -> Optional[str]:
+    """校验机器人能否在取放/换片动作的目标站槽位上作业。
+
+    ``station_refs`` 为逐行 ``(站名, 站槽位号, 手槽号)``。配置了 ``SlotsStationMap``
+    的机器人按手槽候选的**站级可达**逐行校验（双臂可跨站）；具体槽位号信任算法
+    动作声明，不构成硬约束。未配置的退回站级 position 校验。
+    """
+    if robot.slot_map:
+        for station_name, station_slot_id, robot_slot_id in station_refs:
+            options = robot.slot_options.get(robot_slot_id)
+            if options is None:
+                # 该手槽没有槽位级拓扑配置（如算法按 capacity 补全的逻辑槽位），
+                # 不参与候选校验，退回调用方的宽松判定。
+                continue
+            if station_name not in {candidate[0] for candidate in options}:
+                reachable = "、".join(sorted({candidate[0] for candidate in options}))
+                return _issue(
+                    move,
+                    f"{robot.name}#{robot_slot_id} 无法对准 {station_name}#{station_slot_id}（当前手槽可及站：{reachable or '无'}）",
+                )
+        return None
+    station_names = {station_name for station_name, _, _ in station_refs}
+    if robot.position is not None and robot.position not in station_names:
+        return _issue(move, f"{robot.name} 当前指向 {robot.position}，不在组合站点 {sorted(station_names)}")
+    return None
+
+
+def _pretrans_source_issue(robot: RobotState, move: Mapping[str, Any], source: str) -> Optional[str]:
+    """校验转位起点：槽位级模式要求 source 在手槽候选站集合内，否则退回站级。"""
+    if robot.slot_map:
+        if source and source not in _robot_target_stations(robot):
+            return _issue(
+                move,
+                f"{robot.name} 无法从 {source} 转位（当前手槽指向站：{sorted(_robot_target_stations(robot))}）",
+            )
+        return None
+    if robot.position is not None and source and robot.position != source:
+        return _issue(move, f"{robot.name} 当前指向 {robot.position}，不是 {source}")
+    return None
+
+
+def _pretrans_target_group(robot: RobotState, dest_stations: Sequence[str]) -> Optional[str]:
+    """从 DestStationList 反查覆盖全部目标站的 SlotsStationMap 站组名。"""
+    target_stations = {str(value) for value in dest_stations if value}
+    if not target_stations:
+        return None
+    for group_name, stations in _slot_map_group_stations(robot.slot_map).items():
+        if target_stations.issubset(stations):
+            return group_name
+    return None
+
+
+def _apply_pretrans_landing(robot: RobotState, move: Mapping[str, Any]) -> None:
+    """转位落地：全手槽候选更新到目标站组，并按声明配对刷新精确指向。"""
+    if robot.slot_map:
+        dest_stations = [str(value) for value in _values(move, "DestStationList")]
+        group = _pretrans_target_group(robot, dest_stations)
+        if group is not None:
+            for slot_id, groups in robot.slot_map.items():
+                robot.slot_options[slot_id] = set(groups.get(group) or ())
+    robot_slots = _integer_values(move, "RobotSlotList")
+    dest_stations = [str(value) for value in _values(move, "DestStationList")]
+    dest_slots = _integer_values(move, "DestSlotList")
+    for index, robot_slot in enumerate(robot_slots):
+        station = dest_stations[index] if index < len(dest_stations) else (dest_stations[0] if dest_stations else None)
+        station_slot = dest_slots[index] if index < len(dest_slots) else None
+        if station:
+            robot.slot_targets[robot_slot] = (station, station_slot) if station_slot is not None else None
+    robot.position = _robot_derived_position(robot)
+
+
 def _start_move(
     state: MachineState,
     move: Mapping[str, Any],
@@ -495,7 +600,6 @@ def _start_pick(state: MachineState, move: Mapping[str, Any], end_time: float, _
     error = _validate_distinct_transport_rows(move, rows)
     if error:
         return error
-    station_names = {row[0] for row in rows}
     start_time = _start_time(move)
     if not _available(robot.busy_until, start_time):
         return _issue(move, f"{robot.name} 正在执行其他动作")
@@ -519,8 +623,9 @@ def _start_pick(state: MachineState, move: Mapping[str, Any], end_time: float, _
         if slot.phase is not SlotPhase.COMPLETED or not _material_matches(slot.material, material_id):
             return _issue(move, f"{station_name}#{station_slot_id} 没有匹配的已完成物料")
         transfers.append((station, slot, station_slot_id, robot_slot_id, _material_with_metadata(slot.material, move, index)))
-    if robot.position is not None and robot.position not in station_names:
-        return _issue(move, f"{robot.name} 当前指向 {robot.position}，不在取片组合站点 {sorted(station_names)}")
+    alignment_error = _robot_alignment_issue(robot, move, [(row[0], row[1], row[2]) for row in rows])
+    if alignment_error:
+        return alignment_error
     robot.busy_until = end_time
     for station in {row[0].name: row[0] for row in transfers}.values():
         station.transfer_busy_until = end_time
@@ -528,11 +633,12 @@ def _start_pick(state: MachineState, move: Mapping[str, Any], end_time: float, _
         _reserve_slot(slot, end_time, "取片")
 
     def complete() -> None:
-        """在 Pick 完成时一次性把全部晶圆移入对应手槽。"""
-        for _, slot, _, robot_slot_id, material in transfers:
+        """在 Pick 完成时一次性把全部晶圆移入对应手槽，并落地槽位级指向。"""
+        for station, slot, station_slot_id, robot_slot_id, material in transfers:
             _set_slot(slot, SlotPhase.EMPTY, None)
             robot.hands[robot_slot_id] = material
-        robot.position = transfers[-1][0].name
+            robot.slot_targets[robot_slot_id] = (station.name, station_slot_id)
+        robot.position = _robot_derived_position(robot)
 
     _schedule(scheduled, move, end_time, complete)
     return None
@@ -550,7 +656,6 @@ def _start_place(state: MachineState, move: Mapping[str, Any], end_time: float, 
     error = _validate_distinct_transport_rows(move, rows)
     if error:
         return error
-    station_names = {row[0] for row in rows}
     start_time = _start_time(move)
     if not _available(robot.busy_until, start_time):
         return _issue(move, f"{robot.name} 正在执行其他动作")
@@ -575,8 +680,9 @@ def _start_place(state: MachineState, move: Mapping[str, Any], end_time: float, 
         if not _available(slot.busy_until, start_time):
             return _issue(move, f"{station_name}#{station_slot_id} 正在{slot.busy_action}")
         transfers.append((station, slot, station_slot_id, robot_slot_id, _material_with_metadata(material, move, index)))
-    if robot.position is not None and robot.position not in station_names:
-        return _issue(move, f"{robot.name} 当前指向 {robot.position}，不在放片组合站点 {sorted(station_names)}")
+    alignment_error = _robot_alignment_issue(robot, move, [(row[0], row[1], row[2]) for row in rows])
+    if alignment_error:
+        return alignment_error
     robot.busy_until = end_time
     for station in {row[0].name: row[0] for row in transfers}.values():
         station.transfer_busy_until = end_time
@@ -584,11 +690,12 @@ def _start_place(state: MachineState, move: Mapping[str, Any], end_time: float, 
         _reserve_slot(slot, end_time, "放片")
 
     def complete() -> None:
-        """在 Place 完成时一次性把全部晶圆放入目标槽位。"""
-        for _, slot, _, robot_slot_id, material in transfers:
+        """在 Place 完成时一次性把全部晶圆放入目标槽位，并落地槽位级指向。"""
+        for station, slot, station_slot_id, robot_slot_id, material in transfers:
             _set_slot(slot, SlotPhase.UNPROCESSED, material)
             robot.hands[robot_slot_id] = None
-        robot.position = transfers[-1][0].name
+            robot.slot_targets[robot_slot_id] = (station.name, station_slot_id)
+        robot.position = _robot_derived_position(robot)
 
     _schedule(scheduled, move, end_time, complete)
     return None
@@ -605,8 +712,9 @@ def _start_pretrans(state: MachineState, move: Mapping[str, Any], end_time: floa
         return _issue(move, "转位缺少 DestStationList")
     if not _available(robot.busy_until, _start_time(move)):
         return _issue(move, f"{robot.name} 正在执行其他动作")
-    if robot.position is not None and source and robot.position != source:
-        return _issue(move, f"{robot.name} 当前指向 {robot.position}，不是 {source}")
+    source_error = _pretrans_source_issue(robot, move, source)
+    if source_error:
+        return source_error
     for station_name in (source, destination):
         if station_name and robot.scope and station_name not in robot.scope:
             return _issue(move, f"{robot.name} 无法访问 {station_name}")
@@ -627,7 +735,7 @@ def _start_pretrans(state: MachineState, move: Mapping[str, Any], end_time: floa
         if not _material_matches(material, material_id):
             return _issue(move, f"{robot.name}#{robot_slots[index]} 持有物料与 Move 不匹配")
     robot.busy_until = end_time
-    _schedule(scheduled, move, end_time, lambda: setattr(robot, "position", destination))
+    _schedule(scheduled, move, end_time, lambda: _apply_pretrans_landing(robot, move))
     return None
 
 
@@ -826,8 +934,9 @@ def _start_preprepare(state: MachineState, move: Mapping[str, Any], end_time: fl
             f"{station.name}.CurState为{_environment_label(station, last_state)}，不是{_environment_label(station, station.environment)}",
         )
     if violation is not None:
-        if not station.environment_exemption_used and state_space_violation:
-            # 豁免：每个 LoadLock 仅放行第一条不在 PrePrepareTime 状态空间内的环境切换，
+        if not station.environment_exemption_used:
+            # 豁免：每个 LoadLock 仅放行首条环境不匹配的切换——无论 LastState/CurState
+            # 越出 PrePrepareTime 状态空间，还是 LastState 与 LoadLock 当前压力态不符——
             # 但照常执行该 move，把 LoadLock 状态更新为对应的 CurState；后续违例照常报错。
             station.environment_exemption_used = True
             # CurState 必须可解析为标准压力态才能安全落地环境；陌生标签不豁免。
@@ -887,14 +996,18 @@ def _start_swap(state: MachineState, move: Mapping[str, Any], end_time: float, _
     station_receive_slots = _integer_values(move, "StnRecvSlotList")
     robot_receive_slots = _integer_values(move, "RecvSlotList")
     robot_send_slots = _integer_values(move, "SendSlotList")
-    count = max(len(receive_materials), len(send_materials))
-    if not count or any(len(values) != count for values in (station_send_slots, station_receive_slots, robot_receive_slots, robot_send_slots)):
-        lengths = (
-            len(stations), len(receive_materials), len(send_materials),
-            len(station_send_slots), len(station_receive_slots),
-            len(robot_receive_slots), len(robot_send_slots),
-        )
-        return _issue(move, f"SwapMove 的物料与槽位数组数量不一致：{lengths}")
+    send_count = len(send_materials)
+    recv_count = len(receive_materials)
+    if not send_count and not recv_count:
+        return _issue(move, "SwapMove 必须声明至少一个 Send 或 Recv 晶圆")
+    # Send 组：机器人送出晶圆进入腔室，站侧使用 StnRecvSlotList（进入槽位）。
+    if len(robot_send_slots) != send_count or len(station_receive_slots) != send_count:
+        lengths = (send_count, len(robot_send_slots), len(station_receive_slots))
+        return _issue(move, f"SwapMove 的 Send 组数组数量不一致：SendMatList={lengths[0]} SendSlotList={lengths[1]} StnRecvSlotList={lengths[2]}")
+    # Recv 组：机器人拿回晶圆离开腔室，站侧使用 StnSendSlotList（离开槽位）。
+    if len(robot_receive_slots) != recv_count or len(station_send_slots) != recv_count:
+        lengths = (recv_count, len(robot_receive_slots), len(station_send_slots))
+        return _issue(move, f"SwapMove 的 Recv 组数组数量不一致：RecvMatList={lengths[0]} RecvSlotList={lengths[1]} StnSendSlotList={lengths[2]}")
     start_time = _start_time(move)
     physical_stations: List[StationState] = []
     for station_name in stations:
@@ -907,61 +1020,86 @@ def _start_swap(state: MachineState, move: Mapping[str, Any], end_time: float, _
         physical_stations.append(station)
     if not _available(robot.busy_until, start_time):
         return _issue(move, f"{robot.name} 正在执行其他动作")
-    if robot.position is not None and robot.position not in set(stations):
-        return _issue(move, f"{robot.name} 当前指向 {robot.position}，不在换片组合站点 {sorted(set(stations))}")
-    exchanges = []
-    for index in range(count):
-        station = physical_stations[0]
-        receive_material_id = receive_materials[index] if index < len(receive_materials) else None
-        send_material_id = send_materials[index] if index < len(send_materials) else None
-        receive_robot_slot = robot_receive_slots[index]
-        send_robot_slot = robot_send_slots[index]
-        error = robot.swap_slot_error(receive_robot_slot, send_robot_slot)
-        if error:
-            return _issue(move, error)
-        send_station_slot = station.slots.get(station_send_slots[index])
-        receive_station_slot = station.slots.get(station_receive_slots[index])
-        if send_station_slot is None or receive_station_slot is None:
-            return _issue(move, f"{station.name} 的 SwapMove 引用了无效槽位")
-        outgoing = send_station_slot.material
-        incoming = robot.hands.get(send_robot_slot)
-        if receive_material_id is not None:
-            if send_station_slot.phase is not SlotPhase.COMPLETED or not _material_matches(outgoing, receive_material_id):
-                return _issue(move, f"{station.name}#{station_send_slots[index]} 没有可换出的物料")
-            if robot.hands.get(receive_robot_slot) is not None:
-                return _issue(move, f"{robot.name}#{receive_robot_slot} 不是空手")
-        elif send_station_slot.phase not in {SlotPhase.EMPTY, SlotPhase.CLEANED}:
-            return _issue(move, f"{station.name}#{station_send_slots[index]} 不是可直接放片的空槽")
-        if send_material_id is not None:
-            if incoming is None or not _material_matches(incoming, send_material_id):
-                return _issue(move, f"{robot.name}#{send_robot_slot} 没有可换入的物料")
-        elif incoming is not None:
-            return _issue(move, f"{robot.name}#{send_robot_slot} 存在未声明的换入物料")
-        if send_material_id is not None and receive_station_slot is not send_station_slot and receive_station_slot.phase not in {SlotPhase.EMPTY, SlotPhase.CLEANED}:
-            return _issue(move, f"{station.name}#{station_receive_slots[index]} 不是可换入空槽")
-        exchanges.append((station, send_station_slot, receive_station_slot, receive_robot_slot, send_robot_slot, outgoing, incoming, receive_material_id, send_material_id, index))
+    if not robot.can_swap or len(robot.hands) < 2:
+        return _issue(move, f"{robot.name} 不支持双臂换片")
+    station = physical_stations[0]
+    send_rows = [
+        (send_materials[i], robot_send_slots[i], station_receive_slots[i], i)
+        for i in range(send_count)
+    ]
+    recv_rows = [
+        (receive_materials[j], robot_receive_slots[j], station_send_slots[j], j)
+        for j in range(recv_count)
+    ]
+    send_robot_slots = {row[1] for row in send_rows}
+    recv_robot_slots = {row[1] for row in recv_rows}
+    if len(send_robot_slots) != send_count or len(recv_robot_slots) != recv_count:
+        return _issue(move, "SwapMove 的 Send/Recv 手槽不能重复")
+    if send_robot_slots & recv_robot_slots:
+        return _issue(move, "SwapMove 的 Send 与 Recv 不能共用同一个手槽")
+    for slot_id in send_robot_slots | recv_robot_slots:
+        if slot_id not in robot.hands:
+            return _issue(move, f"{robot.name} 未启用手槽 {slot_id}")
+    send_station_slots = {row[2] for row in send_rows}
+    recv_station_slots = {row[2] for row in recv_rows}
+    if len(send_station_slots) != send_count or len(recv_station_slots) != recv_count:
+        return _issue(move, "SwapMove 的站槽位不能重复使用")
+    # Recv 组校验：站槽位有匹配的已完成物料、目标手槽为空。
+    for material_id, robot_slot_id, station_slot_id, _ in recv_rows:
+        slot = station.slots.get(station_slot_id)
+        if slot is None:
+            return _issue(move, f"{station.name} 不存在槽位 {station_slot_id}")
+        if slot.phase is not SlotPhase.COMPLETED or not _material_matches(slot.material, material_id):
+            return _issue(move, f"{station.name}#{station_slot_id} 没有可换出的物料")
+        if robot.hands.get(robot_slot_id) is not None:
+            return _issue(move, f"{robot.name}#{robot_slot_id} 不是空手")
+        if not _available(slot.busy_until, start_time):
+            return _issue(move, f"{station.name}#{station_slot_id} 正在{slot.busy_action}")
+    # Send 组校验：手上有匹配物料；目标槽位可放（换片槽位由 Recv 组腾空，跳过空槽检查）。
+    for material_id, robot_slot_id, station_slot_id, _ in send_rows:
+        slot = station.slots.get(station_slot_id)
+        if slot is None:
+            return _issue(move, f"{station.name} 不存在槽位 {station_slot_id}")
+        material = robot.hands.get(robot_slot_id)
+        if material is None or not _material_matches(material, material_id):
+            return _issue(move, f"{robot.name}#{robot_slot_id} 没有可换入的物料")
+        if station_slot_id not in recv_station_slots and slot.phase not in {SlotPhase.EMPTY, SlotPhase.CLEANED}:
+            return _issue(move, f"{station.name}#{station_slot_id} 不是可直接放片的空槽")
+        if not _available(slot.busy_until, start_time):
+            return _issue(move, f"{station.name}#{station_slot_id} 正在{slot.busy_action}")
+    station_refs = [
+        (station.name, station_receive_slots[i], robot_send_slots[i]) for i in range(send_count)
+    ] + [
+        (station.name, station_send_slots[j], robot_receive_slots[j]) for j in range(recv_count)
+    ]
+    alignment_error = _robot_alignment_issue(robot, move, station_refs)
+    if alignment_error:
+        return alignment_error
     robot.busy_until = end_time
-    for station in {value.name: value for value in physical_stations}.values():
-        station.transfer_busy_until = end_time
-    for _, send_station_slot, receive_station_slot, *_ in exchanges:
-        _reserve_slot(send_station_slot, end_time, "换片")
-        if receive_station_slot is not send_station_slot:
-            _reserve_slot(receive_station_slot, end_time, "换片")
+    for station_item in {value.name: value for value in physical_stations}.values():
+        station_item.transfer_busy_until = end_time
+    for _, _, station_slot_id, _ in recv_rows:
+        _reserve_slot(station.slots[station_slot_id], end_time, "换片")
+    for _, _, station_slot_id, _ in send_rows:
+        _reserve_slot(station.slots[station_slot_id], end_time, "换片")
 
     def complete() -> None:
-        """同时落地 Swap 中所有进出晶圆。"""
-        for _, send_station_slot, receive_station_slot, receive_robot_slot, send_robot_slot, outgoing, incoming, receive_material_id, send_material_id, index in exchanges:
-            if send_material_id is not None:
-                _set_slot(receive_station_slot, SlotPhase.UNPROCESSED, _material_with_metadata(incoming, move, index, "SendMatStepIDList"))
-            else:
-                _set_slot(receive_station_slot, SlotPhase.EMPTY, None)
-            if receive_station_slot is not send_station_slot:
-                _set_slot(send_station_slot, SlotPhase.EMPTY, None)
-            if send_material_id is not None:
-                robot.hands[send_robot_slot] = None
-            if receive_material_id is not None:
-                robot.hands[receive_robot_slot] = _material_with_metadata(outgoing, move, index, "RecvMatStepIDList")
-        robot.position = physical_stations[-1].name
+        """同时落地 Swap 中所有进出晶圆，并落地槽位级指向。
+
+        Recv 先取出旧物料进手槽，Send 再放入新物料（换片槽位被覆盖），
+        未被 Send 覆盖的纯 Recv 槽位最后清空。
+        """
+        for _, robot_slot_id, station_slot_id, index in recv_rows:
+            robot.hands[robot_slot_id] = _material_with_metadata(station.slots[station_slot_id].material, move, index, "RecvMatStepIDList")
+            robot.slot_targets[robot_slot_id] = (station.name, station_slot_id)
+        for _, robot_slot_id, station_slot_id, index in send_rows:
+            _set_slot(station.slots[station_slot_id], SlotPhase.UNPROCESSED, _material_with_metadata(robot.hands[robot_slot_id], move, index, "SendMatStepIDList"))
+            robot.hands[robot_slot_id] = None
+            robot.slot_targets[robot_slot_id] = (station.name, station_slot_id)
+        for _, _, station_slot_id, _ in recv_rows:
+            if station_slot_id not in send_station_slots:
+                _set_slot(station.slots[station_slot_id], SlotPhase.EMPTY, None)
+        robot.position = _robot_derived_position(robot)
 
     _schedule(scheduled, move, end_time, complete)
     return None
@@ -1106,21 +1244,55 @@ def _station_from_task(name: str, task_station: Any) -> StationState:
     return StationState(name, station_type, slots)
 
 
+def _slot_station_entries(entries: Any) -> Set[Tuple[str, int]]:
+    """解析 SlotsStationMap 中一个手槽的候选列表 [{Key, Value}...]。"""
+    candidates: Set[Tuple[str, int]] = set()
+    if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes)):
+        return candidates
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        station_name = str(entry.get("Key") or "").strip()
+        station_slot = _positive_integer(entry.get("Value"))
+        if station_name and station_slot is not None:
+            candidates.add((station_name, station_slot))
+    return candidates
+
+
 def _robot_from_config(name: str, config: Mapping[str, Any], task_robot: Any) -> RobotState:
-    """保留 ArmInfo 中每个启用 Arm 的全部物理手槽。"""
+    """保留 ArmInfo 中每个启用 Arm 的全部物理手槽，并解析槽位级指向拓扑。"""
     hands: Dict[int, Optional[MaterialState]] = {}
     scope: Set[str] = set()
     positions: Set[str] = set()
+    slot_map: Dict[int, Dict[str, Set[Tuple[str, int]]]] = {}
+    arm_slots: Dict[str, Set[int]] = {}
     for arm in _mapping(config.get("ArmInfo")).values():
         if arm.get("IsEnable") is False:
             continue
+        arm_slot_ids: Set[int] = set()
         for slot_id in arm.get("SlotIDs") or ():
             normalized = _positive_integer(slot_id)
             if normalized is not None:
                 hands[normalized] = None
+                arm_slot_ids.add(normalized)
+        if arm_slot_ids:
+            arm_slots[str(arm.get("Name") or "")] = arm_slot_ids
         scope.update(str(station) for station in arm.get("AccessibleStations") or () if station)
         if arm.get("SlotAtStation"):
             positions.add(str(arm["SlotAtStation"]))
+        raw_map = arm.get("SlotsStationMap")
+        if not isinstance(raw_map, Mapping):
+            continue
+        for group_name, group_slots in raw_map.items():
+            if not isinstance(group_slots, Mapping):
+                continue
+            for raw_slot, entries in group_slots.items():
+                slot_id = _positive_integer(raw_slot)
+                if slot_id is None:
+                    continue
+                candidates = _slot_station_entries(entries)
+                if candidates:
+                    slot_map.setdefault(slot_id, {})[str(group_name)] = candidates
     explicit_slots = _configured_robot_slots(config)
     configured_capacity = _positive_integer(config.get("Capacity")) or len(hands) or DEFAULT_SLOT_ID
     task_capacity = _positive_integer(getattr(task_robot, "capacity", DEFAULT_SLOT_ID)) or DEFAULT_SLOT_ID
@@ -1132,13 +1304,55 @@ def _robot_from_config(name: str, config: Mapping[str, Any], task_robot: Any) ->
         for slot_id in range(DEFAULT_SLOT_ID, capacity + DEFAULT_SLOT_ID):
             hands.setdefault(slot_id, None)
     scope.update(str(station) for station in getattr(task_robot, "scope", ()) or () if station)
+    position = next(iter(positions)) if len(positions) == 1 else None
+    slot_targets, slot_options = _initial_slot_alignment(hands, slot_map, position)
     return RobotState(
         name=name,
         hands=hands,
         scope=scope,
-        position=next(iter(positions)) if len(positions) == 1 else None,
+        position=position,
+        slot_targets=slot_targets,
+        slot_options=slot_options,
+        slot_map=slot_map,
+        arm_slots=arm_slots,
         can_swap=(bool(config.get("CanMultiTrans")) or bool(getattr(task_robot, "can_swap", False)) or len(hands) >= 2) and len(hands) >= 2,
     )
+
+
+def _slot_map_group_stations(slot_map: Mapping[int, Mapping[str, Set[Tuple[str, int]]]]) -> Dict[str, Set[str]]:
+    """汇总 SlotsStationMap 各站组覆盖的站名集合。"""
+    group_stations: Dict[str, Set[str]] = {}
+    for groups in slot_map.values():
+        for group_name, candidates in groups.items():
+            stations = group_stations.setdefault(group_name, set())
+            stations.update(station for station, _ in candidates)
+    return group_stations
+
+
+def _initial_slot_alignment(
+    hands: Mapping[int, Optional[MaterialState]],
+    slot_map: Mapping[int, Mapping[str, Set[Tuple[str, int]]]],
+    slot_at_station: Optional[str],
+) -> Tuple[Dict[int, Optional[Tuple[str, int]]], Dict[int, Set[Tuple[str, int]]]]:
+    """按 SlotAtStation 站名反查站组，初始化各手槽的精确指向与候选集。"""
+    targets: Dict[int, Optional[Tuple[str, int]]] = {}
+    options: Dict[int, Set[Tuple[str, int]]] = {}
+    if not slot_map or not slot_at_station:
+        return targets, options
+    target_group = next(
+        (group for group, stations in _slot_map_group_stations(slot_map).items() if slot_at_station in stations),
+        None,
+    )
+    if target_group is None:
+        return targets, options
+    for slot_id in hands:
+        groups = slot_map.get(slot_id)
+        candidates = groups.get(target_group) if groups else None
+        if not candidates:
+            continue
+        options[slot_id] = set(candidates)
+        targets[slot_id] = next(iter(sorted(candidates)))
+    return targets, options
 
 
 def _configured_robot_slots(config: Mapping[str, Any]) -> Optional[Set[int]]:

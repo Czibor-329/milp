@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import Any, Dict, Mapping
+from typing import Any, Dict, Mapping, Optional, Set
 
 from realtime_scheduler.move_validation import (
     ATMOSPHERE,
@@ -24,6 +24,22 @@ from realtime_scheduler.plan_builder import FIRST_SLOT_ID
 
 DEFAULT_ATMOSPHERE_LAST_ITEM = "ATR"
 DEFAULT_VACUUM_LAST_ITEM = "VTR"
+
+
+def _arm_slot_at_station(robot_state: Any, arm_name: Any) -> Optional[str]:
+    """按臂的槽位级指向派生 SlotAtStation（双臂可横跨两站时取最小槽位指向）。"""
+    arm_slots = sorted(robot_state.arm_slots.get(str(arm_name or ""), ()) if robot_state.arm_slots else ())
+    if not arm_slots:
+        arm_slots = sorted(robot_state.hands)
+    for slot_id in arm_slots:
+        target = robot_state.slot_targets.get(slot_id)
+        if target is not None:
+            return target[0]
+    stations: Set[str] = set()
+    for slot_id in arm_slots:
+        for station, _ in robot_state.slot_options.get(slot_id, ()) or ():
+            stations.add(station)
+    return min(stations) if stations else robot_state.position
 
 
 def _material_ids_in_machine_state(state: MachineState) -> set[Any]:
@@ -247,12 +263,12 @@ def apply_machine_state_to_update(
             robot_state.busy_until,
             current_time,
         )
-        if robot_state.position:
+        if robot_state.position or robot_state.slot_targets:
             arm_info = robot.get("ArmInfo") or {}
             if isinstance(arm_info, Mapping):
                 for arm in arm_info.values():
                     if isinstance(arm, dict) and arm.get("IsEnable") is not False:
-                        arm["SlotAtStation"] = robot_state.position
+                        arm["SlotAtStation"] = _arm_slot_at_station(robot_state, arm.get("Name"))
         for slot_id, material in robot_state.hands.items():
             if material is None:
                 continue
