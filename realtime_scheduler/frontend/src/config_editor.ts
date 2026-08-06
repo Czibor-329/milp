@@ -643,10 +643,14 @@ function initializeCompactSelects() {
   }
 }
 
+/** 显示设备名时去掉常见的 .json 后缀，空值回退为“未命名设备”。 */
+function displayDeviceName(name) {
+  return String(name || "未命名设备").replace(/\.json$/i, "");
+}
+
 /** 更新设备、测试集下拉框和保存状态相关按钮。 */
 function renderWorkspaceControls() {
   const deviceSelect = document.getElementById("deviceSelect"), tests = state.workspaceDevice?.tests || [];
-  const displayDeviceName = name => String(name || "未命名设备").replace(/\.json$/i, "");
   deviceSelect.innerHTML = state.workspaceDevices.length ? state.workspaceDevices.map(device => `<option value="${escapeHtml(device.id)}" ${device.id === state.workspaceDeviceId ? "selected" : ""}>${escapeHtml(displayDeviceName(device.name))}</option>`).join("") : `<option value="">尚未导入设备</option>`;
   const natural = (left, right) => left.localeCompare(right, undefined, { numeric: true });
   const groups = [...new Set(["", ...(state.workspaceDevice?.testGroups || []), ...tests.map(test => String(test.group || "").trim())])].sort((left, right) => (!left) - (!right) || natural(left, right));
@@ -664,6 +668,7 @@ function renderWorkspaceControls() {
   const nameInput = document.getElementById("testCaseName"); nameInput.disabled = !hasTest; nameInput.value = state.testCaseName || ""; nameInput.title = state.testCaseName || "";
   document.getElementById("newTestButton").disabled = !state.workspaceDeviceId;
   document.getElementById("newGroupButton").disabled = !state.workspaceDeviceId;
+  document.getElementById("deleteDeviceButton").disabled = !state.workspaceDeviceId;
   const isDefaultGroup = !selectedGroup;
   const hasGroupTests = tests.some(test => String(test.group || "").trim() === selectedGroup);
   document.getElementById("renameGroupButton").disabled = !state.workspaceDeviceId || isDefaultGroup;
@@ -958,7 +963,36 @@ async function selectWorkspaceDevice(deviceId, preferredTestId = "") {
 async function loadWorkspaceCatalog(preferredDeviceId = "", preferredTestId = "") {
   const result = await requestJson("/api/workspaces"); state.workspaceDevices = result.devices;
   const deviceId = result.devices.some(device => device.id === preferredDeviceId) ? preferredDeviceId : result.devices[0]?.id;
-  if (deviceId) await selectWorkspaceDevice(deviceId, preferredTestId); else renderWorkspaceControls();
+  if (deviceId) await selectWorkspaceDevice(deviceId, preferredTestId); else resetWorkspaceSelection();
+}
+
+/** 目录中没有设备时清空选择状态，回到“尚未导入设备”的初始界面。 */
+function resetWorkspaceSelection() {
+  state.workspaceDevice = null; state.workspaceDeviceId = ""; state.testCaseId = ""; state.testCaseName = ""; state.testCaseGroup = ""; state.activeTestGroup = ""; state.dirty = false;
+  state.deviceName = ""; state.baseDevice = null; state.device = null; state.stationNames = []; state.loadPorts = []; state.processModules = []; state.robotNames = []; state.robotScopes = {}; state.robotSlots = {};
+  renderWorkspaceControls();
+  resetRunResult();
+}
+
+/** 删除当前设备及其全部测试集，并刷新设备目录。 */
+async function deleteWorkspaceDevice() {
+  if (!state.workspaceDeviceId) return;
+  if (state.batchRunning) throw new Error("批量任务运行中，请等待完成或取消后再删除设备");
+  const deviceName = displayDeviceName(state.workspaceDevices.find(device => device.id === state.workspaceDeviceId)?.name || state.workspaceDevice?.name);
+  const confirmed = await showWorkspaceDialog({ title: "删除设备", message: `确定删除设备“${deviceName}”吗？其下全部测试集、路线与清洁配方将一并删除，且无法恢复。`, dangerous: true });
+  if (!confirmed) return;
+  const result = await requestJson(`/api/workspaces/devices/${state.workspaceDeviceId}`, { method: "DELETE" });
+  writeTerminal(`$ 已删除设备 ${result.deleted.name}\n  其下 ${result.deleted.testCount} 个测试集已一并移除`);
+  try {
+    await loadWorkspaceCatalog();
+    setWorkspaceStatus(`已删除设备“${result.deleted.name}”`, "saved");
+  } catch (error) {
+    // 服务端删除已生效；目录刷新失败时基于本地快照降级，避免残留已删除的设备。
+    state.workspaceDevices = state.workspaceDevices.filter(device => device.id !== result.deleted.id);
+    const nextDeviceId = state.workspaceDevices[0]?.id;
+    if (nextDeviceId) await selectWorkspaceDevice(nextDeviceId); else resetWorkspaceSelection();
+    setWorkspaceStatus(`设备已删除，但目录刷新失败：${error.message}`, "dirty");
+  }
 }
 
 /** 切换主功能标签，并只在运行页显示策略侧栏。 */
@@ -2802,6 +2836,7 @@ document.getElementById("cleanDialogForm").addEventListener("submit", event => {
 });
 document.getElementById("deviceFile").addEventListener("change", event => loadDevice(event.target.files[0]).catch(error => { event.target.value = ""; writeTerminal(`$ 设备读取失败\n  ${error.message}`, true); }));
 document.getElementById("deviceSelect").addEventListener("change", event => (async () => { if (state.dirty) await saveCurrentTest(true); await selectWorkspaceDevice(event.target.value); })().catch(error => writeTerminal(`$ 设备切换失败\n  ${error.message}`, true)));
+document.getElementById("deleteDeviceButton").addEventListener("click", () => deleteWorkspaceDevice().catch(error => { setWorkspaceStatus(`删除设备失败：${error.message}`, "dirty"); writeTerminal(`$ 删除设备失败\n  ${error.message}`, true); }));
 document.getElementById("testGroupSelect").addEventListener("change", event => selectWorkspaceGroup(event.target.value).catch(error => writeTerminal(`$ 测试组别切换失败\n  ${error.message}`, true)));
 document.getElementById("testCaseSelect").addEventListener("change", event => selectWorkspaceTest(event.target.value).catch(error => writeTerminal(`$ 测试集切换失败\n  ${error.message}`, true)));
 document.getElementById("testCaseName").addEventListener("input", event => { state.testCaseName = event.target.value; markTestDirty(); });

@@ -3470,9 +3470,11 @@ function initializeCompactSelects() {
     });
   }
 }
+function displayDeviceName(name) {
+  return String(name || "\u672A\u547D\u540D\u8BBE\u5907").replace(/\.json$/i, "");
+}
 function renderWorkspaceControls() {
   const deviceSelect = document.getElementById("deviceSelect"), tests = state.workspaceDevice?.tests || [];
-  const displayDeviceName = (name) => String(name || "\u672A\u547D\u540D\u8BBE\u5907").replace(/\.json$/i, "");
   deviceSelect.innerHTML = state.workspaceDevices.length ? state.workspaceDevices.map((device) => `<option value="${escapeHtml3(device.id)}" ${device.id === state.workspaceDeviceId ? "selected" : ""}>${escapeHtml3(displayDeviceName(device.name))}</option>`).join("") : `<option value="">\u5C1A\u672A\u5BFC\u5165\u8BBE\u5907</option>`;
   const natural = (left, right) => left.localeCompare(right, void 0, { numeric: true });
   const groups = [.../* @__PURE__ */ new Set(["", ...state.workspaceDevice?.testGroups || [], ...tests.map((test) => String(test.group || "").trim())])].sort((left, right) => !left - !right || natural(left, right));
@@ -3493,6 +3495,7 @@ function renderWorkspaceControls() {
   nameInput.title = state.testCaseName || "";
   document.getElementById("newTestButton").disabled = !state.workspaceDeviceId;
   document.getElementById("newGroupButton").disabled = !state.workspaceDeviceId;
+  document.getElementById("deleteDeviceButton").disabled = !state.workspaceDeviceId;
   const isDefaultGroup = !selectedGroup;
   const hasGroupTests = tests.some((test) => String(test.group || "").trim() === selectedGroup);
   document.getElementById("renameGroupButton").disabled = !state.workspaceDeviceId || isDefaultGroup;
@@ -3828,7 +3831,47 @@ async function loadWorkspaceCatalog(preferredDeviceId = "", preferredTestId = ""
   state.workspaceDevices = result.devices;
   const deviceId = result.devices.some((device) => device.id === preferredDeviceId) ? preferredDeviceId : result.devices[0]?.id;
   if (deviceId) await selectWorkspaceDevice(deviceId, preferredTestId);
-  else renderWorkspaceControls();
+  else resetWorkspaceSelection();
+}
+function resetWorkspaceSelection() {
+  state.workspaceDevice = null;
+  state.workspaceDeviceId = "";
+  state.testCaseId = "";
+  state.testCaseName = "";
+  state.testCaseGroup = "";
+  state.activeTestGroup = "";
+  state.dirty = false;
+  state.deviceName = "";
+  state.baseDevice = null;
+  state.device = null;
+  state.stationNames = [];
+  state.loadPorts = [];
+  state.processModules = [];
+  state.robotNames = [];
+  state.robotScopes = {};
+  state.robotSlots = {};
+  renderWorkspaceControls();
+  resetRunResult();
+}
+async function deleteWorkspaceDevice() {
+  if (!state.workspaceDeviceId) return;
+  if (state.batchRunning) throw new Error("\u6279\u91CF\u4EFB\u52A1\u8FD0\u884C\u4E2D\uFF0C\u8BF7\u7B49\u5F85\u5B8C\u6210\u6216\u53D6\u6D88\u540E\u518D\u5220\u9664\u8BBE\u5907");
+  const deviceName = displayDeviceName(state.workspaceDevices.find((device) => device.id === state.workspaceDeviceId)?.name || state.workspaceDevice?.name);
+  const confirmed = await showWorkspaceDialog({ title: "\u5220\u9664\u8BBE\u5907", message: `\u786E\u5B9A\u5220\u9664\u8BBE\u5907\u201C${deviceName}\u201D\u5417\uFF1F\u5176\u4E0B\u5168\u90E8\u6D4B\u8BD5\u96C6\u3001\u8DEF\u7EBF\u4E0E\u6E05\u6D01\u914D\u65B9\u5C06\u4E00\u5E76\u5220\u9664\uFF0C\u4E14\u65E0\u6CD5\u6062\u590D\u3002`, dangerous: true });
+  if (!confirmed) return;
+  const result = await requestJson(`/api/workspaces/devices/${state.workspaceDeviceId}`, { method: "DELETE" });
+  writeTerminal(`$ \u5DF2\u5220\u9664\u8BBE\u5907 ${result.deleted.name}
+  \u5176\u4E0B ${result.deleted.testCount} \u4E2A\u6D4B\u8BD5\u96C6\u5DF2\u4E00\u5E76\u79FB\u9664`);
+  try {
+    await loadWorkspaceCatalog();
+    setWorkspaceStatus(`\u5DF2\u5220\u9664\u8BBE\u5907\u201C${result.deleted.name}\u201D`, "saved");
+  } catch (error) {
+    state.workspaceDevices = state.workspaceDevices.filter((device) => device.id !== result.deleted.id);
+    const nextDeviceId = state.workspaceDevices[0]?.id;
+    if (nextDeviceId) await selectWorkspaceDevice(nextDeviceId);
+    else resetWorkspaceSelection();
+    setWorkspaceStatus(`\u8BBE\u5907\u5DF2\u5220\u9664\uFF0C\u4F46\u76EE\u5F55\u5237\u65B0\u5931\u8D25\uFF1A${error.message}`, "dirty");
+  }
 }
 function switchTab(name) {
   document.querySelectorAll("[data-tab-target]").forEach((button) => button.classList.toggle("active", button.dataset.tabTarget === name));
@@ -5558,6 +5601,11 @@ document.getElementById("deviceSelect").addEventListener("change", (event) => (a
   await selectWorkspaceDevice(event.target.value);
 })().catch((error) => writeTerminal(`$ \u8BBE\u5907\u5207\u6362\u5931\u8D25
   ${error.message}`, true)));
+document.getElementById("deleteDeviceButton").addEventListener("click", () => deleteWorkspaceDevice().catch((error) => {
+  setWorkspaceStatus(`\u5220\u9664\u8BBE\u5907\u5931\u8D25\uFF1A${error.message}`, "dirty");
+  writeTerminal(`$ \u5220\u9664\u8BBE\u5907\u5931\u8D25
+  ${error.message}`, true);
+}));
 document.getElementById("testGroupSelect").addEventListener("change", (event) => selectWorkspaceGroup(event.target.value).catch((error) => writeTerminal(`$ \u6D4B\u8BD5\u7EC4\u522B\u5207\u6362\u5931\u8D25
   ${error.message}`, true)));
 document.getElementById("testCaseSelect").addEventListener("change", (event) => selectWorkspaceTest(event.target.value).catch((error) => writeTerminal(`$ \u6D4B\u8BD5\u96C6\u5207\u6362\u5931\u8D25

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import inspect
 import json
 import tempfile
@@ -24,6 +25,7 @@ from scripts.config_editor_server import (
     build_round_update,
     build_route,
     create_workspace_test,
+    delete_workspace_device,
     delete_workspace_test,
     execute_plan,
     extract_init_data,
@@ -1570,6 +1572,31 @@ class ConfigEditorServerTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 delete_workspace_test(device["id"], second["id"], store_path)
 
+    def test_device_workspace_delete_removes_device_and_its_tests(self) -> None:
+        """删除设备应从目录中移除设备及其全部测试集，删除后无法再读取。"""
+        with tempfile.TemporaryDirectory() as directory:
+            store_path = Path(directory) / "workspaces.json"
+            first, _ = import_workspace_device("device-a.json", self.recording, store_path)
+            # 构造一台拓扑有差异的第二台设备，验证删除只影响目标设备。
+            second_device = copy.deepcopy(self.device)
+            second_device["Stations"]["PM1"]["Name"] = "PM1x"
+            second, _ = import_workspace_device("device-b.json", second_device, store_path)
+            self.assertNotEqual(first["id"], second["id"])
+            self.assertEqual(2, len(list_workspace_devices(store_path)))
+
+            deleted = delete_workspace_device(first["id"], store_path)
+            self.assertEqual(first["id"], deleted["id"])
+            self.assertEqual("device-a.json", deleted["name"])
+            self.assertEqual(0, deleted["testCount"])
+            self.assertEqual([second["id"]], [item["id"] for item in list_workspace_devices(store_path)])
+            with self.assertRaises(ValueError):
+                get_workspace_device(first["id"], store_path)
+
+            delete_workspace_device(second["id"], store_path)
+            self.assertEqual([], list_workspace_devices(store_path))
+            with self.assertRaises(ValueError):
+                delete_workspace_device(first["id"], store_path)
+
     def test_different_groups_allow_same_test_name(self) -> None:
         """测试名称只需在组内唯一，不同组可以使用完全相同的名称。"""
         with tempfile.TemporaryDirectory() as directory:
@@ -2239,6 +2266,8 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn('path.startswith("/api/run-batches/")', get_source)
         self.assertNotIn('path.startswith("/api/run-batches/")', post_source)
         self.assertIn("cancel_workspace_batch_run", delete_source)
+        self.assertIn('parts[2] == "devices"', delete_source)
+        self.assertIn("delete_workspace_device", delete_source)
 
     def test_single_external_failure_keeps_elapsed_time_and_baseline_visible(self) -> None:
         """单次外部算法失败也应返回并绘制耗时及 Baseline 对比。"""

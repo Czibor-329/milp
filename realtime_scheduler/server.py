@@ -2756,6 +2756,39 @@ def get_workspace_device(device_id: str, path: Path = WORKSPACE_STORE_PATH) -> D
         return deepcopy(dict(device))
 
 
+def delete_workspace_device(device_id: str, path: Path = WORKSPACE_STORE_PATH) -> Dict[str, Any]:
+    """从本地工作区删除一台设备及其全部测试集，并返回被删除设备的摘要。
+
+    设备删除后不可恢复：工作区目录中的设备记录会移除，设备初始文件
+    （``DEVICE_INIT_DIR/<id>.json``）也会一并清理。设备不存在时抛出明确错误；
+    已被历史批量任务引用的设备不会改写历史记录。
+    """
+    with _workspace_catalog_guard(path):
+        catalog = _read_workspace_catalog_unlocked(path)
+        device = next((
+            item for item in catalog["devices"]
+            if isinstance(item, Mapping) and str(item.get("id")) == device_id
+        ), None)
+        if device is None:
+            raise ValueError(f"设备不存在：{device_id}")
+        catalog["devices"] = [
+            item for item in catalog["devices"]
+            if not (isinstance(item, Mapping) and str(item.get("id")) == device_id)
+        ]
+        _write_workspace_catalog_unlocked(path, catalog)
+        if path == WORKSPACE_STORE_PATH:
+            try:
+                (DEVICE_INIT_DIR / f"{device_id}.json").unlink(missing_ok=True)
+            except OSError:
+                # 设备初始文件只是工作区拓扑的镜像缓存，删除失败不影响工作区移除。
+                pass
+        return {
+            "id": device_id,
+            "name": str(device.get("name") or "未命名设备"),
+            "testCount": len(device.get("tests") or []),
+        }
+
+
 def robot_available_slots(robot: Mapping[str, Any]) -> List[int]:
     """返回机器手可配置的 Arm 槽位编号。
 
@@ -4084,6 +4117,13 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                 self._send_json(batch)
             return
         parts = [part for part in path.split("/") if part]
+        if len(parts) == 4 and parts[:2] == ["api", "workspaces"] and parts[2] == "devices":
+            try:
+                deleted = delete_workspace_device(parts[3])
+                self._send_json({"ok": True, "deleted": deleted})
+            except Exception as error:  # noqa: BLE001
+                self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
+            return
         if len(parts) == 4 and parts[:2] == ["api", "workspaces"] and parts[3] == "groups":
             try:
                 payload = self._read_json_object()
