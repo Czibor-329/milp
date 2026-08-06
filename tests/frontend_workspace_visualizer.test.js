@@ -895,6 +895,106 @@ test("双真空机械手级联拓扑隐藏未使用 LP，并完整显示腔室�
   assert.doesNotMatch(topology, />LP[2-4]</);
 });
 
+test("12kChamber 按设备名使用专属布局：VTR_1 在下主手，UBR/DBR 在其上方，PM3~PM5 围 VTR_2", () => {
+  const twelveKDevice = {
+    Stations: {
+      LP1: { Type: "LoadPort" }, LP2: { Type: "LoadPort" },
+      LP3: { Type: "LoadPort" }, LP4: { Type: "LoadPort" },
+      LA: { Type: "LoadLock" }, LB: { Type: "LoadLock" },
+      LC: { Type: "LoadLock" }, LD: { Type: "LoadLock" },
+      UBR: { Type: "LoadLock" }, DBR: { Type: "LoadLock" },
+      PM1: { Type: "ProcessChamber" }, PM2: { Type: "ProcessChamber" },
+      PM3: { Type: "ProcessChamber" }, PM4: { Type: "ProcessChamber" },
+      PM5: { Type: "ProcessChamber" },
+    },
+    Robots: { ATR: { Type: "ATMRobot" }, VTR_1: { Type: "VTMRobot" }, VTR_2: { Type: "HighVTMRobot" } },
+  };
+  const snapshot = logic.buildWorkspaceSnapshot(moves, twelveKDevice, 0);
+  const topology = logic.renderEquipmentTopology(
+    logic.snapshotWithFullDeviceModules(snapshot, twelveKDevice),
+    null,
+    undefined,
+    "12kChamber",
+  );
+  assertTopologyComplete(topology, ["LA", "LB", "LC", "LD", "UBR", "DBR", "PM1", "PM2", "PM3", "PM4", "PM5"]);
+  const positionOf = name => {
+    const module = new RegExp(
+      `class="reference-module-position" style="--module-left:([\\d.]+)%;--module-top:(\\d+)px">\\s*<strong class="equipment-external-name[^"]*">${name}</strong>`
+    ).exec(topology);
+    if (module) return { x: Number(module[1]) / 100 * 1000, y: Number(module[2]) };
+    const robot = new RegExp(
+      `class="reference-robot-position" style="--robot-left:([\\d.]+)%;--robot-top:(\\d+)px">\\s*<article class="robot-hub[^"]*"[^>]*aria-label="${name}`
+    ).exec(topology);
+    assert.ok(robot, `拓扑应包含 ${name}`);
+    return { x: Number(robot[1]) / 100 * 1000, y: Number(robot[2]) };
+  };
+  const vtr1 = positionOf("VTR_1");
+  const vtr2 = positionOf("VTR_2");
+  assert.ok(vtr1.y > vtr2.y, "VTR_1 主手应在 VTR_2 下方");
+  const pm1 = positionOf("PM1"), pm2 = positionOf("PM2");
+  assert.equal(pm1.y, vtr1.y, "PM1 应与 VTR_1 同排");
+  assert.equal(pm2.y, vtr1.y, "PM2 应与 VTR_1 同排");
+  assert.ok(pm1.x < vtr1.x && pm2.x > vtr1.x, "PM1/PM2 应分列 VTR_1 左右");
+  const ubr = positionOf("UBR"), dbr = positionOf("DBR");
+  assert.equal(ubr.y, dbr.y, "UBR/DBR 应水平同排");
+  assert.ok(ubr.y < vtr1.y && ubr.y > vtr2.y, "UBR/DBR 应位于 VTR_1 上方、VTR_2 下方");
+  assert.ok(ubr.x < dbr.x, "UBR 应在 DBR 左侧");
+  const pm3 = positionOf("PM3"), pm4 = positionOf("PM4"), pm5 = positionOf("PM5");
+  assert.equal(pm3.x, vtr2.x, "PM3 应在 VTR_2 正上方");
+  assert.ok(pm3.y < vtr2.y, "PM3 应位于 VTR_2 上方");
+  assert.equal(pm4.y, vtr2.y, "PM4 应与 VTR_2 同排");
+  assert.equal(pm5.y, vtr2.y, "PM5 应与 VTR_2 同排");
+  assert.ok(pm4.x < vtr2.x && pm5.x > vtr2.x, "PM4/PM5 应分列 VTR_2 左右");
+  const la = positionOf("LA"), lb = positionOf("LB"), lc = positionOf("LC"), ld = positionOf("LD");
+  assert.equal(la.y, lb.y, "LA/LB 应同排（田字格上排）");
+  assert.equal(lc.y, ld.y, "LC/LD 应同排（田字格下排）");
+  assert.ok(lc.y > la.y, "LC/LD 应在 LA/LB 下方");
+  assert.ok(la.x < lb.x && lc.x < ld.x, "田字格左右分布");
+  assert.equal(la.x, lc.x, "LA/LC 同列");
+  assert.equal(lb.x, ld.x, "LB/LD 同列");
+  const vacuumZone = /class="topology-zone topology-zone-vacuum" style="--zone-top:([\d.]+)px;--zone-height:([\d.]+)px"/.exec(topology);
+  assert.ok(vacuumZone, "应绘制真空加工区");
+  const vacuumTop = Number(vacuumZone[1]);
+  const vacuumBottom = vacuumTop + Number(vacuumZone[2]);
+  for (const name of ["UBR", "DBR", "PM1", "PM2", "PM3", "PM4", "PM5", "VTR_1", "VTR_2"]) {
+    const y = positionOf(name).y;
+    assert.ok(
+      y >= vacuumTop && y <= vacuumBottom,
+      `${name} 应位于真空加工区内（y=${y}，真空区 ${vacuumTop}~${vacuumBottom}）`,
+    );
+  }
+  const interfaceBay = /class="topology-interface-bay" style="--zone-top:([\d.]+)px;--zone-height:([\d.]+)px"/.exec(topology);
+  assert.ok(interfaceBay, "应绘制大气/真空接口带");
+  const interfaceTop = Number(interfaceBay[1]);
+  const interfaceBottom = interfaceTop + Number(interfaceBay[2]);
+  for (const name of ["UBR", "DBR"]) {
+    const y = positionOf(name).y;
+    assert.ok(
+      y < interfaceTop || y > interfaceBottom,
+      `${name} 不应落入大气/真空接口带（y=${y}，接口带 ${interfaceTop}~${interfaceBottom}）`,
+    );
+  }
+  const generic = logic.renderEquipmentTopology(
+    logic.snapshotWithFullDeviceModules(snapshot, twelveKDevice),
+    null,
+  );
+  const genericByName = new Map();
+  const genericDivs = generic.matchAll(
+    /class="reference-(?:module|robot)-position" style="--(?:module|robot)-left:([\d.]+)%;--(?:module|robot)-top:(\d+)px">([\s\S]*?)(?=<div class="reference-|\s*<svg class="topology-target-arrows)/g,
+  );
+  for (const match of genericDivs) {
+    const nameMatch = /equipment-external-name[^"]*">([^<]+)<|robot-environment-badge">([^<]+)</.exec(match[3]);
+    if (nameMatch) genericByName.set(nameMatch[1] || nameMatch[2], { x: Number(match[1]), y: Number(match[2]) });
+  }
+  const genericVtr1 = genericByName.get("VTR_1");
+  const genericUbr = genericByName.get("UBR");
+  assert.ok(genericVtr1 && genericUbr, "未指定设备名时仍渲染通用级联拓扑");
+  assert.ok(
+    genericUbr.y > genericVtr1.y,
+    "通用级联布局 UBR 仍按田字规则排在 VTR_1 下方（而非 12k 的上方桥接位）",
+  );
+});
+
 test("多个大气机械手在同一排横向分布且不重叠", () => {
   const multiAtrDevice = {
     Stations: {

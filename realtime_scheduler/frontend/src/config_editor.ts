@@ -472,7 +472,7 @@ function applyDeviceTopology(device, deviceName, rawRobotSlots = {}) {
     .sort(natural);
   state.robotNames = Object.keys(state.device.Robots).sort(natural);
   state.robotScopes = Object.fromEntries(Object.entries(state.device.Robots).map(([name, robot]) => [name, [...new Set(Object.values(robot.ArmInfo || {}).filter(arm => arm.IsEnable !== false).flatMap(arm => arm.AccessibleStations || []))]]));
-  visualizationWorkspace.setDevice(state.device);
+  visualizationWorkspace.setDevice(state.device, state.deviceName);
   if (!state.loadPorts.length || !state.processModules.length) throw new Error("设备必须包含 LoadPort 和 ProcessChamber");
 }
 
