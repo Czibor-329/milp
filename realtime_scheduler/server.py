@@ -22,6 +22,7 @@ import json
 import math
 import os
 import re
+import shutil
 import sys
 import threading
 import time
@@ -169,7 +170,7 @@ E2E_CTQ_MODEL_PATH = ALGORITHM_ROOT / "results" / "models" / "e2e_ctq_policy.npz
 DUAL_ACTOR_MODEL_PATH = (
     ALGORITHM_ROOT / "results" / "dual_actor_primitive_v1_candidate.npz"
 )
-WORKSPACE_STORE_PATH = DATA_DIR / "workspaces.json"
+WORKSPACE_STORE_PATH = DATA_DIR / "workspaces"
 LEGACY_WORKSPACE_STORE_PATH = ALGORITHM_ROOT / "results" / "config_editor_workspaces.json"
 DEVICE_INIT_DIR = DATA_DIR / "devices"
 RESULT_EXPORT_DIR = EXPORT_DIR / "results"
@@ -212,7 +213,11 @@ def _workspace_catalog_guard(path: Path) -> Iterator[None]:
     两个进程若共用固定 ``.tmp`` 文件会破坏 JSON，单靠原子替换也会发生后写覆盖。
     这里用一字节系统文件锁包住完整读改写事务；锁文件只承载互斥，不保存业务数据。
     """
-    lock_path = path.with_suffix(path.suffix + ".lock")
+    lock_path = (
+        path.with_name(path.name + ".lock")
+        if path.suffix == ""
+        else path.with_suffix(path.suffix + ".lock")
+    )
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with _WORKSPACE_STORE_LOCK, lock_path.open("a+b") as lock_file:
         lock_file.seek(0, os.SEEK_END)
@@ -2656,20 +2661,97 @@ def _migrate_workspace_catalog(catalog: Dict[str, Any]) -> bool:
 
 
 def _read_workspace_catalog_unlocked(path: Path) -> Dict[str, Any]:
-    """在调用方持锁时读取并校验设备工作区目录。"""
-    source_path = path
-    if path == WORKSPACE_STORE_PATH and not path.is_file() and LEGACY_WORKSPACE_STORE_PATH.is_file():
-        source_path = LEGACY_WORKSPACE_STORE_PATH
-    if not source_path.is_file():
-        return _empty_workspace_catalog()
-    raw = json.loads(source_path.read_text(encoding="utf-8"))
-    if not isinstance(raw, Mapping) or not isinstance(raw.get("devices"), list):
-        raise ValueError(f"设备测试集存储格式无效：{source_path}")
-    catalog = deepcopy(dict(raw))
+    """在调用方持锁时读取并校验设备工作区目录。
+
+    目录模式（``path`` 无后缀）扫描拆分后的设备目录与测试集文件；文件模式
+    保留旧单文件格式，供测试与历史数据使用。目录模式存储缺失但旧单文件
+    存在时，先自动迁移为拆分目录再读取。
+    """
+    if path.suffix == "":
+        # 目录模式；仅默认存储路径缺失或上次迁移未完成（旧单文件仍在）时重新迁移，
+        # 其他目录路径缺失视为空。迁移本身幂等，可安全重入以恢复中断现场。
+        if path == WORKSPACE_STORE_PATH and (DATA_DIR / "workspaces.json").is_file():
+            _migrate_legacy_workspace_store(path)
+        elif not path.is_dir():
+            if path != WORKSPACE_STORE_PATH:
+                return _empty_workspace_catalog()
+            legacy_candidates = (DATA_DIR / "workspaces.json", LEGACY_WORKSPACE_STORE_PATH)
+            if any(candidate.is_file() for candidate in legacy_candidates):
+                _migrate_legacy_workspace_store(path)
+            else:
+                return _empty_workspace_catalog()
+        catalog = _read_workspace_catalog_directory(path)
+    else:
+        if not path.is_file():
+            return _empty_workspace_catalog()
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, Mapping) or not isinstance(raw.get("devices"), list):
+            raise ValueError(f"设备测试集存储格式无效：{path}")
+        catalog = deepcopy(dict(raw))
+        changed = _migrate_workspace_catalog(catalog)
+        if changed:
+            _write_workspace_catalog_unlocked(path, catalog)
+        return catalog
     changed = _migrate_workspace_catalog(catalog)
-    if changed or source_path != path:
+    if changed:
         _write_workspace_catalog_unlocked(path, catalog)
     return catalog
+
+
+def _read_workspace_catalog_directory(store_dir: Path) -> Dict[str, Any]:
+    """在调用方持锁时扫描拆分目录，组装完整设备工作区目录。
+
+    目录布局为 ``<store_dir>/<device_id>/device.json`` 与
+    ``<store_dir>/<device_id>/tests/<test_id>.json``；设备目录或测试集文件
+    可直接拷贝分享，放入后下次读取即生效。
+    """
+    catalog = _empty_workspace_catalog()
+    if not store_dir.is_dir():
+        return catalog
+    for device_dir in sorted(store_dir.iterdir()):
+        if not device_dir.is_dir():
+            continue
+        device_file = device_dir / "device.json"
+        if not device_file.is_file():
+            continue
+        try:
+            raw_device = json.loads(device_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError(f"设备文件无效：{device_file}") from error
+        if not isinstance(raw_device, dict):
+            continue
+        tests = []
+        tests_dir = device_dir / "tests"
+        if tests_dir.is_dir():
+            for test_file in sorted(tests_dir.glob("*.json")):
+                try:
+                    raw_test = json.loads(test_file.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError) as error:
+                    raise ValueError(f"测试集文件无效：{test_file}") from error
+                if isinstance(raw_test, dict):
+                    tests.append(raw_test)
+        raw_device["tests"] = tests
+        catalog["devices"].append(raw_device)
+    return catalog
+
+
+def _migrate_legacy_workspace_store(store_dir: Path) -> None:
+    """把旧单文件存储迁移为拆分目录，迁移后旧文件保留为 ``*.legacy.json``。
+
+    持锁调用；只处理确实存在的旧文件。迁移是幂等的：先清理可能存在的残留
+    目录再重建，因此上次迁移中断后可以安全重入。迁移成功后旧文件改名，
+    避免重复迁移；确认数据无误后可手动删除旧文件。
+    """
+    legacy_candidates = (DATA_DIR / "workspaces.json", LEGACY_WORKSPACE_STORE_PATH)
+    for legacy_file in legacy_candidates:
+        if not legacy_file.is_file():
+            continue
+        catalog = _read_workspace_catalog_unlocked(legacy_file)
+        shutil.rmtree(store_dir, ignore_errors=True)
+        _write_workspace_catalog_unlocked(store_dir, catalog)
+        backup_path = legacy_file.with_name(f"{legacy_file.name}.legacy.json")
+        legacy_file.replace(backup_path)
+        return
 
 
 def _write_text_atomic(path: Path, content: str) -> None:
@@ -2720,15 +2802,85 @@ def format_reproduction_log(entries: Sequence[Mapping[str, Any]]) -> str:
 
 
 def _write_workspace_catalog_unlocked(path: Path, catalog: Mapping[str, Any]) -> None:
-    """在调用方持锁时以原子替换方式保存设备工作区目录。"""
+    """在调用方持锁时保存设备工作区目录。
+
+    目录模式（``path`` 无后缀）把 catalog 拆分写为设备目录与测试集文件，
+    便于单个测试集或设备直接拷贝分享；文件模式保留旧单文件格式。两种模式
+    都会在默认存储路径下刷新 ``data/devices/<id>.json`` 设备拓扑镜像。
+    """
+    if path.suffix == "":
+        _write_workspace_catalog_directory(path, catalog)
+        if path == WORKSPACE_STORE_PATH:
+            _write_device_init_mirrors(catalog)
+        return
     _write_json_atomic(path, catalog)
     if path == WORKSPACE_STORE_PATH:
-        for device in catalog.get("devices") or []:
-            if not isinstance(device, Mapping) or not isinstance(device.get("device"), Mapping):
+        _write_device_init_mirrors(catalog)
+
+
+def _write_device_init_mirrors(catalog: Mapping[str, Any]) -> None:
+    """把每台设备的拓扑镜像写入 data/devices/，供外部工具读取。"""
+    for device in catalog.get("devices") or []:
+        if not isinstance(device, Mapping) or not isinstance(device.get("device"), Mapping):
+            continue
+        device_id = str(device.get("id") or "").strip()
+        if device_id:
+            _write_json_atomic(DEVICE_INIT_DIR / f"{device_id}.json", device["device"])
+
+
+def _write_json_if_changed(path: Path, payload: Any) -> None:
+    """内容变化时才原子写入 JSON，避免全量重写覆盖他人刚更新的文件。"""
+    try:
+        current = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        current = None
+    if current != payload:
+        _write_json_atomic(path, payload)
+
+
+def _write_workspace_catalog_directory(store_dir: Path, catalog: Mapping[str, Any]) -> None:
+    """在调用方持锁时把完整目录拆分写为设备目录与测试集文件。
+
+    每个设备写 ``<store_dir>/<device_id>/device.json``（不含 tests），每个测试集
+    写 ``<store_dir>/<device_id>/tests/<test_id>.json``；内容未变的文件跳过写入，
+    使共享目录下他人刚放入的文件不被覆盖。本函数只负责写入，不删除磁盘上的
+    任何文件——测试集与设备的物理删除由对应的 delete_* 操作显式完成，从而保证
+    通过拷贝分享进来的文件在任意后续写入后仍然保留。
+    """
+    store_dir.mkdir(parents=True, exist_ok=True)
+    for raw_device in catalog.get("devices") or []:
+        if not isinstance(raw_device, Mapping):
+            continue
+        device = deepcopy(dict(raw_device))
+        device_id = str(device.get("id") or "").strip()
+        if not device_id:
+            continue
+        tests = device.pop("tests", None)
+        device_dir = store_dir / device_id
+        device_dir.mkdir(parents=True, exist_ok=True)
+        _write_json_if_changed(device_dir / "device.json", device)
+        tests_dir = device_dir / "tests"
+        tests_dir.mkdir(parents=True, exist_ok=True)
+        for raw_test in tests or []:
+            if not isinstance(raw_test, Mapping):
                 continue
-            device_id = str(device.get("id") or "").strip()
-            if device_id:
-                _write_json_atomic(DEVICE_INIT_DIR / f"{device_id}.json", device["device"])
+            test = dict(raw_test)
+            test_id = str(test.get("id") or "").strip()
+            if not test_id:
+                continue
+            _write_json_if_changed(tests_dir / f"{test_id}.json", test)
+
+
+def _remove_directory_test_file(store_dir: Path, device_id: str, test_id: str) -> None:
+    """目录模式下物理删除单个测试集文件；文件模式为空操作。"""
+    if store_dir.suffix == "":
+        (store_dir / device_id / "tests" / f"{test_id}.json").unlink(missing_ok=True)
+
+
+def _remove_directory_device_dir(store_dir: Path, device_id: str) -> None:
+    """目录模式下物理删除整个设备目录（含全部测试集文件）；文件模式为空操作。"""
+    if store_dir.suffix == "":
+        shutil.rmtree(store_dir / device_id, ignore_errors=True)
 
 
 def list_workspace_devices(path: Path = WORKSPACE_STORE_PATH) -> List[Dict[str, Any]]:
@@ -2759,9 +2911,10 @@ def get_workspace_device(device_id: str, path: Path = WORKSPACE_STORE_PATH) -> D
 def delete_workspace_device(device_id: str, path: Path = WORKSPACE_STORE_PATH) -> Dict[str, Any]:
     """从本地工作区删除一台设备及其全部测试集，并返回被删除设备的摘要。
 
-    设备删除后不可恢复：工作区目录中的设备记录会移除，设备初始文件
-    （``DEVICE_INIT_DIR/<id>.json``）也会一并清理。设备不存在时抛出明确错误；
-    已被历史批量任务引用的设备不会改写历史记录。
+    设备删除后不可恢复：拆分目录模式会移除 ``<store>/<device_id>/`` 设备目录
+    （含其中全部测试集文件），设备初始文件（``DEVICE_INIT_DIR/<id>.json``）
+    也会一并清理。设备不存在时抛出明确错误；已被历史批量任务引用的设备不会
+    改写历史记录。
     """
     with _workspace_catalog_guard(path):
         catalog = _read_workspace_catalog_unlocked(path)
@@ -2775,13 +2928,15 @@ def delete_workspace_device(device_id: str, path: Path = WORKSPACE_STORE_PATH) -
             item for item in catalog["devices"]
             if not (isinstance(item, Mapping) and str(item.get("id")) == device_id)
         ]
-        _write_workspace_catalog_unlocked(path, catalog)
+        # 先物理删除设备目录与初始文件再写目录：即使中途中断，下次扫描也不会复活该设备。
+        _remove_directory_device_dir(path, device_id)
         if path == WORKSPACE_STORE_PATH:
             try:
                 (DEVICE_INIT_DIR / f"{device_id}.json").unlink(missing_ok=True)
             except OSError:
                 # 设备初始文件只是工作区拓扑的镜像缓存，删除失败不影响工作区移除。
                 pass
+        _write_workspace_catalog_unlocked(path, catalog)
         return {
             "id": device_id,
             "name": str(device.get("name") or "未命名设备"),
@@ -3468,6 +3623,9 @@ def delete_workspace_test_group(
         ]
         _invalidate_stale_device_baselines(device)
         device["updatedAt"] = _workspace_timestamp()
+        # 先物理删除测试集文件再写目录：即使中途中断，下次扫描也不会让已删测试复活。
+        for deleted_test in deleted_tests:
+            _remove_directory_test_file(path, device_id, str(deleted_test.get("id") or "").strip())
         _write_workspace_catalog_unlocked(path, catalog)
         return {
             "groups": deepcopy(device["testGroups"]),
@@ -3495,6 +3653,8 @@ def delete_workspace_test(
             raise ValueError(f"测试集不存在：{test_id}")
         device["tests"] = remaining
         device["updatedAt"] = _workspace_timestamp()
+        # 先物理删除测试集文件再写目录：即使中途中断，下次扫描也不会让已删测试复活。
+        _remove_directory_test_file(path, device_id, test_id)
         _write_workspace_catalog_unlocked(path, catalog)
 
 
@@ -4229,6 +4389,15 @@ def main() -> None:
     server = ThreadingHTTPServer((args.host, args.port), ConfigEditorHandler)
     url = f"http://{args.host}:{args.port}/"
     print(f"CT 调度控制台：{url}")
+    # 预热工作区：旧版单文件（data/workspaces.json）存在时自动迁移为拆分目录。
+    legacy_store = DATA_DIR / "workspaces.json"
+    legacy_present = legacy_store.is_file()
+    list_workspace_devices()
+    if legacy_present:
+        print(
+            f"已自动迁移旧版工作区数据：{legacy_store.name} → {WORKSPACE_STORE_PATH.name}/ 拆分目录"
+        )
+        print(f"原文件备份为 {legacy_store.name}.legacy.json，确认无误后可删除。")
     print("正在预热算法缓存…", end="", flush=True)
     discover_other_algorithms()
     print(" 完成")

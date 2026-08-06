@@ -1597,6 +1597,96 @@ class ConfigEditorServerTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 delete_workspace_device(first["id"], store_path)
 
+    def test_directory_store_splits_tests_into_shareable_files(self) -> None:
+        """拆分目录下每个测试集是独立文件，放入分享文件后无需重启即可读取。"""
+        with tempfile.TemporaryDirectory() as directory:
+            store_dir = Path(directory) / "workspaces"
+            device, _ = import_workspace_device("device-a.json", self.recording, store_dir)
+            test = create_workspace_test(device["id"], {
+                "name": "基础案例", "strategy": "heuristic", "roundCount": 1,
+                "times": [0], "rounds": [{"jobs": [{"name": "Initial"}]}],
+            }, store_dir)
+            device_dir = store_dir / device["id"]
+            self.assertTrue((device_dir / "device.json").is_file())
+            test_file = device_dir / "tests" / f"{test['id']}.json"
+            self.assertTrue(test_file.is_file())
+            self.assertNotIn("tests", json.loads((device_dir / "device.json").read_text(encoding="utf-8")))
+
+            # 把同事分享的测试集文件放入 tests 目录，读取时直接生效。
+            shared = copy.deepcopy(test)
+            shared["id"] = "shared-test-0001"
+            shared["name"] = "同事分享的测试"
+            shared["group"] = "冒烟"
+            (device_dir / "tests" / "shared-test-0001.json").write_text(
+                json.dumps(shared, ensure_ascii=False), encoding="utf-8",
+            )
+            loaded = get_workspace_device(device["id"], store_dir)
+            self.assertEqual(
+                {"基础案例", "同事分享的测试"},
+                {item["name"] for item in loaded["tests"]},
+            )
+
+            # 删除测试集与设备后，对应文件与目录一并清理。
+            delete_workspace_test(device["id"], test["id"], store_dir)
+            self.assertFalse(test_file.exists())
+            delete_workspace_device(device["id"], store_dir)
+            self.assertFalse(device_dir.exists())
+            self.assertEqual([], list_workspace_devices(store_dir))
+
+    def test_directory_store_migrates_legacy_single_file(self) -> None:
+        """旧单文件存储首次以目录模式读取时自动迁移为拆分目录，旧文件保留备份。"""
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            fake_data = tmp / "data"
+            fake_data.mkdir()
+            legacy_file = fake_data / "workspaces.json"
+            device, _ = import_workspace_device("device-a.json", self.recording, legacy_file)
+            create_workspace_test(device["id"], {
+                "name": "迁移案例", "roundCount": 1, "rounds": [{}],
+            }, legacy_file)
+
+            store_dir = tmp / "workspaces"
+            with (
+                patch.object(config_server, "DATA_DIR", fake_data),
+                patch.object(config_server, "WORKSPACE_STORE_PATH", store_dir),
+            ):
+                catalog = config_server._read_workspace_catalog_unlocked(store_dir)
+            self.assertEqual([device["id"]], [item["id"] for item in catalog["devices"]])
+            self.assertTrue((store_dir / device["id"] / "tests").is_dir())
+            self.assertTrue((fake_data / "workspaces.json.legacy.json").is_file())
+            self.assertFalse(legacy_file.exists())
+            # 迁移后的目录重启读取仍然正常。
+            loaded = get_workspace_device(device["id"], store_dir)
+            self.assertEqual("迁移案例", loaded["tests"][0]["name"])
+
+    def test_directory_store_retries_interrupted_migration(self) -> None:
+        """迁移中断（目录残留且旧单文件未改名）后再次读取应重新迁移补齐数据。"""
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            fake_data = tmp / "data"
+            fake_data.mkdir()
+            legacy_file = fake_data / "workspaces.json"
+            device, _ = import_workspace_device("device-a.json", self.recording, legacy_file)
+            create_workspace_test(device["id"], {
+                "name": "迁移案例", "roundCount": 1, "rounds": [{}],
+            }, legacy_file)
+
+            store_dir = tmp / "workspaces"
+            # 模拟上次迁移只写了一部分就中断：目录残留 + 旧文件未改名。
+            store_dir.mkdir()
+            (store_dir / "stale-device-dir").mkdir()
+            with (
+                patch.object(config_server, "DATA_DIR", fake_data),
+                patch.object(config_server, "WORKSPACE_STORE_PATH", store_dir),
+            ):
+                catalog = config_server._read_workspace_catalog_unlocked(store_dir)
+            # 残留目录被幂等重建，数据完整且旧文件保留备份。
+            self.assertEqual([device["id"]], [item["id"] for item in catalog["devices"]])
+            self.assertFalse((store_dir / "stale-device-dir").exists())
+            self.assertTrue((fake_data / "workspaces.json.legacy.json").is_file())
+            loaded = get_workspace_device(device["id"], store_dir)
+            self.assertEqual("迁移案例", loaded["tests"][0]["name"])
+
     def test_different_groups_allow_same_test_name(self) -> None:
         """测试名称只需在组内唯一，不同组可以使用完全相同的名称。"""
         with tempfile.TemporaryDirectory() as directory:
