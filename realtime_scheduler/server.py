@@ -73,21 +73,6 @@ if ALGORITHM_REPOSITORY_PRESENT:
         from src.schedule.realtime import (
             RealtimeRescheduler,
             TIME_TOLERANCE,
-            release_completed_load_port_materials,
-        )
-        from src.validation import MoveStateReplay, validate_move_list
-        from src.validation.move_fields import (
-            COMPLETE_MOVE, PICK_MOVE, PLACE_MOVE, PREPARE_MOVE, PRE_PREPARE_MOVE,
-            PRE_TRANS_MOVE, SWAP_MOVE,
-        )
-        from src.validation.state import (
-            ATMOSPHERE,
-            DoorState,
-            LoadLockState,
-            MachineState,
-            MaterialState,
-            SlotPhase,
-            SlotState,
         )
     except Exception as error:  # noqa: BLE001
         BUILTIN_ALGORITHM_IMPORT_ERROR = f"{type(error).__name__}: {error}"
@@ -98,20 +83,7 @@ if not BUILTIN_ALGORITHM_AVAILABLE:
     # 标准协议常量属于平台与算法包之间的稳定边界。后备定义只用于打包算法
     # 的时间线通知，不包含任何调度策略或本地算法实现。
     TIME_TOLERANCE = 1e-6
-    PICK_MOVE = 0
-    PLACE_MOVE = 1
-    SWAP_MOVE = 4
-    PRE_TRANS_MOVE = 5
-    PREPARE_MOVE = 6
-    COMPLETE_MOVE = 7
-    PRE_PREPARE_MOVE = 10
     MODELS_DIR = ALGORITHM_ROOT / "results" / "models"
-
-    class MoveStateReplay:
-        """在无公共状态机时提供企业 MoveState 协议常量。"""
-
-        RUNNING = 0
-        DONE = 1
 from realtime_scheduler.algorithm_interface import (
     discover_other_algorithms,
     init as algorithm_init,
@@ -127,7 +99,6 @@ from realtime_scheduler.backend.analysis import (
 )
 from realtime_scheduler.plan_builder import (
     CJOB_TYPE_VALUES,
-    FIRST_SLOT_ID,
     MAX_WAFERS_PER_JOB,
     TASK_MODE_VALUES,
     BuildState,
@@ -143,6 +114,27 @@ from realtime_scheduler.plan_builder import (
     build_route,
     expand_pse300_loadlocks,
     extract_init_data,
+)
+from realtime_scheduler.recompute_state import (
+    add_new_materials_to_machine_state,
+    apply_machine_state_to_update,
+    merge_algorithm_update,
+    release_reused_source_slots,
+)
+from realtime_scheduler.move_validation import (
+    COMPLETE_MOVE,
+    DoorState,
+    MachineState,
+    MoveStateReplay,
+    PICK_MOVE,
+    PLACE_MOVE,
+    PREPARE_MOVE,
+    PRE_PREPARE_MOVE,
+    PRE_TRANS_MOVE,
+    SWAP_MOVE,
+    SlotPhase,
+    release_completed_load_port_materials,
+    validate_move_list,
 )
 from realtime_scheduler.replay_machine import ReplayMachine
 
@@ -401,7 +393,7 @@ class StandardAlgorithmRuntime:
 
     @property
     def state(self) -> MachineState:
-        """返回由 ``src.validation.state`` 维护的隔离整机快照。"""
+        """返回由平台物理状态记录器维护的隔离整机快照。"""
         return self._tracker.state.clone()
 
     @property
@@ -525,18 +517,21 @@ class StandardAlgorithmRuntime:
                         track_reservations=False,
                     )
                     finished.add(move_id)
-            for _, notification in group["starts"]:
+            for event_kind, _, notification in _planned_start_events(group):
                 move_id = int(notification["MoveID"])
-                if move_id in committed_ids and move_id not in started:
+                if event_kind == "start" and move_id in committed_ids and move_id not in started:
                     projection.update_move_state(
                         notification,
                         snapshot=False,
                         track_reservations=False,
                     )
                     started.add(move_id)
-            for _, notification in group["sameFinishes"]:
-                move_id = int(notification["MoveID"])
-                if move_id in committed_ids and move_id in started and move_id not in finished:
+                elif (
+                    event_kind == "finish"
+                    and move_id in committed_ids
+                    and move_id in started
+                    and move_id not in finished
+                ):
                     projection.update_move_state(
                         notification,
                         snapshot=False,
@@ -586,7 +581,7 @@ class StandardAlgorithmRuntime:
             if initial_state is not None
             else self._tracker.state.clone()
         )
-        _add_new_materials_to_machine_state(next_state, update_params)
+        add_new_materials_to_machine_state(next_state, update_params)
         next_update = deepcopy(dict(update_params))
         next_problem = parse_task(self.tool_topo, next_update)
         next_moves = list(output.get("MoveList") or [])
@@ -674,39 +669,81 @@ class StandardAlgorithmRuntime:
 
 
 class PackagedAlgorithmRuntime:
-    """在没有本地算法仓库时维护标准算法包的跨轮时间线。
-
-    打包算法自身保存上一轮 MoveList，并根据下一轮的 ``MoveStates`` 与
-    ``RemoveList`` 重建机台现场。平台在此模式下只维护协议事实、历史输出和
-    已完成 LoadPort 批次，不复制本地算法仓库中的解析或状态机实现。
-    """
+    """在没有本地算法仓库时用平台状态记录器维护跨轮时间线。"""
 
     def __init__(
         self,
         update_params: Mapping[str, Any],
         output: Mapping[str, Any],
+        *,
+        skip_validation: bool = False,
     ) -> None:
-        """保存首轮全量 update 与算法输出，初始化轻量运行时。"""
+        """以标准 update 建立首轮物理快照，并校验算法包输出。"""
         self.current_update = deepcopy(dict(update_params))
-        self._current_plan = deepcopy(list(output.get("MoveList") or []))
+        self.skip_validation = bool(skip_validation)
+        initial_state = MachineState.from_sources(None, self.current_update)
+        initial_moves = deepcopy(list(output.get("MoveList") or []))
+        validation_issues = (
+            []
+            if self.skip_validation
+            else validate_move_list(None, initial_moves, initial_state)
+        )
+        if validation_issues:
+            message = (
+                "标准算法首次排程 MoveList 状态校验失败："
+                f"{validation_issues[0]}"
+            )
+            raise MoveListValidationError(
+                message,
+                output,
+                validation_issues,
+                _build_validation_gantt_output(output, validation_issues),
+                float(self.current_update.get("CurrentTime") or 0.0),
+            )
+        self._tracker = MoveStateReplay(None, initial_moves, initial_state)
+        self._generation_initial_state = initial_state.clone()
+        self._tracker.current_time = float(
+            self.current_update.get("CurrentTime") or 0.0
+        )
         self._history: List[dict] = []
         self._recompute_points: List[Dict[str, Any]] = []
         self._latest_output = _alg_output_info(output)
-        self._state_time = float(update_params.get("CurrentTime") or 0.0)
 
     @property
     def current_plan(self) -> List[dict]:
         """返回当前算法代次的 MoveList 副本。"""
-        return deepcopy(self._current_plan)
+        return self._tracker.materialized_plan
+
+    @property
+    def state(self) -> MachineState:
+        """返回平台记录器维护的隔离整机快照。"""
+        return self._tracker.state.clone()
 
     @property
     def state_time(self) -> float:
-        """返回已经推进到的协议时间。"""
-        return float(self._state_time)
+        """返回已经推进到的物理状态时间。"""
+        return float(self._tracker.current_time)
 
     def advance_to(self, cutoff: float) -> None:
-        """记录本轮重算的原始请求时刻。"""
-        self._state_time = max(self._state_time, float(cutoff))
+        """在时间线上推进当前快照时刻。"""
+        self._tracker.current_time = max(
+            self._tracker.current_time,
+            float(cutoff),
+        )
+
+    def update_move_state(
+        self,
+        notification: Mapping[str, Any],
+        *,
+        snapshot: bool = True,
+        track_reservations: bool = True,
+    ) -> Optional[MachineState]:
+        """把算法包时间线通知交给平台物理状态记录器。"""
+        return self._tracker.update_move_state(
+            notification,
+            snapshot=snapshot,
+            track_reservations=track_reservations,
+        )
 
     def release_completed_load_ports(
         self,
@@ -718,7 +755,7 @@ class PackagedAlgorithmRuntime:
         该片完成。只有同一 LoadPort 的历史物料全部完成后才允许槽位复用。
         """
         material_moves: Dict[Any, List[Mapping[str, Any]]] = {}
-        for move in self._current_plan:
+        for move in self.current_plan:
             for material_id in _move_material_ids(move):
                 material_moves.setdefault(material_id, []).append(move)
         released_ids = {
@@ -727,7 +764,7 @@ class PackagedAlgorithmRuntime:
             if moves and max(
                 float(move.get("EndTime") or move.get("StartTime") or 0.0)
                 for move in moves
-            ) <= self._state_time + TIME_TOLERANCE
+            ) <= self.state_time + TIME_TOLERANCE
         }
         if released_ids:
             _remove_released_materials_from_update(self.current_update, released_ids)
@@ -748,10 +785,86 @@ class PackagedAlgorithmRuntime:
         """返回重算时刻前已经启动、不能从历史中删除的动作。"""
         return [
             deepcopy(move)
-            for move in self._current_plan
+            for move in self.current_plan
             if float(move.get("StartTime") or 0.0)
             < float(cutoff) - TIME_TOLERANCE
         ]
+
+    def project_started_moves(
+        self,
+        cutoff: float,
+        released_material_ids: Optional[set[Any]] = None,
+    ) -> Tuple[MachineState, List[dict]]:
+        """把重算时刻前已启动的动作从代次初态完整投影到结束态。"""
+        committed_ids = {
+            int(move["MoveID"])
+            for move in self.current_plan
+            if (
+                isinstance(move.get("MoveID"), int)
+                and float(move.get("StartTime") or 0.0)
+                < float(cutoff) - TIME_TOLERANCE
+            )
+        }
+        projection = MoveStateReplay(
+            None,
+            self.current_plan,
+            self._generation_initial_state,
+        )
+        started: set[int] = set()
+        finished: set[int] = set()
+        for group in _planned_event_groups(self.current_plan):
+            for _, notification in group["priorFinishes"]:
+                move_id = int(notification["MoveID"])
+                if move_id in committed_ids and move_id in started and move_id not in finished:
+                    projection.update_move_state(
+                        notification,
+                        snapshot=False,
+                        track_reservations=False,
+                    )
+                    finished.add(move_id)
+            for event_kind, _, notification in _planned_start_events(group):
+                move_id = int(notification["MoveID"])
+                if event_kind == "start" and move_id in committed_ids and move_id not in started:
+                    projection.update_move_state(
+                        notification,
+                        snapshot=False,
+                        track_reservations=False,
+                    )
+                    started.add(move_id)
+                elif (
+                    event_kind == "finish"
+                    and move_id in committed_ids
+                    and move_id in started
+                    and move_id not in finished
+                ):
+                    projection.update_move_state(
+                        notification,
+                        snapshot=False,
+                        track_reservations=False,
+                    )
+                    finished.add(move_id)
+        missing_ids = committed_ids - finished
+        if missing_ids:
+            raise ValueError(
+                f"无法投影重算时刻前已启动的 Move：{sorted(missing_ids)[:8]}"
+            )
+
+        projected_state = projection.state.clone()
+        released_ids = set(released_material_ids or ())
+        if released_ids:
+            for station in projected_state.stations.values():
+                for slot in station.slots.values():
+                    if (
+                        slot.material is not None
+                        and slot.material.material_id in released_ids
+                    ):
+                        slot.phase = SlotPhase.EMPTY
+                        slot.material = None
+            for robot in projected_state.robots.values():
+                for slot_id, material in robot.hands.items():
+                    if material is not None and material.material_id in released_ids:
+                        robot.hands[slot_id] = None
+        return projected_state, projection.executed_moves
 
     def replace_plan(
         self,
@@ -760,13 +873,51 @@ class PackagedAlgorithmRuntime:
         requested_time: float,
         reason: str,
         committed_moves: Sequence[Mapping[str, Any]],
+        *,
+        initial_state: Optional[MachineState] = None,
     ) -> None:
-        """提交旧代已执行历史，并装载算法包返回的新计划代次。"""
+        """提交旧代历史，并从投影快照装载、校验新的计划代次。"""
+        next_state = (
+            initial_state.clone()
+            if initial_state is not None
+            else self._tracker.state.clone()
+        )
+        add_new_materials_to_machine_state(next_state, update_params)
+        next_moves = deepcopy(list(output.get("MoveList") or []))
+        validation_issues = (
+            []
+            if self.skip_validation
+            else validate_move_list(None, next_moves, next_state)
+        )
+        if validation_issues:
+            message = f"{reason} MoveList 状态校验失败：{validation_issues[0]}"
+            recompute_point = {
+                "Time": float(requested_time),
+                "EffectiveTime": float(requested_time),
+                "ScheduleStartTime": float(requested_time),
+                "RecoveryEndTime": float(requested_time),
+                "Index": len(self._recompute_points) + 1,
+                "Reason": reason,
+                "Validation": "failed",
+            }
+            raise MoveListValidationError(
+                message,
+                output,
+                validation_issues,
+                _build_validation_gantt_output(
+                    output,
+                    validation_issues,
+                    prefix_moves=[*self._history, *deepcopy(list(committed_moves))],
+                    recompute_points=[*self._recompute_points, recompute_point],
+                ),
+                float(requested_time),
+            )
         self._history.extend(deepcopy(list(committed_moves)))
         self.current_update = deepcopy(dict(update_params))
-        self._current_plan = deepcopy(list(output.get("MoveList") or []))
+        self._tracker = MoveStateReplay(None, next_moves, next_state)
+        self._generation_initial_state = next_state.clone()
+        self._tracker.current_time = float(requested_time)
         self._latest_output = _alg_output_info(output)
-        self._state_time = float(requested_time)
         self._recompute_points.append({
             "Time": float(requested_time),
             "EffectiveTime": float(requested_time),
@@ -778,7 +929,7 @@ class PackagedAlgorithmRuntime:
 
     def combined_output(self) -> Dict[str, Any]:
         """拼接旧代已承诺动作与最后一代有效计划。"""
-        moves = [*deepcopy(self._history), *deepcopy(self._current_plan)]
+        moves = [*deepcopy(self._history), *self._tracker.materialized_plan]
         moves.sort(key=lambda move: (
             float(move.get("StartTime") or 0.0),
             int(move.get("MoveID") or 0),
@@ -901,219 +1052,6 @@ def _schedule_log_info(device: Mapping[str, Any], update: Mapping[str, Any]) -> 
     return info
 
 
-def _material_ids_in_machine_state(state: MachineState) -> set[Any]:
-    """收集站点槽位和机器人手槽中已经存在的物料编号。"""
-    material_ids = {
-        slot.material.material_id
-        for station in state.stations.values()
-        for slot in station.slots.values()
-        if slot.material is not None
-    }
-    material_ids.update(
-        material.material_id
-        for robot in state.robots.values()
-        for material in robot.hands.values()
-        if material is not None
-    )
-    return material_ids
-
-
-def _add_new_materials_to_machine_state(
-    state: MachineState,
-    update_params: Mapping[str, Any],
-) -> None:
-    """把下一轮首次出现的 LoadPort 物料补入上一轮稳定状态。"""
-    known_material_ids = _material_ids_in_machine_state(state)
-    for raw_material in update_params.get("Materials") or []:
-        if not isinstance(raw_material, Mapping):
-            continue
-        material_id = raw_material.get("ID")
-        if material_id is None or material_id in known_material_ids:
-            continue
-        station_name = str(raw_material.get("CurrentModuleName") or "")
-        slot_id = raw_material.get("SlotID")
-        if not station_name or not isinstance(slot_id, int) or slot_id < FIRST_SLOT_ID:
-            raise ValueError(f"新增物料 {material_id} 缺少有效 CurrentModuleName/SlotID")
-        station = state.ensure_station(station_name, slot_id)
-        slot = station.slots[slot_id]
-        if slot.material is not None:
-            raise ValueError(
-                f"新增物料 {material_id} 与 {station_name}#{slot_id} 的现有物料冲突"
-            )
-        station.slots[slot_id] = SlotState(
-            SlotPhase.COMPLETED,
-            MaterialState(
-                material_id,
-                str(raw_material.get("PJobName") or ""),
-                raw_material.get("StepID"),
-            ),
-        )
-        known_material_ids.add(material_id)
-
-
-def _release_reused_source_slots(
-    state: MachineState,
-    new_round_update: Mapping[str, Any],
-) -> set[Any]:
-    """新片复用同一 LoadPort 槽位时，从投影状态卸载上一片成品。"""
-    released_ids: set[Any] = set()
-    for material in new_round_update.get("Materials") or []:
-        if not isinstance(material, Mapping):
-            continue
-        station_name = str(material.get("CurrentModuleName") or "")
-        slot_id = material.get("SlotID")
-        if not station_name or not isinstance(slot_id, int):
-            continue
-        station = state.stations.get(station_name)
-        slot = station.slots.get(slot_id) if station is not None else None
-        if slot is None or slot.material is None:
-            continue
-        released_ids.add(slot.material.material_id)
-        slot.phase = SlotPhase.EMPTY
-        slot.material = None
-    return released_ids
-
-
-def _merge_algorithm_update(
-    previous_update: Mapping[str, Any],
-    new_round_update: Mapping[str, Any],
-) -> Dict[str, Any]:
-    """把新一轮 Job 追加到上一轮全量 update，形成企业接口当前快照。"""
-    merged = deepcopy(dict(previous_update))
-    merged["Scenario"] = new_round_update.get("Scenario", merged.get("Scenario", 0))
-    merged["CurrentTime"] = float(new_round_update.get("CurrentTime") or 0.0)
-    merged["InitialMoveID"] = int(
-        new_round_update.get("InitialMoveID", merged.get("InitialMoveID", 0)) or 0
-    )
-    merged["ProcessRecipes"] = deepcopy(list(new_round_update.get("ProcessRecipes") or []))
-    merged_routes = deepcopy(dict(merged.get("Routes") or {}))
-    merged_routes.update(deepcopy(dict(new_round_update.get("Routes") or {})))
-    merged["Routes"] = merged_routes
-
-    material_by_id: Dict[Any, Dict[str, Any]] = {}
-    for raw_material in [
-        *(merged.get("Materials") or []),
-        *(new_round_update.get("Materials") or []),
-    ]:
-        if isinstance(raw_material, Mapping) and raw_material.get("ID") is not None:
-            material_by_id[raw_material["ID"]] = deepcopy(dict(raw_material))
-    merged["Materials"] = list(material_by_id.values())
-
-    process_job_by_name: Dict[str, Dict[str, Any]] = {}
-    for raw_job in [
-        *(merged.get("ProcessJobs") or []),
-        *(new_round_update.get("ProcessJobs") or []),
-    ]:
-        if isinstance(raw_job, Mapping) and raw_job.get("JobName"):
-            process_job_by_name[str(raw_job["JobName"])] = deepcopy(dict(raw_job))
-    merged["ProcessJobs"] = list(process_job_by_name.values())
-    merged["ControlJobs"] = [
-        deepcopy(dict(control_job))
-        for control_job in [
-            *(merged.get("ControlJobs") or []),
-            *(new_round_update.get("ControlJobs") or []),
-        ]
-        if isinstance(control_job, Mapping)
-    ]
-    merged["Robots"] = deepcopy(dict(new_round_update.get("Robots") or {}))
-    merged["Stations"] = deepcopy(dict(new_round_update.get("Stations") or {}))
-    merged["MoveStates"] = []
-    merged["RemoveList"] = []
-    return merged
-
-
-def _remaining_seconds(ready_at: float, current_time: float) -> float:
-    """把状态机绝对释放时间转换为企业 update 使用的剩余秒数。"""
-    return max(0.0, float(ready_at) - float(current_time))
-
-
-def _apply_machine_state_to_update(
-    update_params: Dict[str, Any],
-    state: MachineState,
-    current_time: float,
-) -> None:
-    """将 ``MachineState`` 的物料、机械手、腔室和压力态写回标准 update。"""
-    update_params["CurrentTime"] = float(current_time)
-    materials = {
-        material.get("ID"): material
-        for material in update_params.get("Materials") or []
-        if isinstance(material, dict) and material.get("ID") is not None
-    }
-    located_material_ids: set[Any] = set()
-
-    stations = update_params.setdefault("Stations", {})
-    for station_name, station_state in state.stations.items():
-        station = stations.setdefault(station_name, {})
-        shared_ready_at = max(
-            station_state.door_busy_until,
-            station_state.transfer_busy_until,
-            station_state.environment_busy_until,
-        )
-        slot_times = station.setdefault("TimeToAvailableOfSlot", {})
-        material_count = 0
-        for slot_id, slot_state in station_state.slots.items():
-            slot_times[str(slot_id)] = _remaining_seconds(
-                max(shared_ready_at, slot_state.busy_until),
-                current_time,
-            )
-            material = slot_state.material
-            if material is None:
-                continue
-            material_count += 1
-            raw_material = materials.get(material.material_id)
-            if raw_material is None:
-                raise ValueError(
-                    f"状态机中的物料 {material.material_id} 不在当前 update.Materials"
-                )
-            raw_material["CurrentModuleName"] = station_name
-            raw_material["SlotID"] = int(slot_id)
-            if material.step_id is not None:
-                raw_material["StepID"] = material.step_id
-            if material.pjob_name:
-                raw_material["PJobName"] = material.pjob_name
-            located_material_ids.add(material.material_id)
-        if "MaterialCount" in station:
-            station["MaterialCount"] = material_count
-        if isinstance(station_state, LoadLockState):
-            station["LastItem"] = "ATR" if station_state.environment == ATMOSPHERE else "VTR"
-
-    robots = update_params.setdefault("Robots", {})
-    for robot_name, robot_state in state.robots.items():
-        robot = robots.setdefault(robot_name, {})
-        robot["TimeToAvailable"] = _remaining_seconds(
-            robot_state.busy_until,
-            current_time,
-        )
-        if robot_state.position:
-            arm_info = robot.get("ArmInfo") or {}
-            if isinstance(arm_info, Mapping):
-                for arm in arm_info.values():
-                    if isinstance(arm, dict) and arm.get("IsEnable") is not False:
-                        arm["SlotAtStation"] = robot_state.position
-        for slot_id, material in robot_state.hands.items():
-            if material is None:
-                continue
-            raw_material = materials.get(material.material_id)
-            if raw_material is None:
-                raise ValueError(
-                    f"机械手中的物料 {material.material_id} 不在当前 update.Materials"
-                )
-            raw_material["CurrentModuleName"] = robot_name
-            raw_material["SlotID"] = int(slot_id)
-            if material.step_id is not None:
-                raw_material["StepID"] = material.step_id
-            if material.pjob_name:
-                raw_material["PJobName"] = material.pjob_name
-            located_material_ids.add(material.material_id)
-
-    # 本轮新增物料尚未进入上一代 MachineState，保留 build_round_update 给出的
-    # LoadPort 位置；其余历史物料必须全部能由状态机定位。
-    state_material_ids = _material_ids_in_machine_state(state)
-    missing_material_ids = state_material_ids - located_material_ids
-    if missing_material_ids:
-        raise ValueError(f"机台快照存在无法定位的历史物料：{sorted(missing_material_ids)}")
-
-
 def _build_algorithm_recompute_update(
     runtime: StandardAlgorithmRuntime,
     new_round_update: Mapping[str, Any],
@@ -1122,8 +1060,8 @@ def _build_algorithm_recompute_update(
     move_states: Sequence[Mapping[str, Any]] = (),
 ) -> Dict[str, Any]:
     """按原始重算时刻生成标准 update，并携带真实 Move 状态通知。"""
-    update = _merge_algorithm_update(runtime.current_update, new_round_update)
-    _apply_machine_state_to_update(update, projected_state, requested_time)
+    update = merge_algorithm_update(runtime.current_update, new_round_update)
+    apply_machine_state_to_update(update, projected_state, requested_time)
     update["MoveStates"] = [
         deepcopy(dict(notification))
         for notification in move_states
@@ -1143,24 +1081,19 @@ def _build_packaged_algorithm_recompute_update(
     new_round_update: Mapping[str, Any],
     requested_time: float,
     move_states: Sequence[Mapping[str, Any]],
+    projected_state: Optional[MachineState] = None,
 ) -> Dict[str, Any]:
-    """为自带重算桥接器的算法包构造下一轮标准 update。
-
-    此模式不依赖平台本地 ``src`` 状态机。算法包以自身保存的上一代
-    MoveList、本轮通知和删除尾段为事实源，恢复当前设备快照。
-    """
-    update = _merge_algorithm_update(runtime.current_update, new_round_update)
-    update["CurrentTime"] = float(requested_time)
+    """用平台物理快照为算法包构造下一轮标准 update。"""
+    update = merge_algorithm_update(runtime.current_update, new_round_update)
+    apply_machine_state_to_update(
+        update,
+        projected_state if projected_state is not None else runtime.state,
+        requested_time,
+    )
     update["MoveStates"] = [
         deepcopy(dict(notification))
         for notification in move_states
     ]
-    _apply_packaged_material_projection(
-        update,
-        runtime.current_plan,
-        requested_time,
-        move_states,
-    )
     _apply_packaged_running_resource_times(
         update,
         runtime.current_plan,
@@ -1177,135 +1110,6 @@ def _build_packaged_algorithm_recompute_update(
     return update
 
 
-def _parallel_value(values: Sequence[Any], index: int) -> Any:
-    """按索引读取并行协议数组，越界时返回空值。"""
-    return values[index] if index < len(values) else None
-
-
-def _apply_packaged_material_projection(
-    update: Dict[str, Any],
-    moves: Sequence[Mapping[str, Any]],
-    current_time: float,
-    move_states: Sequence[Mapping[str, Any]],
-) -> None:
-    """仅根据已完成搬运把物料位置投影到本轮企业快照。
-
-    算法包会自行回放全部业务状态；平台这里只补齐运行中动作校验所需的
-    ``CurrentModuleName/SlotID/StepID``。仍 Running 的动作不落完成效果，
-    从而让快照保持在动作开始态。
-    """
-    running_ids = {
-        int(item["MoveID"])
-        for item in move_states
-        if isinstance(item.get("MoveID"), int)
-    }
-    materials = {
-        str(material.get("ID")): material
-        for material in (update.get("Materials") or [])
-        if isinstance(material, dict) and material.get("ID") is not None
-    }
-    completed_moves = sorted(
-        (
-            move
-            for move in moves
-            if (
-                isinstance(move.get("MoveID"), int)
-                and int(move["MoveID"]) not in running_ids
-                and float(move.get("StartTime") or 0.0)
-                < float(current_time) - TIME_TOLERANCE
-                and float(move.get("EndTime") or move.get("StartTime") or 0.0)
-                <= float(current_time) + TIME_TOLERANCE
-            )
-        ),
-        key=lambda move: (
-            float(move.get("EndTime") or move.get("StartTime") or 0.0),
-            int(move.get("MoveID") or 0),
-        ),
-    )
-
-    def write_location(
-        material_id: Any,
-        module_name: Any,
-        slot_id: Any,
-        step_id: Any,
-        *,
-        process_completed: bool = False,
-    ) -> None:
-        """写入单片物料的当前协议位置与工艺完成标志。"""
-        material = materials.get(str(material_id))
-        if material is None or not module_name:
-            return
-        material["CurrentModuleName"] = str(module_name)
-        if slot_id not in (None, ""):
-            material["SlotID"] = int(slot_id)
-        if step_id not in (None, ""):
-            material["StepID"] = int(step_id)
-        material["ProcessCompleted"] = bool(process_completed)
-
-    for move in completed_moves:
-        move_type = int(move.get("MoveType", -1))
-        module_name = str(move.get("ModuleName") or "")
-        step_ids = list(move.get("StepIDList") or [])
-        if move_type == PICK_MOVE:
-            material_ids = list(move.get("MatIDList") or [])
-            robot_slots = list(move.get("RobotSlotList") or [])
-            for index, material_id in enumerate(material_ids):
-                write_location(
-                    material_id,
-                    module_name,
-                    _parallel_value(robot_slots, index),
-                    _parallel_value(step_ids, index),
-                )
-        elif move_type == PLACE_MOVE:
-            material_ids = list(move.get("MatIDList") or [])
-            station_names = list(move.get("DestStationList") or [])
-            station_slots = list(move.get("DestSlotList") or [])
-            for index, material_id in enumerate(material_ids):
-                write_location(
-                    material_id,
-                    _parallel_value(station_names, index),
-                    _parallel_value(station_slots, index),
-                    _parallel_value(step_ids, index),
-                )
-        elif move_type == SWAP_MOVE:
-            station_names = list(move.get("StationList") or [])
-            send_materials = list(move.get("SendMatList") or [])
-            receive_station_slots = list(move.get("StnRecvSlotList") or [])
-            for index, material_id in enumerate(send_materials):
-                write_location(
-                    material_id,
-                    (
-                        _parallel_value(station_names, index)
-                        or _parallel_value(station_names, 0)
-                    ),
-                    _parallel_value(receive_station_slots, index),
-                    _parallel_value(step_ids, index),
-                )
-            receive_materials = list(move.get("RecvMatList") or [])
-            receive_robot_slots = list(move.get("RecvSlotList") or [])
-            for index, material_id in enumerate(receive_materials):
-                write_location(
-                    material_id,
-                    module_name,
-                    _parallel_value(receive_robot_slots, index),
-                    _parallel_value(
-                        step_ids,
-                        index + len(send_materials),
-                    ),
-                )
-        elif move_type == 9:
-            material_ids = list(move.get("MatIDList") or [])
-            station_slots = list(move.get("SlotList") or [])
-            for index, material_id in enumerate(material_ids):
-                write_location(
-                    material_id,
-                    module_name,
-                    _parallel_value(station_slots, index),
-                    _parallel_value(step_ids, index),
-                    process_completed=True,
-                )
-
-
 def _apply_packaged_running_resource_times(
     update: Dict[str, Any],
     moves: Sequence[Mapping[str, Any]],
@@ -1316,7 +1120,7 @@ def _apply_packaged_running_resource_times(
 
     标准算法包会用 ``MoveStates`` 恢复动作语义，同时要求关联 Robot/Station
     的 ``TimeToAvailable`` 作为运行中动作结束时间证据。这里只写协议资源
-    占用，不解释或复制本地状态机。
+    占用；物料和槽位状态由平台状态记录器统一提供。
     """
     started_ids = {
         int(item["MoveID"])
@@ -1436,6 +1240,25 @@ def _planned_event_groups(moves: Sequence[Mapping[str, Any]]) -> List[Dict[str, 
     return ordered
 
 
+def _planned_start_events(
+    group: Mapping[str, Any],
+) -> Iterator[Tuple[str, float, Dict[str, Any]]]:
+    """按 MoveID 依次产生开始事件，并让零时长动作在下一动作开始前完成。"""
+    same_finishes = {
+        int(notification["MoveID"]): (event_time, notification)
+        for event_time, notification in group["sameFinishes"]
+    }
+    for event_time, notification in group["starts"]:
+        move_id = int(notification["MoveID"])
+        yield "start", event_time, notification
+        same_finish = same_finishes.pop(move_id, None)
+        if same_finish is not None:
+            yield "finish", same_finish[0], same_finish[1]
+    for event_time, notification in group["sameFinishes"]:
+        if int(notification["MoveID"]) in same_finishes:
+            yield "finish", event_time, notification
+
+
 def advance_packaged_algorithm_to_update(
     runtime: PackagedAlgorithmRuntime,
     cutoff: float,
@@ -1463,20 +1286,29 @@ def advance_packaged_algorithm_to_update(
             ):
                 notifications.append(deepcopy(notification))
                 finished.add(move_id)
-        for event_time, notification in group["starts"]:
-            move_id = int(notification["MoveID"])
-            if event_time < cutoff - TIME_TOLERANCE and move_id not in started:
-                notifications.append(deepcopy(notification))
-                started.add(move_id)
-        for event_time, notification in group["sameFinishes"]:
+        for event_kind, event_time, notification in _planned_start_events(group):
             move_id = int(notification["MoveID"])
             if (
-                event_time <= cutoff + TIME_TOLERANCE
+                event_kind == "start"
+                and event_time < cutoff - TIME_TOLERANCE
+                and move_id not in started
+            ):
+                notifications.append(deepcopy(notification))
+                started.add(move_id)
+            elif (
+                event_kind == "finish"
+                and event_time <= cutoff + TIME_TOLERANCE
                 and move_id in started
                 and move_id not in finished
             ):
                 notifications.append(deepcopy(notification))
                 finished.add(move_id)
+    for notification in notifications:
+        runtime.update_move_state(
+            notification,
+            snapshot=False,
+            track_reservations=False,
+        )
     runtime.advance_to(cutoff)
     running_ids = started - finished
     return [
@@ -1860,14 +1692,17 @@ def advance_to_algorithm_update(
                 and move_id not in finished
             ):
                 apply_notification(notification)
-        for event_time, notification in group["starts"]:
-            move_id = int(notification["MoveID"])
-            if event_time < cutoff - TIME_TOLERANCE and move_id not in started:
-                apply_notification(notification)
-        for event_time, notification in group["sameFinishes"]:
+        for event_kind, event_time, notification in _planned_start_events(group):
             move_id = int(notification["MoveID"])
             if (
-                event_time <= cutoff + TIME_TOLERANCE
+                event_kind == "start"
+                and event_time < cutoff - TIME_TOLERANCE
+                and move_id not in started
+            ):
+                apply_notification(notification)
+            elif (
+                event_kind == "finish"
+                and event_time <= cutoff + TIME_TOLERANCE
                 and move_id in started
                 and move_id not in finished
             ):
@@ -1935,13 +1770,20 @@ def advance_to_recompute(
             move_id = int(notification["MoveID"])
             if event_time <= cutoff + TIME_TOLERANCE and move_id in started and move_id not in finished:
                 apply_notification(notification)
-        for event_time, notification in group["starts"]:
+        for event_kind, event_time, notification in _planned_start_events(group):
             move_id = int(notification["MoveID"])
-            if event_time < cutoff - TIME_TOLERANCE and move_id not in started:
+            if (
+                event_kind == "start"
+                and event_time < cutoff - TIME_TOLERANCE
+                and move_id not in started
+            ):
                 apply_notification(notification)
-        for event_time, notification in group["sameFinishes"]:
-            move_id = int(notification["MoveID"])
-            if event_time <= cutoff + TIME_TOLERANCE and move_id in started and move_id not in finished:
+            elif (
+                event_kind == "finish"
+                and event_time <= cutoff + TIME_TOLERANCE
+                and move_id in started
+                and move_id not in finished
+            ):
                 apply_notification(notification)
 
     required = _required_recovery_ids(
@@ -1966,13 +1808,16 @@ def advance_to_recompute(
             if move_id in required and move_id in started and move_id not in finished:
                 apply_notification(notification)
                 recovery_end = max(recovery_end, group_time)
-        for _, notification in group["starts"]:
+        for event_kind, _, notification in _planned_start_events(group):
             move_id = int(notification["MoveID"])
-            if move_id in required and move_id not in started:
+            if event_kind == "start" and move_id in required and move_id not in started:
                 apply_notification(notification)
-        for _, notification in group["sameFinishes"]:
-            move_id = int(notification["MoveID"])
-            if move_id in required and move_id in started and move_id not in finished:
+            elif (
+                event_kind == "finish"
+                and move_id in required
+                and move_id in started
+                and move_id not in finished
+            ):
                 apply_notification(notification)
                 recovery_end = max(recovery_end, group_time)
         if required.issubset(finished):
@@ -2109,13 +1954,14 @@ def _execute_standard_algorithm(
                 output,
                 skip_validation=skip_validation,
             )
-            state_source = "src.validation.state.MachineState"
+            state_source = "realtime_scheduler.move_validation.MachineState"
         else:
             runtime = PackagedAlgorithmRuntime(
                 prepared_first_update,
                 output,
+                skip_validation=skip_validation,
             )
-            state_source = "algorithm-package.recompute-bridge"
+            state_source = "realtime_scheduler.move_validation.MachineState"
         reproduction.add("AlgOutput", output)
         summaries.append({
             "index": 1,
@@ -2160,14 +2006,10 @@ def _execute_standard_algorithm(
                     requested_time,
                 )
             released_ids, empty_ports = _release_finished_load_ports(runtime, build_state)
-            if uses_full_platform_runtime:
-                projected_state, committed_moves = runtime.project_started_moves(
-                    requested_time,
-                    released_ids,
-                )
-            else:
-                projected_state = None
-                committed_moves = runtime.committed_moves(requested_time)
+            projected_state, committed_moves = runtime.project_started_moves(
+                requested_time,
+                released_ids,
+            )
             for notification in notifications:
                 event_time = (
                     notification.get("EndTime")
@@ -2196,7 +2038,7 @@ def _execute_standard_algorithm(
                 build_state,
             )
             if uses_full_platform_runtime:
-                reused_slot_material_ids = _release_reused_source_slots(
+                reused_slot_material_ids = release_reused_source_slots(
                     projected_state,
                     new_round_update,
                 )
@@ -2224,6 +2066,7 @@ def _execute_standard_algorithm(
                     new_round_update,
                     requested_time,
                     notifications,
+                    projected_state=projected_state,
                 )
             update_snapshots.append(deepcopy(update))
             reproduction.add(
@@ -2253,6 +2096,7 @@ def _execute_standard_algorithm(
                     requested_time,
                     reason,
                     committed_moves,
+                    initial_state=projected_state,
                 )
             reproduction.add("AlgOutput", output, requested_time)
             summaries.append({
@@ -2979,24 +2823,27 @@ def robot_default_slots(robot: Mapping[str, Any]) -> List[int]:
     return explicit or available[:1]
 
 
-def _project_robot_arm_to_slot(
+def _project_robot_arm_to_slots(
     arm_name: str,
     source_arm: Mapping[str, Any],
-    slot_id: int,
+    slot_ids: Sequence[int],
 ) -> Dict[str, Any]:
-    """复制一个 Arm 并将其规范为独占指定 RobotSlot。"""
+    """复制一个物理 Arm，并保留所选的一个或多个 RobotSlot。"""
     arm = deepcopy(dict(source_arm))
     arm["Name"] = arm_name
     arm["IsEnable"] = True
-    arm["SlotIDs"] = [slot_id]
+    selected = sorted({int(slot_id) for slot_id in slot_ids})
+    arm["SlotIDs"] = selected
     slot_station_map = arm.get("SlotsStationMap")
     if isinstance(slot_station_map, dict):
         for station_name, station_slots in list(slot_station_map.items()):
             if not isinstance(station_slots, Mapping) or not station_slots:
                 continue
-            preferred = station_slots.get(str(slot_id))
-            template = preferred if preferred is not None else next(iter(station_slots.values()))
-            slot_station_map[station_name] = {str(slot_id): deepcopy(template)}
+            fallback = next(iter(station_slots.values()))
+            slot_station_map[station_name] = {
+                str(slot_id): deepcopy(station_slots.get(str(slot_id), fallback))
+                for slot_id in selected
+            }
     return arm
 
 
@@ -3063,8 +2910,9 @@ def apply_robot_slot_selection(
 ) -> Dict[str, List[int]]:
     """将 Arm 槽位选择投影到运行时 ``ArmInfo`` 并返回规范化结果。
 
-    每个启用 Arm 独占一个递增 SlotID。投影只调整 ``Capacity`` 与 ``ArmInfo``，不会
-    创建 Robot.Slot，也不会改写与 Arm 数量无关的 ``CanMultiTrans``。
+    同一原始 Arm 的多个 SlotID 保持在同一个 Arm 下，因此双腔设备的一条物理臂可继续
+    同时承载两片晶圆。投影只调整 ``Capacity`` 与 ``ArmInfo``，不会创建 Robot.Slot，
+    也不会改写与 Arm 数量无关的 ``CanMultiTrans``。
     """
     normalized = normalize_robot_slot_selection(device_data, raw_selection)
     robots = device_data.get("Robots")
@@ -3086,25 +2934,26 @@ def apply_robot_slot_selection(
         if not source_arms:
             continue
         projected_arms: Dict[str, Dict[str, Any]] = {}
-        for slot_id in selected:
-            matched = next((
-                (arm_name, arm)
-                for arm_name, arm in source_arms
-                if slot_id in {
-                    int(value)
-                    for value in (arm.get("SlotIDs") or [])
-                    if isinstance(value, int) and not isinstance(value, bool)
-                }
-            ), None)
-            if matched is None:
-                arm_name = _generated_robot_arm_name(
-                    [*arm_info.keys(), *projected_arms.keys()], slot_id,
-                )
-                source_arm = source_arms[0][1]
-            else:
-                arm_name, source_arm = matched
-            projected_arms[arm_name] = _project_robot_arm_to_slot(
-                arm_name, source_arm, slot_id,
+        unmatched_slots = set(selected)
+        for arm_name, source_arm in source_arms:
+            source_slots = {
+                int(value)
+                for value in (source_arm.get("SlotIDs") or [])
+                if isinstance(value, int) and not isinstance(value, bool)
+            }
+            retained_slots = sorted(unmatched_slots.intersection(source_slots))
+            if not retained_slots:
+                continue
+            projected_arms[arm_name] = _project_robot_arm_to_slots(
+                arm_name, source_arm, retained_slots,
+            )
+            unmatched_slots.difference_update(retained_slots)
+        for slot_id in sorted(unmatched_slots):
+            arm_name = _generated_robot_arm_name(
+                [*arm_info.keys(), *projected_arms.keys()], slot_id,
+            )
+            projected_arms[arm_name] = _project_robot_arm_to_slots(
+                arm_name, source_arms[0][1], [slot_id],
             )
         robot["ArmInfo"] = projected_arms
     return normalized

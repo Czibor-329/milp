@@ -103,6 +103,20 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.recording = _device_recording()
         self.device = extract_init_data(self.recording)
 
+    def test_zero_duration_move_finishes_before_next_same_time_move_starts(self) -> None:
+        """零时长动作应在同刻更大 MoveID 的动作开始前完成。"""
+        groups = config_server._planned_event_groups([
+            {"MoveID": 59, "MoveType": 7, "StartTime": 103.65, "EndTime": 103.65},
+            {"MoveID": 60, "MoveType": 6, "StartTime": 103.65, "EndTime": 103.78},
+        ])
+        group = next(item for item in groups if abs(item["time"] - 103.65) < 1e-9)
+
+        events = [
+            (event_kind, notification["MoveID"])
+            for event_kind, _, notification in config_server._planned_start_events(group)
+        ]
+        self.assertEqual([("start", 59), ("finish", 59), ("start", 60)], events)
+
     def test_extract_init_data_from_recording(self) -> None:
         """input_data 录制数组应只提取 AlgInit 的设备字段。"""
         self.assertIn("Stations", self.device)
@@ -150,12 +164,14 @@ class ConfigEditorServerTests(unittest.TestCase):
             "设备配置分类",
             "机器手槽位",
             'id="robotSlotList"',
-            'data-robot-slot-count="1"',
-            'data-robot-slot-count="2"',
+            'data-robot-arm-count="1"',
+            'data-robot-arm-count="2"',
             'data-robot-slot-default=',
             "恢复默认",
             "/robot-slots",
             "ArmInfo",
+            "parseDeviceFileText",
+            "JSON.parse(`[${records}]`)",
         ):
             self.assertIn(marker, source)
 
@@ -224,6 +240,42 @@ class ConfigEditorServerTests(unittest.TestCase):
                 original_robot["ArmInfo"],
                 restored_device["Robots"][robot_name]["ArmInfo"],
             )
+
+    def test_multi_slot_arm_is_not_split_when_projecting_dual_chamber_robot(self) -> None:
+        """双腔设备的一条物理 Arm 可保留两个槽位，不能被投影成两条假 Arm。"""
+        device = {
+            "Robots": {
+                "VACRobot": {
+                    "Capacity": 4,
+                    "CanMultiTrans": False,
+                    "ArmInfo": {
+                        "ArmA": {"Name": "ArmA", "IsEnable": True, "SlotIDs": [1, 2]},
+                        "ArmB": {"Name": "ArmB", "IsEnable": True, "SlotIDs": [3, 4]},
+                    },
+                },
+            },
+        }
+        single_arm = json.loads(json.dumps(device))
+        config_server.apply_robot_slot_selection(single_arm, {"VACRobot": [1, 2]})
+        self.assertEqual(2, single_arm["Robots"]["VACRobot"]["Capacity"])
+        self.assertEqual(
+            {"ArmA": [1, 2]},
+            {
+                name: arm["SlotIDs"]
+                for name, arm in single_arm["Robots"]["VACRobot"]["ArmInfo"].items()
+            },
+        )
+
+        dual_arm = json.loads(json.dumps(device))
+        config_server.apply_robot_slot_selection(dual_arm, {"VACRobot": [1, 2, 3, 4]})
+        self.assertEqual(4, dual_arm["Robots"]["VACRobot"]["Capacity"])
+        self.assertEqual(
+            {"ArmA": [1, 2], "ArmB": [3, 4]},
+            {
+                name: arm["SlotIDs"]
+                for name, arm in dual_arm["Robots"]["VACRobot"]["ArmInfo"].items()
+            },
+        )
 
     def test_workspace_robot_slot_selection_is_persisted_and_used_by_batch_plan(self) -> None:
         """设备级槽位设置应持久保存，并进入批量计划与 Baseline 指纹输入。"""
@@ -894,6 +946,28 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual(12, process_visit["QTimeLimit"])
         self.assertEqual(34, process_visit["ResidencyConstraint"])
 
+    def test_route_default_slot_expands_for_dual_chamber_and_multi_slot_robot(self) -> None:
+        """手动 Route 的默认槽位应按 PM 容量和 Arm 手槽容量一并展开。"""
+        route = {
+            "name": "TwinRoute",
+            "stages": [
+                {"stepId": 0, "needProcess": False, "visits": [{"stationName": "LP1", "slotIds": "1"}]},
+                {"stepId": 1, "needProcess": False, "visits": [{"stationName": "VACRobot", "slotIds": "1"}]},
+                {"stepId": 2, "needProcess": True, "visits": [{"stationName": "PM1", "slotIds": "1", "processRecipe": "TwinRecipe"}]},
+                {"stepId": 3, "needProcess": False, "visits": [{"stationName": "VACRobot", "slotIds": "1"}]},
+                {"stepId": 4, "needProcess": False, "visits": [{"stationName": "LP1", "slotIds": "1"}]},
+            ],
+        }
+        built = build_route(
+            route,
+            {"TwinRecipe": {"name": "TwinRecipe"}},
+            {},
+            {"VACRobot"},
+            {"VACRobot": [1, 2, 3, 4], "PM1": [1, 2]},
+        )
+        self.assertEqual([1, 2, 3, 4], built["RouteSteps"][1]["Visits"][0]["SlotID"])
+        self.assertEqual([1, 2], built["RouteSteps"][2]["Visits"][0]["SlotID"])
+
     def test_route_rejects_buffer_option_outside_interface_range(self) -> None:
         """BufferOption 只接受算法接口定义的 0~4 整数。"""
         for invalid in (-1, 5, 1.5, "bad"):
@@ -1287,6 +1361,25 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("function isCleaningProcess(raw)", viewer)
         self.assertIn("explicitlyEmpty || cleanMetadata", viewer)
         self.assertIn("if (isCleaningProcess(bar.rec.raw))", viewer)
+
+    def test_gantt_keeps_and_renders_zero_duration_moves(self) -> None:
+        """甘特图应保留零时长动作，并将其绘制为边界内可点击的最小宽度标记。"""
+        viewer = (
+            ROOT / "realtime_scheduler" / "frontend" / "movelist_gantt_viewer.html"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("rec.end >= rec.start", viewer)
+        self.assertNotIn(
+            "let records = dataset.records.filter((rec) => Number.isFinite(rec.start) "
+            "&& Number.isFinite(rec.end) && rec.end > rec.start + 1e-9);",
+            viewer,
+        )
+        self.assertIn("const ZERO_DURATION_MARKER_WIDTH = 3;", viewer)
+        self.assertIn(
+            "Math.abs(bar.end - bar.start) <= ZERO_DURATION_EPSILON_SECONDS",
+            viewer,
+        )
+        self.assertIn("markerCenter - w / 2", viewer)
 
     def test_result_preview_and_group_analysis_use_main_area(self) -> None:
         """结果预览应保持简洁，并提供独立的测试组分析入口。"""

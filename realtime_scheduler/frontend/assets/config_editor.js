@@ -13,6 +13,7 @@ __export(route_editor_logic_exports, {
   compareProfiles: () => compareProfiles,
   differenceFields: () => differenceFields,
   minimumResidencyConstraint: () => minimumResidencyConstraint,
+  normalizeStageProcessRecipes: () => normalizeStageProcessRecipes,
   processProfile: () => processProfile,
   processRecipeName: () => processRecipeName,
   replaceCandidates: () => replaceCandidates,
@@ -142,6 +143,26 @@ function selectReferencedRoutes(routes, rounds) {
 function processRecipeName(value, fallback) {
   const explicitName = String(value ?? "").trim();
   return explicitName || String(fallback ?? "").trim();
+}
+function normalizeStageProcessRecipes(stage, recipeName, normalizeVisit2 = (value) => value) {
+  const needsProcess = stage.needProcess === true;
+  let changed = false;
+  for (const visit of stage.visits || []) {
+    normalizeVisit2(visit);
+    const normalizedRecipe = needsProcess ? processRecipeName(visit.processRecipe, recipeName) : "";
+    if (visit.processRecipe !== normalizedRecipe) {
+      visit.processRecipe = normalizedRecipe;
+      changed = true;
+    }
+    if (needsProcess) {
+      const normalizedRecipeTime = Number(visit.processTime);
+      if (visit.recipeTime !== normalizedRecipeTime) {
+        visit.recipeTime = normalizedRecipeTime;
+        changed = true;
+      }
+    }
+  }
+  return changed;
 }
 
 // src/api_client.ts
@@ -471,8 +492,21 @@ function materialIds(move, field = "MatIDList") {
 function firstStation(move, field) {
   return String(listValue(move[field])[0] ?? "");
 }
-function isRobotName(name) {
-  return /^(ATR|VTR|TM\d*|ROBOT)/i.test(name);
+function isRobotName(name, configuredRobotNames) {
+  return Boolean(configuredRobotNames?.has(name)) || /^(ATR|VTR|ATM|VTM|VAC|TM\d*|ROBOT)/i.test(name);
+}
+function robotEnvironment(name, definition = {}) {
+  const type = String(definition.Type ?? "");
+  if (/ATM|ATR|大气/i.test(type) || /^(ATR|ATM)/i.test(name)) return "atmosphere";
+  return "vacuum";
+}
+function robotCapacity(definition, holdingCount = 0) {
+  const declaredCapacity = finiteNumber(definition.Capacity, 0);
+  const armSlotCount = Object.values(definition.ArmInfo ?? {}).reduce((maximum, arm) => {
+    if (!arm || typeof arm !== "object") return maximum;
+    return Math.max(maximum, listValue(arm.SlotIDs).length);
+  }, 0);
+  return Math.max(1, declaredCapacity, armSlotCount, holdingCount);
 }
 function isDummyPortName(name) {
   return /DUMMY/i.test(name) && /PORT/i.test(name);
@@ -515,9 +549,10 @@ function normalizeMoves(moves) {
     };
   }).sort((left, right) => left.StartTime - right.StartTime || left.EndTime - right.EndTime || left.MoveID - right.MoveID);
 }
-function collectModuleDefinitions(moves, device) {
+function collectModuleDefinitions(moves, device, configuredRobotNames = /* @__PURE__ */ new Set()) {
   const modules = /* @__PURE__ */ new Map();
   const stationDefinitions = device?.Stations ?? {};
+  const hasConfiguredStations = Object.keys(stationDefinitions).length > 0;
   for (const move of moves) {
     const candidates = [
       move.ModuleName,
@@ -526,7 +561,8 @@ function collectModuleDefinitions(moves, device) {
       ...listValue(move.StationList)
     ].map(String).filter(Boolean);
     for (const name of candidates) {
-      if (!isRobotName(name) && !modules.has(name)) {
+      if (hasConfiguredStations && !stationDefinitions[name]) continue;
+      if (!isRobotName(name, configuredRobotNames) && !modules.has(name)) {
         modules.set(name, { type: String(stationDefinitions[name]?.Type ?? "") });
       }
     }
@@ -534,9 +570,10 @@ function collectModuleDefinitions(moves, device) {
   return modules;
 }
 function collectRobotNames(moves, device) {
-  const names = new Set(Object.keys(device?.Robots ?? {}));
+  const configuredRobotNames = new Set(Object.keys(device?.Robots ?? {}));
+  const names = new Set(configuredRobotNames);
   for (const move of moves) {
-    if (isRobotName(move.ModuleName)) names.add(move.ModuleName);
+    if (isRobotName(move.ModuleName, configuredRobotNames)) names.add(move.ModuleName);
     const robot = String(move.Robot ?? "");
     if (robot) names.add(robot);
   }
@@ -797,8 +834,9 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
   const records = normalizeMoves(moves);
   const endTime = records.reduce((maximum, move) => Math.max(maximum, move.EndTime), 0);
   const time = Math.max(0, Math.min(finiteNumber(requestedTime), endTime));
-  const definitions = collectModuleDefinitions(records, device);
   const robotNames = collectRobotNames(records, device);
+  const robotNameSet = new Set(robotNames);
+  const definitions = collectModuleDefinitions(records, device, robotNameSet);
   const initialLocations = initialMaterialLocations(records);
   const locations = new Map(initialLocations);
   const doorStates = /* @__PURE__ */ new Map();
@@ -852,11 +890,11 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
   }
   const robotTargets = /* @__PURE__ */ new Map();
   for (const move of activeMoves) {
-    if (isRobotName(move.ModuleName)) robotTargets.set(move.ModuleName, activeTarget(move));
+    if (isRobotName(move.ModuleName, robotNameSet)) robotTargets.set(move.ModuleName, activeTarget(move));
   }
   const lastRobotTargets = /* @__PURE__ */ new Map();
   for (const move of records) {
-    if (move.StartTime > time || !isRobotName(move.ModuleName)) continue;
+    if (move.StartTime > time || !isRobotName(move.ModuleName, robotNameSet)) continue;
     const target = activeTarget(move);
     if (target) lastRobotTargets.set(move.ModuleName, target);
   }
@@ -900,10 +938,15 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
   }).sort((left, right) => naturalCompare(left.name, right.name));
   const robots = robotNames.map((name) => {
     const move = activeMoves.find((record) => record.ModuleName === name);
+    const definition = device?.Robots?.[name] ?? {};
+    const wafers = wafersByLocation.get(name) ?? [];
     return {
       name,
-      wafers: wafersByLocation.get(name) ?? [],
-      processedWafers: (wafersByLocation.get(name) ?? []).filter((wafer) => processedMaterials.has(wafer)),
+      type: String(definition.Type ?? ""),
+      capacity: robotCapacity(definition, wafers.length),
+      environment: robotEnvironment(name, definition),
+      wafers,
+      processedWafers: wafers.filter((wafer) => processedMaterials.has(wafer)),
       busy: Boolean(move),
       source: move ? firstStation(move, "SrcStationList") : "",
       target: robotTargets.get(name) ?? lastRobotTargets.get(name) ?? "",
@@ -988,10 +1031,14 @@ function candidateDestinations(decision) {
 function snapshotWithCandidateModules(snapshot, decision, device) {
   const modules = [...snapshot.modules];
   const knownNames = new Set(modules.map((module) => module.name));
+  const configuredRobotNames = new Set(Object.keys(device?.Robots ?? {}));
+  const stationDefinitions = device?.Stations ?? {};
+  const hasConfiguredStations = Object.keys(stationDefinitions).length > 0;
   for (const candidate of decision?.candidates ?? []) {
     const name = candidate.destination;
-    if (!name || isRobotName(name) || knownNames.has(name)) continue;
-    const type = String(device?.Stations?.[name]?.Type ?? "");
+    if (!name || isRobotName(name, configuredRobotNames) || knownNames.has(name)) continue;
+    if (hasConfiguredStations && !stationDefinitions[name]) continue;
+    const type = String(stationDefinitions[name]?.Type ?? "");
     modules.push({
       name,
       type,
@@ -1017,8 +1064,9 @@ function snapshotWithCandidateModules(snapshot, decision, device) {
 function snapshotWithFullDeviceModules(snapshot, device) {
   const modules = [...snapshot.modules];
   const knownNames = new Set(modules.map((module) => module.name));
+  const configuredRobotNames = new Set(Object.keys(device?.Robots ?? {}));
   for (const [name, definition] of Object.entries(device?.Stations ?? {})) {
-    if (knownNames.has(name) || isRobotName(name)) continue;
+    if (knownNames.has(name) || isRobotName(name, configuredRobotNames)) continue;
     const type = String(definition?.Type ?? "");
     if (isLoadPortName(name, type)) continue;
     modules.push({
@@ -1111,7 +1159,7 @@ function renderModule(module, role, candidate) {
   const bodyMarkup = role === "process" ? `<div class="equipment-process-shell"><div class="equipment-body">${loadLockLayers}</div></div>` : `<div class="equipment-body">${loadLockLayers}</div>`;
   const article = `
     <article class="equipment-card equipment-${role} status-${module.status} door-${module.door} ${module.loadLockPhase ? `loadlock-${module.loadLockPhase}` : ""} ${module.isRobotTarget ? "is-target" : ""} ${candidate ? "is-candidate-destination" : ""} ${candidate?.selected ? "is-model-selected" : ""}" style="--module-progress:${Math.round(module.progress * 100)}%;--loadlock-atmosphere:${Math.max(0, Math.min(100, atmosphereLevel)).toFixed(1)}%;--loadlock-atmosphere-ratio:${Math.max(0, Math.min(1, atmosphereLevel / 100)).toFixed(3)}" aria-label="${escapeHtml(`${accessibleStatus}${candidateLabel ? `\uFF0C${candidateLabel}` : ""}`)}">
-      ${bodyMarkup}
+       ${bodyMarkup}
       <div class="chamber-doors" aria-hidden="true">${role === "lock" ? '<i class="loadlock-door loadlock-door-vacuum"></i><i class="loadlock-door loadlock-door-atmosphere"></i>' : doors}</div>
     </article>`;
   if (role === "process" || role === "auxiliary" || role === "lock") {
@@ -1122,16 +1170,25 @@ function renderModule(module, role, candidate) {
   }
   return article;
 }
+var ROBOT_DOUBLE_HOLD_CAPACITY = 2;
+var ROBOT_DISPLAY_WAFER_LIMIT = 2;
 function renderRobotHub(robot, environment, angleDegrees) {
-  const wafer = robot.wafers[0] ? renderWaferToken(robot.wafers[0], 0, robot.processedWafers.includes(robot.wafers[0])) : "";
+  const visibleWafers = robot.wafers.slice(0, ROBOT_DISPLAY_WAFER_LIMIT);
+  const capacityLabel = robot.capacity >= ROBOT_DOUBLE_HOLD_CAPACITY ? "\u53CC\u7247\u673A\u68B0\u624B" : "\u5355\u69FD\u673A\u68B0\u624B";
+  const holdingLabel = robot.wafers.length ? `\uFF0C\u6301\u6709 ${robot.wafers.length} \u7247\u6676\u5706 ${robot.wafers.join("\u3001")}` : "\uFF0C\u69FD\u4F4D\u4E3A\u7A7A";
+  const waferMarkup = visibleWafers.map((wafer, index) => `
+    <span class="robot-held-wafer robot-held-wafer-${index}">${renderWaferToken(wafer, 0, robot.processedWafers.includes(wafer))}</span>`).join("");
+  const overflow = robot.wafers.length > ROBOT_DISPLAY_WAFER_LIMIT ? `<span class="robot-held-overflow">+${robot.wafers.length - ROBOT_DISPLAY_WAFER_LIMIT}</span>` : "";
   return `
-    <article class="robot-hub robot-hub-${environment} ${robot.busy ? "is-busy" : ""}" style="--robot-arm-angle:${angleDegrees.toFixed(1)}deg" aria-label="${escapeHtml(robot.name)}\uFF0C\u5355\u69FD\u673A\u68B0\u624B\uFF0C${robot.busy ? "\u5DE5\u4F5C\u4E2D" : "\u5F85\u547D"}${robot.wafers[0] ? `\uFF0C\u6301\u6709\u6676\u5706 ${robot.wafers[0]}` : "\uFF0C\u69FD\u4F4D\u4E3A\u7A7A"}">
-      <span class="robot-environment-badge">${environment === "vacuum" ? "VAC" : "ATM"}</span>
+    <article class="robot-hub robot-hub-${environment} ${robot.busy ? "is-busy" : ""}" style="--robot-arm-angle:${angleDegrees.toFixed(1)}deg" aria-label="${escapeHtml(robot.name)}\uFF0C${capacityLabel}\uFF0C${robot.busy ? "\u5DE5\u4F5C\u4E2D" : "\u5F85\u547D"}${holdingLabel}">
+      <span class="robot-environment-badge">${escapeHtml(robot.name)}</span>
       <div class="robot-mechanism" aria-hidden="true">
         <span class="robot-base"><i></i></span>
         <span class="robot-arm">
           <i class="robot-arm-beam"></i>
-          <span class="robot-end-effector ${wafer ? "is-occupied" : "is-empty"}">${wafer}</span>
+          <span class="robot-end-effector ${visibleWafers.length ? "is-occupied" : "is-empty"}">
+            <span class="robot-held-wafers">${waferMarkup}${overflow}</span>
+          </span>
         </span>
       </div>
     </article>`;
@@ -1305,13 +1362,30 @@ function interpolatedRobotAngle(start, end, progress) {
   if (delta < -Math.PI) delta += Math.PI * 2;
   return start + delta * Math.max(0, Math.min(1, progress));
 }
-function robotLoadLockPortal(robotName, moduleName, modulePositions) {
+function robotLoadLockPortal(robotName, moduleName, modulePositions, environment) {
   const normalizedModule = moduleName.trim().toUpperCase();
-  const isAtmosphereRobot = /^(ATR|ATM)/i.test(robotName);
-  const isVacuumRobot = /^(VTR|VTM)/i.test(robotName);
+  const isAtmosphereRobot = environment ? environment === "atmosphere" : /^(ATR|ATM)/i.test(robotName);
+  const isVacuumRobot = environment ? environment === "vacuum" : /^(VTR|VTM|VAC)/i.test(robotName);
   if (!isAtmosphereRobot && !isVacuumRobot) return moduleName;
   const preferred = ["LA", "LC"].includes(normalizedModule) ? isAtmosphereRobot ? "LC" : "LA" : ["LB", "LD"].includes(normalizedModule) ? isAtmosphereRobot ? "LD" : "LB" : moduleName;
   return modulePositions.has(preferred) ? preferred : moduleName;
+}
+function robotTargetTopologyPosition(robot, moduleName, modulePositions) {
+  const normalizedModule = moduleName.trim().toUpperCase();
+  if (robot.environment === "vacuum" && ["LA", "LB"].includes(normalizedModule)) {
+    const leftLoadLock = modulePositions.get("LA");
+    const rightLoadLock = modulePositions.get("LB");
+    if (leftLoadLock && rightLoadLock) {
+      return {
+        leftPercent: (leftLoadLock.leftPercent + rightLoadLock.leftPercent) / 2,
+        topPixels: (leftLoadLock.topPixels + rightLoadLock.topPixels) / 2,
+        widthPixels: 0,
+        heightPixels: 0
+      };
+    }
+  }
+  const portal = robotLoadLockPortal(robot.name, moduleName, modulePositions, robot.environment);
+  return modulePositions.get(portal);
 }
 function selectedDecisionCandidate(decision) {
   if (!decision) return null;
@@ -1334,7 +1408,7 @@ function renderEquipmentTopology(snapshot, decision, hiddenFilters) {
   const visibleModules = snapshot.modules.filter((module) => !isTopologyHiddenModule(module) && !isModuleFilteredOut(module, hiddenFilters));
   const groups = topologyGroups(visibleModules);
   const destinations = candidateDestinations(decision);
-  const atmosphereRobots = snapshot.robots.filter((robot) => /^(ATR|ATM)/i.test(robot.name));
+  const atmosphereRobots = snapshot.robots.filter((robot) => robot.environment === "atmosphere" || !robot.environment && /^(ATR|ATM)/i.test(robot.name));
   const atmosphereNames = new Set(atmosphereRobots.map((robot) => robot.name));
   const vacuumRobots = snapshot.robots.filter((robot) => !atmosphereNames.has(robot.name));
   const cascade = usesCascadeTopology(visibleModules, vacuumRobots.length);
@@ -1412,15 +1486,14 @@ function renderEquipmentTopology(snapshot, decision, hiddenFilters) {
     const position = robotPositions.get(robot.name);
     if (!position) return "";
     const target = robot.target || decisionTargetForRobot(robot, decision);
-    const portal = robotLoadLockPortal(robot.name, target, modulePositions);
-    const targetPosition = modulePositions.get(portal);
+    const targetPosition = robotTargetTopologyPosition(robot, target, modulePositions);
     const targetAngle = targetPosition ? Math.atan2(
       targetPosition.topPixels - position.topPixels,
       targetPosition.leftPercent / 100 * TOPOLOGY_VIEWBOX_WIDTH - position.leftPercent / 100 * TOPOLOGY_VIEWBOX_WIDTH
     ) : -Math.PI / 2;
     let armAngle = targetAngle;
     if (robot.isPreTrans && robot.source) {
-      const sourcePortal = robotLoadLockPortal(robot.name, robot.source, modulePositions);
+      const sourcePortal = robotLoadLockPortal(robot.name, robot.source, modulePositions, robot.environment);
       const sourcePosition = modulePositions.get(sourcePortal);
       if (sourcePosition) {
         const sourceAngle = Math.atan2(
@@ -2955,7 +3028,7 @@ function stageUsesRobot(stage, index) {
   const names = (stage.visits || []).map((visit) => visit.stationName).filter(Boolean);
   return stage.kind === "robot" || (names.length ? names.every((name) => state.robotNames.includes(name)) : index % 2 === 1);
 }
-function normalizeRoute(route) {
+function normalizeRoute(route, normalizationChanges = null) {
   route.stages = Array.isArray(route.stages) ? route.stages : [];
   ROUTE_CLEAN_KEYS.forEach((key) => {
     route[key] = stringList(route[key]);
@@ -2968,10 +3041,8 @@ function normalizeRoute(route) {
     stage.kind = stageUsesRobot(stage, index) ? "robot" : "station";
     stage.needProcess = stage.kind === "station" && stage.visits.some((visit) => state.processModules.includes(visit.stationName));
     const recipeName = stage.needProcess ? `${route.group || route.name || "Route"}_Step${stage.stepId}` : "";
-    stage.visits.forEach((visit) => {
-      normalizeVisit(visit, recipeName);
-      if (stage.needProcess) visit.recipeTime = Number(visit.processTime);
-    });
+    const recipesChanged = normalizeStageProcessRecipes(stage, recipeName, normalizeVisit);
+    if (recipesChanged && normalizationChanges) normalizationChanges.changed = true;
   });
   return route;
 }
@@ -3037,10 +3108,22 @@ function unwrapDevice(raw) {
   if (!value || typeof value !== "object" || !value.Stations || !value.Robots) throw new Error("\u8BBE\u5907\u6587\u4EF6\u5FC5\u987B\u5305\u542B Stations \u548C Robots");
   return value;
 }
+function parseDeviceFileText(text) {
+  try {
+    return JSON.parse(text);
+  } catch (originalError) {
+    const records = text.trim().replace(/,\s*$/, "");
+    try {
+      return JSON.parse(`[${records}]`);
+    } catch {
+      throw originalError;
+    }
+  }
+}
 async function loadDevice(file) {
   if (!file) return;
   if (state.dirty) await saveCurrentTest(true);
-  const device = unwrapDevice(JSON.parse(await file.text()));
+  const device = unwrapDevice(parseDeviceFileText(await file.text()));
   const result = await requestJson("/api/workspaces/devices", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -3071,6 +3154,24 @@ function robotAvailableSlots(robot) {
   addSlots(robot?.Capacity, true);
   return [...slots.size ? slots : /* @__PURE__ */ new Set([FIRST_ROBOT_SLOT_ID])].sort((left, right) => left - right);
 }
+function robotArmSlotGroups(robot) {
+  const declaredGroups = Object.entries(robot?.ArmInfo || {}).flatMap(([armName, arm]) => {
+    if (!arm || typeof arm !== "object") return [];
+    const slotIds = [...new Set((arm.SlotIDs || []).map(Number).filter(
+      (slotId) => Number.isInteger(slotId) && slotId >= FIRST_ROBOT_SLOT_ID
+    ))].sort((left, right) => left - right);
+    return slotIds.length ? [{ armName, slotIds }] : [];
+  });
+  const groups = declaredGroups.length ? declaredGroups : [];
+  const coveredSlots = new Set(groups.flatMap((group) => group.slotIds));
+  robotAvailableSlots(robot).filter((slotId) => !coveredSlots.has(slotId)).forEach((slotId) => {
+    groups.push({
+      armName: generatedRobotArmName(groups.map((group) => group.armName), slotId),
+      slotIds: [slotId]
+    });
+  });
+  return groups;
+}
 function robotDefaultSlots(robot) {
   const available = robotAvailableSlots(robot);
   const requested = Object.values(robot?.ArmInfo || {}).filter((arm) => arm && typeof arm === "object" && arm.IsEnable !== false).flatMap((arm) => Array.isArray(arm.SlotIDs) ? arm.SlotIDs.map(Number) : []);
@@ -3096,17 +3197,21 @@ function generatedRobotArmName(existingNames, slotId) {
   while (occupied.has(`${numericName}_${suffix}`)) suffix += 1;
   return `${numericName}_${suffix}`;
 }
-function projectRobotArmToSlot(armName, sourceArm, slotId) {
+function projectRobotArmToSlots(armName, sourceArm, slotIds) {
   const arm = structuredClone(sourceArm);
   arm.Name = armName;
   arm.IsEnable = true;
-  arm.SlotIDs = [slotId];
+  const selected = [...new Set(slotIds.map(Number))].sort((left, right) => left - right);
+  arm.SlotIDs = selected;
   Object.entries(arm.SlotsStationMap || {}).forEach(([stationName, stationSlots]) => {
     if (!stationSlots || typeof stationSlots !== "object") return;
     const entries = Object.entries(stationSlots);
     if (!entries.length) return;
-    const template = stationSlots[String(slotId)] ?? entries[0][1];
-    arm.SlotsStationMap[stationName] = { [String(slotId)]: structuredClone(template) };
+    const fallback = entries[0][1];
+    arm.SlotsStationMap[stationName] = Object.fromEntries(selected.map((slotId) => [
+      String(slotId),
+      structuredClone(stationSlots[String(slotId)] ?? fallback)
+    ]));
   });
   return arm;
 }
@@ -3118,14 +3223,19 @@ function configuredDeviceForRobotSlots(baseDevice, rawSelections) {
     robot.Capacity = selected.length;
     const sourceArms = Object.entries(robot.ArmInfo || {}).filter(([, arm]) => arm && typeof arm === "object");
     if (!sourceArms.length) return;
-    const projectedArms = {};
-    selected.forEach((slotId) => {
-      const matched = sourceArms.find(([, arm]) => (arm.SlotIDs || []).map(Number).includes(slotId));
-      const armName = matched?.[0] || generatedRobotArmName(
+    const projectedArms = {}, unmatchedSlots = new Set(selected);
+    sourceArms.forEach(([armName, sourceArm]) => {
+      const retainedSlots = (sourceArm.SlotIDs || []).map(Number).filter((slotId) => unmatchedSlots.has(slotId));
+      if (!retainedSlots.length) return;
+      projectedArms[armName] = projectRobotArmToSlots(armName, sourceArm, retainedSlots);
+      retainedSlots.forEach((slotId) => unmatchedSlots.delete(slotId));
+    });
+    [...unmatchedSlots].sort((left, right) => left - right).forEach((slotId) => {
+      const armName = generatedRobotArmName(
         [...Object.keys(robot.ArmInfo || {}), ...Object.keys(projectedArms)],
         slotId
       );
-      projectedArms[armName] = projectRobotArmToSlot(armName, matched?.[1] || sourceArms[0][1], slotId);
+      projectedArms[armName] = projectRobotArmToSlots(armName, sourceArms[0][1], [slotId]);
     });
     robot.ArmInfo = projectedArms;
   });
@@ -3428,7 +3538,8 @@ function applyTestCase(testCase) {
   state.options.loadLockMacroRollouts = Number.isFinite(macroRollouts) && macroRollouts >= 0 ? Math.floor(macroRollouts) : 96;
   if (!state.routes.length && Array.isArray(value.routes)) state.routes = value.routes;
   if (!state.cleans.length && Array.isArray(value.cleans)) state.cleans = value.cleans.map(normalizeClean);
-  state.routes.forEach(normalizeRoute);
+  const routeNormalizationChanges = { changed: false };
+  state.routes.forEach((route) => normalizeRoute(route, routeNormalizationChanges));
   state.expandedRouteProcessGroups.clear();
   state.expandedRouteGroups.clear();
   state.expandedRoutes.clear();
@@ -3447,7 +3558,7 @@ function applyTestCase(testCase) {
   visualizationWorkspace.setReplayPlan(buildPayload());
   const cleanNamesChanged = synchronizeCleanNames();
   const routeNamesChanged = synchronizeRouteNames();
-  state.dirty = cleanNamesChanged || routeNamesChanged;
+  state.dirty = routeNormalizationChanges.changed || cleanNamesChanged || routeNamesChanged;
   document.getElementById("roundCount").value = state.roundCount;
   document.querySelectorAll('input[name="strategy"]').forEach((input) => {
     input.checked = input.value === state.strategy;
@@ -4124,25 +4235,31 @@ function renderRobotSlots() {
     container.innerHTML = `<div class="robot-slot-empty"><span>${state.baseDevice ? "\u5F53\u524D\u8BBE\u5907\u6CA1\u6709\u53EF\u914D\u7F6E\u7684\u673A\u5668\u624B\u3002" : "\u9009\u62E9\u6216\u5BFC\u5165\u8BBE\u5907\u540E\uFF0C\u53EF\u5728\u8FD9\u91CC\u5207\u6362\u673A\u5668\u624B\u7684\u5355\u81C2\u4E0E\u53CC\u81C2\u6A21\u5F0F\u3002"}</span></div>`;
     return;
   }
-  const dualArmCount = state.robotNames.filter((name) => (state.robotSlots[name] || []).length >= DUAL_ARM_SLOT_COUNT).length;
+  const dualArmCount = state.robotNames.filter((name) => {
+    const robot = state.baseDevice.Robots[name] || {};
+    const selected = state.robotSlots[name] || robotDefaultSlots(robot);
+    return robotArmSlotGroups(robot).filter((group) => group.slotIds.some((slotId) => selected.includes(slotId))).length >= DUAL_ARM_SLOT_COUNT;
+  }).length;
   summary.textContent = `${state.robotNames.length} \u53F0\u673A\u5668\u624B \xB7 ${dualArmCount} \u53F0\u53CC\u81C2`;
   container.innerHTML = state.robotNames.map((robotName) => {
     const robot = state.baseDevice.Robots[robotName] || {};
     const available = robotAvailableSlots(robot);
+    const armGroups = robotArmSlotGroups(robot);
     const selected = state.robotSlots[robotName] || available;
     const defaults = robotDefaultSlots(robot);
-    const isDualArm = selected.length >= DUAL_ARM_SLOT_COUNT;
-    const supportsDualArm = available.length >= DUAL_ARM_SLOT_COUNT;
+    const selectedArmCount = armGroups.filter((group) => group.slotIds.some((slotId) => selected.includes(slotId))).length;
+    const isDualArm = selectedArmCount >= DUAL_ARM_SLOT_COUNT;
+    const supportsDualArm = armGroups.length >= DUAL_ARM_SLOT_COUNT;
     const isDefault = JSON.stringify(selected) === JSON.stringify(defaults);
     const isSaving = state.robotSlotsSaving.has(robotName);
     const accessibleStationCount = new Set(
       Object.values(robot.ArmInfo || {}).flatMap((arm) => arm?.AccessibleStations || [])
     ).size;
-    const tokens = available.map((slotId) => `
+    const tokens = armGroups.map((group) => group.slotIds.map((slotId) => `
       <span class="robot-slot-token ${selected.includes(slotId) ? "is-active" : ""}">
-        Slot ${slotId}
+        ${escapeHtml3(group.armName)} \xB7 Slot ${slotId}
       </span>
-    `).join("");
+    `).join("")).join("");
     return `
       <article class="robot-slot-card" data-robot-slot-card="${escapeHtml3(robotName)}">
         <header class="robot-slot-card-head">
@@ -4159,21 +4276,22 @@ function renderRobotSlots() {
         </header>
         <div class="robot-slot-visual" aria-label="${escapeHtml3(robotName)} \u53EF\u7528\u69FD\u4F4D">${tokens}</div>
         <div class="robot-slot-controls" role="group" aria-label="${escapeHtml3(robotName)} \u5DE5\u4F5C\u6A21\u5F0F">
-          <button class="robot-slot-choice" type="button" data-robot-slot-name="${escapeHtml3(robotName)}" data-robot-slot-count="1" aria-pressed="${String(!isDualArm)}" ${isSaving ? "disabled" : ""}>\u5355\u81C2</button>
-          <button class="robot-slot-choice" type="button" data-robot-slot-name="${escapeHtml3(robotName)}" data-robot-slot-count="2" aria-pressed="${String(isDualArm)}" ${!supportsDualArm || isSaving ? "disabled" : ""}>\u53CC\u81C2</button>
+          <button class="robot-slot-choice" type="button" data-robot-slot-name="${escapeHtml3(robotName)}" data-robot-arm-count="1" aria-pressed="${String(!isDualArm)}" ${isSaving ? "disabled" : ""}>\u5355\u81C2</button>
+          <button class="robot-slot-choice" type="button" data-robot-slot-name="${escapeHtml3(robotName)}" data-robot-arm-count="2" aria-pressed="${String(isDualArm)}" ${!supportsDualArm || isSaving ? "disabled" : ""}>\u53CC\u81C2</button>
           <button class="robot-slot-choice robot-slot-default" type="button" data-robot-slot-default="${escapeHtml3(robotName)}" ${isDefault || isSaving ? "disabled" : ""}>\u6062\u590D\u9ED8\u8BA4</button>
         </div>
-        <p class="robot-slot-card-note">${supportsDualArm ? "\u5207\u6362\u540E\u7ACB\u5373\u4FDD\u5B58\uFF0C\u5E76\u7528\u4E8E\u8BE5\u8BBE\u5907\u4E0B\u7684\u6240\u6709\u6D4B\u8BD5\u3002" : "\u8BBE\u5907\u6587\u4EF6\u4EC5\u58F0\u660E\u4E00\u4E2A\u53EF\u7528\u69FD\u4F4D\uFF0C\u5F53\u524D\u53EA\u80FD\u4F7F\u7528\u5355\u81C2\u3002"}</p>
+        <p class="robot-slot-card-note">${supportsDualArm ? "\u6309\u7269\u7406 Arm \u5207\u6362\uFF1B\u6BCF\u4E2A Arm \u58F0\u660E\u7684\u591A\u4E2A\u69FD\u4F4D\u4F1A\u4E00\u8D77\u4FDD\u7559\u3002" : `\u8BBE\u5907\u6587\u4EF6\u58F0\u660E 1 \u4E2A Arm\u3001${available.length} \u4E2A\u624B\u69FD\u3002`}</p>
       </article>
     `;
   }).join("");
 }
-async function setRobotSlotCount(robotName, slotCount) {
+async function setRobotArmCount(robotName, armCount) {
   if (!state.workspaceDeviceId || !state.baseDevice?.Robots?.[robotName]) return;
-  const available = robotAvailableSlots(state.baseDevice.Robots[robotName]);
-  const boundedCount = Math.max(1, Math.min(Number(slotCount) || 1, DUAL_ARM_SLOT_COUNT, available.length));
+  const armGroups = robotArmSlotGroups(state.baseDevice.Robots[robotName]);
+  const boundedCount = Math.max(1, Math.min(Number(armCount) || 1, DUAL_ARM_SLOT_COUNT, armGroups.length));
   const previousSelections = structuredClone(state.robotSlots);
-  const nextSelections = { ...state.robotSlots, [robotName]: available.slice(0, boundedCount) };
+  const selectedSlots = armGroups.slice(0, boundedCount).flatMap((group) => group.slotIds);
+  const nextSelections = { ...state.robotSlots, [robotName]: selectedSlots };
   if (JSON.stringify(previousSelections[robotName]) === JSON.stringify(nextSelections[robotName])) return;
   state.robotSlotsSaving.add(robotName);
   applyDeviceTopology(state.baseDevice, state.deviceName, nextSelections);
@@ -4201,7 +4319,10 @@ async function restoreRobotSlotDefault(robotName) {
   const robot = state.baseDevice?.Robots?.[robotName];
   if (!robot) return;
   const defaults = robotDefaultSlots(robot);
-  await setRobotSlotCount(robotName, defaults.length);
+  const defaultArmCount = robotArmSlotGroups(robot).filter(
+    (group) => group.slotIds.some((slotId) => defaults.includes(slotId))
+  ).length;
+  await setRobotArmCount(robotName, defaultArmCount);
   setWorkspaceStatus(`\u5DF2\u6062\u590D ${robotName} \u7684\u8BBE\u5907\u6587\u4EF6\u9ED8\u8BA4\u914D\u7F6E`, "saved");
 }
 function renderAll() {
@@ -4450,10 +4571,13 @@ function collectRecipes(routes = state.routes) {
 }
 function stationSlotList(stationName) {
   const station = state.device?.Stations?.[stationName];
-  if (!station) return [1];
-  if (Array.isArray(station.Slots) && station.Slots.length) return station.Slots.map(Number);
-  const capacity = Number(station.Capacity) || 0;
-  return capacity >= 1 ? Array.from({ length: capacity }, (_, index) => index + 1) : [1];
+  if (station) {
+    if (Array.isArray(station.Slots) && station.Slots.length) return station.Slots.map(Number);
+    const capacity = Number(station.Capacity) || 0;
+    return capacity >= 1 ? Array.from({ length: capacity }, (_, index) => index + 1) : [1];
+  }
+  const robot = state.device?.Robots?.[stationName];
+  return robot ? robotDefaultSlots(robot) : [1];
 }
 function expandVisitSlotIds() {
   if (!state.device) return;
@@ -5481,9 +5605,9 @@ document.addEventListener("change", (event) => {
 document.addEventListener("click", (event) => {
   const tab = event.target.closest("[data-tab-target]");
   if (tab) switchTab(tab.dataset.tabTarget);
-  const robotSlotChoice = event.target.closest("[data-robot-slot-name][data-robot-slot-count]");
+  const robotSlotChoice = event.target.closest("[data-robot-slot-name][data-robot-arm-count]");
   if (robotSlotChoice && !robotSlotChoice.disabled) {
-    setRobotSlotCount(robotSlotChoice.dataset.robotSlotName, Number(robotSlotChoice.dataset.robotSlotCount)).catch((error) => writeTerminal(`$ \u673A\u5668\u624B\u69FD\u4F4D\u4FDD\u5B58\u5931\u8D25
+    setRobotArmCount(robotSlotChoice.dataset.robotSlotName, Number(robotSlotChoice.dataset.robotArmCount)).catch((error) => writeTerminal(`$ \u673A\u5668\u624B\u69FD\u4F4D\u4FDD\u5B58\u5931\u8D25
   ${error.message}`, true));
     return;
   }

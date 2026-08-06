@@ -1161,7 +1161,7 @@
     .auxiliary-wafer-slot .wafer-token { width: 64px; min-width: 64px; height: 64px; padding: 4px; }
     .reference-robot-position { width: 132px; height: 132px; }
     .reference-grid-canvas .robot-hub, .reference-grid-canvas .robot-hub-vacuum, .reference-grid-canvas .robot-hub-atmosphere { position: relative; top: auto; left: auto; display: block; width: 132px; height: 132px; min-height: 132px; overflow: visible; border: 0; border-radius: 0; clip-path: none; color: #334155; background: transparent; box-shadow: none; transform: none; }
-    .robot-environment-badge { position: absolute; z-index: 6; top: calc(50% - 44px); left: 50%; padding: 2px 4px; border: 1px solid rgba(73,99,130,.42); border-radius: 2px; color: #5b6d83; background: rgba(248,250,252,.90); font: 800 7px/1 "Fira Code", Consolas, monospace; letter-spacing: .06em; transform: translateX(-50%); }
+    .robot-environment-badge { position: absolute; z-index: 6; top: calc(50% - 44px); left: 50%; padding: 2px 4px; border: 1px solid rgba(73,99,130,.42); border-radius: 2px; color: #5b6d83; background: rgba(248,250,252,.90); font: 800 7px/1 "Fira Code", Consolas, monospace; letter-spacing: .06em; white-space: nowrap; transform: translateX(-50%); }
     .robot-mechanism { position: absolute; inset: 8px; }
     .robot-base { position: absolute; z-index: 3; top: 50%; left: 50%; display: grid; width: 58px; height: 58px; place-items: center; border: 2px solid #667b94; border-radius: 50%; background: radial-gradient(circle at 38% 32%, #fbfdff 0, #d9e3ed 58%, #aebdcd 100%); box-shadow: inset 0 0 0 3px rgba(255,255,255,.58), 2px 3px 7px rgba(32,47,81,.14); transform: translate(-50%, -50%); }
     .robot-base i { width: 18px; height: 18px; border: 2px solid #52677f; border-radius: 50%; background: #9fb0c2; box-shadow: inset 0 2px 3px rgba(28,43,61,.28); }
@@ -1170,7 +1170,12 @@
     /* 末端执行器为小圆盘（外端），与基座圆盘（内端）构成哑铃造型；圆盘比基座小。 */
     .robot-end-effector { position: absolute; top: 50%; left: 58px; display: block; width: 26px; height: 26px; border: 2px solid #52677f; border-radius: 50%; background: radial-gradient(circle at 38% 32%, #fbfdff 0, #d9e3ed 58%, #aebdcd 100%); box-shadow: inset 0 0 0 2px rgba(255,255,255,.50), 1px 2px 4px rgba(32,47,81,.16); transform: translate(-50%, -50%); }
     .reference-grid-canvas .robot-hub-vacuum::before, .reference-grid-canvas .robot-hub-vacuum::after { content: none; }
-    .robot-end-effector .wafer-token { position: absolute; z-index: 2; top: -15px; left: -15px; width: 56px; min-width: 56px; height: 56px; padding: 4px; font-size: 10px; background: transparent; box-shadow: none; }
+    .robot-held-wafers { position: absolute; z-index: 2; inset: 0; overflow: visible; }
+    .robot-held-wafer { position: absolute; top: 50%; left: 50%; display: block; width: 56px; height: 56px; }
+    .robot-held-wafer-0 { z-index: 1; transform: translate(-50%, -50%) translate(-2px, -2px); }
+    .robot-held-wafer-1 { z-index: 2; transform: translate(-50%, -50%) translate(2px, 2px); }
+    .robot-held-wafer .wafer-token { position: relative; top: auto; left: auto; display: inline-grid; width: 56px; min-width: 56px; height: 56px; padding: 4px; font-size: 10px; background: transparent; box-shadow: none; }
+    .robot-held-overflow { position: absolute; z-index: 3; right: -12px; bottom: -7px; padding: 2px 3px; border-radius: 999px; color: #fff; background: #52677f; font: 900 8px/1 "Fira Code", Consolas, monospace; }
     .reference-grid-canvas .robot-hub.is-busy .robot-base { border-color: var(--sim-transfer); box-shadow: inset 0 0 0 3px rgba(255,255,255,.62), 0 0 0 3px rgba(49,95,194,.12), 2px 3px 7px rgba(32,47,81,.14); }
     .reference-grid-canvas .robot-hub.is-busy :is(.robot-arm-beam, .robot-end-effector) { border-color: var(--sim-transfer); }
 

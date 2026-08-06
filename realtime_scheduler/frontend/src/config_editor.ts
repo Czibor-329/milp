@@ -206,7 +206,7 @@ function cloneVisitParameters(visit) {
 }
 
 /** 统一补全 Step 的派生字段，避免 StepID、PostStepID、NeedProcess 被手工改坏。 */
-function normalizeRoute(route) {
+function normalizeRoute(route, normalizationChanges = null) {
   route.stages = Array.isArray(route.stages) ? route.stages : [];
   ROUTE_CLEAN_KEYS.forEach(key => { route[key] = stringList(route[key]); });
   route.postCJobCleanRefs = [];
@@ -217,10 +217,8 @@ function normalizeRoute(route) {
     stage.kind = stageUsesRobot(stage, index) ? "robot" : "station";
     stage.needProcess = stage.kind === "station" && stage.visits.some(visit => state.processModules.includes(visit.stationName));
     const recipeName = stage.needProcess ? `${route.group || route.name || "Route"}_Step${stage.stepId}` : "";
-    stage.visits.forEach(visit => {
-      normalizeVisit(visit, recipeName);
-      if (stage.needProcess) visit.recipeTime = Number(visit.processTime);
-    });
+    const recipesChanged = RouteEditorLogic.normalizeStageProcessRecipes(stage, recipeName, normalizeVisit);
+    if (recipesChanged && normalizationChanges) normalizationChanges.changed = true;
   });
   return route;
 }
@@ -308,11 +306,25 @@ function unwrapDevice(raw) {
   return value;
 }
 
+/** 解析标准 JSON，兼容由多条顶层日志对象加逗号串联的设备录制文件。 */
+function parseDeviceFileText(text: string) {
+  try {
+    return JSON.parse(text);
+  } catch (originalError) {
+    const records = text.trim().replace(/,\s*$/, "");
+    try {
+      return JSON.parse(`[${records}]`);
+    } catch {
+      throw originalError;
+    }
+  }
+}
+
 /** 导入设备到本地工作区；相同拓扑会直接复用已有设备。 */
 async function loadDevice(file) {
   if (!file) return;
   if (state.dirty) await saveCurrentTest(true);
-  const device = unwrapDevice(JSON.parse(await file.text()));
+  const device = unwrapDevice(parseDeviceFileText(await file.text()));
   const result = await requestJson("/api/workspaces/devices", {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: file.name, device })
   });
@@ -321,7 +333,7 @@ async function loadDevice(file) {
   document.getElementById("deviceFile").value = "";
 }
 
-/** 从 ArmInfo 收集槽位，并允许具有 ArmInfo 的机器手切换为双臂。 */
+/** 从 ArmInfo 收集槽位；一个物理 Arm 可以包含多个晶圆手槽。 */
 function robotAvailableSlots(robot) {
   const slots = new Set();
   const addSlots = (rawSlots, scalarIsCapacity = false) => {
@@ -343,6 +355,26 @@ function robotAvailableSlots(robot) {
   }
   addSlots(robot?.Capacity, true);
   return [...(slots.size ? slots : new Set([FIRST_ROBOT_SLOT_ID]))].sort((left, right) => left - right);
+}
+
+/** 按设备原始 ArmInfo 返回物理 Arm 对应的槽位组。 */
+function robotArmSlotGroups(robot) {
+  const declaredGroups = Object.entries(robot?.ArmInfo || {}).flatMap(([armName, arm]) => {
+    if (!arm || typeof arm !== "object") return [];
+    const slotIds = [...new Set((arm.SlotIDs || []).map(Number).filter(
+      slotId => Number.isInteger(slotId) && slotId >= FIRST_ROBOT_SLOT_ID
+    ))].sort((left, right) => left - right);
+    return slotIds.length ? [{ armName, slotIds }] : [];
+  });
+  const groups = declaredGroups.length ? declaredGroups : [];
+  const coveredSlots = new Set(groups.flatMap(group => group.slotIds));
+  robotAvailableSlots(robot).filter(slotId => !coveredSlots.has(slotId)).forEach(slotId => {
+    groups.push({
+      armName: generatedRobotArmName(groups.map(group => group.armName), slotId),
+      slotIds: [slotId],
+    });
+  });
+  return groups;
 }
 
 /** 按原始 ArmInfo 中启用的 Arm 返回设备文件默认模式。 */
@@ -378,18 +410,21 @@ function generatedRobotArmName(existingNames, slotId) {
   return `${numericName}_${suffix}`;
 }
 
-/** 复制一个 Arm，并将它规范为独占指定 RobotSlot。 */
-function projectRobotArmToSlot(armName, sourceArm, slotId) {
+/** 复制一个物理 Arm，并保留该 Arm 被选择的全部 RobotSlot。 */
+function projectRobotArmToSlots(armName, sourceArm, slotIds) {
   const arm = structuredClone(sourceArm);
   arm.Name = armName;
   arm.IsEnable = true;
-  arm.SlotIDs = [slotId];
+  const selected = [...new Set(slotIds.map(Number))].sort((left, right) => left - right);
+  arm.SlotIDs = selected;
   Object.entries(arm.SlotsStationMap || {}).forEach(([stationName, stationSlots]) => {
     if (!stationSlots || typeof stationSlots !== "object") return;
     const entries = Object.entries(stationSlots);
     if (!entries.length) return;
-    const template = stationSlots[String(slotId)] ?? entries[0][1];
-    arm.SlotsStationMap[stationName] = { [String(slotId)]: structuredClone(template) };
+    const fallback = entries[0][1];
+    arm.SlotsStationMap[stationName] = Object.fromEntries(selected.map(slotId => [
+      String(slotId), structuredClone(stationSlots[String(slotId)] ?? fallback)
+    ]));
   });
   return arm;
 }
@@ -403,13 +438,18 @@ function configuredDeviceForRobotSlots(baseDevice, rawSelections) {
     robot.Capacity = selected.length;
     const sourceArms = Object.entries(robot.ArmInfo || {}).filter(([, arm]) => arm && typeof arm === "object");
     if (!sourceArms.length) return;
-    const projectedArms = {};
-    selected.forEach(slotId => {
-      const matched = sourceArms.find(([, arm]) => (arm.SlotIDs || []).map(Number).includes(slotId));
-      const armName = matched?.[0] || generatedRobotArmName(
+    const projectedArms = {}, unmatchedSlots = new Set(selected);
+    sourceArms.forEach(([armName, sourceArm]) => {
+      const retainedSlots = (sourceArm.SlotIDs || []).map(Number).filter(slotId => unmatchedSlots.has(slotId));
+      if (!retainedSlots.length) return;
+      projectedArms[armName] = projectRobotArmToSlots(armName, sourceArm, retainedSlots);
+      retainedSlots.forEach(slotId => unmatchedSlots.delete(slotId));
+    });
+    [...unmatchedSlots].sort((left, right) => left - right).forEach(slotId => {
+      const armName = generatedRobotArmName(
         [...Object.keys(robot.ArmInfo || {}), ...Object.keys(projectedArms)], slotId
       );
-      projectedArms[armName] = projectRobotArmToSlot(armName, matched?.[1] || sourceArms[0][1], slotId);
+      projectedArms[armName] = projectRobotArmToSlots(armName, sourceArms[0][1], [slotId]);
     });
     robot.ArmInfo = projectedArms;
   });
@@ -725,7 +765,8 @@ function applyTestCase(testCase) {
   // v2：Route/Clean 来自设备共享库；仅在加载尚未迁移的旧数据时使用测试集副本兜底。
   if (!state.routes.length && Array.isArray(value.routes)) state.routes = value.routes;
   if (!state.cleans.length && Array.isArray(value.cleans)) state.cleans = value.cleans.map(normalizeClean);
-  state.routes.forEach(normalizeRoute);
+  const routeNormalizationChanges = { changed: false };
+  state.routes.forEach(route => normalizeRoute(route, routeNormalizationChanges));
   state.expandedRouteProcessGroups.clear(); state.expandedRouteGroups.clear(); state.expandedRoutes.clear();
   state.rounds = Array.isArray(value.rounds) ? value.rounds : [];
   while (state.times.length < state.roundCount) state.times.push((Number(state.times.at(-1)) || 0) + 70);
@@ -739,7 +780,7 @@ function applyTestCase(testCase) {
   visualizationWorkspace.setReplayPlan(buildPayload());
   const cleanNamesChanged = synchronizeCleanNames();
   const routeNamesChanged = synchronizeRouteNames();
-  state.dirty = cleanNamesChanged || routeNamesChanged;
+  state.dirty = routeNormalizationChanges.changed || cleanNamesChanged || routeNamesChanged;
   document.getElementById("roundCount").value = state.roundCount;
   document.querySelectorAll('input[name="strategy"]').forEach(input => { input.checked = input.value === state.strategy; });
   document.querySelectorAll("[data-option]").forEach(input => { input.value = state.options[input.dataset.option] ?? input.value; });
@@ -1452,7 +1493,7 @@ function openStepDrawer(routeIndex, stageIndex) {
 /** 关闭 Step 抽屉。 */
 function closeStepDrawer() { state.drawer = null; document.getElementById("drawerLayer").classList.remove("open"); }
 
-/** 绘制机器手槽位卡片，并展示当前单臂或双臂状态。 */
+/** 绘制机器手槽位卡片；臂数与每臂槽位数分别展示。 */
 function renderRobotSlots() {
   const container = document.getElementById("robotSlotList");
   const summary = document.getElementById("robotSlotSummary");
@@ -1461,25 +1502,31 @@ function renderRobotSlots() {
     container.innerHTML = `<div class="robot-slot-empty"><span>${state.baseDevice ? "当前设备没有可配置的机器手。" : "选择或导入设备后，可在这里切换机器手的单臂与双臂模式。"}</span></div>`;
     return;
   }
-  const dualArmCount = state.robotNames.filter(name => (state.robotSlots[name] || []).length >= DUAL_ARM_SLOT_COUNT).length;
+  const dualArmCount = state.robotNames.filter(name => {
+    const robot = state.baseDevice.Robots[name] || {};
+    const selected = state.robotSlots[name] || robotDefaultSlots(robot);
+    return robotArmSlotGroups(robot).filter(group => group.slotIds.some(slotId => selected.includes(slotId))).length >= DUAL_ARM_SLOT_COUNT;
+  }).length;
   summary.textContent = `${state.robotNames.length} 台机器手 · ${dualArmCount} 台双臂`;
   container.innerHTML = state.robotNames.map(robotName => {
     const robot = state.baseDevice.Robots[robotName] || {};
     const available = robotAvailableSlots(robot);
+    const armGroups = robotArmSlotGroups(robot);
     const selected = state.robotSlots[robotName] || available;
     const defaults = robotDefaultSlots(robot);
-    const isDualArm = selected.length >= DUAL_ARM_SLOT_COUNT;
-    const supportsDualArm = available.length >= DUAL_ARM_SLOT_COUNT;
+    const selectedArmCount = armGroups.filter(group => group.slotIds.some(slotId => selected.includes(slotId))).length;
+    const isDualArm = selectedArmCount >= DUAL_ARM_SLOT_COUNT;
+    const supportsDualArm = armGroups.length >= DUAL_ARM_SLOT_COUNT;
     const isDefault = JSON.stringify(selected) === JSON.stringify(defaults);
     const isSaving = state.robotSlotsSaving.has(robotName);
     const accessibleStationCount = new Set(
       Object.values(robot.ArmInfo || {}).flatMap(arm => arm?.AccessibleStations || [])
     ).size;
-    const tokens = available.map(slotId => `
+    const tokens = armGroups.map(group => group.slotIds.map(slotId => `
       <span class="robot-slot-token ${selected.includes(slotId) ? "is-active" : ""}">
-        Slot ${slotId}
+        ${escapeHtml(group.armName)} · Slot ${slotId}
       </span>
-    `).join("");
+    `).join("")).join("");
     return `
       <article class="robot-slot-card" data-robot-slot-card="${escapeHtml(robotName)}">
         <header class="robot-slot-card-head">
@@ -1496,23 +1543,24 @@ function renderRobotSlots() {
         </header>
         <div class="robot-slot-visual" aria-label="${escapeHtml(robotName)} 可用槽位">${tokens}</div>
         <div class="robot-slot-controls" role="group" aria-label="${escapeHtml(robotName)} 工作模式">
-          <button class="robot-slot-choice" type="button" data-robot-slot-name="${escapeHtml(robotName)}" data-robot-slot-count="1" aria-pressed="${String(!isDualArm)}" ${isSaving ? "disabled" : ""}>单臂</button>
-          <button class="robot-slot-choice" type="button" data-robot-slot-name="${escapeHtml(robotName)}" data-robot-slot-count="2" aria-pressed="${String(isDualArm)}" ${!supportsDualArm || isSaving ? "disabled" : ""}>双臂</button>
+          <button class="robot-slot-choice" type="button" data-robot-slot-name="${escapeHtml(robotName)}" data-robot-arm-count="1" aria-pressed="${String(!isDualArm)}" ${isSaving ? "disabled" : ""}>单臂</button>
+          <button class="robot-slot-choice" type="button" data-robot-slot-name="${escapeHtml(robotName)}" data-robot-arm-count="2" aria-pressed="${String(isDualArm)}" ${!supportsDualArm || isSaving ? "disabled" : ""}>双臂</button>
           <button class="robot-slot-choice robot-slot-default" type="button" data-robot-slot-default="${escapeHtml(robotName)}" ${isDefault || isSaving ? "disabled" : ""}>恢复默认</button>
         </div>
-        <p class="robot-slot-card-note">${supportsDualArm ? "切换后立即保存，并用于该设备下的所有测试。" : "设备文件仅声明一个可用槽位，当前只能使用单臂。"}</p>
+        <p class="robot-slot-card-note">${supportsDualArm ? "按物理 Arm 切换；每个 Arm 声明的多个槽位会一起保留。" : `设备文件声明 1 个 Arm、${available.length} 个手槽。`}</p>
       </article>
     `;
   }).join("");
 }
 
-/** 保存一台机器手的单臂或双臂选择，并刷新运行时设备。 */
-async function setRobotSlotCount(robotName, slotCount) {
+/** 保存一台机器手的单臂或双臂选择，并保留每条 Arm 的全部槽位。 */
+async function setRobotArmCount(robotName, armCount) {
   if (!state.workspaceDeviceId || !state.baseDevice?.Robots?.[robotName]) return;
-  const available = robotAvailableSlots(state.baseDevice.Robots[robotName]);
-  const boundedCount = Math.max(1, Math.min(Number(slotCount) || 1, DUAL_ARM_SLOT_COUNT, available.length));
+  const armGroups = robotArmSlotGroups(state.baseDevice.Robots[robotName]);
+  const boundedCount = Math.max(1, Math.min(Number(armCount) || 1, DUAL_ARM_SLOT_COUNT, armGroups.length));
   const previousSelections = structuredClone(state.robotSlots);
-  const nextSelections = { ...state.robotSlots, [robotName]: available.slice(0, boundedCount) };
+  const selectedSlots = armGroups.slice(0, boundedCount).flatMap(group => group.slotIds);
+  const nextSelections = { ...state.robotSlots, [robotName]: selectedSlots };
   if (JSON.stringify(previousSelections[robotName]) === JSON.stringify(nextSelections[robotName])) return;
   state.robotSlotsSaving.add(robotName);
   applyDeviceTopology(state.baseDevice, state.deviceName, nextSelections);
@@ -1542,7 +1590,10 @@ async function restoreRobotSlotDefault(robotName) {
   const robot = state.baseDevice?.Robots?.[robotName];
   if (!robot) return;
   const defaults = robotDefaultSlots(robot);
-  await setRobotSlotCount(robotName, defaults.length);
+  const defaultArmCount = robotArmSlotGroups(robot).filter(
+    group => group.slotIds.some(slotId => defaults.includes(slotId))
+  ).length;
+  await setRobotArmCount(robotName, defaultArmCount);
   setWorkspaceStatus(`已恢复 ${robotName} 的设备文件默认配置`, "saved");
 }
 
@@ -1759,10 +1810,13 @@ function collectRecipes(routes = state.routes) {
 /** 从设备拓扑中提取站点可用槽位列表。 */
 function stationSlotList(stationName: string): number[] {
   const station = state.device?.Stations?.[stationName];
-  if (!station) return [1];
-  if (Array.isArray(station.Slots) && station.Slots.length) return station.Slots.map(Number);
-  const capacity = Number(station.Capacity) || 0;
-  return capacity >= 1 ? Array.from({ length: capacity }, (_, index) => index + 1) : [1];
+  if (station) {
+    if (Array.isArray(station.Slots) && station.Slots.length) return station.Slots.map(Number);
+    const capacity = Number(station.Capacity) || 0;
+    return capacity >= 1 ? Array.from({ length: capacity }, (_, index) => index + 1) : [1];
+  }
+  const robot = state.device?.Robots?.[stationName];
+  return robot ? robotDefaultSlots(robot) : [1];
 }
 
 /** 将 Route Visit 的 slotIds 按站点真实槽位展开。 */
@@ -2808,9 +2862,9 @@ document.addEventListener("change", event => {
 });
 document.addEventListener("click", event => {
   const tab = event.target.closest("[data-tab-target]"); if (tab) switchTab(tab.dataset.tabTarget);
-  const robotSlotChoice = event.target.closest("[data-robot-slot-name][data-robot-slot-count]");
+  const robotSlotChoice = event.target.closest("[data-robot-slot-name][data-robot-arm-count]");
   if (robotSlotChoice && !robotSlotChoice.disabled) {
-    setRobotSlotCount(robotSlotChoice.dataset.robotSlotName, Number(robotSlotChoice.dataset.robotSlotCount))
+    setRobotArmCount(robotSlotChoice.dataset.robotSlotName, Number(robotSlotChoice.dataset.robotArmCount))
       .catch(error => writeTerminal(`$ 机器手槽位保存失败\n  ${error.message}`, true));
     return;
   }

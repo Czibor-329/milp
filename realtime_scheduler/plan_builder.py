@@ -244,6 +244,27 @@ def _station_slot_ids(station: Mapping[str, Any]) -> List[int]:
     return [FIRST_SLOT_ID]
 
 
+def _robot_slot_ids(robot: Mapping[str, Any]) -> List[int]:
+    """从启用 Arm 收集机器人全部物理手槽，缺失时按 Capacity 补齐。"""
+    slots: set[int] = set()
+    arm_info = robot.get("ArmInfo")
+    if isinstance(arm_info, Mapping):
+        for arm in arm_info.values():
+            if not isinstance(arm, Mapping) or arm.get("IsEnable") is False:
+                continue
+            for value in arm.get("SlotIDs") or []:
+                try:
+                    slot_id = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if slot_id >= FIRST_SLOT_ID:
+                    slots.add(slot_id)
+    if slots:
+        return sorted(slots)
+    capacity = int(_finite_number(robot.get("Capacity"), 0))
+    return list(range(FIRST_SLOT_ID, capacity + FIRST_SLOT_ID)) if capacity >= 1 else [FIRST_SLOT_ID]
+
+
 def _finite_number(value: Any, default: float) -> float:
     """读取有限浮点数，非法值回退默认值。"""
     try:
@@ -859,6 +880,11 @@ def build_round_update(
         for station_name, station_data in (tool_topo.get("Stations") or {}).items()
         if isinstance(station_data, Mapping)
     }
+    station_slots_map.update({
+        str(robot_name): _robot_slot_ids(robot_data)
+        for robot_name, robot_data in (tool_topo.get("Robots") or {}).items()
+        if isinstance(robot_data, Mapping)
+    })
     built_routes = {
         name: build_route(route, recipe_by_name, clean_by_name, robot_names, station_slots_map)
         for name, route in route_by_name.items()

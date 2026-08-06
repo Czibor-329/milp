@@ -119,6 +119,30 @@ test("加工 Step 的空 Recipe 使用稳定派生名称", () => {
   assert.equal(logic.processRecipeName("ExplicitRecipe", "Route7_Step6"), "ExplicitRecipe");
 });
 
+test("候选从加工腔改为 LoadLock 后清除继承的 ProcessRecipe", () => {
+  const stage = { needProcess: true, visits: [visit("PM1", 20)] };
+  logic.replaceCandidates(stage, ["LA", "LB"], name => visit(name));
+  assert.ok(stage.visits.every(item => item.processRecipe === "R_Step4"));
+
+  stage.needProcess = false;
+  assert.equal(logic.normalizeStageProcessRecipes(stage, ""), true);
+  assert.deepEqual(
+    stage.visits.map(item => [item.stationName, item.processRecipe]),
+    [["LA", ""], ["LB", ""]],
+  );
+  assert.equal(logic.normalizeStageProcessRecipes(stage, ""), false);
+});
+
+test("加工 Step 仍补齐派生 Recipe 并同步 Recipe Time", () => {
+  const stage = {
+    needProcess: true,
+    visits: [{ ...visit("PM1", 30), processRecipe: "", recipeTime: 12 }],
+  };
+  assert.equal(logic.normalizeStageProcessRecipes(stage, "RouteA_Step4"), true);
+  assert.equal(stage.visits[0].processRecipe, "RouteA_Step4");
+  assert.equal(stage.visits[0].recipeTime, 30);
+});
+
 test("统一参数修改后深拷贝同步到全部候选 Visit", () => {
   const stage = { visits: [visit("PM1", 30), visit("PM2", 50)] };
   stage.visits[0].beforeCleanRefs = ["CleanA"];

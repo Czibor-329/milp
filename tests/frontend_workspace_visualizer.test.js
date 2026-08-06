@@ -930,6 +930,91 @@ test("多个大气机械手在同一排横向分布且不重叠", () => {
   assert.equal(positions[0].y, positions[1].y, "两个大气机械手应在同一排");
 });
 
+test("双腔拓扑使用 init 机器手名称和 Type，并用双片错层效果显示两片晶圆", () => {
+  const dualDevice = {
+    Stations: {
+      LP1: { Type: "LoadPort", Capacity: 2, Slots: [1, 2] },
+      LA: { Type: "LoadLock", LastItem: "VacuumArm" },
+      PM1: { Type: "Process" },
+    },
+    Robots: {
+      AtmosphereArm: { Name: "AtmosphereArm", Type: "ATMRobot", Capacity: 2 },
+      VacuumArm: { Name: "VacuumArm", Type: "VTMRobot", Capacity: 2 },
+    },
+  };
+  const dualPick = [{
+    MoveID: 1,
+    MoveType: 0,
+    ModuleName: "AtmosphereArm",
+    Robot: "AtmosphereArm",
+    SrcStationList: ["LP1", "LP1"],
+    SrcSlotList: [1, 2],
+    MatIDList: ["W1", "W2"],
+    StartTime: 0,
+    EndTime: 1,
+  }];
+  const snapshot = logic.snapshotWithFullDeviceModules(
+    logic.buildWorkspaceSnapshot(dualPick, dualDevice, 1),
+    dualDevice,
+  );
+  const robot = snapshot.robots.find(item => item.name === "AtmosphereArm");
+  assert.deepEqual(robot.wafers, ["W1", "W2"]);
+  const topology = logic.renderEquipmentTopology(snapshot, null);
+  assert.match(topology, /class="robot-environment-badge">AtmosphereArm</);
+  assert.doesNotMatch(topology, />ATMRobot</);
+  assert.match(topology, /aria-label="AtmosphereArm，双片机械手/);
+  assert.match(topology, /class="robot-held-wafer robot-held-wafer-0"/);
+  assert.match(topology, /class="robot-held-wafer robot-held-wafer-1"/);
+  assert.doesNotMatch(topology, /robot-external-name|robot-capacity-badge|robot-holding-count|is-dual-hold/);
+  assert.doesNotMatch(topology, />2片</);
+  assert.doesNotMatch(topology, /loadlock-pressure-state/);
+});
+
+test("双腔拓扑拒绝 MoveList 中不存在于 init 的组合假设备", () => {
+  const twinsDevice = {
+    Stations: {
+      P1: { Type: "LoadPort" },
+      LA: { Type: "LoadLock" },
+      LB: { Type: "LoadLock" },
+      LC: { Type: "LoadLock" },
+      LD: { Type: "LoadLock" },
+      PM1: { Type: "Process" },
+    },
+    Robots: { AtmosphereArm: { Type: "ATMRobot" }, VacuumArm: { Type: "VTMRobot" } },
+  };
+  const replayMoves = [
+    {
+      MoveID: 1,
+      MoveType: 2,
+      ModuleName: "AtmosphereArm",
+      SrcStationList: ["P1"],
+      DestStationList: ["LALB"],
+      MatIDList: ["W1"],
+      StartTime: 0,
+      EndTime: 2,
+    },
+    {
+      MoveID: 2,
+      MoveType: 6,
+      ModuleName: "LCLD",
+      MatIDList: ["W1"],
+      StartTime: 2,
+      EndTime: 3,
+    },
+  ];
+  const snapshot = logic.snapshotWithFullDeviceModules(
+    logic.buildWorkspaceSnapshot(replayMoves, twinsDevice, 0.5),
+    twinsDevice,
+  );
+  const names = snapshot.modules.map(module => module.name);
+  assert.ok(names.includes("P1"));
+  assert.ok(!names.includes("LALB"));
+  assert.ok(!names.includes("LCLD"));
+  const topology = logic.renderEquipmentTopology(snapshot, null);
+  assert.doesNotMatch(topology, />LALB</);
+  assert.doesNotMatch(topology, />LCLD</);
+});
+
 test("LoadPort 按物理槽位显示未加工、空槽与回片后的已加工状态", () => {
   const slotDevice = {
     Stations: {
@@ -997,7 +1082,7 @@ test("E2E 决策在机器人尚未执行时驱动单槽机械臂朝向且不再�
   assert.doesNotMatch(topology, /class="robot-wrist-joint"/);
   assert.doesNotMatch(topology, /robot-fork-tine/);
   assert.doesNotMatch(topology, /robot-reach-sector/);
-  assert.match(topology, /class="robot-environment-badge">ATM</);
+  assert.match(topology, /class="robot-environment-badge">ATR</);
   assert.doesNotMatch(topology, /topology-target-arrows|<line /);
 });
 
@@ -1041,7 +1126,11 @@ test("机械手清除旧坐标偏移，并按 PRE_TRANS 进度连续旋转", () 
   assert.match(css, /\.robot-end-effector \{[^}]*width:\s*26px;[^}]*border-radius:\s*50%;/);
   assert.doesNotMatch(css, /\.robot-fork-tine/);
   assert.match(css, /\.robot-environment-badge[^}]*top:\s*calc\(50% - 44px\);[^}]*padding:\s*2px 4px;/);
+  assert.match(css, /\.robot-environment-badge[^}]*white-space:\s*nowrap;/);
   assert.doesNotMatch(css, /\.robot-environment-badge[^}]*min-width:/);
+  assert.match(css, /\.robot-held-wafer-0[^}]*translate\(-2px, -2px\)/);
+  assert.match(css, /\.robot-held-wafer-1[^}]*translate\(2px, 2px\)/);
+  assert.doesNotMatch(css, /robot-capacity-badge|robot-holding-count|robot-external-name|loadlock-pressure-state/);
   assert.match(css, /\.topology-interface-bay[^}]*right:\s*30%;\s*left:\s*30%;/);
   assert.doesNotMatch(css, /\.robot-reach-sector/);
   assert.doesNotMatch(css, /\.robot-effector-palm/);
@@ -1074,6 +1163,7 @@ test("LoadLock 空层不画晶圆线，并区分已加工晶圆且按环境变�
   assert.match(atmosphereTopology, /loadlock-wafer-line wafer-processed/);
   assert.match(atmosphereTopology, /loadlock-wafer-line wafer-unprocessed/);
   assert.doesNotMatch(atmosphereTopology, /loadlock-empty-slot/);
+  assert.doesNotMatch(atmosphereTopology, /loadlock-pressure-state/);
 
   const pumpingTopology = logic.renderEquipmentTopology(
     logic.buildWorkspaceSnapshot(loadLockMoves, device, 8),
@@ -1122,7 +1212,7 @@ test("初始状态按设备 LastItem 解析 LoadLock 环境，缺省按大气充
   assert.equal(atmosphereOf("LD"), 100, "LastItem ATR 初始为大气，充满蓝色");
 });
 
-test("ATR 与 VTR 机械臂按各自 LoadLock 入口旋转，不再叠加方向箭头", () => {
+test("ATR 指向大气侧入口，VTR 放入 LA/LB 时指向两腔中点", () => {
   const portalDevice = {
     Stations: {
       LP1: { Type: "LoadPort" }, PM1: { Type: "Process" },
@@ -1146,8 +1236,40 @@ test("ATR 与 VTR 机械臂按各自 LoadLock 入口旋转，不再叠加方向�
     return Number(match[1]);
   };
   assert.ok(robotAngle("ATR") < -90, "ATR 应向左上方的下排 LoadLock 入口旋转");
-  assert.ok(robotAngle("VTR") > 0, "VTR 应向下方的上排 LoadLock 入口旋转");
+  assert.ok(Math.abs(robotAngle("VTR") - 90) < 0.1, "VTR 应垂直指向 LA/LB 的中点");
   assert.doesNotMatch(topology, /topology-target-arrows/);
+});
+
+test("VTR 目标为 LA 或 LB 时使用相同的两腔中点角度", () => {
+  const midpointDevice = {
+    Stations: {
+      LA: { Type: "LoadLock" }, LB: { Type: "LoadLock" }, PM1: { Type: "Process" },
+    },
+    Robots: { VACRobot: { Type: "VTMRobot" } },
+  };
+  const angleFor = destination => {
+    const movesToLock = [{
+      MoveID: 1,
+      MoveType: 1,
+      ModuleName: "VACRobot",
+      SrcStationList: ["PM1"],
+      DestStationList: [destination],
+      StartTime: 0,
+      EndTime: 10,
+    }];
+    const topology = logic.renderEquipmentTopology(
+      logic.snapshotWithFullDeviceModules(
+        logic.buildWorkspaceSnapshot(movesToLock, midpointDevice, 5),
+        midpointDevice,
+      ),
+      null,
+    );
+    const match = /style="--robot-arm-angle:([\d.-]+)deg"/.exec(topology);
+    assert.ok(match);
+    return Number(match[1]);
+  };
+  assert.ok(Math.abs(angleFor("LA") - 90) < 0.1);
+  assert.ok(Math.abs(angleFor("LB") - 90) < 0.1);
 });
 
 test("完成取放动作后晶圆位置与机器人状态一致", () => {
