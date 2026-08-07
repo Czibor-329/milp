@@ -585,27 +585,37 @@ function isDummyPortName(name: string): boolean {
   return /DUMMY/i.test(name) && /PORT/i.test(name);
 }
 
-/** 画布仅展示参与核心工艺路径的设备，辅助缓存与温控站点保留在底层数据中。 */
+/** 判断站点是否是大气侧的简易缓存。 */
+function isBufferModule(name: string, type = ""): boolean {
+  return type.trim().toLowerCase() === "buffer" || /^BUF(?:FER)?(?:[_-]?\w+)?$/i.test(name.trim());
+}
+
+/** 判断站点是否是大气侧冷却盘。 */
+function isCoolerModule(name: string, type = ""): boolean {
+  return type.trim().toLowerCase() === "cooler" || /^(CL|COOL(?:ER)?)$/i.test(name.trim());
+}
+
+/** 画布隐藏不参与搬运路径、也没有独立拓扑语义的站点。 */
 function isTopologyHiddenModule(module: ModuleSnapshot): boolean {
   const name = module.name.trim();
   const type = module.type.trim().toLowerCase();
-  return /^BUF(?:FER)?(?:[_-]?\w+)?$/i.test(name)
-    || type === "buffer"
-    || isDummyPortName(name)
-    || type === "dummyport"
-    || /^HEATER$/i.test(name)
+  return /^HEATER$/i.test(name)
     || type === "heater";
 }
 
 /** 判断名称是否代表装载端口。 */
 function isLoadPortName(name: string, type = ""): boolean {
-  return !isDummyPortName(name)
-    && (type.toLowerCase() === "loadport" || /^(LP\d*|P\d+|.*PORT)$/i.test(name));
+  const normalizedType = type.trim().toLowerCase();
+  return normalizedType === "loadport"
+    || normalizedType === "dummyport"
+    || isDummyPortName(name)
+    || /^(LP\d*|P\d+|.*PORT)$/i.test(name);
 }
 
 /** 判断名称是否代表 LoadLock 或真空缓冲腔。 */
 function isLoadLockName(name: string, type = ""): boolean {
-  return type.toLowerCase() === "loadlock" || /^LL?[A-Z]$/i.test(name) || /^BUF_/i.test(name);
+  return !isBufferModule(name, type)
+    && (type.toLowerCase() === "loadlock" || /^LL?[A-Z]$/i.test(name));
 }
 
 /**
@@ -622,7 +632,7 @@ function initialLoadLockEnvironment(device: DeviceDefinition | null, name: strin
 
 /** 判断硬件是否没有可观察的腔室门。 */
 function isDoorlessModule(name: string, type = ""): boolean {
-  return /^cool(er)?$/i.test(name) || type.toLowerCase() === "cooler" || isDummyPortName(name);
+  return isCoolerModule(name, type) || isBufferModule(name, type);
 }
 
 /** 判断模块是否属于围绕 VTR 排列的工艺腔室。 */
@@ -1312,7 +1322,8 @@ function snapshotWithCandidateModules(
 
 /**
  * 把设备配置中尚未被 MoveList 引用的腔室并入拓扑快照。
- * 工艺模块、LoadLock 与辅助腔室完整保留；未被 MoveList 使用的 LoadPort 不再占用画布。
+ * 工艺模块、LoadLock 与辅助设备完整保留；未使用的普通 LoadPort 不占画布，
+ * Dummy Port 作为设备级耗材端口始终保留。
  * 已存在模块保留其回放状态；新增模块以空闲、门关闭的初始状态呈现。
  */
 export function snapshotWithFullDeviceModules(
@@ -1325,7 +1336,7 @@ export function snapshotWithFullDeviceModules(
   for (const [name, definition] of Object.entries(device?.Stations ?? {})) {
     if (knownNames.has(name) || isRobotName(name, configuredRobotNames)) continue;
     const type = String(definition?.Type ?? "");
-    if (isLoadPortName(name, type)) continue;
+    if (isLoadPortName(name, type) && !isDummyPortName(name) && type.trim().toLowerCase() !== "dummyport") continue;
     modules.push({
       name,
       type,
@@ -1377,7 +1388,7 @@ function moduleDoorSides(
 ): Array<"top" | "right" | "bottom" | "left"> {
   if (module.door === "doorless") return [];
   if (role === "lock") return [];
-  if (role === "port") return [];
+  if (role === "port") return ["top"];
   const name = module.name.trim().toUpperCase();
   if (layout === "cascade" && role === "process") {
     /* 级联腔室按布局槽位朝向机器手，不依赖 PM1/PM2 等设备名称。 */
@@ -1449,6 +1460,16 @@ function renderModule(
   const candidateLabel = candidate
     ? `${candidate.count} 个可行动作，最高模型偏好 ${(candidate.preference * 100).toFixed(0)}%`
     : "";
+  if (role === "auxiliary" && (isBufferModule(module.name, module.type) || isCoolerModule(module.name, module.type))) {
+    const utilityKind = isBufferModule(module.name, module.type) ? "buffer" : "cooler";
+    const utilityBody = utilityKind === "buffer"
+      ? `<div class="buffer-tray ${wafers ? "is-occupied" : "is-empty"}" aria-hidden="true"><span></span><span></span><span></span>${wafers}</div>`
+      : `<div class="cooler-plate ${wafers ? "is-occupied" : "is-empty"}" aria-hidden="true"><span></span><i></i>${wafers}</div>`;
+    return `<strong class="equipment-external-name equipment-external-name-${utilityKind}">${escapeHtml(module.name)}</strong>
+      <article class="equipment-utility equipment-${utilityKind} status-${module.status} ${module.isRobotTarget ? "is-target" : ""} ${candidate ? "is-candidate-destination" : ""} ${candidate?.selected ? "is-model-selected" : ""}" aria-label="${escapeHtml(`${accessibleStatus}${candidateLabel ? `，${candidateLabel}` : ""}`)}">
+        ${utilityBody}
+      </article>`;
+  }
   const atmosphereLevel = role === "lock"
     ? module.loadLockPhase === "pumping"
       ? 100 - module.progress * 100
@@ -1471,7 +1492,7 @@ function renderModule(
     : role === "process"
       ? `<div class="process-wafer-slot ${wafers ? "is-occupied" : "is-empty"}">${wafers}</div>`
       : role === "port"
-        ? `<div class="load-port-dock-face" aria-hidden="true"><span></span></div>`
+        ? ``
         : role === "auxiliary"
           ? `<div class="auxiliary-wafer-slot ${wafers ? "is-occupied" : "is-empty"}">${wafers}</div>`
         : `<div class="wafer-stack">${wafers}${overflow}</div>`;
@@ -1487,7 +1508,15 @@ function renderModule(
     return `<strong class="equipment-external-name">${escapeHtml(module.name)}</strong>${article}`;
   }
   if (role === "port") {
-    return `<strong class="equipment-external-name equipment-external-name-port">${escapeHtml(module.name)}</strong><div class="load-port-assembly">${article}${renderLoadPortCassette(module)}</div>`;
+    const isDummy = isDummyPortName(module.name) || module.type.trim().toLowerCase() === "dummyport";
+    const portDoors = moduleDoorSides(module, role, layout, roleIndex)
+      .map(side => `<i class="chamber-door chamber-door-${side}"></i>`)
+      .join("");
+    return `<strong class="equipment-external-name ${isDummy ? "equipment-external-name-dummy" : "equipment-external-name-port"}">${escapeHtml(module.name)}</strong><div class="load-port-assembly ${isDummy ? "is-dummy-port" : "is-load-port"} door-${module.door}" role="group" aria-label="${escapeHtml(`${accessibleStatus}${isDummy ? "，Dummy Port" : ""}${candidateLabel ? `，${candidateLabel}` : ""}`)}">
+      ${isDummy ? '<span class="load-port-kind">DUMMY</span>' : ""}
+      <div class="chamber-doors" aria-hidden="true">${portDoors}</div>
+      ${renderLoadPortCassette(module)}
+    </div>`;
   }
   return article;
 }
@@ -1549,9 +1578,16 @@ const TOPOLOGY_LOADLOCK_WIDTH = 120;
 const TOPOLOGY_LOADLOCK_HEIGHT = 72;
 const TOPOLOGY_LOADPORT_WIDTH = 144;
 const TOPOLOGY_LOADPORT_HEIGHT = 104;
+const TOPOLOGY_LOADPORT_BASE_HEIGHT = 22;
+/* 底座顶沿仅压住晶圆盒底边 2px，使 LoadPort 明确站在下托之上。 */
+const TOPOLOGY_LOADPORT_BASE_OVERHANG = 16;
+const TOPOLOGY_BUFFER_WIDTH = 104;
+const TOPOLOGY_BUFFER_HEIGHT = 56;
+const TOPOLOGY_COOLER_WIDTH = 92;
+const TOPOLOGY_COOLER_HEIGHT = 54;
 const TOPOLOGY_LOADLOCK_ROW_TOP_PIXELS = [664, 740] as const;
 const TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS = 866;
-const TOPOLOGY_LOADPORT_ROW_TOP_PIXELS = 990;
+const TOPOLOGY_LOADPORT_ROW_TOP_PIXELS = 1006;
 const TOPOLOGY_CANVAS_PADDING = 28;
 const TOPOLOGY_EXTERNAL_LABEL_CLEARANCE = 22;
 const TOPOLOGY_SINGLE_PROCESS_MIDDLE_TOP = TOPOLOGY_ROW_TOP_PIXELS[4] - 32;
@@ -1564,7 +1600,9 @@ const TOPOLOGY_CASCADE_LOWER_ROBOT_TOP = 430;
 const TOPOLOGY_CASCADE_LOCK_ROW_TOP = 548;
 const TOPOLOGY_CASCADE_LOCK_ROW_GAP = 80;
 const TOPOLOGY_CASCADE_ATM_TOP = 742;
-const TOPOLOGY_CASCADE_LOADPORT_TOP = 870;
+/* 大气侧在所有拓扑中共用同一垂直节奏：LoadPort 位于 ATR 下方 140px。 */
+const TOPOLOGY_ATMOSPHERE_LOADPORT_OFFSET = 140;
+const TOPOLOGY_CASCADE_LOADPORT_TOP = TOPOLOGY_CASCADE_ATM_TOP + TOPOLOGY_ATMOSPHERE_LOADPORT_OFFSET;
 
 /** 返回均匀分布在四列设备网格中的横向位置。 */
 function distributedTopologyColumns(count: number): number[] {
@@ -1600,6 +1638,46 @@ export function detectDeviceTopologyLayout(device: DeviceDefinition | null): Top
         || (/process|chamber/i.test(type) && finiteNumber(station.Capacity, 1) > 1);
     });
   return hasMultiProcessChamber ? "dual" : "single";
+}
+
+/** 在设备 JSON 中查找精确的模块引用；同时覆盖对象键（如 PickTime.UBR）与字段值。 */
+function configurationReferencesName(value: unknown, name: string): boolean {
+  if (typeof value === "string") return value === name;
+  if (!value || typeof value !== "object") return false;
+  if (Array.isArray(value)) return value.some(item => configurationReferencesName(item, name));
+  return Object.entries(value as Record<string, unknown>).some(([key, item]) => (
+    key === name || configurationReferencesName(item, name)
+  ));
+}
+
+/**
+ * 识别连接上下两级真空机械手的桥接 LoadLock。
+ *
+ * 完整设备配置优先按真实连通关系判断；精简配置通常只保留 Type，因此兼容
+ * UBR/DBR 语义名称。仅当两者都不可用时，才沿用“前四个为接口腔”的旧顺序规则。
+ */
+function cascadeBridgeLoadLockNames(
+  orderedLoadLockNames: string[],
+  device: DeviceDefinition | null | undefined,
+  vacuumRobotNames: string[],
+): Set<string> {
+  const structurallyLinked = orderedLoadLockNames.filter(loadLockName => {
+    const station = device?.Stations?.[loadLockName];
+    const linkedVacuumRobots = vacuumRobotNames.filter(robotName => (
+      configurationReferencesName(station, robotName)
+      || configurationReferencesName(device?.Robots?.[robotName], loadLockName)
+    ));
+    return linkedVacuumRobots.length >= 2;
+  });
+  if (structurallyLinked.length) return new Set(structurallyLinked);
+
+  const namedBridges = orderedLoadLockNames
+    .filter(name => /^(?:UBR|DBR)(?:[_-]?\d+)?$/i.test(name.trim()))
+    .sort((left, right) => {
+      const rank = (name: string): number => /^UBR/i.test(name.trim()) ? 0 : 1;
+      return rank(left) - rank(right) || naturalCompare(left, right);
+    });
+  return new Set(namedBridges.length ? namedBridges : orderedLoadLockNames.slice(4));
 }
 
 /** 按参考仓库 CenterCanvas 的四列网格计算模块坐标。 */
@@ -1680,20 +1758,26 @@ function moduleTopologyPosition(
     };
   }
   if (role === "port") {
-    const loadPortColumns: Record<string, number> = {
-      LP1: column[0], LP2: column[1], LP3: column[2], LP4: column[3],
-    };
+    const canonicalOrder: Record<string, number> = { LP1: 0, LP2: 1, LP3: 2, LP4: 3 };
+    const orderedPorts = [...roleModules].sort((left, right) => {
+      const leftDummy = isDummyPortName(left.name) || left.type.trim().toLowerCase() === "dummyport";
+      const rightDummy = isDummyPortName(right.name) || right.type.trim().toLowerCase() === "dummyport";
+      if (leftDummy !== rightDummy) return leftDummy ? 1 : -1;
+      const leftRank = canonicalOrder[left.name.trim().toUpperCase()] ?? 100;
+      const rightRank = canonicalOrder[right.name.trim().toUpperCase()] ?? 100;
+      return leftRank - rightRank || naturalCompare(left.name, right.name);
+    });
+    const portIndex = Math.max(0, orderedPorts.findIndex(item => item.name === module.name));
+    const currentIsDummy = isDummyPortName(module.name) || module.type.trim().toLowerCase() === "dummyport";
+    const portColumns = roleCount <= column.length
+      ? column
+      : Array.from({ length: roleCount }, (_, current) => 16 + current * 58 / (roleCount - 1));
     const loadPortTop = layout === "cascade" ? TOPOLOGY_CASCADE_LOADPORT_TOP : TOPOLOGY_LOADPORT_ROW_TOP_PIXELS;
-    if (loadPortColumns[name] !== undefined) {
-      return {
-        leftPercent: loadPortColumns[name],
-        topPixels: loadPortTop,
-        widthPixels: TOPOLOGY_LOADPORT_WIDTH,
-        heightPixels: TOPOLOGY_LOADPORT_HEIGHT,
-      };
-    }
     return {
-      leftPercent: distributedTopologyColumns(roleCount)[index],
+      /* 四列语义固定为 LP1 / LP2 / LP3 / Dummy Port；缺少 LP3 时保留空位。 */
+      leftPercent: currentIsDummy && roleCount <= column.length
+        ? column[3]
+        : portColumns[portIndex] ?? column[0],
       topPixels: loadPortTop,
       widthPixels: TOPOLOGY_LOADPORT_WIDTH,
       heightPixels: TOPOLOGY_LOADPORT_HEIGHT,
@@ -1702,8 +1786,25 @@ function moduleTopologyPosition(
   if (["AL", "ALIGNER"].includes(name)) {
     return { leftPercent: column[0], topPixels: layout === "cascade" ? TOPOLOGY_CASCADE_ATM_TOP : TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS };
   }
-  if (["CL", "COOLER"].includes(name)) {
-    return { leftPercent: column[3], topPixels: layout === "cascade" ? TOPOLOGY_CASCADE_ATM_TOP : TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS };
+  if (role === "auxiliary" && (isBufferModule(module.name, module.type) || isCoolerModule(module.name, module.type))) {
+    const atmosphereTop = layout === "cascade" ? TOPOLOGY_CASCADE_ATM_TOP : TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS;
+    const rightUtilities = roleModules
+      .filter(item => isBufferModule(item.name, item.type) || isCoolerModule(item.name, item.type))
+      .sort((left, right) => {
+        const leftRank = isCoolerModule(left.name, left.type) ? 0 : 1;
+        const rightRank = isCoolerModule(right.name, right.type) ? 0 : 1;
+        return leftRank - rightRank || naturalCompare(left.name, right.name);
+      });
+    const utilityIndex = Math.max(0, rightUtilities.findIndex(item => item.name === module.name));
+    /* 从 ATR 所在行开始向下排，避免首个 Buffer/Cooler 越过大气区上边界。 */
+    const utilityTop = atmosphereTop + utilityIndex * 68;
+    const buffer = isBufferModule(module.name, module.type);
+    return {
+      leftPercent: 90,
+      topPixels: utilityTop,
+      widthPixels: buffer ? TOPOLOGY_BUFFER_WIDTH : TOPOLOGY_COOLER_WIDTH,
+      heightPixels: buffer ? TOPOLOGY_BUFFER_HEIGHT : TOPOLOGY_COOLER_HEIGHT,
+    };
   }
   if (role === "auxiliary") {
     const perRow = 6;
@@ -1958,7 +2059,13 @@ export function renderEquipmentTopology(
   const orderedLoadLockNames = configuredLoadLockOrder.length === groups.loadLocks.length
     ? configuredLoadLockOrder
     : groups.loadLocks.map(module => module.name);
-  const bridgeLoadLockNames = new Set(layout === "cascade" ? orderedLoadLockNames.slice(4) : []);
+  const bridgeLoadLockNames = layout === "cascade"
+    ? cascadeBridgeLoadLockNames(
+      orderedLoadLockNames,
+      device,
+      vacuumRobots.map(robot => robot.name),
+    )
+    : new Set<string>();
   const modulePositions = new Map<string, TopologyPosition>();
   const positionModuleGroup = (
     modules: ModuleSnapshot[],
@@ -1994,7 +2101,7 @@ export function renderEquipmentTopology(
     ? Math.max(...allPositions.map(position => position.topPixels + (position.heightPixels ?? TOPOLOGY_ITEM_SIZE) / 2))
     : TOPOLOGY_ITEM_SIZE;
   const verticalOffset = TOPOLOGY_CANVAS_PADDING - minimumTop;
-  const canvasHeight = Math.max(
+  let canvasHeight = Math.max(
     520,
     Math.ceil(maximumBottom + verticalOffset + TOPOLOGY_CANVAS_PADDING),
   );
@@ -2011,7 +2118,7 @@ export function renderEquipmentTopology(
   const positionedRobots = (robots: RobotSnapshot[]): TopologyPosition[] => robots
     .map(robot => robotPositions.get(robot.name))
     .filter((position): position is TopologyPosition => Boolean(position));
-  /* 级联布局中前四个 LoadLock 作为大气/真空接口，其余作为两级真空手之间的桥接腔。 */
+  /* 级联布局中桥接腔归入真空区，其余 LoadLock 作为大气/真空接口。 */
   const interfaceLoadLocks = groups.loadLocks.filter(module => !bridgeLoadLockNames.has(module.name));
   const vacuumExtent = topologyVerticalExtent([
     ...positionedModules(groups.processModules),
@@ -2019,16 +2126,42 @@ export function renderEquipmentTopology(
     ...positionedModules(groups.loadLocks.filter(module => bridgeLoadLockNames.has(module.name))),
   ]);
   const interfaceExtent = topologyVerticalExtent(positionedModules(interfaceLoadLocks));
-  const atmosphereExtent = topologyVerticalExtent([
+  let atmosphereExtent = topologyVerticalExtent([
     ...positionedModules(groups.auxiliaryModules),
     ...positionedModules(groups.loadPorts),
     ...positionedRobots(atmosphereRobots),
   ]);
+  if (interfaceExtent && atmosphereExtent) {
+    /*
+     * 大气侧整组贴合接口带：设备内容的顶边与接口带底边保持 12px 分区间距。
+     * 整组平移不会改变内部布局或区域高度，只消除 LA/LB 下方的额外空白。
+     */
+    const atmosphereOffset = interfaceExtent.bottom + 24 - atmosphereExtent.top;
+    const shiftPosition = (position: TopologyPosition | undefined): void => {
+      if (position) position.topPixels += atmosphereOffset;
+    };
+    groups.auxiliaryModules.forEach(module => shiftPosition(modulePositions.get(module.name)));
+    groups.loadPorts.forEach(module => shiftPosition(modulePositions.get(module.name)));
+    atmosphereRobots.forEach(robot => shiftPosition(robotPositions.get(robot.name)));
+    atmosphereExtent = topologyVerticalExtent([
+      ...positionedModules(groups.auxiliaryModules),
+      ...positionedModules(groups.loadPorts),
+      ...positionedRobots(atmosphereRobots),
+    ]);
+    const finalMaximumBottom = Math.max(
+      ...[...modulePositions.values()].map(position => position.topPixels + (position.heightPixels ?? TOPOLOGY_ITEM_SIZE) / 2),
+      ...[...robotPositions.values()].map(position => position.topPixels + (position.heightPixels ?? TOPOLOGY_ITEM_SIZE) / 2),
+    );
+    canvasHeight = Math.max(520, Math.ceil(finalMaximumBottom + TOPOLOGY_CANVAS_PADDING));
+  }
   const interfaceTop = interfaceExtent ? Math.max(12, interfaceExtent.top - 12) : Math.round(canvasHeight * .48);
   const interfaceBottom = interfaceExtent ? Math.min(canvasHeight - 12, interfaceExtent.bottom + 12) : interfaceTop;
   const vacuumTop = vacuumExtent ? Math.max(12, vacuumExtent.top - 24) : 12;
   const vacuumBottom = Math.max(vacuumTop + 120, interfaceTop - 12);
-  const atmosphereTop = interfaceExtent ? interfaceBottom + 12 : Math.round(canvasHeight * .52);
+  /* 大气区高度只由大气侧内容决定；位置则紧接接口带，避免区域之间出现断层。 */
+  const atmosphereTop = atmosphereExtent
+    ? interfaceExtent ? interfaceBottom + 12 : Math.max(12, atmosphereExtent.top)
+    : interfaceExtent ? interfaceBottom + 12 : Math.round(canvasHeight * .52);
   const atmosphereBottom = atmosphereExtent
     ? Math.min(canvasHeight - 12, atmosphereExtent.bottom + 24)
     : canvasHeight - 12;
@@ -2049,6 +2182,14 @@ export function renderEquipmentTopology(
     if (!position) return "";
     return `<div class="reference-module-position" style="--module-left:${position.leftPercent}%;--module-top:${position.topPixels}px">${renderModule(module, role, destinations.get(module.name), layout, roleIndex)}</div>`;
   }).join("");
+  const positionedLoadPorts = positionedModules(groups.loadPorts);
+  const loadPortBaseMarkup = positionedLoadPorts.length ? (() => {
+    const lefts = positionedLoadPorts.map((position) => position.leftPercent);
+    const baseCenter = (Math.min(...lefts) + Math.max(...lefts)) / 2;
+    const baseWidth = Math.max(...lefts) - Math.min(...lefts) + TOPOLOGY_LOADPORT_WIDTH / TOPOLOGY_VIEWBOX_WIDTH * 100;
+    const baseTop = positionedLoadPorts[0].topPixels + TOPOLOGY_LOADPORT_HEIGHT / 2 + TOPOLOGY_LOADPORT_BASE_OVERHANG - TOPOLOGY_LOADPORT_BASE_HEIGHT / 2;
+    return `<div class="load-port-shared-base" style="--base-left:${baseCenter.toFixed(2)}%;--base-width:${baseWidth.toFixed(2)}%;--base-top:${baseTop.toFixed(1)}px" aria-hidden="true"></div>`;
+  })() : "";
   const moduleMarkup = [
     renderModuleGroup(groups.processModules, "process"),
     renderModuleGroup(groups.loadLocks, "lock"),
@@ -2092,6 +2233,7 @@ export function renderEquipmentTopology(
     <section class="equipment-schematic" data-topology-layout="${layout}" aria-label="完整设备拓扑回放">
       <div class="schematic-canvas reference-grid-canvas" style="--topology-canvas-height:${canvasHeight}px">
         ${machineAreaMarkup}
+        ${loadPortBaseMarkup}
         ${moduleMarkup}
         ${robotMarkup}
       </div>
