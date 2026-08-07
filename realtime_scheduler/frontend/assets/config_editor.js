@@ -2910,12 +2910,6 @@ var batchBottleneckSummaries = /* @__PURE__ */ new Map();
 var batchBottleneckRequests = /* @__PURE__ */ new Map();
 var batchBottleneckErrors = /* @__PURE__ */ new Map();
 var EXPECTED_API_SCHEMA = "cjob-pjob-v3";
-var BUILTIN_STRATEGIES = /* @__PURE__ */ new Set([
-  "heuristic",
-  "loadlock-macro",
-  "e2e-ctq",
-  "dual-actor-e2e"
-]);
 var DEFAULT_SCHEDULE_OPTIONS = Object.freeze({
   loadLockManager: "petri-look",
   residencyGuardSeconds: 0,
@@ -2970,7 +2964,7 @@ var state = {
   robotSlots: {},
   robotSlotsSaving: /* @__PURE__ */ new Set(),
   strategy: "heuristic",
-  availableOtherAlgorithms: [],
+  availableAlgorithms: [],
   algorithmMetadata: {},
   roundCount: 2,
   times: [0, 70],
@@ -3578,7 +3572,7 @@ function applyTestCase(testCase) {
   state.testCaseGroup = String(value.group || "");
   state.activeTestGroup = state.testCaseGroup;
   const requestedStrategy = String(value.strategy || "heuristic");
-  state.strategy = BUILTIN_STRATEGIES.has(requestedStrategy) || requestedStrategy.startsWith("other_alg:") ? requestedStrategy : "heuristic";
+  state.strategy = requestedStrategy.trim() || "heuristic";
   state.roundCount = Math.max(1, Number(value.roundCount) || 1);
   state.times = Array.isArray(value.times) ? value.times : [0];
   const persistedOptions = value.options && typeof value.options === "object" ? value.options : {};
@@ -3628,8 +3622,7 @@ function applyTestCase(testCase) {
   document.querySelectorAll("[data-option]").forEach((input) => {
     input.value = state.options[input.dataset.option] ?? input.value;
   });
-  document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro", "e2e-ctq", "dual-actor-e2e"].includes(state.strategy));
-  document.getElementById("heuristicObjectiveOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro"].includes(state.strategy));
+  updateStrategyOptionVisibility();
   document.getElementById("roundCount").disabled = false;
   if (Object.keys(state.algorithmMetadata).length) showAlgorithmDetails(state.strategy);
   renderAll();
@@ -4713,15 +4706,22 @@ function validationDisplay(value) {
   return value ? String(value) : "";
 }
 function renderOtherAlgorithmOptions(algorithms) {
-  state.availableOtherAlgorithms = Array.isArray(algorithms) ? algorithms : [];
+  state.availableAlgorithms = Array.isArray(algorithms) ? algorithms : [];
   const container = document.getElementById("otherAlgorithmOptions");
-  container.innerHTML = state.availableOtherAlgorithms.map((algorithm) => `
-    <label class="strategy-card" data-strategy-card="${escapeHtml3(algorithm.strategy)}">
-      <input type="radio" name="strategy" value="${escapeHtml3(algorithm.strategy)}" ${algorithm.strategy === state.strategy ? "checked" : ""}>
+  container.innerHTML = state.availableAlgorithms.map((algorithm) => `
+    <label class="strategy-card" data-strategy-card="${escapeHtml3(algorithm.strategy)}" ${algorithm.unavailableReason ? `title="${escapeHtml3(algorithm.unavailableReason)}"` : ""}>
+      <input type="radio" name="strategy" value="${escapeHtml3(algorithm.strategy)}" ${algorithm.strategy === state.strategy ? "checked" : ""} ${algorithm.available === false ? "disabled" : ""}>
       <b>${escapeHtml3(algorithm.name)}</b>
     </label>
   `).join("");
+  updateStrategyOptionVisibility();
   renderAlgorithmMetadata();
+}
+function updateStrategyOptionVisibility() {
+  const algorithm = state.availableAlgorithms.find((item) => item.strategy === state.strategy);
+  const optionGroups = new Set(algorithm?.optionGroups || []);
+  document.getElementById("loadlockOptions").classList.toggle("is-hidden", !optionGroups.has("loadlock"));
+  document.getElementById("heuristicObjectiveOptions").classList.toggle("is-hidden", !optionGroups.has("heuristic-objectives"));
 }
 function showAlgorithmDetails(strategy) {
   const metadata = state.algorithmMetadata[strategy] || {};
@@ -5542,11 +5542,8 @@ async function checkService() {
     if (!response.ok) throw new Error();
     const status = await response.json(), compatible = status.schemaVersion === EXPECTED_API_SCHEMA;
     state.serviceCompatible = compatible;
-    const loadlockMacroAvailable = status.strategies?.["loadlock-macro"] === true, e2eCTQAvailable = status.strategies?.["e2e-ctq"] === true, dualActorE2EAvailable = status.strategies?.["dual-actor-e2e"] === true;
+    const e2eCTQAvailable = status.strategies?.["e2e-ctq"] === true, dualActorE2EAvailable = status.strategies?.["dual-actor-e2e"] === true;
     state.algorithmMetadata = status.algorithmMetadata || {};
-    document.getElementById("loadlockMacroStrategyInput").disabled = !loadlockMacroAvailable;
-    document.getElementById("e2eCTQStrategyInput").disabled = !e2eCTQAvailable;
-    document.getElementById("dualActorE2EStrategyInput").disabled = !dualActorE2EAvailable;
     const replayModelSelect = document.getElementById("visualRecommendationModel");
     replayModelSelect.querySelector('option[value="e2e-ctq"]').disabled = !e2eCTQAvailable;
     replayModelSelect.querySelector('option[value="dual-actor-e2e"]').disabled = !dualActorE2EAvailable;
@@ -5554,7 +5551,7 @@ async function checkService() {
       replayModelSelect.value = dualActorE2EAvailable ? "dual-actor-e2e" : "e2e-ctq";
       replayModelSelect.dispatchEvent(new Event("change"));
     }
-    renderOtherAlgorithmOptions(status.otherAlgorithms || []);
+    renderOtherAlgorithmOptions(status.algorithms || status.otherAlgorithms || []);
     runButton.disabled = !compatible;
     batchRunButton.disabled = !compatible;
     comparisonButton.disabled = !compatible || !state.parameterComparison?.baseline;
@@ -5699,11 +5696,12 @@ document.addEventListener("change", (event) => {
   }
   if (event.target.name === "strategy") {
     state.strategy = event.target.value;
-    if (["e2e-ctq", "dual-actor-e2e"].includes(state.strategy)) state.options.loadLockManager = "joint";
-    else if (["heuristic", "loadlock-macro"].includes(state.strategy)) state.options.loadLockManager = "petri-look";
+    const algorithm = state.availableAlgorithms.find((item) => item.strategy === state.strategy);
+    if (algorithm?.defaultOptions && typeof algorithm.defaultOptions === "object") {
+      Object.assign(state.options, algorithm.defaultOptions);
+    }
     document.getElementById("roundCount").disabled = false;
-    document.getElementById("loadlockOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro", "e2e-ctq", "dual-actor-e2e"].includes(state.strategy));
-    document.getElementById("heuristicObjectiveOptions").classList.toggle("is-hidden", !["heuristic", "loadlock-macro"].includes(state.strategy));
+    updateStrategyOptionVisibility();
     showAlgorithmDetails(state.strategy);
     markTestDirty();
     renderAll();

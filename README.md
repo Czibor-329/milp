@@ -89,6 +89,16 @@ python realtime_scheduler\server.py --open
 src/
 ```
 
+本地算法选择器由 `alg/algorithms.json` 驱动。新增算法时只需在算法仓库中：
+
+1. 实现算法，并把算法 ID 加入 `infer/function.py` 的 `SUPPORTED_ALGORITHMS`；
+2. 在 `algorithms.json` 的 `algorithms` 数组增加一项。
+
+前端会从健康检查接口自动生成算法卡片，不需要再修改 HTML 或 TypeScript。
+`enabled: false` 可隐藏暂不使用的算法；`requiredFiles` 可声明模型等运行依赖，缺失时
+卡片仍会显示但不可选择；`optionGroups` 当前支持 `loadlock` 和
+`heuristic-objectives` 两个通用参数区。配置由服务实时读取，刷新页面即可生效。
+
 外部算法包放到：
 
 ```text

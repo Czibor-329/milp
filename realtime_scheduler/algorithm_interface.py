@@ -46,7 +46,6 @@ _ACTIVE_ALGORITHM = threading.local()
 _ENTRY_MODULE: Optional[ModuleType] = None
 _ENTRY_ROOT: Optional[Path] = None
 _ENTRY_REVISION: Optional[str] = None
-_DISCOVERED_ALGORITHMS_CACHE: Optional[list[JsonObject]] = None
 
 ALGORITHM_SOURCE_SUFFIXES = frozenset({
     ".py", ".json", ".yaml", ".yml", ".toml", ".npz", ".npy", ".pt",
@@ -92,13 +91,9 @@ def discover_other_algorithms() -> list[JsonObject]:
     每个算法目录必须包含 ``CT/infer/scheduler.py`` 或
     ``infer/scheduler.py``，目录名同时作为稳定算法 ID。
 
-    结果在首次扫描后缓存于进程生命周期内；新增或删除算法目录需重启服务。
+    每次调用都重新扫描目录；新增或删除算法包后刷新前端即可看到最新列表。
     """
-    global _DISCOVERED_ALGORITHMS_CACHE
-    if _DISCOVERED_ALGORITHMS_CACHE is not None:
-        return _DISCOVERED_ALGORITHMS_CACHE
     if not OTHER_ALGORITHM_ROOT.is_dir():
-        _DISCOVERED_ALGORITHMS_CACHE = []
         return []
     algorithms: list[JsonObject] = []
     for root in sorted(
@@ -129,7 +124,6 @@ def discover_other_algorithms() -> list[JsonObject]:
             "available": True,
             "revision": algorithm_revision(root),
         })
-    _DISCOVERED_ALGORITHMS_CACHE = algorithms
     return algorithms
 
 

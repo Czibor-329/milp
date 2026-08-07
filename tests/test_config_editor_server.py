@@ -134,10 +134,12 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("LP1", self.device["Stations"])
 
     def test_frontend_contains_search_strategy_controls(self) -> None:
-        """页面应提供算法选择，但不显示宏周期的旧兼容参数。"""
+        """页面应动态生成算法选择，但不显示宏周期的旧兼容参数。"""
         source = _editor_source()
         for marker in (
-            "loadlockMacroStrategyInput",
+            "status.algorithms",
+            "updateStrategyOptionVisibility",
+            "algorithm?.optionGroups",
         ):
             self.assertIn(marker, source)
         self.assertNotIn('data-option="loadLockMacroSearchSeconds"', source)
@@ -156,6 +158,38 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertNotIn("configuredWaferCount", source)
         self.assertNotIn("milpTimeLimit", source)
         self.assertNotIn("milp", config_server.BUILTIN_ALGORITHM_METADATA)
+
+    def test_discovers_builtin_algorithms_from_repository_catalog(self) -> None:
+        """算法仓库清单新增策略后，服务应直接返回其前端卡片定义。"""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            catalog_path = Path(temporary_directory) / "algorithms.json"
+            catalog_path.write_text(json.dumps({
+                "schemaVersion": 1,
+                "algorithms": [{
+                    "id": "new-search",
+                    "name": "新搜索算法",
+                    "introduction": "用于验证动态算法目录。",
+                    "optionGroups": ["loadlock"],
+                }],
+            }, ensure_ascii=False), encoding="utf-8")
+            with (
+                patch.object(config_server, "BUILTIN_ALGORITHM_CATALOG_PATH", catalog_path),
+                patch.object(config_server, "builtin_supported_algorithms", frozenset({"new-search"})),
+                patch.object(config_server, "BUILTIN_ALGORITHM_AVAILABLE", True),
+            ):
+                algorithms = config_server.discover_builtin_algorithms()
+
+                catalog_path.write_text(json.dumps({
+                    "schemaVersion": 1,
+                    "algorithms": [{"id": "new-search", "enabled": False}],
+                }), encoding="utf-8")
+                algorithms_after_disable = config_server.discover_builtin_algorithms()
+
+        self.assertEqual(["new-search"], [item["strategy"] for item in algorithms])
+        self.assertEqual("新搜索算法", algorithms[0]["name"])
+        self.assertTrue(algorithms[0]["available"])
+        self.assertEqual(["loadlock"], algorithms[0]["optionGroups"])
+        self.assertEqual([], algorithms_after_disable)
 
     def test_frontend_contains_extensible_device_config_and_robot_slot_save(self) -> None:
         """页面应提供可扩展设备配置入口，并独立保存机器手单臂/双臂配置。"""
@@ -1299,7 +1333,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertNotIn('id="neuralStrategyHint"', html)
         self.assertNotIn('id="rlStrategyHint"', html)
         self.assertIn('id="otherAlgorithmOptions"', html)
-        self.assertIn("status.otherAlgorithms", html)
+        self.assertIn("status.algorithms", html)
         self.assertIn('id="deviceSelect"', html)
         self.assertIn('id="testCaseSelect"', html)
         self.assertIn('id="copyTestButton"', html)
@@ -2954,7 +2988,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertTrue(all(set(entry) == {"Time", "Describe", "SimTime", "Info"} for entry in reproduction))
 
     def test_frontend_exposes_available_dual_actor_strategy(self) -> None:
-        """双 Actor 卡片、健康检查和介绍必须使用同一个稳定策略名。"""
+        """双 Actor 清单、健康检查和介绍必须使用同一个稳定策略名。"""
         html = _editor_source()
         workspace_source = (
             ROOT
@@ -2965,8 +2999,8 @@ class ConfigEditorServerTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         metadata = config_server.read_algorithm_metadata()
 
-        self.assertIn('id="dualActorE2EStrategyInput"', html)
-        self.assertIn('value="dual-actor-e2e"', html)
+        self.assertIn("renderOtherAlgorithmOptions(status.algorithms", html)
+        self.assertIn("algorithm.strategy", html)
         self.assertIn('status.strategies?.["dual-actor-e2e"]', html)
         self.assertIn('"校验 / 双 Actor"', html)
         self.assertIn('id="visualRecommendationModel"', html)

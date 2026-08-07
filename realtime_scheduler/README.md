@@ -64,6 +64,10 @@ npm run build
 - `other_alg 标准算法`：自动扫描算法仓库 `alg/other_alg/<算法名>`，通过包内正式 `CT.infer.scheduler.init/update` 入口运行。每次重算前使用算法仓库的状态回放能力生成全量物料、机台、机器人快照以及 `RemoveList`，支持连续多轮重算；结果中的 `updates` 保留每次实际发送的数据。
 - `跳过输出校验`：运行策略面板可勾选“跳过输出校验”，此时不再对 MoveList 做平台侧状态校验（首排与重算均跳过），直接展示算法原始输出，结果校验状态标记为 `skipped`；批量运行同样生效。
 
+本地算法列表不在前端写死，而是由算法仓库根目录的 `algorithms.json` 控制。
+服务会在每次健康检查时重读清单；配置中的算法还必须存在于
+`infer.function.SUPPORTED_ALGORITHMS`，并满足 `requiredFiles`，才能在页面中启用。
+
 内置算法与 `other_alg` 现在共用同一套标准 update 数据流。内置入口示例：
 
 ```python

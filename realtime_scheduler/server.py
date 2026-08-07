@@ -66,6 +66,7 @@ if ALGORITHM_REPOSITORY_PRESENT:
     try:
         from infer import scheduler as builtin_algorithm_scheduler
         from infer.function import (
+            SUPPORTED_ALGORITHMS as builtin_supported_algorithms,
             get_last_strategy_diagnostics as builtin_strategy_diagnostics,
             session as builtin_algorithm_session,
         )
@@ -85,6 +86,7 @@ if not BUILTIN_ALGORITHM_AVAILABLE:
     # 的时间线通知，不包含任何调度策略或本地算法实现。
     TIME_TOLERANCE = 1e-6
     MODELS_DIR = ALGORITHM_ROOT / "results" / "models"
+    builtin_supported_algorithms = frozenset()
 from realtime_scheduler.algorithm_interface import (
     discover_other_algorithms,
     init as algorithm_init,
@@ -170,6 +172,8 @@ E2E_CTQ_MODEL_PATH = ALGORITHM_ROOT / "results" / "models" / "e2e_ctq_policy.npz
 DUAL_ACTOR_MODEL_PATH = (
     ALGORITHM_ROOT / "results" / "dual_actor_primitive_v1_candidate.npz"
 )
+BUILTIN_ALGORITHM_CATALOG_PATH = ALGORITHM_ROOT / "algorithms.json"
+ALGORITHM_CATALOG_SCHEMA_VERSION = 1
 WORKSPACE_STORE_PATH = DATA_DIR / "workspaces"
 LEGACY_WORKSPACE_STORE_PATH = ALGORITHM_ROOT / "results" / "config_editor_workspaces.json"
 DEVICE_INIT_DIR = DATA_DIR / "devices"
@@ -185,24 +189,135 @@ _BATCH_RUNS: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
 _BATCH_RUNS_LOCK = threading.RLock()
 _BATCH_CANCEL_EVENTS: Dict[str, threading.Event] = {}
 
-BUILTIN_ALGORITHM_METADATA: Dict[str, Dict[str, str]] = {
-    "heuristic": {
-        "name": "启发式",
-        "introduction": "基于设备状态、工艺约束和局部优先级快速生成可执行排程，适合作为低延迟实时调度策略与稳定基线。",
-    },
-    "loadlock-macro": {
-        "name": "LoadLock 宏周期",
-        "introduction": "面向真空设备的宏周期规划策略，统一安排 LoadLock 抽气、充气和携片节奏，再由底层安全规则完成动作落地。",
-    },
-    "e2e-ctq": {
-        "name": "E2E-CTQ",
-        "introduction": "使用异构资源流图和剩余工期分位价值，从当前设备状态直接生成唯一调度轨迹。",
-    },
-    "dual-actor-e2e": {
-        "name": "双 Actor 原子调度",
-        "introduction": "大气端与真空端两个模型并行形成决策，以 Pick、Place、Swap 为粒度协调 LoadLock 准入、晶圆重入、清洁停靠与系统停留时间波动。",
-    },
-}
+ALGORITHM_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+FALLBACK_BUILTIN_ALGORITHM_ID = "heuristic"
+
+
+def _algorithm_catalog_rows() -> List[Mapping[str, Any]]:
+    """读取算法仓库的展示清单；缺少配置时自动暴露运行时声明的算法。"""
+    if not BUILTIN_ALGORITHM_CATALOG_PATH.is_file():
+        discovered_ids = (
+            sorted(builtin_supported_algorithms)
+            if builtin_supported_algorithms
+            else [FALLBACK_BUILTIN_ALGORITHM_ID]
+        )
+        return [
+            {
+                "id": algorithm_id,
+                "name": algorithm_id,
+                "introduction": "由本地算法仓库自动发现的调度算法。",
+            }
+            for algorithm_id in discovered_ids
+        ]
+    try:
+        catalog = json.loads(
+            BUILTIN_ALGORITHM_CATALOG_PATH.read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(
+            f"无法读取算法清单 {BUILTIN_ALGORITHM_CATALOG_PATH}：{error}"
+        ) from error
+    if not isinstance(catalog, Mapping):
+        raise ValueError("algorithms.json 顶层必须是 JSON object")
+    if catalog.get("schemaVersion") != ALGORITHM_CATALOG_SCHEMA_VERSION:
+        raise ValueError(
+            "algorithms.json.schemaVersion 必须为 "
+            f"{ALGORITHM_CATALOG_SCHEMA_VERSION}"
+        )
+    rows = catalog.get("algorithms")
+    if not isinstance(rows, list):
+        raise ValueError("algorithms.json 必须包含 algorithms 数组")
+    if not all(isinstance(row, Mapping) for row in rows):
+        raise ValueError("algorithms.json.algorithms 的每一项都必须是 JSON object")
+    return rows
+
+
+def discover_builtin_algorithms() -> List[Dict[str, Any]]:
+    """返回算法仓库配置中启用的本地算法及其实时可用状态。
+
+    清单在每次调用时重读，因此新增算法或调整 ``enabled`` 后无需修改前端，
+    也无需重启本地服务。算法只有同时被运行时 ``SUPPORTED_ALGORITHMS`` 声明、
+    且配置中的依赖文件存在时才可执行。
+    """
+    algorithms: List[Dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for index, row in enumerate(_algorithm_catalog_rows()):
+        if row.get("enabled", True) is False:
+            continue
+        algorithm_id = str(row.get("id") or "").strip().lower()
+        if not ALGORITHM_ID_PATTERN.fullmatch(algorithm_id):
+            raise ValueError(
+                f"algorithms.json 第 {index + 1} 项 id 不合法：{algorithm_id or '<empty>'}"
+            )
+        if algorithm_id in seen_ids:
+            raise ValueError(f"algorithms.json 中算法 id 重复：{algorithm_id}")
+        seen_ids.add(algorithm_id)
+        required_files = row.get("requiredFiles") or []
+        if not isinstance(required_files, list) or not all(
+            isinstance(path, str) and path.strip() for path in required_files
+        ):
+            raise ValueError(f"{algorithm_id}.requiredFiles 必须是非空路径字符串数组")
+        missing_files: List[str] = []
+        for path in required_files:
+            resolved_path = (ALGORITHM_ROOT / path).resolve()
+            try:
+                resolved_path.relative_to(ALGORITHM_ROOT)
+            except ValueError as error:
+                raise ValueError(
+                    f"{algorithm_id}.requiredFiles 只能引用算法仓库内文件：{path}"
+                ) from error
+            if not resolved_path.is_file():
+                missing_files.append(path)
+        runtime_supported = algorithm_id in builtin_supported_algorithms
+        available = bool(
+            BUILTIN_ALGORITHM_AVAILABLE and runtime_supported and not missing_files
+        )
+        unavailable_reason = ""
+        if not BUILTIN_ALGORITHM_AVAILABLE:
+            unavailable_reason = (
+                f"本地算法仓库加载失败：{BUILTIN_ALGORITHM_IMPORT_ERROR}"
+                if BUILTIN_ALGORITHM_IMPORT_ERROR
+                else "本地算法仓库未安装"
+            )
+        elif not runtime_supported:
+            unavailable_reason = "算法未加入 infer.function.SUPPORTED_ALGORITHMS"
+        elif missing_files:
+            unavailable_reason = "缺少依赖文件：" + "、".join(missing_files)
+        option_groups = row.get("optionGroups") or []
+        if not isinstance(option_groups, list) or not all(
+            isinstance(group, str) and group.strip() for group in option_groups
+        ):
+            raise ValueError(f"{algorithm_id}.optionGroups 必须是字符串数组")
+        algorithms.append({
+            "id": algorithm_id,
+            "strategy": algorithm_id,
+            "name": str(row.get("name") or algorithm_id),
+            "introduction": str(row.get("introduction") or "暂无算法简介"),
+            "source": "builtin",
+            "available": available,
+            "unavailableReason": unavailable_reason,
+            "optionGroups": [str(group) for group in option_groups],
+            "defaultOptions": (
+                dict(row["defaultOptions"])
+                if isinstance(row.get("defaultOptions"), Mapping)
+                else {}
+            ),
+        })
+    return algorithms
+
+
+def _builtin_algorithm_metadata_snapshot() -> Dict[str, Dict[str, str]]:
+    """生成兼容旧调用方的元数据快照，实际健康检查仍会实时读取清单。"""
+    return {
+        str(algorithm["strategy"]): {
+            "name": str(algorithm["name"]),
+            "introduction": str(algorithm["introduction"]),
+        }
+        for algorithm in discover_builtin_algorithms()
+    }
+
+
+BUILTIN_ALGORITHM_METADATA = _builtin_algorithm_metadata_snapshot()
 
 
 @contextmanager
@@ -2232,16 +2347,14 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
         else None
     )
     builtin_strategies = {
-        "heuristic",
-        "loadlock-macro",
-        "e2e-ctq",
-        "dual-actor-e2e",
+        str(algorithm["strategy"]): algorithm
+        for algorithm in discover_builtin_algorithms()
     }
     if normalized_strategy not in builtin_strategies:
         if other_algorithm_id is None:
+            supported = "、".join(sorted(builtin_strategies)) or "无"
             raise ValueError(
-                "策略只支持 heuristic、loadlock-macro、"
-                "e2e-ctq、dual-actor-e2e，"
+                f"本地策略只支持 {supported}，"
                 "或 other_alg 下已发现的标准算法"
             )
         discovered_ids = {
@@ -2249,11 +2362,17 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
             for item in discover_other_algorithms()
         }
         if other_algorithm_id.casefold() not in discovered_ids:
+            supported = "、".join(sorted(builtin_strategies)) or "无"
             raise ValueError(
-                "策略只支持 heuristic、loadlock-macro、"
-                "e2e-ctq、dual-actor-e2e，"
+                f"本地策略只支持 {supported}，"
                 "或 other_alg 下已发现的标准算法"
             )
+    elif not builtin_strategies[normalized_strategy]["available"]:
+        reason = str(
+            builtin_strategies[normalized_strategy].get("unavailableReason")
+            or "当前不可用"
+        )
+        raise RuntimeError(f"{normalized_strategy} 策略当前不可用：{reason}")
     strategy = normalized_strategy if normalized_strategy in builtin_strategies else strategy
     rounds = [row for row in (plan.get("rounds") or []) if isinstance(row, Mapping)]
     round_count = int(_finite_number(plan.get("roundCount"), len(rounds)))
@@ -2774,14 +2893,39 @@ def _write_json_atomic(path: Path, payload: Any) -> None:
 
 
 def read_algorithm_metadata() -> Dict[str, Dict[str, str]]:
-    """返回内置算法的名称和介绍，不再保存或读取版本记录。"""
-    return deepcopy(BUILTIN_ALGORITHM_METADATA)
+    """从算法仓库清单实时返回内置算法的名称和介绍。"""
+    return {
+        str(algorithm["strategy"]): {
+            "name": str(algorithm["name"]),
+            "introduction": str(algorithm["introduction"]),
+        }
+        for algorithm in discover_builtin_algorithms()
+    }
 
 
-def algorithm_metadata_for_health() -> Dict[str, Dict[str, str]]:
-    """返回健康检查使用的算法介绍，并补齐外部算法的默认介绍。"""
-    metadata = read_algorithm_metadata()
-    for algorithm in discover_other_algorithms():
+def algorithm_metadata_for_health(
+    builtin_algorithms: Optional[Sequence[Mapping[str, Any]]] = None,
+    other_algorithms: Optional[Sequence[Mapping[str, Any]]] = None,
+) -> Dict[str, Dict[str, str]]:
+    """返回健康检查使用的算法介绍，并补齐标准算法包的默认介绍。"""
+    discovered_builtin_algorithms = (
+        discover_builtin_algorithms()
+        if builtin_algorithms is None
+        else builtin_algorithms
+    )
+    metadata = {
+        str(algorithm["strategy"]): {
+            "name": str(algorithm["name"]),
+            "introduction": str(algorithm["introduction"]),
+        }
+        for algorithm in discovered_builtin_algorithms
+    }
+    discovered_algorithms = (
+        discover_other_algorithms()
+        if other_algorithms is None
+        else other_algorithms
+    )
+    for algorithm in discovered_algorithms:
         strategy = str(algorithm["strategy"])
         metadata.setdefault(strategy, {
             "name": str(algorithm["name"]),
@@ -3857,41 +4001,23 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             self._send_frontend_asset(path.removeprefix("/assets/"))
             return
         if path == "/api/health":
+            builtin_algorithms = discover_builtin_algorithms()
             other_algorithms = discover_other_algorithms()
-            builtin_error = (
-                "本地算法仓库未安装，请选择 other_alg 标准算法；"
-                "开发环境可设置 CT_ALGORITHM_ROOT 指向完整算法仓库。"
-            )
-            if BUILTIN_ALGORITHM_IMPORT_ERROR:
-                builtin_error = (
-                    "本地算法仓库加载失败："
-                    f"{BUILTIN_ALGORITHM_IMPORT_ERROR}"
-                )
-            builtin_strategy_errors = (
-                {}
-                if BUILTIN_ALGORITHM_AVAILABLE
-                else {
-                    strategy: builtin_error
-                    for strategy in BUILTIN_ALGORITHM_METADATA
-                }
-            )
+            builtin_strategy_errors = {
+                str(algorithm["strategy"]): str(algorithm["unavailableReason"])
+                for algorithm in builtin_algorithms
+                if not algorithm["available"]
+            }
+            strategy_availability = {
+                str(algorithm["strategy"]): bool(algorithm["available"])
+                for algorithm in builtin_algorithms
+            }
             self._send_json({
                 "ok": True,
                 "service": "ct-config-editor",
                 "schemaVersion": API_SCHEMA_VERSION,
                 "algorithmRepositoryAvailable": BUILTIN_ALGORITHM_AVAILABLE,
-                "strategies": {
-                    "heuristic": BUILTIN_ALGORITHM_AVAILABLE,
-                    "loadlock-macro": BUILTIN_ALGORITHM_AVAILABLE,
-                    "e2e-ctq": (
-                        BUILTIN_ALGORITHM_AVAILABLE
-                        and E2E_CTQ_MODEL_PATH.is_file()
-                    ),
-                    "dual-actor-e2e": (
-                        BUILTIN_ALGORITHM_AVAILABLE
-                        and DUAL_ACTOR_MODEL_PATH.is_file()
-                    ),
-                },
+                "strategies": strategy_availability,
                 "strategyModels": {
                     "e2e-ctq": str(E2E_CTQ_MODEL_PATH) if E2E_CTQ_MODEL_PATH.is_file() else "",
                     "dual-actor-e2e": (
@@ -3901,7 +4027,11 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                     ),
                 },
                 "strategyErrors": builtin_strategy_errors,
-                "algorithmMetadata": algorithm_metadata_for_health(),
+                "algorithmMetadata": algorithm_metadata_for_health(
+                    builtin_algorithms,
+                    other_algorithms,
+                ),
+                "algorithms": [*builtin_algorithms, *other_algorithms],
                 "otherAlgorithms": other_algorithms,
             })
             return
