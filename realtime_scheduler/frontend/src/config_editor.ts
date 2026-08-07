@@ -13,7 +13,7 @@ import {
   requestScheduleAnalysis,
   requestTestGroupAnalysis,
 } from "./api_client";
-import { createVisualizationWorkspace } from "./workspace_visualizer";
+import { createVisualizationWorkspace, detectDeviceTopologyLayout } from "./workspace_visualizer";
 import { renderTestGroupAnalysis } from "./group_analysis_view";
 import {
   CJOB_TYPES,
@@ -466,7 +466,7 @@ function applyDeviceTopology(device, deviceName, rawRobotSlots = {}) {
     .sort(natural);
   state.robotNames = Object.keys(state.device.Robots).sort(natural);
   state.robotScopes = Object.fromEntries(Object.entries(state.device.Robots).map(([name, robot]) => [name, [...new Set(Object.values(robot.ArmInfo || {}).filter(arm => arm.IsEnable !== false).flatMap(arm => arm.AccessibleStations || []))]]));
-  visualizationWorkspace.setDevice(state.device, state.deviceName);
+  visualizationWorkspace.setDevice(state.device);
   if (!state.loadPorts.length || !state.processModules.length) throw new Error("设备必须包含 LoadPort 和 ProcessChamber");
 }
 
@@ -678,7 +678,11 @@ function renderWorkspaceControls() {
   const emptyHint = document.getElementById("emptyGroupHint");
   emptyHint.classList.toggle("visible", Boolean(state.workspaceDeviceId) && !visibleTests.length);
   document.getElementById("emptyGroupNewTestButton").disabled = !state.workspaceDeviceId;
-  const deviceType = /PSE300/i.test(state.deviceName) ? "单腔非级联" : String(state.workspaceDevice?.deviceType || "单腔非级联");
+  const deviceType = {
+    single: "单腔非级联",
+    dual: "双腔非级联",
+    cascade: "级联",
+  }[detectDeviceTopologyLayout(state.device)];
   document.getElementById("deviceSummary").innerHTML = state.device ? `<span class="chip good">${escapeHtml(deviceType)}</span>` : `<span class="chip">尚未选择设备</span>`;
   compactSelectTargets().forEach(refreshCompactSelect);
 }

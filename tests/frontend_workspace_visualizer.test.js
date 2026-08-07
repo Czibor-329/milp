@@ -895,7 +895,49 @@ test("双真空机械手级联拓扑隐藏未使用 LP，并完整显示腔室�
   assert.doesNotMatch(topology, />LP[2-4]</);
 });
 
-test("12kChamber 按设备名使用专属布局：VTR_1 在下主手，UBR/DBR 在其上方，PM3~PM5 围 VTR_2", () => {
+test("拓扑布局按多腔类型和机器手数量识别，与自定义命名无关", () => {
+  const single = {
+    Stations: { "工艺站-甲": { Type: "ProcessChamber" } },
+    Robots: { "大气搬运": { Type: "ATMRobot" }, "真空搬运": { Type: "VTMRobot" } },
+  };
+  const dual = {
+    Stations: { "工艺站-乙": { Type: "MultiProcessChamber", Capacity: 2 } },
+    Robots: { "前端手": { Type: "ATMRobot" }, "腔体手": { Type: "VTMRobot" } },
+  };
+  const cascade = {
+    Stations: {
+      "任意腔室-甲": { Type: "MultiProcessChamber", Capacity: 2 },
+      "任意腔室-乙": { Type: "ProcessChamber" },
+      "任意腔室-丙": { Type: "ProcessChamber" },
+      "任意腔室-丁": { Type: "ProcessChamber" },
+      "任意腔室-戊": { Type: "ProcessChamber" },
+    },
+    Robots: {
+      "入口机械手": { Type: "ATMRobot" },
+      "下层机械手": { Type: "VTMRobot" },
+      "上层机械手": { Type: "HighVTMRobot" },
+    },
+  };
+
+  assert.equal(logic.detectDeviceTopologyLayout(single), "single");
+  assert.equal(logic.detectDeviceTopologyLayout(dual), "dual");
+  assert.equal(logic.detectDeviceTopologyLayout(cascade), "cascade", "机器手超过 2 个时级联优先");
+
+  for (const [deviceDefinition, expected] of [[single, "single"], [dual, "dual"], [cascade, "cascade"]]) {
+    const snapshot = logic.snapshotWithFullDeviceModules(
+      logic.buildWorkspaceSnapshot([], deviceDefinition, 0),
+      deviceDefinition,
+    );
+    const topology = logic.renderEquipmentTopology(snapshot, null);
+    assert.match(
+      topology,
+      new RegExp(`data-topology-layout="${expected}"`),
+    );
+    if (expected === "cascade") assertTopologyComplete(topology, Object.keys(deviceDefinition.Stations));
+  }
+});
+
+test("三级机器手设备按结构使用级联布局，不依赖设备名称", () => {
   const twelveKDevice = {
     Stations: {
       LP1: { Type: "LoadPort" }, LP2: { Type: "LoadPort" },
@@ -914,8 +956,9 @@ test("12kChamber 按设备名使用专属布局：VTR_1 在下主手，UBR/DBR �
     logic.snapshotWithFullDeviceModules(snapshot, twelveKDevice),
     null,
     undefined,
-    "12kChamber",
+    twelveKDevice,
   );
+  assert.match(topology, /data-topology-layout="cascade"/);
   assertTopologyComplete(topology, ["LA", "LB", "LC", "LD", "UBR", "DBR", "PM1", "PM2", "PM3", "PM4", "PM5"]);
   const positionOf = name => {
     const module = new RegExp(
@@ -974,25 +1017,13 @@ test("12kChamber 按设备名使用专属布局：VTR_1 在下主手，UBR/DBR �
       `${name} 不应落入大气/真空接口带（y=${y}，接口带 ${interfaceTop}~${interfaceBottom}）`,
     );
   }
-  const generic = logic.renderEquipmentTopology(
+  const renamedDeviceTopology = logic.renderEquipmentTopology(
     logic.snapshotWithFullDeviceModules(snapshot, twelveKDevice),
     null,
+    undefined,
+    { ...twelveKDevice, Name: "任意新建设备名称" },
   );
-  const genericByName = new Map();
-  const genericDivs = generic.matchAll(
-    /class="reference-(?:module|robot)-position" style="--(?:module|robot)-left:([\d.]+)%;--(?:module|robot)-top:(\d+)px">([\s\S]*?)(?=<div class="reference-|\s*<svg class="topology-target-arrows)/g,
-  );
-  for (const match of genericDivs) {
-    const nameMatch = /equipment-external-name[^"]*">([^<]+)<|robot-environment-badge">([^<]+)</.exec(match[3]);
-    if (nameMatch) genericByName.set(nameMatch[1] || nameMatch[2], { x: Number(match[1]), y: Number(match[2]) });
-  }
-  const genericVtr1 = genericByName.get("VTR_1");
-  const genericUbr = genericByName.get("UBR");
-  assert.ok(genericVtr1 && genericUbr, "未指定设备名时仍渲染通用级联拓扑");
-  assert.ok(
-    genericUbr.y > genericVtr1.y,
-    "通用级联布局 UBR 仍按田字规则排在 VTR_1 下方（而非 12k 的上方桥接位）",
-  );
+  assert.equal(renamedDeviceTopology, topology, "设备名称不应影响布局选择或坐标");
 });
 
 test("多个大气机械手在同一排横向分布且不重叠", () => {

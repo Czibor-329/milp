@@ -13,6 +13,8 @@ export {
   decisionAtTime,
   decisionBoundaryTimes,
   decisionSpaceSignature,
+  detectDeviceTopologyLayout,
+  detectTopologyLayout,
   groupedBottleneckResources,
   normalizeDecisionTrace,
   normalizeMovePayload,
