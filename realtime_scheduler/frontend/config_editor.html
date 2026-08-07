@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>调度平台</title>
-  <link rel="stylesheet" href="/assets/config_editor.css?v=1.1.13">
+  <link rel="stylesheet" href="/assets/config_editor.css?v=1.1.32">
 </head>
 <body>
   <a class="skip-link" href="#mainContent">跳到主要内容</a>
@@ -51,11 +51,7 @@
           <article class="panel workspace-panel">
             <div class="panel-head workspace-panel-head">
               <div><h2>设备与测试集</h2></div>
-              <div class="workspace-status" id="workspaceStatus" role="status" aria-live="polite">导入或选择一个设备后开始。</div>
-            </div>
-            <div class="panel-body workspace-panel-body">
-              <div class="workspace-device-row">
-                <label for="deviceSelect">设备</label>
+              <div class="workspace-head-actions">
                 <div class="workspace-device-controls">
                   <select id="deviceSelect" data-compact-label="设备"><option value="">尚未导入设备</option></select>
                   <label class="btn workspace-icon-button import-device" title="导入新设备" aria-label="导入新设备">
@@ -67,11 +63,11 @@
                   </button>
                   <div class="chips workspace-device-summary" id="deviceSummary"><span class="chip">尚未选择设备</span></div>
                 </div>
+                <div class="workspace-status" id="workspaceStatus" role="status" aria-live="polite">导入或选择一个设备后开始。</div>
               </div>
-
-              <div class="workspace-divider" aria-hidden="true"></div>
-
-              <div class="workspace-edit-grid">
+            </div>
+            <div class="panel-body workspace-panel-body">
+              <div class="workspace-inline-grid">
                 <section class="field workspace-editor-section">
                   <label for="testGroupSelect">测试组别</label>
                   <div class="workspace-control-row">
@@ -272,7 +268,20 @@
 
         <div class="tab-view" data-tab-view="route">
           <article class="panel">
-            <div class="panel-head route-panel-head"><div><h2>路径配置</h2></div><div class="row-actions"><button class="btn small" data-action="add-route">＋ 路径</button></div></div>
+            <div class="panel-head route-panel-head">
+              <div><h2>路径配置</h2></div>
+              <div class="route-panel-actions">
+                <div class="route-filter-bar" aria-label="路径分类选择">
+                  <div class="route-filter-field">
+                    <select id="routeProcessFilter" data-compact-label="工序数"></select>
+                  </div>
+                  <div class="route-filter-field">
+                    <select id="routeParallelFilter" data-compact-label="并行机器数"></select>
+                  </div>
+                </div>
+                <button class="btn small" data-action="add-route">＋ 路径</button>
+              </div>
+            </div>
             <div class="panel-body"><div class="card-list" id="routeList"></div></div>
           </article>
         </div>
@@ -399,6 +408,17 @@
     </form>
   </dialog>
 
+  <dialog class="pjob-route-dialog" id="pjobRouteDialog" aria-labelledby="pjobRouteDialogTitle">
+    <section class="pjob-route-dialog-body">
+      <header class="pjob-route-dialog-head">
+        <div><h3 id="pjobRouteDialogTitle">选择具体路径</h3><p id="pjobRouteDialogContext"></p></div>
+        <button class="btn icon" type="button" id="pjobRouteDialogClose" aria-label="关闭路径选择">×</button>
+      </header>
+      <label class="pjob-route-process-filter" for="pjobRouteProcess"><span>工序</span><select id="pjobRouteProcess" aria-label="工序"></select></label>
+      <div class="pjob-route-card-list" id="pjobRouteCardList" aria-label="候选路径"></div>
+    </section>
+  </dialog>
+
 
   <div class="drawer-layer" id="drawerLayer">
     <aside class="drawer" id="stepDrawer" aria-label="路径 Step 详细设置">
@@ -407,6 +427,6 @@
     </aside>
   </div>
 
-  <script type="module" src="/assets/config_editor.js?v=1.1.14"></script>
+  <script type="module" src="/assets/config_editor.js?v=1.1.32"></script>
 </body>
 </html>
