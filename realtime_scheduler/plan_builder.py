@@ -16,6 +16,10 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 FIRST_SLOT_ID = 1
 MAX_WAFERS_PER_JOB = 25
 DEFAULT_TRIGGER_UPPER = 9999.0
+DUMMY_MATERIAL_COUNT = 5
+DUMMY_MATERIAL_ID_START = 100000
+DUMMY_MATERIAL_LIMIT_LEVEL = 10000
+DUMMY_MATERIAL_USAGE_MIX = 2
 CJOB_TYPE_VALUES = {"NormalLot": 0, "HighestLot": 2, "HigherLot": 3}
 TASK_MODE_VALUES = {"Smart": 0, "Pipeline": 1, "Sequential": 2, "Concurrent": 3}
 PSE300_REQUIRED_STATIONS = {
@@ -469,21 +473,60 @@ def _append_module_clean_conditions(
             target.append(condition)
 
 
-def _dummy_material_count(route: Mapping[str, Any]) -> int:
-    """统计一条标准 Route 同时需要的 DummyPort 清洁晶圆数。"""
-    total = 0
-    for conditions in (route.get("PrePJob") or {}).values():
-        for condition in conditions or []:
-            if not isinstance(condition, Mapping):
-                continue
-            for tasks in (condition.get("CheckConditions") or {}).values():
-                for task in tasks or []:
-                    if isinstance(task, Mapping):
-                        total += max(
-                            0,
-                            int(_finite_number(task.get("MaterialCount"), 0)),
-                        )
-    return total
+def _dummy_accessible_pms(route: Mapping[str, Any]) -> List[str]:
+    """按 Route 的带片清洁条件收集 Dummy 晶圆允许进入的腔室。"""
+    modules: List[str] = []
+    for module, conditions in (route.get("PrePJob") or {}).items():
+        has_dummy_clean = any(
+            int(_finite_number(task.get("MaterialCount"), 0)) > 0
+            for condition in conditions or []
+            if isinstance(condition, Mapping)
+            for tasks in (condition.get("CheckConditions") or {}).values()
+            for task in tasks or []
+            if isinstance(task, Mapping)
+        )
+        module_name = str(module)
+        if has_dummy_clean and module_name not in modules:
+            modules.append(module_name)
+    return modules
+
+
+def _dummy_material(
+    slot_id: int,
+    dummy_port: str,
+    accessible_pms: Sequence[str],
+) -> Dict[str, Any]:
+    """使用企业接口模板创建一片可复用的 DummyPort 库存晶圆。"""
+    material_id = DUMMY_MATERIAL_ID_START + slot_id - FIRST_SLOT_ID
+    return {
+        "Name": str(slot_id),
+        "AccessiblePM": list(accessible_pms),
+        "TaskID": "",
+        "FoupID": "",
+        "ID": material_id,
+        "LimitLevel1": DUMMY_MATERIAL_LIMIT_LEVEL,
+        "LimitLevel2": DUMMY_MATERIAL_LIMIT_LEVEL,
+        "Priority": -1,
+        "StepID": 0,
+        "LotID": "",
+        "SlotID": slot_id,
+        "NeedSchedule": True,
+        "CurrentModuleName": dummy_port,
+        "PJobName": "",
+        "SrcPortName": dummy_port,
+        "Usage": DUMMY_MATERIAL_USAGE_MIX,
+        "Count": 0,
+        "Route": {
+            "Name": "",
+            "RouteSteps": [],
+            "BufferOption": -1,
+            "BoundedStepIDs": [],
+            "Group": "",
+            "PrePJob": {},
+            "PostPJob": {},
+            "PostCJob": {},
+        },
+    }
 
 
 def _integer_list(value: Any) -> List[int]:
@@ -889,6 +932,11 @@ def build_round_update(
         name: build_route(route, recipe_by_name, clean_by_name, robot_names, station_slots_map)
         for name, route in route_by_name.items()
     }
+    dummy_accessible_pms: List[str] = []
+    for route in built_routes.values():
+        for module in _dummy_accessible_pms(route):
+            if module not in dummy_accessible_pms:
+                dummy_accessible_pms.append(module)
     cjobs = _round_cjob_rows(round_config)
     if not cjobs:
         raise ValueError("每一轮至少需要一个 CJob")
@@ -907,7 +955,7 @@ def build_round_update(
     process_jobs: List[Dict[str, Any]] = []
     control_jobs: List[Dict[str, Any]] = []
     referenced_routes: Dict[str, Dict[str, Any]] = {}
-    round_dummy_material_count = 0
+    round_uses_dummy_material = False
     used_control_load_ports: Dict[str, str] = {}
     for cjob_index, cjob in enumerate(cjobs, start=1):
         task_id = str(cjob.get("taskId") or cjob.get("TaskID") or cjob_index).strip()
@@ -954,9 +1002,9 @@ def build_round_update(
             priority = max(1, int(_finite_number(pjob.get("priority"), 1)))
             runtime_route_name = f"{route_name}__{legacy_name or pjob_name}"
             runtime_route = deepcopy(route)
-            round_dummy_material_count = max(
-                round_dummy_material_count,
-                _dummy_material_count(runtime_route),
+            round_uses_dummy_material = (
+                round_uses_dummy_material
+                or bool(_dummy_accessible_pms(runtime_route))
             )
             runtime_route["Name"] = runtime_route_name
             route_steps = runtime_route.get("RouteSteps") or []
@@ -1001,7 +1049,7 @@ def build_round_update(
             "TaskMode": task_mode, "PJobNameList": runtime_pjob_names,
             "MaterialCount": cjob_material_count,
         })
-    if round_dummy_material_count > build_state.dummy_material_count:
+    if round_uses_dummy_material and build_state.dummy_material_count < DUMMY_MATERIAL_COUNT:
         dummy_port = next(
             (
                 str(name)
@@ -1013,31 +1061,16 @@ def build_round_update(
         if not dummy_port:
             raise ValueError("Dummy / Dummy WAC 清洁需要设备配置 DummyPort")
         capacity = _load_port_capacity(tool_topo, dummy_port)
-        if round_dummy_material_count > capacity:
+        if DUMMY_MATERIAL_COUNT > capacity:
             raise ValueError(
-                f"DummyPort 容量不足：需要 {round_dummy_material_count} 片，容量 {capacity}"
+                f"DummyPort 容量不足：需要 {DUMMY_MATERIAL_COUNT} 片，容量 {capacity}"
             )
         for slot_id in range(
             build_state.dummy_material_count + FIRST_SLOT_ID,
-            round_dummy_material_count + FIRST_SLOT_ID,
+            DUMMY_MATERIAL_COUNT + FIRST_SLOT_ID,
         ):
-            material_id = build_state.next_material_id
-            build_state.next_material_id += 1
-            materials.append({
-                "Name": str(material_id),
-                "ID": material_id,
-                "TaskID": "DummyClean",
-                "LotID": "DummyClean",
-                "FoupID": "DummyFoup",
-                "Priority": -1,
-                "StepID": 0,
-                "CurrentModuleName": dummy_port,
-                "SlotID": slot_id,
-                "NeedSchedule": True,
-                "PJobName": "",
-                "SrcPortName": dummy_port,
-            })
-        build_state.dummy_material_count = round_dummy_material_count
+            materials.append(_dummy_material(slot_id, dummy_port, dummy_accessible_pms))
+        build_state.dummy_material_count = DUMMY_MATERIAL_COUNT
     return {
         "Scenario": 0, "Routes": referenced_routes,
         "ProcessRecipes": build_process_recipes(recipes, routes, cleans),

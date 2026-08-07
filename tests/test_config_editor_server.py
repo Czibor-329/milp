@@ -1230,8 +1230,37 @@ class ConfigEditorServerTests(unittest.TestCase):
             for material in update["Materials"]
             if material["CurrentModuleName"] == "DummyPort"
         ]
-        self.assertEqual(2, len(dummy_materials))
-        self.assertEqual(1, dummy_materials[0]["SlotID"])
+        self.assertEqual(5, len(dummy_materials))
+        self.assertEqual([1, 2, 3, 4, 5], [row["SlotID"] for row in dummy_materials])
+        self.assertEqual(
+            [100000, 100001, 100002, 100003, 100004],
+            [row["ID"] for row in dummy_materials],
+        )
+        expected_template = {
+            "Name": "1",
+            "AccessiblePM": ["PM1"],
+            "TaskID": "",
+            "FoupID": "",
+            "ID": 100000,
+            "LimitLevel1": 10000,
+            "LimitLevel2": 10000,
+            "Priority": -1,
+            "StepID": 0,
+            "LotID": "",
+            "SlotID": 1,
+            "NeedSchedule": True,
+            "CurrentModuleName": "DummyPort",
+            "PJobName": "",
+            "SrcPortName": "DummyPort",
+            "Usage": 2,
+            "Count": 0,
+            "Route": {
+                "Name": "", "RouteSteps": [], "BufferOption": -1,
+                "BoundedStepIDs": [], "Group": "", "PrePJob": {},
+                "PostPJob": {}, "PostCJob": {},
+            },
+        }
+        self.assertEqual(expected_template, dummy_materials[0])
         problem = parse_task(self.device, update)
         dummy_wafers = [
             wafer for wafer in problem.wafers
@@ -1242,6 +1271,53 @@ class ConfigEditorServerTests(unittest.TestCase):
         result = execute_plan(plan)
         self.assertTrue(result["ok"])
         self.assertGreater(result["makespan"], 0)
+
+    def test_dummy_clean_adds_fixed_material_template_and_per_pm_route_conditions(self) -> None:
+        """Dummy Clean 应固定准备五片库存，并按绑定腔室写入物料权限与 Route 条件。"""
+        route = _route("DummyRoute", "PM1,PM2", "Recipe1")
+        route["prePJobCleanRefs"] = ["DummyClean"]
+        plan = {
+            "device": self.device,
+            "recipes": [{
+                "name": "Recipe1", "time": 10,
+                "modules": ["PM1", "PM2"], "weight": {},
+            }],
+            "cleans": [{
+                "name": "DummyClean",
+                "cleanType": "dummy",
+                "recipeTime": 6,
+                "modules": ["PM1", "PM2"],
+            }],
+            "routes": [route],
+        }
+
+        update = build_round_update(
+            plan,
+            {"currentTime": 0, "jobs": [_job("J1", "DummyRoute", "LP1")]},
+            0.0,
+            BuildState(),
+        )
+
+        dummy_materials = [
+            material
+            for material in update["Materials"]
+            if material["CurrentModuleName"] == "DummyPort"
+        ]
+        self.assertEqual(5, len(dummy_materials))
+        self.assertTrue(all(
+            material["AccessiblePM"] == ["PM1", "PM2"]
+            for material in dummy_materials
+        ))
+        origin_route = update["ProcessJobs"][0]["OriginRoute"]
+        self.assertEqual(["PM1", "PM2"], list(origin_route["PrePJob"]))
+        for module in ("PM1", "PM2"):
+            condition = origin_route["PrePJob"][module][0]
+            task = next(iter(condition["CheckConditions"].values()))[0]
+            self.assertEqual("PreDummyClean", task["TaskName"])
+            self.assertEqual("DummyClean-Recipe", task["CleanRecipe"])
+            self.assertEqual(["IdleTime", "DummyCount"], task["UpdateStateVariables"])
+            self.assertEqual(2, task["MaterialCount"])
+            self.assertEqual("", task["EmptyCleanRecipeAfterMaterial"])
 
     def test_editor_uses_persistent_route_table_and_step_drawer(self) -> None:
         """路径按工艺结构折叠，Route 和 Step 都提供 Clean 弹窗入口。"""
