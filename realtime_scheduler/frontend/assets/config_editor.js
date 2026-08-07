@@ -514,10 +514,10 @@ function isDummyPortName(name) {
 function isTopologyHiddenModule(module) {
   const name = module.name.trim();
   const type = module.type.trim().toLowerCase();
-  return /^BUF(?:FER)?(?:[_-]?\w+)?$/i.test(name) || type === "buffer" || isDummyPortName(name) || type === "dummyport" || /^HEATER$/i.test(name) || type === "heater";
+  return /^BUF(?:FER)?(?:[_-]?\w+)?$/i.test(name) || type === "buffer" || /^HEATER$/i.test(name) || type === "heater";
 }
 function isLoadPortName(name, type = "") {
-  return !isDummyPortName(name) && (type.toLowerCase() === "loadport" || /^(LP\d*|P\d+|.*PORT)$/i.test(name));
+  return !isDummyPortName(name) && type.trim().toLowerCase() !== "dummyport" && (type.toLowerCase() === "loadport" || /^(LP\d*|P\d+|.*PORT)$/i.test(name));
 }
 function isLoadLockName(name, type = "") {
   return type.toLowerCase() === "loadlock" || /^LL?[A-Z]$/i.test(name) || /^BUF_/i.test(name);
@@ -1094,12 +1094,16 @@ function snapshotWithFullDeviceModules(snapshot, device) {
 function topologyGroups(modules) {
   const loadLocks = modules.filter((module) => isLoadLockName(module.name, module.type));
   const loadPorts = modules.filter((module) => isLoadPortName(module.name, module.type));
+  const dummyPorts = modules.filter((module) => isDummyPortName(module.name) || module.type.trim().toLowerCase() === "dummyport");
   const processModules = modules.filter((module) => isProcessModule(module.name, module.type));
-  const assignedNames = new Set([...loadLocks, ...loadPorts, ...processModules].map((module) => module.name));
+  const assignedNames = new Set(
+    [...loadLocks, ...loadPorts, ...dummyPorts, ...processModules].map((module) => module.name)
+  );
   return {
     processModules,
     loadLocks,
     loadPorts,
+    dummyPorts,
     auxiliaryModules: modules.filter((module) => !assignedNames.has(module.name))
   };
 }
@@ -1175,7 +1179,7 @@ function renderModule(module, role, candidate, layout = "single", roleIndex = 0)
     const processed = layer ? layer.processed : wafer ? processedWafers.has(wafer) : false;
     const waferState = processed ? "processed" : "unprocessed";
     return `<div class="loadlock-layer ${wafer ? "is-occupied" : "is-empty"}">${wafer ? `<span class="loadlock-wafer-line wafer-${waferState}" title="\u6676\u5706 ${escapeHtml(wafer)}\uFF08${processed ? "\u5DF2\u52A0\u5DE5" : "\u672A\u52A0\u5DE5"}\uFF09"></span>` : ""}</div>`;
-  }).join("")}${overflow}</div>` : role === "process" ? `<div class="process-wafer-slot ${wafers ? "is-occupied" : "is-empty"}">${wafers}</div>` : role === "port" ? `<div class="load-port-dock-face" aria-hidden="true"><span></span></div>` : role === "auxiliary" ? `<div class="auxiliary-wafer-slot ${wafers ? "is-occupied" : "is-empty"}">${wafers}</div>` : `<div class="wafer-stack">${wafers}${overflow}</div>`;
+  }).join("")}${overflow}</div>` : role === "process" ? `<div class="process-wafer-slot ${wafers ? "is-occupied" : "is-empty"}">${wafers}</div>` : role === "auxiliary" ? `<div class="auxiliary-wafer-slot ${wafers ? "is-occupied" : "is-empty"}">${wafers}</div>` : `<div class="wafer-stack">${wafers}${overflow}</div>`;
   const bodyMarkup = role === "process" ? `<div class="equipment-process-shell"><div class="equipment-body">${loadLockLayers}</div></div>` : `<div class="equipment-body">${loadLockLayers}</div>`;
   const article = `
     <article class="equipment-card equipment-${role} status-${module.status} door-${module.door} ${module.loadLockPhase ? `loadlock-${module.loadLockPhase}` : ""} ${module.isRobotTarget ? "is-target" : ""} ${candidate ? "is-candidate-destination" : ""} ${candidate?.selected ? "is-model-selected" : ""}" style="--module-progress:${Math.round(module.progress * 100)}%;--loadlock-atmosphere:${Math.max(0, Math.min(100, atmosphereLevel)).toFixed(1)}%;--loadlock-atmosphere-ratio:${Math.max(0, Math.min(1, atmosphereLevel / 100)).toFixed(3)}" aria-label="${escapeHtml(`${accessibleStatus}${candidateLabel ? `\uFF0C${candidateLabel}` : ""}`)}">
@@ -1186,7 +1190,12 @@ function renderModule(module, role, candidate, layout = "single", roleIndex = 0)
     return `<strong class="equipment-external-name">${escapeHtml(module.name)}</strong>${article}`;
   }
   if (role === "port") {
-    return `<strong class="equipment-external-name equipment-external-name-port">${escapeHtml(module.name)}</strong><div class="load-port-assembly">${article}${renderLoadPortCassette(module)}</div>`;
+    const isDummy = isDummyPortName(module.name) || module.type.trim().toLowerCase() === "dummyport";
+    const assemblyClass = ["load-port-assembly"].concat(isDummy ? ["is-dummy-port"] : []).concat(module.isRobotTarget ? ["is-target"] : []).concat(candidate ? ["is-candidate-destination"] : []).concat(candidate?.selected ? ["is-model-selected"] : []).join(" ");
+    return `<strong class="equipment-external-name ${isDummy ? "equipment-external-name-dummy" : "equipment-external-name-port"}">${escapeHtml(module.name)}</strong><div class="${assemblyClass}" role="group" aria-label="${escapeHtml(`${accessibleStatus}${candidateLabel ? `\uFF0C${candidateLabel}` : ""}`)}">
+      <div class="load-port-dock-face" aria-hidden="true"><span></span></div>
+      ${renderLoadPortCassette(module)}
+    </div>`;
   }
   return article;
 }
@@ -1224,6 +1233,8 @@ var TOPOLOGY_LOADLOCK_WIDTH = 120;
 var TOPOLOGY_LOADLOCK_HEIGHT = 72;
 var TOPOLOGY_LOADPORT_WIDTH = 144;
 var TOPOLOGY_LOADPORT_HEIGHT = 104;
+var TOPOLOGY_LOADPORT_BASE_HEIGHT = 22;
+var TOPOLOGY_LOADPORT_BASE_OVERHANG = 7;
 var TOPOLOGY_LOADLOCK_ROW_TOP_PIXELS = [664, 740];
 var TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS = 866;
 var TOPOLOGY_LOADPORT_ROW_TOP_PIXELS = 990;
@@ -1330,6 +1341,16 @@ function moduleTopologyPosition(module, role, index, roleModules, layout, bridge
     };
   }
   if (role === "port") {
+    const isDummy = isDummyPortName(module.name) || module.type.trim().toLowerCase() === "dummyport";
+    if (isDummy) {
+      const dummyColumns = roleCount === 1 ? [88] : [12, 88];
+      return {
+        leftPercent: dummyColumns[index % dummyColumns.length] ?? 88,
+        topPixels: layout === "cascade" ? TOPOLOGY_CASCADE_ATM_TOP : TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS,
+        widthPixels: TOPOLOGY_LOADPORT_WIDTH,
+        heightPixels: TOPOLOGY_LOADPORT_HEIGHT
+      };
+    }
     const loadPortColumns = {
       LP1: column[0],
       LP2: column[1],
@@ -1485,6 +1506,7 @@ function renderEquipmentTopology(snapshot, decision, hiddenFilters, device) {
   positionModuleGroup(groups.processModules, "process");
   positionModuleGroup(groups.loadLocks, "lock");
   positionModuleGroup(groups.loadPorts, "port");
+  positionModuleGroup(groups.dummyPorts, "port");
   positionModuleGroup(groups.auxiliaryModules, "auxiliary");
   const robotPositions = /* @__PURE__ */ new Map();
   const positionRobotGroup = (robots, environment) => robots.forEach((robot, index) => {
@@ -1522,6 +1544,7 @@ function renderEquipmentTopology(snapshot, decision, hiddenFilters, device) {
   const atmosphereExtent = topologyVerticalExtent([
     ...positionedModules(groups.auxiliaryModules),
     ...positionedModules(groups.loadPorts),
+    ...positionedModules(groups.dummyPorts),
     ...positionedRobots(atmosphereRobots)
   ]);
   const interfaceTop = interfaceExtent ? Math.max(12, interfaceExtent.top - 12) : Math.round(canvasHeight * 0.48);
@@ -1543,10 +1566,19 @@ function renderEquipmentTopology(snapshot, decision, hiddenFilters, device) {
     if (!position) return "";
     return `<div class="reference-module-position" style="--module-left:${position.leftPercent}%;--module-top:${position.topPixels}px">${renderModule(module, role, destinations.get(module.name), layout, roleIndex)}</div>`;
   }).join("");
+  const positionedLoadPorts = positionedModules(groups.loadPorts);
+  const loadPortBaseMarkup = positionedLoadPorts.length ? (() => {
+    const lefts = positionedLoadPorts.map((position) => position.leftPercent);
+    const baseCenter = (Math.min(...lefts) + Math.max(...lefts)) / 2;
+    const baseWidth = Math.max(...lefts) - Math.min(...lefts) + TOPOLOGY_LOADPORT_WIDTH / TOPOLOGY_VIEWBOX_WIDTH * 100;
+    const baseTop = positionedLoadPorts[0].topPixels + TOPOLOGY_LOADPORT_HEIGHT / 2 + TOPOLOGY_LOADPORT_BASE_OVERHANG - TOPOLOGY_LOADPORT_BASE_HEIGHT / 2;
+    return `<div class="load-port-shared-base" style="--base-left:${baseCenter.toFixed(2)}%;--base-width:${baseWidth.toFixed(2)}%;--base-top:${baseTop.toFixed(1)}px" aria-hidden="true"></div>`;
+  })() : "";
   const moduleMarkup = [
     renderModuleGroup(groups.processModules, "process"),
     renderModuleGroup(groups.loadLocks, "lock"),
     renderModuleGroup(groups.loadPorts, "port"),
+    renderModuleGroup(groups.dummyPorts, "port"),
     renderModuleGroup(groups.auxiliaryModules, "auxiliary")
   ].join("");
   const renderRobotGroup = (robots, environment) => robots.map((robot) => {
@@ -1578,6 +1610,7 @@ function renderEquipmentTopology(snapshot, decision, hiddenFilters, device) {
     <section class="equipment-schematic" data-topology-layout="${layout}" aria-label="\u5B8C\u6574\u8BBE\u5907\u62D3\u6251\u56DE\u653E">
       <div class="schematic-canvas reference-grid-canvas" style="--topology-canvas-height:${canvasHeight}px">
         ${machineAreaMarkup}
+        ${loadPortBaseMarkup}
         ${moduleMarkup}
         ${robotMarkup}
       </div>
@@ -3570,10 +3603,10 @@ function resetRunResult() {
   document.getElementById("parameterComparisonPanel").hidden = true;
   document.getElementById("parameterComparisonResults").innerHTML = "";
   document.getElementById("openParameterComparisonDialogButton").disabled = true;
-  document.getElementById("metricTimeLabel").textContent = "\u603B\u8017\u65F6";
+  document.getElementById("metricTimeLabel").textContent = "Total Time";
   document.getElementById("metricMakespanLabel").textContent = "Makespan";
   setBottleneckMetric(null);
-  document.getElementById("metricValidationLabel").textContent = "\u6821\u9A8C";
+  document.getElementById("metricValidationLabel").textContent = "Validation";
   document.getElementById("metricValidation").closest(".metric").classList.remove("is-success", "is-error");
   document.getElementById("batchProgress").classList.remove("visible");
   document.getElementById("batchResults").innerHTML = "";
@@ -5162,14 +5195,15 @@ function setResultMetric(key, label, value, detail = "") {
 function hasBatchResultMetrics(item) {
   return item?.status === "succeeded" || item?.metricsAvailable === true;
 }
-function setBottleneckMetric(summary, emptyDetail = "\u8FD0\u884C\u540E\u8BA1\u7B97\u7A33\u6001\u74F6\u9888\u5019\u9009") {
+function setBottleneckMetric(summary, emptyDetail = "") {
   const utilization = Number(summary?.utilization);
   const available = summary && Number.isFinite(utilization);
+  const resourceName = String(summary?.resourceName || "\u672A\u77E5\u8D44\u6E90").replace(/^工序容量组\s*[·:：-]?\s*/, "").trim() || "\u672A\u77E5\u8D44\u6E90";
   setResultMetric(
     "Moves",
-    "\u74F6\u9888\u5229\u7528\u7387",
-    available ? `${(utilization * 100).toFixed(1)}%` : "\u2014",
-    available ? `${summary.resourceName || "\u672A\u77E5\u8D44\u6E90"} \xB7 ${{ high: "\u8BC1\u636E\u8F83\u5F3A", medium: "\u8BC1\u636E\u4E2D\u7B49", low: "\u8BC1\u636E\u8F83\u5F31" }[summary.confidence] || "\u5019\u9009"}${Number(summary.candidateCount) > 1 ? ` \xB7 \u5171 ${summary.candidateCount} \u4E2A\u5019\u9009` : ""}` : emptyDetail
+    "Bottleneck Utilization",
+    available ? `${resourceName} ${(utilization * 100).toFixed(1)}%` : "\u2014",
+    available ? "" : emptyDetail
   );
 }
 function showBatchOverviewMetrics(result) {
@@ -5185,7 +5219,7 @@ function showBatchOverviewMetrics(result) {
   const improvementText = comparable.length && Number.isFinite(aggregateImprovement) ? `${aggregateImprovement >= 0 ? "\u63D0\u5347" : "\u9000\u5316"} ${Math.abs(aggregateImprovement).toFixed(2)}%` : "";
   document.getElementById("metricContext").textContent = `\u6279\u91CF\u603B\u89C8 \xB7 ${result.group || "\u672A\u5206\u7EC4"}`;
   document.getElementById("batchOverviewButton").hidden = true;
-  setResultMetric("Time", "\u603B\u8017\u65F6", timeText);
+  setResultMetric("Time", "Total Time", timeText);
   setResultMetric("Makespan", comparable.length ? "\u603B Makespan / Baseline" : "\u5E73\u5747 Makespan", makespanText, improvementText);
   setResultMetric("Moves", "\u603B Move \u6570", moveCount || "\u2014");
   setResultMetric("Validation", result.cancelled ? "\u6210\u529F / \u5931\u8D25 / \u7EC8\u6B62" : "\u6210\u529F / \u5931\u8D25", result.cancelled ? `${result.succeeded || 0} / ${result.failed || 0} / ${result.cancelled}` : `${result.succeeded || 0} / ${result.failed || 0}`);
@@ -5199,7 +5233,7 @@ function showBatchItemOverview(item, index) {
   const makespan = Number(item.makespan);
   const improvement = Number(item.improvementPercent);
   const validationText = item.validation === "passed" ? "\u901A\u8FC7" : item.validation === "skipped" ? "\u8DF3\u8FC7" : item.validation ? String(item.validation) : item.status === "failed" ? "\u8FD0\u884C\u5931\u8D25" : item.status === "cancelled" ? "\u5DF2\u7EC8\u6B62" : "\u7B49\u5F85\u5B8C\u6210";
-  const comparisonDetail = baselineReady && Number.isFinite(improvement) ? `${improvement >= 0 ? "\u63D0\u5347" : "\u9000\u5316"} ${Math.abs(improvement).toFixed(2)}%` : baseline.status === "skipped" ? "Baseline \u5DF2\u8DF3\u8FC7" : baseline.status && baseline.status !== "succeeded" ? `Baseline ${baseline.status === "failed" ? "\u5931\u8D25" : "\u5931\u6548"}` : "";
+  const comparisonDetail = baselineReady && Number.isFinite(improvement) ? `${improvement >= 0 ? "\u63D0\u5347" : "\u9000\u5316"} ${Math.abs(improvement).toFixed(2)}%` : baseline.status && baseline.status !== "succeeded" && baseline.status !== "skipped" ? `Baseline ${baseline.status === "failed" ? "\u5931\u8D25" : "\u5931\u6548"}` : "";
   const resultUrl = String(item.resultUrl || "");
   const bottleneckReady = resultUrl && batchBottleneckSummaries.has(resultUrl);
   const bottleneckSummary = bottleneckReady ? batchBottleneckSummaries.get(resultUrl) : null;
@@ -5212,7 +5246,7 @@ function showBatchItemOverview(item, index) {
     bottleneckSummary,
     hasMetrics && resultUrl ? bottleneckError ? `\u74F6\u9888\u8BA1\u7B97\u5931\u8D25\uFF1A${bottleneckError}` : bottleneckReady ? "\u6CA1\u6709\u8DB3\u591F\u7684\u8D44\u6E90\u6D3B\u52A8" : "\u6B63\u5728\u8BA1\u7B97\u7A33\u6001\u74F6\u9888\u2026" : "\u6CA1\u6709\u53EF\u5206\u6790\u7684 MoveList"
   );
-  setResultMetric("Validation", "\u6821\u9A8C", validationText, item.error || "");
+  setResultMetric("Validation", "Validation", validationText, item.error || "");
 }
 async function loadBatchItemPerformance(item, index) {
   const resultUrl = String(item?.resultUrl || "");
@@ -5352,7 +5386,7 @@ function renderBatchItems(items) {
     const cpuTime = Number(item.cpuTimeMs);
     const improvement = Number(item.improvementPercent);
     const improvementText = hasMetrics && baselineReady && Number.isFinite(improvement) ? `${improvement >= 0 ? "\u63D0\u5347" : "\u9000\u5316"} ${Math.abs(improvement).toFixed(2)}%` : baseline.status === "skipped" ? "\u5DF2\u8DF3\u8FC7\u57FA\u7EBF" : baseline.status && baseline.status !== "succeeded" ? "\u65E0\u6709\u6548\u57FA\u7EBF" : "\u63D0\u5347 \u2014";
-    const baselineReason = baseline.status === "skipped" ? "Baseline \u5DF2\u8DF3\u8FC7" : baseline.status && baseline.status !== "succeeded" ? `Baseline ${baseline.status === "failed" ? "\u5931\u8D25" : "\u5931\u6548"}\uFF1A${baseline.error || "\u7B49\u5F85\u91CD\u65B0\u8BA1\u7B97"}` : "";
+    const baselineReason = baseline.status === "skipped" ? "" : baseline.status && baseline.status !== "succeeded" ? `Baseline ${baseline.status === "failed" ? "\u5931\u8D25" : "\u5931\u6548"}\uFF1A${baseline.error || "\u7B49\u5F85\u91CD\u65B0\u8BA1\u7B97"}` : "";
     const summaryError = baseline.status === "failed" ? baselineReason : item.status === "failed" ? `${hasMetrics ? "\u6821\u9A8C\u5931\u8D25" : "\u8FD0\u884C\u5931\u8D25"}\uFF1A${item.error || "\u672A\u77E5\u9519\u8BEF"}` : item.status === "cancelled" ? "\u8C03\u5EA6\u5DF2\u7EC8\u6B62" : baselineReason;
     const displayId = `t${index + 1}`;
     const itemSelectionId = String(item.testId || `index-${index}`);
@@ -5633,10 +5667,9 @@ function showResult(result) {
   document.getElementById("metricTimeLabel").textContent = "CPU Time";
   document.getElementById("metricMakespanLabel").textContent = "Makespan / Baseline";
   setBottleneckMetric(result.bottleneckUtilization, "\u6CA1\u6709\u8DB3\u591F\u7684\u8D44\u6E90\u6D3B\u52A8");
-  document.getElementById("metricValidationLabel").textContent = "\u6821\u9A8C";
+  document.getElementById("metricValidationLabel").textContent = "Validation";
   document.getElementById("metricTime").textContent = `${cpuTime.toFixed(1)} ms`;
   document.getElementById("metricMakespan").textContent = `${result.makespan.toFixed(2)} / ${baselineReady ? Number(baseline.makespan).toFixed(2) : "\u2014"} s`;
-  if (baseline.status === "skipped") document.getElementById("metricMakespanDetail").textContent = "Baseline \u5DF2\u8DF3\u8FC7";
   const validationValue = validationDisplay(result.validation);
   document.getElementById("metricValidation").textContent = validationValue;
   document.getElementById("metricValidation").closest(".metric").classList.toggle("is-success", result.validation === "passed");
@@ -5644,7 +5677,7 @@ function showResult(result) {
   const objectiveDiagnostics = [...result.rounds || []].reverse().map((round) => round.strategyDiagnostics).find((diagnostics) => diagnostics?.metrics);
   if (objectiveDiagnostics) {
     const metrics = objectiveDiagnostics.metrics;
-    document.getElementById("metricValidationLabel").textContent = "\u6821\u9A8C / \u591A\u6307\u6807";
+    document.getElementById("metricValidationLabel").textContent = "Validation / Multi-metric";
     document.getElementById("metricValidationDetail").textContent = `\u9A7B\u7559\u8D85\u9650 ${Number(metrics.residencyViolationCount) || 0} \u6B21 \xB7 \u6700\u5927\u6301\u7247 ${Number(metrics.maximumRobotHoldingSeconds || 0).toFixed(2)} s \xB7 \u7CFB\u7EDF\u505C\u7559 CV ${Number(metrics.systemResidenceCv || 0).toFixed(3)}`;
   }
   const dualActorDiagnostics = (result.rounds || []).map((round) => round.strategyDiagnostics).filter((diagnostics) => diagnostics?.selectedSource === "dual-actor-e2e");
@@ -5656,7 +5689,7 @@ function showResult(result) {
       place: summary.place + (Number(diagnostics.primitiveActionCounts?.place) || 0),
       swap: summary.swap + (Number(diagnostics.primitiveActionCounts?.swap) || 0)
     }), { atmosphere: 0, vacuum: 0, pick: 0, place: 0, swap: 0 });
-    document.getElementById("metricValidationLabel").textContent = "\u6821\u9A8C / \u53CC Actor";
+    document.getElementById("metricValidationLabel").textContent = "Validation / Dual Actor";
     document.getElementById("metricValidationDetail").textContent = `\u51B3\u7B56\uFF1A\u5927\u6C14 ${totals.atmosphere} \xB7 \u771F\u7A7A ${totals.vacuum}\uFF1B\u539F\u5B50\u52A8\u4F5C\uFF1APick ${totals.pick} \xB7 Place ${totals.place} \xB7 Swap ${totals.swap}`;
   }
   const baselinePlan = structuredClone(buildPayload());
@@ -5690,13 +5723,13 @@ function showFailedResultMetrics(result) {
   const elapsedTime = Number(result?.totalElapsedMs ?? result?.cpuTimeMs);
   const improvement = Number(result?.improvementPercent);
   const makespanText = `${Number.isFinite(makespan) ? makespan.toFixed(2) : "\u2014"} / ${Number.isFinite(baselineMakespan) ? baselineMakespan.toFixed(2) : "\u2014"} s`;
-  const comparisonDetail = Number.isFinite(improvement) ? `${improvement >= 0 ? "\u63D0\u5347" : "\u9000\u5316"} ${Math.abs(improvement).toFixed(2)}% \xB7 \u7ED3\u679C\u6821\u9A8C\u672A\u901A\u8FC7` : baseline.status === "skipped" ? "Baseline \u5DF2\u8DF3\u8FC7" : baseline.status && baseline.status !== "succeeded" ? `Baseline ${baseline.status === "failed" ? "\u5931\u8D25" : "\u5931\u6548"}` : "\u5916\u90E8\u7B97\u6CD5\u672A\u8FD4\u56DE\u53EF\u6BD4\u8F83\u7684\u5B8C\u6574 Makespan";
+  const comparisonDetail = Number.isFinite(improvement) ? `${improvement >= 0 ? "\u63D0\u5347" : "\u9000\u5316"} ${Math.abs(improvement).toFixed(2)}% \xB7 \u7ED3\u679C\u6821\u9A8C\u672A\u901A\u8FC7` : baseline.status === "skipped" ? "" : baseline.status && baseline.status !== "succeeded" ? `Baseline ${baseline.status === "failed" ? "\u5931\u8D25" : "\u5931\u6548"}` : "\u5916\u90E8\u7B97\u6CD5\u672A\u8FD4\u56DE\u53EF\u6BD4\u8F83\u7684\u5B8C\u6574 Makespan";
   document.getElementById("metricContext").textContent = "\u5F53\u524D\u6D4B\u8BD5 \xB7 \u5916\u90E8\u7B97\u6CD5\u5931\u8D25\u7ED3\u679C";
   document.getElementById("batchOverviewButton").hidden = true;
   setResultMetric("Time", "\u5931\u8D25\u524D\u8017\u65F6", Number.isFinite(elapsedTime) ? `${elapsedTime.toFixed(1)} ms` : "\u2014", "\u4ECE\u63D0\u4EA4\u5230\u8FD4\u56DE\u5931\u8D25\u7ED3\u679C");
   setResultMetric("Makespan", "Makespan / Baseline", makespanText, comparisonDetail);
   setBottleneckMetric(result?.bottleneckUtilization, result?.resultId ? "\u5931\u8D25\u7ED3\u679C\u6CA1\u6709\u8DB3\u591F\u7684\u8D44\u6E90\u6D3B\u52A8" : "\u672A\u751F\u6210\u53EF\u5206\u6790\u7684 MoveList");
-  setResultMetric("Validation", "\u6821\u9A8C", result?.validation === "failed" ? "\u672A\u901A\u8FC7" : String(result?.validation || "\u5931\u8D25"), result?.error || "");
+  setResultMetric("Validation", "Validation", result?.validation === "failed" ? "\u672A\u901A\u8FC7" : String(result?.validation || "\u5931\u8D25"), result?.error || "");
   document.getElementById("metricValidation").closest(".metric").classList.remove("is-success");
   document.getElementById("metricValidation").closest(".metric").classList.add("is-error");
   state.parameterComparison = null;

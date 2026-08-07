@@ -729,10 +729,10 @@ function resetRunResult() {
   document.getElementById("parameterComparisonPanel").hidden = true;
   document.getElementById("parameterComparisonResults").innerHTML = "";
   document.getElementById("openParameterComparisonDialogButton").disabled = true;
-  document.getElementById("metricTimeLabel").textContent = "总耗时";
+  document.getElementById("metricTimeLabel").textContent = "Total Time";
   document.getElementById("metricMakespanLabel").textContent = "Makespan";
   setBottleneckMetric(null);
-  document.getElementById("metricValidationLabel").textContent = "校验";
+  document.getElementById("metricValidationLabel").textContent = "Validation";
   document.getElementById("metricValidation").closest(".metric").classList.remove("is-success", "is-error");
   document.getElementById("batchProgress").classList.remove("visible");
   document.getElementById("batchResults").innerHTML = "";
@@ -2347,18 +2347,15 @@ function hasBatchResultMetrics(item) {
 }
 
 /** 将结果分析中的同一瓶颈口径写入顶部摘要卡片。 */
-function setBottleneckMetric(summary, emptyDetail = "运行后计算稳态瓶颈候选") {
+function setBottleneckMetric(summary, emptyDetail = "") {
   const utilization = Number(summary?.utilization);
   const available = summary && Number.isFinite(utilization);
+  const resourceName = String(summary?.resourceName || "未知资源").replace(/^工序容量组\s*[·:：-]?\s*/, "").trim() || "未知资源";
   setResultMetric(
     "Moves",
-    "瓶颈利用率",
-    available ? `${(utilization * 100).toFixed(1)}%` : "—",
-    available
-      ? `${summary.resourceName || "未知资源"} · ${
-        ({ high: "证据较强", medium: "证据中等", low: "证据较弱" })[summary.confidence] || "候选"
-      }${Number(summary.candidateCount) > 1 ? ` · 共 ${summary.candidateCount} 个候选` : ""}`
-      : emptyDetail,
+    "Bottleneck Utilization",
+    available ? `${resourceName} ${(utilization * 100).toFixed(1)}%` : "—",
+    available ? "" : emptyDetail,
   );
 }
 
@@ -2380,13 +2377,13 @@ function showBatchOverviewMetrics(result) {
     : "";
   document.getElementById("metricContext").textContent = `批量总览 · ${result.group || "未分组"}`;
   document.getElementById("batchOverviewButton").hidden = true;
-  setResultMetric("Time", "总耗时", timeText);
+  setResultMetric("Time", "Total Time", timeText);
   setResultMetric("Makespan", comparable.length ? "总 Makespan / Baseline" : "平均 Makespan", makespanText, improvementText);
   setResultMetric("Moves", "总 Move 数", moveCount || "—");
   setResultMetric("Validation", result.cancelled ? "成功 / 失败 / 终止" : "成功 / 失败", result.cancelled ? `${result.succeeded || 0} / ${result.failed || 0} / ${result.cancelled}` : `${result.succeeded || 0} / ${result.failed || 0}`);
 }
 
-/** 把所选测试的耗时、基线、瓶颈利用率和校验结果展示在顶部。 */
+/** 把所选测试的耗时、基线、瓶颈和校验结果展示在顶部。 */
 function showBatchItemOverview(item, index) {
   const hasMetrics = hasBatchResultMetrics(item);
   const baseline = item.baseline || {};
@@ -2398,8 +2395,7 @@ function showBatchItemOverview(item, index) {
   const validationText = item.validation === "passed" ? "通过" : item.validation === "skipped" ? "跳过" : item.validation ? String(item.validation) : item.status === "failed" ? "运行失败" : item.status === "cancelled" ? "已终止" : "等待完成";
   const comparisonDetail = baselineReady && Number.isFinite(improvement)
     ? `${improvement >= 0 ? "提升" : "退化"} ${Math.abs(improvement).toFixed(2)}%`
-    : baseline.status === "skipped" ? "Baseline 已跳过"
-    : baseline.status && baseline.status !== "succeeded" ? `Baseline ${baseline.status === "failed" ? "失败" : "失效"}` : "";
+    : baseline.status && baseline.status !== "succeeded" && baseline.status !== "skipped" ? `Baseline ${baseline.status === "failed" ? "失败" : "失效"}` : "";
   const resultUrl = String(item.resultUrl || "");
   const bottleneckReady = resultUrl && batchBottleneckSummaries.has(resultUrl);
   const bottleneckSummary = bottleneckReady ? batchBottleneckSummaries.get(resultUrl) : null;
@@ -2417,7 +2413,7 @@ function showBatchItemOverview(item, index) {
         : bottleneckReady ? "没有足够的资源活动" : "正在计算稳态瓶颈…"
       : "没有可分析的 MoveList",
   );
-  setResultMetric("Validation", "校验", validationText, item.error || "");
+  setResultMetric("Validation", "Validation", validationText, item.error || "");
 }
 
 /** 请求后端分析批量单项，并缓存结构化结果供页面复用。 */
@@ -2464,7 +2460,7 @@ async function loadBatchItemPerformance(item, index) {
   }
 }
 
-/** 为所选测试异步补齐瓶颈利用率，然后刷新顶部预览。 */
+/** 为所选测试异步补齐瓶颈数据，然后刷新顶部预览。 */
 async function loadBatchItemBottleneck(item, index) {
   await loadBatchItemPerformance(item, index);
   const currentIndex = (state.batchResult?.items || []).findIndex(
@@ -2581,7 +2577,7 @@ function renderBatchItems(items) {
       ? `${improvement >= 0 ? "提升" : "退化"} ${Math.abs(improvement).toFixed(2)}%`
       : baseline.status === "skipped" ? "已跳过基线" : baseline.status && baseline.status !== "succeeded" ? "无有效基线" : "提升 —";
     const baselineReason = baseline.status === "skipped"
-      ? "Baseline 已跳过"
+      ? ""
       : baseline.status && baseline.status !== "succeeded"
         ? `Baseline ${baseline.status === "failed" ? "失败" : "失效"}：${baseline.error || "等待重新计算"}`
         : "";
@@ -2886,10 +2882,9 @@ function showResult(result) {
   document.getElementById("metricTimeLabel").textContent = "CPU Time";
   document.getElementById("metricMakespanLabel").textContent = "Makespan / Baseline";
   setBottleneckMetric(result.bottleneckUtilization, "没有足够的资源活动");
-  document.getElementById("metricValidationLabel").textContent = "校验";
+  document.getElementById("metricValidationLabel").textContent = "Validation";
   document.getElementById("metricTime").textContent = `${cpuTime.toFixed(1)} ms`;
   document.getElementById("metricMakespan").textContent = `${result.makespan.toFixed(2)} / ${baselineReady ? Number(baseline.makespan).toFixed(2) : "—"} s`;
-  if (baseline.status === "skipped") document.getElementById("metricMakespanDetail").textContent = "Baseline 已跳过";
   const validationValue = validationDisplay(result.validation);
   document.getElementById("metricValidation").textContent = validationValue;
   document.getElementById("metricValidation").closest(".metric").classList.toggle("is-success", result.validation === "passed");
@@ -2897,7 +2892,7 @@ function showResult(result) {
   const objectiveDiagnostics = [...(result.rounds || [])].reverse().map(round => round.strategyDiagnostics).find(diagnostics => diagnostics?.metrics);
   if (objectiveDiagnostics) {
     const metrics = objectiveDiagnostics.metrics;
-    document.getElementById("metricValidationLabel").textContent = "校验 / 多指标";
+    document.getElementById("metricValidationLabel").textContent = "Validation / Multi-metric";
     document.getElementById("metricValidationDetail").textContent = `驻留超限 ${Number(metrics.residencyViolationCount) || 0} 次 · 最大持片 ${Number(metrics.maximumRobotHoldingSeconds || 0).toFixed(2)} s · 系统停留 CV ${Number(metrics.systemResidenceCv || 0).toFixed(3)}`;
   }
   const dualActorDiagnostics = (result.rounds || [])
@@ -2911,7 +2906,7 @@ function showResult(result) {
       place: summary.place + (Number(diagnostics.primitiveActionCounts?.place) || 0),
       swap: summary.swap + (Number(diagnostics.primitiveActionCounts?.swap) || 0),
     }), { atmosphere: 0, vacuum: 0, pick: 0, place: 0, swap: 0 });
-    document.getElementById("metricValidationLabel").textContent = "校验 / 双 Actor";
+    document.getElementById("metricValidationLabel").textContent = "Validation / Dual Actor";
     document.getElementById("metricValidationDetail").textContent = `决策：大气 ${totals.atmosphere} · 真空 ${totals.vacuum}；原子动作：Pick ${totals.pick} · Place ${totals.place} · Swap ${totals.swap}`;
   }
   const baselinePlan = structuredClone(buildPayload());
@@ -2951,7 +2946,7 @@ function showFailedResultMetrics(result) {
   const comparisonDetail = Number.isFinite(improvement)
     ? `${improvement >= 0 ? "提升" : "退化"} ${Math.abs(improvement).toFixed(2)}% · 结果校验未通过`
     : baseline.status === "skipped"
-      ? "Baseline 已跳过"
+      ? ""
       : baseline.status && baseline.status !== "succeeded"
         ? `Baseline ${baseline.status === "failed" ? "失败" : "失效"}`
         : "外部算法未返回可比较的完整 Makespan";
@@ -2961,7 +2956,7 @@ function showFailedResultMetrics(result) {
   setResultMetric("Time", "失败前耗时", Number.isFinite(elapsedTime) ? `${elapsedTime.toFixed(1)} ms` : "—", "从提交到返回失败结果");
   setResultMetric("Makespan", "Makespan / Baseline", makespanText, comparisonDetail);
   setBottleneckMetric(result?.bottleneckUtilization, result?.resultId ? "失败结果没有足够的资源活动" : "未生成可分析的 MoveList");
-  setResultMetric("Validation", "校验", result?.validation === "failed" ? "未通过" : String(result?.validation || "失败"), result?.error || "");
+  setResultMetric("Validation", "Validation", result?.validation === "failed" ? "未通过" : String(result?.validation || "失败"), result?.error || "");
   document.getElementById("metricValidation").closest(".metric").classList.remove("is-success");
   document.getElementById("metricValidation").closest(".metric").classList.add("is-error");
   state.parameterComparison = null;
