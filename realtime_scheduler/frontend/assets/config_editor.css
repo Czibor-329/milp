@@ -56,6 +56,8 @@
     .round-count-field { display: flex; align-items: center; gap: 8px; width: auto; }
     .panel-head .round-count-field label { flex: 0 0 auto; margin: 0; white-space: nowrap; }
     .panel-head .round-count-field input { flex: 0 0 72px; width: 72px; }
+    .recompute-panel > .panel-head { min-height: 60px; justify-content: flex-start; gap: 28px; padding: 12px 16px; }
+    .recompute-panel > .panel-body { padding: 14px; }
     .panel-body { padding: 20px; }
     .grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 14px; }
     .span-12 { grid-column: span 12; } .span-8 { grid-column: span 8; } .span-6 { grid-column: span 6; } .span-4 { grid-column: span 4; } .span-3 { grid-column: span 3; }
@@ -211,38 +213,63 @@
       .context-clean-item { align-items: flex-start; flex-direction: column; }
     }
     .empty { padding: 28px 18px; border: 1px dashed #bdc8d8; border-radius: 12px; color: var(--muted); text-align: center; }
-    .round-card { overflow: hidden; border: 1px solid #ccd8ea; border-radius: 14px; background: #f7f9fc; }
-    .round-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 14px 16px; border-bottom: 1px solid #d8e1ed; background: linear-gradient(90deg, #edf3ff, #f8faff); }
+    .round-card { overflow: hidden; border: 1px solid #ccd8ea; border-radius: 12px; background: #f7f9fc; }
+    .round-head { display: flex; min-height: 58px; align-items: center; justify-content: flex-start; gap: 12px; padding: 9px 12px; border-bottom: 1px solid #d8e1ed; background: linear-gradient(90deg, #edf3ff, #f8faff); }
+    .round-summary { display: flex; min-width: 0; align-items: center; gap: 20px; }
     .round-title { display: flex; align-items: center; gap: 10px; }
-    .round-number { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 9px; color: #fff; background: var(--brand); font-size: 12px; font-weight: 900; }
-    .round-title strong { display: block; font-size: 14px; }
-    .round-time-editor { display: flex; align-items: center; gap: 7px; color: var(--brand); font-weight: 800; }
-    .round-time-editor input { width: 92px; min-height: 34px; padding: 5px 8px; border: 1px solid #bfcde2; border-radius: 8px; color: var(--ink); background: #fff; }
+    .round-number { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 9px; color: #fff; background: var(--brand); font-size: 12px; font-weight: 900; }
+    .round-title strong { display: block; font-size: 14px; white-space: nowrap; }
+    .round-time-editor { display: flex; align-items: center; gap: 8px; color: #42526b; font-size: 11px; font-weight: 800; }
+    .round-time-control { display: flex; align-items: center; gap: 6px; color: var(--brand); }
+    .round-time-control input { width: 80px; min-height: 36px; padding: 5px 8px; border: 1px solid #bfcde2; border-radius: 9px; color: var(--ink); background: #fff; font-weight: 700; }
+    .round-time-control b { font-weight: 800; }
+    .round-add-cjob { min-height: 38px; }
     .round-actions { display: flex; align-items: center; gap: 8px; }
-    .cjob-list { display: grid; gap: 12px; padding: 14px; }
-    .cjob-card { overflow: hidden; border: 1px solid #d8e0eb; border-radius: 12px; background: #fff; }
-    .cjob-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 13px; border-bottom: 1px solid var(--line); background: #fff; }
-    .cjob-title { display: flex; align-items: center; gap: 8px; }
-    .cjob-title strong { font-size: 13px; }
+    .round-head .btn svg, .cjob-actions .btn svg, .pjob-remove svg { width: 16px; height: 16px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
+    .cjob-list { display: grid; gap: 10px; padding: 10px; }
+    .cjob-card { overflow: hidden; border: 1px solid #d8e0eb; border-radius: 10px; background: #fff; container-type: inline-size; }
+    .cjob-head { display: grid; grid-template-columns: minmax(88px, auto) minmax(0, 1fr) auto; align-items: end; gap: 12px; padding: 9px 11px; border-bottom: 1px solid var(--line); background: #fafbfd; }
+    .cjob-title { display: grid; align-self: center; gap: 1px; }
+    .cjob-title strong { font-size: 13px; line-height: 1.35; }
+    .cjob-task-id { color: var(--muted); font-size: 9px; font-weight: 700; line-height: 1.35; }
     .readonly-pill { display: inline-flex; align-items: center; gap: 5px; padding: 4px 8px; border-radius: 7px; color: #475569; background: #eef2f7; font-size: 11px; font-weight: 700; }
-    .cjob-controls { display: grid; grid-template-columns: minmax(150px, 1fr) 120px minmax(150px, 1fr) minmax(180px, 1.2fr); gap: 10px; padding: 12px 13px; border-bottom: 1px solid var(--line); background: #fafbfd; }
-    .cjob-controls .field label { margin-bottom: 4px; font-size: 10px; }
-    .cjob-controls input, .cjob-controls select { min-height: 35px; }
-    .pjob-name-list { display: flex; flex-wrap: wrap; gap: 5px; min-height: 35px; align-items: center; }
-    .pjob-table-wrap { overflow-x: auto; }
-    .pjob-table { width: 100%; min-width: 680px; border-collapse: collapse; font-size: 11px; }
-    .pjob-table th, .pjob-table td { padding: 9px 10px; border-bottom: 1px solid #e3e8ef; text-align: left; vertical-align: middle; }
-    .pjob-table th { color: var(--muted); background: #f8fafc; font-size: 10px; white-space: nowrap; }
-    .pjob-table tr:last-child td { border-bottom: 0; }
-    .pjob-table input, .pjob-table select { min-height: 34px; padding: 5px 7px; border: 1px solid #cad5e3; border-radius: 7px; color: var(--ink); background: #fff; }
-    .pjob-table .pjob-number { width: 72px; }
-    .pjob-route-picker { display: grid; min-width: 360px; grid-template-columns: minmax(0, 1fr) 36px; align-items: center; gap: 8px; padding: 7px; border: 1px solid #d5deea; border-radius: 10px; background: #f8fafc; }
-    .pjob-route-open { display: grid; width: 36px; min-width: 36px; min-height: 36px; place-items: center; padding: 0; border: 1px solid #b9c9e7; border-radius: 8px; color: var(--brand); background: #fff; font-size: 18px; font-weight: 800; line-height: 1; transition: border-color .18s ease, color .18s ease, background .18s ease, box-shadow .18s ease; }
+    .cjob-controls { display: grid; min-width: 0; grid-template-columns: minmax(126px, 160px) 80px minmax(120px, 150px); justify-content: end; gap: 8px; }
+    .cjob-controls .field label { margin-bottom: 3px; font-size: 9px; line-height: 1.2; }
+    .cjob-controls input, .cjob-controls select { min-height: 36px; padding: 5px 8px; border-radius: 8px; }
+    .cjob-actions { align-self: end; }
+    .cjob-actions .btn { min-height: 36px; }
+    .pjob-list { display: grid; }
+    .pjob-row { display: grid; grid-template-columns: 78px 110px minmax(320px, 1fr) 92px 44px; align-items: end; gap: 12px; padding: 9px 11px 10px; border-bottom: 1px solid #e3e8ef; background: #fff; }
+    .pjob-row:last-child { border-bottom: 0; }
+    .pjob-identity { display: grid; align-self: center; gap: 2px; }
+    .pjob-identity span, .pjob-field > span { color: var(--muted); font-size: 9px; font-weight: 800; line-height: 1.2; }
+    .pjob-identity strong { font-size: 12px; }
+    .pjob-field { display: grid; min-width: 0; gap: 4px; }
+    .pjob-field input { width: 100%; min-height: 40px; padding: 6px 9px; border: 1px solid #cad5e3; border-radius: 9px; color: var(--ink); background: #fff; }
+    .pjob-route-picker { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr) 40px; align-items: center; gap: 8px; padding: 0 0 0 9px; border: 1px solid #cad5e3; border-radius: 9px; background: #fff; }
+    .pjob-route-open { display: grid; width: 40px; min-width: 40px; min-height: 40px; place-items: center; padding: 0; border: 0; border-left: 1px solid #cad5e3; border-radius: 0 8px 8px 0; color: var(--brand); background: #f8faff; line-height: 1; transition: border-color .18s ease, color .18s ease, background .18s ease, box-shadow .18s ease; }
+    .pjob-route-open svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-width: 2; }
     .pjob-route-open:hover:not(:disabled) { border-color: var(--brand); color: #fff; background: var(--brand); box-shadow: 0 4px 10px rgba(36,87,214,.18); }
     .pjob-route-open:disabled { color: #94a3b8; background: #eef2f6; cursor: not-allowed; }
-    .pjob-route-current { display: grid; min-width: 0; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 8px; padding: 0 4px; }
+    .pjob-route-current { display: grid; min-width: 0; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 8px; padding: 0; }
     .pjob-route-current > strong { color: #1f2f49; font-size: 12px; font-weight: 850; white-space: nowrap; }
     .pjob-route-current > span { min-width: 0; overflow: hidden; color: #52627a; font-size: 11px; font-weight: 750; text-overflow: ellipsis; white-space: nowrap; }
+    .pjob-remove { width: 40px; min-width: 40px; min-height: 40px; align-self: end; padding: 0; }
+    @container (max-width: 760px) {
+      .cjob-head { grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
+      .cjob-controls { grid-row: 2; grid-column: 1 / -1; grid-template-columns: minmax(120px, 1fr) 80px minmax(120px, 1fr); justify-content: stretch; }
+      .cjob-actions { grid-row: 1; grid-column: 2; }
+      .pjob-row { grid-template-columns: 70px 100px 92px minmax(44px, 1fr); grid-template-areas: "identity material priority remove" "route route route route"; }
+      .pjob-identity { grid-area: identity; }
+      .pjob-material { grid-area: material; }
+      .pjob-origin-route { grid-area: route; }
+      .pjob-priority { grid-area: priority; }
+      .pjob-remove { grid-area: remove; }
+    }
+    @container (max-width: 420px) {
+      .cjob-controls { grid-template-columns: 1fr; }
+      .pjob-row { grid-template-columns: minmax(0, 1fr) 100px 44px; grid-template-areas: "identity priority remove" "material material material" "route route route"; }
+    }
     dialog.pjob-route-dialog { width: min(1040px, calc(100vw - 32px)); max-height: min(780px, calc(100dvh - 32px)); overflow: hidden; background: var(--surface); }
     .pjob-route-dialog-body { display: grid; max-height: min(780px, calc(100dvh - 32px)); grid-template-rows: auto auto minmax(0, 1fr); }
     .pjob-route-dialog-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; padding: 18px 20px 15px; border-bottom: 1px solid var(--line); background: linear-gradient(90deg, #edf3ff, #f8faff); }
@@ -932,6 +959,27 @@
       .hero-meta { display: none; }
       .layout.editor-mode .main { width: 100%; }
     }
+    @media (max-width: 820px) {
+      .cjob-head { grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
+      .cjob-controls { grid-row: 2; grid-column: 1 / -1; grid-template-columns: minmax(120px, 1fr) 80px minmax(120px, 1fr); justify-content: stretch; }
+      .cjob-actions { grid-row: 1; grid-column: 2; }
+      .pjob-row { grid-template-columns: 70px 100px 92px minmax(44px, 1fr); grid-template-areas: "identity material priority remove" "route route route route"; }
+      .pjob-identity { grid-area: identity; }
+      .pjob-material { grid-area: material; }
+      .pjob-origin-route { grid-area: route; }
+      .pjob-priority { grid-area: priority; }
+      .pjob-remove { grid-area: remove; }
+      .round-head { align-items: center; flex-direction: row; }
+      .round-summary { flex-wrap: wrap; gap: 8px 16px; }
+    }
+    @media (max-width: 540px) {
+      .recompute-panel > .panel-head { align-items: flex-start; flex-direction: column; }
+      .round-head { align-items: stretch; flex-direction: column; }
+      .round-add-cjob { align-self: flex-end; }
+      .round-summary { align-items: flex-start; flex-direction: column; }
+      .cjob-controls { grid-template-columns: 1fr; }
+      .pjob-row { grid-template-columns: minmax(0, 1fr) 100px 44px; grid-template-areas: "identity priority remove" "material material material" "route route route"; }
+    }
 
     /* 夜间模式使用 DeepSeek 深灰阶表面，保留蓝色作为强调与焦点色。 */
     body.theme-dark { --bg: #111214; --surface: #2d2f33; --soft: #222428; --ink: #f4f5f7; --muted: #a7aab2; --line: #414349; --brand: #4b7ff2; --brand-dark: #3a66d4; --brand-soft: #202c47; --green: #69d5a2; --green-soft: #173d31; --red: #ff9ca5; --red-soft: #45252a; --shadow: none; background: var(--bg); }
@@ -952,6 +1000,8 @@
     body.theme-dark .device-config-nav-item small { color: #aeb9d2; }
     body.theme-dark .app-content :is(.workspace-device-controls > select, .workspace-icon-button, .clean-type-group, .clean-card, .round-card, .cjob-card, .cjob-head, .cjob-controls, .route-process-group, .route-type-group, .route-type-head, .route-summary-card, .route-summary-head, .candidate-picker summary, .candidate-picker-menu, .algorithm-hover-info, .test-group-analysis, .group-kpi-grid article, .group-chart-card, .group-analysis-table-wrap, .visual-content, .visual-overview, .timeline-console, .result-card, .performance-summary, .bottleneck-analysis-head, .bottleneck-analysis-list li, .bl-candidate-bars, .other-resources-section, .loadlock-card-head, .equipment-schematic, .schematic-head, .decision-lens-panel, .active-moves-panel, .visual-legend, .drawer, .step-overview-card, .step-editor-card, .step-system-details, .step-meta-list, .step-number-control, .clean-choice, .robot-slot-card, .robot-slot-notice, .robot-slot-empty) { border-color: var(--line); color: var(--ink); background: var(--surface); box-shadow: none; }
     body.theme-dark .app-content :is(.cjob-controls, .route-type-head, .route-summary-head, .test-group-analysis, .visual-content, .bottleneck-analysis-head, .bl-candidate-bars, .other-resources-section, .loadlock-card-head, .schematic-head, .decision-alternative-empty, .visual-legend, .step-meta-list) { background: var(--soft); }
+    body.theme-dark .app-content .cjob-controls { background: transparent; }
+    body.theme-dark .app-content .pjob-row { border-color: var(--line); background: var(--surface); }
     body.theme-dark .route-summary-primary strong { color: #e1e5ec; }
     body.theme-dark .route-property-tag.buffer-none, body.theme-dark .route-property-tag.clean-none { border-color: #4d5561; color: #c4cad3; background: #343941; }
     body.theme-dark .route-property-tag.buffer-forced { border-color: #4966a2; color: #b9ceff; background: #26375e; }
