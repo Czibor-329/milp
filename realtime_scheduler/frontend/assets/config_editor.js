@@ -208,11 +208,11 @@ async function requestSearchTelemetry(sinceRevision = null) {
   });
   return result.telemetry;
 }
-async function requestSearchControl(command) {
+async function requestSearchControl(command, actionKey = null) {
   return requestJson("/api/search-control", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ command })
+    body: JSON.stringify(actionKey ? { command, actionKey } : { command })
   });
 }
 
@@ -2187,6 +2187,8 @@ var VisualizationWorkspace = class {
   time = 0;
   playing = false;
   liveSolving = false;
+  /** 外部（Schedule-AlphaGo 搜索面板）接管右侧决策镜头时跳过本类每帧覆盖。 */
+  externalDecisionLensOwner = false;
   playbackSpeed = DEFAULT_PLAYBACK_SPEED;
   performanceWindowMode = "steady";
   animationFrame = 0;
@@ -2281,6 +2283,10 @@ var VisualizationWorkspace = class {
     this.primitiveDecisionBoundaries = primitiveDecisionBoundaryTimes(this.moves);
     this.replayDecisionRequestVersion += 1;
     if (this.moves.length) this.render();
+  }
+  /** 让 Schedule-AlphaGo 搜索面板接管右侧“合法动作空间”的渲染。 */
+  setExternalDecisionLensOwner(owner) {
+    this.externalDecisionLensOwner = owner;
   }
   /** 在完整 MoveList 返回前显示初始拓扑，并进入增量求解状态。 */
   beginLiveSolve(plan, sourceName = "Schedule-AlphaGo \u5B9E\u65F6\u6C42\u89E3") {
@@ -2628,12 +2634,14 @@ var VisualizationWorkspace = class {
       this.hiddenModuleFilters,
       this.device
     );
-    const requestState = this.pendingReplayDecisionKeys.has(replayKey) ? "loading" : this.replayDecisionErrorKey === replayKey ? "error" : "idle";
-    this.elements.decisionLens.innerHTML = renderDecisionLens(
-      currentDecision,
-      requestState,
-      this.replayDecisionErrorMessage
-    );
+    if (!this.externalDecisionLensOwner) {
+      const requestState = this.pendingReplayDecisionKeys.has(replayKey) ? "loading" : this.replayDecisionErrorKey === replayKey ? "error" : "idle";
+      this.elements.decisionLens.innerHTML = renderDecisionLens(
+        currentDecision,
+        requestState,
+        this.replayDecisionErrorMessage
+      );
+    }
     this.elements.activeMoves.innerHTML = snapshot.activeMoves.length ? snapshot.activeMoves.map((move) => `
         <li>
           <span class="active-move-id">#${finiteNumber(move.MoveID)}</span>
@@ -3191,6 +3199,12 @@ var followLatestSearchTelemetry = true;
 var searchTelemetryRunActive = false;
 var searchTelemetryControlPending = false;
 var lastSearchTelemetryMoveCount = 0;
+var playbackMode = "replay";
+var userChosenActionKey = "";
+var userChosenSearchId = "";
+var pendingModeSync = "";
+var stepRunActive = false;
+var stepRunCancelling = false;
 var pendingAlphaGoCheckpointFile = null;
 function inferCleanType(clean) {
   const explicit = String(clean.cleanType || clean.category || "").toLowerCase().replace(/[-_\s]/g, "");
@@ -3790,17 +3804,18 @@ function resetSearchTelemetryView() {
   searchTelemetryRunActive = false;
   searchTelemetryControlPending = false;
   lastSearchTelemetryMoveCount = 0;
+  userChosenActionKey = "";
+  userChosenSearchId = "";
   const panel = document.getElementById("searchTelemetryPanel");
   panel.hidden = true;
+  document.getElementById("searchTelemetryVariationPanel").hidden = true;
   document.getElementById("searchTelemetryDecisionSelect").innerHTML = "";
-  document.getElementById("searchTelemetrySummary").innerHTML = "";
-  document.getElementById("searchTelemetryActions").innerHTML = "";
   document.getElementById("searchTelemetryVariation").innerHTML = "";
-  document.getElementById("searchTelemetryNodes").innerHTML = "";
   for (const id of [
     "searchTelemetryPauseButton",
     "searchTelemetryStepButton",
-    "searchTelemetryContinueButton"
+    "searchTelemetryContinueButton",
+    "searchTelemetryFollowRecommendationButton"
   ]) {
     const button = document.getElementById(id);
     button.disabled = true;
@@ -3818,67 +3833,77 @@ function searchTelemetryStopReason(reason) {
     node_budget: "\u8282\u70B9\u9884\u7B97"
   }[String(reason || "")] || "\u641C\u7D22\u4E2D";
 }
-function renderSearchValueSparkline(history) {
-  const values = (Array.isArray(history) ? history : []).map((item) => Number(item?.value)).filter(Number.isFinite);
-  if (!values.length) return `<span class="search-telemetry-empty">\u2014</span>`;
-  const chartWidth = 132, chartHeight = 30, chartPadding = 3;
-  const minimum = Math.min(...values), maximum = Math.max(...values);
-  const span = Math.max(maximum - minimum, 1e-9);
-  const points = values.map((value, index) => {
-    const x = values.length === 1 ? chartWidth / 2 : chartPadding + index * (chartWidth - chartPadding * 2) / (values.length - 1);
-    const y = chartHeight - chartPadding - (value - minimum) * (chartHeight - chartPadding * 2) / span;
-    return [x, y];
-  });
-  const path = points.map(([x, y], index) => `${index ? "L" : "M"}${x.toFixed(2)},${y.toFixed(2)}`).join(" ");
-  const [lastX, lastY] = points[points.length - 1];
-  const title = `Q ${values[0].toFixed(4)} \u2192 ${values[values.length - 1].toFixed(4)}\uFF0C${values.length} \u4E2A\u91C7\u6837\u70B9`;
-  return `<svg class="search-value-sparkline" viewBox="0 0 ${chartWidth} ${chartHeight}" role="img" aria-label="${escapeHtml3(title)}"><title>${escapeHtml3(title)}</title><path d="${path}"></path><circle cx="${lastX.toFixed(2)}" cy="${lastY.toFixed(2)}" r="2.4"></circle></svg>`;
+function renderSearchActionCandidates(actions, decisionIndex, recommendedKey, selectedKey, maximumVisits, interactive) {
+  return `<section class="decision-candidate-section search-action-section" aria-labelledby="searchCandidatesTitle">
+    <header>
+      <strong id="searchCandidatesTitle">\u6839\u8282\u70B9\u5168\u90E8\u5408\u6CD5\u52A8\u4F5C <small>\u51B3\u7B56 #${decisionIndex}</small></strong>
+      <span>P \u5148\u9A8C \xB7 N \u8BBF\u95EE \xB7 Q \u4EF7\u503C</span>
+    </header>
+    <ol>
+      ${actions.map((action, index) => {
+    const visits = Number(action?.visits) || 0;
+    const visitPercent = Math.max(0, Math.min(100, visits / maximumVisits * 100));
+    const isRecommended = String(action?.actionKey || "") === recommendedKey;
+    const isSelected = String(action?.actionKey || "") === selectedKey;
+    const materials = Array.isArray(action?.materialIds) && action.materialIds.length ? `\u7269\u6599 ${action.materialIds.join(", ")}` : String(action?.kind || "action");
+    const route = [action?.sourceStation, action?.destinationStation].filter(Boolean).join(" \u2192 ");
+    const tags = `${isRecommended ? '<span class="decision-tag is-recommendation">\u63A8\u8350</span>' : ""}${isSelected && !isRecommended ? '<span class="decision-tag is-user-chosen">\u4F60\u7684\u9009\u62E9</span>' : ""}`;
+    return `<li class="decision-candidate search-action-candidate ${isSelected ? "is-selected" : ""} ${interactive ? "is-interactive" : ""}" data-action-key="${escapeHtml3(String(action?.actionKey || ""))}" ${interactive ? 'role="button" tabindex="0"' : ""}>
+          <div class="decision-candidate-rank" aria-label="\u7B2C ${index + 1} \u540D">${index + 1}</div>
+          <div class="decision-candidate-main">
+            <div class="decision-candidate-title"><strong title="${escapeHtml3(action?.description || action?.actionKey || "\u52A8\u4F5C")}">${escapeHtml3(action?.description || action?.actionKey || "\u52A8\u4F5C")}</strong>${tags}</div>
+            <small>${escapeHtml3([materials, route].filter(Boolean).join(" \xB7 "))}</small>
+            <div class="decision-candidate-detail search-pnq">
+              <span title="\u7B56\u7565\u5148\u9A8C P"><small>P</small><strong>${formatSearchTelemetryNumber(action?.prior, 4)}</strong></span>
+              <span title="\u8BBF\u95EE\u6B21\u6570 N"><small>N</small><strong>${visits}</strong><i>${visitPercent.toFixed(0)}%</i></span>
+              <span title="\u5E73\u5747\u4EF7\u503C Q"><small>Q</small><strong>${formatSearchTelemetryNumber(action?.value, 4)}</strong></span>
+            </div>
+          </div>
+          <strong class="decision-candidate-preference" aria-label="\u8BBF\u95EE\u5360\u6BD4 ${visitPercent.toFixed(0)}%">${visitPercent.toFixed(0)}%</strong>
+        </li>`;
+  }).join("")}
+    </ol>
+  </section>`;
 }
 function renderSearchTelemetryDecision(snapshot) {
   const root = snapshot?.root || {};
   const actions = Array.isArray(root.children) ? root.children : [];
-  const selectedKey = String(snapshot?.selectedActionKey || "");
+  const recommendedKey = String(snapshot?.selectedActionKey || "");
+  const selectedKey = String(snapshot?.searchId || "") === userChosenSearchId ? userChosenActionKey : recommendedKey;
+  const decisionIndex = Number(snapshot?.decisionIndex || 0) + 1;
+  const interactive = playbackMode === "step" && latestSearchTelemetry?.status === "waiting-choice" && String(snapshot?.searchId || "") === String(latestSearchTelemetry?.searchId || "");
   const maximumVisits = Math.max(1, ...actions.map((action) => Number(action?.visits) || 0));
-  document.getElementById("searchTelemetrySummary").innerHTML = [
-    ["\u6839\u51B3\u7B56", `#${Number(snapshot?.decisionIndex || 0) + 1}`],
-    ["\u7528\u65F6 / \u9884\u7B97", `${formatSearchTelemetryNumber(snapshot?.elapsedMilliseconds, 1)} / ${formatSearchTelemetryNumber(snapshot?.budgetMilliseconds, 1)} ms`],
-    ["\u641C\u7D22\u6B21\u6570", `${Number(snapshot?.simulations) || 0} sim \xB7 \u6839 N=${Number(root?.visits) || 0}`],
-    ["\u641C\u7D22\u6811", `${Number(snapshot?.expandedNodes) || 0} \u8282\u70B9 \xB7 \u6DF1\u5EA6 ${Number(snapshot?.maximumDepth) || 0}`],
-    ["\u8BC4\u4F30\u5668", `${String(snapshot?.device || "cpu").toUpperCase()} \xB7 ${String(snapshot?.modelSource || "unknown")}`]
-  ].map(([label, value]) => `<div class="search-summary-item"><span>${escapeHtml3(label)}</span><strong title="${escapeHtml3(value)}">${escapeHtml3(value)}</strong></div>`).join("");
-  document.getElementById("searchTelemetryActions").innerHTML = actions.length ? actions.map((action) => {
-    const visits = Number(action?.visits) || 0;
-    const visitPercent = Math.max(0, Math.min(100, visits / maximumVisits * 100));
-    const materials = Array.isArray(action?.materialIds) && action.materialIds.length ? `\u7269\u6599 ${action.materialIds.join(", ")}` : String(action?.kind || "action");
-    const route = [action?.sourceStation, action?.destinationStation].filter(Boolean).join(" \u2192 ");
-    return `<tr class="${String(action?.actionKey || "") === selectedKey ? "is-selected" : ""}">
-        <td><div class="search-action-name"><strong title="${escapeHtml3(action?.description || action?.actionKey || "\u52A8\u4F5C")}">${escapeHtml3(action?.description || action?.actionKey || "\u52A8\u4F5C")}</strong><small>${escapeHtml3([materials, route].filter(Boolean).join(" \xB7 "))}</small></div></td>
-        <td>${formatSearchTelemetryNumber(action?.prior, 4)}</td>
-        <td><div class="search-visits"><span>${visits}</span><div class="search-visits-meter"><i style="width:${visitPercent.toFixed(2)}%"></i></div></div></td>
-        <td><div class="search-value-cell"><strong>Q ${formatSearchTelemetryNumber(action?.value, 4)}</strong><small>${formatSearchTelemetryNumber(action?.estimatedCostSeconds, 2)} s</small></div></td>
-        <td>${visits ? formatSearchTelemetryNumber(action?.standardError, 4) : "\u2014"}</td>
-        <td>${renderSearchValueSparkline(action?.valueHistory)}</td>
-      </tr>`;
-  }).join("") : `<tr><td colspan="6" class="search-telemetry-empty">\u6B63\u5728\u679A\u4E3E\u6839\u8282\u70B9\u5408\u6CD5\u52A8\u4F5C\u2026</td></tr>`;
+  document.getElementById("visualDecisionLens").innerHTML = actions.length ? renderSearchActionCandidates(
+    actions,
+    decisionIndex,
+    recommendedKey,
+    selectedKey,
+    maximumVisits,
+    interactive
+  ) : `<div class="decision-empty"><strong>\u6B63\u5728\u679A\u4E3E\u6839\u8282\u70B9\u5408\u6CD5\u52A8\u4F5C\u2026</strong><p>\u641C\u7D22\u8FDB\u884C\u4E2D\uFF0C\u5019\u9009\u7A0D\u540E\u51FA\u73B0\u3002</p></div>`;
   const variation = Array.isArray(snapshot?.principalVariation) ? snapshot.principalVariation : [];
+  const variationPanel = document.getElementById("searchTelemetryVariationPanel");
+  variationPanel.hidden = false;
   document.getElementById("searchTelemetryVariation").innerHTML = variation.length ? variation.slice(0, 10).map((step, index) => `<div class="search-pv-step"><b>${index + 1}</b><span title="${escapeHtml3(step?.description || step?.actionKey || "\u52A8\u4F5C")}">${escapeHtml3(step?.description || step?.actionKey || "\u52A8\u4F5C")}</span><small>N=${Number(step?.visits) || 0}</small></div>`).join("") : `<div class="search-telemetry-empty">\u5C1A\u672A\u5F62\u6210\u4E3B\u53D8\u5316</div>`;
-  const nodes = Array.isArray(snapshot?.relatedNodes) ? snapshot.relatedNodes : [];
-  document.getElementById("searchTelemetryNodes").innerHTML = nodes.length ? nodes.slice(0, 32).map((node) => {
-    const path = Array.isArray(node?.path) && node.path.length ? node.path.join(" \u2192 ") : "\u6839\u8282\u70B9";
-    return `<div class="search-node"><b>#${Number(node?.nodeId) || 0} \xB7 d${Number(node?.depth) || 0}</b><span>N=${Number(node?.visits) || 0}</span><small title="${escapeHtml3(path)}">${escapeHtml3(path)} \xB7 Q ${formatSearchTelemetryNumber(node?.value, 4)}</small></div>`;
-  }).join("") : `<div class="search-telemetry-empty">\u5C1A\u672A\u6269\u5C55\u76F8\u5173\u8282\u70B9</div>`;
 }
 function updateSearchTelemetryControls(snapshot) {
   const executionMode = String(snapshot?.executionMode || "continuous");
+  const stepMode = playbackMode === "step";
   const disabled = !searchTelemetryRunActive || searchTelemetryControlPending;
   const pauseButton = document.getElementById("searchTelemetryPauseButton");
   const stepButton = document.getElementById("searchTelemetryStepButton");
   const continueButton = document.getElementById("searchTelemetryContinueButton");
+  const followButton = document.getElementById("searchTelemetryFollowRecommendationButton");
+  pauseButton.hidden = stepMode;
+  stepButton.hidden = stepMode;
+  continueButton.hidden = stepMode;
+  followButton.hidden = !stepMode;
   pauseButton.disabled = disabled;
   stepButton.disabled = disabled;
   continueButton.disabled = disabled;
-  pauseButton.classList.toggle("is-active", !disabled && executionMode === "paused");
-  continueButton.classList.toggle("is-active", !disabled && executionMode === "continuous");
+  followButton.disabled = !(!disabled && stepMode && executionMode === "paused" && snapshot?.status === "waiting-choice" && Boolean(snapshot?.selectedActionKey));
+  pauseButton.classList.toggle("is-active", !disabled && !stepMode && executionMode === "paused");
+  continueButton.classList.toggle("is-active", !disabled && !stepMode && executionMode === "continuous");
 }
 function syncSearchTelemetryPlayback(snapshot, selectedDecision) {
   const committedMoves = Array.isArray(snapshot?.committedMoves) ? snapshot.committedMoves : [];
@@ -3893,6 +3918,65 @@ function syncSearchTelemetryPlayback(snapshot, selectedDecision) {
   if (Number.isFinite(replayTime) && replayTime >= 0) {
     visualizationWorkspace.seekTo(replayTime);
   }
+}
+async function chooseSearchAction(actionKey) {
+  if (!searchTelemetryRunActive || playbackMode !== "step") return;
+  if (searchTelemetryControlPending) return;
+  if (latestSearchTelemetry?.status !== "waiting-choice") return;
+  const key = String(actionKey || "");
+  if (!key) return;
+  userChosenActionKey = key;
+  userChosenSearchId = String(latestSearchTelemetry?.searchId || "");
+  if (latestSearchTelemetry) renderSearchTelemetry(latestSearchTelemetry);
+  searchTelemetryControlPending = true;
+  updateSearchTelemetryControls(latestSearchTelemetry);
+  try {
+    const result = await requestSearchControl("choose", key);
+    if (result?.telemetry) renderSearchTelemetry(result.telemetry);
+  } catch (error) {
+    const status = document.getElementById("searchTelemetryStatus");
+    status.textContent = `\u63D0\u4EA4\u9009\u62E9\u5931\u8D25\uFF1A${error.message || "\u672A\u77E5\u9519\u8BEF"}`;
+    status.classList.remove("is-searching", "is-paused");
+  } finally {
+    searchTelemetryControlPending = false;
+    flushPendingModeSync();
+    updateSearchTelemetryControls(latestSearchTelemetry);
+  }
+}
+function followSearchRecommendation() {
+  const key = String(latestSearchTelemetry?.selectedActionKey || "");
+  if (!key) return;
+  void chooseSearchAction(key);
+}
+async function flushPendingModeSync() {
+  const mode = pendingModeSync;
+  if (!mode) return;
+  pendingModeSync = "";
+  await setPlaybackMode(mode);
+}
+function renderPlaybackModeSwitch() {
+  document.getElementById("playbackModeReplayButton").classList.toggle("is-active", playbackMode === "replay");
+  document.getElementById("playbackModeStepButton").classList.toggle("is-active", playbackMode === "step");
+  document.getElementById("playbackModeReplayButton").setAttribute("aria-pressed", String(playbackMode === "replay"));
+  document.getElementById("playbackModeStepButton").setAttribute("aria-pressed", String(playbackMode === "step"));
+}
+async function setPlaybackMode(mode) {
+  if (mode !== "step" && mode !== "replay") return;
+  playbackMode = mode;
+  renderPlaybackModeSwitch();
+  if (searchTelemetryRunActive && !searchTelemetryControlPending) {
+    try {
+      const result = await requestSearchControl(mode === "step" ? "step-mode" : "replay-mode");
+      if (result?.telemetry) renderSearchTelemetry(result.telemetry);
+    } catch (error) {
+      const status = document.getElementById("searchTelemetryStatus");
+      status.textContent = `\u5207\u6362\u6A21\u5F0F\u5931\u8D25\uFF1A${error.message || "\u672A\u77E5\u9519\u8BEF"}`;
+      status.classList.remove("is-searching", "is-paused");
+    }
+  } else if (searchTelemetryRunActive) {
+    pendingModeSync = mode;
+  }
+  if (latestSearchTelemetry) renderSearchTelemetry(latestSearchTelemetry);
 }
 async function controlSearchTelemetry(command) {
   if (!searchTelemetryRunActive || searchTelemetryControlPending) return;
@@ -3911,6 +3995,7 @@ async function controlSearchTelemetry(command) {
     status.classList.remove("is-searching", "is-paused");
   } finally {
     searchTelemetryControlPending = false;
+    flushPendingModeSync();
     updateSearchTelemetryControls(latestSearchTelemetry);
   }
 }
@@ -3943,9 +4028,11 @@ function renderSearchTelemetry(snapshot) {
   const selected = decisions.find((item) => item.searchId === selectedSearchTelemetryId) || latestDecision;
   const searching = snapshot?.status === "searching";
   const waiting = snapshot?.status === "waiting-step";
-  status.textContent = waiting ? "\u6C42\u89E3\u5DF2\u6682\u505C \xB7 \u53EF\u5355\u6B65\u653E\u884C\u4E00\u4E2A\u6839\u51B3\u7B56\uFF0C\u6216\u7EE7\u7EED\u8FDE\u7EED\u6C42\u89E3" : searching ? `\u6B63\u5728\u8FDB\u884C\u975E\u5BF9\u79F0\u6811\u641C\u7D22 \xB7 ${Number(snapshot?.simulations) || 0} \u6B21\u6A21\u62DF` : snapshot?.status === "action-applied" ? `\u6839\u52A8\u4F5C #${Number(snapshot?.decisionIndex || 0) + 1} \u5DF2\u63D0\u4EA4 \xB7 \u62D3\u6251\u5DF2\u63A8\u8FDB` : `\u51B3\u7B56\u5B8C\u6210 \xB7 \u7531${searchTelemetryStopReason(selected?.stopReason)}\u7EC8\u6B62`;
+  const waitingChoice = snapshot?.status === "waiting-choice";
+  const cancelled = snapshot?.status === "cancelled";
+  status.textContent = cancelled ? "\u8FD0\u884C\u5DF2\u53D6\u6D88" : waitingChoice ? playbackMode === "step" ? "\u641C\u7D22\u5B8C\u6210 \xB7 \u8BF7\u9009\u62E9\u8981\u6267\u884C\u7684\u52A8\u4F5C" : "\u6C42\u89E3\u5DF2\u6682\u505C \xB7 \u7B49\u5F85\u653E\u884C" : waiting ? "\u6C42\u89E3\u5DF2\u6682\u505C \xB7 \u53EF\u5355\u6B65\u653E\u884C\u4E00\u4E2A\u6839\u51B3\u7B56\uFF0C\u6216\u7EE7\u7EED\u8FDE\u7EED\u6C42\u89E3" : searching ? `\u6B63\u5728\u8FDB\u884C\u975E\u5BF9\u79F0\u6811\u641C\u7D22 \xB7 ${Number(snapshot?.simulations) || 0} \u6B21\u6A21\u62DF` : snapshot?.status === "action-applied" ? `\u6839\u52A8\u4F5C #${Number(snapshot?.decisionIndex || 0) + 1} \u5DF2\u63D0\u4EA4 \xB7 \u62D3\u6251\u5DF2\u63A8\u8FDB` : `\u51B3\u7B56\u5B8C\u6210 \xB7 \u7531${searchTelemetryStopReason(selected?.stopReason)}\u7EC8\u6B62`;
   status.classList.toggle("is-searching", searching);
-  status.classList.toggle("is-paused", waiting);
+  status.classList.toggle("is-paused", waiting || waitingChoice);
   updateSearchTelemetryControls(snapshot);
   renderSearchTelemetryDecision(selected);
   syncSearchTelemetryPlayback(snapshot, selected);
@@ -3971,18 +4058,20 @@ async function pollSearchTelemetry(token) {
 function startSearchTelemetryPolling() {
   resetSearchTelemetryView();
   searchTelemetryRunActive = true;
+  visualizationWorkspace.setExternalDecisionLensOwner(true);
   const panel = document.getElementById("searchTelemetryPanel");
   panel.hidden = false;
   const status = document.getElementById("searchTelemetryStatus");
   status.textContent = "\u6B63\u5728\u521D\u59CB\u5316\u641C\u7D22\u5668\u2026";
   status.classList.add("is-searching");
-  updateSearchTelemetryControls({ executionMode: "continuous" });
+  updateSearchTelemetryControls({ executionMode: playbackMode === "step" ? "paused" : "continuous" });
   const token = ++searchTelemetryPollToken;
   void pollSearchTelemetry(token);
 }
 function stopSearchTelemetryPolling(finalSnapshot = null) {
   searchTelemetryPollToken += 1;
   searchTelemetryRunActive = false;
+  visualizationWorkspace.setExternalDecisionLensOwner(false);
   if (finalSnapshot) renderSearchTelemetry(finalSnapshot);
   const status = document.getElementById("searchTelemetryStatus");
   if (!finalSnapshot && latestSearchTelemetry?.algorithm === "schedule-alphago") {
@@ -5343,7 +5432,11 @@ function buildPayload() {
   expandVisitSlotIds();
   const routes = selectReferencedRoutes2(state.routes, state.rounds).map((route) => ({ ...normalizeRoute(route), stages: route.stages.map((stage) => ({ ...stage, visits: stage.visits.map((visit) => structuredClone(visit)) })) }));
   const cleans = state.cleans.map(runtimeClean);
-  return { schemaVersion: EXPECTED_API_SCHEMA, workspaceDeviceId: state.workspaceDeviceId, workspaceTestId: state.testCaseId, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options: state.options, skipValidation: skipValidationEnabled(), skipBaseline: skipBaselineEnabled(), recipes: collectRecipes(routes), cleans, routes, rounds: structuredClone(state.rounds) };
+  const options = { ...state.options };
+  if (state.strategy === "schedule-alphago") {
+    options.scheduleAlphaGoExecutionMode = playbackMode === "step" ? "stepped" : "continuous";
+  }
+  return { schemaVersion: EXPECTED_API_SCHEMA, workspaceDeviceId: state.workspaceDeviceId, workspaceTestId: state.testCaseId, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options, skipValidation: skipValidationEnabled(), skipBaseline: skipBaselineEnabled(), recipes: collectRecipes(routes), cleans, routes, rounds: structuredClone(state.rounds) };
 }
 function skipValidationEnabled() {
   return document.getElementById("skipValidationInput")?.checked === true;
@@ -5452,6 +5545,7 @@ async function prepareWorkspaceView(result) {
 }
 async function runPlan() {
   const button = document.getElementById("runButton");
+  const stepRunButton = document.getElementById("stepRunButton");
   const batchButton = document.getElementById("batchRunButton");
   const comparisonButton = document.getElementById("openParameterComparisonDialogButton");
   let logReady = false, ganttReady = false, runResult = null, bottleneckSummary = null;
@@ -5473,6 +5567,13 @@ async function runPlan() {
     comparisonButton.disabled = true;
     button.classList.add("running");
     button.textContent = "\u6B63\u5728\u8FD0\u884C\u7B56\u7565\u2026";
+    if (telemetryEnabled) {
+      stepRunActive = true;
+      stepRunCancelling = false;
+      stepRunButton.classList.add("cancel");
+      stepRunButton.disabled = false;
+      stepRunButton.textContent = "\u25A0 \u505C\u6B62\u6A21\u578B\u6B65\u8FDB";
+    }
     resetRunResult();
     visualizationWorkspace.setAnalysisConfiguration(state.routes, state.rounds);
     if (telemetryEnabled) {
@@ -5514,6 +5615,7 @@ async function runPlan() {
     }
     showResult(runResult);
   } catch (error) {
+    const cancelled = runResult?.cancelled === true;
     const baselineError = runResult?.baseline?.status === "failed" ? `
   Baseline \u5931\u8D25\uFF1A${runResult.baseline.error || "\u672A\u77E5\u539F\u56E0"}` : "";
     const validationIssues = Array.isArray(runResult?.validationIssues) ? runResult.validationIssues.map((issue) => `  ${issue}`) : [];
@@ -5522,7 +5624,7 @@ async function runPlan() {
       document.getElementById("metricMakespan").textContent = Number.isFinite(Number(runResult.makespan)) ? `${Number(runResult.makespan).toFixed(2)} s` : "\u2014";
     }
     writeTerminal([
-      `$ \u8FD0\u884C\u5931\u8D25\uFF1A${error.message || "\u672A\u77E5\u9519\u8BEF"}`,
+      cancelled ? `$ \u6A21\u578B\u6B65\u8FDB\u8FD0\u884C\u5DF2\u53D6\u6D88` : `$ \u8FD0\u884C\u5931\u8D25\uFF1A${error.message || "\u672A\u77E5\u9519\u8BEF"}`,
       ...validationIssues,
       ...baselineError ? [baselineError.trim()] : [],
       ...ganttReady ? ["  \u5931\u8D25 MoveList \u5DF2\u4FDD\u7559\uFF0C\u53EF\u70B9\u51FB\u201C\u6253\u5F00\u7518\u7279\u56FE\u201D\u67E5\u770B\u7EA2\u8272\u95EE\u9898 Move"] : [],
@@ -5533,11 +5635,46 @@ async function runPlan() {
     if (telemetryEnabled && !telemetryStopped) {
       stopSearchTelemetryPolling(runResult?.searchTelemetry || null);
     }
+    if (stepRunActive) {
+      stepRunActive = false;
+      stepRunCancelling = false;
+      stepRunButton.classList.remove("cancel");
+      stepRunButton.textContent = "\u27F3 \u8FD0\u884C\u6A21\u578B\u6B65\u8FDB";
+    }
     button.disabled = false;
     button.classList.remove("running");
     button.textContent = "\u25B6 \u8FD0\u884C\u5F53\u524D\u6D4B\u8BD5";
     renderWorkspaceControls();
   }
+}
+async function runModelStepped() {
+  const stepButton = document.getElementById("stepRunButton");
+  if (stepButton.disabled) return;
+  if (stepRunActive) {
+    if (stepRunCancelling) return;
+    stepRunCancelling = true;
+    stepButton.disabled = true;
+    stepButton.textContent = "\u6B63\u5728\u505C\u6B62\u2026";
+    writeTerminal("$ \u6B63\u5728\u505C\u6B62\u6A21\u578B\u6B65\u8FDB\u8FD0\u884C\u2026");
+    try {
+      await requestSearchControl("cancel");
+    } catch (error) {
+      stepRunCancelling = false;
+      stepButton.disabled = false;
+      stepButton.classList.add("cancel");
+      stepButton.textContent = "\u25A0 \u505C\u6B62";
+      writeTerminal(`$ \u505C\u6B62\u8BF7\u6C42\u5931\u8D25\uFF1A${error.message || "\u672A\u77E5\u9519\u8BEF"}
+  \u53EF\u518D\u6B21\u70B9\u51FB\u201C\u25A0 \u505C\u6B62\u201D\u91CD\u8BD5\u3002`, true);
+    }
+    return;
+  }
+  if (state.strategy !== "schedule-alphago") {
+    writeTerminal("$ \u8FD0\u884C\u6A21\u578B\u6B65\u8FDB\u4EC5\u652F\u6301 Schedule-AlphaGo \u7B56\u7565\uFF0C\u8BF7\u5148\u5728\u201C\u8FD0\u884C\u7B56\u7565\u201D\u4E2D\u9009\u62E9\u3002", true);
+    return;
+  }
+  playbackMode = "step";
+  renderPlaybackModeSwitch();
+  await runPlan();
 }
 async function runCurrentTestGroup() {
   const button = document.getElementById("batchRunButton");
@@ -6228,6 +6365,7 @@ async function checkService() {
     runButton.disabled = !compatible;
     batchRunButton.disabled = !compatible;
     comparisonButton.disabled = !compatible || !state.parameterComparison?.baseline;
+    document.getElementById("stepRunButton").disabled = !compatible || state.strategy !== "schedule-alphago";
     renderWorkspaceControls();
     pill.textContent = compatible ? "\u672C\u5730\u670D\u52A1\u5DF2\u8FDE\u63A5" : "\u670D\u52A1\u7248\u672C\u8FC7\u65E7";
     if (!compatible) {
@@ -6240,6 +6378,7 @@ async function checkService() {
     runButton.disabled = true;
     batchRunButton.disabled = true;
     comparisonButton.disabled = true;
+    document.getElementById("stepRunButton").disabled = true;
     renderWorkspaceControls();
     pill.textContent = "\u672C\u5730\u670D\u52A1\u672A\u8FDE\u63A5";
     pill.style.color = "var(--red)";
@@ -6335,6 +6474,7 @@ document.getElementById("roundCount").addEventListener("input", (event) => {
   markTestDirty();
 });
 document.getElementById("runButton").addEventListener("click", runPlan);
+document.getElementById("stepRunButton").addEventListener("click", runModelStepped);
 document.getElementById("batchRunButton").addEventListener("click", runCurrentTestGroup);
 document.getElementById("openParameterComparisonDialogButton").addEventListener("click", openParameterComparisonDialog);
 document.getElementById("parameterComparisonDialogCancel").addEventListener("click", () => document.getElementById("parameterComparisonDialog").close());
@@ -6402,6 +6542,25 @@ document.getElementById("searchTelemetryStepButton").addEventListener("click", (
 document.getElementById("searchTelemetryContinueButton").addEventListener("click", () => {
   void controlSearchTelemetry("continue");
 });
+document.getElementById("searchTelemetryFollowRecommendationButton").addEventListener("click", followSearchRecommendation);
+document.getElementById("playbackModeReplayButton").addEventListener("click", () => {
+  void setPlaybackMode("replay");
+});
+document.getElementById("playbackModeStepButton").addEventListener("click", () => {
+  void setPlaybackMode("step");
+});
+document.getElementById("visualDecisionLens").addEventListener("click", (event) => {
+  const candidate = event.target.closest?.("[data-action-key][role='button']");
+  if (!candidate) return;
+  void chooseSearchAction(candidate.dataset.actionKey);
+});
+document.getElementById("visualDecisionLens").addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  const candidate = event.target.closest?.("[data-action-key][role='button']");
+  if (!candidate) return;
+  event.preventDefault();
+  void chooseSearchAction(candidate.dataset.actionKey);
+});
 document.getElementById("closeDrawer").addEventListener("click", closeStepDrawer);
 document.getElementById("drawerLayer").addEventListener("click", (event) => {
   if (event.target.id === "drawerLayer") closeStepDrawer();
@@ -6434,6 +6593,7 @@ document.addEventListener("change", (event) => {
     document.getElementById("roundCount").disabled = false;
     updateStrategyOptionVisibility();
     showAlgorithmDetails(state.strategy);
+    document.getElementById("stepRunButton").disabled = stepRunActive ? false : !state.serviceCompatible || state.strategy !== "schedule-alphago";
     markTestDirty();
     renderAll();
   }

@@ -90,13 +90,14 @@ export async function requestSearchTelemetry(
   return result.telemetry as Record<string, any>;
 }
 
-/** 暂停、单步或继续当前 Schedule-AlphaGo 根决策求解。 */
+/** 暂停、单步、继续、指定根动作或取消求解；actionKey 仅 choose 命令使用。 */
 export async function requestSearchControl(
-  command: "pause" | "step" | "continue",
+  command: "pause" | "step" | "continue" | "step-mode" | "replay-mode" | "choose" | "cancel",
+  actionKey: string | null = null,
 ): Promise<Record<string, any>> {
   return requestJson("/api/search-control", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ command }),
+    body: JSON.stringify(actionKey ? { command, actionKey } : { command }),
   });
 }

@@ -106,6 +106,18 @@ let followLatestSearchTelemetry = true;
 let searchTelemetryRunActive = false;
 let searchTelemetryControlPending = false;
 let lastSearchTelemetryMoveCount = 0;
+/** 拓扑回放页面的求解模式：回放模式连续求解，步进模式等待用户选择根动作。 */
+let playbackMode = "replay";
+/** 用户最近一次 choose 的根动作键；用于回放历史时高亮实际执行的动作。 */
+let userChosenActionKey = "";
+/** 用户最近一次 choose 对应的根决策 searchId；跨决策后不再沿用旧高亮。 */
+let userChosenSearchId = "";
+/** 控制请求在途时待补发的模式切换命令；避免前后端执行模式失步。 */
+let pendingModeSync = "";
+/** “运行模型步进”是否正在运行；运行中按钮变为停止入口。 */
+let stepRunActive = false;
+/** 停止请求是否已在途；避免重复发送。 */
+let stepRunCancelling = false;
 let pendingAlphaGoCheckpointFile: File | null = null;
 
 /** 从新版字段或旧版任务参数识别清洁类别。 */
@@ -782,17 +794,18 @@ function resetSearchTelemetryView() {
   searchTelemetryRunActive = false;
   searchTelemetryControlPending = false;
   lastSearchTelemetryMoveCount = 0;
+  userChosenActionKey = "";
+  userChosenSearchId = "";
   const panel = document.getElementById("searchTelemetryPanel");
   panel.hidden = true;
+  document.getElementById("searchTelemetryVariationPanel").hidden = true;
   document.getElementById("searchTelemetryDecisionSelect").innerHTML = "";
-  document.getElementById("searchTelemetrySummary").innerHTML = "";
-  document.getElementById("searchTelemetryActions").innerHTML = "";
   document.getElementById("searchTelemetryVariation").innerHTML = "";
-  document.getElementById("searchTelemetryNodes").innerHTML = "";
   for (const id of [
     "searchTelemetryPauseButton",
     "searchTelemetryStepButton",
     "searchTelemetryContinueButton",
+    "searchTelemetryFollowRecommendationButton",
   ]) {
     const button = document.getElementById(id);
     button.disabled = true;
@@ -815,87 +828,109 @@ function searchTelemetryStopReason(reason) {
   }[String(reason || "")] || "搜索中";
 }
 
-/** 将根动作的离散 Q 序列画成无依赖的小型折线图。 */
-function renderSearchValueSparkline(history) {
-  const values = (Array.isArray(history) ? history : [])
-    .map(item => Number(item?.value))
-    .filter(Number.isFinite);
-  if (!values.length) return `<span class="search-telemetry-empty">—</span>`;
-  const chartWidth = 132, chartHeight = 30, chartPadding = 3;
-  const minimum = Math.min(...values), maximum = Math.max(...values);
-  const span = Math.max(maximum - minimum, 1e-9);
-  const points = values.map((value, index) => {
-    const x = values.length === 1
-      ? chartWidth / 2
-      : chartPadding + index * (chartWidth - chartPadding * 2) / (values.length - 1);
-    const y = chartHeight - chartPadding - (value - minimum) * (chartHeight - chartPadding * 2) / span;
-    return [x, y];
-  });
-  const path = points.map(([x, y], index) => `${index ? "L" : "M"}${x.toFixed(2)},${y.toFixed(2)}`).join(" ");
-  const [lastX, lastY] = points[points.length - 1];
-  const title = `Q ${values[0].toFixed(4)} → ${values[values.length - 1].toFixed(4)}，${values.length} 个采样点`;
-  return `<svg class="search-value-sparkline" viewBox="0 0 ${chartWidth} ${chartHeight}" role="img" aria-label="${escapeHtml(title)}"><title>${escapeHtml(title)}</title><path d="${path}"></path><circle cx="${lastX.toFixed(2)}" cy="${lastY.toFixed(2)}" r="2.4"></circle></svg>`;
+/** 把根候选动作渲染成右侧面板的候选卡片，只保留 P/N/Q 三列统计。 */
+function renderSearchActionCandidates(
+  actions,
+  decisionIndex,
+  recommendedKey,
+  selectedKey,
+  maximumVisits,
+  interactive,
+) {
+  return `<section class="decision-candidate-section search-action-section" aria-labelledby="searchCandidatesTitle">
+    <header>
+      <strong id="searchCandidatesTitle">根节点全部合法动作 <small>决策 #${decisionIndex}</small></strong>
+      <span>P 先验 · N 访问 · Q 价值</span>
+    </header>
+    <ol>
+      ${actions.map((action, index) => {
+        const visits = Number(action?.visits) || 0;
+        const visitPercent = Math.max(0, Math.min(100, visits / maximumVisits * 100));
+        const isRecommended = String(action?.actionKey || "") === recommendedKey;
+        const isSelected = String(action?.actionKey || "") === selectedKey;
+        const materials = Array.isArray(action?.materialIds) && action.materialIds.length
+          ? `物料 ${action.materialIds.join(", ")}`
+          : String(action?.kind || "action");
+        const route = [action?.sourceStation, action?.destinationStation].filter(Boolean).join(" → ");
+        const tags = `${isRecommended ? '<span class="decision-tag is-recommendation">推荐</span>' : ""}${isSelected && !isRecommended ? '<span class="decision-tag is-user-chosen">你的选择</span>' : ""}`;
+        return `<li class="decision-candidate search-action-candidate ${isSelected ? "is-selected" : ""} ${interactive ? "is-interactive" : ""}" data-action-key="${escapeHtml(String(action?.actionKey || ""))}" ${interactive ? 'role="button" tabindex="0"' : ""}>
+          <div class="decision-candidate-rank" aria-label="第 ${index + 1} 名">${index + 1}</div>
+          <div class="decision-candidate-main">
+            <div class="decision-candidate-title"><strong title="${escapeHtml(action?.description || action?.actionKey || "动作")}">${escapeHtml(action?.description || action?.actionKey || "动作")}</strong>${tags}</div>
+            <small>${escapeHtml([materials, route].filter(Boolean).join(" · "))}</small>
+            <div class="decision-candidate-detail search-pnq">
+              <span title="策略先验 P"><small>P</small><strong>${formatSearchTelemetryNumber(action?.prior, 4)}</strong></span>
+              <span title="访问次数 N"><small>N</small><strong>${visits}</strong><i>${visitPercent.toFixed(0)}%</i></span>
+              <span title="平均价值 Q"><small>Q</small><strong>${formatSearchTelemetryNumber(action?.value, 4)}</strong></span>
+            </div>
+          </div>
+          <strong class="decision-candidate-preference" aria-label="访问占比 ${visitPercent.toFixed(0)}%">${visitPercent.toFixed(0)}%</strong>
+        </li>`;
+      }).join("")}
+    </ol>
+  </section>`;
 }
 
-/** 绘制某一次根决策的全部动作、主变化和高访问节点。 */
+/** 绘制某一次根决策的候选动作和折叠主变化；摘要与高访问节点不再展示。 */
 function renderSearchTelemetryDecision(snapshot) {
   const root = snapshot?.root || {};
   const actions = Array.isArray(root.children) ? root.children : [];
-  const selectedKey = String(snapshot?.selectedActionKey || "");
+  const recommendedKey = String(snapshot?.selectedActionKey || "");
+  // 用户选择只作用于其提交时的那个根决策；跨决策或回看其他历史时沿用模型推荐。
+  const selectedKey = String(snapshot?.searchId || "") === userChosenSearchId
+    ? userChosenActionKey
+    : recommendedKey;
+  const decisionIndex = Number(snapshot?.decisionIndex || 0) + 1;
+  const interactive = playbackMode === "step"
+    && latestSearchTelemetry?.status === "waiting-choice"
+    && String(snapshot?.searchId || "") === String(latestSearchTelemetry?.searchId || "");
   const maximumVisits = Math.max(1, ...actions.map(action => Number(action?.visits) || 0));
-  document.getElementById("searchTelemetrySummary").innerHTML = [
-    ["根决策", `#${Number(snapshot?.decisionIndex || 0) + 1}`],
-    ["用时 / 预算", `${formatSearchTelemetryNumber(snapshot?.elapsedMilliseconds, 1)} / ${formatSearchTelemetryNumber(snapshot?.budgetMilliseconds, 1)} ms`],
-    ["搜索次数", `${Number(snapshot?.simulations) || 0} sim · 根 N=${Number(root?.visits) || 0}`],
-    ["搜索树", `${Number(snapshot?.expandedNodes) || 0} 节点 · 深度 ${Number(snapshot?.maximumDepth) || 0}`],
-    ["评估器", `${String(snapshot?.device || "cpu").toUpperCase()} · ${String(snapshot?.modelSource || "unknown")}`],
-  ].map(([label, value]) => `<div class="search-summary-item"><span>${escapeHtml(label)}</span><strong title="${escapeHtml(value)}">${escapeHtml(value)}</strong></div>`).join("");
-
-  document.getElementById("searchTelemetryActions").innerHTML = actions.length
-    ? actions.map(action => {
-      const visits = Number(action?.visits) || 0;
-      const visitPercent = Math.max(0, Math.min(100, visits / maximumVisits * 100));
-      const materials = Array.isArray(action?.materialIds) && action.materialIds.length
-        ? `物料 ${action.materialIds.join(", ")}`
-        : String(action?.kind || "action");
-      const route = [action?.sourceStation, action?.destinationStation].filter(Boolean).join(" → ");
-      return `<tr class="${String(action?.actionKey || "") === selectedKey ? "is-selected" : ""}">
-        <td><div class="search-action-name"><strong title="${escapeHtml(action?.description || action?.actionKey || "动作")}">${escapeHtml(action?.description || action?.actionKey || "动作")}</strong><small>${escapeHtml([materials, route].filter(Boolean).join(" · "))}</small></div></td>
-        <td>${formatSearchTelemetryNumber(action?.prior, 4)}</td>
-        <td><div class="search-visits"><span>${visits}</span><div class="search-visits-meter"><i style="width:${visitPercent.toFixed(2)}%"></i></div></div></td>
-        <td><div class="search-value-cell"><strong>Q ${formatSearchTelemetryNumber(action?.value, 4)}</strong><small>${formatSearchTelemetryNumber(action?.estimatedCostSeconds, 2)} s</small></div></td>
-        <td>${visits ? formatSearchTelemetryNumber(action?.standardError, 4) : "—"}</td>
-        <td>${renderSearchValueSparkline(action?.valueHistory)}</td>
-      </tr>`;
-    }).join("")
-    : `<tr><td colspan="6" class="search-telemetry-empty">正在枚举根节点合法动作…</td></tr>`;
+  document.getElementById("visualDecisionLens").innerHTML = actions.length
+    ? renderSearchActionCandidates(
+      actions,
+      decisionIndex,
+      recommendedKey,
+      selectedKey,
+      maximumVisits,
+      interactive,
+    )
+    : `<div class="decision-empty"><strong>正在枚举根节点合法动作…</strong><p>搜索进行中，候选稍后出现。</p></div>`;
 
   const variation = Array.isArray(snapshot?.principalVariation) ? snapshot.principalVariation : [];
+  const variationPanel = document.getElementById("searchTelemetryVariationPanel");
+  variationPanel.hidden = false;
   document.getElementById("searchTelemetryVariation").innerHTML = variation.length
     ? variation.slice(0, 10).map((step, index) => `<div class="search-pv-step"><b>${index + 1}</b><span title="${escapeHtml(step?.description || step?.actionKey || "动作")}">${escapeHtml(step?.description || step?.actionKey || "动作")}</span><small>N=${Number(step?.visits) || 0}</small></div>`).join("")
     : `<div class="search-telemetry-empty">尚未形成主变化</div>`;
-
-  const nodes = Array.isArray(snapshot?.relatedNodes) ? snapshot.relatedNodes : [];
-  document.getElementById("searchTelemetryNodes").innerHTML = nodes.length
-    ? nodes.slice(0, 32).map(node => {
-      const path = Array.isArray(node?.path) && node.path.length ? node.path.join(" → ") : "根节点";
-      return `<div class="search-node"><b>#${Number(node?.nodeId) || 0} · d${Number(node?.depth) || 0}</b><span>N=${Number(node?.visits) || 0}</span><small title="${escapeHtml(path)}">${escapeHtml(path)} · Q ${formatSearchTelemetryNumber(node?.value, 4)}</small></div>`;
-    }).join("")
-    : `<div class="search-telemetry-empty">尚未扩展相关节点</div>`;
 }
 
-/** 同步暂停、单步和连续求解按钮的状态。 */
+/** 按回放/步进模式同步搜索控制按钮的可见与可用状态。 */
 function updateSearchTelemetryControls(snapshot) {
   const executionMode = String(snapshot?.executionMode || "continuous");
+  const stepMode = playbackMode === "step";
   const disabled = !searchTelemetryRunActive || searchTelemetryControlPending;
   const pauseButton = document.getElementById("searchTelemetryPauseButton");
   const stepButton = document.getElementById("searchTelemetryStepButton");
   const continueButton = document.getElementById("searchTelemetryContinueButton");
+  const followButton = document.getElementById("searchTelemetryFollowRecommendationButton");
+  // 回放模式显示暂停/单步/连续；步进模式显示“执行模型推荐”。
+  pauseButton.hidden = stepMode;
+  stepButton.hidden = stepMode;
+  continueButton.hidden = stepMode;
+  followButton.hidden = !stepMode;
   pauseButton.disabled = disabled;
   stepButton.disabled = disabled;
   continueButton.disabled = disabled;
-  pauseButton.classList.toggle("is-active", !disabled && executionMode === "paused");
-  continueButton.classList.toggle("is-active", !disabled && executionMode === "continuous");
+  // 步进模式下仅当正等待用户选择时允许提交推荐动作。
+  followButton.disabled = !(
+    !disabled
+    && stepMode
+    && executionMode === "paused"
+    && snapshot?.status === "waiting-choice"
+    && Boolean(snapshot?.selectedActionKey)
+  );
+  pauseButton.classList.toggle("is-active", !disabled && !stepMode && executionMode === "paused");
+  continueButton.classList.toggle("is-active", !disabled && !stepMode && executionMode === "continuous");
 }
 
 /** 用已提交 MoveList 和所选根决策时刻同步拓扑画布。 */
@@ -919,6 +954,77 @@ function syncSearchTelemetryPlayback(snapshot, selectedDecision) {
   }
 }
 
+/** 步进模式下用户点选某个根动作并提交。 */
+async function chooseSearchAction(actionKey) {
+  if (!searchTelemetryRunActive || playbackMode !== "step") return;
+  if (searchTelemetryControlPending) return;
+  // 只在后端确实等待用户选择时提交，避免搜索中的误点被静默预选。
+  if (latestSearchTelemetry?.status !== "waiting-choice") return;
+  const key = String(actionKey || "");
+  if (!key) return;
+  userChosenActionKey = key;
+  userChosenSearchId = String(latestSearchTelemetry?.searchId || "");
+  if (latestSearchTelemetry) renderSearchTelemetry(latestSearchTelemetry);
+  searchTelemetryControlPending = true;
+  updateSearchTelemetryControls(latestSearchTelemetry);
+  try {
+    const result = await requestSearchControl("choose", key);
+    if (result?.telemetry) renderSearchTelemetry(result.telemetry);
+  } catch (error) {
+    const status = document.getElementById("searchTelemetryStatus");
+    status.textContent = `提交选择失败：${error.message || "未知错误"}`;
+    status.classList.remove("is-searching", "is-paused");
+  } finally {
+    searchTelemetryControlPending = false;
+    flushPendingModeSync();
+    updateSearchTelemetryControls(latestSearchTelemetry);
+  }
+}
+
+/** 步进模式下直接提交模型推荐动作。 */
+function followSearchRecommendation() {
+  const key = String(latestSearchTelemetry?.selectedActionKey || "");
+  if (!key) return;
+  void chooseSearchAction(key);
+}
+
+/** 在控制请求结束后补发被跳过的模式切换命令，保持前后端执行模式一致。 */
+async function flushPendingModeSync() {
+  const mode = pendingModeSync;
+  if (!mode) return;
+  pendingModeSync = "";
+  await setPlaybackMode(mode);
+}
+
+/** 切换回放/步进模式；运行中会同步后端执行模式。 */
+/** 同步回放/步进模式切换按钮的选中状态（不向后端发命令）。 */
+function renderPlaybackModeSwitch() {
+  document.getElementById("playbackModeReplayButton").classList.toggle("is-active", playbackMode === "replay");
+  document.getElementById("playbackModeStepButton").classList.toggle("is-active", playbackMode === "step");
+  document.getElementById("playbackModeReplayButton").setAttribute("aria-pressed", String(playbackMode === "replay"));
+  document.getElementById("playbackModeStepButton").setAttribute("aria-pressed", String(playbackMode === "step"));
+}
+
+async function setPlaybackMode(mode) {
+  if (mode !== "step" && mode !== "replay") return;
+  playbackMode = mode;
+  renderPlaybackModeSwitch();
+  if (searchTelemetryRunActive && !searchTelemetryControlPending) {
+    try {
+      const result = await requestSearchControl(mode === "step" ? "step-mode" : "replay-mode");
+      if (result?.telemetry) renderSearchTelemetry(result.telemetry);
+    } catch (error) {
+      const status = document.getElementById("searchTelemetryStatus");
+      status.textContent = `切换模式失败：${error.message || "未知错误"}`;
+      status.classList.remove("is-searching", "is-paused");
+    }
+  } else if (searchTelemetryRunActive) {
+    // 控制请求在途：记下待补发的模式，请求结束后由 flushPendingModeSync 补发。
+    pendingModeSync = mode;
+  }
+  if (latestSearchTelemetry) renderSearchTelemetry(latestSearchTelemetry);
+}
+
 /** 向服务端发送根决策暂停、单步或连续求解命令。 */
 async function controlSearchTelemetry(command) {
   if (!searchTelemetryRunActive || searchTelemetryControlPending) return;
@@ -937,6 +1043,7 @@ async function controlSearchTelemetry(command) {
     status.classList.remove("is-searching", "is-paused");
   } finally {
     searchTelemetryControlPending = false;
+    flushPendingModeSync();
     updateSearchTelemetryControls(latestSearchTelemetry);
   }
 }
@@ -971,15 +1078,23 @@ function renderSearchTelemetry(snapshot) {
   const selected = decisions.find(item => item.searchId === selectedSearchTelemetryId) || latestDecision;
   const searching = snapshot?.status === "searching";
   const waiting = snapshot?.status === "waiting-step";
-  status.textContent = waiting
-    ? "求解已暂停 · 可单步放行一个根决策，或继续连续求解"
-    : searching
-      ? `正在进行非对称树搜索 · ${Number(snapshot?.simulations) || 0} 次模拟`
-      : snapshot?.status === "action-applied"
-        ? `根动作 #${Number(snapshot?.decisionIndex || 0) + 1} 已提交 · 拓扑已推进`
-        : `决策完成 · 由${searchTelemetryStopReason(selected?.stopReason)}终止`;
+  const waitingChoice = snapshot?.status === "waiting-choice";
+  const cancelled = snapshot?.status === "cancelled";
+  status.textContent = cancelled
+    ? "运行已取消"
+    : waitingChoice
+      ? playbackMode === "step"
+        ? "搜索完成 · 请选择要执行的动作"
+        : "求解已暂停 · 等待放行"
+      : waiting
+        ? "求解已暂停 · 可单步放行一个根决策，或继续连续求解"
+        : searching
+          ? `正在进行非对称树搜索 · ${Number(snapshot?.simulations) || 0} 次模拟`
+          : snapshot?.status === "action-applied"
+            ? `根动作 #${Number(snapshot?.decisionIndex || 0) + 1} 已提交 · 拓扑已推进`
+            : `决策完成 · 由${searchTelemetryStopReason(selected?.stopReason)}终止`;
   status.classList.toggle("is-searching", searching);
-  status.classList.toggle("is-paused", waiting);
+  status.classList.toggle("is-paused", waiting || waitingChoice);
   updateSearchTelemetryControls(snapshot);
   renderSearchTelemetryDecision(selected);
   syncSearchTelemetryPlayback(snapshot, selected);
@@ -1009,12 +1124,14 @@ async function pollSearchTelemetry(token) {
 function startSearchTelemetryPolling() {
   resetSearchTelemetryView();
   searchTelemetryRunActive = true;
+  // 搜索面板接管右侧“合法动作空间”渲染，避免回放帧覆盖候选列表。
+  visualizationWorkspace.setExternalDecisionLensOwner(true);
   const panel = document.getElementById("searchTelemetryPanel");
   panel.hidden = false;
   const status = document.getElementById("searchTelemetryStatus");
   status.textContent = "正在初始化搜索器…";
   status.classList.add("is-searching");
-  updateSearchTelemetryControls({ executionMode: "continuous" });
+  updateSearchTelemetryControls({ executionMode: playbackMode === "step" ? "paused" : "continuous" });
   const token = ++searchTelemetryPollToken;
   void pollSearchTelemetry(token);
 }
@@ -1023,6 +1140,7 @@ function startSearchTelemetryPolling() {
 function stopSearchTelemetryPolling(finalSnapshot = null) {
   searchTelemetryPollToken += 1;
   searchTelemetryRunActive = false;
+  visualizationWorkspace.setExternalDecisionLensOwner(false);
   if (finalSnapshot) renderSearchTelemetry(finalSnapshot);
   const status = document.getElementById("searchTelemetryStatus");
   if (!finalSnapshot && latestSearchTelemetry?.algorithm === "schedule-alphago") {
@@ -2427,7 +2545,12 @@ function buildPayload() {
   expandVisitSlotIds();
   const routes = selectReferencedRoutes(state.routes, state.rounds).map(route => ({ ...normalizeRoute(route), stages: route.stages.map(stage => ({ ...stage, visits: stage.visits.map(visit => structuredClone(visit)) })) }));
   const cleans = state.cleans.map(runtimeClean);
-  return { schemaVersion: EXPECTED_API_SCHEMA, workspaceDeviceId: state.workspaceDeviceId, workspaceTestId: state.testCaseId, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options: state.options, skipValidation: skipValidationEnabled(), skipBaseline: skipBaselineEnabled(), recipes: collectRecipes(routes), cleans, routes, rounds: structuredClone(state.rounds) };
+  const options = { ...state.options };
+  if (state.strategy === "schedule-alphago") {
+    // 初始执行模式随回放/步进模式走，避免 update 启动时的会话重置覆盖用户选择。
+    options.scheduleAlphaGoExecutionMode = playbackMode === "step" ? "stepped" : "continuous";
+  }
+  return { schemaVersion: EXPECTED_API_SCHEMA, workspaceDeviceId: state.workspaceDeviceId, workspaceTestId: state.testCaseId, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options, skipValidation: skipValidationEnabled(), skipBaseline: skipBaselineEnabled(), recipes: collectRecipes(routes), cleans, routes, rounds: structuredClone(state.rounds) };
 }
 
 /** 返回“跳过输出校验”是否已勾选。 */
@@ -2558,6 +2681,7 @@ async function prepareWorkspaceView(result) {
 /** 调用本地服务运行排程。 */
 async function runPlan() {
   const button = document.getElementById("runButton");
+  const stepRunButton = document.getElementById("stepRunButton");
   const batchButton = document.getElementById("batchRunButton");
   const comparisonButton = document.getElementById("openParameterComparisonDialogButton");
   let logReady = false, ganttReady = false, runResult = null, bottleneckSummary = null;
@@ -2574,6 +2698,10 @@ async function runPlan() {
     }
     if (state.testCaseId) await saveCurrentTest(true);
     const payload = buildPayload(); button.disabled = true; batchButton.disabled = true; comparisonButton.disabled = true; button.classList.add("running"); button.textContent = "正在运行策略…";
+    if (telemetryEnabled) {
+      stepRunActive = true; stepRunCancelling = false;
+      stepRunButton.classList.add("cancel"); stepRunButton.disabled = false; stepRunButton.textContent = "■ 停止模型步进";
+    }
     resetRunResult();
     visualizationWorkspace.setAnalysisConfiguration(state.routes, state.rounds);
     if (telemetryEnabled) {
@@ -2608,6 +2736,7 @@ async function runPlan() {
     }
     showResult(runResult);
   } catch (error) {
+    const cancelled = runResult?.cancelled === true;
     const baselineError = runResult?.baseline?.status === "failed" ? `\n  Baseline 失败：${runResult.baseline.error || "未知原因"}` : "";
     const validationIssues = Array.isArray(runResult?.validationIssues)
       ? runResult.validationIssues.map(issue => `  ${issue}`)
@@ -2619,7 +2748,7 @@ async function runPlan() {
         : "—";
     }
     writeTerminal([
-      `$ 运行失败：${error.message || "未知错误"}`,
+      cancelled ? `$ 模型步进运行已取消` : `$ 运行失败：${error.message || "未知错误"}`,
       ...validationIssues,
       ...(baselineError ? [baselineError.trim()] : []),
       ...(ganttReady ? ["  失败 MoveList 已保留，可点击“打开甘特图”查看红色问题 Move"] : []),
@@ -2633,8 +2762,42 @@ async function runPlan() {
     if (telemetryEnabled && !telemetryStopped) {
       stopSearchTelemetryPolling(runResult?.searchTelemetry || null);
     }
+    if (stepRunActive) {
+      stepRunActive = false; stepRunCancelling = false;
+      stepRunButton.classList.remove("cancel"); stepRunButton.textContent = "⟳ 运行模型步进";
+    }
     button.disabled = false; button.classList.remove("running"); button.textContent = "▶ 运行当前测试"; renderWorkspaceControls();
   }
+}
+
+/** 以步进模式运行当前测试：运行中按钮变为停止入口，可随时终止耗时较长的搜索。 */
+async function runModelStepped() {
+  const stepButton = document.getElementById("stepRunButton");
+  if (stepButton.disabled) return;
+  if (stepRunActive) {
+    if (stepRunCancelling) return;
+    stepRunCancelling = true;
+    stepButton.disabled = true;
+    stepButton.textContent = "正在停止…";
+    writeTerminal("$ 正在停止模型步进运行…");
+    try {
+      await requestSearchControl("cancel");
+    } catch (error) {
+      stepRunCancelling = false;
+      stepButton.disabled = false;
+      stepButton.classList.add("cancel");
+      stepButton.textContent = "■ 停止";
+      writeTerminal(`$ 停止请求失败：${error.message || "未知错误"}\n  可再次点击“■ 停止”重试。`, true);
+    }
+    return;
+  }
+  if (state.strategy !== "schedule-alphago") {
+    writeTerminal("$ 运行模型步进仅支持 Schedule-AlphaGo 策略，请先在“运行策略”中选择。", true);
+    return;
+  }
+  playbackMode = "step";
+  renderPlaybackModeSwitch();
+  await runPlan();
 }
 
 /** 使用当前所选策略并行运行当前测试组中的全部测试。 */
@@ -3390,6 +3553,7 @@ async function checkService() {
     runButton.disabled = !compatible;
     batchRunButton.disabled = !compatible;
     comparisonButton.disabled = !compatible || !state.parameterComparison?.baseline;
+    document.getElementById("stepRunButton").disabled = !compatible || state.strategy !== "schedule-alphago";
     renderWorkspaceControls();
     pill.textContent = compatible ? "本地服务已连接" : "服务版本过旧";
     if (!compatible) {
@@ -3397,7 +3561,7 @@ async function checkService() {
       writeTerminal("$ 本地服务版本过旧\n  请重启: py scripts/config_editor_server.py", true);
     }
   }
-  catch { state.serviceCompatible = false; runButton.disabled = true; batchRunButton.disabled = true; comparisonButton.disabled = true; renderWorkspaceControls(); pill.textContent = "本地服务未连接"; pill.style.color = "var(--red)"; pill.style.background = "var(--red-soft)"; writeTerminal("$ 无法连接本地服务\n  请运行: py scripts/config_editor_server.py", true); }
+  catch { state.serviceCompatible = false; runButton.disabled = true; batchRunButton.disabled = true; comparisonButton.disabled = true; document.getElementById("stepRunButton").disabled = true; renderWorkspaceControls(); pill.textContent = "本地服务未连接"; pill.style.color = "var(--red)"; pill.style.background = "var(--red-soft)"; writeTerminal("$ 无法连接本地服务\n  请运行: py scripts/config_editor_server.py", true); }
 }
 
 document.getElementById("workspaceDialogCancel").addEventListener("click", () => document.getElementById("workspaceDialog").close("cancel"));
@@ -3447,6 +3611,7 @@ document.getElementById("saveTestButton").addEventListener("click", () => saveCu
 document.getElementById("deleteTestButton").addEventListener("click", () => deleteCurrentTest().catch(error => writeTerminal(`$ 删除测试集失败\n  ${error.message}`, true)));
 document.getElementById("roundCount").addEventListener("input", event => { resizeRounds(event.target.value); markTestDirty(); });
 document.getElementById("runButton").addEventListener("click", runPlan);
+document.getElementById("stepRunButton").addEventListener("click", runModelStepped);
 document.getElementById("batchRunButton").addEventListener("click", runCurrentTestGroup);
 document.getElementById("openParameterComparisonDialogButton").addEventListener("click", openParameterComparisonDialog);
 document.getElementById("parameterComparisonDialogCancel").addEventListener("click", () => document.getElementById("parameterComparisonDialog").close());
@@ -3504,6 +3669,27 @@ document.getElementById("searchTelemetryStepButton").addEventListener("click", (
 document.getElementById("searchTelemetryContinueButton").addEventListener("click", () => {
   void controlSearchTelemetry("continue");
 });
+document.getElementById("searchTelemetryFollowRecommendationButton").addEventListener("click", followSearchRecommendation);
+document.getElementById("playbackModeReplayButton").addEventListener("click", () => {
+  void setPlaybackMode("replay");
+});
+document.getElementById("playbackModeStepButton").addEventListener("click", () => {
+  void setPlaybackMode("step");
+});
+// 步进模式下点击候选行提交该动作；事件委托在容器上，避免每次重渲染重复绑定。
+// 只响应可交互（role="button"）的候选行，防止搜索中的误点被静默预选。
+document.getElementById("visualDecisionLens").addEventListener("click", event => {
+  const candidate = event.target.closest?.("[data-action-key][role='button']");
+  if (!candidate) return;
+  void chooseSearchAction(candidate.dataset.actionKey);
+});
+document.getElementById("visualDecisionLens").addEventListener("keydown", event => {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  const candidate = event.target.closest?.("[data-action-key][role='button']");
+  if (!candidate) return;
+  event.preventDefault();
+  void chooseSearchAction(candidate.dataset.actionKey);
+});
 document.getElementById("closeDrawer").addEventListener("click", closeStepDrawer);
 document.getElementById("drawerLayer").addEventListener("click", event => { if (event.target.id === "drawerLayer") closeStepDrawer(); });
 document.addEventListener("keydown", event => { if (event.key === "Escape") closeStepDrawer(); });
@@ -3524,6 +3710,10 @@ document.addEventListener("change", event => {
     document.getElementById("roundCount").disabled = false;
     updateStrategyOptionVisibility();
     showAlgorithmDetails(state.strategy);
+    // 运行期保持“停止”入口可用；非运行期才按策略/服务状态禁用。
+    document.getElementById("stepRunButton").disabled = stepRunActive
+      ? false
+      : !state.serviceCompatible || state.strategy !== "schedule-alphago";
     markTestDirty(); renderAll();
   }
 });

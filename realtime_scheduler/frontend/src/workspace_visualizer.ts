@@ -2885,6 +2885,8 @@ export class VisualizationWorkspace {
   private time = 0;
   private playing = false;
   private liveSolving = false;
+  /** 外部（Schedule-AlphaGo 搜索面板）接管右侧决策镜头时跳过本类每帧覆盖。 */
+  private externalDecisionLensOwner = false;
   private playbackSpeed = DEFAULT_PLAYBACK_SPEED;
   private performanceWindowMode: PerformanceWindowMode = "steady";
   private animationFrame = 0;
@@ -2995,6 +2997,11 @@ export class VisualizationWorkspace {
     this.primitiveDecisionBoundaries = primitiveDecisionBoundaryTimes(this.moves);
     this.replayDecisionRequestVersion += 1;
     if (this.moves.length) this.render();
+  }
+
+  /** 让 Schedule-AlphaGo 搜索面板接管右侧“合法动作空间”的渲染。 */
+  setExternalDecisionLensOwner(owner: boolean): void {
+    this.externalDecisionLensOwner = owner;
   }
 
   /** 在完整 MoveList 返回前显示初始拓扑，并进入增量求解状态。 */
@@ -3410,14 +3417,16 @@ export class VisualizationWorkspace {
       this.hiddenModuleFilters,
       this.device,
     );
-    const requestState = this.pendingReplayDecisionKeys.has(replayKey)
-      ? "loading"
-      : this.replayDecisionErrorKey === replayKey ? "error" : "idle";
-    this.elements.decisionLens.innerHTML = renderDecisionLens(
-      currentDecision,
-      requestState,
-      this.replayDecisionErrorMessage,
-    );
+    if (!this.externalDecisionLensOwner) {
+      const requestState = this.pendingReplayDecisionKeys.has(replayKey)
+        ? "loading"
+        : this.replayDecisionErrorKey === replayKey ? "error" : "idle";
+      this.elements.decisionLens.innerHTML = renderDecisionLens(
+        currentDecision,
+        requestState,
+        this.replayDecisionErrorMessage,
+      );
+    }
 
     this.elements.activeMoves.innerHTML = snapshot.activeMoves.length
       ? snapshot.activeMoves.map(move => `

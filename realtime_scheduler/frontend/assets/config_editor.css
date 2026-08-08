@@ -390,6 +390,8 @@
     .run-actions .btn.batch:hover { background: rgba(255,255,255,.12); }
     .run-actions .btn.batch.cancel { border-color: #ffd1d6; color: #fff; background: rgba(168, 27, 43, .42); }
     .run-actions .btn.batch.cancel:hover { background: rgba(168, 27, 43, .62); }
+    .run-actions .btn.cancel { border-color: #ffd1d6; color: #fff; background: rgba(168, 27, 43, .42); }
+    .run-actions .btn.cancel:hover:not(:disabled) { background: rgba(168, 27, 43, .62); }
     .run-options { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; margin: 14px 0; }
     .export-option { display: inline-flex; align-items: center; gap: 8px; color: #e5ecff; font-size: 12px; cursor: pointer; margin: 0; }
     .export-option input { width: 16px; height: 16px; margin: 0; accent-color: #fff; flex: none; }
@@ -1188,6 +1190,57 @@
     .petri-playback-controls .timeline-speed select { min-width: 96px; min-height: 44px; border-radius: 0; }
     .petri-control-panel .visual-legend { grid-template-columns: 1fr 1fr; padding: 10px; border: 1px solid var(--line); border-radius: 0; background: var(--soft); }
     .petri-control-panel .visual-legend h3 { font: 800 10px/1.3 "Fira Code", Consolas, monospace; letter-spacing: .06em; }
+
+    /* -------- Schedule-AlphaGo 搜索控制（内嵌右侧合法动作空间） -------- */
+    .playback-mode-switch { display: inline-flex; align-items: center; gap: 2px; padding: 2px; border: 1px solid #bcc9dd; border-radius: var(--playback-radius); background: #e9eef6; }
+    .playback-mode-switch .btn { height: calc(var(--playback-control-height) - 8px); min-height: 0; padding: 0 10px; border: 0; border-radius: calc(var(--playback-radius) - 3px); color: #5b6b82; background: transparent; box-shadow: none; font-size: 11px; font-weight: 700; white-space: nowrap; }
+    .playback-mode-switch .btn:hover:not(:disabled) { color: #2f4a76; background: rgba(49,95,194,.08); }
+    .playback-mode-switch .btn.is-active { color: #fff; background: #3568b8; }
+    .playback-mode-switch .btn.is-active:hover:not(:disabled) { color: #fff; background: #2e5ca6; }
+    body.theme-dark .playback-mode-switch { border-color: #455163; background: #23282f; }
+    body.theme-dark .playback-mode-switch .btn { color: #aeb9c8; }
+    body.theme-dark .playback-mode-switch .btn:hover:not(:disabled) { color: #dbe5f5; background: rgba(90,124,190,.18); }
+    body.theme-dark .playback-mode-switch .btn.is-active { color: #fff; background: #4a74bd; }
+
+    .search-telemetry-panel { display: grid; min-width: 0; gap: 6px; }
+    .search-telemetry-panel[hidden] { display: none; }
+    .search-telemetry-panel .search-telemetry-head { display: grid; min-width: 0; gap: 6px; padding: 0; border-bottom: 0; }
+    .search-telemetry-panel .search-telemetry-head p { margin: 0; color: #4a5c75; font-size: 12px; font-weight: 700; line-height: 1.4; }
+    .search-telemetry-panel .search-telemetry-head p.is-searching::before { display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; background: #2878d0; box-shadow: 0 0 0 4px rgba(40,120,208,.12); content: ""; animation: search-telemetry-pulse 1.1s ease-in-out infinite; }
+    .search-telemetry-panel .search-telemetry-head p.is-paused::before { display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 2px; background: #d58b12; content: ""; }
+    .search-telemetry-panel .search-telemetry-controls { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 6px; justify-content: flex-start; }
+    .search-telemetry-panel .search-telemetry-controls .btn { min-height: 30px; padding: 4px 9px; font-size: 11px; }
+    .search-telemetry-panel .search-telemetry-controls .btn.is-active { border-color: #2878d0; color: #fff; background: #2878d0; }
+    .search-telemetry-panel .search-telemetry-controls .btn.is-recommendation { border-color: #2e8b57; color: #fff; background: #2e8b57; }
+    .search-telemetry-panel .search-telemetry-controls label { display: inline-flex; min-width: 0; align-items: center; gap: 6px; color: #64748b; font-size: 11px; font-weight: 700; white-space: nowrap; }
+    .search-telemetry-panel .search-telemetry-controls select { min-width: 0; max-width: 190px; height: 30px; padding: 0 26px 0 8px; font-size: 11px; }
+    body.theme-dark .search-telemetry-panel .search-telemetry-head p { color: #b9c4d3; }
+    body.theme-dark .search-telemetry-panel .search-telemetry-controls label { color: #8d9ab0; }
+
+    .search-action-candidate.is-interactive { cursor: pointer; }
+    .search-action-candidate.is-interactive:hover { background: var(--brand-soft); }
+    .search-action-candidate.is-interactive:focus-visible { outline: 3px solid rgba(36,87,214,.24); outline-offset: -2px; }
+    .search-action-candidate.is-selected { background: #eaf4ff; }
+    .search-action-candidate.is-selected .decision-candidate-preference { color: #2878d0; }
+    body.theme-dark .search-action-candidate.is-selected { background: rgba(40,120,208,.16); }
+    .decision-tag.is-user-chosen { border-color: #2e8b57; color: #2e8b57; background: rgba(46,139,87,.08); }
+    body.theme-dark .decision-tag.is-user-chosen { border-color: #57b581; color: #7fd3a4; background: rgba(46,139,87,.14); }
+    .search-pnq { display: flex; flex-wrap: wrap; justify-content: flex-start; gap: 4px 14px; }
+    .search-pnq span { display: inline-flex; min-width: 0; align-items: baseline; gap: 4px; }
+    .search-pnq small { color: var(--muted); font: 800 10px/1 "Fira Code", Consolas, monospace; }
+    .search-pnq strong { color: var(--ink); font: 700 12px/1 "Fira Code", Consolas, monospace; font-variant-numeric: tabular-nums; }
+    .search-pnq i { color: var(--muted); font-size: 10px; font-style: normal; font-variant-numeric: tabular-nums; }
+
+    .search-variation-panel { display: block; margin-top: 2px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+    .search-variation-panel[hidden] { display: none; }
+    .search-variation-panel summary { padding: 8px 10px; color: var(--ink); font-size: 12px; font-weight: 700; cursor: pointer; }
+    .search-variation-panel summary::marker { color: var(--muted); }
+    .search-variation-panel .search-principal-variation { display: grid; max-height: 220px; gap: 5px; padding: 8px 10px; overflow: auto; border-top: 1px solid var(--line); }
+    .search-variation-panel .search-pv-step { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; align-items: center; gap: 6px; padding: 6px 7px; border: 1px solid var(--line); border-radius: 6px; color: var(--ink); background: var(--soft); font-size: 11px; }
+    .search-variation-panel .search-pv-step b { display: grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; color: #fff; background: #3568b8; font-size: 9px; }
+    .search-variation-panel .search-pv-step span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .search-variation-panel .search-pv-step small { color: var(--muted); font-variant-numeric: tabular-nums; }
+    .search-variation-panel .search-telemetry-empty { padding: 10px; color: var(--muted); font-size: 11px; text-align: center; }
 
     .petri-center-column .equipment-schematic { border-radius: 0; box-shadow: 0 1px 2px rgba(32,47,81,.04); }
     .topology-module-filter { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 8px 12px; border: 1px solid #d7e0eb; border-top: 0; background: #fbfcfe; font-size: 12px; }

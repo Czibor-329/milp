@@ -77,6 +77,9 @@ if ALGORITHM_REPOSITORY_PRESENT:
             RealtimeRescheduler,
             TIME_TOLERANCE,
         )
+        from src.schedule.strategies.schedule_alphago.telemetry import (
+            SearchCancelledError,
+        )
     except Exception as error:  # noqa: BLE001
         BUILTIN_ALGORITHM_IMPORT_ERROR = f"{type(error).__name__}: {error}"
     else:
@@ -2475,6 +2478,14 @@ def execute_plan(raw_plan: Mapping[str, Any]) -> Dict[str, Any]:
     try:
         result = _execute_plan(raw_plan, reproduction)
     except Exception as error:  # noqa: BLE001
+        # 用户主动取消属于预期终止而非运行失败，原样向上传播，
+        # 由 /api/run 返回 cancelled 标记。
+        cancelled_error_type = globals().get("SearchCancelledError")
+        if (
+            cancelled_error_type is not None
+            and isinstance(error, cancelled_error_type)
+        ):
+            raise
         feedback = [{
             "Level": "Error",
             "Type": type(error).__name__,
@@ -4364,13 +4375,21 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                     HTTPStatus.BAD_REQUEST,
                 )
             return
+        if self._current_username() is None:
+            self._send_json(
+                {"ok": False, "error": "未登录或会话已过期"},
+                HTTPStatus.UNAUTHORIZED,
+            )
+            return
         if path == "/api/search-control":
+            # search-control 可暂停求解或指定实际执行的动作，需要登录保护。
             try:
                 if not BUILTIN_ALGORITHM_AVAILABLE:
                     raise RuntimeError("本地算法仓库未加载，无法控制搜索")
                 payload = self._read_json_object()
                 result = builtin_algorithm_scheduler.control_search(
-                    str(payload.get("command") or "")
+                    str(payload.get("command") or ""),
+                    payload.get("actionKey"),
                 )
                 self._send_json({"ok": True, **result})
             except (RuntimeError, TypeError, ValueError) as error:
@@ -4378,12 +4397,6 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                     {"ok": False, "error": str(error)},
                     HTTPStatus.BAD_REQUEST,
                 )
-            return
-        if self._current_username() is None:
-            self._send_json(
-                {"ok": False, "error": "未登录或会话已过期"},
-                HTTPStatus.UNAUTHORIZED,
-            )
             return
         if path == "/api/analysis/replay-decision":
             try:
@@ -4671,7 +4684,11 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                 "Message": str(error),
             }]))
             log_id = save_reproduction_log(reproduction.entries)
-            response = {"ok": False, "error": str(error) or type(error).__name__}
+            cancelled_error_type = globals().get("SearchCancelledError")
+            if cancelled_error_type is not None and isinstance(error, cancelled_error_type):
+                response = {"ok": False, "cancelled": True, "error": "运行已取消"}
+            else:
+                response = {"ok": False, "error": str(error) or type(error).__name__}
             if baseline_response is not None:
                 response["baseline"] = baseline_response
             response.update(_log_response_fields(log_id))

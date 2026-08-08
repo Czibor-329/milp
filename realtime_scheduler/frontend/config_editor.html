@@ -228,6 +228,10 @@
                     </select>
                   </label>
                   <div class="topology-toolbar-actions" aria-label="回放工具">
+                    <div class="playback-mode-switch" role="group" aria-label="搜索求解模式">
+                      <button class="btn small is-active" id="playbackModeReplayButton" type="button" aria-pressed="true">回放模式</button>
+                      <button class="btn small" id="playbackModeStepButton" type="button" aria-pressed="false">步进模式</button>
+                    </div>
                     <button class="btn toolbar-import" id="visualImportButton" type="button" aria-label="导入 MoveList">
                       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L7 9m5-5 5 5M5 15v5h14v-5"/></svg>
                       <span class="toolbar-label-full">导入 MoveList</span><span class="toolbar-label-compact">导入</span>
@@ -237,36 +241,6 @@
                       <span class="toolbar-label-full">打开甘特图</span><span class="toolbar-label-compact">甘特图</span>
                     </a>
                   </div>
-                </div>
-              </section>
-
-              <section class="search-telemetry playback-search-telemetry" id="searchTelemetryPanel" hidden aria-live="polite">
-                <header class="search-telemetry-head">
-                  <div><h3>Schedule-AlphaGo 搜索</h3><p id="searchTelemetryStatus">等待搜索开始</p></div>
-                  <div class="search-telemetry-controls">
-                    <button class="btn small" id="searchTelemetryPauseButton" type="button">暂停</button>
-                    <button class="btn small" id="searchTelemetryStepButton" type="button">单步求解</button>
-                    <button class="btn primary small" id="searchTelemetryContinueButton" type="button">连续求解</button>
-                    <label>根决策<select id="searchTelemetryDecisionSelect" aria-label="选择要查看的根决策"></select></label>
-                  </div>
-                </header>
-                <div class="search-telemetry-summary" id="searchTelemetrySummary"></div>
-                <div class="search-telemetry-grid">
-                  <section class="search-action-section">
-                    <h4>根节点全部合法动作</h4>
-                    <div class="search-action-table-wrap">
-                      <table class="search-action-table">
-                        <thead><tr><th>动作</th><th>P</th><th>N / 占比</th><th>Q / 估计代价</th><th>标准误</th><th>价值变化</th></tr></thead>
-                        <tbody id="searchTelemetryActions"></tbody>
-                      </table>
-                    </div>
-                  </section>
-                  <aside class="search-tree-section">
-                    <h4>当前主变化</h4>
-                    <div class="search-principal-variation" id="searchTelemetryVariation"></div>
-                    <h4>高访问相关节点</h4>
-                    <div class="search-related-nodes" id="searchTelemetryNodes"></div>
-                  </aside>
                 </div>
               </section>
 
@@ -295,7 +269,23 @@
                       </select>
                       <small id="visualRecommendationModelHint">对完整 Pick + Place / Swap 事务统一排序。</small>
                     </label>
+                    <div class="search-telemetry-panel" id="searchTelemetryPanel" hidden aria-live="polite">
+                      <div class="search-telemetry-head">
+                        <p id="searchTelemetryStatus">等待搜索开始</p>
+                        <div class="search-telemetry-controls">
+                          <button class="btn small" id="searchTelemetryPauseButton" type="button">暂停</button>
+                          <button class="btn small" id="searchTelemetryStepButton" type="button">单步求解</button>
+                          <button class="btn primary small" id="searchTelemetryContinueButton" type="button">连续求解</button>
+                          <button class="btn primary small is-recommendation" id="searchTelemetryFollowRecommendationButton" type="button" hidden>执行模型推荐</button>
+                          <label>根决策<select id="searchTelemetryDecisionSelect" aria-label="选择要查看的根决策"></select></label>
+                        </div>
+                      </div>
+                    </div>
                     <div class="decision-lens-panel" id="visualDecisionLens" aria-live="polite"></div>
+                    <details class="search-variation-panel" id="searchTelemetryVariationPanel" hidden>
+                      <summary>当前主变化</summary>
+                      <div class="search-principal-variation" id="searchTelemetryVariation"></div>
+                    </details>
                     <ul id="visualActiveMoves" hidden></ul>
                   </section>
                 </aside>
@@ -391,7 +381,7 @@
               <label class="export-option"><input id="skipValidationInput" type="checkbox" checked>跳过输出校验</label>
               <label class="export-option"><input id="skipBaselineInput" type="checkbox" checked>跳过Baseline</label>
             </div>
-            <div class="run-actions"><button class="btn" id="runButton">▶ 运行当前测试</button><button class="btn batch" id="batchRunButton">▦ 运行当前测试组</button><button class="btn batch" id="openParameterComparisonDialogButton" title="先运行当前测试，再选择策略和参数创建对比实验" disabled>⇄ 运行对比测试</button></div>
+            <div class="run-actions"><button class="btn" id="runButton">▶ 运行当前测试</button><button class="btn" id="stepRunButton" title="以步进模式运行 Schedule-AlphaGo：每个根决策搜索完成后在拓扑回放页选择要执行的动作">⟳ 运行模型步进</button><button class="btn batch" id="batchRunButton">▦ 运行当前测试组</button><button class="btn batch" id="openParameterComparisonDialogButton" title="先运行当前测试，再选择策略和参数创建对比实验" disabled>⇄ 运行对比测试</button></div>
           </div>
         </article>
       </aside>
