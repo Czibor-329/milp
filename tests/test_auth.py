@@ -121,6 +121,16 @@ class SessionTests(unittest.TestCase):
         with auth._SESSIONS_LOCK:
             self.assertNotIn(token, auth._SESSIONS)
 
+    def test_destroy_user_sessions_revokes_all_sessions(self) -> None:
+        """删除账号时应同时销毁该用户的所有会话。"""
+        token_a = auth.create_session("alice")
+        token_b = auth.create_session("alice")
+        other = auth.create_session("bob")
+        auth.destroy_user_sessions("alice")
+        self.assertIsNone(auth.get_session_username(token_a))
+        self.assertIsNone(auth.get_session_username(token_b))
+        self.assertEqual("bob", auth.get_session_username(other))
+
     def test_cookie_header_value(self) -> None:
         """会话 Cookie 必须包含 HttpOnly 与 SameSite=Lax。"""
         cookie = auth.session_cookie("token123")
@@ -157,6 +167,171 @@ class HttpAuthIntegrationTests(unittest.TestCase):
         get_source = inspect.getsource(config_server.ConfigEditorHandler.do_GET)
         self.assertIn('if path == "/login.html":', get_source)
         self.assertTrue(config_server.LOGIN_PATH.is_file())
+
+    def test_admin_users_page_is_login_protected_and_served(self) -> None:
+        """用户管理页应在登录保护之列，且文件存在。"""
+        get_source = inspect.getsource(config_server.ConfigEditorHandler.do_GET)
+        self.assertIn('"/admin_users.html"', get_source)
+        self.assertTrue(config_server.ADMIN_USERS_PATH.is_file())
+
+
+class PermissionModelTests(unittest.TestCase):
+    """用户角色与算法/设备权限的判定语义。"""
+
+    def _temporary_store(self) -> Path:
+        """返回一个空的临时账号文件路径。"""
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        return Path(temporary.name) / "users.json"
+
+    def test_admin_sees_everything_while_user_is_restricted(self) -> None:
+        """admin 的权限列表为 None（全部），普通用户按分配列表判定。"""
+        store = self._temporary_store()
+        auth.add_user(
+            "boss", "Boss-12345", store, role=auth.ROLE_ADMIN,
+            allowed_algorithms=["heuristic"], allowed_devices=["dev-a"],
+        )
+        auth.add_user(
+            "worker", "Worker-12345", store, role=auth.ROLE_USER,
+            allowed_algorithms=["heuristic"], allowed_devices=["dev-a"],
+        )
+        self.assertTrue(auth.is_admin("boss", store))
+        self.assertFalse(auth.is_admin("worker", store))
+        self.assertIsNone(auth.user_strategies("boss", store))
+        self.assertIsNone(auth.user_devices("boss", store))
+        self.assertEqual(["heuristic"], auth.user_strategies("worker", store))
+        self.assertEqual(["dev-a"], auth.user_devices("worker", store))
+        self.assertTrue(auth.user_allows_algorithm("boss", "other_alg:x", store))
+        self.assertTrue(auth.user_allows_device("boss", "dev-b", store))
+        self.assertTrue(auth.user_allows_algorithm("worker", "heuristic", store))
+        self.assertFalse(auth.user_allows_algorithm("worker", "other_alg:x", store))
+        self.assertFalse(auth.user_allows_device("worker", "dev-b", store))
+
+    def test_legacy_account_without_role_defaults_to_admin(self) -> None:
+        """升级前的旧账号缺少 role 字段时按管理员处理，保持兼容。"""
+        store = self._temporary_store()
+        auth.add_user("olduser", "Old-12345", store)
+        raw = json.loads(store.read_text(encoding="utf-8"))
+        del raw["users"]["olduser"]["role"]
+        store.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+        self.assertTrue(auth.is_admin("olduser", store))
+        self.assertIsNone(auth.user_strategies("olduser", store))
+
+    def test_user_with_empty_permissions_has_nothing(self) -> None:
+        """权限为空的普通用户不允许任何算法与设备（fail-closed）。"""
+        store = self._temporary_store()
+        auth.add_user("worker", "Worker-12345", store, role=auth.ROLE_USER)
+        self.assertEqual([], auth.user_strategies("worker", store))
+        self.assertEqual([], auth.user_devices("worker", store))
+        self.assertFalse(auth.user_allows_algorithm("worker", "heuristic", store))
+        self.assertFalse(auth.user_allows_device("worker", "dev-a", store))
+
+    def test_update_user_and_set_password_preserve_fields(self) -> None:
+        """改权限与改密码应只影响对应字段，其他字段保留。"""
+        store = self._temporary_store()
+        auth.add_user(
+            "worker", "Worker-12345", store, role=auth.ROLE_USER,
+            allowed_algorithms=["heuristic"], allowed_devices=["dev-a"],
+        )
+        self.assertTrue(auth.update_user(
+            "worker", store, role=auth.ROLE_USER,
+            allowed_algorithms=["e2e-ctq"], allowed_devices=["dev-a", "dev-b"],
+        ))
+        self.assertEqual(
+            ["e2e-ctq"], auth.user_strategies("worker", store)
+        )
+        self.assertEqual(
+            ["dev-a", "dev-b"], auth.user_devices("worker", store)
+        )
+        self.assertTrue(auth.set_user_password("worker", "New-Pass-99", store))
+        self.assertTrue(auth.verify_credentials("worker", "New-Pass-99", store))
+        self.assertFalse(auth.verify_credentials("worker", "Worker-12345", store))
+        self.assertEqual(
+            ["e2e-ctq"], auth.user_strategies("worker", store)
+        )
+        self.assertFalse(auth.update_user("nobody", store, role=auth.ROLE_USER))
+        self.assertFalse(auth.set_user_password("nobody", "New-Pass-99", store))
+
+    def test_list_user_infos_exposes_no_secrets(self) -> None:
+        """管理信息列表不得包含密码哈希或盐。"""
+        store = self._temporary_store()
+        auth.add_user(
+            "worker", "Worker-12345", store, role=auth.ROLE_USER,
+            allowed_algorithms=["heuristic"], allowed_devices=["dev-a"],
+        )
+        infos = auth.list_user_infos(store)
+        self.assertEqual(1, len(infos))
+        self.assertEqual("worker", infos[0]["username"])
+        self.assertEqual(auth.ROLE_USER, infos[0]["role"])
+        self.assertEqual(["heuristic"], infos[0]["allowedAlgorithms"])
+        self.assertNotIn("passwordHash", infos[0])
+        self.assertNotIn("salt", infos[0])
+
+    def test_unknown_role_is_rejected(self) -> None:
+        """未知角色应被拒绝，避免误写脏数据。"""
+        store = self._temporary_store()
+        with self.assertRaises(ValueError):
+            auth.add_user("x", "X-12345", store, role="superuser")
+        with self.assertRaises(ValueError):
+            auth.update_user("x", store, role="superuser")
+
+
+class HttpPermissionIntegrationTests(unittest.TestCase):
+    """HTTP 层权限过滤与用户管理路由（源码级回归断言）。"""
+
+    def test_session_and_admin_user_routes_exist(self) -> None:
+        """/api/session 与 /api/admin/users 路由必须存在且仅管理员可用。"""
+        get_source = inspect.getsource(config_server.ConfigEditorHandler.do_GET)
+        post_source = inspect.getsource(config_server.ConfigEditorHandler.do_POST)
+        put_source = inspect.getsource(config_server.ConfigEditorHandler.do_PUT)
+        delete_source = inspect.getsource(config_server.ConfigEditorHandler.do_DELETE)
+        self.assertIn('path == "/api/session"', get_source)
+        self.assertIn('path == "/api/admin/users"', get_source)
+        self.assertIn('path == "/api/admin/users"', post_source)
+        self.assertIn('"api", "admin", "users"', put_source)
+        self.assertIn('"api", "admin", "users"', delete_source)
+        self.assertIn('"仅管理员可管理用户"', post_source + put_source + delete_source)
+
+    def test_health_and_workspaces_are_filtered_by_permission(self) -> None:
+        """健康检查与工作区列表必须按当前用户权限过滤。"""
+        get_source = inspect.getsource(config_server.ConfigEditorHandler.do_GET)
+        self.assertIn("user_strategies", get_source)
+        self.assertIn("user_devices", get_source)
+        self.assertIn('self._deny_device(parts[2])', get_source)
+
+    def test_run_and_batch_validate_permissions(self) -> None:
+        """运行接口必须校验设备与算法权限。"""
+        post_source = inspect.getsource(config_server.ConfigEditorHandler.do_POST)
+        self.assertIn("self._deny_device(device_id)", post_source)
+        self.assertIn("self._deny_strategy(strategy)", post_source)
+        self.assertIn("设备不在当前账号权限内", post_source)
+        self.assertIn("算法", post_source)
+
+    def test_device_import_and_export_cleanup_are_admin_only(self) -> None:
+        """导入/删除设备与清理导出数据必须仅管理员可操作。"""
+        post_source = inspect.getsource(config_server.ConfigEditorHandler.do_POST)
+        delete_source = inspect.getsource(config_server.ConfigEditorHandler.do_DELETE)
+        self.assertIn("仅管理员可导入设备", post_source)
+        self.assertIn("仅管理员可删除设备", delete_source)
+        self.assertIn("仅管理员可清理导出数据", delete_source)
+
+    def test_deleted_account_session_is_revoked(self) -> None:
+        """删除账号必须销毁其会话，/api/session 不得再返回该用户信息。"""
+        get_source = inspect.getsource(config_server.ConfigEditorHandler.do_GET)
+        delete_source = inspect.getsource(config_server.ConfigEditorHandler.do_DELETE)
+        self.assertIn("destroy_user_sessions", get_source)
+        self.assertIn("destroy_user_sessions", delete_source)
+        self.assertIn('"账号不存在或已删除"', get_source)
+
+    def test_anonymous_health_hides_algorithm_catalog(self) -> None:
+        """未登录的健康检查不应暴露算法清单（仅用于监控可用性）。"""
+        get_source = inspect.getsource(config_server.ConfigEditorHandler.do_GET)
+        self.assertIn("不暴露算法清单", get_source)
+
+    def test_login_failure_is_delayed(self) -> None:
+        """登录失败应有固定延迟以拖慢暴力破解。"""
+        source = inspect.getsource(config_server.ConfigEditorHandler._handle_login)
+        self.assertIn("LOGIN_FAILURE_DELAY", source)
 
     def test_health_check_stays_open(self) -> None:
         """健康检查应保持无需登录，供监控探测。"""

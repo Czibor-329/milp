@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>用户管理 · CT 调度平台</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px;
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    background: #101828; color: #e5e7eb;
+  }
+  header { display: flex; align-items: center; justify-content: space-between; max-width: 1080px; margin: 0 auto 20px; }
+  h1 { margin: 0; font-size: 20px; }
+  header a { color: #7ea6ff; text-decoration: none; font-size: 14px; }
+  .card {
+    max-width: 1080px; margin: 0 auto 20px;
+    background: #182235; border: 1px solid #2b3a52; border-radius: 10px;
+    padding: 20px;
+  }
+  h2 { margin: 0 0 14px; font-size: 15px; color: #c3ccda; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid #263449; vertical-align: top; }
+  th { color: #93a1b8; font-weight: 600; white-space: nowrap; }
+  .tag { display: inline-block; margin: 1px 3px 1px 0; padding: 1px 7px; font-size: 12px; border-radius: 8px; background: #22314a; color: #b9c7dd; }
+  .tag.role-admin { background: #2b4a3a; color: #8ee0b0; }
+  .tag.role-user { background: #3a3a2b; color: #e0d08e; }
+  .empty { color: #6b7a93; }
+  button { padding: 7px 14px; font-size: 13px; color: #fff; background: #2f6bff; border: none; border-radius: 6px; cursor: pointer; }
+  button:hover { background: #2457db; }
+  button.danger { background: #b3372e; }
+  button.danger:hover { background: #94281f; }
+  button.ghost { background: #334155; }
+  button.ghost:hover { background: #42526b; }
+  button:disabled { background: #3b4a63; cursor: not-allowed; }
+  form { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px 18px; }
+  label { font-size: 13px; color: #c3ccda; display: flex; flex-direction: column; gap: 5px; }
+  input, select { padding: 8px 10px; font-size: 13px; color: #e5e7eb; background: #101828; border: 1px solid #334155; border-radius: 6px; outline: none; }
+  input:focus, select:focus { border-color: #4f8cff; }
+  .checks { display: flex; flex-wrap: wrap; gap: 8px 14px; padding: 8px 0; }
+  .checks label { flex-direction: row; align-items: center; font-size: 13px; gap: 6px; cursor: pointer; }
+  .checks input { width: auto; }
+  .form-actions { grid-column: 1 / -1; display: flex; gap: 10px; align-items: center; }
+  .hint { font-size: 12px; color: #6b7a93; margin: 0; }
+  .notice { padding: 12px; border-radius: 8px; font-size: 13px; }
+  .notice.error { background: #3a2020; color: #ff9b92; }
+  .notice.info { background: #1e2a45; color: #a8c4ff; }
+  .notice { max-width: 1080px; margin: 0 auto 20px; }
+  .row-actions { display: flex; gap: 6px; white-space: nowrap; }
+  .small { font-size: 12px; color: #6b7a93; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>用户管理</h1>
+    <a href="/config_editor.html">← 返回调度主页面</a>
+  </header>
+
+  <div class="notice error" id="errorNotice" hidden></div>
+  <div class="notice info" id="infoNotice" hidden></div>
+
+  <section class="card" id="createCard">
+    <h2 id="formTitle">新建用户</h2>
+    <form id="userForm">
+      <label>用户名
+        <input id="username" autocomplete="off" required>
+      </label>
+      <label>密码
+        <input id="password" type="password" autocomplete="new-password">
+      </label>
+      <label>角色
+        <select id="role">
+          <option value="user">普通用户（只能使用分配的内容）</option>
+          <option value="admin">管理员（全部权限）</option>
+        </select>
+      </label>
+      <label>允许的算法
+        <span class="checks" id="algorithmChecks"></span>
+      </label>
+      <label>允许的设备
+        <span class="checks" id="deviceChecks"></span>
+      </label>
+      <div class="form-actions">
+        <button type="submit" id="saveButton">保存用户</button>
+        <button type="button" class="ghost" id="cancelEditButton" hidden>取消编辑</button>
+        <p class="hint" id="formHint"></p>
+      </div>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>账号列表</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>用户名</th>
+          <th>角色</th>
+          <th>允许的算法</th>
+          <th>允许的设备</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody id="userTableBody">
+        <tr><td colspan="5" class="empty">加载中…</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <script>
+    // 用户管理页：仅管理员可访问，负责账号的增删改、权限分配与密码重置。
+    (function () {
+      var state = { users: [], algorithms: [], devices: [], editing: null, currentUser: null };
+      var $ = function (id) { return document.getElementById(id); };
+
+      function escapeHtml(value) {
+        return String(value).replace(/[&<>"']/g, function (ch) {
+          return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch];
+        });
+      }
+
+      function showError(message) {
+        var el = $("errorNotice");
+        el.textContent = message;
+        el.hidden = !message;
+      }
+
+      function showInfo(message) {
+        var el = $("infoNotice");
+        el.textContent = message;
+        el.hidden = !message;
+      }
+
+      async function fetchJson(url, options) {
+        var response = await fetch(url, Object.assign({
+          headers: { "Content-Type": "application/json" },
+        }, options || {}));
+        var payload = await response.json().catch(function () { return {}; });
+        if (!response.ok || payload.ok === false) {
+          throw new Error(payload.error || ("请求失败：" + response.status));
+        }
+        return payload;
+      }
+
+      function algorithmLabel(strategy) {
+        var algorithm = state.algorithms.find(function (item) { return item.strategy === strategy; });
+        return algorithm ? (algorithm.name || algorithm.strategy) : strategy;
+      }
+
+      function deviceLabel(deviceId) {
+        var device = state.devices.find(function (item) { return String(item.id) === String(deviceId); });
+        return device ? device.name : deviceId;
+      }
+
+      function renderChecks(containerId, options, selected, labelOf) {
+        var container = $(containerId);
+        container.innerHTML = "";
+        options.forEach(function (option) {
+          var label = document.createElement("label");
+          var input = document.createElement("input");
+          input.type = "checkbox";
+          input.value = String(option.id != null ? option.id : option.strategy);
+          input.checked = selected.indexOf(String(option.id != null ? option.id : option.strategy)) >= 0;
+          label.appendChild(input);
+          label.appendChild(document.createTextNode(" " + labelOf(option)));
+          container.appendChild(label);
+        });
+      }
+
+      function renderUsers() {
+        var body = $("userTableBody");
+        if (!state.users.length) {
+          body.innerHTML = '<tr><td colspan="5" class="empty">暂无账号</td></tr>';
+          return;
+        }
+        body.innerHTML = "";
+        state.users.forEach(function (user) {
+          var tr = document.createElement("tr");
+          var roleClass = user.role === "admin" ? "role-admin" : "role-user";
+          var algorithms = (user.allowedAlgorithms || []).map(function (item) {
+            return '<span class="tag">' + escapeHtml(algorithmLabel(item)) + "</span>";
+          }).join("") || '<span class="empty">无</span>';
+          var devices = (user.allowedDevices || []).map(function (item) {
+            return '<span class="tag">' + escapeHtml(deviceLabel(item)) + "</span>";
+          }).join("") || '<span class="empty">无</span>';
+          var canDelete = user.username !== state.currentUser;
+          tr.innerHTML =
+            "<td><strong>" + escapeHtml(user.username) + "</strong></td>" +
+            '<td><span class="tag ' + roleClass + '">' + (user.role === "admin" ? "管理员" : "普通用户") + "</span></td>" +
+            "<td>" + algorithms + "</td>" +
+            "<td>" + devices + "</td>" +
+            '<td><div class="row-actions">' +
+            '<button class="ghost" data-action="edit">编辑</button>' +
+            '<button class="ghost" data-action="password">重置密码</button>' +
+            (canDelete ? '<button class="danger" data-action="delete">删除</button>' : '<span class="small">当前登录</span>') +
+            "</div></td>";
+          tr.dataset.username = user.username;
+          body.appendChild(tr);
+        });
+      }
+
+      function startEdit(user) {
+        state.editing = user.username;
+        $("formTitle").textContent = "编辑用户：" + user.username;
+        $("username").value = user.username;
+        $("username").disabled = true;
+        $("password").value = "";
+        $("password").placeholder = "留空则不修改密码";
+        $("role").value = user.role;
+        renderChecks("algorithmChecks", state.algorithms, user.allowedAlgorithms || [], algorithmLabel);
+        renderChecks("deviceChecks", state.devices, user.allowedDevices || [], deviceLabel);
+        $("cancelEditButton").hidden = false;
+        $("formHint").textContent = "普通用户只能看到并运行勾选的内容；管理员拥有全部权限。";
+      }
+
+      function resetForm() {
+        state.editing = null;
+        $("formTitle").textContent = "新建用户";
+        $("username").value = "";
+        $("username").disabled = false;
+        $("password").value = "";
+        $("password").placeholder = "至少 8 位";
+        $("role").value = "user";
+        renderChecks("algorithmChecks", state.algorithms, [], algorithmLabel);
+        renderChecks("deviceChecks", state.devices, [], deviceLabel);
+        $("cancelEditButton").hidden = true;
+        $("formHint").textContent = "新建用户密码至少 8 位；权限为空的普通用户看不到任何算法与设备。";
+      }
+
+      function collectForm() {
+        return {
+          role: $("role").value,
+          allowedAlgorithms: Array.prototype.map.call(
+            $("algorithmChecks").querySelectorAll("input:checked"), function (input) { return input.value; }
+          ),
+          allowedDevices: Array.prototype.map.call(
+            $("deviceChecks").querySelectorAll("input:checked"), function (input) { return input.value; }
+          ),
+        };
+      }
+
+      async function loadAll() {
+        var session = await fetchJson("/api/session");
+        if (session.role !== "admin") throw new Error("仅管理员可访问用户管理");
+        state.currentUser = session.username;
+        var [users, health, workspaces] = await Promise.all([
+          fetchJson("/api/admin/users"),
+          fetchJson("/api/health"),
+          fetchJson("/api/workspaces"),
+        ]);
+        state.users = users.users || [];
+        state.algorithms = health.algorithms || [];
+        state.devices = workspaces.devices || [];
+        resetForm();
+        renderUsers();
+      }
+
+      $("userForm").addEventListener("submit", async function (event) {
+        event.preventDefault();
+        showError("");
+        var payload = collectForm();
+        payload.username = $("username").value.trim();
+        payload.password = $("password").value;
+        if (!payload.username) { showError("用户名不能为空"); return; }
+        if (!state.editing && payload.password.length < 8) { showError("新用户密码至少 8 位"); return; }
+        var saveButton = $("saveButton");
+        saveButton.disabled = true;
+        try {
+          if (state.editing) {
+            await fetchJson("/api/admin/users/" + encodeURIComponent(state.editing), {
+              method: "PUT", body: JSON.stringify({
+                role: payload.role,
+                allowedAlgorithms: payload.allowedAlgorithms,
+                allowedDevices: payload.allowedDevices,
+              }),
+            });
+            showInfo("用户 " + state.editing + " 的权限已更新");
+          } else {
+            await fetchJson("/api/admin/users", {
+              method: "POST", body: JSON.stringify(payload),
+            });
+            showInfo("用户 " + payload.username + " 已创建");
+          }
+          await loadAll();
+        } catch (error) {
+          showError(error.message);
+        } finally {
+          saveButton.disabled = false;
+        }
+      });
+
+      $("cancelEditButton").addEventListener("click", function () {
+        resetForm();
+      });
+
+      $("userTableBody").addEventListener("click", async function (event) {
+        var button = event.target.closest("button[data-action]");
+        if (!button) return;
+        var username = button.closest("tr").dataset.username;
+        var action = button.dataset.action;
+        showError("");
+        try {
+          if (action === "edit") {
+            var user = state.users.find(function (item) { return item.username === username; });
+            startEdit(user);
+          } else if (action === "password") {
+            var password = window.prompt("为 " + username + " 设置新密码（至少 8 位）：");
+            if (!password) return;
+            if (password.length < 8) { showError("密码至少 8 位"); return; }
+            await fetchJson("/api/admin/users/" + encodeURIComponent(username) + "/password", {
+              method: "POST", body: JSON.stringify({ password: password }),
+            });
+            showInfo("用户 " + username + " 的密码已重置");
+          } else if (action === "delete") {
+            if (!window.confirm("确定删除账号 " + username + "？")) return;
+            await fetchJson("/api/admin/users/" + encodeURIComponent(username), { method: "DELETE" });
+            showInfo("用户 " + username + " 已删除");
+            if (state.editing === username) resetForm();
+            await loadAll();
+          }
+        } catch (error) {
+          showError(error.message);
+        }
+      });
+
+      loadAll().catch(function (error) {
+        showError(error.message || "加载失败，请确认已登录管理员账号");
+      });
+    })();
+  </script>
+</body>
+</html>

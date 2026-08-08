@@ -72,11 +72,17 @@ python realtime_scheduler\server.py --open
 
 默认地址为 `http://127.0.0.1:8765/config_editor.html`
 
-> 服务自带登录认证：首次启动自动创建默认账号 `admin`（密码 `admin123`，
-> 控制台会提示），请立即用 `python realtime_scheduler\server.py --add-user admin`
-> 修改密码。账号管理命令见 `docs/deploy-windows.md`。
+> 服务自带登录认证与权限管理：首次启动自动创建默认账号 `admin`（密码
+> `admin123`，控制台会提示），请立即用 `python realtime_scheduler\server.py
+> --add-user admin` 修改密码。账号管理命令见 `docs/deploy-windows.md`。
 > 未登录访问页面会跳转到登录页，调用 API 返回 401；健康检查 `/api/health`
 > 不要求登录，供监控探测。
+>
+> **权限管理**：账号分管理员（admin）与普通用户（user）两种角色。管理员
+> 拥有全部设备与算法权限，登录后在主页面侧边栏进入「用户管理」，可为每个
+> 普通用户分配可见的设备（含其测试集）与可用的算法；普通用户登录后只能
+> 看到并使用被分配的内容，未分配的设备不可见、未分配的算法不可运行。
+> 权限修改即时生效，无需重启服务。
 
 ## 对外部署
 

@@ -23,7 +23,7 @@ import secrets
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 # PBKDF2 哈希参数：迭代次数越多越抗暴力破解，200_000 是常见建议下限。
 PBKDF2_ITERATIONS = 200_000
@@ -36,6 +36,11 @@ DEFAULT_ADMIN_USERNAME = "admin"
 DEFAULT_ADMIN_PASSWORD = "admin123"
 # 新账号密码的最短长度。
 MIN_PASSWORD_LENGTH = 8
+# 角色：admin 拥有全部算法与设备权限；user 只能使用管理员分配的内容。
+ROLE_ADMIN = "admin"
+ROLE_USER = "user"
+# 旧账号缺少 role 字段时按管理员处理，避免升级后现有部署失去全部权限。
+DEFAULT_ROLE = ROLE_ADMIN
 # 会话令牌的随机字节数与有效期（秒）。
 SESSION_TOKEN_BYTES = 32
 SESSION_TTL_SECONDS = 12 * 3600
@@ -82,13 +87,18 @@ def load_users(path: Path) -> Dict[str, Dict[str, Any]]:
 
 
 def save_users(users: Dict[str, Dict[str, Any]], path: Path) -> None:
-    """把账号表原子写入 JSON 文件，避免中途断电产生半截文件。"""
+    """把账号表原子写入 JSON 文件，避免中途断电产生半截文件。
+
+    临时文件使用唯一名字，防止并发写入互相截断；os.replace 保证替换原子。
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "schemaVersion": 1,
         "users": users,
     }
-    temporary = path.with_name(f"{path.name}.tmp")
+    temporary = path.with_name(
+        f"{path.name}.{os.getpid()}.{threading.get_ident()}.{secrets.token_hex(4)}.tmp"
+    )
     temporary.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -96,38 +106,163 @@ def save_users(users: Dict[str, Dict[str, Any]], path: Path) -> None:
     os.replace(temporary, path)
 
 
-def add_user(username: str, password: str, path: Path) -> bool:
+# 账号“读-改-写”复合操作（新增/删除/改权限/改密码）的互斥锁，
+# 避免并发账号管理互相覆盖；只读的 load_users 依赖 os.replace 的原子性，无需加锁。
+_USERS_LOCK = threading.RLock()
+
+
+def add_user(
+    username: str,
+    password: str,
+    path: Path,
+    role: str = DEFAULT_ROLE,
+    allowed_algorithms: Optional[Iterable[str]] = None,
+    allowed_devices: Optional[Iterable[str]] = None,
+) -> bool:
     """新增账号或重置已有账号密码，返回 True 表示新建、False 表示更新。
 
-    密码在此处完成加盐哈希，盐为每次随机生成。
+    role 为 admin 或 user；普通用户仅可使用 allowed_algorithms（算法
+    strategy 列表）与 allowed_devices（设备 id 列表）中列出的内容。
+    密码在此处完成加盐哈希，盐为每次随机生成；复合读写受锁保护。
     """
     if not username or not password:
         raise ValueError("用户名和密码不能为空")
-    users = load_users(path)
-    created = username not in users
-    salt = secrets.token_hex(SALT_BYTES)
-    users[username] = {
-        "passwordHash": hash_password(password, salt),
-        "salt": salt,
-        "updatedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
-    }
-    save_users(users, path)
+    if role not in {ROLE_ADMIN, ROLE_USER}:
+        raise ValueError(f"未知角色：{role}")
+    with _USERS_LOCK:
+        users = load_users(path)
+        created = username not in users
+        salt = secrets.token_hex(SALT_BYTES)
+        users[username] = {
+            "passwordHash": hash_password(password, salt),
+            "salt": salt,
+            "role": role,
+            "allowedAlgorithms": [str(item) for item in (allowed_algorithms or [])],
+            "allowedDevices": [str(item) for item in (allowed_devices or [])],
+            "updatedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        save_users(users, path)
     return created
 
 
 def remove_user(username: str, path: Path) -> bool:
     """删除账号，返回是否确实存在并被删除。"""
-    users = load_users(path)
-    if username not in users:
-        return False
-    del users[username]
-    save_users(users, path)
+    with _USERS_LOCK:
+        users = load_users(path)
+        if username not in users:
+            return False
+        del users[username]
+        save_users(users, path)
     return True
 
 
 def list_users(path: Path) -> List[str]:
     """返回全部用户名（不含任何密码信息），便于管理端展示。"""
     return sorted(load_users(path).keys())
+
+
+def list_user_infos(path: Path) -> List[Dict[str, Any]]:
+    """返回全部账号的管理信息（不含密码与盐），供管理页面展示。"""
+    users = load_users(path)
+    return [
+        {
+            "username": name,
+            "role": str(record.get("role") or DEFAULT_ROLE),
+            "allowedAlgorithms": [
+                str(item) for item in record.get("allowedAlgorithms")
+            ]
+            if isinstance(record.get("allowedAlgorithms"), list)
+            else [],
+            "allowedDevices": [
+                str(item) for item in record.get("allowedDevices")
+            ]
+            if isinstance(record.get("allowedDevices"), list)
+            else [],
+        }
+        for name, record in sorted(users.items())
+    ]
+
+
+def is_admin(username: str, path: Path) -> bool:
+    """判断账号是否为管理员；不存在的账号按非管理员处理。"""
+    record = load_users(path).get(username)
+    if not record:
+        return False
+    return str(record.get("role") or DEFAULT_ROLE) == ROLE_ADMIN
+
+
+def user_strategies(username: str, path: Path) -> Optional[List[str]]:
+    """返回普通用户允许的算法 strategy 列表；admin 返回 None 表示全部。"""
+    record = load_users(path).get(username)
+    if not record:
+        return []
+    if str(record.get("role") or DEFAULT_ROLE) == ROLE_ADMIN:
+        return None
+    allowed = record.get("allowedAlgorithms")
+    return [str(item) for item in allowed] if isinstance(allowed, list) else []
+
+
+def user_devices(username: str, path: Path) -> Optional[List[str]]:
+    """返回普通用户可见的设备 id 列表；admin 返回 None 表示全部。"""
+    record = load_users(path).get(username)
+    if not record:
+        return []
+    if str(record.get("role") or DEFAULT_ROLE) == ROLE_ADMIN:
+        return None
+    allowed = record.get("allowedDevices")
+    return [str(item) for item in allowed] if isinstance(allowed, list) else []
+
+
+def user_allows_algorithm(username: str, strategy: str, path: Path) -> bool:
+    """判断用户是否允许使用指定算法（strategy）。"""
+    allowed = user_strategies(username, path)
+    return allowed is None or str(strategy) in allowed
+
+
+def user_allows_device(username: str, device_id: str, path: Path) -> bool:
+    """判断用户是否允许访问指定设备（及其测试集）。"""
+    allowed = user_devices(username, path)
+    return allowed is None or str(device_id) in allowed
+
+
+def update_user(
+    username: str,
+    path: Path,
+    role: str,
+    allowed_algorithms: Optional[Iterable[str]] = None,
+    allowed_devices: Optional[Iterable[str]] = None,
+) -> bool:
+    """更新账号的角色与权限字段，返回是否更新成功。"""
+    if role not in {ROLE_ADMIN, ROLE_USER}:
+        raise ValueError(f"未知角色：{role}")
+    with _USERS_LOCK:
+        users = load_users(path)
+        record = users.get(username)
+        if not record:
+            return False
+        record["role"] = role
+        record["allowedAlgorithms"] = [str(item) for item in (allowed_algorithms or [])]
+        record["allowedDevices"] = [str(item) for item in (allowed_devices or [])]
+        record["updatedAt"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        save_users(users, path)
+    return True
+
+
+def set_user_password(username: str, password: str, path: Path) -> bool:
+    """重置账号密码（保留角色与权限字段），返回是否成功。"""
+    if not password:
+        raise ValueError("密码不能为空")
+    with _USERS_LOCK:
+        users = load_users(path)
+        record = users.get(username)
+        if not record:
+            return False
+        salt = secrets.token_hex(SALT_BYTES)
+        record["passwordHash"] = hash_password(password, salt)
+        record["salt"] = salt
+        record["updatedAt"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        save_users(users, path)
+    return True
 
 
 def ensure_default_admin(path: Path) -> bool:
@@ -192,6 +327,18 @@ def destroy_session(token: Optional[str]) -> None:
         return
     with _SESSIONS_LOCK:
         _SESSIONS.pop(token, None)
+
+
+def destroy_user_sessions(username: str) -> None:
+    """删除指定用户的全部会话，用于删除账号或权限回收后立即失效。"""
+    with _SESSIONS_LOCK:
+        expired = [
+            token
+            for token, record in _SESSIONS.items()
+            if record.get("username") == username
+        ]
+        for token in expired:
+            _SESSIONS.pop(token, None)
 
 
 def session_cookie(token: str) -> str:
