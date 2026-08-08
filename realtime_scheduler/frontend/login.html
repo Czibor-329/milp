@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>登录 · CT 调度平台</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex; align-items: center; justify-content: center;
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    background: linear-gradient(160deg, #101828 0%, #1d2a3f 100%);
+    color: #e5e7eb;
+  }
+  .login-card {
+    width: min(360px, 90vw);
+    padding: 36px 32px 28px;
+    background: #182235;
+    border: 1px solid #2b3a52;
+    border-radius: 12px;
+    box-shadow: 0 18px 48px rgba(0, 0, 0, 0.35);
+  }
+  h1 { margin: 0 0 6px; font-size: 22px; letter-spacing: 1px; }
+  .subtitle { margin: 0 0 24px; font-size: 13px; color: #93a1b8; }
+  form { display: flex; flex-direction: column; gap: 14px; }
+  label { font-size: 13px; color: #c3ccda; }
+  input {
+    width: 100%; padding: 10px 12px; margin-top: 6px;
+    font-size: 14px; color: #e5e7eb;
+    background: #101828; border: 1px solid #334155; border-radius: 8px;
+    outline: none;
+  }
+  input:focus { border-color: #4f8cff; }
+  button {
+    margin-top: 6px; padding: 11px 0;
+    font-size: 15px; letter-spacing: 4px; color: #fff;
+    background: #2f6bff; border: none; border-radius: 8px; cursor: pointer;
+  }
+  button:hover { background: #2457db; }
+  button:disabled { background: #3b4a63; cursor: not-allowed; }
+  .error { margin: 0; font-size: 13px; color: #ff8a80; }
+  .hint { margin: 18px 0 0; font-size: 12px; color: #6b7a93; text-align: center; }
+</style>
+</head>
+<body>
+  <main class="login-card">
+    <h1>CT 调度平台</h1>
+    <p class="subtitle">请登录后进入调度系统</p>
+    <form id="loginForm">
+      <label for="username">用户名
+        <input id="username" name="username" autocomplete="username" required autofocus>
+      </label>
+      <label for="password">密码
+        <input id="password" name="password" type="password" autocomplete="current-password" required>
+      </label>
+      <p class="error" id="errorMessage" hidden></p>
+      <button type="submit" id="submitButton">登 录</button>
+    </form>
+    <p class="hint">账号由系统管理员统一分配</p>
+  </main>
+  <script>
+    // 登录页：把用户名密码提交给 /api/login，成功后在浏览器种下会话 Cookie 并进入主页面。
+    (function () {
+      var form = document.getElementById("loginForm");
+      var errorMessage = document.getElementById("errorMessage");
+      var submitButton = document.getElementById("submitButton");
+      form.addEventListener("submit", async function (event) {
+        event.preventDefault();
+        errorMessage.hidden = true;
+        submitButton.disabled = true;
+        submitButton.textContent = "登录中…";
+        try {
+          var response = await fetch("/api/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              username: document.getElementById("username").value.trim(),
+              password: document.getElementById("password").value,
+            }),
+          });
+          var payload = await response.json();
+          if (response.ok && payload.ok) {
+            window.location.href = "/config_editor.html";
+            return;
+          }
+          errorMessage.textContent = payload.error || "登录失败，请重试";
+          errorMessage.hidden = false;
+        } catch (error) {
+          errorMessage.textContent = "无法连接服务，请稍后重试";
+          errorMessage.hidden = false;
+        } finally {
+          submitButton.disabled = false;
+          submitButton.textContent = "登 录";
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

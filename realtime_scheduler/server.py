@@ -16,6 +16,7 @@ realtime_scheduler 目录中。批处理、Baseline 与并发运行状态由 bat
 from __future__ import annotations
 
 import argparse
+import getpass
 import hashlib
 from io import BytesIO
 import json
@@ -140,10 +141,22 @@ from realtime_scheduler.move_validation import (
     validate_move_list,
 )
 from realtime_scheduler.replay_machine import ReplayMachine
+from realtime_scheduler import auth as _auth
 
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
+# 登录失败后的固定延迟（秒），用于拖慢针对已知用户名的暴力破解。
+LOGIN_FAILURE_DELAY = 0.5
+# 是否强制登录认证。默认免登录，便于本地/直接分发使用（本机管理员身份，
+# 页面与接口全量可用）；对外部署（公网网址、多人共用）必须设置
+# CT_REQUIRE_AUTH=1 开启登录，否则任何能访问地址的人都能操作系统。
+AUTH_REQUIRED = os.environ.get("CT_REQUIRE_AUTH", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 MAX_REQUEST_BYTES = 12 * 1024 * 1024
 MAX_CHECKPOINT_BYTES = 512 * 1024 * 1024
 MAX_SAVED_RESULTS = 8
@@ -168,7 +181,10 @@ EXPORT_DIR = REALTIME_APP_DIR / "exports"
 EDITOR_PATH = FRONTEND_DIR / "config_editor.html"
 VIEWER_PATH = FRONTEND_DIR / "movelist_gantt_viewer.html"
 ROUTE_EDITOR_LOGIC_PATH = FRONTEND_DIR / "route_editor_logic.js"
+LOGIN_PATH = FRONTEND_DIR / "login.html"
+ADMIN_USERS_PATH = FRONTEND_DIR / "admin_users.html"
 FRONTEND_ASSET_DIR = FRONTEND_DIR / "assets"
+USERS_PATH = DATA_DIR / _auth.USER_FILE_NAME
 E2E_CTQ_MODEL_PATH = ALGORITHM_ROOT / "results" / "models" / "e2e_ctq_policy.npz"
 DUAL_ACTOR_MODEL_PATH = (
     ALGORITHM_ROOT / "results" / "dual_actor_primitive_v1_candidate.npz"
@@ -4035,11 +4051,23 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
         """处理页面、健康检查和内存结果读取。"""
         parsed_url = urlparse(self.path)
         path = unquote(parsed_url.path)
+        if path == "/login.html":
+            self._send_file(LOGIN_PATH, "text/html; charset=utf-8")
+            return
         if path in {"/", "/config_editor.html"}:
             self._send_file(EDITOR_PATH, "text/html; charset=utf-8")
             return
-        if path == "/movelist_gantt_viewer.html":
-            self._send_file(VIEWER_PATH, "text/html; charset=utf-8")
+        if path in {"/", "/config_editor.html", "/movelist_gantt_viewer.html", "/admin_users.html"}:
+            # 页面必须登录后才能访问，未登录一律转向登录页。
+            if self._current_username() is None:
+                self._redirect("/login.html")
+                return
+            if path == "/movelist_gantt_viewer.html":
+                self._send_file(VIEWER_PATH, "text/html; charset=utf-8")
+            elif path == "/admin_users.html":
+                self._send_file(ADMIN_USERS_PATH, "text/html; charset=utf-8")
+            else:
+                self._send_file(EDITOR_PATH, "text/html; charset=utf-8")
             return
         if path == "/route_editor_logic.js":
             self._send_file(ROUTE_EDITOR_LOGIC_PATH, "text/javascript; charset=utf-8")
@@ -4047,9 +4075,35 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
         if path.startswith("/assets/"):
             self._send_frontend_asset(path.removeprefix("/assets/"))
             return
+        if path.startswith("/api/"):
+            # 健康检查用于监控，不要求登录；其余 API 一律需要有效会话。
+            if path != "/api/health" and self._current_username() is None:
+                self._send_json(
+                    {"ok": False, "error": "未登录或会话已过期"},
+                    HTTPStatus.UNAUTHORIZED,
+                )
+                return
         if path == "/api/health":
             builtin_algorithms = discover_builtin_algorithms()
             other_algorithms = discover_other_algorithms()
+            # 已登录用户只能看到分配给自己的算法；未登录（监控探测）不暴露算法清单。
+            username = self._current_username()
+            if AUTH_REQUIRED and username is None:
+                # 强制登录且未登录（监控探测）不暴露算法清单。
+                builtin_algorithms = []
+                other_algorithms = []
+            elif AUTH_REQUIRED:
+                allowed_strategies = _auth.user_strategies(username, USERS_PATH)
+                if allowed_strategies is not None:
+                    allowed_set = set(allowed_strategies)
+                    builtin_algorithms = [
+                        item for item in builtin_algorithms
+                        if str(item.get("strategy")) in allowed_set
+                    ]
+                    other_algorithms = [
+                        item for item in other_algorithms
+                        if str(item.get("strategy")) in allowed_set
+                    ]
             builtin_strategy_errors = {
                 str(algorithm["strategy"]): str(algorithm["unavailableReason"])
                 for algorithm in builtin_algorithms
@@ -4066,9 +4120,11 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                 "algorithmRepositoryAvailable": BUILTIN_ALGORITHM_AVAILABLE,
                 "strategies": strategy_availability,
                 "strategyModels": {
-                    "e2e-ctq": str(E2E_CTQ_MODEL_PATH) if E2E_CTQ_MODEL_PATH.is_file() else "",
+                    "e2e-ctq": (
+                        E2E_CTQ_MODEL_PATH.name if E2E_CTQ_MODEL_PATH.is_file() else ""
+                    ),
                     "dual-actor-e2e": (
-                        str(DUAL_ACTOR_MODEL_PATH)
+                        DUAL_ACTOR_MODEL_PATH.name
                         if DUAL_ACTOR_MODEL_PATH.is_file()
                         else ""
                     ),
@@ -4081,6 +4137,47 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                 "algorithms": [*builtin_algorithms, *other_algorithms],
                 "otherAlgorithms": other_algorithms,
             })
+            return
+        if path == "/api/session":
+            if not AUTH_REQUIRED:
+                # 免登录模式：返回本机管理员身份，供前端展示入口。
+                self._send_json({
+                    "ok": True,
+                    "username": "local",
+                    "role": "admin",
+                    "allowedAlgorithms": None,
+                    "allowedDevices": None,
+                })
+                return
+            username = self._current_username()
+            if username is None:
+                self._send_json(
+                    {"ok": False, "error": "未登录或会话已过期"},
+                    HTTPStatus.UNAUTHORIZED,
+                )
+                return
+            info = next((
+                item for item in _auth.list_user_infos(USERS_PATH)
+                if item["username"] == username
+            ), None)
+            if info is None:
+                # 账号已被删除：会话视为无效，不允许继续使用系统。
+                _auth.destroy_user_sessions(username)
+                self._send_json(
+                    {"ok": False, "error": "账号不存在或已删除"},
+                    HTTPStatus.UNAUTHORIZED,
+                )
+                return
+            self._send_json({"ok": True, **info})
+            return
+        if path == "/api/admin/users":
+            if self._require_admin() is None:
+                self._send_json(
+                    {"ok": False, "error": "仅管理员可管理用户"},
+                    HTTPStatus.FORBIDDEN,
+                )
+                return
+            self._send_json({"ok": True, "users": _auth.list_user_infos(USERS_PATH)})
             return
         if path == "/api/search-telemetry":
             if not BUILTIN_ALGORITHM_AVAILABLE:
@@ -4109,13 +4206,35 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/workspaces":
             try:
-                self._send_json({"ok": True, "devices": list_workspace_devices()})
+                devices = list_workspace_devices()
+                # 强制登录时普通用户只能看到分配给自己的设备；免登录模式看到全部。
+                username = self._current_username()
+                allowed_devices = None
+                if AUTH_REQUIRED:
+                    allowed_devices = (
+                        None
+                        if username is None
+                        else _auth.user_devices(username, USERS_PATH)
+                    )
+                if allowed_devices is not None:
+                    allowed_set = set(allowed_devices)
+                    devices = [
+                        item for item in devices
+                        if str(item.get("id")) in allowed_set
+                    ]
+                self._send_json({"ok": True, "devices": devices})
             except Exception as error:  # noqa: BLE001
                 self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
             return
         if path.startswith("/api/workspaces/"):
             parts = [part for part in path.split("/") if part]
             if len(parts) == 3:
+                if self._deny_device(parts[2]):
+                    self._send_json(
+                        {"ok": False, "error": "设备不存在"},
+                        HTTPStatus.NOT_FOUND,
+                    )
+                    return
                 try:
                     self._send_json({"ok": True, "device": get_workspace_device(parts[2])})
                 except Exception as error:  # noqa: BLE001
@@ -4162,6 +4281,75 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         """接收控制台配置并同步运行后端策略。"""
         path = unquote(urlparse(self.path).path)
+        if path == "/api/login":
+            self._handle_login()
+            return
+        if path == "/api/logout":
+            self._handle_logout()
+            return
+        if path == "/api/admin/users":
+            if self._require_admin() is None:
+                self._send_json(
+                    {"ok": False, "error": "仅管理员可管理用户"},
+                    HTTPStatus.FORBIDDEN,
+                )
+                return
+            try:
+                payload = self._read_json_object()
+                username = str(payload.get("username") or "").strip()
+                password = str(payload.get("password") or "")
+                role = str(payload.get("role") or _auth.ROLE_USER)
+                allowed_algorithms = payload.get("allowedAlgorithms")
+                allowed_devices = payload.get("allowedDevices")
+                if not username:
+                    raise ValueError("用户名不能为空")
+                if role not in {_auth.ROLE_ADMIN, _auth.ROLE_USER}:
+                    raise ValueError(f"未知角色：{role}")
+                if len(password) < _auth.MIN_PASSWORD_LENGTH:
+                    raise ValueError(
+                        f"密码长度必须不少于 {_auth.MIN_PASSWORD_LENGTH} 位"
+                    )
+                if not isinstance(allowed_algorithms, list) or not isinstance(
+                    allowed_devices, list
+                ):
+                    raise ValueError("allowedAlgorithms 与 allowedDevices 必须是数组")
+                created = _auth.add_user(
+                    username,
+                    password,
+                    USERS_PATH,
+                    role=role,
+                    allowed_algorithms=[str(item) for item in allowed_algorithms],
+                    allowed_devices=[str(item) for item in allowed_devices],
+                )
+                self._send_json({"ok": True, "created": created})
+            except (ValueError, TypeError) as error:
+                self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
+            return
+        admin_parts = [part for part in path.split("/") if part]
+        if (
+            len(admin_parts) == 5
+            and admin_parts[:3] == ["api", "admin", "users"]
+            and admin_parts[4] == "password"
+        ):
+            if self._require_admin() is None:
+                self._send_json(
+                    {"ok": False, "error": "仅管理员可管理用户"},
+                    HTTPStatus.FORBIDDEN,
+                )
+                return
+            try:
+                payload = self._read_json_object()
+                password = str(payload.get("password") or "")
+                if len(password) < _auth.MIN_PASSWORD_LENGTH:
+                    raise ValueError(
+                        f"密码长度必须不少于 {_auth.MIN_PASSWORD_LENGTH} 位"
+                    )
+                if not _auth.set_user_password(admin_parts[3], password, USERS_PATH):
+                    raise ValueError("账号不存在")
+                self._send_json({"ok": True})
+            except ValueError as error:
+                self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
+            return
         if path == "/api/model-checkpoints":
             try:
                 filename = unquote(str(self.headers.get("X-Checkpoint-Filename") or ""))
@@ -4190,6 +4378,12 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                     {"ok": False, "error": str(error)},
                     HTTPStatus.BAD_REQUEST,
                 )
+            return
+        if self._current_username() is None:
+            self._send_json(
+                {"ok": False, "error": "未登录或会话已过期"},
+                HTTPStatus.UNAUTHORIZED,
+            )
             return
         if path == "/api/analysis/replay-decision":
             try:
@@ -4310,13 +4504,19 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
         if path == "/api/run-batch":
             try:
                 payload = self._read_json_object()
+                device_id = str(payload.get("deviceId") or "")
+                strategy = str(payload.get("strategy") or "heuristic")
+                if self._deny_device(device_id):
+                    raise ValueError("设备不在当前账号权限内")
+                if self._deny_strategy(strategy):
+                    raise ValueError(f"算法 {strategy} 不在当前账号权限内")
                 options = payload.get("options")
                 if not isinstance(options, Mapping):
                     options = {}
                 result = start_workspace_test_batch(
-                    str(payload.get("deviceId") or ""),
+                    device_id,
                     str(payload.get("group") or ""),
-                    str(payload.get("strategy") or "heuristic"),
+                    strategy,
                     options,
                     skip_validation=bool(payload.get("skipValidation")),
                     skip_baseline=bool(payload.get("skipBaseline")),
@@ -4326,6 +4526,12 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
             return
         if path == "/api/workspaces/devices":
+            if self._require_admin() is None:
+                self._send_json(
+                    {"ok": False, "error": "仅管理员可导入设备"},
+                    HTTPStatus.FORBIDDEN,
+                )
+                return
             try:
                 payload = self._read_json_object()
                 device, created = import_workspace_device(
@@ -4341,6 +4547,11 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             return
         workspace_parts = [part for part in path.split("/") if part]
         if len(workspace_parts) == 4 and workspace_parts[:2] == ["api", "workspaces"] and workspace_parts[3] == "groups":
+            if self._deny_device(workspace_parts[2]):
+                self._send_json(
+                    {"ok": False, "error": "设备不存在"}, HTTPStatus.NOT_FOUND
+                )
+                return
             try:
                 payload = self._read_json_object()
                 groups = create_workspace_test_group(workspace_parts[2], str(payload.get("name") or ""))
@@ -4349,6 +4560,11 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
             return
         if len(workspace_parts) == 4 and workspace_parts[:2] == ["api", "workspaces"] and workspace_parts[3] == "tests":
+            if self._deny_device(workspace_parts[2]):
+                self._send_json(
+                    {"ok": False, "error": "设备不存在"}, HTTPStatus.NOT_FOUND
+                )
+                return
             try:
                 payload = self._read_json_object()
                 test_case = create_workspace_test(workspace_parts[2], payload)
@@ -4372,6 +4588,11 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                 raise ValueError("请求体必须是 JSON 对象")
             workspace_device_id = str(payload.get("workspaceDeviceId") or "")
             workspace_test_id = str(payload.get("workspaceTestId") or "")
+            strategy = str(payload.get("strategy") or "heuristic")
+            if workspace_device_id and self._deny_device(workspace_device_id):
+                raise ValueError("设备不在当前账号权限内")
+            if self._deny_strategy(strategy):
+                raise ValueError(f"算法 {strategy} 不在当前账号权限内")
             if workspace_device_id and workspace_test_id:
                 device = get_workspace_device(workspace_device_id)
                 test_case = next((
@@ -4458,9 +4679,70 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
 
     def do_PUT(self) -> None:
         """保存测试集、机器手槽位或重命名设备下的测试组别。"""
+        if self._current_username() is None:
+            self._send_json(
+                {"ok": False, "error": "未登录或会话已过期"},
+                HTTPStatus.UNAUTHORIZED,
+            )
+            return
         path = unquote(urlparse(self.path).path)
         parts = [part for part in path.split("/") if part]
+        if (
+            len(parts) == 4
+            and parts[:3] == ["api", "admin", "users"]
+            and parts[3] != "password"
+        ):
+            if self._require_admin() is None:
+                self._send_json(
+                    {"ok": False, "error": "仅管理员可管理用户"},
+                    HTTPStatus.FORBIDDEN,
+                )
+                return
+            try:
+                payload = self._read_json_object()
+                role = str(payload.get("role") or "")
+                allowed_algorithms = payload.get("allowedAlgorithms")
+                allowed_devices = payload.get("allowedDevices")
+                if role not in {_auth.ROLE_ADMIN, _auth.ROLE_USER}:
+                    raise ValueError(f"未知角色：{role}")
+                if not isinstance(allowed_algorithms, list) or not isinstance(
+                    allowed_devices, list
+                ):
+                    raise ValueError("allowedAlgorithms 与 allowedDevices 必须是数组")
+                target_name = parts[3]
+                if role == _auth.ROLE_USER:
+                    infos = _auth.list_user_infos(USERS_PATH)
+                    target_is_admin = any(
+                        item["username"] == target_name
+                        and item["role"] == _auth.ROLE_ADMIN
+                        for item in infos
+                    )
+                    remaining_admins = [
+                        item for item in infos
+                        if item["username"] != target_name
+                        and item["role"] == _auth.ROLE_ADMIN
+                    ]
+                    if target_is_admin and not remaining_admins:
+                        raise ValueError("至少需要保留一名管理员")
+                updated = _auth.update_user(
+                    target_name,
+                    USERS_PATH,
+                    role=role,
+                    allowed_algorithms=[str(item) for item in allowed_algorithms],
+                    allowed_devices=[str(item) for item in allowed_devices],
+                )
+                if not updated:
+                    raise ValueError("账号不存在")
+                self._send_json({"ok": True})
+            except (ValueError, TypeError) as error:
+                self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
+            return
         if len(parts) == 4 and parts[:2] == ["api", "workspaces"] and parts[3] == "robot-slots":
+            if self._deny_device(parts[2]):
+                self._send_json(
+                    {"ok": False, "error": "设备不存在"}, HTTPStatus.NOT_FOUND
+                )
+                return
             try:
                 payload = self._read_json_object()
                 robot_slots = update_workspace_robot_slots(
@@ -4471,6 +4753,11 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
             return
         if len(parts) == 4 and parts[:2] == ["api", "workspaces"] and parts[3] == "groups":
+            if self._deny_device(parts[2]):
+                self._send_json(
+                    {"ok": False, "error": "设备不存在"}, HTTPStatus.NOT_FOUND
+                )
+                return
             try:
                 payload = self._read_json_object()
                 result = rename_workspace_test_group(
@@ -4483,6 +4770,11 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
         if len(parts) != 5 or parts[:2] != ["api", "workspaces"] or parts[3] != "tests":
             self._send_json({"ok": False, "error": "Not found"}, HTTPStatus.NOT_FOUND)
             return
+        if self._deny_device(parts[2]):
+            self._send_json(
+                {"ok": False, "error": "设备不存在"}, HTTPStatus.NOT_FOUND
+            )
+            return
         try:
             payload = self._read_json_object()
             test_case = update_workspace_test(parts[2], parts[4], payload)
@@ -4492,8 +4784,64 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         """删除导出文件、设备下指定测试集或测试组，并返回剩余数据。"""
+        if self._current_username() is None:
+            self._send_json(
+                {"ok": False, "error": "未登录或会话已过期"},
+                HTTPStatus.UNAUTHORIZED,
+            )
+            return
         path = unquote(urlparse(self.path).path)
+        admin_parts = [part for part in path.split("/") if part]
+        if (
+            len(admin_parts) == 4
+            and admin_parts[:3] == ["api", "admin", "users"]
+        ):
+            if self._require_admin() is None:
+                self._send_json(
+                    {"ok": False, "error": "仅管理员可管理用户"},
+                    HTTPStatus.FORBIDDEN,
+                )
+                return
+            username = admin_parts[3]
+            if username == self._current_username():
+                self._send_json(
+                    {"ok": False, "error": "不能删除当前登录的账号"},
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            infos = _auth.list_user_infos(USERS_PATH)
+            target_is_admin = any(
+                item["username"] == username and item["role"] == _auth.ROLE_ADMIN
+                for item in infos
+            )
+            if target_is_admin:
+                remaining_admins = [
+                    item for item in infos
+                    if item["username"] != username
+                    and item["role"] == _auth.ROLE_ADMIN
+                ]
+                if not remaining_admins:
+                    self._send_json(
+                        {"ok": False, "error": "至少需要保留一名管理员"},
+                        HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+            if not _auth.remove_user(username, USERS_PATH):
+                self._send_json(
+                    {"ok": False, "error": "账号不存在"}, HTTPStatus.NOT_FOUND
+                )
+                return
+            # 删除账号后立即销毁其全部会话，防止已登录会话继续使用系统。
+            _auth.destroy_user_sessions(username)
+            self._send_json({"ok": True})
+            return
         if path == "/api/exports":
+            if self._require_admin() is None:
+                self._send_json(
+                    {"ok": False, "error": "仅管理员可清理导出数据"},
+                    HTTPStatus.FORBIDDEN,
+                )
+                return
             try:
                 deleted_counts = clear_exported_artifacts()
                 self._send_json({"ok": True, "deleted": deleted_counts})
@@ -4509,6 +4857,12 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             return
         parts = [part for part in path.split("/") if part]
         if len(parts) == 4 and parts[:2] == ["api", "workspaces"] and parts[2] == "devices":
+            if self._require_admin() is None:
+                self._send_json(
+                    {"ok": False, "error": "仅管理员可删除设备"},
+                    HTTPStatus.FORBIDDEN,
+                )
+                return
             try:
                 deleted = delete_workspace_device(parts[3])
                 self._send_json({"ok": True, "deleted": deleted})
@@ -4516,6 +4870,11 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
             return
         if len(parts) == 4 and parts[:2] == ["api", "workspaces"] and parts[3] == "groups":
+            if self._deny_device(parts[2]):
+                self._send_json(
+                    {"ok": False, "error": "设备不存在"}, HTTPStatus.NOT_FOUND
+                )
+                return
             try:
                 payload = self._read_json_object()
                 result = delete_workspace_test_group(parts[2], str(payload.get("name") or ""))
@@ -4526,12 +4885,121 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
         if len(parts) != 5 or parts[:2] != ["api", "workspaces"] or parts[3] != "tests":
             self._send_json({"ok": False, "error": "Not found"}, HTTPStatus.NOT_FOUND)
             return
+        if self._deny_device(parts[2]):
+            self._send_json(
+                {"ok": False, "error": "设备不存在"}, HTTPStatus.NOT_FOUND
+            )
+            return
         try:
             delete_workspace_test(parts[2], parts[4])
             device = get_workspace_device(parts[2])
             self._send_json({"ok": True, "tests": device["tests"]})
         except Exception as error:  # noqa: BLE001
             self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
+
+    def _request_token(self) -> Optional[str]:
+        """从 Cookie 请求头解析会话令牌，没有则返回 None。"""
+        cookie_header = self.headers.get("Cookie") or ""
+        for part in cookie_header.split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == _auth.SESSION_COOKIE_NAME:
+                return value
+        return None
+
+    def _current_username(self) -> Optional[str]:
+        """返回当前请求会话对应的用户名；未登录或会话过期返回 None。
+
+        免登录模式下直接返回本机管理员身份，页面与接口全量可用。
+        """
+        if not AUTH_REQUIRED:
+            return "local"
+        token = self._request_token()
+        if not token:
+            return None
+        return _auth.get_session_username(token)
+
+    def _require_admin(self) -> Optional[str]:
+        """返回当前用户名（须为管理员）；未登录或非管理员返回 None。
+
+        免登录模式下返回本机管理员身份，管理员操作全部放行。
+        """
+        if not AUTH_REQUIRED:
+            return "local"
+        username = self._current_username()
+        if username is None:
+            return None
+        return username if _auth.is_admin(username, USERS_PATH) else None
+
+    def _deny_device(self, device_id: str) -> bool:
+        """设备不在当前用户权限内时返回 True，调用方应返回 404。
+
+        免登录模式下放行全部设备。
+        """
+        if not AUTH_REQUIRED:
+            return False
+        return not _auth.user_allows_device(
+            str(self._current_username() or ""), str(device_id), USERS_PATH
+        )
+
+    def _deny_strategy(self, strategy: str) -> bool:
+        """算法不在当前用户权限内时返回 True，调用方应返回 403。
+
+        免登录模式下放行全部算法。
+        """
+        if not AUTH_REQUIRED:
+            return False
+        return not _auth.user_allows_algorithm(
+            str(self._current_username() or ""), str(strategy), USERS_PATH
+        )
+
+    def _redirect(self, location: str) -> None:
+        """发送 302 跳转，用于未登录时转向登录页。"""
+        self.send_response(HTTPStatus.FOUND)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _handle_login(self) -> None:
+        """校验账号密码，成功则种下会话 Cookie。"""
+        try:
+            payload = self._read_json_object()
+        except (ValueError, json.JSONDecodeError) as error:
+            self._send_json(
+                {"ok": False, "error": str(error)},
+                HTTPStatus.BAD_REQUEST,
+            )
+            return
+        username = str(payload.get("username") or "").strip()
+        password = str(payload.get("password") or "")
+        if not username or not password:
+            self._send_json(
+                {"ok": False, "error": "请输入用户名和密码"},
+                HTTPStatus.BAD_REQUEST,
+            )
+            return
+        if not _auth.verify_credentials(username, password, USERS_PATH):
+            time.sleep(LOGIN_FAILURE_DELAY)
+            self._send_json(
+                {"ok": False, "error": "用户名或密码错误"},
+                HTTPStatus.UNAUTHORIZED,
+            )
+            return
+        token = _auth.create_session(username)
+        content = json.dumps(
+            {"ok": True, "username": username}, ensure_ascii=False
+        ).encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(content)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Set-Cookie", _auth.session_cookie(token))
+        self.end_headers()
+        self.wfile.write(content)
+
+    def _handle_logout(self) -> None:
+        """删除当前会话令牌并返回成功。"""
+        _auth.destroy_session(self._request_token())
+        self._send_json({"ok": True})
 
     def log_message(self, format_string: str, *args: Any) -> None:
         """保留简洁的本地访问日志。"""
@@ -4617,16 +5085,69 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
         self.wfile.write(content)
 
 
+def _run_account_command(args: argparse.Namespace) -> None:
+    """执行账号管理命令后退出（不启动服务）。"""
+    if args.add_user:
+        username = args.add_user
+        password = getpass.getpass(
+            f"为账号 {username} 设置密码（至少 {_auth.MIN_PASSWORD_LENGTH} 位）："
+        )
+        if len(password) < _auth.MIN_PASSWORD_LENGTH:
+            print(f"密码长度必须不少于 {_auth.MIN_PASSWORD_LENGTH} 位")
+            return
+        if password != getpass.getpass("再次输入密码确认："):
+            print("两次输入不一致，未保存")
+            return
+        created = _auth.add_user(username, password, USERS_PATH)
+        print(f"账号 {username} 已{'新建' if created else '重置密码'}")
+        return
+    if args.remove_user:
+        removed = _auth.remove_user(args.remove_user, USERS_PATH)
+        if removed:
+            print(f"账号 {args.remove_user} 已删除")
+        else:
+            print(f"账号 {args.remove_user} 不存在")
+        return
+    if args.list_users:
+        users = _auth.list_users(USERS_PATH)
+        print("当前账号：" + ("、".join(users) if users else "无"))
+
+
 def main() -> None:
     """启动仅监听本机的多线程调度控制台服务。"""
     parser = argparse.ArgumentParser(description="CT 调度控制台本地服务")
     parser.add_argument("--host", default=DEFAULT_HOST, help="监听地址，默认仅本机")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="监听端口")
     parser.add_argument("--open", action="store_true", help="启动后打开默认浏览器")
+    parser.add_argument(
+        "--add-user", metavar="USERNAME", help="新建账号或重置密码后退出（不启动服务）"
+    )
+    parser.add_argument(
+        "--remove-user", metavar="USERNAME", help="删除账号后退出（不启动服务）"
+    )
+    parser.add_argument(
+        "--list-users", action="store_true", help="列出全部账号后退出（不启动服务）"
+    )
     args = parser.parse_args()
+    if args.add_user or args.remove_user or args.list_users:
+        _run_account_command(args)
+        return
+    default_admin_created = _auth.ensure_default_admin(USERS_PATH)
+    if default_admin_created:
+        print(
+            f"已创建默认账号 {_auth.DEFAULT_ADMIN_USERNAME}/"
+            f"{_auth.DEFAULT_ADMIN_PASSWORD}，上线后请立即修改密码"
+        )
     server = ThreadingHTTPServer((args.host, args.port), ConfigEditorHandler)
     url = f"http://{args.host}:{args.port}/"
     print(f"CT 调度控制台：{url}")
+    if AUTH_REQUIRED:
+        print("已启用强制登录（CT_REQUIRE_AUTH=1），页面与接口需要登录。")
+    else:
+        print(
+            "当前为免登录模式：打开即用，无需登录；"
+            "对外部署请设置环境变量 CT_REQUIRE_AUTH=1 开启登录保护。"
+        )
     # 预热工作区：旧版单文件（data/workspaces.json）存在时自动迁移为拆分目录。
     legacy_store = DATA_DIR / "workspaces.json"
     legacy_present = legacy_store.is_file()
