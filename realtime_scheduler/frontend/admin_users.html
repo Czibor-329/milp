@@ -143,8 +143,26 @@
       }
 
       function algorithmLabel(strategy) {
+        // 由策略字符串查算法显示名，用于用户列表中的标签。
         var algorithm = state.algorithms.find(function (item) { return item.strategy === strategy; });
         return algorithm ? (algorithm.name || algorithm.strategy) : strategy;
+      }
+
+      function strategyValue(option) {
+        // 算法权限以 strategy 为准（后端按 strategy 过滤），与 id 区分。
+        return option.strategy;
+      }
+
+      function algorithmCheckLabel(option) {
+        return option.name || option.strategy;
+      }
+
+      function deviceValue(option) {
+        return String(option.id);
+      }
+
+      function deviceCheckLabel(option) {
+        return option.name;
       }
 
       function deviceLabel(deviceId) {
@@ -152,15 +170,16 @@
         return device ? device.name : deviceId;
       }
 
-      function renderChecks(containerId, options, selected, labelOf) {
+      function renderChecks(containerId, options, selected, valueOf, labelOf) {
         var container = $(containerId);
         container.innerHTML = "";
         options.forEach(function (option) {
+          var value = String(valueOf(option));
           var label = document.createElement("label");
           var input = document.createElement("input");
           input.type = "checkbox";
-          input.value = String(option.id != null ? option.id : option.strategy);
-          input.checked = selected.indexOf(String(option.id != null ? option.id : option.strategy)) >= 0;
+          input.value = value;
+          input.checked = selected.indexOf(value) >= 0;
           label.appendChild(input);
           label.appendChild(document.createTextNode(" " + labelOf(option)));
           container.appendChild(label);
@@ -207,8 +226,8 @@
         $("password").value = "";
         $("password").placeholder = "留空则不修改密码";
         $("role").value = user.role;
-        renderChecks("algorithmChecks", state.algorithms, user.allowedAlgorithms || [], algorithmLabel);
-        renderChecks("deviceChecks", state.devices, user.allowedDevices || [], deviceLabel);
+        renderChecks("algorithmChecks", state.algorithms, user.allowedAlgorithms || [], strategyValue, algorithmCheckLabel);
+        renderChecks("deviceChecks", state.devices, user.allowedDevices || [], deviceValue, deviceCheckLabel);
         $("cancelEditButton").hidden = false;
         $("formHint").textContent = "普通用户只能看到并运行勾选的内容；管理员拥有全部权限。";
       }
@@ -221,8 +240,8 @@
         $("password").value = "";
         $("password").placeholder = "至少 8 位";
         $("role").value = "user";
-        renderChecks("algorithmChecks", state.algorithms, [], algorithmLabel);
-        renderChecks("deviceChecks", state.devices, [], deviceLabel);
+        renderChecks("algorithmChecks", state.algorithms, [], strategyValue, algorithmCheckLabel);
+        renderChecks("deviceChecks", state.devices, [], deviceValue, deviceCheckLabel);
         $("cancelEditButton").hidden = true;
         $("formHint").textContent = "新建用户密码至少 8 位；权限为空的普通用户看不到任何算法与设备。";
       }
