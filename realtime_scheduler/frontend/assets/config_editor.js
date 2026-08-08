@@ -2313,8 +2313,10 @@ var VisualizationWorkspace = class {
     this.render(buildWorkspaceSnapshot([], this.device, 0));
   }
   /** 用已提交根动作产生的累计 MoveList 推进实时拓扑。 */
-  updateLiveMoves(rawMoves, followLatest = true) {
+  updateLiveMoves(rawMoves, followLatest = true, animateToLatest = false) {
     if (!this.liveSolving || !rawMoves.length) return;
+    const previousTime = this.time;
+    this.pause();
     this.moves = normalizeMovePayload({ MoveList: rawMoves });
     this.decisionBoundaries = decisionBoundaryTimes(this.moves);
     this.primitiveDecisionBoundaries = primitiveDecisionBoundaryTimes(this.moves);
@@ -2325,6 +2327,13 @@ var VisualizationWorkspace = class {
     );
     this.elements.range.max = String(latestSnapshot.endTime);
     this.elements.range.step = latestSnapshot.endTime > 1e4 ? "1" : "0.1";
+    if (animateToLatest && followLatest && latestSnapshot.endTime > previousTime + PERFORMANCE_DISPLAY_TOLERANCE) {
+      this.time = Math.max(0, Math.min(previousTime, latestSnapshot.endTime));
+      this.elements.range.value = String(this.time);
+      this.render(buildWorkspaceSnapshot(this.moves, this.device, this.time));
+      this.play();
+      return;
+    }
     this.time = followLatest ? latestSnapshot.endTime : Math.min(this.time, latestSnapshot.endTime);
     this.render(buildWorkspaceSnapshot(this.moves, this.device, this.time));
   }
@@ -3836,8 +3845,8 @@ function searchTelemetryStopReason(reason) {
 function renderSearchActionCandidates(actions, decisionIndex, recommendedKey, selectedKey, maximumVisits, interactive) {
   return `<section class="decision-candidate-section search-action-section" aria-labelledby="searchCandidatesTitle">
     <header>
-      <strong id="searchCandidatesTitle">\u6839\u8282\u70B9\u5168\u90E8\u5408\u6CD5\u52A8\u4F5C <small>\u51B3\u7B56 #${decisionIndex}</small></strong>
-      <span>P \u5148\u9A8C \xB7 N \u8BBF\u95EE \xB7 Q \u4EF7\u503C</span>
+      <strong id="searchCandidatesTitle">\u51B3\u7B56 #${decisionIndex}</strong>
+      <span>${actions.length} \u4E2A\u53EF\u9009\u52A8\u4F5C</span>
     </header>
     <ol>
       ${actions.map((action, index) => {
@@ -3845,21 +3854,19 @@ function renderSearchActionCandidates(actions, decisionIndex, recommendedKey, se
     const visitPercent = Math.max(0, Math.min(100, visits / maximumVisits * 100));
     const isRecommended = String(action?.actionKey || "") === recommendedKey;
     const isSelected = String(action?.actionKey || "") === selectedKey;
-    const materials = Array.isArray(action?.materialIds) && action.materialIds.length ? `\u7269\u6599 ${action.materialIds.join(", ")}` : String(action?.kind || "action");
-    const route = [action?.sourceStation, action?.destinationStation].filter(Boolean).join(" \u2192 ");
     const tags = `${isRecommended ? '<span class="decision-tag is-recommendation">\u63A8\u8350</span>' : ""}${isSelected && !isRecommended ? '<span class="decision-tag is-user-chosen">\u4F60\u7684\u9009\u62E9</span>' : ""}`;
-    return `<li class="decision-candidate search-action-candidate ${isSelected ? "is-selected" : ""} ${interactive ? "is-interactive" : ""}" data-action-key="${escapeHtml3(String(action?.actionKey || ""))}" ${interactive ? 'role="button" tabindex="0"' : ""}>
+    const description = String(action?.description || action?.actionKey || "\u52A8\u4F5C");
+    return `<li class="decision-candidate search-action-candidate ${isSelected ? "is-selected" : ""} ${interactive ? "is-interactive" : ""}" data-action-key="${escapeHtml3(String(action?.actionKey || ""))}" ${interactive ? `role="button" tabindex="0" aria-label="\u6267\u884C ${escapeHtml3(description)}"` : ""}>
           <div class="decision-candidate-rank" aria-label="\u7B2C ${index + 1} \u540D">${index + 1}</div>
           <div class="decision-candidate-main">
-            <div class="decision-candidate-title"><strong title="${escapeHtml3(action?.description || action?.actionKey || "\u52A8\u4F5C")}">${escapeHtml3(action?.description || action?.actionKey || "\u52A8\u4F5C")}</strong>${tags}</div>
-            <small>${escapeHtml3([materials, route].filter(Boolean).join(" \xB7 "))}</small>
-            <div class="decision-candidate-detail search-pnq">
-              <span title="\u7B56\u7565\u5148\u9A8C P"><small>P</small><strong>${formatSearchTelemetryNumber(action?.prior, 4)}</strong></span>
-              <span title="\u8BBF\u95EE\u6B21\u6570 N"><small>N</small><strong>${visits}</strong><i>${visitPercent.toFixed(0)}%</i></span>
-              <span title="\u5E73\u5747\u4EF7\u503C Q"><small>Q</small><strong>${formatSearchTelemetryNumber(action?.value, 4)}</strong></span>
+            <div class="decision-candidate-title"><strong title="${escapeHtml3(description)}">${escapeHtml3(description)}</strong>${tags}</div>
+            <div class="decision-candidate-detail search-pnq" aria-label="\u641C\u7D22\u8BC4\u4F30\u6307\u6807">
+              <span title="\u7B56\u7565\u5148\u9A8C P"><small>P \u5148\u9A8C</small><strong>${formatSearchTelemetryNumber(action?.prior, 4)}</strong></span>
+              <span title="\u8BBF\u95EE\u6B21\u6570 N"><small>N \u8BBF\u95EE</small><strong>${visits}</strong></span>
+              <span title="\u5E73\u5747\u4EF7\u503C Q"><small>Q \u4EF7\u503C</small><strong>${formatSearchTelemetryNumber(action?.value, 4)}</strong></span>
             </div>
           </div>
-          <strong class="decision-candidate-preference" aria-label="\u8BBF\u95EE\u5360\u6BD4 ${visitPercent.toFixed(0)}%">${visitPercent.toFixed(0)}%</strong>
+          <div class="decision-candidate-preference" aria-label="\u63A8\u8350\u6BD4\u4F8B ${visitPercent.toFixed(0)}%"><small>\u63A8\u8350\u6BD4\u4F8B</small><strong>${visitPercent.toFixed(0)}%</strong></div>
         </li>`;
   }).join("")}
     </ol>
@@ -3907,15 +3914,20 @@ function updateSearchTelemetryControls(snapshot) {
 }
 function syncSearchTelemetryPlayback(snapshot, selectedDecision) {
   const committedMoves = Array.isArray(snapshot?.committedMoves) ? snapshot.committedMoves : [];
-  if (committedMoves.length && committedMoves.length !== lastSearchTelemetryMoveCount) {
+  const movesChanged = Boolean(
+    committedMoves.length && committedMoves.length !== lastSearchTelemetryMoveCount
+  );
+  const animateLatestStep = movesChanged && playbackMode === "step" && followLatestSearchTelemetry;
+  if (movesChanged) {
     visualizationWorkspace.updateLiveMoves(
       committedMoves,
-      followLatestSearchTelemetry
+      followLatestSearchTelemetry,
+      animateLatestStep
     );
     lastSearchTelemetryMoveCount = committedMoves.length;
   }
   const replayTime = Number(selectedDecision?.replayTime);
-  if (Number.isFinite(replayTime) && replayTime >= 0) {
+  if (!animateLatestStep && Number.isFinite(replayTime) && replayTime >= 0) {
     visualizationWorkspace.seekTo(replayTime);
   }
 }
@@ -3955,10 +3967,13 @@ async function flushPendingModeSync() {
   await setPlaybackMode(mode);
 }
 function renderPlaybackModeSwitch() {
+  const stepMode = playbackMode === "step";
   document.getElementById("playbackModeReplayButton").classList.toggle("is-active", playbackMode === "replay");
-  document.getElementById("playbackModeStepButton").classList.toggle("is-active", playbackMode === "step");
+  document.getElementById("playbackModeStepButton").classList.toggle("is-active", stepMode);
   document.getElementById("playbackModeReplayButton").setAttribute("aria-pressed", String(playbackMode === "replay"));
-  document.getElementById("playbackModeStepButton").setAttribute("aria-pressed", String(playbackMode === "step"));
+  document.getElementById("playbackModeStepButton").setAttribute("aria-pressed", String(stepMode));
+  document.getElementById("visualRecommendationModelControl").hidden = stepMode;
+  document.getElementById("visualPauseOnDecisionChangeButton").hidden = stepMode;
 }
 async function setPlaybackMode(mode) {
   if (mode !== "step" && mode !== "replay") return;

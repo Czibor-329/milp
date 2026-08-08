@@ -3036,8 +3036,11 @@ export class VisualizationWorkspace {
   updateLiveMoves(
     rawMoves: unknown[],
     followLatest = true,
+    animateToLatest = false,
   ): void {
     if (!this.liveSolving || !rawMoves.length) return;
+    const previousTime = this.time;
+    this.pause();
     this.moves = normalizeMovePayload({ MoveList: rawMoves });
     this.decisionBoundaries = decisionBoundaryTimes(this.moves);
     this.primitiveDecisionBoundaries = primitiveDecisionBoundaryTimes(this.moves);
@@ -3048,6 +3051,17 @@ export class VisualizationWorkspace {
     );
     this.elements.range.max = String(latestSnapshot.endTime);
     this.elements.range.step = latestSnapshot.endTime > 10000 ? "1" : "0.1";
+    if (
+      animateToLatest
+      && followLatest
+      && latestSnapshot.endTime > previousTime + PERFORMANCE_DISPLAY_TOLERANCE
+    ) {
+      this.time = Math.max(0, Math.min(previousTime, latestSnapshot.endTime));
+      this.elements.range.value = String(this.time);
+      this.render(buildWorkspaceSnapshot(this.moves, this.device, this.time));
+      this.play();
+      return;
+    }
     this.time = followLatest
       ? latestSnapshot.endTime
       : Math.min(this.time, latestSnapshot.endTime);

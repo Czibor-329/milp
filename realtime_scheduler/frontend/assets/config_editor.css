@@ -1221,14 +1221,21 @@
     .search-action-candidate.is-interactive:hover { background: var(--brand-soft); }
     .search-action-candidate.is-interactive:focus-visible { outline: 3px solid rgba(36,87,214,.24); outline-offset: -2px; }
     .search-action-candidate.is-selected { background: #eaf4ff; }
-    .search-action-candidate.is-selected .decision-candidate-preference { color: #2878d0; }
     body.theme-dark .search-action-candidate.is-selected { background: rgba(40,120,208,.16); }
+    .petri-control-panel .search-action-section { padding: 0; }
+    .petri-control-panel .search-action-candidate { min-height: 94px; grid-template-columns: 24px minmax(0, 1fr) 62px; align-items: start; gap: 10px; padding: 11px 12px; }
+    .petri-control-panel .search-action-candidate .decision-candidate-rank { padding-top: 3px; }
+    .petri-control-panel .search-action-candidate .decision-candidate-title { justify-content: space-between; gap: 8px; }
+    .petri-control-panel .search-action-candidate .decision-candidate-title > strong { font-size: 13px; line-height: 1.35; }
+    .petri-control-panel .search-action-candidate .decision-candidate-preference { display: grid; justify-items: end; gap: 4px; padding-top: 1px; }
+    .petri-control-panel .search-action-candidate .decision-candidate-preference small { color: var(--muted); font-size: 9px; font-weight: 700; white-space: nowrap; }
+    .petri-control-panel .search-action-candidate .decision-candidate-preference strong { color: #2878d0; font-size: 15px; font-variant-numeric: tabular-nums; }
     .decision-tag.is-user-chosen { border-color: #2e8b57; color: #2e8b57; background: rgba(46,139,87,.08); }
     body.theme-dark .decision-tag.is-user-chosen { border-color: #57b581; color: #7fd3a4; background: rgba(46,139,87,.14); }
-    .search-pnq { display: flex; flex-wrap: wrap; justify-content: flex-start; gap: 4px 14px; }
-    .search-pnq span { display: inline-flex; min-width: 0; align-items: baseline; gap: 4px; }
-    .search-pnq small { color: var(--muted); font: 800 10px/1 "Fira Code", Consolas, monospace; }
-    .search-pnq strong { color: var(--ink); font: 700 12px/1 "Fira Code", Consolas, monospace; font-variant-numeric: tabular-nums; }
+    .search-pnq { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin-top: 9px; }
+    .search-pnq span { display: grid; min-width: 0; gap: 3px; padding: 6px 7px; border: 1px solid var(--line); border-radius: 5px; background: var(--soft); }
+    .search-pnq small { color: var(--muted); font: 700 9px/1 "Fira Sans", "Microsoft YaHei", sans-serif; white-space: nowrap; }
+    .search-pnq strong { overflow: hidden; color: var(--ink); font: 700 11px/1.2 "Fira Code", Consolas, monospace; font-variant-numeric: tabular-nums; text-overflow: ellipsis; }
     .search-pnq i { color: var(--muted); font-size: 10px; font-style: normal; font-variant-numeric: tabular-nums; }
 
     .search-variation-panel { display: block; margin-top: 2px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }

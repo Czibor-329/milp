@@ -828,7 +828,7 @@ function searchTelemetryStopReason(reason) {
   }[String(reason || "")] || "搜索中";
 }
 
-/** 把根候选动作渲染成右侧面板的候选卡片，只保留 P/N/Q 三列统计。 */
+/** 把 Alpha 的原子合法动作渲染成紧凑、整行可选的候选卡片。 */
 function renderSearchActionCandidates(
   actions,
   decisionIndex,
@@ -839,8 +839,8 @@ function renderSearchActionCandidates(
 ) {
   return `<section class="decision-candidate-section search-action-section" aria-labelledby="searchCandidatesTitle">
     <header>
-      <strong id="searchCandidatesTitle">根节点全部合法动作 <small>决策 #${decisionIndex}</small></strong>
-      <span>P 先验 · N 访问 · Q 价值</span>
+      <strong id="searchCandidatesTitle">决策 #${decisionIndex}</strong>
+      <span>${actions.length} 个可选动作</span>
     </header>
     <ol>
       ${actions.map((action, index) => {
@@ -848,23 +848,19 @@ function renderSearchActionCandidates(
         const visitPercent = Math.max(0, Math.min(100, visits / maximumVisits * 100));
         const isRecommended = String(action?.actionKey || "") === recommendedKey;
         const isSelected = String(action?.actionKey || "") === selectedKey;
-        const materials = Array.isArray(action?.materialIds) && action.materialIds.length
-          ? `物料 ${action.materialIds.join(", ")}`
-          : String(action?.kind || "action");
-        const route = [action?.sourceStation, action?.destinationStation].filter(Boolean).join(" → ");
         const tags = `${isRecommended ? '<span class="decision-tag is-recommendation">推荐</span>' : ""}${isSelected && !isRecommended ? '<span class="decision-tag is-user-chosen">你的选择</span>' : ""}`;
-        return `<li class="decision-candidate search-action-candidate ${isSelected ? "is-selected" : ""} ${interactive ? "is-interactive" : ""}" data-action-key="${escapeHtml(String(action?.actionKey || ""))}" ${interactive ? 'role="button" tabindex="0"' : ""}>
+        const description = String(action?.description || action?.actionKey || "动作");
+        return `<li class="decision-candidate search-action-candidate ${isSelected ? "is-selected" : ""} ${interactive ? "is-interactive" : ""}" data-action-key="${escapeHtml(String(action?.actionKey || ""))}" ${interactive ? `role="button" tabindex="0" aria-label="执行 ${escapeHtml(description)}"` : ""}>
           <div class="decision-candidate-rank" aria-label="第 ${index + 1} 名">${index + 1}</div>
           <div class="decision-candidate-main">
-            <div class="decision-candidate-title"><strong title="${escapeHtml(action?.description || action?.actionKey || "动作")}">${escapeHtml(action?.description || action?.actionKey || "动作")}</strong>${tags}</div>
-            <small>${escapeHtml([materials, route].filter(Boolean).join(" · "))}</small>
-            <div class="decision-candidate-detail search-pnq">
-              <span title="策略先验 P"><small>P</small><strong>${formatSearchTelemetryNumber(action?.prior, 4)}</strong></span>
-              <span title="访问次数 N"><small>N</small><strong>${visits}</strong><i>${visitPercent.toFixed(0)}%</i></span>
-              <span title="平均价值 Q"><small>Q</small><strong>${formatSearchTelemetryNumber(action?.value, 4)}</strong></span>
+            <div class="decision-candidate-title"><strong title="${escapeHtml(description)}">${escapeHtml(description)}</strong>${tags}</div>
+            <div class="decision-candidate-detail search-pnq" aria-label="搜索评估指标">
+              <span title="策略先验 P"><small>P 先验</small><strong>${formatSearchTelemetryNumber(action?.prior, 4)}</strong></span>
+              <span title="访问次数 N"><small>N 访问</small><strong>${visits}</strong></span>
+              <span title="平均价值 Q"><small>Q 价值</small><strong>${formatSearchTelemetryNumber(action?.value, 4)}</strong></span>
             </div>
           </div>
-          <strong class="decision-candidate-preference" aria-label="访问占比 ${visitPercent.toFixed(0)}%">${visitPercent.toFixed(0)}%</strong>
+          <div class="decision-candidate-preference" aria-label="推荐比例 ${visitPercent.toFixed(0)}%"><small>推荐比例</small><strong>${visitPercent.toFixed(0)}%</strong></div>
         </li>`;
       }).join("")}
     </ol>
@@ -938,18 +934,25 @@ function syncSearchTelemetryPlayback(snapshot, selectedDecision) {
   const committedMoves = Array.isArray(snapshot?.committedMoves)
     ? snapshot.committedMoves
     : [];
-  if (
+  const movesChanged = Boolean(
     committedMoves.length
     && committedMoves.length !== lastSearchTelemetryMoveCount
-  ) {
+  );
+  const animateLatestStep = (
+    movesChanged
+    && playbackMode === "step"
+    && followLatestSearchTelemetry
+  );
+  if (movesChanged) {
     visualizationWorkspace.updateLiveMoves(
       committedMoves,
       followLatestSearchTelemetry,
+      animateLatestStep,
     );
     lastSearchTelemetryMoveCount = committedMoves.length;
   }
   const replayTime = Number(selectedDecision?.replayTime);
-  if (Number.isFinite(replayTime) && replayTime >= 0) {
+  if (!animateLatestStep && Number.isFinite(replayTime) && replayTime >= 0) {
     visualizationWorkspace.seekTo(replayTime);
   }
 }
@@ -999,10 +1002,13 @@ async function flushPendingModeSync() {
 /** 切换回放/步进模式；运行中会同步后端执行模式。 */
 /** 同步回放/步进模式切换按钮的选中状态（不向后端发命令）。 */
 function renderPlaybackModeSwitch() {
+  const stepMode = playbackMode === "step";
   document.getElementById("playbackModeReplayButton").classList.toggle("is-active", playbackMode === "replay");
-  document.getElementById("playbackModeStepButton").classList.toggle("is-active", playbackMode === "step");
+  document.getElementById("playbackModeStepButton").classList.toggle("is-active", stepMode);
   document.getElementById("playbackModeReplayButton").setAttribute("aria-pressed", String(playbackMode === "replay"));
-  document.getElementById("playbackModeStepButton").setAttribute("aria-pressed", String(playbackMode === "step"));
+  document.getElementById("playbackModeStepButton").setAttribute("aria-pressed", String(stepMode));
+  document.getElementById("visualRecommendationModelControl").hidden = stepMode;
+  document.getElementById("visualPauseOnDecisionChangeButton").hidden = stepMode;
 }
 
 async function setPlaybackMode(mode) {

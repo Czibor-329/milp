@@ -217,13 +217,25 @@ test("合法动作空间面板保持单一候选列表与标准开关视觉契�
     path.join(__dirname, "../realtime_scheduler/frontend/assets/config_editor.css"),
     "utf8",
   );
+  const source = fs.readFileSync(
+    path.join(__dirname, "../realtime_scheduler/frontend/src/config_editor.ts"),
+    "utf8",
+  );
 
   assert.match(html, /<h2 class="petri-panel-title">合法动作空间<\/h2>/);
   assert.match(html, /id="visualPauseOnDecisionChangeButton"[^>]*role="switch"[^>]*aria-checked="false"/);
+  assert.match(html, /id="visualRecommendationModelControl"/);
   assert.match(css, /\.decision-lens-panel[^\n]*border-radius: 6px[^\n]*box-shadow: none/);
   assert.match(css, /\.decision-auto-pause[^\n]*min-height: 44px/);
   assert.match(css, /\.decision-tag\.is-recommendation/);
   assert.match(css, /body\.theme-dark \.decision-tag\.is-recommendation/);
+  assert.doesNotMatch(css, /\.topology-playback\.is-instant-state-transition/);
+  assert.match(source, /visualRecommendationModelControl"\)\.hidden = stepMode/);
+  assert.match(source, /visualPauseOnDecisionChangeButton"\)\.hidden = stepMode/);
+  assert.match(source, /<strong id="searchCandidatesTitle">决策 #\$\{decisionIndex\}<\/strong>/);
+  assert.match(source, /P 先验[\s\S]*N 访问[\s\S]*Q 价值[\s\S]*推荐比例/);
+  assert.match(source, /animateLatestStep/);
+  assert.doesNotMatch(source, /根节点全部合法动作|物料 \$\{action\.materialIds/);
   assert.doesNotMatch(css, /decision-selected-summary|decision-preference-track|decision-auto-pause:hover|decision-candidate:hover/);
 });
 
@@ -607,6 +619,35 @@ test("开启保护后，回放越过完整事务边界时精确暂停在下一�
     assert.equal(root.elements.get("visualCurrentTime").textContent, "3.0");
     assert.equal(autoPause.getAttribute("aria-checked"), "true");
     assert.equal(autoPause.getAttribute("aria-label"), "已到达下一个完整事务决策，回放已暂停");
+  } finally {
+    global.requestAnimationFrame = originalRequestAnimationFrame;
+    global.cancelAnimationFrame = originalCancelAnimationFrame;
+  }
+});
+
+test("Alpha 实时步进从当前状态播放到新提交状态而不是直接跳转", () => {
+  const originalRequestAnimationFrame = global.requestAnimationFrame;
+  const originalCancelAnimationFrame = global.cancelAnimationFrame;
+  let scheduledFrame = null;
+  global.requestAnimationFrame = callback => {
+    scheduledFrame = callback;
+    return 1;
+  };
+  global.cancelAnimationFrame = () => {};
+
+  try {
+    const root = fakeWorkspaceDocument();
+    const workspace = logic.createVisualizationWorkspace(root);
+    workspace.beginLiveSolve({}, "Alpha 实时步进");
+    workspace.updateLiveMoves(moves, true, true);
+
+    assert.match(root.elements.get("visualPlayButton").innerHTML, /暂停/);
+    assert.equal(root.elements.get("visualCurrentTime").textContent, "0.0");
+    assert.equal(typeof scheduledFrame, "function");
+
+    scheduledFrame(performance.now() + 100);
+    const current = Number.parseFloat(root.elements.get("visualCurrentTime").textContent);
+    assert.ok(current > 0 && current < 4, `应处于过渡动画中，实际为 ${current}`);
   } finally {
     global.requestAnimationFrame = originalRequestAnimationFrame;
     global.cancelAnimationFrame = originalCancelAnimationFrame;
