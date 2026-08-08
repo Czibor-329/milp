@@ -76,3 +76,27 @@ export async function requestReplayDecision(input: {
   });
   return result.decision as Record<string, any>;
 }
+
+/** 读取 Schedule-AlphaGo 搜索快照；版本未变化时后端只返回紧凑标记。 */
+export async function requestSearchTelemetry(
+  sinceRevision: number | null = null,
+): Promise<Record<string, any>> {
+  const query = sinceRevision === null
+    ? ""
+    : `?since=${encodeURIComponent(String(sinceRevision))}`;
+  const result = await requestJson(`/api/search-telemetry${query}`, {
+    cache: "no-store",
+  });
+  return result.telemetry as Record<string, any>;
+}
+
+/** 暂停、单步或继续当前 Schedule-AlphaGo 根决策求解。 */
+export async function requestSearchControl(
+  command: "pause" | "step" | "continue",
+): Promise<Record<string, any>> {
+  return requestJson("/api/search-control", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ command }),
+  });
+}

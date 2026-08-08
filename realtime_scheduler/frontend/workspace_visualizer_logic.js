@@ -2045,6 +2045,7 @@ var VisualizationWorkspace = class {
   analysisRequestVersion = 0;
   time = 0;
   playing = false;
+  liveSolving = false;
   playbackSpeed = DEFAULT_PLAYBACK_SPEED;
   performanceWindowMode = "steady";
   animationFrame = 0;
@@ -2140,6 +2141,62 @@ var VisualizationWorkspace = class {
     this.replayDecisionRequestVersion += 1;
     if (this.moves.length) this.render();
   }
+  /** 在完整 MoveList 返回前显示初始拓扑，并进入增量求解状态。 */
+  beginLiveSolve(plan, sourceName = "Schedule-AlphaGo \u5B9E\u65F6\u6C42\u89E3") {
+    this.pause();
+    this.liveSolving = true;
+    this.moves = [];
+    this.decisionTrace = [];
+    this.sourceName = sourceName;
+    this.resultUrl = "";
+    this.analysisResultId = "";
+    this.analysis = null;
+    this.bottleneckSummary = null;
+    this.time = 0;
+    this.setReplayPlan(plan);
+    this.elements.range.min = "0";
+    this.elements.range.max = "0";
+    this.elements.range.value = "0";
+    this.elements.range.disabled = true;
+    this.elements.playButton.disabled = true;
+    this.elements.openGantt.href = "#";
+    this.elements.openGantt.setAttribute("aria-disabled", "true");
+    this.showSingleResult();
+    this.setTopologyVisible(true);
+    this.render(buildWorkspaceSnapshot([], this.device, 0));
+  }
+  /** 用已提交根动作产生的累计 MoveList 推进实时拓扑。 */
+  updateLiveMoves(rawMoves, followLatest = true) {
+    if (!this.liveSolving || !rawMoves.length) return;
+    this.moves = normalizeMovePayload({ MoveList: rawMoves });
+    this.decisionBoundaries = decisionBoundaryTimes(this.moves);
+    this.primitiveDecisionBoundaries = primitiveDecisionBoundaryTimes(this.moves);
+    const latestSnapshot = buildWorkspaceSnapshot(
+      this.moves,
+      this.device,
+      Number.POSITIVE_INFINITY
+    );
+    this.elements.range.max = String(latestSnapshot.endTime);
+    this.elements.range.step = latestSnapshot.endTime > 1e4 ? "1" : "0.1";
+    this.time = followLatest ? latestSnapshot.endTime : Math.min(this.time, latestSnapshot.endTime);
+    this.render(buildWorkspaceSnapshot(this.moves, this.device, this.time));
+  }
+  /** 把拓扑回放定位到某个根决策已经提交后的时刻。 */
+  seekTo(time) {
+    if (!this.moves.length) return;
+    const bounded = Math.max(
+      0,
+      Math.min(finiteNumber(time), finiteNumber(this.elements.range.max))
+    );
+    this.time = bounded;
+    this.elements.range.value = String(bounded);
+    this.render();
+  }
+  /** 切换到独立拓扑回放标签。 */
+  showPlayback() {
+    const tab = this.root.querySelector('[data-tab-target="playback"]');
+    tab?.click();
+  }
   /** 返回与诊断面板一致的稳态瓶颈候选利用率，供运行结果摘要复用。 */
   getBottleneckUtilization() {
     return this.bottleneckSummary ? structuredClone(this.bottleneckSummary) : null;
@@ -2166,6 +2223,7 @@ var VisualizationWorkspace = class {
   /** 清除旧测试结果，避免切换测试后继续误看上一份 MoveList。 */
   clear() {
     this.pause();
+    this.liveSolving = false;
     this.moves = [];
     this.decisionTrace = [];
     this.liveDecision = null;
@@ -2185,6 +2243,8 @@ var VisualizationWorkspace = class {
     this.analysisRequestVersion += 1;
     this.time = 0;
     this.elements.resultButton.disabled = true;
+    this.elements.range.disabled = false;
+    this.elements.playButton.disabled = false;
     this.elements.openGantt.href = "#";
     this.elements.openGantt.setAttribute("aria-disabled", "true");
     this.elements.toolbar.hidden = false;
@@ -2209,6 +2269,7 @@ var VisualizationWorkspace = class {
   async loadMoves(moves, decisionTrace, sourceName, resultUrl, analysisResultId) {
     if (!moves.length) throw new Error("MoveList \u4E3A\u7A7A\uFF0C\u65E0\u6CD5\u5EFA\u7ACB\u53EF\u89C6\u5316\u56DE\u653E");
     this.pause();
+    this.liveSolving = false;
     this.moves = moves;
     this.decisionBoundaries = decisionBoundaryTimes(moves);
     this.primitiveDecisionBoundaries = primitiveDecisionBoundaryTimes(moves);
@@ -2231,6 +2292,8 @@ var VisualizationWorkspace = class {
     this.elements.range.max = String(snapshot.endTime);
     this.elements.range.step = snapshot.endTime > 1e4 ? "1" : "0.1";
     this.elements.range.value = "0";
+    this.elements.range.disabled = false;
+    this.elements.playButton.disabled = false;
     this.elements.openGantt.href = resultUrl ? `/movelist_gantt_viewer.html?src=${encodeURIComponent(resultUrl)}` : "#";
     this.elements.openGantt.setAttribute("aria-disabled", resultUrl ? "false" : "true");
     this.elements.resultButton.disabled = false;
@@ -2389,7 +2452,7 @@ var VisualizationWorkspace = class {
   }
   /** 绘制当前时间对应的设备快照。 */
   render(prebuiltSnapshot) {
-    if (!this.moves.length) return;
+    if (!this.moves.length && !this.liveSolving) return;
     const snapshot = prebuiltSnapshot ?? buildWorkspaceSnapshot(this.moves, this.device, this.time);
     this.time = snapshot.time;
     this.elements.source.textContent = this.sourceName;
@@ -2411,7 +2474,7 @@ var VisualizationWorkspace = class {
     const compatibleTraceDecision = traceDecision?.model === this.recommendationModel ? traceDecision : null;
     const originalDecisionTraceAvailable = this.hasOriginalDecisionTrace();
     const currentDecision = originalDecisionTraceAvailable ? compatibleTraceDecision : cachedDecision ?? (this.liveDecisionKey === replayKey ? this.liveDecision : null) ?? compatibleTraceDecision;
-    if (this.replayPlan && !originalDecisionTraceAvailable && !cachedDecision && this.liveDecisionKey !== replayKey && !this.pendingReplayDecisionKeys.has(replayKey) && this.replayDecisionErrorKey !== replayKey) {
+    if (this.replayPlan && !this.liveSolving && !originalDecisionTraceAvailable && !cachedDecision && this.liveDecisionKey !== replayKey && !this.pendingReplayDecisionKeys.has(replayKey) && this.replayDecisionErrorKey !== replayKey) {
       void this.refreshReplayDecision(replayKey, replayTime);
     }
     const topologySnapshot = snapshotWithFullDeviceModules(

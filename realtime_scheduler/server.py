@@ -38,7 +38,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -145,6 +145,7 @@ from realtime_scheduler.replay_machine import ReplayMachine
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 MAX_REQUEST_BYTES = 12 * 1024 * 1024
+MAX_CHECKPOINT_BYTES = 512 * 1024 * 1024
 MAX_SAVED_RESULTS = 8
 MAX_SAVED_BATCH_RUNS = 8
 WORKSPACE_STORE_VERSION = 3
@@ -179,11 +180,14 @@ LEGACY_WORKSPACE_STORE_PATH = ALGORITHM_ROOT / "results" / "config_editor_worksp
 DEVICE_INIT_DIR = DATA_DIR / "devices"
 RESULT_EXPORT_DIR = EXPORT_DIR / "results"
 LOG_EXPORT_DIR = EXPORT_DIR / "logs"
+MODEL_CHECKPOINT_DIR = DATA_DIR / "checkpoints"
+ALLOWED_CHECKPOINT_SUFFIXES = frozenset({".npz", ".pt", ".pth", ".ckpt"})
 _RESULTS: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
 _RESULTS_LOCK = threading.Lock()
 _REPRODUCTION_LOGS: "OrderedDict[str, List[Dict[str, Any]]]" = OrderedDict()
 _REPRODUCTION_LOGS_LOCK = threading.Lock()
 _EXPORTS_LOCK = threading.RLock()
+_MODEL_CHECKPOINT_LOCK = threading.RLock()
 _WORKSPACE_STORE_LOCK = threading.RLock()
 _BATCH_RUNS: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
 _BATCH_RUNS_LOCK = threading.RLock()
@@ -2255,6 +2259,14 @@ def _execute_standard_algorithm(
 
     combined_output = runtime.combined_output()
 
+    search_telemetry: Optional[Dict[str, Any]] = None
+    if builtin_strategy == "schedule-alphago":
+        search_telemetry = dict(
+            builtin_algorithm_scheduler.get_search_telemetry()
+        )
+        search_telemetry.pop("committedMoves", None)
+        combined_output["SearchTelemetry"] = deepcopy(search_telemetry)
+
     # 决策轨迹只进入可回放结果文件；运行摘要保留计数，避免 API 响应重复携带大数组。
     decision_trace: List[Dict[str, Any]] = []
     decision_trace_truncated = False
@@ -2298,7 +2310,7 @@ def _execute_standard_algorithm(
         f"完成：总耗时 {total_ms:.1f} ms，"
         f"makespan={makespan:.2f}s，Move={len(combined_output['MoveList'])}"
     )
-    return {
+    result = {
         "ok": True,
         "strategy": strategy,
         "rounds": summaries,
@@ -2310,6 +2322,9 @@ def _execute_standard_algorithm(
         "updates": update_snapshots,
         "output": combined_output,
     }
+    if search_telemetry is not None:
+        result["searchTelemetry"] = search_telemetry
+    return result
 
 
 def _ensure_algorithm_output(
@@ -2890,6 +2905,37 @@ def _write_json_atomic(path: Path, payload: Any) -> None:
     """把 JSON 原子写入指定文件，避免异常退出留下半份配置。"""
     content = json.dumps(payload, ensure_ascii=False, allow_nan=False, indent=2)
     _write_text_atomic(path, content)
+
+
+def save_model_checkpoint(filename: str, content: bytes) -> Path:
+    """安全保存前端选取的模型文件，并返回算法运行时可读取的绝对路径。
+
+    浏览器出于隐私保护不会提供用户选择文件的真实路径；因此将文件复制到本地
+    服务的数据目录。文件名只保留 basename，避免请求头构造出目录穿越路径。
+    """
+    source_name = Path(filename).name.strip()
+    suffix = Path(source_name).suffix.lower()
+    if not source_name or suffix not in ALLOWED_CHECKPOINT_SUFFIXES:
+        allowed = "、".join(sorted(ALLOWED_CHECKPOINT_SUFFIXES))
+        raise ValueError(f"checkpoint 文件格式仅支持：{allowed}")
+    if not content:
+        raise ValueError("checkpoint 文件为空")
+    if len(content) > MAX_CHECKPOINT_BYTES:
+        raise ValueError("checkpoint 文件超过大小限制")
+    safe_stem = re.sub(r"[^A-Za-z0-9._-]", "_", Path(source_name).stem).strip("._")
+    if not safe_stem:
+        safe_stem = "checkpoint"
+    safe_name = f"{safe_stem[:96]}{suffix}"
+    target = MODEL_CHECKPOINT_DIR / f"{uuid.uuid4().hex}-{safe_name}"
+    with _MODEL_CHECKPOINT_LOCK:
+        MODEL_CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(f".{target.name}.upload")
+        try:
+            temporary.write_bytes(content)
+            temporary.replace(target)
+        finally:
+            temporary.unlink(missing_ok=True)
+    return target.resolve()
 
 
 def read_algorithm_metadata() -> Dict[str, Dict[str, str]]:
@@ -3987,7 +4033,8 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         """处理页面、健康检查和内存结果读取。"""
-        path = unquote(urlparse(self.path).path)
+        parsed_url = urlparse(self.path)
+        path = unquote(parsed_url.path)
         if path in {"/", "/config_editor.html"}:
             self._send_file(EDITOR_PATH, "text/html; charset=utf-8")
             return
@@ -4034,6 +4081,31 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                 "algorithms": [*builtin_algorithms, *other_algorithms],
                 "otherAlgorithms": other_algorithms,
             })
+            return
+        if path == "/api/search-telemetry":
+            if not BUILTIN_ALGORITHM_AVAILABLE:
+                self._send_json(
+                    {"ok": False, "error": "本地算法仓库未加载，无法读取搜索遥测"},
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                )
+                return
+            try:
+                query = parse_qs(parsed_url.query)
+                raw_revision = (query.get("since") or [None])[0]
+                since_revision = (
+                    None if raw_revision in {None, ""} else int(raw_revision)
+                )
+                self._send_json({
+                    "ok": True,
+                    "telemetry": builtin_algorithm_scheduler.get_search_telemetry(
+                        since_revision
+                    ),
+                })
+            except (TypeError, ValueError) as error:
+                self._send_json(
+                    {"ok": False, "error": f"since 必须是整数：{error}"},
+                    HTTPStatus.BAD_REQUEST,
+                )
             return
         if path == "/api/workspaces":
             try:
@@ -4090,6 +4162,35 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         """接收控制台配置并同步运行后端策略。"""
         path = unquote(urlparse(self.path).path)
+        if path == "/api/model-checkpoints":
+            try:
+                filename = unquote(str(self.headers.get("X-Checkpoint-Filename") or ""))
+                checkpoint_path = save_model_checkpoint(
+                    filename,
+                    self._read_binary_body(MAX_CHECKPOINT_BYTES),
+                )
+                self._send_json({"ok": True, "modelPath": str(checkpoint_path)})
+            except (OSError, ValueError) as error:
+                self._send_json(
+                    {"ok": False, "error": str(error)},
+                    HTTPStatus.BAD_REQUEST,
+                )
+            return
+        if path == "/api/search-control":
+            try:
+                if not BUILTIN_ALGORITHM_AVAILABLE:
+                    raise RuntimeError("本地算法仓库未加载，无法控制搜索")
+                payload = self._read_json_object()
+                result = builtin_algorithm_scheduler.control_search(
+                    str(payload.get("command") or "")
+                )
+                self._send_json({"ok": True, **result})
+            except (RuntimeError, TypeError, ValueError) as error:
+                self._send_json(
+                    {"ok": False, "error": str(error)},
+                    HTTPStatus.BAD_REQUEST,
+                )
+            return
         if path == "/api/analysis/replay-decision":
             try:
                 if not BUILTIN_ALGORITHM_AVAILABLE:
@@ -4485,6 +4586,13 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
         if not isinstance(payload, Mapping):
             raise ValueError("请求体必须是 JSON 对象")
         return dict(payload)
+
+    def _read_binary_body(self, maximum_bytes: int) -> bytes:
+        """读取有明确上限的二进制请求体，供本机模型文件上传使用。"""
+        length = int(self.headers.get("Content-Length") or 0)
+        if length <= 0 or length > maximum_bytes:
+            raise ValueError("文件为空或超过大小限制")
+        return self.rfile.read(length)
 
     def _send_json(
         self,

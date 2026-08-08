@@ -1596,12 +1596,20 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertNotIn('id="visualTopologyPlayback"', analysis_view)
         topology_playback = page.split('id="visualTopologyPlayback"', 1)[1]
         self.assertIn('id="visualTimeline"', topology_playback)
+        self.assertIn('id="searchTelemetryPanel"', topology_playback)
+        self.assertIn('id="searchTelemetryPauseButton"', topology_playback)
+        self.assertIn('id="searchTelemetryStepButton"', topology_playback)
+        self.assertIn('id="searchTelemetryContinueButton"', topology_playback)
         self.assertIn('id="visualDeviceStage"', topology_playback)
         self.assertIn('id="visualDecisionLens"', topology_playback)
         self.assertIn('id="visualPauseOnDecisionChangeButton"', topology_playback)
         self.assertIn("合法动作空间", topology_playback)
         self.assertNotIn('id="visualTransitionButtons"', topology_playback)
         self.assertIn("decisionBoundaryTimes", workspace_source)
+        self.assertIn("beginLiveSolve(", workspace_source)
+        self.assertIn("updateLiveMoves(", workspace_source)
+        self.assertIn("seekTo(time", workspace_source)
+        self.assertIn("showPlayback()", workspace_source)
         self.assertNotIn("未来单轨迹", workspace_source)
         self.assertNotIn("调度结果分析", page)
         self.assertNotIn("按设备俯视拓扑回放晶圆流转", page)
@@ -1612,6 +1620,12 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("private showSingleResult()", workspace_source)
         self.assertIn("this.elements.groupAnalysis.hidden = true", workspace_source)
         self.assertIn("visualizationWorkspace.showGroupAnalysis(panelMarkup)", editor_source)
+        self.assertIn('requestSearchControl(command)', editor_source)
+        self.assertIn('controlSearchTelemetry("pause")', editor_source)
+        self.assertIn('controlSearchTelemetry("step")', editor_source)
+        self.assertIn('controlSearchTelemetry("continue")', editor_source)
+        self.assertIn("visualizationWorkspace.beginLiveSolve", editor_source)
+        self.assertIn("visualizationWorkspace.showPlayback()", editor_source)
 
         for removed_content in (
             "逐例对比 · 不做综合打分",

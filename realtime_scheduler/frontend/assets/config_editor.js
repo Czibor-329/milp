@@ -201,6 +201,20 @@ async function requestReplayDecision(input) {
   });
   return result.decision;
 }
+async function requestSearchTelemetry(sinceRevision = null) {
+  const query = sinceRevision === null ? "" : `?since=${encodeURIComponent(String(sinceRevision))}`;
+  const result = await requestJson(`/api/search-telemetry${query}`, {
+    cache: "no-store"
+  });
+  return result.telemetry;
+}
+async function requestSearchControl(command) {
+  return requestJson("/api/search-control", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ command })
+  });
+}
 
 // src/workspace_visualizer.ts
 var PICK_MOVE_TYPES = /* @__PURE__ */ new Set([0, 2]);
@@ -2172,6 +2186,7 @@ var VisualizationWorkspace = class {
   analysisRequestVersion = 0;
   time = 0;
   playing = false;
+  liveSolving = false;
   playbackSpeed = DEFAULT_PLAYBACK_SPEED;
   performanceWindowMode = "steady";
   animationFrame = 0;
@@ -2267,6 +2282,62 @@ var VisualizationWorkspace = class {
     this.replayDecisionRequestVersion += 1;
     if (this.moves.length) this.render();
   }
+  /** 在完整 MoveList 返回前显示初始拓扑，并进入增量求解状态。 */
+  beginLiveSolve(plan, sourceName = "Schedule-AlphaGo \u5B9E\u65F6\u6C42\u89E3") {
+    this.pause();
+    this.liveSolving = true;
+    this.moves = [];
+    this.decisionTrace = [];
+    this.sourceName = sourceName;
+    this.resultUrl = "";
+    this.analysisResultId = "";
+    this.analysis = null;
+    this.bottleneckSummary = null;
+    this.time = 0;
+    this.setReplayPlan(plan);
+    this.elements.range.min = "0";
+    this.elements.range.max = "0";
+    this.elements.range.value = "0";
+    this.elements.range.disabled = true;
+    this.elements.playButton.disabled = true;
+    this.elements.openGantt.href = "#";
+    this.elements.openGantt.setAttribute("aria-disabled", "true");
+    this.showSingleResult();
+    this.setTopologyVisible(true);
+    this.render(buildWorkspaceSnapshot([], this.device, 0));
+  }
+  /** 用已提交根动作产生的累计 MoveList 推进实时拓扑。 */
+  updateLiveMoves(rawMoves, followLatest = true) {
+    if (!this.liveSolving || !rawMoves.length) return;
+    this.moves = normalizeMovePayload({ MoveList: rawMoves });
+    this.decisionBoundaries = decisionBoundaryTimes(this.moves);
+    this.primitiveDecisionBoundaries = primitiveDecisionBoundaryTimes(this.moves);
+    const latestSnapshot = buildWorkspaceSnapshot(
+      this.moves,
+      this.device,
+      Number.POSITIVE_INFINITY
+    );
+    this.elements.range.max = String(latestSnapshot.endTime);
+    this.elements.range.step = latestSnapshot.endTime > 1e4 ? "1" : "0.1";
+    this.time = followLatest ? latestSnapshot.endTime : Math.min(this.time, latestSnapshot.endTime);
+    this.render(buildWorkspaceSnapshot(this.moves, this.device, this.time));
+  }
+  /** 把拓扑回放定位到某个根决策已经提交后的时刻。 */
+  seekTo(time) {
+    if (!this.moves.length) return;
+    const bounded = Math.max(
+      0,
+      Math.min(finiteNumber(time), finiteNumber(this.elements.range.max))
+    );
+    this.time = bounded;
+    this.elements.range.value = String(bounded);
+    this.render();
+  }
+  /** 切换到独立拓扑回放标签。 */
+  showPlayback() {
+    const tab = this.root.querySelector('[data-tab-target="playback"]');
+    tab?.click();
+  }
   /** 返回与诊断面板一致的稳态瓶颈候选利用率，供运行结果摘要复用。 */
   getBottleneckUtilization() {
     return this.bottleneckSummary ? structuredClone(this.bottleneckSummary) : null;
@@ -2293,6 +2364,7 @@ var VisualizationWorkspace = class {
   /** 清除旧测试结果，避免切换测试后继续误看上一份 MoveList。 */
   clear() {
     this.pause();
+    this.liveSolving = false;
     this.moves = [];
     this.decisionTrace = [];
     this.liveDecision = null;
@@ -2312,6 +2384,8 @@ var VisualizationWorkspace = class {
     this.analysisRequestVersion += 1;
     this.time = 0;
     this.elements.resultButton.disabled = true;
+    this.elements.range.disabled = false;
+    this.elements.playButton.disabled = false;
     this.elements.openGantt.href = "#";
     this.elements.openGantt.setAttribute("aria-disabled", "true");
     this.elements.toolbar.hidden = false;
@@ -2336,6 +2410,7 @@ var VisualizationWorkspace = class {
   async loadMoves(moves, decisionTrace, sourceName, resultUrl, analysisResultId) {
     if (!moves.length) throw new Error("MoveList \u4E3A\u7A7A\uFF0C\u65E0\u6CD5\u5EFA\u7ACB\u53EF\u89C6\u5316\u56DE\u653E");
     this.pause();
+    this.liveSolving = false;
     this.moves = moves;
     this.decisionBoundaries = decisionBoundaryTimes(moves);
     this.primitiveDecisionBoundaries = primitiveDecisionBoundaryTimes(moves);
@@ -2358,6 +2433,8 @@ var VisualizationWorkspace = class {
     this.elements.range.max = String(snapshot.endTime);
     this.elements.range.step = snapshot.endTime > 1e4 ? "1" : "0.1";
     this.elements.range.value = "0";
+    this.elements.range.disabled = false;
+    this.elements.playButton.disabled = false;
     this.elements.openGantt.href = resultUrl ? `/movelist_gantt_viewer.html?src=${encodeURIComponent(resultUrl)}` : "#";
     this.elements.openGantt.setAttribute("aria-disabled", resultUrl ? "false" : "true");
     this.elements.resultButton.disabled = false;
@@ -2516,7 +2593,7 @@ var VisualizationWorkspace = class {
   }
   /** 绘制当前时间对应的设备快照。 */
   render(prebuiltSnapshot) {
-    if (!this.moves.length) return;
+    if (!this.moves.length && !this.liveSolving) return;
     const snapshot = prebuiltSnapshot ?? buildWorkspaceSnapshot(this.moves, this.device, this.time);
     this.time = snapshot.time;
     this.elements.source.textContent = this.sourceName;
@@ -2538,7 +2615,7 @@ var VisualizationWorkspace = class {
     const compatibleTraceDecision = traceDecision?.model === this.recommendationModel ? traceDecision : null;
     const originalDecisionTraceAvailable = this.hasOriginalDecisionTrace();
     const currentDecision = originalDecisionTraceAvailable ? compatibleTraceDecision : cachedDecision ?? (this.liveDecisionKey === replayKey ? this.liveDecision : null) ?? compatibleTraceDecision;
-    if (this.replayPlan && !originalDecisionTraceAvailable && !cachedDecision && this.liveDecisionKey !== replayKey && !this.pendingReplayDecisionKeys.has(replayKey) && this.replayDecisionErrorKey !== replayKey) {
+    if (this.replayPlan && !this.liveSolving && !originalDecisionTraceAvailable && !cachedDecision && this.liveDecisionKey !== replayKey && !this.pendingReplayDecisionKeys.has(replayKey) && this.replayDecisionErrorKey !== replayKey) {
       void this.refreshReplayDecision(replayKey, replayTime);
     }
     const topologySnapshot = snapshotWithFullDeviceModules(
@@ -3022,9 +3099,28 @@ var DEFAULT_SCHEDULE_OPTIONS = Object.freeze({
   maximumSystemResidenceCv: 0,
   loadLockMacroSearchSeconds: 4,
   loadLockMacroRollouts: 96,
+  scheduleAlphaGoDecisionSeconds: null,
+  scheduleAlphaGoMaxSimulations: 256,
+  scheduleAlphaGoMaxDepth: 24,
+  scheduleAlphaGoRolloutDepth: 96,
+  scheduleAlphaGoMaxNodes: 4096,
+  scheduleAlphaGoCPuct: 1.5,
+  scheduleAlphaGoRolloutMix: null,
+  scheduleAlphaGoTelemetryMilliseconds: 50,
+  scheduleAlphaGoModelPath: "",
+  scheduleAlphaGoDevice: "auto",
   seed: 0
 });
 var SCHEDULE_OPTION_KEYS = new Set(Object.keys(DEFAULT_SCHEDULE_OPTIONS));
+var ALPHA_GO_NUMERIC_OPTION_SPECS = Object.freeze([
+  { controlId: "alphaGoDecisionSeconds", option: "scheduleAlphaGoDecisionSeconds", minimum: 1e-3, integer: false, optional: true, label: "\u5355\u6B65\u65F6\u95F4\u9884\u7B97" },
+  { controlId: "alphaGoMaxSimulations", option: "scheduleAlphaGoMaxSimulations", minimum: 1, integer: true, optional: false, label: "\u6700\u5927\u6A21\u62DF\u6B21\u6570" },
+  { controlId: "alphaGoMaxNodes", option: "scheduleAlphaGoMaxNodes", minimum: 1, integer: true, optional: false, label: "\u6700\u5927\u641C\u7D22\u8282\u70B9" },
+  { controlId: "alphaGoMaxDepth", option: "scheduleAlphaGoMaxDepth", minimum: 1, integer: true, optional: false, label: "\u6811\u6DF1\u4E0A\u9650" },
+  { controlId: "alphaGoRolloutDepth", option: "scheduleAlphaGoRolloutDepth", minimum: 0, integer: true, optional: false, label: "Rollout \u6DF1\u5EA6" },
+  { controlId: "alphaGoCPuct", option: "scheduleAlphaGoCPuct", minimum: 0, integer: false, optional: false, label: "PUCT \u63A2\u7D22\u7CFB\u6570" },
+  { controlId: "alphaGoTelemetryMilliseconds", option: "scheduleAlphaGoTelemetryMilliseconds", minimum: 1, integer: true, optional: false, label: "\u9065\u6D4B\u95F4\u9694" }
+]);
 var CLEAN_TYPE_DEFINITIONS = [
   { key: "preclean", label: "PreClean" },
   { key: "postclean", label: "PostClean" },
@@ -3041,6 +3137,7 @@ var PROCESSING_STATION_TYPES = /* @__PURE__ */ new Set([
 ]);
 var FIRST_ROBOT_SLOT_ID = 1;
 var DUAL_ARM_SLOT_COUNT = 2;
+var SEARCH_TELEMETRY_POLL_MILLISECONDS = 75;
 var state = {
   workspaceDevices: [],
   workspaceDevice: null,
@@ -3087,6 +3184,14 @@ var state = {
   routeParallelFilter: ""
 };
 var pjobRoutePickerContext = null;
+var searchTelemetryPollToken = 0;
+var latestSearchTelemetry = null;
+var selectedSearchTelemetryId = "";
+var followLatestSearchTelemetry = true;
+var searchTelemetryRunActive = false;
+var searchTelemetryControlPending = false;
+var lastSearchTelemetryMoveCount = 0;
+var pendingAlphaGoCheckpointFile = null;
 function inferCleanType(clean) {
   const explicit = String(clean.cleanType || clean.category || "").toLowerCase().replace(/[-_\s]/g, "");
   if (["preclean", "postclean", "wacclean", "dummy", "dummywac"].includes(explicit)) return explicit;
@@ -3674,7 +3779,216 @@ function resetRunResult() {
     link.href = "#";
     link.setAttribute("aria-disabled", "true");
   }
+  resetSearchTelemetryView();
   writeTerminal("$ \u6D4B\u8BD5\u96C6\u5DF2\u5C31\u7EEA\uFF0C\u7B49\u5F85\u8FD0\u884C\u2026");
+}
+function resetSearchTelemetryView() {
+  searchTelemetryPollToken += 1;
+  latestSearchTelemetry = null;
+  selectedSearchTelemetryId = "";
+  followLatestSearchTelemetry = true;
+  searchTelemetryRunActive = false;
+  searchTelemetryControlPending = false;
+  lastSearchTelemetryMoveCount = 0;
+  const panel = document.getElementById("searchTelemetryPanel");
+  panel.hidden = true;
+  document.getElementById("searchTelemetryDecisionSelect").innerHTML = "";
+  document.getElementById("searchTelemetrySummary").innerHTML = "";
+  document.getElementById("searchTelemetryActions").innerHTML = "";
+  document.getElementById("searchTelemetryVariation").innerHTML = "";
+  document.getElementById("searchTelemetryNodes").innerHTML = "";
+  for (const id of [
+    "searchTelemetryPauseButton",
+    "searchTelemetryStepButton",
+    "searchTelemetryContinueButton"
+  ]) {
+    const button = document.getElementById(id);
+    button.disabled = true;
+    button.classList.remove("is-active");
+  }
+}
+function formatSearchTelemetryNumber(value, digits = 2) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number.toFixed(digits) : "\u2014";
+}
+function searchTelemetryStopReason(reason) {
+  return {
+    time_budget: "\u65F6\u95F4\u9884\u7B97",
+    simulation_budget: "\u6A21\u62DF\u6B21\u6570\u9884\u7B97",
+    node_budget: "\u8282\u70B9\u9884\u7B97"
+  }[String(reason || "")] || "\u641C\u7D22\u4E2D";
+}
+function renderSearchValueSparkline(history) {
+  const values = (Array.isArray(history) ? history : []).map((item) => Number(item?.value)).filter(Number.isFinite);
+  if (!values.length) return `<span class="search-telemetry-empty">\u2014</span>`;
+  const chartWidth = 132, chartHeight = 30, chartPadding = 3;
+  const minimum = Math.min(...values), maximum = Math.max(...values);
+  const span = Math.max(maximum - minimum, 1e-9);
+  const points = values.map((value, index) => {
+    const x = values.length === 1 ? chartWidth / 2 : chartPadding + index * (chartWidth - chartPadding * 2) / (values.length - 1);
+    const y = chartHeight - chartPadding - (value - minimum) * (chartHeight - chartPadding * 2) / span;
+    return [x, y];
+  });
+  const path = points.map(([x, y], index) => `${index ? "L" : "M"}${x.toFixed(2)},${y.toFixed(2)}`).join(" ");
+  const [lastX, lastY] = points[points.length - 1];
+  const title = `Q ${values[0].toFixed(4)} \u2192 ${values[values.length - 1].toFixed(4)}\uFF0C${values.length} \u4E2A\u91C7\u6837\u70B9`;
+  return `<svg class="search-value-sparkline" viewBox="0 0 ${chartWidth} ${chartHeight}" role="img" aria-label="${escapeHtml3(title)}"><title>${escapeHtml3(title)}</title><path d="${path}"></path><circle cx="${lastX.toFixed(2)}" cy="${lastY.toFixed(2)}" r="2.4"></circle></svg>`;
+}
+function renderSearchTelemetryDecision(snapshot) {
+  const root = snapshot?.root || {};
+  const actions = Array.isArray(root.children) ? root.children : [];
+  const selectedKey = String(snapshot?.selectedActionKey || "");
+  const maximumVisits = Math.max(1, ...actions.map((action) => Number(action?.visits) || 0));
+  document.getElementById("searchTelemetrySummary").innerHTML = [
+    ["\u6839\u51B3\u7B56", `#${Number(snapshot?.decisionIndex || 0) + 1}`],
+    ["\u7528\u65F6 / \u9884\u7B97", `${formatSearchTelemetryNumber(snapshot?.elapsedMilliseconds, 1)} / ${formatSearchTelemetryNumber(snapshot?.budgetMilliseconds, 1)} ms`],
+    ["\u641C\u7D22\u6B21\u6570", `${Number(snapshot?.simulations) || 0} sim \xB7 \u6839 N=${Number(root?.visits) || 0}`],
+    ["\u641C\u7D22\u6811", `${Number(snapshot?.expandedNodes) || 0} \u8282\u70B9 \xB7 \u6DF1\u5EA6 ${Number(snapshot?.maximumDepth) || 0}`],
+    ["\u8BC4\u4F30\u5668", `${String(snapshot?.device || "cpu").toUpperCase()} \xB7 ${String(snapshot?.modelSource || "unknown")}`]
+  ].map(([label, value]) => `<div class="search-summary-item"><span>${escapeHtml3(label)}</span><strong title="${escapeHtml3(value)}">${escapeHtml3(value)}</strong></div>`).join("");
+  document.getElementById("searchTelemetryActions").innerHTML = actions.length ? actions.map((action) => {
+    const visits = Number(action?.visits) || 0;
+    const visitPercent = Math.max(0, Math.min(100, visits / maximumVisits * 100));
+    const materials = Array.isArray(action?.materialIds) && action.materialIds.length ? `\u7269\u6599 ${action.materialIds.join(", ")}` : String(action?.kind || "action");
+    const route = [action?.sourceStation, action?.destinationStation].filter(Boolean).join(" \u2192 ");
+    return `<tr class="${String(action?.actionKey || "") === selectedKey ? "is-selected" : ""}">
+        <td><div class="search-action-name"><strong title="${escapeHtml3(action?.description || action?.actionKey || "\u52A8\u4F5C")}">${escapeHtml3(action?.description || action?.actionKey || "\u52A8\u4F5C")}</strong><small>${escapeHtml3([materials, route].filter(Boolean).join(" \xB7 "))}</small></div></td>
+        <td>${formatSearchTelemetryNumber(action?.prior, 4)}</td>
+        <td><div class="search-visits"><span>${visits}</span><div class="search-visits-meter"><i style="width:${visitPercent.toFixed(2)}%"></i></div></div></td>
+        <td><div class="search-value-cell"><strong>Q ${formatSearchTelemetryNumber(action?.value, 4)}</strong><small>${formatSearchTelemetryNumber(action?.estimatedCostSeconds, 2)} s</small></div></td>
+        <td>${visits ? formatSearchTelemetryNumber(action?.standardError, 4) : "\u2014"}</td>
+        <td>${renderSearchValueSparkline(action?.valueHistory)}</td>
+      </tr>`;
+  }).join("") : `<tr><td colspan="6" class="search-telemetry-empty">\u6B63\u5728\u679A\u4E3E\u6839\u8282\u70B9\u5408\u6CD5\u52A8\u4F5C\u2026</td></tr>`;
+  const variation = Array.isArray(snapshot?.principalVariation) ? snapshot.principalVariation : [];
+  document.getElementById("searchTelemetryVariation").innerHTML = variation.length ? variation.slice(0, 10).map((step, index) => `<div class="search-pv-step"><b>${index + 1}</b><span title="${escapeHtml3(step?.description || step?.actionKey || "\u52A8\u4F5C")}">${escapeHtml3(step?.description || step?.actionKey || "\u52A8\u4F5C")}</span><small>N=${Number(step?.visits) || 0}</small></div>`).join("") : `<div class="search-telemetry-empty">\u5C1A\u672A\u5F62\u6210\u4E3B\u53D8\u5316</div>`;
+  const nodes = Array.isArray(snapshot?.relatedNodes) ? snapshot.relatedNodes : [];
+  document.getElementById("searchTelemetryNodes").innerHTML = nodes.length ? nodes.slice(0, 32).map((node) => {
+    const path = Array.isArray(node?.path) && node.path.length ? node.path.join(" \u2192 ") : "\u6839\u8282\u70B9";
+    return `<div class="search-node"><b>#${Number(node?.nodeId) || 0} \xB7 d${Number(node?.depth) || 0}</b><span>N=${Number(node?.visits) || 0}</span><small title="${escapeHtml3(path)}">${escapeHtml3(path)} \xB7 Q ${formatSearchTelemetryNumber(node?.value, 4)}</small></div>`;
+  }).join("") : `<div class="search-telemetry-empty">\u5C1A\u672A\u6269\u5C55\u76F8\u5173\u8282\u70B9</div>`;
+}
+function updateSearchTelemetryControls(snapshot) {
+  const executionMode = String(snapshot?.executionMode || "continuous");
+  const disabled = !searchTelemetryRunActive || searchTelemetryControlPending;
+  const pauseButton = document.getElementById("searchTelemetryPauseButton");
+  const stepButton = document.getElementById("searchTelemetryStepButton");
+  const continueButton = document.getElementById("searchTelemetryContinueButton");
+  pauseButton.disabled = disabled;
+  stepButton.disabled = disabled;
+  continueButton.disabled = disabled;
+  pauseButton.classList.toggle("is-active", !disabled && executionMode === "paused");
+  continueButton.classList.toggle("is-active", !disabled && executionMode === "continuous");
+}
+function syncSearchTelemetryPlayback(snapshot, selectedDecision) {
+  const committedMoves = Array.isArray(snapshot?.committedMoves) ? snapshot.committedMoves : [];
+  if (committedMoves.length && committedMoves.length !== lastSearchTelemetryMoveCount) {
+    visualizationWorkspace.updateLiveMoves(
+      committedMoves,
+      followLatestSearchTelemetry
+    );
+    lastSearchTelemetryMoveCount = committedMoves.length;
+  }
+  const replayTime = Number(selectedDecision?.replayTime);
+  if (Number.isFinite(replayTime) && replayTime >= 0) {
+    visualizationWorkspace.seekTo(replayTime);
+  }
+}
+async function controlSearchTelemetry(command) {
+  if (!searchTelemetryRunActive || searchTelemetryControlPending) return;
+  searchTelemetryControlPending = true;
+  if (command !== "pause") {
+    followLatestSearchTelemetry = true;
+    selectedSearchTelemetryId = "";
+  }
+  updateSearchTelemetryControls(latestSearchTelemetry);
+  try {
+    const result = await requestSearchControl(command);
+    if (result?.telemetry) renderSearchTelemetry(result.telemetry);
+  } catch (error) {
+    const status = document.getElementById("searchTelemetryStatus");
+    status.textContent = `\u6C42\u89E3\u63A7\u5236\u5931\u8D25\uFF1A${error.message || "\u672A\u77E5\u9519\u8BEF"}`;
+    status.classList.remove("is-searching", "is-paused");
+  } finally {
+    searchTelemetryControlPending = false;
+    updateSearchTelemetryControls(latestSearchTelemetry);
+  }
+}
+function renderSearchTelemetry(snapshot) {
+  if (!snapshot || snapshot.unchanged) return;
+  if (snapshot.algorithm !== "schedule-alphago" && latestSearchTelemetry) return;
+  latestSearchTelemetry = snapshot;
+  const panel = document.getElementById("searchTelemetryPanel");
+  panel.hidden = false;
+  const status = document.getElementById("searchTelemetryStatus");
+  if (snapshot.algorithm !== "schedule-alphago") {
+    status.textContent = "\u6B63\u5728\u521D\u59CB\u5316\u641C\u7D22\u5668\u2026";
+    status.classList.add("is-searching");
+    status.classList.remove("is-paused");
+    updateSearchTelemetryControls(snapshot);
+    return;
+  }
+  const decisions = Array.isArray(snapshot.history) ? [...snapshot.history] : [];
+  if (snapshot.searchId && decisions.at(-1)?.searchId !== snapshot.searchId) decisions.push(snapshot);
+  const latestDecision = decisions.at(-1) || snapshot;
+  if (followLatestSearchTelemetry || !decisions.some((item) => item.searchId === selectedSearchTelemetryId)) {
+    selectedSearchTelemetryId = String(latestDecision.searchId || "");
+  }
+  const selector = document.getElementById("searchTelemetryDecisionSelect");
+  selector.innerHTML = decisions.map((item) => {
+    const suffix = item.status === "searching" ? "\u641C\u7D22\u4E2D" : `${Number(item.simulations) || 0} \u6B21`;
+    return `<option value="${escapeHtml3(item.searchId || "")}">#${Number(item.decisionIndex || 0) + 1} \xB7 ${suffix}</option>`;
+  }).join("");
+  selector.value = selectedSearchTelemetryId;
+  const selected = decisions.find((item) => item.searchId === selectedSearchTelemetryId) || latestDecision;
+  const searching = snapshot?.status === "searching";
+  const waiting = snapshot?.status === "waiting-step";
+  status.textContent = waiting ? "\u6C42\u89E3\u5DF2\u6682\u505C \xB7 \u53EF\u5355\u6B65\u653E\u884C\u4E00\u4E2A\u6839\u51B3\u7B56\uFF0C\u6216\u7EE7\u7EED\u8FDE\u7EED\u6C42\u89E3" : searching ? `\u6B63\u5728\u8FDB\u884C\u975E\u5BF9\u79F0\u6811\u641C\u7D22 \xB7 ${Number(snapshot?.simulations) || 0} \u6B21\u6A21\u62DF` : snapshot?.status === "action-applied" ? `\u6839\u52A8\u4F5C #${Number(snapshot?.decisionIndex || 0) + 1} \u5DF2\u63D0\u4EA4 \xB7 \u62D3\u6251\u5DF2\u63A8\u8FDB` : `\u51B3\u7B56\u5B8C\u6210 \xB7 \u7531${searchTelemetryStopReason(selected?.stopReason)}\u7EC8\u6B62`;
+  status.classList.toggle("is-searching", searching);
+  status.classList.toggle("is-paused", waiting);
+  updateSearchTelemetryControls(snapshot);
+  renderSearchTelemetryDecision(selected);
+  syncSearchTelemetryPlayback(snapshot, selected);
+}
+async function pollSearchTelemetry(token) {
+  let revision = null;
+  while (token === searchTelemetryPollToken) {
+    try {
+      const snapshot = await requestSearchTelemetry(revision);
+      if (token !== searchTelemetryPollToken) break;
+      if (Number.isFinite(Number(snapshot?.revision))) revision = Number(snapshot.revision);
+      renderSearchTelemetry(snapshot);
+    } catch (error) {
+      if (!latestSearchTelemetry && token === searchTelemetryPollToken) {
+        const status = document.getElementById("searchTelemetryStatus");
+        status.textContent = `\u9065\u6D4B\u6682\u4E0D\u53EF\u7528\uFF1A${error.message || "\u672A\u77E5\u9519\u8BEF"}`;
+        status.classList.remove("is-searching");
+      }
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, SEARCH_TELEMETRY_POLL_MILLISECONDS));
+  }
+}
+function startSearchTelemetryPolling() {
+  resetSearchTelemetryView();
+  searchTelemetryRunActive = true;
+  const panel = document.getElementById("searchTelemetryPanel");
+  panel.hidden = false;
+  const status = document.getElementById("searchTelemetryStatus");
+  status.textContent = "\u6B63\u5728\u521D\u59CB\u5316\u641C\u7D22\u5668\u2026";
+  status.classList.add("is-searching");
+  updateSearchTelemetryControls({ executionMode: "continuous" });
+  const token = ++searchTelemetryPollToken;
+  void pollSearchTelemetry(token);
+}
+function stopSearchTelemetryPolling(finalSnapshot = null) {
+  searchTelemetryPollToken += 1;
+  searchTelemetryRunActive = false;
+  if (finalSnapshot) renderSearchTelemetry(finalSnapshot);
+  const status = document.getElementById("searchTelemetryStatus");
+  if (!finalSnapshot && latestSearchTelemetry?.algorithm === "schedule-alphago") {
+    status.classList.remove("is-searching");
+  }
+  updateSearchTelemetryControls(finalSnapshot || latestSearchTelemetry);
 }
 function applyTestCase(testCase) {
   const value = structuredClone(testCase);
@@ -4688,7 +5002,71 @@ function renderAll() {
   renderRoutes();
   renderRounds();
   renderRobotSlots();
+  renderAlphaGoSettingsSummary();
   if (state.drawer) renderStepDrawer();
+}
+function renderAlphaGoSettingsSummary() {
+  const summary = document.getElementById("alphagoSettingsSummary");
+  if (!summary) return;
+  const device = String(state.options.scheduleAlphaGoDevice || "auto").toUpperCase();
+  const simulations = Number(state.options.scheduleAlphaGoMaxSimulations) || DEFAULT_SCHEDULE_OPTIONS.scheduleAlphaGoMaxSimulations;
+  const configuredPath = String(state.options.scheduleAlphaGoModelPath || "").trim();
+  const modelName = configuredPath ? configuredPath.split(/[\\/]/).pop() : "\u9ED8\u8BA4\u6A21\u578B";
+  summary.textContent = `${device} \xB7 ${simulations} \u6B21\u6A21\u62DF \xB7 ${modelName}`;
+}
+function openScheduleAlphaGoOptionsDialog() {
+  pendingAlphaGoCheckpointFile = null;
+  for (const specification of ALPHA_GO_NUMERIC_OPTION_SPECS) {
+    const value = state.options[specification.option];
+    document.getElementById(specification.controlId).value = value ?? "";
+  }
+  document.getElementById("alphaGoDevice").value = state.options.scheduleAlphaGoDevice || "auto";
+  const configuredPath = String(state.options.scheduleAlphaGoModelPath || "").trim();
+  document.getElementById("alphaGoCheckpointPath").value = configuredPath;
+  document.getElementById("alphaGoCheckpointFile").value = "";
+  document.getElementById("alphaGoCheckpointHint").textContent = configuredPath ? "\u5F53\u524D checkpoint \u5DF2\u4FDD\u5B58\u5728\u672C\u5730\u670D\u52A1\u4E2D\uFF1B\u91CD\u65B0\u9009\u62E9\u6587\u4EF6\u53EF\u66FF\u6362\u5B83\u3002" : "\u9009\u62E9\u672C\u673A checkpoint \u540E\u5C06\u4E0A\u4F20\u5230\u672C\u5730\u670D\u52A1\uFF0C\u5E76\u7528\u4E8E\u540E\u7EED\u8FD0\u884C\u3002";
+  document.getElementById("scheduleAlphaGoOptionsDialog").showModal();
+}
+function readAlphaGoNumericOption(specification) {
+  const rawValue = String(document.getElementById(specification.controlId).value || "").trim();
+  if (!rawValue && specification.optional) return null;
+  const value = Number(rawValue);
+  if (!Number.isFinite(value) || value < specification.minimum || specification.integer && !Number.isInteger(value)) {
+    const unit = specification.integer ? "\u6574\u6570" : `\u4E0D\u5C0F\u4E8E ${specification.minimum} \u7684\u6570\u503C`;
+    throw new Error(`${specification.label}\u5FC5\u987B\u4E3A${unit}`);
+  }
+  return value;
+}
+async function uploadAlphaGoCheckpoint(file) {
+  const response = await fetch("/api/model-checkpoints", {
+    method: "POST",
+    headers: { "X-Checkpoint-Filename": encodeURIComponent(file.name) },
+    body: file
+  });
+  const result = await response.json();
+  if (!response.ok || !result.ok || !result.modelPath) {
+    throw new Error(result.error || `checkpoint \u4E0A\u4F20\u5931\u8D25\uFF08${response.status}\uFF09`);
+  }
+  return String(result.modelPath);
+}
+async function saveScheduleAlphaGoOptions() {
+  const saveButton = document.getElementById("saveScheduleAlphaGoOptionsButton");
+  const nextOptions = {};
+  for (const specification of ALPHA_GO_NUMERIC_OPTION_SPECS) {
+    nextOptions[specification.option] = readAlphaGoNumericOption(specification);
+  }
+  nextOptions.scheduleAlphaGoDevice = document.getElementById("alphaGoDevice").value;
+  saveButton.disabled = true;
+  try {
+    nextOptions.scheduleAlphaGoModelPath = pendingAlphaGoCheckpointFile ? await uploadAlphaGoCheckpoint(pendingAlphaGoCheckpointFile) : String(document.getElementById("alphaGoCheckpointPath").value || "").trim();
+    Object.assign(state.options, nextOptions);
+    pendingAlphaGoCheckpointFile = null;
+    markTestDirty();
+    renderAll();
+    document.getElementById("scheduleAlphaGoOptionsDialog").close();
+  } finally {
+    saveButton.disabled = false;
+  }
 }
 function updateStateFromControl(control) {
   let value = control.multiple ? Array.from(control.selectedOptions, (item) => item.value) : control.type === "checkbox" ? control.checked : control.type === "number" ? Number(control.value) : control.value;
@@ -4995,6 +5373,7 @@ function updateStrategyOptionVisibility() {
   const optionGroups = new Set(algorithm?.optionGroups || []);
   document.getElementById("loadlockOptions").classList.toggle("is-hidden", !optionGroups.has("loadlock"));
   document.getElementById("heuristicObjectiveOptions").classList.toggle("is-hidden", !optionGroups.has("heuristic-objectives"));
+  document.getElementById("scheduleAlphaGoOptions").classList.toggle("is-hidden", !optionGroups.has("schedule-alphago"));
 }
 function showAlgorithmDetails(strategy) {
   const metadata = state.algorithmMetadata[strategy] || {};
@@ -5066,6 +5445,9 @@ async function prepareWorkspaceView(result) {
   visualizationWorkspace.setAnalysisConfiguration(state.routes, state.rounds);
   visualizationWorkspace.setReplayPlan(buildPayload());
   await visualizationWorkspace.loadResult(result.resultId, state.testCaseName || "\u5F53\u524D\u8FD0\u884C\u7ED3\u679C");
+  if (latestSearchTelemetry?.algorithm === "schedule-alphago") {
+    renderSearchTelemetry(latestSearchTelemetry);
+  }
   return visualizationWorkspace.getBottleneckUtilization();
 }
 async function runPlan() {
@@ -5073,6 +5455,8 @@ async function runPlan() {
   const batchButton = document.getElementById("batchRunButton");
   const comparisonButton = document.getElementById("openParameterComparisonDialogButton");
   let logReady = false, ganttReady = false, runResult = null, bottleneckSummary = null;
+  const telemetryEnabled = state.strategy === "schedule-alphago";
+  let telemetryStopped = false;
   try {
     const healthResponse = await fetch("/api/health", { cache: "no-store" }), health = await healthResponse.json();
     if (!healthResponse.ok || health.schemaVersion !== EXPECTED_API_SCHEMA) throw new Error("\u672C\u5730\u670D\u52A1\u7248\u672C\u8FC7\u65E7\uFF0C\u8BF7\u91CD\u542F scripts/config_editor_server.py");
@@ -5090,6 +5474,15 @@ async function runPlan() {
     button.classList.add("running");
     button.textContent = "\u6B63\u5728\u8FD0\u884C\u7B56\u7565\u2026";
     resetRunResult();
+    visualizationWorkspace.setAnalysisConfiguration(state.routes, state.rounds);
+    if (telemetryEnabled) {
+      visualizationWorkspace.beginLiveSolve(
+        payload,
+        `${displayStrategyName(state.strategy)} \xB7 \u5B9E\u65F6\u6C42\u89E3`
+      );
+      visualizationWorkspace.showPlayback();
+      startSearchTelemetryPolling();
+    }
     writeTerminal(`$ \u5F00\u59CB\u8FD0\u884C ${state.strategy}
   \u603B\u8F6E\u6570: ${state.roundCount}
   \u91CD\u7B97\u65F6\u95F4: ${state.rounds.map((round) => round.currentTime).join(", ")} s`);
@@ -5099,6 +5492,10 @@ async function runPlan() {
       runResult = JSON.parse(responseText);
     } catch {
       throw new Error(responseText.trim().slice(0, 240) || `\u670D\u52A1\u8FD4\u56DE ${response.status}`);
+    }
+    if (telemetryEnabled) {
+      stopSearchTelemetryPolling(runResult?.searchTelemetry || null);
+      telemetryStopped = true;
     }
     logReady = prepareLogDownload(runResult);
     ganttReady = prepareGanttView(runResult);
@@ -5133,6 +5530,9 @@ async function runPlan() {
     ].join("\n"), true);
     document.getElementById("metricValidation").textContent = runResult?.metricsAvailable ? runResult.validation === "failed" ? "\u672A\u901A\u8FC7" : validationDisplay(runResult.validation) || "\u5931\u8D25" : "\u5931\u8D25";
   } finally {
+    if (telemetryEnabled && !telemetryStopped) {
+      stopSearchTelemetryPolling(runResult?.searchTelemetry || null);
+    }
     button.disabled = false;
     button.classList.remove("running");
     button.textContent = "\u25B6 \u8FD0\u884C\u5F53\u524D\u6D4B\u8BD5";
@@ -5938,6 +6338,26 @@ document.getElementById("runButton").addEventListener("click", runPlan);
 document.getElementById("batchRunButton").addEventListener("click", runCurrentTestGroup);
 document.getElementById("openParameterComparisonDialogButton").addEventListener("click", openParameterComparisonDialog);
 document.getElementById("parameterComparisonDialogCancel").addEventListener("click", () => document.getElementById("parameterComparisonDialog").close());
+document.getElementById("openScheduleAlphaGoOptionsDialogButton").addEventListener("click", openScheduleAlphaGoOptionsDialog);
+document.getElementById("scheduleAlphaGoOptionsDialogCancel").addEventListener("click", () => document.getElementById("scheduleAlphaGoOptionsDialog").close());
+document.getElementById("alphaGoCheckpointFile").addEventListener("change", (event) => {
+  pendingAlphaGoCheckpointFile = event.currentTarget.files?.[0] || null;
+  if (!pendingAlphaGoCheckpointFile) return;
+  document.getElementById("alphaGoCheckpointPath").value = pendingAlphaGoCheckpointFile.name;
+  document.getElementById("alphaGoCheckpointHint").textContent = `\u5DF2\u9009\u62E9\u201C${pendingAlphaGoCheckpointFile.name}\u201D\uFF1B\u4FDD\u5B58\u53C2\u6570\u65F6\u4E0A\u4F20\u3002`;
+});
+document.getElementById("clearAlphaGoCheckpointButton").addEventListener("click", () => {
+  pendingAlphaGoCheckpointFile = null;
+  document.getElementById("alphaGoCheckpointFile").value = "";
+  document.getElementById("alphaGoCheckpointPath").value = "";
+  document.getElementById("alphaGoCheckpointHint").textContent = "\u4FDD\u5B58\u540E\u5C06\u4F7F\u7528\u9ED8\u8BA4\u6A21\u578B\u6216\u51B7\u542F\u52A8\u6A21\u578B\u3002";
+});
+document.getElementById("scheduleAlphaGoOptionsForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  saveScheduleAlphaGoOptions().catch((error) => {
+    document.getElementById("alphaGoCheckpointHint").textContent = error.message || "\u53C2\u6570\u4FDD\u5B58\u5931\u8D25";
+  });
+});
 document.getElementById("parameterComparisonStrategy").addEventListener("change", (event) => {
   const baselineOptions = state.parameterComparison?.baseline?.options || {};
   renderParameterComparisonStrategyFields(event.target.value, baselineOptions);
@@ -5967,6 +6387,20 @@ document.getElementById("batchLogButton").addEventListener("click", (event) => {
 });
 document.getElementById("batchGanttButton").addEventListener("click", (event) => {
   if (event.currentTarget.getAttribute("aria-disabled") === "true") event.preventDefault();
+});
+document.getElementById("searchTelemetryDecisionSelect").addEventListener("change", (event) => {
+  selectedSearchTelemetryId = String(event.currentTarget.value || "");
+  followLatestSearchTelemetry = selectedSearchTelemetryId === String(latestSearchTelemetry?.searchId || "");
+  if (latestSearchTelemetry) renderSearchTelemetry(latestSearchTelemetry);
+});
+document.getElementById("searchTelemetryPauseButton").addEventListener("click", () => {
+  void controlSearchTelemetry("pause");
+});
+document.getElementById("searchTelemetryStepButton").addEventListener("click", () => {
+  void controlSearchTelemetry("step");
+});
+document.getElementById("searchTelemetryContinueButton").addEventListener("click", () => {
+  void controlSearchTelemetry("continue");
 });
 document.getElementById("closeDrawer").addEventListener("click", closeStepDrawer);
 document.getElementById("drawerLayer").addEventListener("click", (event) => {

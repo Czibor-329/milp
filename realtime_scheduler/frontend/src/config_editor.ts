@@ -11,6 +11,8 @@ import * as RouteEditorLogic from "./route_editor_logic";
 import {
   requestJson,
   requestScheduleAnalysis,
+  requestSearchControl,
+  requestSearchTelemetry,
   requestTestGroupAnalysis,
 } from "./api_client";
 import { createVisualizationWorkspace, detectDeviceTopologyLayout } from "./workspace_visualizer";
@@ -44,9 +46,28 @@ const DEFAULT_SCHEDULE_OPTIONS = Object.freeze({
   maximumSystemResidenceCv: 0,
   loadLockMacroSearchSeconds: 4,
   loadLockMacroRollouts: 96,
+  scheduleAlphaGoDecisionSeconds: null,
+  scheduleAlphaGoMaxSimulations: 256,
+  scheduleAlphaGoMaxDepth: 24,
+  scheduleAlphaGoRolloutDepth: 96,
+  scheduleAlphaGoMaxNodes: 4096,
+  scheduleAlphaGoCPuct: 1.5,
+  scheduleAlphaGoRolloutMix: null,
+  scheduleAlphaGoTelemetryMilliseconds: 50,
+  scheduleAlphaGoModelPath: "",
+  scheduleAlphaGoDevice: "auto",
   seed: 0,
 });
 const SCHEDULE_OPTION_KEYS = new Set(Object.keys(DEFAULT_SCHEDULE_OPTIONS));
+const ALPHA_GO_NUMERIC_OPTION_SPECS = Object.freeze([
+  { controlId: "alphaGoDecisionSeconds", option: "scheduleAlphaGoDecisionSeconds", minimum: 0.001, integer: false, optional: true, label: "单步时间预算" },
+  { controlId: "alphaGoMaxSimulations", option: "scheduleAlphaGoMaxSimulations", minimum: 1, integer: true, optional: false, label: "最大模拟次数" },
+  { controlId: "alphaGoMaxNodes", option: "scheduleAlphaGoMaxNodes", minimum: 1, integer: true, optional: false, label: "最大搜索节点" },
+  { controlId: "alphaGoMaxDepth", option: "scheduleAlphaGoMaxDepth", minimum: 1, integer: true, optional: false, label: "树深上限" },
+  { controlId: "alphaGoRolloutDepth", option: "scheduleAlphaGoRolloutDepth", minimum: 0, integer: true, optional: false, label: "Rollout 深度" },
+  { controlId: "alphaGoCPuct", option: "scheduleAlphaGoCPuct", minimum: 0, integer: false, optional: false, label: "PUCT 探索系数" },
+  { controlId: "alphaGoTelemetryMilliseconds", option: "scheduleAlphaGoTelemetryMilliseconds", minimum: 1, integer: true, optional: false, label: "遥测间隔" },
+]);
 
 const CLEAN_TYPE_DEFINITIONS = [
   { key: "preclean", label: "PreClean" },
@@ -64,6 +85,7 @@ const PROCESSING_STATION_TYPES = new Set([
 ]);
 const FIRST_ROBOT_SLOT_ID = 1;
 const DUAL_ARM_SLOT_COUNT = 2;
+const SEARCH_TELEMETRY_POLL_MILLISECONDS = 75;
 
 const state = {
   workspaceDevices: [], workspaceDevice: null, workspaceDeviceId: "", testCaseId: "", testCaseName: "", testCaseGroup: "", activeTestGroup: "", serviceCompatible: false, dirty: false,
@@ -77,6 +99,14 @@ const state = {
   routeProcessFilter: "", routeParallelFilter: ""
 };
 let pjobRoutePickerContext = null;
+let searchTelemetryPollToken = 0;
+let latestSearchTelemetry = null;
+let selectedSearchTelemetryId = "";
+let followLatestSearchTelemetry = true;
+let searchTelemetryRunActive = false;
+let searchTelemetryControlPending = false;
+let lastSearchTelemetryMoveCount = 0;
+let pendingAlphaGoCheckpointFile: File | null = null;
 
 /** 从新版字段或旧版任务参数识别清洁类别。 */
 function inferCleanType(clean) {
@@ -739,7 +769,266 @@ function resetRunResult() {
   for (const id of ["logButton", "ganttButton", "batchGanttButton"]) {
     const link = document.getElementById(id); link.href = "#"; link.setAttribute("aria-disabled", "true");
   }
+  resetSearchTelemetryView();
   writeTerminal("$ 测试集已就绪，等待运行…");
+}
+
+/** 清空搜索轮询和历史视图，避免切换测试后误看上一结果。 */
+function resetSearchTelemetryView() {
+  searchTelemetryPollToken += 1;
+  latestSearchTelemetry = null;
+  selectedSearchTelemetryId = "";
+  followLatestSearchTelemetry = true;
+  searchTelemetryRunActive = false;
+  searchTelemetryControlPending = false;
+  lastSearchTelemetryMoveCount = 0;
+  const panel = document.getElementById("searchTelemetryPanel");
+  panel.hidden = true;
+  document.getElementById("searchTelemetryDecisionSelect").innerHTML = "";
+  document.getElementById("searchTelemetrySummary").innerHTML = "";
+  document.getElementById("searchTelemetryActions").innerHTML = "";
+  document.getElementById("searchTelemetryVariation").innerHTML = "";
+  document.getElementById("searchTelemetryNodes").innerHTML = "";
+  for (const id of [
+    "searchTelemetryPauseButton",
+    "searchTelemetryStepButton",
+    "searchTelemetryContinueButton",
+  ]) {
+    const button = document.getElementById(id);
+    button.disabled = true;
+    button.classList.remove("is-active");
+  }
+}
+
+/** 把搜索数值格式化为稳定的有限小数。 */
+function formatSearchTelemetryNumber(value, digits = 2) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number.toFixed(digits) : "—";
+}
+
+/** 返回有限搜索终止原因的中文说明。 */
+function searchTelemetryStopReason(reason) {
+  return {
+    time_budget: "时间预算",
+    simulation_budget: "模拟次数预算",
+    node_budget: "节点预算",
+  }[String(reason || "")] || "搜索中";
+}
+
+/** 将根动作的离散 Q 序列画成无依赖的小型折线图。 */
+function renderSearchValueSparkline(history) {
+  const values = (Array.isArray(history) ? history : [])
+    .map(item => Number(item?.value))
+    .filter(Number.isFinite);
+  if (!values.length) return `<span class="search-telemetry-empty">—</span>`;
+  const chartWidth = 132, chartHeight = 30, chartPadding = 3;
+  const minimum = Math.min(...values), maximum = Math.max(...values);
+  const span = Math.max(maximum - minimum, 1e-9);
+  const points = values.map((value, index) => {
+    const x = values.length === 1
+      ? chartWidth / 2
+      : chartPadding + index * (chartWidth - chartPadding * 2) / (values.length - 1);
+    const y = chartHeight - chartPadding - (value - minimum) * (chartHeight - chartPadding * 2) / span;
+    return [x, y];
+  });
+  const path = points.map(([x, y], index) => `${index ? "L" : "M"}${x.toFixed(2)},${y.toFixed(2)}`).join(" ");
+  const [lastX, lastY] = points[points.length - 1];
+  const title = `Q ${values[0].toFixed(4)} → ${values[values.length - 1].toFixed(4)}，${values.length} 个采样点`;
+  return `<svg class="search-value-sparkline" viewBox="0 0 ${chartWidth} ${chartHeight}" role="img" aria-label="${escapeHtml(title)}"><title>${escapeHtml(title)}</title><path d="${path}"></path><circle cx="${lastX.toFixed(2)}" cy="${lastY.toFixed(2)}" r="2.4"></circle></svg>`;
+}
+
+/** 绘制某一次根决策的全部动作、主变化和高访问节点。 */
+function renderSearchTelemetryDecision(snapshot) {
+  const root = snapshot?.root || {};
+  const actions = Array.isArray(root.children) ? root.children : [];
+  const selectedKey = String(snapshot?.selectedActionKey || "");
+  const maximumVisits = Math.max(1, ...actions.map(action => Number(action?.visits) || 0));
+  document.getElementById("searchTelemetrySummary").innerHTML = [
+    ["根决策", `#${Number(snapshot?.decisionIndex || 0) + 1}`],
+    ["用时 / 预算", `${formatSearchTelemetryNumber(snapshot?.elapsedMilliseconds, 1)} / ${formatSearchTelemetryNumber(snapshot?.budgetMilliseconds, 1)} ms`],
+    ["搜索次数", `${Number(snapshot?.simulations) || 0} sim · 根 N=${Number(root?.visits) || 0}`],
+    ["搜索树", `${Number(snapshot?.expandedNodes) || 0} 节点 · 深度 ${Number(snapshot?.maximumDepth) || 0}`],
+    ["评估器", `${String(snapshot?.device || "cpu").toUpperCase()} · ${String(snapshot?.modelSource || "unknown")}`],
+  ].map(([label, value]) => `<div class="search-summary-item"><span>${escapeHtml(label)}</span><strong title="${escapeHtml(value)}">${escapeHtml(value)}</strong></div>`).join("");
+
+  document.getElementById("searchTelemetryActions").innerHTML = actions.length
+    ? actions.map(action => {
+      const visits = Number(action?.visits) || 0;
+      const visitPercent = Math.max(0, Math.min(100, visits / maximumVisits * 100));
+      const materials = Array.isArray(action?.materialIds) && action.materialIds.length
+        ? `物料 ${action.materialIds.join(", ")}`
+        : String(action?.kind || "action");
+      const route = [action?.sourceStation, action?.destinationStation].filter(Boolean).join(" → ");
+      return `<tr class="${String(action?.actionKey || "") === selectedKey ? "is-selected" : ""}">
+        <td><div class="search-action-name"><strong title="${escapeHtml(action?.description || action?.actionKey || "动作")}">${escapeHtml(action?.description || action?.actionKey || "动作")}</strong><small>${escapeHtml([materials, route].filter(Boolean).join(" · "))}</small></div></td>
+        <td>${formatSearchTelemetryNumber(action?.prior, 4)}</td>
+        <td><div class="search-visits"><span>${visits}</span><div class="search-visits-meter"><i style="width:${visitPercent.toFixed(2)}%"></i></div></div></td>
+        <td><div class="search-value-cell"><strong>Q ${formatSearchTelemetryNumber(action?.value, 4)}</strong><small>${formatSearchTelemetryNumber(action?.estimatedCostSeconds, 2)} s</small></div></td>
+        <td>${visits ? formatSearchTelemetryNumber(action?.standardError, 4) : "—"}</td>
+        <td>${renderSearchValueSparkline(action?.valueHistory)}</td>
+      </tr>`;
+    }).join("")
+    : `<tr><td colspan="6" class="search-telemetry-empty">正在枚举根节点合法动作…</td></tr>`;
+
+  const variation = Array.isArray(snapshot?.principalVariation) ? snapshot.principalVariation : [];
+  document.getElementById("searchTelemetryVariation").innerHTML = variation.length
+    ? variation.slice(0, 10).map((step, index) => `<div class="search-pv-step"><b>${index + 1}</b><span title="${escapeHtml(step?.description || step?.actionKey || "动作")}">${escapeHtml(step?.description || step?.actionKey || "动作")}</span><small>N=${Number(step?.visits) || 0}</small></div>`).join("")
+    : `<div class="search-telemetry-empty">尚未形成主变化</div>`;
+
+  const nodes = Array.isArray(snapshot?.relatedNodes) ? snapshot.relatedNodes : [];
+  document.getElementById("searchTelemetryNodes").innerHTML = nodes.length
+    ? nodes.slice(0, 32).map(node => {
+      const path = Array.isArray(node?.path) && node.path.length ? node.path.join(" → ") : "根节点";
+      return `<div class="search-node"><b>#${Number(node?.nodeId) || 0} · d${Number(node?.depth) || 0}</b><span>N=${Number(node?.visits) || 0}</span><small title="${escapeHtml(path)}">${escapeHtml(path)} · Q ${formatSearchTelemetryNumber(node?.value, 4)}</small></div>`;
+    }).join("")
+    : `<div class="search-telemetry-empty">尚未扩展相关节点</div>`;
+}
+
+/** 同步暂停、单步和连续求解按钮的状态。 */
+function updateSearchTelemetryControls(snapshot) {
+  const executionMode = String(snapshot?.executionMode || "continuous");
+  const disabled = !searchTelemetryRunActive || searchTelemetryControlPending;
+  const pauseButton = document.getElementById("searchTelemetryPauseButton");
+  const stepButton = document.getElementById("searchTelemetryStepButton");
+  const continueButton = document.getElementById("searchTelemetryContinueButton");
+  pauseButton.disabled = disabled;
+  stepButton.disabled = disabled;
+  continueButton.disabled = disabled;
+  pauseButton.classList.toggle("is-active", !disabled && executionMode === "paused");
+  continueButton.classList.toggle("is-active", !disabled && executionMode === "continuous");
+}
+
+/** 用已提交 MoveList 和所选根决策时刻同步拓扑画布。 */
+function syncSearchTelemetryPlayback(snapshot, selectedDecision) {
+  const committedMoves = Array.isArray(snapshot?.committedMoves)
+    ? snapshot.committedMoves
+    : [];
+  if (
+    committedMoves.length
+    && committedMoves.length !== lastSearchTelemetryMoveCount
+  ) {
+    visualizationWorkspace.updateLiveMoves(
+      committedMoves,
+      followLatestSearchTelemetry,
+    );
+    lastSearchTelemetryMoveCount = committedMoves.length;
+  }
+  const replayTime = Number(selectedDecision?.replayTime);
+  if (Number.isFinite(replayTime) && replayTime >= 0) {
+    visualizationWorkspace.seekTo(replayTime);
+  }
+}
+
+/** 向服务端发送根决策暂停、单步或连续求解命令。 */
+async function controlSearchTelemetry(command) {
+  if (!searchTelemetryRunActive || searchTelemetryControlPending) return;
+  searchTelemetryControlPending = true;
+  if (command !== "pause") {
+    followLatestSearchTelemetry = true;
+    selectedSearchTelemetryId = "";
+  }
+  updateSearchTelemetryControls(latestSearchTelemetry);
+  try {
+    const result = await requestSearchControl(command);
+    if (result?.telemetry) renderSearchTelemetry(result.telemetry);
+  } catch (error) {
+    const status = document.getElementById("searchTelemetryStatus");
+    status.textContent = `求解控制失败：${error.message || "未知错误"}`;
+    status.classList.remove("is-searching", "is-paused");
+  } finally {
+    searchTelemetryControlPending = false;
+    updateSearchTelemetryControls(latestSearchTelemetry);
+  }
+}
+
+/** 合并实时帧与已完成历史，并保持用户手动选择的旧决策。 */
+function renderSearchTelemetry(snapshot) {
+  if (!snapshot || snapshot.unchanged) return;
+  if (snapshot.algorithm !== "schedule-alphago" && latestSearchTelemetry) return;
+  latestSearchTelemetry = snapshot;
+  const panel = document.getElementById("searchTelemetryPanel");
+  panel.hidden = false;
+  const status = document.getElementById("searchTelemetryStatus");
+  if (snapshot.algorithm !== "schedule-alphago") {
+    status.textContent = "正在初始化搜索器…";
+    status.classList.add("is-searching");
+    status.classList.remove("is-paused");
+    updateSearchTelemetryControls(snapshot);
+    return;
+  }
+  const decisions = Array.isArray(snapshot.history) ? [...snapshot.history] : [];
+  if (snapshot.searchId && decisions.at(-1)?.searchId !== snapshot.searchId) decisions.push(snapshot);
+  const latestDecision = decisions.at(-1) || snapshot;
+  if (followLatestSearchTelemetry || !decisions.some(item => item.searchId === selectedSearchTelemetryId)) {
+    selectedSearchTelemetryId = String(latestDecision.searchId || "");
+  }
+  const selector = document.getElementById("searchTelemetryDecisionSelect");
+  selector.innerHTML = decisions.map(item => {
+    const suffix = item.status === "searching" ? "搜索中" : `${Number(item.simulations) || 0} 次`;
+    return `<option value="${escapeHtml(item.searchId || "")}">#${Number(item.decisionIndex || 0) + 1} · ${suffix}</option>`;
+  }).join("");
+  selector.value = selectedSearchTelemetryId;
+  const selected = decisions.find(item => item.searchId === selectedSearchTelemetryId) || latestDecision;
+  const searching = snapshot?.status === "searching";
+  const waiting = snapshot?.status === "waiting-step";
+  status.textContent = waiting
+    ? "求解已暂停 · 可单步放行一个根决策，或继续连续求解"
+    : searching
+      ? `正在进行非对称树搜索 · ${Number(snapshot?.simulations) || 0} 次模拟`
+      : snapshot?.status === "action-applied"
+        ? `根动作 #${Number(snapshot?.decisionIndex || 0) + 1} 已提交 · 拓扑已推进`
+        : `决策完成 · 由${searchTelemetryStopReason(selected?.stopReason)}终止`;
+  status.classList.toggle("is-searching", searching);
+  status.classList.toggle("is-paused", waiting);
+  updateSearchTelemetryControls(snapshot);
+  renderSearchTelemetryDecision(selected);
+  syncSearchTelemetryPlayback(snapshot, selected);
+}
+
+/** 在独立 HTTP 线程上轮询搜索快照，不阻塞同步调度请求。 */
+async function pollSearchTelemetry(token) {
+  let revision = null;
+  while (token === searchTelemetryPollToken) {
+    try {
+      const snapshot = await requestSearchTelemetry(revision);
+      if (token !== searchTelemetryPollToken) break;
+      if (Number.isFinite(Number(snapshot?.revision))) revision = Number(snapshot.revision);
+      renderSearchTelemetry(snapshot);
+    } catch (error) {
+      if (!latestSearchTelemetry && token === searchTelemetryPollToken) {
+        const status = document.getElementById("searchTelemetryStatus");
+        status.textContent = `遥测暂不可用：${error.message || "未知错误"}`;
+        status.classList.remove("is-searching");
+      }
+    }
+    await new Promise(resolve => window.setTimeout(resolve, SEARCH_TELEMETRY_POLL_MILLISECONDS));
+  }
+}
+
+/** 开始本次 Schedule-AlphaGo 运行的实时搜索轮询。 */
+function startSearchTelemetryPolling() {
+  resetSearchTelemetryView();
+  searchTelemetryRunActive = true;
+  const panel = document.getElementById("searchTelemetryPanel");
+  panel.hidden = false;
+  const status = document.getElementById("searchTelemetryStatus");
+  status.textContent = "正在初始化搜索器…";
+  status.classList.add("is-searching");
+  updateSearchTelemetryControls({ executionMode: "continuous" });
+  const token = ++searchTelemetryPollToken;
+  void pollSearchTelemetry(token);
+}
+
+/** 停止轮询，并用服务端随结果返回的完整历史覆盖最后一帧。 */
+function stopSearchTelemetryPolling(finalSnapshot = null) {
+  searchTelemetryPollToken += 1;
+  searchTelemetryRunActive = false;
+  if (finalSnapshot) renderSearchTelemetry(finalSnapshot);
+  const status = document.getElementById("searchTelemetryStatus");
+  if (!finalSnapshot && latestSearchTelemetry?.algorithm === "schedule-alphago") {
+    status.classList.remove("is-searching");
+  }
+  updateSearchTelemetryControls(finalSnapshot || latestSearchTelemetry);
 }
 
 /** 将持久化测试集载入页面编辑状态。 */
@@ -1815,7 +2104,84 @@ async function restoreRobotSlotDefault(robotName) {
 }
 
 /** 渲染所有依赖状态的区域。 */
-function renderAll() { renderTimes(); renderRoutes(); renderRounds(); renderRobotSlots(); if (state.drawer) renderStepDrawer(); }
+function renderAll() { renderTimes(); renderRoutes(); renderRounds(); renderRobotSlots(); renderAlphaGoSettingsSummary(); if (state.drawer) renderStepDrawer(); }
+
+/** 更新侧栏中 AlphaGo 高级参数卡片的当前配置摘要。 */
+function renderAlphaGoSettingsSummary() {
+  const summary = document.getElementById("alphagoSettingsSummary");
+  if (!summary) return;
+  const device = String(state.options.scheduleAlphaGoDevice || "auto").toUpperCase();
+  const simulations = Number(state.options.scheduleAlphaGoMaxSimulations) || DEFAULT_SCHEDULE_OPTIONS.scheduleAlphaGoMaxSimulations;
+  const configuredPath = String(state.options.scheduleAlphaGoModelPath || "").trim();
+  const modelName = configuredPath ? configuredPath.split(/[\\/]/).pop() : "默认模型";
+  summary.textContent = `${device} · ${simulations} 次模拟 · ${modelName}`;
+}
+
+/** 打开 AlphaGo 参数弹窗，并用当前测试集中的已保存值初始化控件。 */
+function openScheduleAlphaGoOptionsDialog() {
+  pendingAlphaGoCheckpointFile = null;
+  for (const specification of ALPHA_GO_NUMERIC_OPTION_SPECS) {
+    const value = state.options[specification.option];
+    document.getElementById(specification.controlId).value = value ?? "";
+  }
+  document.getElementById("alphaGoDevice").value = state.options.scheduleAlphaGoDevice || "auto";
+  const configuredPath = String(state.options.scheduleAlphaGoModelPath || "").trim();
+  document.getElementById("alphaGoCheckpointPath").value = configuredPath;
+  document.getElementById("alphaGoCheckpointFile").value = "";
+  document.getElementById("alphaGoCheckpointHint").textContent = configuredPath
+    ? "当前 checkpoint 已保存在本地服务中；重新选择文件可替换它。"
+    : "选择本机 checkpoint 后将上传到本地服务，并用于后续运行。";
+  document.getElementById("scheduleAlphaGoOptionsDialog").showModal();
+}
+
+/** 校验一个 AlphaGo 数值控件，并返回可直接写入调度选项的值。 */
+function readAlphaGoNumericOption(specification) {
+  const rawValue = String(document.getElementById(specification.controlId).value || "").trim();
+  if (!rawValue && specification.optional) return null;
+  const value = Number(rawValue);
+  if (!Number.isFinite(value) || value < specification.minimum || (specification.integer && !Number.isInteger(value))) {
+    const unit = specification.integer ? "整数" : `不小于 ${specification.minimum} 的数值`;
+    throw new Error(`${specification.label}必须为${unit}`);
+  }
+  return value;
+}
+
+/** 上传用户从文件夹选取的 checkpoint，并返回本地服务可访问的绝对路径。 */
+async function uploadAlphaGoCheckpoint(file) {
+  const response = await fetch("/api/model-checkpoints", {
+    method: "POST",
+    headers: { "X-Checkpoint-Filename": encodeURIComponent(file.name) },
+    body: file,
+  });
+  const result = await response.json();
+  if (!response.ok || !result.ok || !result.modelPath) {
+    throw new Error(result.error || `checkpoint 上传失败（${response.status}）`);
+  }
+  return String(result.modelPath);
+}
+
+/** 保存 AlphaGo 弹窗中的参数；选择的新 checkpoint 会在此时才上传。 */
+async function saveScheduleAlphaGoOptions() {
+  const saveButton = document.getElementById("saveScheduleAlphaGoOptionsButton");
+  const nextOptions = {};
+  for (const specification of ALPHA_GO_NUMERIC_OPTION_SPECS) {
+    nextOptions[specification.option] = readAlphaGoNumericOption(specification);
+  }
+  nextOptions.scheduleAlphaGoDevice = document.getElementById("alphaGoDevice").value;
+  saveButton.disabled = true;
+  try {
+    nextOptions.scheduleAlphaGoModelPath = pendingAlphaGoCheckpointFile
+      ? await uploadAlphaGoCheckpoint(pendingAlphaGoCheckpointFile)
+      : String(document.getElementById("alphaGoCheckpointPath").value || "").trim();
+    Object.assign(state.options, nextOptions);
+    pendingAlphaGoCheckpointFile = null;
+    markTestDirty();
+    renderAll();
+    document.getElementById("scheduleAlphaGoOptionsDialog").close();
+  } finally {
+    saveButton.disabled = false;
+  }
+}
 
 /** 根据 data 属性把表单值写回状态。 */
 function updateStateFromControl(control) {
@@ -2101,6 +2467,7 @@ function updateStrategyOptionVisibility() {
   const optionGroups = new Set(algorithm?.optionGroups || []);
   document.getElementById("loadlockOptions").classList.toggle("is-hidden", !optionGroups.has("loadlock"));
   document.getElementById("heuristicObjectiveOptions").classList.toggle("is-hidden", !optionGroups.has("heuristic-objectives"));
+  document.getElementById("scheduleAlphaGoOptions").classList.toggle("is-hidden", !optionGroups.has("schedule-alphago"));
 }
 
 /** 在策略列表下方显示指定算法的介绍。 */
@@ -2182,6 +2549,9 @@ async function prepareWorkspaceView(result) {
   visualizationWorkspace.setAnalysisConfiguration(state.routes, state.rounds);
   visualizationWorkspace.setReplayPlan(buildPayload());
   await visualizationWorkspace.loadResult(result.resultId, state.testCaseName || "当前运行结果");
+  if (latestSearchTelemetry?.algorithm === "schedule-alphago") {
+    renderSearchTelemetry(latestSearchTelemetry);
+  }
   return visualizationWorkspace.getBottleneckUtilization();
 }
 
@@ -2191,6 +2561,8 @@ async function runPlan() {
   const batchButton = document.getElementById("batchRunButton");
   const comparisonButton = document.getElementById("openParameterComparisonDialogButton");
   let logReady = false, ganttReady = false, runResult = null, bottleneckSummary = null;
+  const telemetryEnabled = state.strategy === "schedule-alphago";
+  let telemetryStopped = false;
   try {
     const healthResponse = await fetch("/api/health", { cache: "no-store" }), health = await healthResponse.json();
     if (!healthResponse.ok || health.schemaVersion !== EXPECTED_API_SCHEMA) throw new Error("本地服务版本过旧，请重启 scripts/config_editor_server.py");
@@ -2203,11 +2575,24 @@ async function runPlan() {
     if (state.testCaseId) await saveCurrentTest(true);
     const payload = buildPayload(); button.disabled = true; batchButton.disabled = true; comparisonButton.disabled = true; button.classList.add("running"); button.textContent = "正在运行策略…";
     resetRunResult();
+    visualizationWorkspace.setAnalysisConfiguration(state.routes, state.rounds);
+    if (telemetryEnabled) {
+      visualizationWorkspace.beginLiveSolve(
+        payload,
+        `${displayStrategyName(state.strategy)} · 实时求解`,
+      );
+      visualizationWorkspace.showPlayback();
+      startSearchTelemetryPolling();
+    }
     writeTerminal(`$ 开始运行 ${state.strategy}\n  总轮数: ${state.roundCount}\n  重算时间: ${state.rounds.map(round => round.currentTime).join(", ")} s`);
     const response = await fetch("/api/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
     const responseText = await response.text();
     try { runResult = JSON.parse(responseText); }
     catch { throw new Error(responseText.trim().slice(0, 240) || `服务返回 ${response.status}`); }
+    if (telemetryEnabled) {
+      stopSearchTelemetryPolling(runResult?.searchTelemetry || null);
+      telemetryStopped = true;
+    }
     logReady = prepareLogDownload(runResult);
     ganttReady = prepareGanttView(runResult);
     if (runResult?.resultId) {
@@ -2244,7 +2629,12 @@ async function runPlan() {
       ? (runResult.validation === "failed" ? "未通过" : validationDisplay(runResult.validation) || "失败")
       : "失败";
   }
-  finally { button.disabled = false; button.classList.remove("running"); button.textContent = "▶ 运行当前测试"; renderWorkspaceControls(); }
+  finally {
+    if (telemetryEnabled && !telemetryStopped) {
+      stopSearchTelemetryPolling(runResult?.searchTelemetry || null);
+    }
+    button.disabled = false; button.classList.remove("running"); button.textContent = "▶ 运行当前测试"; renderWorkspaceControls();
+  }
 }
 
 /** 使用当前所选策略并行运行当前测试组中的全部测试。 */
@@ -3060,6 +3450,26 @@ document.getElementById("runButton").addEventListener("click", runPlan);
 document.getElementById("batchRunButton").addEventListener("click", runCurrentTestGroup);
 document.getElementById("openParameterComparisonDialogButton").addEventListener("click", openParameterComparisonDialog);
 document.getElementById("parameterComparisonDialogCancel").addEventListener("click", () => document.getElementById("parameterComparisonDialog").close());
+document.getElementById("openScheduleAlphaGoOptionsDialogButton").addEventListener("click", openScheduleAlphaGoOptionsDialog);
+document.getElementById("scheduleAlphaGoOptionsDialogCancel").addEventListener("click", () => document.getElementById("scheduleAlphaGoOptionsDialog").close());
+document.getElementById("alphaGoCheckpointFile").addEventListener("change", event => {
+  pendingAlphaGoCheckpointFile = event.currentTarget.files?.[0] || null;
+  if (!pendingAlphaGoCheckpointFile) return;
+  document.getElementById("alphaGoCheckpointPath").value = pendingAlphaGoCheckpointFile.name;
+  document.getElementById("alphaGoCheckpointHint").textContent = `已选择“${pendingAlphaGoCheckpointFile.name}”；保存参数时上传。`;
+});
+document.getElementById("clearAlphaGoCheckpointButton").addEventListener("click", () => {
+  pendingAlphaGoCheckpointFile = null;
+  document.getElementById("alphaGoCheckpointFile").value = "";
+  document.getElementById("alphaGoCheckpointPath").value = "";
+  document.getElementById("alphaGoCheckpointHint").textContent = "保存后将使用默认模型或冷启动模型。";
+});
+document.getElementById("scheduleAlphaGoOptionsForm").addEventListener("submit", event => {
+  event.preventDefault();
+  saveScheduleAlphaGoOptions().catch(error => {
+    document.getElementById("alphaGoCheckpointHint").textContent = error.message || "参数保存失败";
+  });
+});
 document.getElementById("parameterComparisonStrategy").addEventListener("change", event => {
   const baselineOptions = state.parameterComparison?.baseline?.options || {};
   renderParameterComparisonStrategyFields(event.target.value, baselineOptions);
@@ -3080,6 +3490,20 @@ document.getElementById("logButton").addEventListener("click", event => { if (ev
 document.getElementById("ganttButton").addEventListener("click", event => { if (event.currentTarget.getAttribute("aria-disabled") === "true") event.preventDefault(); });
 document.getElementById("batchLogButton").addEventListener("click", event => { if (event.currentTarget.getAttribute("aria-disabled") === "true") event.preventDefault(); });
 document.getElementById("batchGanttButton").addEventListener("click", event => { if (event.currentTarget.getAttribute("aria-disabled") === "true") event.preventDefault(); });
+document.getElementById("searchTelemetryDecisionSelect").addEventListener("change", event => {
+  selectedSearchTelemetryId = String(event.currentTarget.value || "");
+  followLatestSearchTelemetry = selectedSearchTelemetryId === String(latestSearchTelemetry?.searchId || "");
+  if (latestSearchTelemetry) renderSearchTelemetry(latestSearchTelemetry);
+});
+document.getElementById("searchTelemetryPauseButton").addEventListener("click", () => {
+  void controlSearchTelemetry("pause");
+});
+document.getElementById("searchTelemetryStepButton").addEventListener("click", () => {
+  void controlSearchTelemetry("step");
+});
+document.getElementById("searchTelemetryContinueButton").addEventListener("click", () => {
+  void controlSearchTelemetry("continue");
+});
 document.getElementById("closeDrawer").addEventListener("click", closeStepDrawer);
 document.getElementById("drawerLayer").addEventListener("click", event => { if (event.target.id === "drawerLayer") closeStepDrawer(); });
 document.addEventListener("keydown", event => { if (event.key === "Escape") closeStepDrawer(); });

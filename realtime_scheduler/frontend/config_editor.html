@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>调度平台</title>
-  <link rel="stylesheet" href="/assets/config_editor.css?v=1.1.34">
+  <link rel="stylesheet" href="/assets/config_editor.css?v=1.1.36">
 </head>
 <body>
   <a class="skip-link" href="#mainContent">跳到主要内容</a>
@@ -232,6 +232,36 @@
                 </div>
               </section>
 
+              <section class="search-telemetry playback-search-telemetry" id="searchTelemetryPanel" hidden aria-live="polite">
+                <header class="search-telemetry-head">
+                  <div><h3>Schedule-AlphaGo 搜索</h3><p id="searchTelemetryStatus">等待搜索开始</p></div>
+                  <div class="search-telemetry-controls">
+                    <button class="btn small" id="searchTelemetryPauseButton" type="button">暂停</button>
+                    <button class="btn small" id="searchTelemetryStepButton" type="button">单步求解</button>
+                    <button class="btn primary small" id="searchTelemetryContinueButton" type="button">连续求解</button>
+                    <label>根决策<select id="searchTelemetryDecisionSelect" aria-label="选择要查看的根决策"></select></label>
+                  </div>
+                </header>
+                <div class="search-telemetry-summary" id="searchTelemetrySummary"></div>
+                <div class="search-telemetry-grid">
+                  <section class="search-action-section">
+                    <h4>根节点全部合法动作</h4>
+                    <div class="search-action-table-wrap">
+                      <table class="search-action-table">
+                        <thead><tr><th>动作</th><th>P</th><th>N / 占比</th><th>Q / 估计代价</th><th>标准误</th><th>价值变化</th></tr></thead>
+                        <tbody id="searchTelemetryActions"></tbody>
+                      </table>
+                    </div>
+                  </section>
+                  <aside class="search-tree-section">
+                    <h4>当前主变化</h4>
+                    <div class="search-principal-variation" id="searchTelemetryVariation"></div>
+                    <h4>高访问相关节点</h4>
+                    <div class="search-related-nodes" id="searchTelemetryNodes"></div>
+                  </aside>
+                </div>
+              </section>
+
               <div class="petri-console-layout">
                 <main class="petri-center-column">
                   <section class="device-stage" id="visualDeviceStage" aria-label="设备拓扑状态"></section>
@@ -339,6 +369,12 @@
               <div class="field span-4"><label>系统停留时间 CV 上限</label><input data-option="maximumSystemResidenceCv" type="number" min="0" step="0.01" value="0"><div class="hint">CV = 标准差 ÷ 均值；例如 0.10 表示目标波动约 10%，0 表示不限制。</div></div>
               <div class="field span-12"><div class="hint">多指标模式会比较多套可执行启发式方案：优先减少驻留超限，再尽量达到持片和 CV 目标，最后比较 makespan。目标用于探索选优，不保证一定满足；运行时间也会比默认模式更长。</div></div>
             </div>
+            <div id="scheduleAlphaGoOptions" class="is-hidden" style="margin-top:14px">
+              <section class="alphago-settings-card" aria-labelledby="alphagoSettingsTitle">
+                <div><strong id="alphagoSettingsTitle">AlphaGo 搜索参数</strong><p id="alphagoSettingsSummary">使用默认搜索设置和冷启动模型。</p></div>
+                <button class="btn small" id="openScheduleAlphaGoOptionsDialogButton" type="button">编辑参数</button>
+              </section>
+            </div>
           </div>
           <div class="run-box">
             <h2>开始运行</h2>
@@ -370,6 +406,25 @@
       <section class="comparison-strategy-options" id="parameterComparisonStrategyOptions"></section>
       <div class="algorithm-dialog-status" id="parameterComparisonDialogStatus" role="status"></div>
       <div class="dialog-actions"><button class="btn small" type="button" id="parameterComparisonDialogCancel">取消</button><button class="btn primary small" id="runParameterComparisonButton" type="submit">运行对比测试</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="scheduleAlphaGoOptionsDialog" aria-labelledby="scheduleAlphaGoOptionsDialogTitle">
+    <form class="dialog-body alphago-options-dialog-body" id="scheduleAlphaGoOptionsForm">
+      <h3 id="scheduleAlphaGoOptionsDialogTitle">编辑 AlphaGo 搜索参数</h3>
+      <p>这些设置仅在运行 Schedule-AlphaGo 时生效。</p>
+      <div class="algorithm-form-grid alphago-options-grid">
+        <div class="field"><label for="alphaGoDecisionSeconds">单步时间预算（秒）</label><input id="alphaGoDecisionSeconds" type="number" min="0.001" step="0.05" placeholder="自动：GPU 0.85 / CPU 1.5"><div class="hint">留空时按推理设备自动选择。</div></div>
+        <div class="field"><label for="alphaGoMaxSimulations">最大模拟次数</label><input id="alphaGoMaxSimulations" type="number" min="1" step="1"></div>
+        <div class="field"><label for="alphaGoMaxNodes">最大搜索节点</label><input id="alphaGoMaxNodes" type="number" min="1" step="1"></div>
+        <div class="field"><label for="alphaGoMaxDepth">树深上限</label><input id="alphaGoMaxDepth" type="number" min="1" step="1"></div>
+        <div class="field"><label for="alphaGoRolloutDepth">Rollout 深度</label><input id="alphaGoRolloutDepth" type="number" min="0" step="1"></div>
+        <div class="field"><label for="alphaGoCPuct">PUCT 探索系数</label><input id="alphaGoCPuct" type="number" min="0" step="0.05"></div>
+        <div class="field"><label for="alphaGoTelemetryMilliseconds">遥测间隔（毫秒）</label><input id="alphaGoTelemetryMilliseconds" type="number" min="1" step="1"></div>
+        <div class="field"><label for="alphaGoDevice">推理设备</label><select id="alphaGoDevice"><option value="auto">自动</option><option value="cuda">CUDA GPU</option><option value="cpu">CPU</option></select></div>
+        <div class="field span-2"><label>策略价值模型 checkpoint</label><div class="checkpoint-picker"><input id="alphaGoCheckpointPath" type="text" readonly placeholder="未选择，使用默认模型"><label class="btn small" for="alphaGoCheckpointFile">从文件夹选择</label><input id="alphaGoCheckpointFile" type="file" accept=".npz,.pt,.pth,.ckpt,application/octet-stream"></div><div class="hint" id="alphaGoCheckpointHint">选择本机 checkpoint 后将上传到本地服务，并用于后续运行。</div><button class="text-button" id="clearAlphaGoCheckpointButton" type="button">使用默认模型</button></div>
+      </div>
+      <div class="dialog-actions"><button class="btn small" type="button" id="scheduleAlphaGoOptionsDialogCancel">取消</button><button class="btn primary small" id="saveScheduleAlphaGoOptionsButton" type="submit">保存参数</button></div>
     </form>
   </dialog>
 
@@ -427,6 +482,6 @@
     </aside>
   </div>
 
-  <script type="module" src="/assets/config_editor.js?v=1.1.34"></script>
+  <script type="module" src="/assets/config_editor.js?v=1.1.36"></script>
 </body>
 </html>
