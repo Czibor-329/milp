@@ -3123,6 +3123,7 @@ var DEFAULT_SCHEDULE_OPTIONS = Object.freeze({
   scheduleAlphaGoMaxNodes: 4096,
   scheduleAlphaGoCPuct: 1.5,
   scheduleAlphaGoRolloutMix: null,
+  scheduleAlphaGoDecisionCount: 8,
   scheduleAlphaGoTelemetryMilliseconds: 50,
   scheduleAlphaGoModelPath: "",
   scheduleAlphaGoDevice: "auto",
@@ -3136,7 +3137,8 @@ var ALPHA_GO_NUMERIC_OPTION_SPECS = Object.freeze([
   { controlId: "alphaGoMaxDepth", option: "scheduleAlphaGoMaxDepth", minimum: 1, integer: true, optional: false, label: "\u6811\u6DF1\u4E0A\u9650" },
   { controlId: "alphaGoRolloutDepth", option: "scheduleAlphaGoRolloutDepth", minimum: 0, integer: true, optional: false, label: "Rollout \u6DF1\u5EA6" },
   { controlId: "alphaGoCPuct", option: "scheduleAlphaGoCPuct", minimum: 0, integer: false, optional: false, label: "PUCT \u63A2\u7D22\u7CFB\u6570" },
-  { controlId: "alphaGoTelemetryMilliseconds", option: "scheduleAlphaGoTelemetryMilliseconds", minimum: 1, integer: true, optional: false, label: "\u9065\u6D4B\u95F4\u9694" }
+  { controlId: "alphaGoTelemetryMilliseconds", option: "scheduleAlphaGoTelemetryMilliseconds", minimum: 1, integer: true, optional: false, label: "\u9065\u6D4B\u95F4\u9694" },
+  { controlId: "alphaGoDecisionCount", option: "scheduleAlphaGoDecisionCount", minimum: 1, integer: true, optional: false, label: "\u51B3\u7B56\u6570\u91CF" }
 ]);
 var CLEAN_TYPE_DEFINITIONS = [
   { key: "preclean", label: "PreClean" },
@@ -3208,6 +3210,8 @@ var followLatestSearchTelemetry = true;
 var searchTelemetryRunActive = false;
 var searchTelemetryControlPending = false;
 var lastSearchTelemetryMoveCount = 0;
+var continuousDecisionEnabled = false;
+var continuousDecisionSubmittedSearchId = "";
 var playbackMode = "replay";
 var userChosenActionKey = "";
 var userChosenSearchId = "";
@@ -3813,6 +3817,8 @@ function resetSearchTelemetryView() {
   searchTelemetryRunActive = false;
   searchTelemetryControlPending = false;
   lastSearchTelemetryMoveCount = 0;
+  continuousDecisionEnabled = false;
+  continuousDecisionSubmittedSearchId = "";
   userChosenActionKey = "";
   userChosenSearchId = "";
   const panel = document.getElementById("searchTelemetryPanel");
@@ -3824,7 +3830,8 @@ function resetSearchTelemetryView() {
     "searchTelemetryPauseButton",
     "searchTelemetryStepButton",
     "searchTelemetryContinueButton",
-    "searchTelemetryFollowRecommendationButton"
+    "searchTelemetryFollowRecommendationButton",
+    "searchTelemetryContinuousDecisionButton"
   ]) {
     const button = document.getElementById(id);
     button.disabled = true;
@@ -3901,14 +3908,23 @@ function updateSearchTelemetryControls(snapshot) {
   const stepButton = document.getElementById("searchTelemetryStepButton");
   const continueButton = document.getElementById("searchTelemetryContinueButton");
   const followButton = document.getElementById("searchTelemetryFollowRecommendationButton");
+  const continuousButton = document.getElementById("searchTelemetryContinuousDecisionButton");
+  const continuousActive = continuousDecisionEnabled && searchTelemetryRunActive && stepMode;
   pauseButton.hidden = stepMode;
   stepButton.hidden = stepMode;
   continueButton.hidden = stepMode;
   followButton.hidden = !stepMode;
+  continuousButton.hidden = !stepMode;
   pauseButton.disabled = disabled;
   stepButton.disabled = disabled;
   continueButton.disabled = disabled;
-  followButton.disabled = !(!disabled && stepMode && executionMode === "paused" && snapshot?.status === "waiting-choice" && Boolean(snapshot?.selectedActionKey));
+  const canFollowRecommendation = !disabled && stepMode && executionMode === "paused" && snapshot?.status === "waiting-choice" && Boolean(snapshot?.selectedActionKey);
+  followButton.disabled = !canFollowRecommendation || continuousActive;
+  continuousButton.disabled = !stepMode || !searchTelemetryRunActive || !continuousActive && !canFollowRecommendation;
+  continuousButton.textContent = continuousActive ? "\u505C\u6B62\u6301\u7EED\u51B3\u7B56" : "\u6301\u7EED\u51B3\u7B56";
+  continuousButton.title = continuousActive ? "\u5B8C\u6210\u5F53\u524D\u5728\u9014\u9009\u62E9\u540E\u505C\u6B62\uFF0C\u4E0D\u518D\u81EA\u52A8\u6267\u884C\u4E0B\u4E00\u8F6E\u63A8\u8350" : "\u6301\u7EED\u6267\u884C\u6BCF\u4E00\u8F6E\u641C\u7D22\u7684\u6A21\u578B\u63A8\u8350\u52A8\u4F5C";
+  continuousButton.setAttribute("aria-pressed", String(continuousActive));
+  continuousButton.classList.toggle("is-active", continuousActive);
   pauseButton.classList.toggle("is-active", !disabled && !stepMode && executionMode === "paused");
   continueButton.classList.toggle("is-active", !disabled && !stepMode && executionMode === "continuous");
 }
@@ -3931,28 +3947,33 @@ function syncSearchTelemetryPlayback(snapshot, selectedDecision) {
     visualizationWorkspace.seekTo(replayTime);
   }
 }
-async function chooseSearchAction(actionKey) {
+async function chooseSearchAction(actionKey, automatic = false) {
   if (!searchTelemetryRunActive || playbackMode !== "step") return;
   if (searchTelemetryControlPending) return;
   if (latestSearchTelemetry?.status !== "waiting-choice") return;
   const key = String(actionKey || "");
   if (!key) return;
+  searchTelemetryControlPending = true;
   userChosenActionKey = key;
   userChosenSearchId = String(latestSearchTelemetry?.searchId || "");
   if (latestSearchTelemetry) renderSearchTelemetry(latestSearchTelemetry);
-  searchTelemetryControlPending = true;
   updateSearchTelemetryControls(latestSearchTelemetry);
   try {
     const result = await requestSearchControl("choose", key);
     if (result?.telemetry) renderSearchTelemetry(result.telemetry);
   } catch (error) {
+    if (automatic) {
+      continuousDecisionEnabled = false;
+      continuousDecisionSubmittedSearchId = "";
+    }
     const status = document.getElementById("searchTelemetryStatus");
-    status.textContent = `\u63D0\u4EA4\u9009\u62E9\u5931\u8D25\uFF1A${error.message || "\u672A\u77E5\u9519\u8BEF"}`;
+    status.textContent = automatic ? `\u6301\u7EED\u51B3\u7B56\u5DF2\u505C\u6B62\uFF1A${error.message || "\u63D0\u4EA4\u63A8\u8350\u5931\u8D25"}` : `\u63D0\u4EA4\u9009\u62E9\u5931\u8D25\uFF1A${error.message || "\u672A\u77E5\u9519\u8BEF"}`;
     status.classList.remove("is-searching", "is-paused");
   } finally {
     searchTelemetryControlPending = false;
     flushPendingModeSync();
     updateSearchTelemetryControls(latestSearchTelemetry);
+    maybeContinueModelDecision(latestSearchTelemetry);
   }
 }
 function followSearchRecommendation() {
@@ -3975,9 +3996,31 @@ function renderPlaybackModeSwitch() {
   document.getElementById("visualRecommendationModelControl").hidden = stepMode;
   document.getElementById("visualPauseOnDecisionChangeButton").hidden = stepMode;
 }
+function maybeContinueModelDecision(snapshot) {
+  if (!continuousDecisionEnabled || !searchTelemetryRunActive || playbackMode !== "step") return;
+  if (searchTelemetryControlPending || snapshot?.status !== "waiting-choice") return;
+  const searchId = String(snapshot?.searchId || "");
+  const actionKey = String(snapshot?.selectedActionKey || "");
+  if (!searchId || !actionKey || searchId === continuousDecisionSubmittedSearchId) return;
+  continuousDecisionSubmittedSearchId = searchId;
+  void chooseSearchAction(actionKey, true);
+}
+function toggleContinuousDecision() {
+  if (!searchTelemetryRunActive || playbackMode !== "step") return;
+  continuousDecisionEnabled = !continuousDecisionEnabled;
+  continuousDecisionSubmittedSearchId = "";
+  followLatestSearchTelemetry = true;
+  selectedSearchTelemetryId = "";
+  if (latestSearchTelemetry) renderSearchTelemetry(latestSearchTelemetry);
+  else updateSearchTelemetryControls(null);
+}
 async function setPlaybackMode(mode) {
   if (mode !== "step" && mode !== "replay") return;
   playbackMode = mode;
+  if (mode !== "step") {
+    continuousDecisionEnabled = false;
+    continuousDecisionSubmittedSearchId = "";
+  }
   renderPlaybackModeSwitch();
   if (searchTelemetryRunActive && !searchTelemetryControlPending) {
     try {
@@ -4045,12 +4088,13 @@ function renderSearchTelemetry(snapshot) {
   const waiting = snapshot?.status === "waiting-step";
   const waitingChoice = snapshot?.status === "waiting-choice";
   const cancelled = snapshot?.status === "cancelled";
-  status.textContent = cancelled ? "\u8FD0\u884C\u5DF2\u53D6\u6D88" : waitingChoice ? playbackMode === "step" ? "\u641C\u7D22\u5B8C\u6210 \xB7 \u8BF7\u9009\u62E9\u8981\u6267\u884C\u7684\u52A8\u4F5C" : "\u6C42\u89E3\u5DF2\u6682\u505C \xB7 \u7B49\u5F85\u653E\u884C" : waiting ? "\u6C42\u89E3\u5DF2\u6682\u505C \xB7 \u53EF\u5355\u6B65\u653E\u884C\u4E00\u4E2A\u6839\u51B3\u7B56\uFF0C\u6216\u7EE7\u7EED\u8FDE\u7EED\u6C42\u89E3" : searching ? `\u6B63\u5728\u8FDB\u884C\u975E\u5BF9\u79F0\u6811\u641C\u7D22 \xB7 ${Number(snapshot?.simulations) || 0} \u6B21\u6A21\u62DF` : snapshot?.status === "action-applied" ? `\u6839\u52A8\u4F5C #${Number(snapshot?.decisionIndex || 0) + 1} \u5DF2\u63D0\u4EA4 \xB7 \u62D3\u6251\u5DF2\u63A8\u8FDB` : `\u51B3\u7B56\u5B8C\u6210 \xB7 \u7531${searchTelemetryStopReason(selected?.stopReason)}\u7EC8\u6B62`;
+  status.textContent = cancelled ? "\u8FD0\u884C\u5DF2\u53D6\u6D88" : waitingChoice ? playbackMode === "step" ? continuousDecisionEnabled ? "\u6301\u7EED\u51B3\u7B56\u4E2D \xB7 \u6B63\u5728\u6267\u884C\u6A21\u578B\u63A8\u8350" : "\u641C\u7D22\u5B8C\u6210 \xB7 \u8BF7\u9009\u62E9\u8981\u6267\u884C\u7684\u52A8\u4F5C" : "\u6C42\u89E3\u5DF2\u6682\u505C \xB7 \u7B49\u5F85\u653E\u884C" : waiting ? "\u6C42\u89E3\u5DF2\u6682\u505C \xB7 \u53EF\u5355\u6B65\u653E\u884C\u4E00\u4E2A\u6839\u51B3\u7B56\uFF0C\u6216\u7EE7\u7EED\u8FDE\u7EED\u6C42\u89E3" : searching ? `${continuousDecisionEnabled && playbackMode === "step" ? "\u6301\u7EED\u51B3\u7B56\u4E2D \xB7 " : ""}\u6B63\u5728\u8FDB\u884C\u975E\u5BF9\u79F0\u6811\u641C\u7D22 \xB7 ${Number(snapshot?.simulations) || 0} \u6B21\u6A21\u62DF` : snapshot?.status === "action-applied" ? `\u6839\u52A8\u4F5C #${Number(snapshot?.decisionIndex || 0) + 1} \u5DF2\u63D0\u4EA4 \xB7 \u62D3\u6251\u5DF2\u63A8\u8FDB` : `\u51B3\u7B56\u5B8C\u6210 \xB7 \u7531${searchTelemetryStopReason(selected?.stopReason)}\u7EC8\u6B62`;
   status.classList.toggle("is-searching", searching);
   status.classList.toggle("is-paused", waiting || waitingChoice);
   updateSearchTelemetryControls(snapshot);
   renderSearchTelemetryDecision(selected);
   syncSearchTelemetryPlayback(snapshot, selected);
+  maybeContinueModelDecision(snapshot);
 }
 async function pollSearchTelemetry(token) {
   let revision = null;
@@ -4086,6 +4130,8 @@ function startSearchTelemetryPolling() {
 function stopSearchTelemetryPolling(finalSnapshot = null) {
   searchTelemetryPollToken += 1;
   searchTelemetryRunActive = false;
+  continuousDecisionEnabled = false;
+  continuousDecisionSubmittedSearchId = "";
   visualizationWorkspace.setExternalDecisionLensOwner(false);
   if (finalSnapshot) renderSearchTelemetry(finalSnapshot);
   const status = document.getElementById("searchTelemetryStatus");
@@ -5106,17 +5152,7 @@ function renderAll() {
   renderRoutes();
   renderRounds();
   renderRobotSlots();
-  renderAlphaGoSettingsSummary();
   if (state.drawer) renderStepDrawer();
-}
-function renderAlphaGoSettingsSummary() {
-  const summary = document.getElementById("alphagoSettingsSummary");
-  if (!summary) return;
-  const device = String(state.options.scheduleAlphaGoDevice || "auto").toUpperCase();
-  const simulations = Number(state.options.scheduleAlphaGoMaxSimulations) || DEFAULT_SCHEDULE_OPTIONS.scheduleAlphaGoMaxSimulations;
-  const configuredPath = String(state.options.scheduleAlphaGoModelPath || "").trim();
-  const modelName = configuredPath ? configuredPath.split(/[\\/]/).pop() : "\u9ED8\u8BA4\u6A21\u578B";
-  summary.textContent = `${device} \xB7 ${simulations} \u6B21\u6A21\u62DF \xB7 ${modelName}`;
 }
 function openScheduleAlphaGoOptionsDialog() {
   pendingAlphaGoCheckpointFile = null;
@@ -6558,6 +6594,7 @@ document.getElementById("searchTelemetryContinueButton").addEventListener("click
   void controlSearchTelemetry("continue");
 });
 document.getElementById("searchTelemetryFollowRecommendationButton").addEventListener("click", followSearchRecommendation);
+document.getElementById("searchTelemetryContinuousDecisionButton").addEventListener("click", toggleContinuousDecision);
 document.getElementById("playbackModeReplayButton").addEventListener("click", () => {
   void setPlaybackMode("replay");
 });

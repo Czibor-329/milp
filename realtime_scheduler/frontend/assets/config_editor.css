@@ -131,18 +131,55 @@
     .dialog-body input { width: 100%; min-height: 39px; margin-top: 14px; padding: 8px 10px; border: 1px solid #cdd6e2; border-radius: 9px; outline: none; }
     .dialog-body input:focus { border-color: #7396ee; box-shadow: 0 0 0 3px rgba(36,87,214,.11); }
     .dialog-actions { display: flex; justify-content: flex-end; gap: 7px; margin-top: 16px; }
-    .alphago-settings-card { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 14px; border: 1px solid #c9d7ed; border-radius: 12px; background: linear-gradient(135deg, #f7faff, #eef4ff); }
+    .alphago-settings-card { display: flex; min-height: 54px; align-items: center; justify-content: space-between; gap: 14px; padding: 10px 12px 10px 14px; border: 1px solid #c9d7ed; border-radius: 12px; background: linear-gradient(135deg, #f7faff, #eef4ff); }
     .alphago-settings-card strong { display: block; color: #16254a; font-size: 13px; }
-    .alphago-settings-card p { margin: 4px 0 0; color: #5c6d85; font-size: 11px; line-height: 1.5; }
-    .alphago-options-dialog-body { width: min(720px, calc(100vw - 32px)); }
-    .alphago-options-grid { margin-top: 16px; }
-    .checkpoint-picker { display: flex; gap: 8px; align-items: center; }
-    .checkpoint-picker input[type="text"] { min-width: 0; margin: 0; flex: 1; color: #52637b; background: #f8fafc; }
+    #scheduleAlphaGoOptionsDialog { width: min(760px, calc(100vw - 32px)); max-width: none; max-height: calc(100dvh - 32px); overflow: hidden; }
+    .alphago-options-dialog-body { display: flex; width: 100%; max-height: calc(100dvh - 34px); min-height: 0; padding: 0; overflow: hidden; flex-direction: column; }
+    .alphago-dialog-header { display: flex; flex: 0 0 auto; align-items: flex-start; justify-content: space-between; gap: 18px; padding: 22px 24px 18px; border-bottom: 1px solid var(--line); }
+    .alphago-dialog-header h3 { margin-bottom: 4px; font-size: 18px; }
+    .alphago-dialog-header p { font-size: 12px; }
+    .alphago-dialog-tag { flex: 0 0 auto; padding: 4px 9px; border-radius: 999px; color: var(--brand-dark); background: var(--brand-soft); font-size: 10px; font-weight: 800; letter-spacing: .05em; }
+    .alphago-options-content { display: grid; min-height: 0; padding: 18px 24px; overflow-x: hidden; overflow-y: auto; gap: 12px; }
+    .alphago-option-group { padding: 15px 16px 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--soft); }
+    .alphago-option-group-head { display: flex; align-items: baseline; justify-content: space-between; gap: 18px; margin-bottom: 12px; }
+    .alphago-option-group-head h4 { margin: 0; color: #243653; font-size: 13px; }
+    .alphago-option-group-head p { font-size: 11px; text-align: right; }
+    .alphago-options-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px 16px; }
+    .alphago-options-dialog-body .field label { margin-bottom: 5px; color: #334966; }
+    .alphago-options-dialog-body .field label > span { color: var(--muted); font-weight: 600; }
+    .alphago-options-dialog-body .field input, .alphago-options-dialog-body .field select { min-height: 40px; margin-top: 0; background: #fff; }
+    .alphago-options-dialog-body .hint { line-height: 1.45; }
+    .checkpoint-picker { display: flex; align-items: center; gap: 8px; }
+    .checkpoint-picker input[type="text"] { min-width: 0; margin: 0; flex: 1; overflow: hidden; color: #52637b; background: #fff; text-overflow: ellipsis; }
     .checkpoint-picker input[type="file"] { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
-    .checkpoint-picker .btn { flex: 0 0 auto; white-space: nowrap; }
-    .text-button { margin-top: 7px; padding: 0; border: 0; color: var(--brand); background: transparent; font: inherit; font-size: 11px; font-weight: 750; cursor: pointer; }
+    .checkpoint-picker .btn { min-height: 40px; flex: 0 0 auto; padding-inline: 13px; white-space: nowrap; }
+    .alphago-checkpoint-meta { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+    .alphago-checkpoint-meta .hint { min-width: 0; }
+    .text-button { margin-top: 7px; padding: 0; border: 0; color: var(--brand); background: transparent; font: inherit; font-size: 11px; font-weight: 750; white-space: nowrap; cursor: pointer; }
     .text-button:hover { color: var(--brand-dark); text-decoration: underline; }
-    @media (max-width: 560px) { .alphago-settings-card { align-items: flex-start; flex-direction: column; } .checkpoint-picker { align-items: stretch; flex-direction: column; } }
+    .alphago-options-dialog-body > .dialog-actions { flex: 0 0 auto; margin: 0; padding: 14px 24px 18px; border-top: 1px solid var(--line); background: #fff; }
+    .alphago-options-dialog-body > .dialog-actions .btn { min-width: 76px; min-height: 36px; }
+    body.theme-dark #scheduleAlphaGoOptionsDialog { border-color: var(--line); color: var(--ink); background: var(--surface); }
+    body.theme-dark .alphago-dialog-header, body.theme-dark .alphago-options-dialog-body > .dialog-actions { border-color: var(--line); background: var(--surface); }
+    body.theme-dark .alphago-dialog-header p, body.theme-dark .alphago-option-group-head p { color: var(--muted); }
+    body.theme-dark .alphago-dialog-tag { color: #bdd0ff; background: #25365f; }
+    body.theme-dark .alphago-option-group { border-color: var(--line); background: var(--soft); }
+    body.theme-dark .alphago-option-group-head h4, body.theme-dark .alphago-options-dialog-body .field label { color: #e2e7f0; }
+    body.theme-dark .alphago-options-dialog-body .field input, body.theme-dark .alphago-options-dialog-body .field select, body.theme-dark .checkpoint-picker input[type="text"] { border-color: #51545b; color: var(--ink); background: #222428; }
+    body.theme-dark .alphago-settings-card { border-color: #3f5687; background: linear-gradient(135deg, #252c3a, #202a40); }
+    body.theme-dark .alphago-settings-card strong { color: #e1e9ff; }
+    @media (max-width: 620px) {
+      .alphago-dialog-header { padding: 18px 18px 15px; }
+      .alphago-dialog-tag { display: none; }
+      .alphago-options-content { padding: 14px 18px; }
+      .alphago-option-group { padding: 14px; }
+      .alphago-option-group-head { display: block; }
+      .alphago-option-group-head p { margin-top: 3px; text-align: left; }
+      .alphago-options-grid { grid-template-columns: minmax(0, 1fr); }
+      .checkpoint-picker { align-items: stretch; flex-direction: column; }
+      .alphago-checkpoint-meta { display: block; }
+      .alphago-options-dialog-body > .dialog-actions { padding: 12px 18px 16px; }
+    }
     .import-device { position: relative; overflow: hidden; }
     .import-device input { position: absolute; inset: 0; width: 100%; opacity: 0; cursor: pointer; }
     .workspace-status { display: inline-flex; align-items: center; justify-content: flex-end; gap: 8px; min-height: 28px; color: var(--muted); font-size: 11px; font-weight: 750; text-align: right; }
@@ -1212,10 +1249,14 @@
     .search-telemetry-panel .search-telemetry-controls .btn { min-height: 30px; padding: 4px 9px; font-size: 11px; }
     .search-telemetry-panel .search-telemetry-controls .btn.is-active { border-color: #2878d0; color: #fff; background: #2878d0; }
     .search-telemetry-panel .search-telemetry-controls .btn.is-recommendation { border-color: #2e8b57; color: #fff; background: #2e8b57; }
+    .search-telemetry-panel .search-telemetry-controls .btn.is-continuous-decision { border-color: #2e8b57; color: #247548; background: #f1faf5; }
+    .search-telemetry-panel .search-telemetry-controls .btn.is-continuous-decision.is-active { border-color: #b74935; color: #fff; background: #b74935; }
     .search-telemetry-panel .search-telemetry-controls label { display: inline-flex; min-width: 0; align-items: center; gap: 6px; color: #64748b; font-size: 11px; font-weight: 700; white-space: nowrap; }
     .search-telemetry-panel .search-telemetry-controls select { min-width: 0; max-width: 190px; height: 30px; padding: 0 26px 0 8px; font-size: 11px; }
     body.theme-dark .search-telemetry-panel .search-telemetry-head p { color: #b9c4d3; }
     body.theme-dark .search-telemetry-panel .search-telemetry-controls label { color: #8d9ab0; }
+    body.theme-dark .search-telemetry-panel .search-telemetry-controls .btn.is-continuous-decision { border-color: #4c946b; color: #8bd3aa; background: rgba(46,139,87,.12); }
+    body.theme-dark .search-telemetry-panel .search-telemetry-controls .btn.is-continuous-decision.is-active { border-color: #cf6a57; color: #fff; background: #a94230; }
 
     .search-action-candidate.is-interactive { cursor: pointer; }
     .search-action-candidate.is-interactive:hover { background: var(--brand-soft); }

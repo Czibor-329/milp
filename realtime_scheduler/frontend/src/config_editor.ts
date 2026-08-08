@@ -53,6 +53,7 @@ const DEFAULT_SCHEDULE_OPTIONS = Object.freeze({
   scheduleAlphaGoMaxNodes: 4096,
   scheduleAlphaGoCPuct: 1.5,
   scheduleAlphaGoRolloutMix: null,
+  scheduleAlphaGoDecisionCount: 8,
   scheduleAlphaGoTelemetryMilliseconds: 50,
   scheduleAlphaGoModelPath: "",
   scheduleAlphaGoDevice: "auto",
@@ -67,6 +68,7 @@ const ALPHA_GO_NUMERIC_OPTION_SPECS = Object.freeze([
   { controlId: "alphaGoRolloutDepth", option: "scheduleAlphaGoRolloutDepth", minimum: 0, integer: true, optional: false, label: "Rollout 深度" },
   { controlId: "alphaGoCPuct", option: "scheduleAlphaGoCPuct", minimum: 0, integer: false, optional: false, label: "PUCT 探索系数" },
   { controlId: "alphaGoTelemetryMilliseconds", option: "scheduleAlphaGoTelemetryMilliseconds", minimum: 1, integer: true, optional: false, label: "遥测间隔" },
+  { controlId: "alphaGoDecisionCount", option: "scheduleAlphaGoDecisionCount", minimum: 1, integer: true, optional: false, label: "决策数量" },
 ]);
 
 const CLEAN_TYPE_DEFINITIONS = [
@@ -106,6 +108,10 @@ let followLatestSearchTelemetry = true;
 let searchTelemetryRunActive = false;
 let searchTelemetryControlPending = false;
 let lastSearchTelemetryMoveCount = 0;
+/** 是否在步进模式下持续提交每一轮搜索的模型推荐动作。 */
+let continuousDecisionEnabled = false;
+/** 已由持续决策提交的 searchId；防止同一遥测帧被轮询重复提交。 */
+let continuousDecisionSubmittedSearchId = "";
 /** 拓扑回放页面的求解模式：回放模式连续求解，步进模式等待用户选择根动作。 */
 let playbackMode = "replay";
 /** 用户最近一次 choose 的根动作键；用于回放历史时高亮实际执行的动作。 */
@@ -794,6 +800,8 @@ function resetSearchTelemetryView() {
   searchTelemetryRunActive = false;
   searchTelemetryControlPending = false;
   lastSearchTelemetryMoveCount = 0;
+  continuousDecisionEnabled = false;
+  continuousDecisionSubmittedSearchId = "";
   userChosenActionKey = "";
   userChosenSearchId = "";
   const panel = document.getElementById("searchTelemetryPanel");
@@ -806,6 +814,7 @@ function resetSearchTelemetryView() {
     "searchTelemetryStepButton",
     "searchTelemetryContinueButton",
     "searchTelemetryFollowRecommendationButton",
+    "searchTelemetryContinuousDecisionButton",
   ]) {
     const button = document.getElementById(id);
     button.disabled = true;
@@ -909,22 +918,33 @@ function updateSearchTelemetryControls(snapshot) {
   const stepButton = document.getElementById("searchTelemetryStepButton");
   const continueButton = document.getElementById("searchTelemetryContinueButton");
   const followButton = document.getElementById("searchTelemetryFollowRecommendationButton");
-  // 回放模式显示暂停/单步/连续；步进模式显示“执行模型推荐”。
+  const continuousButton = document.getElementById("searchTelemetryContinuousDecisionButton");
+  const continuousActive = continuousDecisionEnabled && searchTelemetryRunActive && stepMode;
+  // 回放模式显示暂停/单步/连续；步进模式显示单次执行和持续决策。
   pauseButton.hidden = stepMode;
   stepButton.hidden = stepMode;
   continueButton.hidden = stepMode;
   followButton.hidden = !stepMode;
+  continuousButton.hidden = !stepMode;
   pauseButton.disabled = disabled;
   stepButton.disabled = disabled;
   continueButton.disabled = disabled;
-  // 步进模式下仅当正等待用户选择时允许提交推荐动作。
-  followButton.disabled = !(
+  const canFollowRecommendation = (
     !disabled
     && stepMode
     && executionMode === "paused"
     && snapshot?.status === "waiting-choice"
     && Boolean(snapshot?.selectedActionKey)
   );
+  // 持续决策开启后保留停止入口；关闭时只在当前推荐动作可提交时允许启动。
+  followButton.disabled = !canFollowRecommendation || continuousActive;
+  continuousButton.disabled = !stepMode || !searchTelemetryRunActive || (!continuousActive && !canFollowRecommendation);
+  continuousButton.textContent = continuousActive ? "停止持续决策" : "持续决策";
+  continuousButton.title = continuousActive
+    ? "完成当前在途选择后停止，不再自动执行下一轮推荐"
+    : "持续执行每一轮搜索的模型推荐动作";
+  continuousButton.setAttribute("aria-pressed", String(continuousActive));
+  continuousButton.classList.toggle("is-active", continuousActive);
   pauseButton.classList.toggle("is-active", !disabled && !stepMode && executionMode === "paused");
   continueButton.classList.toggle("is-active", !disabled && !stepMode && executionMode === "continuous");
 }
@@ -958,29 +978,36 @@ function syncSearchTelemetryPlayback(snapshot, selectedDecision) {
 }
 
 /** 步进模式下用户点选某个根动作并提交。 */
-async function chooseSearchAction(actionKey) {
+async function chooseSearchAction(actionKey, automatic = false) {
   if (!searchTelemetryRunActive || playbackMode !== "step") return;
   if (searchTelemetryControlPending) return;
   // 只在后端确实等待用户选择时提交，避免搜索中的误点被静默预选。
   if (latestSearchTelemetry?.status !== "waiting-choice") return;
   const key = String(actionKey || "");
   if (!key) return;
+  searchTelemetryControlPending = true;
   userChosenActionKey = key;
   userChosenSearchId = String(latestSearchTelemetry?.searchId || "");
   if (latestSearchTelemetry) renderSearchTelemetry(latestSearchTelemetry);
-  searchTelemetryControlPending = true;
   updateSearchTelemetryControls(latestSearchTelemetry);
   try {
     const result = await requestSearchControl("choose", key);
     if (result?.telemetry) renderSearchTelemetry(result.telemetry);
   } catch (error) {
+    if (automatic) {
+      continuousDecisionEnabled = false;
+      continuousDecisionSubmittedSearchId = "";
+    }
     const status = document.getElementById("searchTelemetryStatus");
-    status.textContent = `提交选择失败：${error.message || "未知错误"}`;
+    status.textContent = automatic
+      ? `持续决策已停止：${error.message || "提交推荐失败"}`
+      : `提交选择失败：${error.message || "未知错误"}`;
     status.classList.remove("is-searching", "is-paused");
   } finally {
     searchTelemetryControlPending = false;
     flushPendingModeSync();
     updateSearchTelemetryControls(latestSearchTelemetry);
+    maybeContinueModelDecision(latestSearchTelemetry);
   }
 }
 
@@ -1011,9 +1038,35 @@ function renderPlaybackModeSwitch() {
   document.getElementById("visualPauseOnDecisionChangeButton").hidden = stepMode;
 }
 
+/** 当持续决策开启时，为当前根决策恰好提交一次模型推荐动作。 */
+function maybeContinueModelDecision(snapshot) {
+  if (!continuousDecisionEnabled || !searchTelemetryRunActive || playbackMode !== "step") return;
+  if (searchTelemetryControlPending || snapshot?.status !== "waiting-choice") return;
+  const searchId = String(snapshot?.searchId || "");
+  const actionKey = String(snapshot?.selectedActionKey || "");
+  if (!searchId || !actionKey || searchId === continuousDecisionSubmittedSearchId) return;
+  continuousDecisionSubmittedSearchId = searchId;
+  void chooseSearchAction(actionKey, true);
+}
+
+/** 开启或停止持续决策；停止不会撤销已经提交的当前动作。 */
+function toggleContinuousDecision() {
+  if (!searchTelemetryRunActive || playbackMode !== "step") return;
+  continuousDecisionEnabled = !continuousDecisionEnabled;
+  continuousDecisionSubmittedSearchId = "";
+  followLatestSearchTelemetry = true;
+  selectedSearchTelemetryId = "";
+  if (latestSearchTelemetry) renderSearchTelemetry(latestSearchTelemetry);
+  else updateSearchTelemetryControls(null);
+}
+
 async function setPlaybackMode(mode) {
   if (mode !== "step" && mode !== "replay") return;
   playbackMode = mode;
+  if (mode !== "step") {
+    continuousDecisionEnabled = false;
+    continuousDecisionSubmittedSearchId = "";
+  }
   renderPlaybackModeSwitch();
   if (searchTelemetryRunActive && !searchTelemetryControlPending) {
     try {
@@ -1090,12 +1143,14 @@ function renderSearchTelemetry(snapshot) {
     ? "运行已取消"
     : waitingChoice
       ? playbackMode === "step"
-        ? "搜索完成 · 请选择要执行的动作"
+        ? continuousDecisionEnabled
+          ? "持续决策中 · 正在执行模型推荐"
+          : "搜索完成 · 请选择要执行的动作"
         : "求解已暂停 · 等待放行"
       : waiting
         ? "求解已暂停 · 可单步放行一个根决策，或继续连续求解"
         : searching
-          ? `正在进行非对称树搜索 · ${Number(snapshot?.simulations) || 0} 次模拟`
+          ? `${continuousDecisionEnabled && playbackMode === "step" ? "持续决策中 · " : ""}正在进行非对称树搜索 · ${Number(snapshot?.simulations) || 0} 次模拟`
           : snapshot?.status === "action-applied"
             ? `根动作 #${Number(snapshot?.decisionIndex || 0) + 1} 已提交 · 拓扑已推进`
             : `决策完成 · 由${searchTelemetryStopReason(selected?.stopReason)}终止`;
@@ -1104,6 +1159,7 @@ function renderSearchTelemetry(snapshot) {
   updateSearchTelemetryControls(snapshot);
   renderSearchTelemetryDecision(selected);
   syncSearchTelemetryPlayback(snapshot, selected);
+  maybeContinueModelDecision(snapshot);
 }
 
 /** 在独立 HTTP 线程上轮询搜索快照，不阻塞同步调度请求。 */
@@ -1146,6 +1202,8 @@ function startSearchTelemetryPolling() {
 function stopSearchTelemetryPolling(finalSnapshot = null) {
   searchTelemetryPollToken += 1;
   searchTelemetryRunActive = false;
+  continuousDecisionEnabled = false;
+  continuousDecisionSubmittedSearchId = "";
   visualizationWorkspace.setExternalDecisionLensOwner(false);
   if (finalSnapshot) renderSearchTelemetry(finalSnapshot);
   const status = document.getElementById("searchTelemetryStatus");
@@ -2228,18 +2286,7 @@ async function restoreRobotSlotDefault(robotName) {
 }
 
 /** 渲染所有依赖状态的区域。 */
-function renderAll() { renderTimes(); renderRoutes(); renderRounds(); renderRobotSlots(); renderAlphaGoSettingsSummary(); if (state.drawer) renderStepDrawer(); }
-
-/** 更新侧栏中 AlphaGo 高级参数卡片的当前配置摘要。 */
-function renderAlphaGoSettingsSummary() {
-  const summary = document.getElementById("alphagoSettingsSummary");
-  if (!summary) return;
-  const device = String(state.options.scheduleAlphaGoDevice || "auto").toUpperCase();
-  const simulations = Number(state.options.scheduleAlphaGoMaxSimulations) || DEFAULT_SCHEDULE_OPTIONS.scheduleAlphaGoMaxSimulations;
-  const configuredPath = String(state.options.scheduleAlphaGoModelPath || "").trim();
-  const modelName = configuredPath ? configuredPath.split(/[\\/]/).pop() : "默认模型";
-  summary.textContent = `${device} · ${simulations} 次模拟 · ${modelName}`;
-}
+function renderAll() { renderTimes(); renderRoutes(); renderRounds(); renderRobotSlots(); if (state.drawer) renderStepDrawer(); }
 
 /** 打开 AlphaGo 参数弹窗，并用当前测试集中的已保存值初始化控件。 */
 function openScheduleAlphaGoOptionsDialog() {
@@ -3676,6 +3723,7 @@ document.getElementById("searchTelemetryContinueButton").addEventListener("click
   void controlSearchTelemetry("continue");
 });
 document.getElementById("searchTelemetryFollowRecommendationButton").addEventListener("click", followSearchRecommendation);
+document.getElementById("searchTelemetryContinuousDecisionButton").addEventListener("click", toggleContinuousDecision);
 document.getElementById("playbackModeReplayButton").addEventListener("click", () => {
   void setPlaybackMode("replay");
 });

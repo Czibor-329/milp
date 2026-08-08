@@ -224,6 +224,7 @@ test("合法动作空间面板保持单一候选列表与标准开关视觉契�
 
   assert.match(html, /<h2 class="petri-panel-title">合法动作空间<\/h2>/);
   assert.match(html, /id="visualPauseOnDecisionChangeButton"[^>]*role="switch"[^>]*aria-checked="false"/);
+  assert.match(html, /id="searchTelemetryContinuousDecisionButton"[^>]*aria-pressed="false"[^>]*>持续决策<\/button>/);
   assert.match(html, /id="visualRecommendationModelControl"/);
   assert.match(css, /\.decision-lens-panel[^\n]*border-radius: 6px[^\n]*box-shadow: none/);
   assert.match(css, /\.decision-auto-pause[^\n]*min-height: 44px/);
@@ -232,6 +233,10 @@ test("合法动作空间面板保持单一候选列表与标准开关视觉契�
   assert.doesNotMatch(css, /\.topology-playback\.is-instant-state-transition/);
   assert.match(source, /visualRecommendationModelControl"\)\.hidden = stepMode/);
   assert.match(source, /visualPauseOnDecisionChangeButton"\)\.hidden = stepMode/);
+  assert.match(source, /function maybeContinueModelDecision\(snapshot\)/);
+  assert.match(source, /searchId === continuousDecisionSubmittedSearchId/);
+  assert.match(source, /void chooseSearchAction\(actionKey, true\)/);
+  assert.match(source, /function toggleContinuousDecision\(\)/);
   assert.match(source, /<strong id="searchCandidatesTitle">决策 #\$\{decisionIndex\}<\/strong>/);
   assert.match(source, /P 先验[\s\S]*N 访问[\s\S]*Q 价值[\s\S]*推荐比例/);
   assert.match(source, /animateLatestStep/);

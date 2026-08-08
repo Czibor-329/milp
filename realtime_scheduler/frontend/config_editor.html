@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>调度平台</title>
-  <link rel="stylesheet" href="/assets/config_editor.css?v=1.1.36">
+  <link rel="stylesheet" href="/assets/config_editor.css?v=1.3.2">
 </head>
 <body>
   <a class="skip-link" href="#mainContent">跳到主要内容</a>
@@ -40,7 +40,7 @@
         </button>
         <span class="sidebar-footer-label">系统状态</span>
         <div class="service-pill" id="serviceState">本地服务</div>
-        <span class="frontend-version">前端 v1.3.1</span>
+        <span class="frontend-version">前端 v1.3.2</span>
         <a class="theme-toggle" id="adminUsersLink" href="/admin_users.html" hidden>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
           <span>用户管理</span>
@@ -277,6 +277,7 @@
                           <button class="btn small" id="searchTelemetryStepButton" type="button">单步求解</button>
                           <button class="btn primary small" id="searchTelemetryContinueButton" type="button">连续求解</button>
                           <button class="btn primary small is-recommendation" id="searchTelemetryFollowRecommendationButton" type="button" hidden>执行模型推荐</button>
+                          <button class="btn small is-continuous-decision" id="searchTelemetryContinuousDecisionButton" type="button" aria-pressed="false" title="持续执行每一轮搜索的模型推荐动作" hidden>持续决策</button>
                           <label>根决策<select id="searchTelemetryDecisionSelect" aria-label="选择要查看的根决策"></select></label>
                         </div>
                       </div>
@@ -369,8 +370,8 @@
             </div>
             <div id="scheduleAlphaGoOptions" class="is-hidden" style="margin-top:14px">
               <section class="alphago-settings-card" aria-labelledby="alphagoSettingsTitle">
-                <div><strong id="alphagoSettingsTitle">AlphaGo 搜索参数</strong><p id="alphagoSettingsSummary">使用默认搜索设置和冷启动模型。</p></div>
-                <button class="btn small" id="openScheduleAlphaGoOptionsDialogButton" type="button">编辑参数</button>
+                <strong id="alphagoSettingsTitle">AlphaGo 搜索参数</strong>
+                <button class="btn small" id="openScheduleAlphaGoOptionsDialogButton" type="button">配置参数</button>
               </section>
             </div>
           </div>
@@ -409,18 +410,50 @@
 
   <dialog id="scheduleAlphaGoOptionsDialog" aria-labelledby="scheduleAlphaGoOptionsDialogTitle">
     <form class="dialog-body alphago-options-dialog-body" id="scheduleAlphaGoOptionsForm">
-      <h3 id="scheduleAlphaGoOptionsDialogTitle">编辑 AlphaGo 搜索参数</h3>
-      <p>这些设置仅在运行 Schedule-AlphaGo 时生效。</p>
-      <div class="algorithm-form-grid alphago-options-grid">
-        <div class="field"><label for="alphaGoDecisionSeconds">单步时间预算（秒）</label><input id="alphaGoDecisionSeconds" type="number" min="0.001" step="0.05" placeholder="自动：GPU 0.85 / CPU 1.5"><div class="hint">留空时按推理设备自动选择。</div></div>
-        <div class="field"><label for="alphaGoMaxSimulations">最大模拟次数</label><input id="alphaGoMaxSimulations" type="number" min="1" step="1"></div>
-        <div class="field"><label for="alphaGoMaxNodes">最大搜索节点</label><input id="alphaGoMaxNodes" type="number" min="1" step="1"></div>
-        <div class="field"><label for="alphaGoMaxDepth">树深上限</label><input id="alphaGoMaxDepth" type="number" min="1" step="1"></div>
-        <div class="field"><label for="alphaGoRolloutDepth">Rollout 深度</label><input id="alphaGoRolloutDepth" type="number" min="0" step="1"></div>
-        <div class="field"><label for="alphaGoCPuct">PUCT 探索系数</label><input id="alphaGoCPuct" type="number" min="0" step="0.05"></div>
-        <div class="field"><label for="alphaGoTelemetryMilliseconds">遥测间隔（毫秒）</label><input id="alphaGoTelemetryMilliseconds" type="number" min="1" step="1"></div>
-        <div class="field"><label for="alphaGoDevice">推理设备</label><select id="alphaGoDevice"><option value="auto">自动</option><option value="cuda">CUDA GPU</option><option value="cpu">CPU</option></select></div>
-        <div class="field span-2"><label>策略价值模型 checkpoint</label><div class="checkpoint-picker"><input id="alphaGoCheckpointPath" type="text" readonly placeholder="未选择，使用默认模型"><label class="btn small" for="alphaGoCheckpointFile">从文件夹选择</label><input id="alphaGoCheckpointFile" type="file" accept=".npz,.pt,.pth,.ckpt,application/octet-stream"></div><div class="hint" id="alphaGoCheckpointHint">选择本机 checkpoint 后将上传到本地服务，并用于后续运行。</div><button class="text-button" id="clearAlphaGoCheckpointButton" type="button">使用默认模型</button></div>
+      <header class="alphago-dialog-header">
+        <div>
+          <h3 id="scheduleAlphaGoOptionsDialogTitle">编辑 AlphaGo 搜索参数</h3>
+          <p>配置会随当前测试保存，仅在运行 Schedule-AlphaGo 时生效。</p>
+        </div>
+        <span class="alphago-dialog-tag">高级设置</span>
+      </header>
+      <div class="alphago-options-content">
+        <section class="alphago-option-group" aria-labelledby="alphaGoBudgetGroupTitle">
+          <div class="alphago-option-group-head">
+            <h4 id="alphaGoBudgetGroupTitle">搜索预算</h4>
+            <p>控制每次根决策可使用的时间与搜索规模。</p>
+          </div>
+          <div class="alphago-options-grid">
+            <div class="field"><label for="alphaGoDecisionSeconds">单步时间预算 <span>秒</span></label><input id="alphaGoDecisionSeconds" type="number" min="0.001" step="0.05" placeholder="自动"><div class="hint">留空时自动使用 GPU 0.85 秒或 CPU 1.5 秒。</div></div>
+            <div class="field"><label for="alphaGoMaxSimulations">最大模拟次数</label><input id="alphaGoMaxSimulations" type="number" min="1" step="1"></div>
+            <div class="field"><label for="alphaGoMaxNodes">最大搜索节点</label><input id="alphaGoMaxNodes" type="number" min="1" step="1"></div>
+            <div class="field"><label for="alphaGoMaxDepth">树深上限</label><input id="alphaGoMaxDepth" type="number" min="1" step="1"></div>
+          </div>
+        </section>
+        <section class="alphago-option-group" aria-labelledby="alphaGoBehaviorGroupTitle">
+          <div class="alphago-option-group-head">
+            <h4 id="alphaGoBehaviorGroupTitle">搜索行为</h4>
+            <p>调整探索强度、Rollout 范围与运行时遥测。</p>
+          </div>
+          <div class="alphago-options-grid">
+            <div class="field"><label for="alphaGoRolloutDepth">Rollout 深度</label><input id="alphaGoRolloutDepth" type="number" min="0" step="1"></div>
+            <div class="field"><label for="alphaGoCPuct">PUCT 探索系数</label><input id="alphaGoCPuct" type="number" min="0" step="0.05"></div>
+            <div class="field"><label for="alphaGoTelemetryMilliseconds">遥测间隔 <span>毫秒</span></label><input id="alphaGoTelemetryMilliseconds" type="number" min="1" step="1"></div>
+            <div class="field"><label for="alphaGoDecisionCount">决策数量</label><input id="alphaGoDecisionCount" type="number" min="1" step="1"><div class="hint">每次根决策联合输出的最大动作数（1~N）。</div></div>
+            <div class="field"><label for="alphaGoDevice">推理设备</label><select id="alphaGoDevice"><option value="auto">自动选择</option><option value="cuda">CUDA GPU</option><option value="cpu">CPU</option></select></div>
+          </div>
+        </section>
+        <section class="alphago-option-group alphago-model-group" aria-labelledby="alphaGoModelGroupTitle">
+          <div class="alphago-option-group-head">
+            <h4 id="alphaGoModelGroupTitle">策略价值模型</h4>
+            <p>未选择 checkpoint 时使用默认模型或冷启动模型。</p>
+          </div>
+          <div class="field">
+            <label for="alphaGoCheckpointPath">Checkpoint 文件</label>
+            <div class="checkpoint-picker"><input id="alphaGoCheckpointPath" type="text" readonly placeholder="未选择，使用默认模型"><label class="btn small" for="alphaGoCheckpointFile">选择文件</label><input id="alphaGoCheckpointFile" type="file" accept=".npz,.pt,.pth,.ckpt,application/octet-stream"></div>
+            <div class="alphago-checkpoint-meta"><div class="hint" id="alphaGoCheckpointHint">选择本机 checkpoint 后将上传到本地服务，并用于后续运行。</div><button class="text-button" id="clearAlphaGoCheckpointButton" type="button">恢复默认模型</button></div>
+          </div>
+        </section>
       </div>
       <div class="dialog-actions"><button class="btn small" type="button" id="scheduleAlphaGoOptionsDialogCancel">取消</button><button class="btn primary small" id="saveScheduleAlphaGoOptionsButton" type="submit">保存参数</button></div>
     </form>
@@ -480,7 +513,7 @@
     </aside>
   </div>
 
-  <script type="module" src="/assets/config_editor.js?v=1.3.1"></script>
+  <script type="module" src="/assets/config_editor.js?v=1.3.2"></script>
   <script>
     // 管理员才显示“用户管理”入口。
     (function () {

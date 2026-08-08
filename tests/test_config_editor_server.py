@@ -97,6 +97,23 @@ def _job(name: str, route: str, load_port: str) -> dict:
     }
 
 
+class FrontendTemplateTests(unittest.TestCase):
+    """验证不依赖算法数据夹具的前端模板与样式约束。"""
+
+    def test_groups_alphago_options_without_external_summary(self) -> None:
+        """AlphaGo 参数应在弹窗内分组展示，外层入口不再渲染配置摘要。"""
+        template = EDITOR_PATH.read_text(encoding="utf-8")
+        style = EDITOR_STYLE_PATH.read_text(encoding="utf-8")
+        script = EDITOR_SCRIPT_PATH.read_text(encoding="utf-8")
+
+        for heading in ("搜索预算", "搜索行为", "策略价值模型"):
+            self.assertIn(heading, template)
+        self.assertIn("grid-template-columns: repeat(2, minmax(0, 1fr))", style)
+        self.assertIn("@media (max-width: 620px)", style)
+        self.assertNotIn("alphagoSettingsSummary", template)
+        self.assertNotIn("renderAlphaGoSettingsSummary", script)
+
+
 class ConfigEditorServerTests(unittest.TestCase):
     """验证设备选择、Route 引用和两次重算的统一输出。"""
 
