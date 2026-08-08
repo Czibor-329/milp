@@ -72,6 +72,18 @@ python realtime_scheduler\server.py --open
 
 默认地址为 `http://127.0.0.1:8765/config_editor.html`
 
+> 服务自带登录认证：首次启动自动创建默认账号 `admin`（密码 `admin123`，
+> 控制台会提示），请立即用 `python realtime_scheduler\server.py --add-user admin`
+> 修改密码。账号管理命令见 `docs/deploy-windows.md`。
+> 未登录访问页面会跳转到登录页，调用 API 返回 401；健康检查 `/api/health`
+> 不要求登录，供监控探测。
+
+## 对外部署
+
+把平台部署到一台常开的 Windows 电脑上、让用户在任意地点通过公网网址
+登录调度的完整步骤（账号管理、开机自启、防火墙、cpolar 内网穿透）见
+[`docs/deploy-windows.md`](docs/deploy-windows.md)。
+
 
 
 ## 算法部署方式

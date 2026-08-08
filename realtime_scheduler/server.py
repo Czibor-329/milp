@@ -16,6 +16,7 @@ realtime_scheduler 目录中。批处理、Baseline 与并发运行状态由 bat
 from __future__ import annotations
 
 import argparse
+import getpass
 import hashlib
 from io import BytesIO
 import json
@@ -140,6 +141,7 @@ from realtime_scheduler.move_validation import (
     validate_move_list,
 )
 from realtime_scheduler.replay_machine import ReplayMachine
+from realtime_scheduler import auth as _auth
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -167,7 +169,9 @@ EXPORT_DIR = REALTIME_APP_DIR / "exports"
 EDITOR_PATH = FRONTEND_DIR / "config_editor.html"
 VIEWER_PATH = FRONTEND_DIR / "movelist_gantt_viewer.html"
 ROUTE_EDITOR_LOGIC_PATH = FRONTEND_DIR / "route_editor_logic.js"
+LOGIN_PATH = FRONTEND_DIR / "login.html"
 FRONTEND_ASSET_DIR = FRONTEND_DIR / "assets"
+USERS_PATH = DATA_DIR / _auth.USER_FILE_NAME
 E2E_CTQ_MODEL_PATH = ALGORITHM_ROOT / "results" / "models" / "e2e_ctq_policy.npz"
 DUAL_ACTOR_MODEL_PATH = (
     ALGORITHM_ROOT / "results" / "dual_actor_primitive_v1_candidate.npz"
@@ -3988,11 +3992,18 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         """处理页面、健康检查和内存结果读取。"""
         path = unquote(urlparse(self.path).path)
-        if path in {"/", "/config_editor.html"}:
-            self._send_file(EDITOR_PATH, "text/html; charset=utf-8")
+        if path == "/login.html":
+            self._send_file(LOGIN_PATH, "text/html; charset=utf-8")
             return
-        if path == "/movelist_gantt_viewer.html":
-            self._send_file(VIEWER_PATH, "text/html; charset=utf-8")
+        if path in {"/", "/config_editor.html", "/movelist_gantt_viewer.html"}:
+            # 页面必须登录后才能访问，未登录一律转向登录页。
+            if self._current_username() is None:
+                self._redirect("/login.html")
+                return
+            if path == "/movelist_gantt_viewer.html":
+                self._send_file(VIEWER_PATH, "text/html; charset=utf-8")
+            else:
+                self._send_file(EDITOR_PATH, "text/html; charset=utf-8")
             return
         if path == "/route_editor_logic.js":
             self._send_file(ROUTE_EDITOR_LOGIC_PATH, "text/javascript; charset=utf-8")
@@ -4000,6 +4011,14 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
         if path.startswith("/assets/"):
             self._send_frontend_asset(path.removeprefix("/assets/"))
             return
+        if path.startswith("/api/"):
+            # 健康检查用于监控，不要求登录；其余 API 一律需要有效会话。
+            if path != "/api/health" and self._current_username() is None:
+                self._send_json(
+                    {"ok": False, "error": "未登录或会话已过期"},
+                    HTTPStatus.UNAUTHORIZED,
+                )
+                return
         if path == "/api/health":
             builtin_algorithms = discover_builtin_algorithms()
             other_algorithms = discover_other_algorithms()
@@ -4019,9 +4038,11 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                 "algorithmRepositoryAvailable": BUILTIN_ALGORITHM_AVAILABLE,
                 "strategies": strategy_availability,
                 "strategyModels": {
-                    "e2e-ctq": str(E2E_CTQ_MODEL_PATH) if E2E_CTQ_MODEL_PATH.is_file() else "",
+                    "e2e-ctq": (
+                        E2E_CTQ_MODEL_PATH.name if E2E_CTQ_MODEL_PATH.is_file() else ""
+                    ),
                     "dual-actor-e2e": (
-                        str(DUAL_ACTOR_MODEL_PATH)
+                        DUAL_ACTOR_MODEL_PATH.name
                         if DUAL_ACTOR_MODEL_PATH.is_file()
                         else ""
                     ),
@@ -4090,6 +4111,18 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         """接收控制台配置并同步运行后端策略。"""
         path = unquote(urlparse(self.path).path)
+        if path == "/api/login":
+            self._handle_login()
+            return
+        if path == "/api/logout":
+            self._handle_logout()
+            return
+        if self._current_username() is None:
+            self._send_json(
+                {"ok": False, "error": "未登录或会话已过期"},
+                HTTPStatus.UNAUTHORIZED,
+            )
+            return
         if path == "/api/analysis/replay-decision":
             try:
                 if not BUILTIN_ALGORITHM_AVAILABLE:
@@ -4357,6 +4390,12 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
 
     def do_PUT(self) -> None:
         """保存测试集、机器手槽位或重命名设备下的测试组别。"""
+        if self._current_username() is None:
+            self._send_json(
+                {"ok": False, "error": "未登录或会话已过期"},
+                HTTPStatus.UNAUTHORIZED,
+            )
+            return
         path = unquote(urlparse(self.path).path)
         parts = [part for part in path.split("/") if part]
         if len(parts) == 4 and parts[:2] == ["api", "workspaces"] and parts[3] == "robot-slots":
@@ -4391,6 +4430,12 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         """删除导出文件、设备下指定测试集或测试组，并返回剩余数据。"""
+        if self._current_username() is None:
+            self._send_json(
+                {"ok": False, "error": "未登录或会话已过期"},
+                HTTPStatus.UNAUTHORIZED,
+            )
+            return
         path = unquote(urlparse(self.path).path)
         if path == "/api/exports":
             try:
@@ -4431,6 +4476,70 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": True, "tests": device["tests"]})
         except Exception as error:  # noqa: BLE001
             self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
+
+    def _request_token(self) -> Optional[str]:
+        """从 Cookie 请求头解析会话令牌，没有则返回 None。"""
+        cookie_header = self.headers.get("Cookie") or ""
+        for part in cookie_header.split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == _auth.SESSION_COOKIE_NAME:
+                return value
+        return None
+
+    def _current_username(self) -> Optional[str]:
+        """返回当前请求会话对应的用户名；未登录或会话过期返回 None。"""
+        token = self._request_token()
+        if not token:
+            return None
+        return _auth.get_session_username(token)
+
+    def _redirect(self, location: str) -> None:
+        """发送 302 跳转，用于未登录时转向登录页。"""
+        self.send_response(HTTPStatus.FOUND)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _handle_login(self) -> None:
+        """校验账号密码，成功则种下会话 Cookie。"""
+        try:
+            payload = self._read_json_object()
+        except (ValueError, json.JSONDecodeError) as error:
+            self._send_json(
+                {"ok": False, "error": str(error)},
+                HTTPStatus.BAD_REQUEST,
+            )
+            return
+        username = str(payload.get("username") or "").strip()
+        password = str(payload.get("password") or "")
+        if not username or not password:
+            self._send_json(
+                {"ok": False, "error": "请输入用户名和密码"},
+                HTTPStatus.BAD_REQUEST,
+            )
+            return
+        if not _auth.verify_credentials(username, password, USERS_PATH):
+            self._send_json(
+                {"ok": False, "error": "用户名或密码错误"},
+                HTTPStatus.UNAUTHORIZED,
+            )
+            return
+        token = _auth.create_session(username)
+        content = json.dumps(
+            {"ok": True, "username": username}, ensure_ascii=False
+        ).encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(content)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Set-Cookie", _auth.session_cookie(token))
+        self.end_headers()
+        self.wfile.write(content)
+
+    def _handle_logout(self) -> None:
+        """删除当前会话令牌并返回成功。"""
+        _auth.destroy_session(self._request_token())
+        self._send_json({"ok": True})
 
     def log_message(self, format_string: str, *args: Any) -> None:
         """保留简洁的本地访问日志。"""
@@ -4509,13 +4618,59 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
         self.wfile.write(content)
 
 
+def _run_account_command(args: argparse.Namespace) -> None:
+    """执行账号管理命令后退出（不启动服务）。"""
+    if args.add_user:
+        username = args.add_user
+        password = getpass.getpass(
+            f"为账号 {username} 设置密码（至少 {_auth.MIN_PASSWORD_LENGTH} 位）："
+        )
+        if len(password) < _auth.MIN_PASSWORD_LENGTH:
+            print(f"密码长度必须不少于 {_auth.MIN_PASSWORD_LENGTH} 位")
+            return
+        if password != getpass.getpass("再次输入密码确认："):
+            print("两次输入不一致，未保存")
+            return
+        created = _auth.add_user(username, password, USERS_PATH)
+        print(f"账号 {username} 已{'新建' if created else '重置密码'}")
+        return
+    if args.remove_user:
+        removed = _auth.remove_user(args.remove_user, USERS_PATH)
+        if removed:
+            print(f"账号 {args.remove_user} 已删除")
+        else:
+            print(f"账号 {args.remove_user} 不存在")
+        return
+    if args.list_users:
+        users = _auth.list_users(USERS_PATH)
+        print("当前账号：" + ("、".join(users) if users else "无"))
+
+
 def main() -> None:
     """启动仅监听本机的多线程调度控制台服务。"""
     parser = argparse.ArgumentParser(description="CT 调度控制台本地服务")
     parser.add_argument("--host", default=DEFAULT_HOST, help="监听地址，默认仅本机")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="监听端口")
     parser.add_argument("--open", action="store_true", help="启动后打开默认浏览器")
+    parser.add_argument(
+        "--add-user", metavar="USERNAME", help="新建账号或重置密码后退出（不启动服务）"
+    )
+    parser.add_argument(
+        "--remove-user", metavar="USERNAME", help="删除账号后退出（不启动服务）"
+    )
+    parser.add_argument(
+        "--list-users", action="store_true", help="列出全部账号后退出（不启动服务）"
+    )
     args = parser.parse_args()
+    if args.add_user or args.remove_user or args.list_users:
+        _run_account_command(args)
+        return
+    default_admin_created = _auth.ensure_default_admin(USERS_PATH)
+    if default_admin_created:
+        print(
+            f"已创建默认账号 {_auth.DEFAULT_ADMIN_USERNAME}/"
+            f"{_auth.DEFAULT_ADMIN_PASSWORD}，上线后请立即修改密码"
+        )
     server = ThreadingHTTPServer((args.host, args.port), ConfigEditorHandler)
     url = f"http://{args.host}:{args.port}/"
     print(f"CT 调度控制台：{url}")
