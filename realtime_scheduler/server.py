@@ -148,6 +148,15 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 # 登录失败后的固定延迟（秒），用于拖慢针对已知用户名的暴力破解。
 LOGIN_FAILURE_DELAY = 0.5
+# 是否强制登录认证。默认免登录，便于本地/直接分发使用（本机管理员身份，
+# 页面与接口全量可用）；对外部署（公网网址、多人共用）必须设置
+# CT_REQUIRE_AUTH=1 开启登录，否则任何能访问地址的人都能操作系统。
+AUTH_REQUIRED = os.environ.get("CT_REQUIRE_AUTH", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 MAX_REQUEST_BYTES = 12 * 1024 * 1024
 MAX_SAVED_RESULTS = 8
 MAX_SAVED_BATCH_RUNS = 8
@@ -4029,10 +4038,11 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             other_algorithms = discover_other_algorithms()
             # 已登录用户只能看到分配给自己的算法；未登录（监控探测）不暴露算法清单。
             username = self._current_username()
-            if username is None:
+            if AUTH_REQUIRED and username is None:
+                # 强制登录且未登录（监控探测）不暴露算法清单。
                 builtin_algorithms = []
                 other_algorithms = []
-            else:
+            elif AUTH_REQUIRED:
                 allowed_strategies = _auth.user_strategies(username, USERS_PATH)
                 if allowed_strategies is not None:
                     allowed_set = set(allowed_strategies)
@@ -4079,6 +4089,16 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             })
             return
         if path == "/api/session":
+            if not AUTH_REQUIRED:
+                # 免登录模式：返回本机管理员身份，供前端展示入口。
+                self._send_json({
+                    "ok": True,
+                    "username": "local",
+                    "role": "admin",
+                    "allowedAlgorithms": None,
+                    "allowedDevices": None,
+                })
+                return
             username = self._current_username()
             if username is None:
                 self._send_json(
@@ -4112,13 +4132,15 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
         if path == "/api/workspaces":
             try:
                 devices = list_workspace_devices()
-                # 普通用户只能看到分配给自己的设备，admin 与未登录探测看到全部。
+                # 强制登录时普通用户只能看到分配给自己的设备；免登录模式看到全部。
                 username = self._current_username()
-                allowed_devices = (
-                    None
-                    if username is None
-                    else _auth.user_devices(username, USERS_PATH)
-                )
+                allowed_devices = None
+                if AUTH_REQUIRED:
+                    allowed_devices = (
+                        None
+                        if username is None
+                        else _auth.user_devices(username, USERS_PATH)
+                    )
                 if allowed_devices is not None:
                     allowed_set = set(allowed_devices)
                     devices = [
@@ -4781,27 +4803,47 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
         return None
 
     def _current_username(self) -> Optional[str]:
-        """返回当前请求会话对应的用户名；未登录或会话过期返回 None。"""
+        """返回当前请求会话对应的用户名；未登录或会话过期返回 None。
+
+        免登录模式下直接返回本机管理员身份，页面与接口全量可用。
+        """
+        if not AUTH_REQUIRED:
+            return "local"
         token = self._request_token()
         if not token:
             return None
         return _auth.get_session_username(token)
 
     def _require_admin(self) -> Optional[str]:
-        """返回当前用户名（须为管理员）；未登录或非管理员返回 None。"""
+        """返回当前用户名（须为管理员）；未登录或非管理员返回 None。
+
+        免登录模式下返回本机管理员身份，管理员操作全部放行。
+        """
+        if not AUTH_REQUIRED:
+            return "local"
         username = self._current_username()
         if username is None:
             return None
         return username if _auth.is_admin(username, USERS_PATH) else None
 
     def _deny_device(self, device_id: str) -> bool:
-        """设备不在当前用户权限内时返回 True，调用方应返回 404。"""
+        """设备不在当前用户权限内时返回 True，调用方应返回 404。
+
+        免登录模式下放行全部设备。
+        """
+        if not AUTH_REQUIRED:
+            return False
         return not _auth.user_allows_device(
             str(self._current_username() or ""), str(device_id), USERS_PATH
         )
 
     def _deny_strategy(self, strategy: str) -> bool:
-        """算法不在当前用户权限内时返回 True，调用方应返回 403。"""
+        """算法不在当前用户权限内时返回 True，调用方应返回 403。
+
+        免登录模式下放行全部算法。
+        """
+        if not AUTH_REQUIRED:
+            return False
         return not _auth.user_allows_algorithm(
             str(self._current_username() or ""), str(strategy), USERS_PATH
         )
@@ -4988,6 +5030,13 @@ def main() -> None:
     server = ThreadingHTTPServer((args.host, args.port), ConfigEditorHandler)
     url = f"http://{args.host}:{args.port}/"
     print(f"CT 调度控制台：{url}")
+    if AUTH_REQUIRED:
+        print("已启用强制登录（CT_REQUIRE_AUTH=1），页面与接口需要登录。")
+    else:
+        print(
+            "当前为免登录模式：打开即用，无需登录；"
+            "对外部署请设置环境变量 CT_REQUIRE_AUTH=1 开启登录保护。"
+        )
     # 预热工作区：旧版单文件（data/workspaces.json）存在时自动迁移为拆分目录。
     legacy_store = DATA_DIR / "workspaces.json"
     legacy_present = legacy_store.is_file()

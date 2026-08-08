@@ -333,6 +333,14 @@ class HttpPermissionIntegrationTests(unittest.TestCase):
         source = inspect.getsource(config_server.ConfigEditorHandler._handle_login)
         self.assertIn("LOGIN_FAILURE_DELAY", source)
 
+    def test_anonymous_mode_supports_local_usage(self) -> None:
+        """默认免登录：本机管理员身份直通，环境变量开关可强制登录。"""
+        self.assertFalse(config_server.AUTH_REQUIRED)
+        source = inspect.getsource(config_server.ConfigEditorHandler._current_username)
+        self.assertIn('if not AUTH_REQUIRED:', source)
+        self.assertIn('return "local"', source)
+        self.assertIn('"CT_REQUIRE_AUTH"', inspect.getsource(config_server))
+
     def test_health_check_stays_open(self) -> None:
         """健康检查应保持无需登录，供监控探测。"""
         get_source = inspect.getsource(config_server.ConfigEditorHandler.do_GET)

@@ -26,9 +26,16 @@
 
 ## 二、首次启动与账号初始化
 
-在项目目录打开命令行（PowerShell），执行：
+> ⚠️ **本指南针对"对外部署"**（用户通过公网/局域网访问，多人共用）。
+> 对外部署**必须**开启登录保护：启动时设置环境变量
+> `CT_REQUIRE_AUTH=1`。否则服务处于免登录模式，任何能访问网址的人都
+> 能直接操作系统。
+
+在项目目录打开命令行（PowerShell），设置环境变量并启动：
 
 ```powershell
+# 对外部署：必须开启登录
+$env:CT_REQUIRE_AUTH = "1"
 python realtime_scheduler\server.py
 ```
 
@@ -41,6 +48,10 @@ python realtime_scheduler\server.py
 用 `admin / admin123` 登录。
 
 > ⚠️ 正式上线前**必须修改默认密码**（见下节账号管理）。
+>
+> 💡 只在本地单机用、不对外（比如直接把项目发给同事在各自电脑上跑）时，
+> **不要**设置 `CT_REQUIRE_AUTH`，保持默认免登录即可——打开网址直接进，
+> 不需要账号密码，也互相不冲突（每台电脑的数据是独立的）。
 
 ## 三、账号管理与权限分配
 
@@ -97,7 +108,7 @@ python realtime_scheduler\server.py --host 0.0.0.0 --port 8765
 让电脑重启后服务自动运行，无需人工登录启动：
 
 ```powershell
-schtasks /Create /TN "CTScheduler" /TR "cmd /c cd /d D:\milp && python realtime_scheduler\server.py --host 0.0.0.0 --port 8765 > D:\milp\server.log 2>&1" /SC ONSTART /RU SYSTEM /RL HIGHEST /F
+schtasks /Create /TN "CTScheduler" /TR "cmd /c set CT_REQUIRE_AUTH=1 && cd /d D:\milp && python realtime_scheduler\server.py --host 0.0.0.0 --port 8765 > D:\milp\server.log 2>&1" /SC ONSTART /RU SYSTEM /RL HIGHEST /F
 ```
 
 - 把 `D:\milp` 换成你的实际项目路径
