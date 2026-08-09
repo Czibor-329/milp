@@ -3230,6 +3230,13 @@ var pendingModeSync = "";
 var stepRunActive = false;
 var stepRunCancelling = false;
 var pendingAlphaGoCheckpointFile = null;
+var sessionSchedulingConfiguration = null;
+function retainSessionSchedulingConfiguration() {
+  sessionSchedulingConfiguration = structuredClone({
+    strategy: state.strategy,
+    options: state.options
+  });
+}
 function inferCleanType(clean) {
   const explicit = String(clean.cleanType || clean.category || "").toLowerCase().replace(/[-_\s]/g, "");
   if (["preclean", "postclean", "wacclean", "dummy", "dummywac"].includes(explicit)) return explicit;
@@ -4185,6 +4192,12 @@ function applyTestCase(testCase) {
   state.options.loadLockMacroSearchSeconds = Number.isFinite(macroSearchSeconds) && macroSearchSeconds >= 0 ? macroSearchSeconds : 4;
   const macroRollouts = Number(state.options.loadLockMacroRollouts);
   state.options.loadLockMacroRollouts = Number.isFinite(macroRollouts) && macroRollouts >= 0 ? Math.floor(macroRollouts) : 96;
+  if (sessionSchedulingConfiguration) {
+    state.strategy = sessionSchedulingConfiguration.strategy;
+    state.options = structuredClone(sessionSchedulingConfiguration.options);
+  } else {
+    retainSessionSchedulingConfiguration();
+  }
   if (!state.routes.length && Array.isArray(value.routes)) state.routes = value.routes;
   if (!state.cleans.length && Array.isArray(value.cleans)) state.cleans = value.cleans.map(normalizeClean);
   const routeNormalizationChanges = { changed: false };
@@ -5270,6 +5283,7 @@ async function saveScheduleAlphaGoOptions() {
     nextOptions.scheduleAlphaGoModelPath = pendingAlphaGoCheckpointFile ? await uploadAlphaGoCheckpoint(pendingAlphaGoCheckpointFile) : String(document.getElementById("alphaGoCheckpointPath").value || "").trim();
     Object.assign(state.options, nextOptions);
     pendingAlphaGoCheckpointFile = null;
+    retainSessionSchedulingConfiguration();
     markTestDirty();
     renderAll();
     document.getElementById("scheduleAlphaGoOptionsDialog").close();
@@ -5297,6 +5311,7 @@ function updateStateFromControl(control) {
       control.value = value;
     }
     state.options[control.dataset.option] = value;
+    retainSessionSchedulingConfiguration();
     return;
   }
   const scope = control.dataset.scope;
@@ -6738,6 +6753,7 @@ document.addEventListener("change", (event) => {
     if (algorithm?.defaultOptions && typeof algorithm.defaultOptions === "object") {
       Object.assign(state.options, algorithm.defaultOptions);
     }
+    retainSessionSchedulingConfiguration();
     document.getElementById("roundCount").disabled = false;
     updateStrategyOptionVisibility();
     showAlgorithmDetails(state.strategy);

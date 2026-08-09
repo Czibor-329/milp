@@ -113,6 +113,15 @@ class FrontendTemplateTests(unittest.TestCase):
         self.assertNotIn("alphagoSettingsSummary", template)
         self.assertNotIn("renderAlphaGoSettingsSummary", script)
 
+    def test_keeps_scheduling_configuration_while_switching_tests(self) -> None:
+        """同一页面会话切换测试时，策略与 checkpoint 不应被测试集默认值覆盖。"""
+        script = EDITOR_SCRIPT_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("sessionSchedulingConfiguration", script)
+        self.assertIn("retainSessionSchedulingConfiguration", script)
+        self.assertIn("state.strategy = sessionSchedulingConfiguration.strategy", script)
+        self.assertIn("state.options = structuredClone(sessionSchedulingConfiguration.options)", script)
+
 
 class ConfigEditorServerTests(unittest.TestCase):
     """验证设备选择、Route 引用和两次重算的统一输出。"""

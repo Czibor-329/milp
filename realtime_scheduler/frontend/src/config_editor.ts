@@ -125,6 +125,22 @@ let stepRunActive = false;
 /** 停止请求是否已在途；避免重复发送。 */
 let stepRunCancelling = false;
 let pendingAlphaGoCheckpointFile: File | null = null;
+/**
+ * 当前页面会话统一使用的运行配置。
+ *
+ * 测试集仍会各自保存调度参数，便于在新页面会话中恢复；但用户已选择的策略、
+ * checkpoint 和参数不能在切换测试集时被另一个测试集的旧配置覆盖。此状态只在
+ * 当前页面存活期间保留，关闭页面后会自然清除。
+ */
+let sessionSchedulingConfiguration: { strategy: string; options: Record<string, unknown> } | null = null;
+
+/** 将当前策略和调度参数设为本页面会话后续测试共用的运行配置。 */
+function retainSessionSchedulingConfiguration() {
+  sessionSchedulingConfiguration = structuredClone({
+    strategy: state.strategy,
+    options: state.options,
+  });
+}
 
 /** 从新版字段或旧版任务参数识别清洁类别。 */
 function inferCleanType(clean) {
@@ -1246,6 +1262,13 @@ function applyTestCase(testCase) {
   state.options.loadLockMacroSearchSeconds = Number.isFinite(macroSearchSeconds) && macroSearchSeconds >= 0 ? macroSearchSeconds : 4;
   const macroRollouts = Number(state.options.loadLockMacroRollouts);
   state.options.loadLockMacroRollouts = Number.isFinite(macroRollouts) && macroRollouts >= 0 ? Math.floor(macroRollouts) : 96;
+  // 首次载入以测试集配置建立会话基线；之后切换测试时沿用用户最近主动确认的运行配置。
+  if (sessionSchedulingConfiguration) {
+    state.strategy = sessionSchedulingConfiguration.strategy;
+    state.options = structuredClone(sessionSchedulingConfiguration.options);
+  } else {
+    retainSessionSchedulingConfiguration();
+  }
   // v2：Route/Clean 来自设备共享库；仅在加载尚未迁移的旧数据时使用测试集副本兜底。
   if (!state.routes.length && Array.isArray(value.routes)) state.routes = value.routes;
   if (!state.cleans.length && Array.isArray(value.cleans)) state.cleans = value.cleans.map(normalizeClean);
@@ -2407,6 +2430,7 @@ async function saveScheduleAlphaGoOptions() {
       : String(document.getElementById("alphaGoCheckpointPath").value || "").trim();
     Object.assign(state.options, nextOptions);
     pendingAlphaGoCheckpointFile = null;
+    retainSessionSchedulingConfiguration();
     markTestDirty();
     renderAll();
     document.getElementById("scheduleAlphaGoOptionsDialog").close();
@@ -2433,6 +2457,7 @@ function updateStateFromControl(control) {
       control.value = value;
     }
     state.options[control.dataset.option] = value;
+    retainSessionSchedulingConfiguration();
     return;
   }
   const scope = control.dataset.scope;
@@ -3849,6 +3874,7 @@ document.addEventListener("change", event => {
     if (algorithm?.defaultOptions && typeof algorithm.defaultOptions === "object") {
       Object.assign(state.options, algorithm.defaultOptions);
     }
+    retainSessionSchedulingConfiguration();
     document.getElementById("roundCount").disabled = false;
     updateStrategyOptionVisibility();
     showAlgorithmDetails(state.strategy);
