@@ -16,7 +16,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 FIRST_SLOT_ID = 1
 MAX_WAFERS_PER_JOB = 25
 DEFAULT_TRIGGER_UPPER = 9999.0
-DUMMY_MATERIAL_COUNT = 5
+DUMMY_MATERIAL_MINIMUM_COUNT = 5
 DUMMY_MATERIAL_ID_START = 100000
 DUMMY_MATERIAL_LIMIT_LEVEL = 10000
 DUMMY_MATERIAL_USAGE_MIX = 2
@@ -334,6 +334,10 @@ def _runtime_clean(clean: Mapping[str, Any]) -> Dict[str, Any]:
     )
     is_wac = clean_type == "wacclean"
     is_dummy = clean_type in {"dummy", "dummywac"}
+    material_count = max(
+        1,
+        int(_finite_number(value.get("materialCount", value.get("triggerCount")), 2)),
+    ) if is_dummy else 0
     task_names = {
         "preclean": "PreClean",
         "postclean": "PostClean",
@@ -352,7 +356,7 @@ def _runtime_clean(clean: Mapping[str, Any]) -> Dict[str, Any]:
         "stateVariable": "ProcessCount" if is_wac else "IdleTime",
         "lower": trigger_count if is_wac else 0,
         "upper": DEFAULT_TRIGGER_UPPER,
-        "triggerCount": trigger_count,
+        "triggerCount": material_count if is_dummy else trigger_count,
         "updateStateVariables": (
             ["ProcessCount"]
             if is_wac
@@ -362,7 +366,7 @@ def _runtime_clean(clean: Mapping[str, Any]) -> Dict[str, Any]:
             if clean_type == "preclean"
             else []
         ),
-        "materialCount": 2 if is_dummy else 0,
+        "materialCount": material_count,
         "preJudge": False,
         "emptyRecipeRef": (
             str(value.get("emptyRecipeRef") or f"{recipe_name}-WAC").strip()
@@ -489,6 +493,25 @@ def _dummy_accessible_pms(route: Mapping[str, Any]) -> List[str]:
         if has_dummy_clean and module_name not in modules:
             modules.append(module_name)
     return modules
+
+
+def _dummy_material_requirement(route: Mapping[str, Any]) -> int:
+    """返回单个产品 Route 同时需要的 Dummy 晶圆数。
+
+    ``MaterialCount`` 是每个 PM 的带片清洁所需数量；同一产品各 PM 的 dummy
+    PJob 会一同建模，因此库存至少要覆盖所有 PM 的条件总和。固定五片只适用于
+    需求不超过五片的旧模板，不能作为上限。
+    """
+    requirement = 0
+    for conditions in (route.get("PrePJob") or {}).values():
+        for condition in conditions or []:
+            if not isinstance(condition, Mapping):
+                continue
+            for tasks in (condition.get("CheckConditions") or {}).values():
+                for task in tasks or []:
+                    if isinstance(task, Mapping):
+                        requirement += max(0, int(_finite_number(task.get("MaterialCount"), 0)))
+    return requirement
 
 
 def _dummy_material(
@@ -1049,7 +1072,11 @@ def build_round_update(
             "TaskMode": task_mode, "PJobNameList": runtime_pjob_names,
             "MaterialCount": cjob_material_count,
         })
-    if round_uses_dummy_material and build_state.dummy_material_count < DUMMY_MATERIAL_COUNT:
+    dummy_material_count = max(
+        DUMMY_MATERIAL_MINIMUM_COUNT,
+        *(_dummy_material_requirement(route) for route in built_routes.values()),
+    )
+    if round_uses_dummy_material and build_state.dummy_material_count < dummy_material_count:
         dummy_port = next(
             (
                 str(name)
@@ -1061,16 +1088,16 @@ def build_round_update(
         if not dummy_port:
             raise ValueError("Dummy / Dummy WAC 清洁需要设备配置 DummyPort")
         capacity = _load_port_capacity(tool_topo, dummy_port)
-        if DUMMY_MATERIAL_COUNT > capacity:
+        if dummy_material_count > capacity:
             raise ValueError(
-                f"DummyPort 容量不足：需要 {DUMMY_MATERIAL_COUNT} 片，容量 {capacity}"
+                f"DummyPort 容量不足：需要 {dummy_material_count} 片，容量 {capacity}"
             )
         for slot_id in range(
             build_state.dummy_material_count + FIRST_SLOT_ID,
-            DUMMY_MATERIAL_COUNT + FIRST_SLOT_ID,
+            dummy_material_count + FIRST_SLOT_ID,
         ):
             materials.append(_dummy_material(slot_id, dummy_port, dummy_accessible_pms))
-        build_state.dummy_material_count = DUMMY_MATERIAL_COUNT
+        build_state.dummy_material_count = dummy_material_count
     return {
         "Scenario": 0, "Routes": referenced_routes,
         "ProcessRecipes": build_process_recipes(recipes, routes, cleans),

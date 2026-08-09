@@ -503,6 +503,14 @@ function formatSeconds2(value) {
 function materialIds(move, field = "MatIDList") {
   return listValue(move[field]).map(String).filter(Boolean);
 }
+function isCleaningMove(move) {
+  if (move.MoveType === CLEAN_MOVE) return true;
+  if (move.MoveType !== PROCESS_MOVE) return false;
+  const materialList = move.MatIDList;
+  const explicitlyEmpty = Array.isArray(materialList) && materialList.length === 0;
+  const cleanMetadata = [move.CleanRecipe, move.CleanTaskName, move.RecipeName, move.ProcessRecipe].some((value) => /clean|wac|dummy/i.test(String(value ?? "")));
+  return explicitlyEmpty || cleanMetadata;
+}
 function firstStation(move, field) {
   return String(listValue(move[field])[0] ?? "");
 }
@@ -931,9 +939,9 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
   const loadLockSlots = buildLoadLockSlots(records, device, time, initialLocations, processedMaterials);
   const modules = [...definitions.entries()].map(([name, definition]) => {
     const moduleMoves = activeMoves.filter((move) => move.ModuleName === name || firstStation(move, "SrcStationList") === name || firstStation(move, "DestStationList") === name || listValue(move.StationList).map(String).includes(name));
-    const primaryMove = moduleMoves.find((move) => move.MoveType === CLEAN_MOVE) ?? moduleMoves.find((move) => move.MoveType === PROCESS_MOVE) ?? moduleMoves.find((move) => LOADLOCK_ENVIRONMENT_MOVE_TYPES.has(move.MoveType)) ?? moduleMoves.find((move) => [PREPARE_MOVE, COMPLETE_MOVE].includes(move.MoveType)) ?? moduleMoves[0];
+    const primaryMove = moduleMoves.find(isCleaningMove) ?? moduleMoves.find((move) => move.MoveType === PROCESS_MOVE) ?? moduleMoves.find((move) => LOADLOCK_ENVIRONMENT_MOVE_TYPES.has(move.MoveType)) ?? moduleMoves.find((move) => [PREPARE_MOVE, COMPLETE_MOVE].includes(move.MoveType)) ?? moduleMoves[0];
     let status = (wafersByLocation.get(name)?.length ?? 0) > 0 ? "occupied" : "idle";
-    if (primaryMove?.MoveType === CLEAN_MOVE) status = "cleaning";
+    if (primaryMove && isCleaningMove(primaryMove)) status = "cleaning";
     else if (primaryMove?.MoveType === PROCESS_MOVE) status = "processing";
     else if (primaryMove && LOADLOCK_ENVIRONMENT_MOVE_TYPES.has(primaryMove.MoveType)) status = "environment";
     else if (primaryMove && [PREPARE_MOVE, COMPLETE_MOVE].includes(primaryMove.MoveType)) status = "door";
@@ -950,7 +958,7 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
       processedWafers: (wafersByLocation.get(name) ?? []).filter((wafer) => processedMaterials.has(wafer)),
       loadPortSlots: loadPortSlots.get(name) ?? [],
       loadLockSlots: loadLockSlots.get(name) ?? [],
-      activeMoveName: primaryMove ? MOVE_NAMES[primaryMove.MoveType] ?? `\u52A8\u4F5C ${primaryMove.MoveType}` : "",
+      activeMoveName: primaryMove ? isCleaningMove(primaryMove) ? "\u6E05\u6D01" : MOVE_NAMES[primaryMove.MoveType] ?? `\u52A8\u4F5C ${primaryMove.MoveType}` : "",
       progress: primaryMove ? moveProgress(primaryMove, time) : 0,
       environment: environments.get(name) ?? "",
       loadLockPhase,
@@ -3200,7 +3208,10 @@ var state = {
   expandedRoutes: /* @__PURE__ */ new Set(),
   routeNameChanges: /* @__PURE__ */ new Map(),
   routeProcessFilter: "",
-  routeParallelFilter: ""
+  routeParallelFilter: "",
+  routeCleanFilter: "all",
+  routeResidencyFilter: "all",
+  routeQTimeFilter: "all"
 };
 var pjobRoutePickerContext = null;
 var searchTelemetryPollToken = 0;
@@ -3233,13 +3244,18 @@ function inferCleanType(clean) {
 }
 function normalizeClean(clean) {
   const value = { ...clean || {} }, cleanType = inferCleanType(value);
+  const isDummy = cleanType === "dummy" || cleanType === "dummywac";
   const name = String(value.name || `Clean${state.cleans.length + 1}`).trim() || `Clean${state.cleans.length + 1}`;
   value.name = name;
   value.cleanType = cleanType;
   value.recipeName = String(value.recipeName || value.recipeRef || `${name}-Recipe`).trim() || `${name}-Recipe`;
   const recipeTime = Number(value.recipeTime);
   value.recipeTime = Math.max(0, Number.isFinite(recipeTime) ? recipeTime : 0);
-  value.triggerCount = Math.max(1, Math.floor(Number(value.triggerCount ?? value.lower) || 5));
+  const defaultTriggerCount = isDummy ? 2 : 5;
+  value.triggerCount = Math.max(1, Math.floor(Number(
+    isDummy ? value.materialCount ?? value.triggerCount : value.triggerCount ?? value.lower
+  ) || defaultTriggerCount));
+  if (isDummy) value.materialCount = value.triggerCount;
   const wacRecipeTime = Number(value.wacRecipeTime ?? value.emptyRecipeTime);
   value.wacRecipeTime = Math.max(0, Number.isFinite(wacRecipeTime) ? wacRecipeTime : 20);
   value.modules = [...new Set(stringList(value.modules))];
@@ -3256,8 +3272,9 @@ function automaticCleanName(clean) {
   const labels = Object.fromEntries(CLEAN_TYPE_DEFINITIONS.map((item) => [item.key, item.label]));
   const mainDuration = formatCleanSeconds(value.recipeTime);
   if (value.cleanType === "dummywac") {
-    return `${labels[value.cleanType]} \xB7 \u4E3B\u6E05\u6D01 ${mainDuration} \xB7 WAC ${formatCleanSeconds(value.wacRecipeTime)}`;
+    return `${labels[value.cleanType]} \xB7 ${value.triggerCount}\u7247 \xB7 \u4E3B\u6E05\u6D01 ${mainDuration} \xB7 WAC ${formatCleanSeconds(value.wacRecipeTime)}`;
   }
+  if (value.cleanType === "dummy") return `${labels[value.cleanType]} \xB7 ${value.triggerCount}\u7247 \xB7 ${mainDuration}`;
   return `${labels[value.cleanType]} \xB7 ${mainDuration}`;
 }
 function renameCleanReferences(oldName, newName) {
@@ -3309,7 +3326,7 @@ function runtimeClean(clean) {
     lower: isWac ? value.triggerCount : 0,
     upper: 9999,
     updateStateVariables: isWac ? ["ProcessCount"] : isDummy ? ["IdleTime", "DummyCount"] : type === "preclean" ? ["IdleTime"] : [],
-    materialCount: isDummy ? 2 : 0,
+    materialCount: isDummy ? value.triggerCount : 0,
     preJudge: false,
     emptyRecipeRef: type === "dummywac" ? `${value.recipeName}-WAC` : ""
   };
@@ -4177,6 +4194,9 @@ function applyTestCase(testCase) {
   state.expandedRoutes.clear();
   state.routeProcessFilter = "";
   state.routeParallelFilter = "";
+  state.routeCleanFilter = "all";
+  state.routeResidencyFilter = "all";
+  state.routeQTimeFilter = "all";
   state.rounds = Array.isArray(value.rounds) ? value.rounds : [];
   while (state.times.length < state.roundCount) state.times.push((Number(state.times.at(-1)) || 0) + 70);
   while (state.rounds.length < state.roundCount) {
@@ -4347,11 +4367,24 @@ async function deleteCurrentTest() {
   if (!state.testCaseId) return;
   const confirmed = await showWorkspaceDialog({ title: "\u5220\u9664\u6D4B\u8BD5", message: `\u786E\u5B9A\u5220\u9664\u6D4B\u8BD5\u201C${state.testCaseName}\u201D\u5417\uFF1F\u5220\u9664\u540E\u65E0\u6CD5\u6062\u590D\u3002`, dangerous: true });
   if (!confirmed) return;
+  const currentGroup = state.activeTestGroup, deletedTestName = state.testCaseName;
   const result = await requestJson(`/api/workspaces/${state.workspaceDeviceId}/tests/${state.testCaseId}`, { method: "DELETE" });
   state.workspaceDevice.tests = result.tests;
   const summary = state.workspaceDevices.find((device) => device.id === state.workspaceDeviceId);
   if (summary) summary.testCount = result.tests.length;
-  applyTestCase(result.tests[0]);
+  const nextTestInCurrentGroup = result.tests.find((test) => String(test.group || "").trim() === currentGroup);
+  if (nextTestInCurrentGroup) {
+    applyTestCase(nextTestInCurrentGroup);
+    return;
+  }
+  state.activeTestGroup = currentGroup;
+  state.testCaseId = "";
+  state.testCaseName = "";
+  state.testCaseGroup = currentGroup;
+  state.dirty = false;
+  renderWorkspaceControls();
+  resetRunResult();
+  setWorkspaceStatus(`\u5DF2\u5220\u9664\u6D4B\u8BD5\u201C${deletedTestName}\u201D`, "saved");
 }
 async function selectWorkspaceTest(testId) {
   if (state.dirty) await saveCurrentTest(true);
@@ -4495,8 +4528,8 @@ function cleanPlacementDefinitions(scope) {
     { key: "prePJobCleanRefs", label: "PJob \u524D", types: ["preclean", "dummy", "dummywac"] },
     { key: "postPJobCleanRefs", label: "PJob \u540E", types: ["postclean"] }
   ] : [
-    { key: "beforeCleanRefs", label: "\u8FDB\u5165\u8154\u5BA4\u524D", types: ["preclean", "dummy", "dummywac"] },
-    { key: "afterCleanRefs", label: "\u79BB\u5F00\u8154\u5BA4\u540E", types: ["postclean", "wacclean"] }
+    // 腔室级清洁仅支持离开腔室后的 WAC；带 Dummy 晶圆的清洁必须绑定到 Route。
+    { key: "afterCleanRefs", label: "\u79BB\u5F00\u8154\u5BA4\u540E", types: ["wacclean"] }
   ];
 }
 function cleanContextModules(scope, routeIndex, stageIndex = -1) {
@@ -4567,7 +4600,9 @@ function updateCleanDialogFields() {
   const currentType = typeSelect.value || context.draft.cleanType;
   typeSelect.innerHTML = CLEAN_TYPE_DEFINITIONS.filter((item) => definition?.types.includes(item.key)).map((item) => `<option value="${item.key}">${escapeHtml3(item.label)}</option>`).join("");
   typeSelect.value = definition?.types.includes(currentType) ? currentType : definition?.types[0] || "";
-  document.getElementById("cleanTriggerField").hidden = typeSelect.value !== "wacclean";
+  const usesMaterialCount = ["dummy", "dummywac"].includes(typeSelect.value);
+  document.getElementById("cleanTriggerField").hidden = typeSelect.value !== "wacclean" && !usesMaterialCount;
+  document.getElementById("cleanTriggerLabel").textContent = usesMaterialCount ? "Dummy \u6676\u5706\u6570\uFF08MaterialCount\uFF09" : "\u89E6\u53D1\u6B21\u6570";
   document.getElementById("cleanWacTimeField").hidden = typeSelect.value !== "dummywac";
 }
 function openCleanDialog(scope, routeIndex, stageIndex = -1, cleanName = "", placement = "") {
@@ -4612,11 +4647,13 @@ function saveCleanDialog() {
     return;
   }
   const placement = document.getElementById("cleanPlacement").value;
+  const cleanType = document.getElementById("cleanType").value;
   const clean = normalizeClean({
     ...context.draft,
-    cleanType: document.getElementById("cleanType").value,
+    cleanType,
     recipeTime: Number(document.getElementById("cleanRecipeTime").value),
     triggerCount: Number(document.getElementById("cleanTriggerCount").value),
+    materialCount: ["dummy", "dummywac"].includes(cleanType) ? Number(document.getElementById("cleanTriggerCount").value) : context.draft.materialCount,
     wacRecipeTime: Number(document.getElementById("cleanWacRecipeTime").value),
     modules
   });
@@ -4759,6 +4796,9 @@ function renderRoutes() {
   const host = document.getElementById("routeList");
   const processSelect = document.getElementById("routeProcessFilter");
   const parallelSelect = document.getElementById("routeParallelFilter");
+  const cleanSelect = document.getElementById("routeCleanFilter");
+  const residencySelect = document.getElementById("routeResidencyFilter");
+  const qTimeSelect = document.getElementById("routeQTimeFilter");
   const processGroups = groupedRoutes();
   const selectedProcess = processGroups.find((group) => group.key === state.routeProcessFilter) || processGroups[0];
   state.routeProcessFilter = selectedProcess?.key || "";
@@ -4770,14 +4810,23 @@ function renderRoutes() {
   parallelSelect.innerHTML = (selectedProcess?.structures || []).map((structure) => `<option value="${escapeHtml3(structure.key)}">${escapeHtml3(structure.label)}</option>`).join("");
   parallelSelect.value = state.routeParallelFilter;
   parallelSelect.disabled = !selectedProcess?.structures.length;
+  cleanSelect.value = state.routeCleanFilter;
+  cleanSelect.disabled = !selectedStructure;
+  residencySelect.value = state.routeResidencyFilter;
+  residencySelect.disabled = !selectedStructure;
+  qTimeSelect.value = state.routeQTimeFilter;
+  qTimeSelect.disabled = !selectedStructure;
   initializeCompactSelects();
   refreshCompactSelect(processSelect);
   refreshCompactSelect(parallelSelect);
+  refreshCompactSelect(cleanSelect);
+  refreshCompactSelect(residencySelect);
+  refreshCompactSelect(qTimeSelect);
   if (!selectedStructure) {
     host.innerHTML = `<div class="empty">\u81F3\u5C11\u521B\u5EFA\u4E00\u6761\u8DEF\u5F84\uFF0CJob \u624D\u80FD\u5F15\u7528\u3002</div>`;
     return;
   }
-  const routes = selectedStructure.routes.map(({ route, routeIndex }) => {
+  const routes = selectedStructure.routes.filter(({ route }) => (state.routeCleanFilter === "all" || routePickerCleanSummary(route) !== "\u65E0" === (state.routeCleanFilter === "yes")) && (state.routeResidencyFilter === "all" || routeHasTimeConstraint(route, "residencyConstraint") === (state.routeResidencyFilter === "yes")) && (state.routeQTimeFilter === "all" || routeHasTimeConstraint(route, "qTimeLimit") === (state.routeQTimeFilter === "yes"))).map(({ route, routeIndex }) => {
     const routeOpen = state.expandedRoutes.has(routeIndex);
     const compactPath = routePickerCompactPath(route);
     return `<article class="route-summary-card"><div class="route-summary-head"><button class="route-summary-toggle" data-action="toggle-route" data-route-index="${routeIndex}" aria-expanded="${routeOpen}">
@@ -4785,7 +4834,7 @@ function renderRoutes() {
       <div class="route-summary-actions"><button class="btn small" data-action="open-context-clean" data-clean-scope="route" data-route-index="${routeIndex}">\uFF0B Clean</button><button class="btn small" data-action="edit-route" data-route-index="${routeIndex}">\u7F16\u8F91</button><button class="btn small" data-action="copy-route" data-route-index="${routeIndex}">\u590D\u5236</button><button class="btn danger small" data-action="remove-route" data-index="${routeIndex}">\u5220\u9664</button></div>
     </div>${routeOpen ? renderRouteDetails(route, routeIndex) : ""}</article>`;
   }).join("");
-  host.innerHTML = `<div class="route-flat-list">${routes}</div>`;
+  host.innerHTML = routes ? `<div class="route-flat-list">${routes}</div>` : `<div class="empty">\u5F53\u524D\u7B5B\u9009\u6761\u4EF6\u4E0B\u6CA1\u6709\u5339\u914D\u7684\u8DEF\u5F84\u3002</div>`;
   initializeCompactSelects();
 }
 function routePickerShortId(route) {
@@ -4857,11 +4906,19 @@ function routeBufferMode(value) {
   ];
   return { index, ...modes[index] };
 }
+function routeHasTimeConstraint(route, field) {
+  return (route.stages || []).some((stage) => (stage.visits || []).some((visit) => {
+    const value = Number(visit[field]);
+    return Number.isFinite(value) && value >= 0;
+  }));
+}
 function renderRoutePropertyTags(route) {
   const buffer = routeBufferMode(route.bufferOption);
   const cleanSummary = routePickerCleanSummary(route);
   const cleanLabel = cleanSummary === "\u65E0" ? "\u65E0\u6E05\u6D01" : cleanSummary;
-  return `<span class="route-property-tags"><span class="route-property-tag buffer-${buffer.tone}" title="Buffer \u4F7F\u7528\u6A21\u5F0F ${buffer.index}\uFF1A${escapeHtml3(buffer.label)}">${escapeHtml3(buffer.label)}</span><span class="route-property-tag clean-${cleanSummary === "\u65E0" ? "none" : "active"}" title="\u6E05\u6D01\uFF1A${escapeHtml3(cleanLabel)}">${escapeHtml3(cleanLabel)}</span></span>`;
+  const hasResidency = routeHasTimeConstraint(route, "residencyConstraint");
+  const hasQTime = routeHasTimeConstraint(route, "qTimeLimit");
+  return `<span class="route-property-tags"><span class="route-property-tag buffer-${buffer.tone}" title="Buffer \u4F7F\u7528\u6A21\u5F0F ${buffer.index}\uFF1A${escapeHtml3(buffer.label)}">${escapeHtml3(buffer.label)}</span><span class="route-property-tag clean-${cleanSummary === "\u65E0" ? "none" : "active"}" title="\u6E05\u6D01\uFF1A${escapeHtml3(cleanLabel)}">${escapeHtml3(cleanLabel)}</span><span class="route-property-tag constraint-${hasResidency ? "active" : "none"}" title="\u9A7B\u7559\u65F6\u95F4\u7EA6\u675F\uFF1A${hasResidency ? "\u5DF2\u914D\u7F6E" : "\u672A\u914D\u7F6E"}">\u9A7B\u7559${hasResidency ? "\u7EA6\u675F" : "\u65E0"}</span><span class="route-property-tag qtime-${hasQTime ? "active" : "none"}" title="QTime\uFF1A${hasQTime ? "\u5DF2\u914D\u7F6E" : "\u672A\u914D\u7F6E"}">QTime${hasQTime ? "" : "\u65E0"}</span></span>`;
 }
 function renderPJobRouteCard(route, baseline) {
   const routeIndex = state.routes.indexOf(route), selected = route === baseline;
@@ -4874,7 +4931,8 @@ function renderPJobRouteDialogGroup(groupKey) {
   const context = pjobRoutePickerContext;
   if (!context) return;
   const selectedGroup = context.groups.find((group) => group.key === groupKey) || context.groups[0];
-  const candidates = selectedGroup?.routes || [];
+  const filters = context.filters;
+  const candidates = (selectedGroup?.routes || []).filter(({ route }) => (filters.clean === "all" || routePickerCleanSummary(route) !== "\u65E0" === (filters.clean === "yes")) && (filters.residency === "all" || routeHasTimeConstraint(route, "residencyConstraint") === (filters.residency === "yes")) && (filters.qtime === "all" || routeHasTimeConstraint(route, "qTimeLimit") === (filters.qtime === "yes")));
   const pjob = state.rounds[context.roundIndex]?.cjobs[context.cjobIndex]?.pjobs[context.pjobIndex];
   const selectedRoute = state.routes.find((route) => route.name === pjob.routeRef);
   context.groupKey = selectedGroup?.key || "";
@@ -4888,10 +4946,21 @@ function openPJobRoutePicker(button) {
   const groups = groupedRoutes().flatMap((processGroup) => processGroup.structures);
   const selectedRoute = state.routes.find((route) => route.name === pjob.routeRef);
   const selectedKey = selectedRoute ? routeProcessProfile(selectedRoute).key : groups[0]?.key || "";
-  pjobRoutePickerContext = { roundIndex, cjobIndex, pjobIndex, trigger: button, groups, groupKey: selectedKey };
+  pjobRoutePickerContext = {
+    roundIndex,
+    cjobIndex,
+    pjobIndex,
+    trigger: button,
+    groups,
+    groupKey: selectedKey,
+    filters: { clean: "all", residency: "all", qtime: "all" }
+  };
   document.getElementById("pjobRouteDialogTitle").textContent = `\u9009\u62E9 ${pjob.jobName} \u7684\u8DEF\u5F84`;
   const processSelect = document.getElementById("pjobRouteProcess");
   processSelect.innerHTML = groups.length ? groups.map((group) => `<option value="${escapeHtml3(group.key)}" ${group.key === selectedKey ? "selected" : ""}>${escapeHtml3(`${group.processLabel} \xB7 ${group.label}`)}</option>`).join("") : `<option value="">\u6682\u65E0\u5DE5\u5E8F</option>`;
+  document.getElementById("pjobRouteCleanFilter").value = "all";
+  document.getElementById("pjobRouteResidencyFilter").value = "all";
+  document.getElementById("pjobRouteQTimeFilter").value = "all";
   renderPJobRouteDialogGroup(selectedKey);
   button.setAttribute("aria-expanded", "true");
   const dialog = document.getElementById("pjobRouteDialog");
@@ -6454,6 +6523,21 @@ document.getElementById("pjobRouteDialog").addEventListener("click", (event) => 
   if (event.target.id === "pjobRouteDialog") closePJobRoutePicker();
 });
 document.getElementById("pjobRouteProcess").addEventListener("change", (event) => renderPJobRouteDialogGroup(event.target.value));
+document.getElementById("pjobRouteCleanFilter").addEventListener("change", (event) => {
+  if (!pjobRoutePickerContext) return;
+  pjobRoutePickerContext.filters.clean = event.target.value;
+  renderPJobRouteDialogGroup(pjobRoutePickerContext.groupKey);
+});
+document.getElementById("pjobRouteResidencyFilter").addEventListener("change", (event) => {
+  if (!pjobRoutePickerContext) return;
+  pjobRoutePickerContext.filters.residency = event.target.value;
+  renderPJobRouteDialogGroup(pjobRoutePickerContext.groupKey);
+});
+document.getElementById("pjobRouteQTimeFilter").addEventListener("change", (event) => {
+  if (!pjobRoutePickerContext) return;
+  pjobRoutePickerContext.filters.qtime = event.target.value;
+  renderPJobRouteDialogGroup(pjobRoutePickerContext.groupKey);
+});
 document.getElementById("routeProcessFilter").addEventListener("change", (event) => {
   state.routeProcessFilter = event.target.value;
   state.routeParallelFilter = "";
@@ -6461,6 +6545,18 @@ document.getElementById("routeProcessFilter").addEventListener("change", (event)
 });
 document.getElementById("routeParallelFilter").addEventListener("change", (event) => {
   state.routeParallelFilter = event.target.value;
+  renderRoutes();
+});
+document.getElementById("routeCleanFilter").addEventListener("change", (event) => {
+  state.routeCleanFilter = event.target.value;
+  renderRoutes();
+});
+document.getElementById("routeResidencyFilter").addEventListener("change", (event) => {
+  state.routeResidencyFilter = event.target.value;
+  renderRoutes();
+});
+document.getElementById("routeQTimeFilter").addEventListener("change", (event) => {
+  state.routeQTimeFilter = event.target.value;
   renderRoutes();
 });
 document.addEventListener("keydown", (event) => {

@@ -553,6 +553,22 @@ function materialIds(move: MoveRecord, field = "MatIDList"): string[] {
   return listValue(move[field]).map(String).filter(Boolean);
 }
 
+/**
+ * 判断算法是否以 ProcessMove 形式记录清洁。
+ *
+ * 部分算法包不会输出 MoveType=14，而是用没有产品晶圆的 ProcessMove 或附带
+ * 清洁配方元数据的 ProcessMove 表达清洁。回放需把两种协议形态统一成清洁状态。
+ */
+function isCleaningMove(move: MoveRecord): boolean {
+  if (move.MoveType === CLEAN_MOVE) return true;
+  if (move.MoveType !== PROCESS_MOVE) return false;
+  const materialList = move.MatIDList;
+  const explicitlyEmpty = Array.isArray(materialList) && materialList.length === 0;
+  const cleanMetadata = [move.CleanRecipe, move.CleanTaskName, move.RecipeName, move.ProcessRecipe]
+    .some(value => /clean|wac|dummy/i.test(String(value ?? "")));
+  return explicitlyEmpty || cleanMetadata;
+}
+
 /** 返回动作引用的第一个站点。 */
 function firstStation(move: MoveRecord, field: string): string {
   return String(listValue(move[field])[0] ?? "");
@@ -1125,13 +1141,13 @@ export function buildWorkspaceSnapshot(
       || firstStation(move, "DestStationList") === name
       || listValue(move.StationList).map(String).includes(name)
     ));
-    const primaryMove = moduleMoves.find(move => move.MoveType === CLEAN_MOVE)
+    const primaryMove = moduleMoves.find(isCleaningMove)
       ?? moduleMoves.find(move => move.MoveType === PROCESS_MOVE)
       ?? moduleMoves.find(move => LOADLOCK_ENVIRONMENT_MOVE_TYPES.has(move.MoveType))
       ?? moduleMoves.find(move => [PREPARE_MOVE, COMPLETE_MOVE].includes(move.MoveType))
       ?? moduleMoves[0];
     let status: ModuleStatus = (wafersByLocation.get(name)?.length ?? 0) > 0 ? "occupied" : "idle";
-    if (primaryMove?.MoveType === CLEAN_MOVE) status = "cleaning";
+    if (primaryMove && isCleaningMove(primaryMove)) status = "cleaning";
     else if (primaryMove?.MoveType === PROCESS_MOVE) status = "processing";
     else if (primaryMove && LOADLOCK_ENVIRONMENT_MOVE_TYPES.has(primaryMove.MoveType)) status = "environment";
     else if (primaryMove && [PREPARE_MOVE, COMPLETE_MOVE].includes(primaryMove.MoveType)) status = "door";
@@ -1154,7 +1170,7 @@ export function buildWorkspaceSnapshot(
       processedWafers: (wafersByLocation.get(name) ?? []).filter(wafer => processedMaterials.has(wafer)),
       loadPortSlots: loadPortSlots.get(name) ?? [],
       loadLockSlots: loadLockSlots.get(name) ?? [],
-      activeMoveName: primaryMove ? (MOVE_NAMES[primaryMove.MoveType] ?? `动作 ${primaryMove.MoveType}`) : "",
+      activeMoveName: primaryMove ? (isCleaningMove(primaryMove) ? "清洁" : MOVE_NAMES[primaryMove.MoveType] ?? `动作 ${primaryMove.MoveType}`) : "",
       progress: primaryMove ? moveProgress(primaryMove, time) : 0,
       environment: environments.get(name) ?? "",
       loadLockPhase,

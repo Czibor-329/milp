@@ -358,6 +358,14 @@ function formatSeconds(value) {
 function materialIds(move, field = "MatIDList") {
   return listValue(move[field]).map(String).filter(Boolean);
 }
+function isCleaningMove(move) {
+  if (move.MoveType === CLEAN_MOVE) return true;
+  if (move.MoveType !== PROCESS_MOVE) return false;
+  const materialList = move.MatIDList;
+  const explicitlyEmpty = Array.isArray(materialList) && materialList.length === 0;
+  const cleanMetadata = [move.CleanRecipe, move.CleanTaskName, move.RecipeName, move.ProcessRecipe].some((value) => /clean|wac|dummy/i.test(String(value ?? "")));
+  return explicitlyEmpty || cleanMetadata;
+}
 function firstStation(move, field) {
   return String(listValue(move[field])[0] ?? "");
 }
@@ -786,9 +794,9 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
   const loadLockSlots = buildLoadLockSlots(records, device, time, initialLocations, processedMaterials);
   const modules = [...definitions.entries()].map(([name, definition]) => {
     const moduleMoves = activeMoves.filter((move) => move.ModuleName === name || firstStation(move, "SrcStationList") === name || firstStation(move, "DestStationList") === name || listValue(move.StationList).map(String).includes(name));
-    const primaryMove = moduleMoves.find((move) => move.MoveType === CLEAN_MOVE) ?? moduleMoves.find((move) => move.MoveType === PROCESS_MOVE) ?? moduleMoves.find((move) => LOADLOCK_ENVIRONMENT_MOVE_TYPES.has(move.MoveType)) ?? moduleMoves.find((move) => [PREPARE_MOVE, COMPLETE_MOVE].includes(move.MoveType)) ?? moduleMoves[0];
+    const primaryMove = moduleMoves.find(isCleaningMove) ?? moduleMoves.find((move) => move.MoveType === PROCESS_MOVE) ?? moduleMoves.find((move) => LOADLOCK_ENVIRONMENT_MOVE_TYPES.has(move.MoveType)) ?? moduleMoves.find((move) => [PREPARE_MOVE, COMPLETE_MOVE].includes(move.MoveType)) ?? moduleMoves[0];
     let status = (wafersByLocation.get(name)?.length ?? 0) > 0 ? "occupied" : "idle";
-    if (primaryMove?.MoveType === CLEAN_MOVE) status = "cleaning";
+    if (primaryMove && isCleaningMove(primaryMove)) status = "cleaning";
     else if (primaryMove?.MoveType === PROCESS_MOVE) status = "processing";
     else if (primaryMove && LOADLOCK_ENVIRONMENT_MOVE_TYPES.has(primaryMove.MoveType)) status = "environment";
     else if (primaryMove && [PREPARE_MOVE, COMPLETE_MOVE].includes(primaryMove.MoveType)) status = "door";
@@ -805,7 +813,7 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
       processedWafers: (wafersByLocation.get(name) ?? []).filter((wafer) => processedMaterials.has(wafer)),
       loadPortSlots: loadPortSlots.get(name) ?? [],
       loadLockSlots: loadLockSlots.get(name) ?? [],
-      activeMoveName: primaryMove ? MOVE_NAMES[primaryMove.MoveType] ?? `\u52A8\u4F5C ${primaryMove.MoveType}` : "",
+      activeMoveName: primaryMove ? isCleaningMove(primaryMove) ? "\u6E05\u6D01" : MOVE_NAMES[primaryMove.MoveType] ?? `\u52A8\u4F5C ${primaryMove.MoveType}` : "",
       progress: primaryMove ? moveProgress(primaryMove, time) : 0,
       environment: environments.get(name) ?? "",
       loadLockPhase,

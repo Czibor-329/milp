@@ -98,7 +98,7 @@ const state = {
   routes: [{ name: "RouteA", group: "RouteA", bufferOption: 0, prePJobCleanRefs: [], postPJobCleanRefs: [], postCJobCleanRefs: [], stages: linkRouteSteps([makeStage("LP1"), makeStage("Robot"), makeStage("PM1,PM2", true, "RouteA_Step2"), makeStage("Robot"), makeStage("LP1")]) }],
   rounds: [makeRound(1, 0, "RouteA", "LP1"), makeRound(2, 70, "RouteA", "LP2")],
   drawer: null, cleanDialogContext: null, expandedRouteProcessGroups: new Set(), expandedRouteGroups: new Set(), expandedRoutes: new Set(), routeNameChanges: new Map(),
-  routeProcessFilter: "", routeParallelFilter: ""
+  routeProcessFilter: "", routeParallelFilter: "", routeCleanFilter: "all", routeResidencyFilter: "all", routeQTimeFilter: "all"
 };
 let pjobRoutePickerContext = null;
 let searchTelemetryPollToken = 0;
@@ -143,13 +143,20 @@ function inferCleanType(clean) {
 /** 兼容旧 Clean，并保留弹窗需要编辑的类型、时长和适用腔室。 */
 function normalizeClean(clean) {
   const value = { ...(clean || {}) }, cleanType = inferCleanType(value);
+  const isDummy = cleanType === "dummy" || cleanType === "dummywac";
   const name = String(value.name || `Clean${state.cleans.length + 1}`).trim() || `Clean${state.cleans.length + 1}`;
   value.name = name;
   value.cleanType = cleanType;
   value.recipeName = String(value.recipeName || value.recipeRef || `${name}-Recipe`).trim() || `${name}-Recipe`;
   const recipeTime = Number(value.recipeTime);
   value.recipeTime = Math.max(0, Number.isFinite(recipeTime) ? recipeTime : 0);
-  value.triggerCount = Math.max(1, Math.floor(Number(value.triggerCount ?? value.lower) || 5));
+  // Dummy Clean 的触发数量由接口中的 CheckConditions.MaterialCount 表示；
+  // 旧数据没有 triggerCount 时兼容读取 materialCount，避免编辑后重置为默认值。
+  const defaultTriggerCount = isDummy ? 2 : 5;
+  value.triggerCount = Math.max(1, Math.floor(Number(
+    isDummy ? (value.materialCount ?? value.triggerCount) : (value.triggerCount ?? value.lower),
+  ) || defaultTriggerCount));
+  if (isDummy) value.materialCount = value.triggerCount;
   const wacRecipeTime = Number(value.wacRecipeTime ?? value.emptyRecipeTime);
   value.wacRecipeTime = Math.max(0, Number.isFinite(wacRecipeTime) ? wacRecipeTime : 20);
   value.modules = [...new Set(stringList(value.modules))];
@@ -170,8 +177,9 @@ function automaticCleanName(clean) {
   const labels = Object.fromEntries(CLEAN_TYPE_DEFINITIONS.map(item => [item.key, item.label]));
   const mainDuration = formatCleanSeconds(value.recipeTime);
   if (value.cleanType === "dummywac") {
-    return `${labels[value.cleanType]} · 主清洁 ${mainDuration} · WAC ${formatCleanSeconds(value.wacRecipeTime)}`;
+    return `${labels[value.cleanType]} · ${value.triggerCount}片 · 主清洁 ${mainDuration} · WAC ${formatCleanSeconds(value.wacRecipeTime)}`;
   }
+  if (value.cleanType === "dummy") return `${labels[value.cleanType]} · ${value.triggerCount}片 · ${mainDuration}`;
   return `${labels[value.cleanType]} · ${mainDuration}`;
 }
 
@@ -227,7 +235,7 @@ function runtimeClean(clean) {
     lower: isWac ? value.triggerCount : 0,
     upper: 9999,
     updateStateVariables: isWac ? ["ProcessCount"] : isDummy ? ["IdleTime", "DummyCount"] : type === "preclean" ? ["IdleTime"] : [],
-    materialCount: isDummy ? 2 : 0,
+    materialCount: isDummy ? value.triggerCount : 0,
     preJudge: false,
     emptyRecipeRef: type === "dummywac" ? `${value.recipeName}-WAC` : "",
   };
@@ -1244,7 +1252,7 @@ function applyTestCase(testCase) {
   const routeNormalizationChanges = { changed: false };
   state.routes.forEach(route => normalizeRoute(route, routeNormalizationChanges));
   state.expandedRouteProcessGroups.clear(); state.expandedRouteGroups.clear(); state.expandedRoutes.clear();
-  state.routeProcessFilter = ""; state.routeParallelFilter = "";
+  state.routeProcessFilter = ""; state.routeParallelFilter = ""; state.routeCleanFilter = "all"; state.routeResidencyFilter = "all"; state.routeQTimeFilter = "all";
   state.rounds = Array.isArray(value.rounds) ? value.rounds : [];
   while (state.times.length < state.roundCount) state.times.push((Number(state.times.at(-1)) || 0) + 70);
   while (state.rounds.length < state.roundCount) {
@@ -1379,15 +1387,23 @@ async function deleteCurrentTestGroup() {
   else { renderWorkspaceControls(); resetRunResult(); setWorkspaceStatus(`已删除测试组别“${displayName}”`, "saved"); }
 }
 
-/** 删除当前测试集并切换到该设备的第一套剩余测试。 */
+/** 删除当前测试集，并优先停留在当前测试组别的下一套剩余测试。 */
 async function deleteCurrentTest() {
   if (!state.testCaseId) return;
   const confirmed = await showWorkspaceDialog({ title: "删除测试", message: `确定删除测试“${state.testCaseName}”吗？删除后无法恢复。`, dangerous: true });
   if (!confirmed) return;
+  const currentGroup = state.activeTestGroup, deletedTestName = state.testCaseName;
   const result = await requestJson(`/api/workspaces/${state.workspaceDeviceId}/tests/${state.testCaseId}`, { method: "DELETE" });
   state.workspaceDevice.tests = result.tests;
   const summary = state.workspaceDevices.find(device => device.id === state.workspaceDeviceId); if (summary) summary.testCount = result.tests.length;
-  applyTestCase(result.tests[0]);
+  const nextTestInCurrentGroup = result.tests.find(test => String(test.group || "").trim() === currentGroup);
+  if (nextTestInCurrentGroup) {
+    applyTestCase(nextTestInCurrentGroup);
+    return;
+  }
+  // 当前组已为空时仍保留该组选择，方便继续新建测试而不跳转到其他组。
+  state.activeTestGroup = currentGroup; state.testCaseId = ""; state.testCaseName = ""; state.testCaseGroup = currentGroup; state.dirty = false;
+  renderWorkspaceControls(); resetRunResult(); setWorkspaceStatus(`已删除测试“${deletedTestName}”`, "saved");
 }
 
 /** 在当前设备中切换测试集，切换前自动保存当前编辑。 */
@@ -1528,8 +1544,8 @@ function cleanPlacementDefinitions(scope) {
         { key: "postPJobCleanRefs", label: "PJob 后", types: ["postclean"] },
       ]
     : [
-        { key: "beforeCleanRefs", label: "进入腔室前", types: ["preclean", "dummy", "dummywac"] },
-        { key: "afterCleanRefs", label: "离开腔室后", types: ["postclean", "wacclean"] },
+        // 腔室级清洁仅支持离开腔室后的 WAC；带 Dummy 晶圆的清洁必须绑定到 Route。
+        { key: "afterCleanRefs", label: "离开腔室后", types: ["wacclean"] },
       ];
 }
 
@@ -1614,7 +1630,11 @@ function updateCleanDialogFields() {
     .map(item => `<option value="${item.key}">${escapeHtml(item.label)}</option>`)
     .join("");
   typeSelect.value = definition?.types.includes(currentType) ? currentType : definition?.types[0] || "";
-  document.getElementById("cleanTriggerField").hidden = typeSelect.value !== "wacclean";
+  const usesMaterialCount = ["dummy", "dummywac"].includes(typeSelect.value);
+  document.getElementById("cleanTriggerField").hidden = typeSelect.value !== "wacclean" && !usesMaterialCount;
+  document.getElementById("cleanTriggerLabel").textContent = usesMaterialCount
+    ? "Dummy 晶圆数（MaterialCount）"
+    : "触发次数";
   document.getElementById("cleanWacTimeField").hidden = typeSelect.value !== "dummywac";
 }
 
@@ -1667,11 +1687,15 @@ function saveCleanDialog() {
     return;
   }
   const placement = document.getElementById("cleanPlacement").value;
+  const cleanType = document.getElementById("cleanType").value;
   const clean = normalizeClean({
     ...context.draft,
-    cleanType: document.getElementById("cleanType").value,
+    cleanType,
     recipeTime: Number(document.getElementById("cleanRecipeTime").value),
     triggerCount: Number(document.getElementById("cleanTriggerCount").value),
+    materialCount: ["dummy", "dummywac"].includes(cleanType)
+      ? Number(document.getElementById("cleanTriggerCount").value)
+      : context.draft.materialCount,
     wacRecipeTime: Number(document.getElementById("cleanWacRecipeTime").value),
     modules,
   });
@@ -1836,6 +1860,9 @@ function renderRoutes() {
   const host = document.getElementById("routeList");
   const processSelect = document.getElementById("routeProcessFilter");
   const parallelSelect = document.getElementById("routeParallelFilter");
+  const cleanSelect = document.getElementById("routeCleanFilter");
+  const residencySelect = document.getElementById("routeResidencyFilter");
+  const qTimeSelect = document.getElementById("routeQTimeFilter");
   const processGroups = groupedRoutes();
   const selectedProcess = processGroups.find(group => group.key === state.routeProcessFilter) || processGroups[0];
   state.routeProcessFilter = selectedProcess?.key || "";
@@ -1848,15 +1875,28 @@ function renderRoutes() {
   parallelSelect.innerHTML = (selectedProcess?.structures || []).map(structure => `<option value="${escapeHtml(structure.key)}">${escapeHtml(structure.label)}</option>`).join("");
   parallelSelect.value = state.routeParallelFilter;
   parallelSelect.disabled = !selectedProcess?.structures.length;
+  cleanSelect.value = state.routeCleanFilter;
+  cleanSelect.disabled = !selectedStructure;
+  residencySelect.value = state.routeResidencyFilter;
+  residencySelect.disabled = !selectedStructure;
+  qTimeSelect.value = state.routeQTimeFilter;
+  qTimeSelect.disabled = !selectedStructure;
   initializeCompactSelects();
   refreshCompactSelect(processSelect);
   refreshCompactSelect(parallelSelect);
+  refreshCompactSelect(cleanSelect);
+  refreshCompactSelect(residencySelect);
+  refreshCompactSelect(qTimeSelect);
 
   if (!selectedStructure) {
     host.innerHTML = `<div class="empty">至少创建一条路径，Job 才能引用。</div>`;
     return;
   }
-  const routes = selectedStructure.routes.map(({ route, routeIndex }) => {
+  const routes = selectedStructure.routes.filter(({ route }) => (
+    (state.routeCleanFilter === "all" || (routePickerCleanSummary(route) !== "无") === (state.routeCleanFilter === "yes"))
+    && (state.routeResidencyFilter === "all" || routeHasTimeConstraint(route, "residencyConstraint") === (state.routeResidencyFilter === "yes"))
+    && (state.routeQTimeFilter === "all" || routeHasTimeConstraint(route, "qTimeLimit") === (state.routeQTimeFilter === "yes"))
+  )).map(({ route, routeIndex }) => {
     const routeOpen = state.expandedRoutes.has(routeIndex);
     const compactPath = routePickerCompactPath(route);
     return `<article class="route-summary-card"><div class="route-summary-head"><button class="route-summary-toggle" data-action="toggle-route" data-route-index="${routeIndex}" aria-expanded="${routeOpen}">
@@ -1864,7 +1904,7 @@ function renderRoutes() {
       <div class="route-summary-actions"><button class="btn small" data-action="open-context-clean" data-clean-scope="route" data-route-index="${routeIndex}">＋ Clean</button><button class="btn small" data-action="edit-route" data-route-index="${routeIndex}">编辑</button><button class="btn small" data-action="copy-route" data-route-index="${routeIndex}">复制</button><button class="btn danger small" data-action="remove-route" data-index="${routeIndex}">删除</button></div>
     </div>${routeOpen ? renderRouteDetails(route, routeIndex) : ""}</article>`;
   }).join("");
-  host.innerHTML = `<div class="route-flat-list">${routes}</div>`;
+  host.innerHTML = routes ? `<div class="route-flat-list">${routes}</div>` : `<div class="empty">当前筛选条件下没有匹配的路径。</div>`;
   initializeCompactSelects();
 }
 
@@ -1959,12 +1999,22 @@ function routeBufferMode(value) {
   return { index, ...modes[index] };
 }
 
+/** 判断路径是否至少有一个加工 Visit 配置了给定的时间约束。 */
+function routeHasTimeConstraint(route, field) {
+  return (route.stages || []).some(stage => (stage.visits || []).some(visit => {
+    const value = Number(visit[field]);
+    return Number.isFinite(value) && value >= 0;
+  }));
+}
+
 /** 绘制与路径同行的 Buffer 和清洁状态标签。 */
 function renderRoutePropertyTags(route) {
   const buffer = routeBufferMode(route.bufferOption);
   const cleanSummary = routePickerCleanSummary(route);
   const cleanLabel = cleanSummary === "无" ? "无清洁" : cleanSummary;
-  return `<span class="route-property-tags"><span class="route-property-tag buffer-${buffer.tone}" title="Buffer 使用模式 ${buffer.index}：${escapeHtml(buffer.label)}">${escapeHtml(buffer.label)}</span><span class="route-property-tag clean-${cleanSummary === "无" ? "none" : "active"}" title="清洁：${escapeHtml(cleanLabel)}">${escapeHtml(cleanLabel)}</span></span>`;
+  const hasResidency = routeHasTimeConstraint(route, "residencyConstraint");
+  const hasQTime = routeHasTimeConstraint(route, "qTimeLimit");
+  return `<span class="route-property-tags"><span class="route-property-tag buffer-${buffer.tone}" title="Buffer 使用模式 ${buffer.index}：${escapeHtml(buffer.label)}">${escapeHtml(buffer.label)}</span><span class="route-property-tag clean-${cleanSummary === "无" ? "none" : "active"}" title="清洁：${escapeHtml(cleanLabel)}">${escapeHtml(cleanLabel)}</span><span class="route-property-tag constraint-${hasResidency ? "active" : "none"}" title="驻留时间约束：${hasResidency ? "已配置" : "未配置"}">驻留${hasResidency ? "约束" : "无"}</span><span class="route-property-tag qtime-${hasQTime ? "active" : "none"}" title="QTime：${hasQTime ? "已配置" : "未配置"}">QTime${hasQTime ? "" : "无"}</span></span>`;
 }
 
 /** 绘制一张紧凑的具体路径选择卡片。 */
@@ -1981,7 +2031,12 @@ function renderPJobRouteDialogGroup(groupKey) {
   const context = pjobRoutePickerContext;
   if (!context) return;
   const selectedGroup = context.groups.find(group => group.key === groupKey) || context.groups[0];
-  const candidates = selectedGroup?.routes || [];
+  const filters = context.filters;
+  const candidates = (selectedGroup?.routes || []).filter(({ route }) => (
+    (filters.clean === "all" || (routePickerCleanSummary(route) !== "无") === (filters.clean === "yes"))
+    && (filters.residency === "all" || routeHasTimeConstraint(route, "residencyConstraint") === (filters.residency === "yes"))
+    && (filters.qtime === "all" || routeHasTimeConstraint(route, "qTimeLimit") === (filters.qtime === "yes"))
+  ));
   const pjob = state.rounds[context.roundIndex]?.cjobs[context.cjobIndex]?.pjobs[context.pjobIndex];
   const selectedRoute = state.routes.find(route => route.name === pjob.routeRef);
   context.groupKey = selectedGroup?.key || "";
@@ -2001,12 +2056,18 @@ function openPJobRoutePicker(button) {
   const groups = groupedRoutes().flatMap(processGroup => processGroup.structures);
   const selectedRoute = state.routes.find(route => route.name === pjob.routeRef);
   const selectedKey = selectedRoute ? routeProcessProfile(selectedRoute).key : groups[0]?.key || "";
-  pjobRoutePickerContext = { roundIndex, cjobIndex, pjobIndex, trigger: button, groups, groupKey: selectedKey };
+  pjobRoutePickerContext = {
+    roundIndex, cjobIndex, pjobIndex, trigger: button, groups, groupKey: selectedKey,
+    filters: { clean: "all", residency: "all", qtime: "all" },
+  };
   document.getElementById("pjobRouteDialogTitle").textContent = `选择 ${pjob.jobName} 的路径`;
   const processSelect = document.getElementById("pjobRouteProcess");
   processSelect.innerHTML = groups.length ? groups.map(group => (
     `<option value="${escapeHtml(group.key)}" ${group.key === selectedKey ? "selected" : ""}>${escapeHtml(`${group.processLabel} · ${group.label}`)}</option>`
   )).join("") : `<option value="">暂无工序</option>`;
+  document.getElementById("pjobRouteCleanFilter").value = "all";
+  document.getElementById("pjobRouteResidencyFilter").value = "all";
+  document.getElementById("pjobRouteQTimeFilter").value = "all";
   renderPJobRouteDialogGroup(selectedKey);
   button.setAttribute("aria-expanded", "true");
   const dialog = document.getElementById("pjobRouteDialog");
@@ -3627,6 +3688,21 @@ document.getElementById("pjobRouteDialogClose").addEventListener("click", () => 
 document.getElementById("pjobRouteDialog").addEventListener("cancel", event => { event.preventDefault(); closePJobRoutePicker(); });
 document.getElementById("pjobRouteDialog").addEventListener("click", event => { if (event.target.id === "pjobRouteDialog") closePJobRoutePicker(); });
 document.getElementById("pjobRouteProcess").addEventListener("change", event => renderPJobRouteDialogGroup(event.target.value));
+document.getElementById("pjobRouteCleanFilter").addEventListener("change", event => {
+  if (!pjobRoutePickerContext) return;
+  pjobRoutePickerContext.filters.clean = event.target.value;
+  renderPJobRouteDialogGroup(pjobRoutePickerContext.groupKey);
+});
+document.getElementById("pjobRouteResidencyFilter").addEventListener("change", event => {
+  if (!pjobRoutePickerContext) return;
+  pjobRoutePickerContext.filters.residency = event.target.value;
+  renderPJobRouteDialogGroup(pjobRoutePickerContext.groupKey);
+});
+document.getElementById("pjobRouteQTimeFilter").addEventListener("change", event => {
+  if (!pjobRoutePickerContext) return;
+  pjobRoutePickerContext.filters.qtime = event.target.value;
+  renderPJobRouteDialogGroup(pjobRoutePickerContext.groupKey);
+});
 document.getElementById("routeProcessFilter").addEventListener("change", event => {
   state.routeProcessFilter = event.target.value;
   state.routeParallelFilter = "";
@@ -3634,6 +3710,18 @@ document.getElementById("routeProcessFilter").addEventListener("change", event =
 });
 document.getElementById("routeParallelFilter").addEventListener("change", event => {
   state.routeParallelFilter = event.target.value;
+  renderRoutes();
+});
+document.getElementById("routeCleanFilter").addEventListener("change", event => {
+  state.routeCleanFilter = event.target.value;
+  renderRoutes();
+});
+document.getElementById("routeResidencyFilter").addEventListener("change", event => {
+  state.routeResidencyFilter = event.target.value;
+  renderRoutes();
+});
+document.getElementById("routeQTimeFilter").addEventListener("change", event => {
+  state.routeQTimeFilter = event.target.value;
   renderRoutes();
 });
 document.addEventListener("keydown", event => {

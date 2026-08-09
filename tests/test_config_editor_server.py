@@ -383,6 +383,8 @@ class ConfigEditorServerTests(unittest.TestCase):
         clean_placements = clean_placements.split("/** 返回当前 Route", 1)[0]
         self.assertIn('key: "prePJobCleanRefs"', clean_placements)
         self.assertIn('key: "postPJobCleanRefs"', clean_placements)
+        self.assertIn('key: "afterCleanRefs", label: "离开腔室后", types: ["wacclean"]', clean_placements)
+        self.assertNotIn('key: "beforeCleanRefs"', clean_placements)
         self.assertNotIn("postCJobCleanRefs", clean_placements)
         self.assertNotIn("LoadPort（自动）", source)
         self.assertNotIn("LoadPort ${escapeHtml(cjob.loadPort", source)
@@ -1043,7 +1045,10 @@ class ConfigEditorServerTests(unittest.TestCase):
             "name": "Wac", "cleanType": "wacclean",
             "recipeTime": 12, "triggerCount": 7,
         })
-        dummy = _runtime_clean({"name": "Dummy", "cleanType": "dummy", "recipeTime": 13})
+        dummy = _runtime_clean({
+            "name": "Dummy", "cleanType": "dummy", "recipeTime": 13,
+            "triggerCount": 4,
+        })
         dummy_wac = _runtime_clean({
             "name": "DummyWac", "cleanType": "dummywac",
             "recipeTime": 14, "wacRecipeTime": 6, "modules": ["PM1"],
@@ -1053,7 +1058,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual("PostClean", post["taskName"])
         self.assertEqual(("ProcessCount", 7), (wac["stateVariable"], wac["lower"]))
         self.assertEqual(("WacClean", ["ProcessCount"]), (wac["taskName"], wac["updateStateVariables"]))
-        self.assertEqual(("PreDummyClean", 2), (dummy["taskName"], dummy["materialCount"]))
+        self.assertEqual(("PreDummyClean", 4), (dummy["taskName"], dummy["materialCount"]))
         self.assertEqual(("PreWacClean", 2), (dummy_wac["taskName"], dummy_wac["materialCount"]))
         self.assertEqual("DummyWac-Recipe-WAC", dummy_wac["emptyRecipeRef"])
         self.assertEqual(6, dummy_wac["wacRecipeTime"])
@@ -1336,6 +1341,29 @@ class ConfigEditorServerTests(unittest.TestCase):
             self.assertEqual(2, task["MaterialCount"])
             self.assertEqual("", task["EmptyCleanRecipeAfterMaterial"])
 
+    def test_dummy_clean_reuses_high_limit_inventory_between_chambers(self) -> None:
+        """库存 Dummy 晶圆应跨 PM 复用，不能因固定五片少于条件总数而失败。"""
+        route = _route("DummyReuseRoute", "PM1,PM2,PM3", "Recipe1")
+        route["prePJobCleanRefs"] = ["DummyClean"]
+        plan = {
+            "device": self.device,
+            "recipes": [{
+                "name": "Recipe1", "time": 10,
+                "modules": ["PM1", "PM2", "PM3"], "weight": {},
+            }],
+            "cleans": [{
+                "name": "DummyClean", "cleanType": "dummy", "recipeTime": 6,
+                "triggerCount": 2, "modules": ["PM1", "PM2", "PM3"],
+            }],
+            "routes": [route],
+            "rounds": [{"currentTime": 0, "jobs": [_job("J1", "DummyReuseRoute", "LP1")]}],
+        }
+
+        result = execute_plan(plan)
+
+        self.assertTrue(result["ok"])
+        self.assertGreater(result["makespan"], 0)
+
     def test_editor_uses_persistent_route_table_and_step_drawer(self) -> None:
         """路径按工艺结构折叠，Route 和 Step 都提供 Clean 弹窗入口。"""
         html = _editor_source()
@@ -1409,6 +1437,12 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn('src="/assets/config_editor.js?v=', html)
         self.assertIn('id="routeProcessFilter"', template)
         self.assertIn('id="routeParallelFilter"', template)
+        self.assertIn('id="routeCleanFilter"', template)
+        self.assertIn('id="routeResidencyFilter"', template)
+        self.assertIn('id="routeQTimeFilter"', template)
+        self.assertIn('data-compact-label="Clean"', template)
+        self.assertIn('data-compact-label="驻留时间"', template)
+        self.assertIn('data-compact-label="QTime"', template)
         self.assertIn('data-compact-label="工序数"', template)
         self.assertIn('data-compact-label="并行机器数"', template)
         self.assertIn('class="route-flat-list"', html)
@@ -1464,12 +1498,17 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertNotIn('class="pjob-route-specific"', html)
         self.assertIn('id="pjobRouteDialog"', page_template)
         self.assertIn('id="pjobRouteProcess"', page_template)
+        self.assertIn('id="pjobRouteCleanFilter"', page_template)
+        self.assertIn('id="pjobRouteResidencyFilter"', page_template)
+        self.assertIn('id="pjobRouteQTimeFilter"', page_template)
         self.assertNotIn('id="pjobRouteSearch"', page_template)
         self.assertIn("function routePickerCompactPath", html)
         self.assertIn("function routePickerProcessSummary", html)
         self.assertIn("function renderPJobRouteDialogGroup", html)
         self.assertIn("function routePickerSpecialCleanSummary", html)
         self.assertIn("function routePickerCleanSummary", html)
+        self.assertIn("function routeHasTimeConstraint", html)
+        self.assertIn("Dummy 晶圆数（MaterialCount）", html)
         self.assertIn("Buffer Option", html)
         self.assertIn('class="pjob-route-card-meta"', html)
         self.assertIn('class="route-summary-primary"', html)

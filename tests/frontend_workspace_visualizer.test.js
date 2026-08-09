@@ -2155,6 +2155,22 @@ test("工艺腔渲染为正八边形 shell 结构，清洁状态使用浅粉色�
   assert.match(css, /\.reference-grid-canvas \.equipment-process \.equipment-process-shell \{[^}]*clip-path:\s*polygon\(29\.29% 0, 70\.71% 0, 100% 29\.29%, 100% 70\.71%, 70\.71% 100%, 29\.29% 100%, 0 70\.71%, 0 29\.29%\)/);
   assert.match(css, /\.reference-grid-canvas \.equipment-process\.status-cleaning \.equipment-process-shell \{ background: #fdeef1; \}/);
   assert.match(css, /\.reference-grid-canvas \.equipment-process\.status-cleaning \{ background: #d98a97; \}/);
+  assert.doesNotMatch(css, /reference-chamber-clean-sweep/, "清洁状态仅保留粉色，不应有循环扫光动画");
+});
+
+test("以空 ProcessMove 或清洁配方记录的清洁在拓扑回放中可见", () => {
+  const cleanMoves = [
+    { MoveID: 1, MoveType: 9, ModuleName: "PM1", MatIDList: [], StartTime: 10, EndTime: 20 },
+    { MoveID: 2, MoveType: 9, ModuleName: "PM2", MatIDList: ["D1"], CleanRecipe: "Dummy Clean", StartTime: 30, EndTime: 40 },
+  ];
+
+  const emptyProcessSnapshot = logic.buildWorkspaceSnapshot(cleanMoves, device, 15);
+  const recipeMarkedSnapshot = logic.buildWorkspaceSnapshot(cleanMoves, device, 35);
+
+  assert.equal(moduleAt(emptyProcessSnapshot, "PM1").status, "cleaning");
+  assert.equal(moduleAt(emptyProcessSnapshot, "PM1").activeMoveName, "清洁");
+  assert.equal(moduleAt(recipeMarkedSnapshot, "PM2").status, "cleaning");
+  assert.match(logic.renderEquipmentTopology(recipeMarkedSnapshot, null), /PM2[\s\S]*清洁中/);
 });
 
 test("瓶颈分析隐藏说明、窗口详情和统计口径可见标签", () => {
