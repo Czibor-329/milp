@@ -348,10 +348,19 @@ def validate_move_list(
     moves: List[dict],
     init_data: "Optional[Mapping[str, Any] | MachineState]" = None,
     *,
-    check_residency: bool = False,
+    check_residency: bool = True,
 ) -> List[str]:
-    """按时间线校验 MoveList；仅返回首个物理状态违例。"""
-    del check_residency  # 驻留上限是策略约束，不属于平台物理可执行性边界。
+    """按时间线校验 MoveList；覆盖依赖 DAG、Route 时限与物理状态。"""
+    dependency_error = _validate_move_dependencies(moves)
+    if dependency_error:
+        return [dependency_error]
+    duration_error = _validate_configured_durations(task, moves, init_data)
+    if duration_error:
+        return [duration_error]
+    if check_residency:
+        route_time_error = _validate_route_time_limits(task, moves)
+        if route_time_error:
+            return [route_time_error]
     try:
         state = MachineState.from_sources(task, init_data)
     except ValueError as error:
@@ -372,6 +381,279 @@ def validate_move_list(
             return [error]
     _finish_until(scheduled, float("inf"))
     return []
+
+
+def _validate_move_dependencies(moves: Sequence[Mapping[str, Any]]) -> Optional[str]:
+    """校验 MoveID 唯一性、PreMoveID 引用、拓扑无环和时间先后。"""
+    by_id: Dict[int, Mapping[str, Any]] = {}
+    for move in moves:
+        raw_move_id = move.get("MoveID")
+        if isinstance(raw_move_id, bool) or not isinstance(raw_move_id, int):
+            return _issue(move, "MoveID 必须是整数")
+        move_id = int(raw_move_id)
+        if move_id in by_id:
+            return _issue(move, f"MoveID={move_id} 重复")
+        by_id[move_id] = move
+
+    predecessors: Dict[int, Set[int]] = {}
+    successors: Dict[int, Set[int]] = {move_id: set() for move_id in by_id}
+    for move_id, move in by_id.items():
+        raw_values = move.get("PreMoveID") or []
+        if not isinstance(raw_values, Sequence) or isinstance(raw_values, (str, bytes)):
+            return _issue(move, "PreMoveID 必须是整数数组")
+        parsed: Set[int] = set()
+        for raw_value in raw_values:
+            if isinstance(raw_value, bool) or not isinstance(raw_value, int):
+                return _issue(move, f"PreMoveID 包含非整数引用: {raw_value}")
+            predecessor_id = int(raw_value)
+            if predecessor_id == move_id:
+                return _issue(move, "PreMoveID 不能引用自身")
+            predecessor = by_id.get(predecessor_id)
+            if predecessor is None:
+                return _issue(move, f"PreMoveID 引用了不存在的 MoveID={predecessor_id}")
+            predecessor_end = _number(predecessor.get("EndTime"))
+            current_start = _number(move.get("StartTime"))
+            if (
+                predecessor_end is not None
+                and current_start is not None
+                and predecessor_end > current_start + TIME_TOLERANCE
+            ):
+                return _issue(
+                    move,
+                    f"前驱 MoveID={predecessor_id} 尚未结束（EndTime={predecessor_end}）",
+                )
+            parsed.add(predecessor_id)
+            successors[predecessor_id].add(move_id)
+        predecessors[move_id] = parsed
+
+    ready = [move_id for move_id, values in predecessors.items() if not values]
+    visited = 0
+    while ready:
+        current = ready.pop()
+        visited += 1
+        for successor in successors[current]:
+            predecessors[successor].discard(current)
+            if not predecessors[successor]:
+                ready.append(successor)
+    if visited != len(by_id):
+        cyclic = sorted(move_id for move_id, values in predecessors.items() if values)
+        return f"MoveList 的 PreMoveID 存在依赖环: {cyclic}"
+    return None
+
+
+def _validate_configured_durations(
+    task: Any,
+    moves: Sequence[Mapping[str, Any]],
+    init_data: "Optional[Mapping[str, Any] | MachineState]",
+) -> Optional[str]:
+    """按设备四元组和 Route Visit 校验算法输出的原子动作时长。"""
+    if isinstance(init_data, MachineState):
+        payload: Mapping[str, Any] = {}
+    else:
+        payload = _initial_payload(init_data)
+    robots = _mapping(payload.get("Robots"))
+
+    for move in moves:
+        move_type = move.get("MoveType")
+        start_time = _number(move.get("StartTime"))
+        end_time = _number(move.get("EndTime"))
+        if start_time is None or end_time is None:
+            continue
+        actual = end_time - start_time
+        robot_name = str(move.get("Robot") or move.get("ModuleName") or "")
+        robot = robots.get(robot_name)
+        expected: Optional[float] = None
+        if move_type in {PICK_MOVE, PLACE_MOVE} and isinstance(robot, Mapping):
+            station_field = "SrcStationList" if move_type == PICK_MOVE else "DestStationList"
+            station_name = _first_text(move, station_field)
+            timing_field = "PickTime" if move_type == PICK_MOVE else "PlaceTime"
+            raw_timing = robot.get(timing_field)
+            if isinstance(raw_timing, Mapping):
+                if station_name not in raw_timing:
+                    return _issue(
+                        move,
+                        f"{robot_name} 缺少 {timing_field}[{station_name}]",
+                    )
+                expected = float(raw_timing[station_name])
+        elif move_type == PRE_TRANS_MOVE and isinstance(robot, Mapping):
+            entries = robot.get("PrepTransTime")
+            if isinstance(entries, Sequence) and not isinstance(entries, (str, bytes)) and entries:
+                source = _first_text(move, "SrcStationList")
+                destination = _first_text(move, "DestStationList")
+                material_ids = _values(move, "MatIDList")
+                robot_slots = _integer_values(move, "RobotSlotList")
+                is_linked_empty = bool(material_ids) and all(
+                    index < len(robot_slots)
+                    and _pretrans_is_linked_empty_pick(
+                        move,
+                        moves,
+                        index,
+                        robot_slots[index],
+                        material_id,
+                    )
+                    for index, material_id in enumerate(material_ids)
+                )
+                trans_type = 0 if not material_ids or is_linked_empty else 1
+                transfer_index: Dict[Tuple[str, str, int], float] = {}
+                for item in entries:
+                    if not isinstance(item, Mapping) or "TransType" not in item:
+                        return _issue(move, f"{robot_name} 的 PrepTransTime 缺少 TransType")
+                    key = (
+                        str(item.get("SrcStation") or ""),
+                        str(item.get("DestStation") or ""),
+                        int(item["TransType"]),
+                    )
+                    if key in transfer_index:
+                        return _issue(move, f"{robot_name} 的 PrepTransTime 重复四元组 {key}")
+                    transfer_index[key] = float(item.get("Time", 0.0))
+                lookup = (source, destination, trans_type)
+                if lookup not in transfer_index:
+                    return _issue(move, f"{robot_name} 缺少 PrepTransTime 四元组 {lookup}")
+                expected = transfer_index[lookup]
+        elif move_type == PROCESS_MOVE and task is not None:
+            expected = _process_move_expected_duration(task, move)
+
+        if expected is not None and abs(actual - expected) > TIME_TOLERANCE:
+            return _issue(
+                move,
+                f"动作时长 {actual:.6f}s 与配置 {expected:.6f}s 不一致",
+            )
+    return None
+
+
+def _process_move_expected_duration(task: Any, move: Mapping[str, Any]) -> Optional[float]:
+    """按 MatID、原始 StepID 和模块定位 ProcessMove 的配置时长。"""
+    material_ids = _values(move, "MatIDList")
+    if not material_ids:
+        return None
+    material_key = str(material_ids[0])
+    wafer = next(
+        (
+            item
+            for item in getattr(task, "wafers", ()) or ()
+            if str(getattr(item, "mat_id", "")) == material_key
+        ),
+        None,
+    )
+    if wafer is None:
+        return None
+    step_ids = _integer_values(move, "StepIDList")
+    step_id = step_ids[0] if step_ids else None
+    station_name = _station_name(move)
+    stage = next(
+        (
+            item
+            for item in getattr(wafer, "stages", ()) or ()
+            if str(getattr(item, "stage_type", "")) == "process"
+            and (
+                step_id is None
+                or int(getattr(item, "step_id", getattr(item, "j", -1))) == step_id
+            )
+            and (
+                str(getattr(item, "chamber", "")) == station_name
+                or station_name in {str(value) for value in getattr(item, "cands", ()) or ()}
+            )
+        ),
+        None,
+    )
+    if stage is None:
+        return None
+    by_chamber = dict(getattr(stage, "process_time_by_chamber", {}) or {})
+    return float(by_chamber.get(station_name, getattr(stage, "proc", 0.0)))
+
+
+def _validate_route_time_limits(
+    task: Any,
+    moves: Sequence[Mapping[str, Any]],
+) -> Optional[str]:
+    """按 Problem 中保留的原始 StepID 校验 Residency 与相邻加工 Q-time。"""
+    wafers = list(getattr(task, "wafers", ()) or ()) if task is not None else []
+    if not wafers:
+        return None
+    wafer_by_material = {
+        str(getattr(wafer, "mat_id", "")): wafer
+        for wafer in wafers
+    }
+    ordered = sorted(moves, key=_sort_key)
+    process_events: Dict[str, List[Tuple[Mapping[str, Any], Any]]] = {}
+    for move in ordered:
+        if move.get("MoveType") != PROCESS_MOVE:
+            continue
+        material_ids = _values(move, "MatIDList")
+        step_ids = _integer_values(move, "StepIDList")
+        station_name = _station_name(move)
+        for index, material_id in enumerate(material_ids):
+            material_key = str(material_id)
+            wafer = wafer_by_material.get(material_key)
+            if wafer is None:
+                continue
+            step_id = step_ids[index] if index < len(step_ids) else None
+            stages = [
+                stage
+                for stage in getattr(wafer, "stages", ()) or ()
+                if str(getattr(stage, "stage_type", "")) == "process"
+                and (
+                    step_id is None
+                    or int(getattr(stage, "step_id", getattr(stage, "j", -1))) == step_id
+                )
+                and (
+                    str(getattr(stage, "chamber", "")) == station_name
+                    or station_name in {
+                        str(value) for value in getattr(stage, "cands", ()) or ()
+                    }
+                )
+            ]
+            occurrence = len(process_events.get(material_key, ()))
+            if not stages:
+                continue
+            stage = stages[min(occurrence, len(stages) - 1)]
+            process_events.setdefault(material_key, []).append((move, stage))
+
+    for material_key, events in process_events.items():
+        for index, (process_move, stage) in enumerate(events):
+            process_end = _number(process_move.get("EndTime"))
+            if process_end is None:
+                continue
+            residency = float(getattr(stage, "residency", -1.0))
+            if residency >= 0.0:
+                source_station = _station_name(process_move)
+                departure = next(
+                    (
+                        candidate
+                        for candidate in ordered
+                        if candidate.get("MoveType") == PICK_MOVE
+                        and material_key in {
+                            str(value) for value in _values(candidate, "MatIDList")
+                        }
+                        and source_station in {
+                            str(value) for value in _values(candidate, "SrcStationList")
+                        }
+                        and (_number(candidate.get("StartTime")) or 0.0)
+                        >= process_end - TIME_TOLERANCE
+                    ),
+                    None,
+                )
+                if departure is None:
+                    return _issue(
+                        process_move,
+                        f"加工完成后缺少物料 {material_key} 的取片动作",
+                    )
+                elapsed = (_number(departure.get("StartTime")) or process_end) - process_end
+                if elapsed > residency + TIME_TOLERANCE:
+                    return _issue(
+                        departure,
+                        f"物料 {material_key} 驻留 {elapsed:.3f}s 超过上限 {residency:.3f}s",
+                    )
+            qtime = float(getattr(stage, "qtime", -1.0))
+            if qtime >= 0.0 and index + 1 < len(events):
+                next_move = events[index + 1][0]
+                elapsed = (_number(next_move.get("StartTime")) or process_end) - process_end
+                if elapsed > qtime + TIME_TOLERANCE:
+                    return _issue(
+                        next_move,
+                        f"物料 {material_key} 相邻加工间隔 {elapsed:.3f}s 超过 Q-time {qtime:.3f}s",
+                    )
+    return None
 
 
 def release_completed_load_port_materials(

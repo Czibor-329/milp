@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>调度平台</title>
-  <link rel="stylesheet" href="/assets/config_editor.css?v=1.3.4">
+  <link rel="stylesheet" href="/assets/config_editor.css?v=1.3.5">
 </head>
 <body>
   <a class="skip-link" href="#mainContent">跳到主要内容</a>
@@ -373,8 +373,8 @@
             </div>
             <div id="scheduleAlphaGoOptions" class="is-hidden" style="margin-top:14px">
               <section class="alphago-settings-card" aria-labelledby="alphagoSettingsTitle">
-                <strong id="alphagoSettingsTitle">AlphaGo 搜索参数</strong>
-                <button class="btn small" id="openScheduleAlphaGoOptionsDialogButton" type="button">配置参数</button>
+                <strong id="alphagoSettingsTitle">AlphaGo 策略价值模型</strong>
+                <button class="btn small" id="openScheduleAlphaGoOptionsDialogButton" type="button">选择模型</button>
               </section>
             </div>
           </div>
@@ -385,7 +385,7 @@
               <label class="export-option"><input id="skipValidationInput" type="checkbox" checked>跳过输出校验</label>
               <label class="export-option"><input id="skipBaselineInput" type="checkbox" checked>跳过Baseline</label>
             </div>
-            <div class="run-actions"><button class="btn" id="runButton">▶ 运行当前测试</button><button class="btn" id="stepRunButton" title="以步进模式运行 Schedule-AlphaGo：每个根决策搜索完成后在拓扑回放页选择要执行的动作">⟳ 运行模型步进</button><button class="btn batch" id="batchRunButton">▦ 运行当前测试组</button><button class="btn batch" id="openParameterComparisonDialogButton" title="先运行当前测试，再选择策略和参数创建对比实验" disabled>⇄ 运行对比测试</button></div>
+            <div class="run-actions"><button class="btn" id="runButton">▶ 运行当前测试</button><button class="btn" id="stepRunButton" title="以步进模式运行 Schedule-AlphaGo：每次决策完成后从 3 条稳定动作链中选择一条整体提交">⟳ 运行模型步进</button><button class="btn batch" id="batchRunButton">▦ 运行当前测试组</button><button class="btn batch" id="openParameterComparisonDialogButton" title="先运行当前测试，再选择策略和参数创建对比实验" disabled>⇄ 运行对比测试</button></div>
           </div>
         </article>
       </aside>
@@ -415,37 +415,12 @@
     <form class="dialog-body alphago-options-dialog-body" id="scheduleAlphaGoOptionsForm">
       <header class="alphago-dialog-header">
         <div>
-          <h3 id="scheduleAlphaGoOptionsDialogTitle">编辑 AlphaGo 搜索参数</h3>
-          <p>配置在当前页面会话中保持不变；切换测试不会覆盖，直到您主动修改或关闭页面。</p>
+          <h3 id="scheduleAlphaGoOptionsDialogTitle">选择 AlphaGo 模型</h3>
+          <p>前端只选择 checkpoint；搜索预算、动作数和 50 层稳定链上限由生产后端统一管理。</p>
         </div>
-        <span class="alphago-dialog-tag">高级设置</span>
+        <span class="alphago-dialog-tag">模型</span>
       </header>
       <div class="alphago-options-content">
-        <section class="alphago-option-group" aria-labelledby="alphaGoBudgetGroupTitle">
-          <div class="alphago-option-group-head">
-            <h4 id="alphaGoBudgetGroupTitle">搜索预算</h4>
-            <p>控制每次根决策可使用的时间与搜索规模。</p>
-          </div>
-          <div class="alphago-options-grid">
-            <div class="field"><label for="alphaGoDecisionSeconds">单步时间预算 <span>秒</span></label><input id="alphaGoDecisionSeconds" type="number" min="0.001" step="0.05" placeholder="自动"><div class="hint">留空时自动使用 GPU 0.85 秒或 CPU 1.5 秒。</div></div>
-            <div class="field"><label for="alphaGoMaxSimulations">最大模拟次数</label><input id="alphaGoMaxSimulations" type="number" min="1" step="1"></div>
-            <div class="field"><label for="alphaGoMaxNodes">最大搜索节点</label><input id="alphaGoMaxNodes" type="number" min="1" step="1"></div>
-            <div class="field"><label for="alphaGoMaxDepth">树深上限</label><input id="alphaGoMaxDepth" type="number" min="1" step="1"></div>
-          </div>
-        </section>
-        <section class="alphago-option-group" aria-labelledby="alphaGoBehaviorGroupTitle">
-          <div class="alphago-option-group-head">
-            <h4 id="alphaGoBehaviorGroupTitle">搜索行为</h4>
-            <p>调整探索强度、Rollout 范围与运行时遥测。</p>
-          </div>
-          <div class="alphago-options-grid">
-            <div class="field"><label for="alphaGoRolloutDepth">Rollout 深度</label><input id="alphaGoRolloutDepth" type="number" min="0" step="1"></div>
-            <div class="field"><label for="alphaGoCPuct">PUCT 探索系数</label><input id="alphaGoCPuct" type="number" min="0" step="0.05"></div>
-            <div class="field"><label for="alphaGoTelemetryMilliseconds">遥测间隔 <span>毫秒</span></label><input id="alphaGoTelemetryMilliseconds" type="number" min="1" step="1"></div>
-            <div class="field"><label for="alphaGoDecisionCount">决策数量</label><input id="alphaGoDecisionCount" type="number" min="1" step="1"><div class="hint">每次根决策联合输出的最大动作数（1~N）。</div></div>
-            <div class="field"><label for="alphaGoDevice">推理设备</label><select id="alphaGoDevice"><option value="auto">自动选择</option><option value="cuda">CUDA GPU</option><option value="cpu">CPU</option></select></div>
-          </div>
-        </section>
         <section class="alphago-option-group alphago-model-group" aria-labelledby="alphaGoModelGroupTitle">
           <div class="alphago-option-group-head">
             <h4 id="alphaGoModelGroupTitle">策略价值模型</h4>
@@ -458,7 +433,7 @@
           </div>
         </section>
       </div>
-      <div class="dialog-actions"><button class="btn small" type="button" id="scheduleAlphaGoOptionsDialogCancel">取消</button><button class="btn primary small" id="saveScheduleAlphaGoOptionsButton" type="submit">保存参数</button></div>
+      <div class="dialog-actions"><button class="btn small" type="button" id="scheduleAlphaGoOptionsDialogCancel">取消</button><button class="btn primary small" id="saveScheduleAlphaGoOptionsButton" type="submit">保存模型</button></div>
     </form>
   </dialog>
 
@@ -521,7 +496,7 @@
     </aside>
   </div>
 
-  <script type="module" src="/assets/config_editor.js?v=1.3.4"></script>
+  <script type="module" src="/assets/config_editor.js?v=1.3.5"></script>
   <script>
     // 管理员才显示“用户管理”入口。
     (function () {

@@ -46,30 +46,10 @@ const DEFAULT_SCHEDULE_OPTIONS = Object.freeze({
   maximumSystemResidenceCv: 0,
   loadLockMacroSearchSeconds: 4,
   loadLockMacroRollouts: 96,
-  scheduleAlphaGoDecisionSeconds: null,
-  scheduleAlphaGoMaxSimulations: 256,
-  scheduleAlphaGoMaxDepth: 24,
-  scheduleAlphaGoRolloutDepth: 96,
-  scheduleAlphaGoMaxNodes: 4096,
-  scheduleAlphaGoCPuct: 1.5,
-  scheduleAlphaGoRolloutMix: null,
-  scheduleAlphaGoDecisionCount: 8,
-  scheduleAlphaGoTelemetryMilliseconds: 50,
   scheduleAlphaGoModelPath: "",
-  scheduleAlphaGoDevice: "auto",
   seed: 0,
 });
 const SCHEDULE_OPTION_KEYS = new Set(Object.keys(DEFAULT_SCHEDULE_OPTIONS));
-const ALPHA_GO_NUMERIC_OPTION_SPECS = Object.freeze([
-  { controlId: "alphaGoDecisionSeconds", option: "scheduleAlphaGoDecisionSeconds", minimum: 0.001, integer: false, optional: true, label: "单步时间预算" },
-  { controlId: "alphaGoMaxSimulations", option: "scheduleAlphaGoMaxSimulations", minimum: 1, integer: true, optional: false, label: "最大模拟次数" },
-  { controlId: "alphaGoMaxNodes", option: "scheduleAlphaGoMaxNodes", minimum: 1, integer: true, optional: false, label: "最大搜索节点" },
-  { controlId: "alphaGoMaxDepth", option: "scheduleAlphaGoMaxDepth", minimum: 1, integer: true, optional: false, label: "树深上限" },
-  { controlId: "alphaGoRolloutDepth", option: "scheduleAlphaGoRolloutDepth", minimum: 0, integer: true, optional: false, label: "Rollout 深度" },
-  { controlId: "alphaGoCPuct", option: "scheduleAlphaGoCPuct", minimum: 0, integer: false, optional: false, label: "PUCT 探索系数" },
-  { controlId: "alphaGoTelemetryMilliseconds", option: "scheduleAlphaGoTelemetryMilliseconds", minimum: 1, integer: true, optional: false, label: "遥测间隔" },
-  { controlId: "alphaGoDecisionCount", option: "scheduleAlphaGoDecisionCount", minimum: 1, integer: true, optional: false, label: "决策数量" },
-]);
 
 const CLEAN_TYPE_DEFINITIONS = [
   { key: "preclean", label: "PreClean" },
@@ -861,9 +841,9 @@ function searchTelemetryStopReason(reason) {
   }[String(reason || "")] || "搜索中";
 }
 
-/** 把 Alpha 的原子合法动作渲染成紧凑、整行可选的候选卡片。 */
-function renderSearchActionCandidates(
-  actions,
+/** 把一次 Alpha 决策的稳定动作链渲染成三张可展开候选卡片。 */
+function renderSearchActionChains(
+  chains,
   decisionIndex,
   recommendedKey,
   selectedKey,
@@ -873,25 +853,29 @@ function renderSearchActionCandidates(
   return `<section class="decision-candidate-section search-action-section" aria-labelledby="searchCandidatesTitle">
     <header>
       <strong id="searchCandidatesTitle">决策 #${decisionIndex}</strong>
-      <span>${actions.length} 个可选动作</span>
+      <span>${chains.length} 条可选稳定动作链</span>
     </header>
     <ol>
-      ${actions.map((action, index) => {
-        const visits = Number(action?.visits) || 0;
+      ${chains.map((chain, index) => {
+        const visits = Number(chain?.visits) || 0;
         const visitPercent = Math.max(0, Math.min(100, visits / maximumVisits * 100));
-        const isRecommended = String(action?.actionKey || "") === recommendedKey;
-        const isSelected = String(action?.actionKey || "") === selectedKey;
+        const isRecommended = String(chain?.actionKey || "") === recommendedKey;
+        const isSelected = String(chain?.actionKey || "") === selectedKey;
         const tags = `${isRecommended ? '<span class="decision-tag is-recommendation">推荐</span>' : ""}${isSelected && !isRecommended ? '<span class="decision-tag is-user-chosen">你的选择</span>' : ""}`;
-        const description = String(action?.description || action?.actionKey || "动作");
-        return `<li class="decision-candidate search-action-candidate ${isSelected ? "is-selected" : ""} ${interactive ? "is-interactive" : ""}" data-action-key="${escapeHtml(String(action?.actionKey || ""))}" ${interactive ? `role="button" tabindex="0" aria-label="执行 ${escapeHtml(description)}"` : ""}>
+        const description = String(chain?.description || "稳定动作链");
+        const steps = Array.isArray(chain?.steps) ? chain.steps : [];
+        return `<li class="decision-candidate search-action-candidate search-action-chain ${isSelected ? "is-selected" : ""} ${interactive ? "is-interactive" : ""}" data-action-key="${escapeHtml(String(chain?.actionKey || ""))}" ${interactive ? `role="button" tabindex="0" aria-label="执行 ${escapeHtml(description)}"` : ""}>
           <div class="decision-candidate-rank" aria-label="第 ${index + 1} 名">${index + 1}</div>
           <div class="decision-candidate-main">
             <div class="decision-candidate-title"><strong title="${escapeHtml(description)}">${escapeHtml(description)}</strong>${tags}</div>
             <div class="decision-candidate-detail search-pnq" aria-label="搜索评估指标">
-              <span title="策略先验 P"><small>P 先验</small><strong>${formatSearchTelemetryNumber(action?.prior, 4)}</strong></span>
+              <span title="策略先验 P"><small>P 先验</small><strong>${formatSearchTelemetryNumber(chain?.prior, 4)}</strong></span>
               <span title="访问次数 N"><small>N 访问</small><strong>${visits}</strong></span>
-              <span title="平均价值 Q"><small>Q 价值</small><strong>${formatSearchTelemetryNumber(action?.value, 4)}</strong></span>
+              <span title="平均价值 Q"><small>Q 价值</small><strong>${formatSearchTelemetryNumber(chain?.value, 4)}</strong></span>
             </div>
+            <ol class="search-chain-steps" aria-label="动作链步骤">
+              ${steps.map((step, stepIndex) => `<li><b>${stepIndex + 1}</b><span title="${escapeHtml(step?.description || "动作")}">${escapeHtml(step?.description || "动作")}</span><small>${Number(step?.primitiveCount) || 1} 步</small></li>`).join("")}
+            </ol>
           </div>
           <div class="decision-candidate-preference" aria-label="推荐比例 ${visitPercent.toFixed(0)}%"><small>推荐比例</small><strong>${visitPercent.toFixed(0)}%</strong></div>
         </li>`;
@@ -900,10 +884,9 @@ function renderSearchActionCandidates(
   </section>`;
 }
 
-/** 绘制某一次根决策的候选动作和折叠主变化；摘要与高访问节点不再展示。 */
+/** 绘制某一次决策的三条可提交稳定动作链。 */
 function renderSearchTelemetryDecision(snapshot) {
-  const root = snapshot?.root || {};
-  const actions = Array.isArray(root.children) ? root.children : [];
+  const chains = Array.isArray(snapshot?.actionChains) ? snapshot.actionChains.slice(0, 3) : [];
   const recommendedKey = String(snapshot?.selectedActionKey || "");
   // 用户选择只作用于其提交时的那个根决策；跨决策或回看其他历史时沿用模型推荐。
   const selectedKey = String(snapshot?.searchId || "") === userChosenSearchId
@@ -913,24 +896,21 @@ function renderSearchTelemetryDecision(snapshot) {
   const interactive = playbackMode === "step"
     && latestSearchTelemetry?.status === "waiting-choice"
     && String(snapshot?.searchId || "") === String(latestSearchTelemetry?.searchId || "");
-  const maximumVisits = Math.max(1, ...actions.map(action => Number(action?.visits) || 0));
-  document.getElementById("visualDecisionLens").innerHTML = actions.length
-    ? renderSearchActionCandidates(
-      actions,
+  const maximumVisits = Math.max(1, ...chains.map(chain => Number(chain?.visits) || 0));
+  document.getElementById("visualDecisionLens").innerHTML = chains.length
+    ? renderSearchActionChains(
+      chains,
       decisionIndex,
       recommendedKey,
       selectedKey,
       maximumVisits,
       interactive,
     )
-    : `<div class="decision-empty"><strong>正在枚举根节点合法动作…</strong><p>搜索进行中，候选稍后出现。</p></div>`;
+    : `<div class="decision-empty"><strong>正在构造稳定动作链…</strong><p>只有在 50 层内回到 Robot 全部空手状态的链才会出现。</p></div>`;
 
-  const variation = Array.isArray(snapshot?.principalVariation) ? snapshot.principalVariation : [];
   const variationPanel = document.getElementById("searchTelemetryVariationPanel");
-  variationPanel.hidden = false;
-  document.getElementById("searchTelemetryVariation").innerHTML = variation.length
-    ? variation.slice(0, 10).map((step, index) => `<div class="search-pv-step"><b>${index + 1}</b><span title="${escapeHtml(step?.description || step?.actionKey || "动作")}">${escapeHtml(step?.description || step?.actionKey || "动作")}</span><small>N=${Number(step?.visits) || 0}</small></div>`).join("")
-    : `<div class="search-telemetry-empty">尚未形成主变化</div>`;
+  variationPanel.hidden = true;
+  document.getElementById("searchTelemetryVariation").innerHTML = "";
 }
 
 /** 按回放/步进模式同步搜索控制按钮的可见与可用状态。 */
@@ -2372,14 +2352,9 @@ async function restoreRobotSlotDefault(robotName) {
 /** 渲染所有依赖状态的区域。 */
 function renderAll() { renderTimes(); renderRoutes(); renderRounds(); renderRobotSlots(); if (state.drawer) renderStepDrawer(); }
 
-/** 打开 AlphaGo 参数弹窗，并用当前测试集中的已保存值初始化控件。 */
+/** 打开 AlphaGo 模型选择弹窗。 */
 function openScheduleAlphaGoOptionsDialog() {
   pendingAlphaGoCheckpointFile = null;
-  for (const specification of ALPHA_GO_NUMERIC_OPTION_SPECS) {
-    const value = state.options[specification.option];
-    document.getElementById(specification.controlId).value = value ?? "";
-  }
-  document.getElementById("alphaGoDevice").value = state.options.scheduleAlphaGoDevice || "auto";
   const configuredPath = String(state.options.scheduleAlphaGoModelPath || "").trim();
   document.getElementById("alphaGoCheckpointPath").value = configuredPath;
   document.getElementById("alphaGoCheckpointFile").value = "";
@@ -2387,18 +2362,6 @@ function openScheduleAlphaGoOptionsDialog() {
     ? "当前 checkpoint 已保存在本地服务中；重新选择文件可替换它。"
     : "选择本机 checkpoint 后将上传到本地服务，并用于后续运行。";
   document.getElementById("scheduleAlphaGoOptionsDialog").showModal();
-}
-
-/** 校验一个 AlphaGo 数值控件，并返回可直接写入调度选项的值。 */
-function readAlphaGoNumericOption(specification) {
-  const rawValue = String(document.getElementById(specification.controlId).value || "").trim();
-  if (!rawValue && specification.optional) return null;
-  const value = Number(rawValue);
-  if (!Number.isFinite(value) || value < specification.minimum || (specification.integer && !Number.isInteger(value))) {
-    const unit = specification.integer ? "整数" : `不小于 ${specification.minimum} 的数值`;
-    throw new Error(`${specification.label}必须为${unit}`);
-  }
-  return value;
 }
 
 /** 上传用户从文件夹选取的 checkpoint，并返回本地服务可访问的绝对路径。 */
@@ -2415,20 +2378,15 @@ async function uploadAlphaGoCheckpoint(file) {
   return String(result.modelPath);
 }
 
-/** 保存 AlphaGo 弹窗中的参数；选择的新 checkpoint 会在此时才上传。 */
+/** 保存 AlphaGo checkpoint；搜索和深度参数由生产后端统一管理。 */
 async function saveScheduleAlphaGoOptions() {
   const saveButton = document.getElementById("saveScheduleAlphaGoOptionsButton");
-  const nextOptions = {};
-  for (const specification of ALPHA_GO_NUMERIC_OPTION_SPECS) {
-    nextOptions[specification.option] = readAlphaGoNumericOption(specification);
-  }
-  nextOptions.scheduleAlphaGoDevice = document.getElementById("alphaGoDevice").value;
   saveButton.disabled = true;
   try {
-    nextOptions.scheduleAlphaGoModelPath = pendingAlphaGoCheckpointFile
+    const modelPath = pendingAlphaGoCheckpointFile
       ? await uploadAlphaGoCheckpoint(pendingAlphaGoCheckpointFile)
       : String(document.getElementById("alphaGoCheckpointPath").value || "").trim();
-    Object.assign(state.options, nextOptions);
+    state.options.scheduleAlphaGoModelPath = modelPath;
     pendingAlphaGoCheckpointFile = null;
     retainSessionSchedulingConfiguration();
     markTestDirty();

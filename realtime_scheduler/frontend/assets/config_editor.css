@@ -1290,6 +1290,12 @@
     .search-pnq small { color: var(--muted); font: 700 9px/1 "Fira Sans", "Microsoft YaHei", sans-serif; white-space: nowrap; }
     .search-pnq strong { overflow: hidden; color: var(--ink); font: 700 11px/1.2 "Fira Code", Consolas, monospace; font-variant-numeric: tabular-nums; text-overflow: ellipsis; }
     .search-pnq i { color: var(--muted); font-size: 10px; font-style: normal; font-variant-numeric: tabular-nums; }
+    .petri-control-panel .search-action-chain { min-height: 180px; }
+    .search-action-chain .search-chain-steps { display: grid; max-height: 190px; gap: 4px; margin-top: 9px; padding: 0; overflow: auto; list-style: none; }
+    .search-action-chain .search-chain-steps li { display: grid; min-height: 28px; grid-template-columns: 20px minmax(0, 1fr) auto; align-items: center; gap: 6px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 4px; color: var(--ink); background: var(--soft); font-size: 10px; }
+    .search-action-chain .search-chain-steps b { display: grid; width: 17px; height: 17px; place-items: center; border-radius: 50%; color: #fff; background: #3568b8; font-size: 8px; }
+    .search-action-chain .search-chain-steps span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .search-action-chain .search-chain-steps small { color: var(--muted); font-size: 9px; white-space: nowrap; }
 
     .search-variation-panel { display: block; margin-top: 2px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
     .search-variation-panel[hidden] { display: none; }

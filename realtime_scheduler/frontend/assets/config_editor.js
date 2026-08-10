@@ -3124,30 +3124,10 @@ var DEFAULT_SCHEDULE_OPTIONS = Object.freeze({
   maximumSystemResidenceCv: 0,
   loadLockMacroSearchSeconds: 4,
   loadLockMacroRollouts: 96,
-  scheduleAlphaGoDecisionSeconds: null,
-  scheduleAlphaGoMaxSimulations: 256,
-  scheduleAlphaGoMaxDepth: 24,
-  scheduleAlphaGoRolloutDepth: 96,
-  scheduleAlphaGoMaxNodes: 4096,
-  scheduleAlphaGoCPuct: 1.5,
-  scheduleAlphaGoRolloutMix: null,
-  scheduleAlphaGoDecisionCount: 8,
-  scheduleAlphaGoTelemetryMilliseconds: 50,
   scheduleAlphaGoModelPath: "",
-  scheduleAlphaGoDevice: "auto",
   seed: 0
 });
 var SCHEDULE_OPTION_KEYS = new Set(Object.keys(DEFAULT_SCHEDULE_OPTIONS));
-var ALPHA_GO_NUMERIC_OPTION_SPECS = Object.freeze([
-  { controlId: "alphaGoDecisionSeconds", option: "scheduleAlphaGoDecisionSeconds", minimum: 1e-3, integer: false, optional: true, label: "\u5355\u6B65\u65F6\u95F4\u9884\u7B97" },
-  { controlId: "alphaGoMaxSimulations", option: "scheduleAlphaGoMaxSimulations", minimum: 1, integer: true, optional: false, label: "\u6700\u5927\u6A21\u62DF\u6B21\u6570" },
-  { controlId: "alphaGoMaxNodes", option: "scheduleAlphaGoMaxNodes", minimum: 1, integer: true, optional: false, label: "\u6700\u5927\u641C\u7D22\u8282\u70B9" },
-  { controlId: "alphaGoMaxDepth", option: "scheduleAlphaGoMaxDepth", minimum: 1, integer: true, optional: false, label: "\u6811\u6DF1\u4E0A\u9650" },
-  { controlId: "alphaGoRolloutDepth", option: "scheduleAlphaGoRolloutDepth", minimum: 0, integer: true, optional: false, label: "Rollout \u6DF1\u5EA6" },
-  { controlId: "alphaGoCPuct", option: "scheduleAlphaGoCPuct", minimum: 0, integer: false, optional: false, label: "PUCT \u63A2\u7D22\u7CFB\u6570" },
-  { controlId: "alphaGoTelemetryMilliseconds", option: "scheduleAlphaGoTelemetryMilliseconds", minimum: 1, integer: true, optional: false, label: "\u9065\u6D4B\u95F4\u9694" },
-  { controlId: "alphaGoDecisionCount", option: "scheduleAlphaGoDecisionCount", minimum: 1, integer: true, optional: false, label: "\u51B3\u7B56\u6570\u91CF" }
-]);
 var CLEAN_TYPE_DEFINITIONS = [
   { key: "preclean", label: "PreClean" },
   { key: "postclean", label: "PostClean" },
@@ -3873,29 +3853,33 @@ function searchTelemetryStopReason(reason) {
     node_budget: "\u8282\u70B9\u9884\u7B97"
   }[String(reason || "")] || "\u641C\u7D22\u4E2D";
 }
-function renderSearchActionCandidates(actions, decisionIndex, recommendedKey, selectedKey, maximumVisits, interactive) {
+function renderSearchActionChains(chains, decisionIndex, recommendedKey, selectedKey, maximumVisits, interactive) {
   return `<section class="decision-candidate-section search-action-section" aria-labelledby="searchCandidatesTitle">
     <header>
       <strong id="searchCandidatesTitle">\u51B3\u7B56 #${decisionIndex}</strong>
-      <span>${actions.length} \u4E2A\u53EF\u9009\u52A8\u4F5C</span>
+      <span>${chains.length} \u6761\u53EF\u9009\u7A33\u5B9A\u52A8\u4F5C\u94FE</span>
     </header>
     <ol>
-      ${actions.map((action, index) => {
-    const visits = Number(action?.visits) || 0;
+      ${chains.map((chain, index) => {
+    const visits = Number(chain?.visits) || 0;
     const visitPercent = Math.max(0, Math.min(100, visits / maximumVisits * 100));
-    const isRecommended = String(action?.actionKey || "") === recommendedKey;
-    const isSelected = String(action?.actionKey || "") === selectedKey;
+    const isRecommended = String(chain?.actionKey || "") === recommendedKey;
+    const isSelected = String(chain?.actionKey || "") === selectedKey;
     const tags = `${isRecommended ? '<span class="decision-tag is-recommendation">\u63A8\u8350</span>' : ""}${isSelected && !isRecommended ? '<span class="decision-tag is-user-chosen">\u4F60\u7684\u9009\u62E9</span>' : ""}`;
-    const description = String(action?.description || action?.actionKey || "\u52A8\u4F5C");
-    return `<li class="decision-candidate search-action-candidate ${isSelected ? "is-selected" : ""} ${interactive ? "is-interactive" : ""}" data-action-key="${escapeHtml3(String(action?.actionKey || ""))}" ${interactive ? `role="button" tabindex="0" aria-label="\u6267\u884C ${escapeHtml3(description)}"` : ""}>
+    const description = String(chain?.description || "\u7A33\u5B9A\u52A8\u4F5C\u94FE");
+    const steps = Array.isArray(chain?.steps) ? chain.steps : [];
+    return `<li class="decision-candidate search-action-candidate search-action-chain ${isSelected ? "is-selected" : ""} ${interactive ? "is-interactive" : ""}" data-action-key="${escapeHtml3(String(chain?.actionKey || ""))}" ${interactive ? `role="button" tabindex="0" aria-label="\u6267\u884C ${escapeHtml3(description)}"` : ""}>
           <div class="decision-candidate-rank" aria-label="\u7B2C ${index + 1} \u540D">${index + 1}</div>
           <div class="decision-candidate-main">
             <div class="decision-candidate-title"><strong title="${escapeHtml3(description)}">${escapeHtml3(description)}</strong>${tags}</div>
             <div class="decision-candidate-detail search-pnq" aria-label="\u641C\u7D22\u8BC4\u4F30\u6307\u6807">
-              <span title="\u7B56\u7565\u5148\u9A8C P"><small>P \u5148\u9A8C</small><strong>${formatSearchTelemetryNumber(action?.prior, 4)}</strong></span>
+              <span title="\u7B56\u7565\u5148\u9A8C P"><small>P \u5148\u9A8C</small><strong>${formatSearchTelemetryNumber(chain?.prior, 4)}</strong></span>
               <span title="\u8BBF\u95EE\u6B21\u6570 N"><small>N \u8BBF\u95EE</small><strong>${visits}</strong></span>
-              <span title="\u5E73\u5747\u4EF7\u503C Q"><small>Q \u4EF7\u503C</small><strong>${formatSearchTelemetryNumber(action?.value, 4)}</strong></span>
+              <span title="\u5E73\u5747\u4EF7\u503C Q"><small>Q \u4EF7\u503C</small><strong>${formatSearchTelemetryNumber(chain?.value, 4)}</strong></span>
             </div>
+            <ol class="search-chain-steps" aria-label="\u52A8\u4F5C\u94FE\u6B65\u9AA4">
+              ${steps.map((step, stepIndex) => `<li><b>${stepIndex + 1}</b><span title="${escapeHtml3(step?.description || "\u52A8\u4F5C")}">${escapeHtml3(step?.description || "\u52A8\u4F5C")}</span><small>${Number(step?.primitiveCount) || 1} \u6B65</small></li>`).join("")}
+            </ol>
           </div>
           <div class="decision-candidate-preference" aria-label="\u63A8\u8350\u6BD4\u4F8B ${visitPercent.toFixed(0)}%"><small>\u63A8\u8350\u6BD4\u4F8B</small><strong>${visitPercent.toFixed(0)}%</strong></div>
         </li>`;
@@ -3904,25 +3888,23 @@ function renderSearchActionCandidates(actions, decisionIndex, recommendedKey, se
   </section>`;
 }
 function renderSearchTelemetryDecision(snapshot) {
-  const root = snapshot?.root || {};
-  const actions = Array.isArray(root.children) ? root.children : [];
+  const chains = Array.isArray(snapshot?.actionChains) ? snapshot.actionChains.slice(0, 3) : [];
   const recommendedKey = String(snapshot?.selectedActionKey || "");
   const selectedKey = String(snapshot?.searchId || "") === userChosenSearchId ? userChosenActionKey : recommendedKey;
   const decisionIndex = Number(snapshot?.decisionIndex || 0) + 1;
   const interactive = playbackMode === "step" && latestSearchTelemetry?.status === "waiting-choice" && String(snapshot?.searchId || "") === String(latestSearchTelemetry?.searchId || "");
-  const maximumVisits = Math.max(1, ...actions.map((action) => Number(action?.visits) || 0));
-  document.getElementById("visualDecisionLens").innerHTML = actions.length ? renderSearchActionCandidates(
-    actions,
+  const maximumVisits = Math.max(1, ...chains.map((chain) => Number(chain?.visits) || 0));
+  document.getElementById("visualDecisionLens").innerHTML = chains.length ? renderSearchActionChains(
+    chains,
     decisionIndex,
     recommendedKey,
     selectedKey,
     maximumVisits,
     interactive
-  ) : `<div class="decision-empty"><strong>\u6B63\u5728\u679A\u4E3E\u6839\u8282\u70B9\u5408\u6CD5\u52A8\u4F5C\u2026</strong><p>\u641C\u7D22\u8FDB\u884C\u4E2D\uFF0C\u5019\u9009\u7A0D\u540E\u51FA\u73B0\u3002</p></div>`;
-  const variation = Array.isArray(snapshot?.principalVariation) ? snapshot.principalVariation : [];
+  ) : `<div class="decision-empty"><strong>\u6B63\u5728\u6784\u9020\u7A33\u5B9A\u52A8\u4F5C\u94FE\u2026</strong><p>\u53EA\u6709\u5728 50 \u5C42\u5185\u56DE\u5230 Robot \u5168\u90E8\u7A7A\u624B\u72B6\u6001\u7684\u94FE\u624D\u4F1A\u51FA\u73B0\u3002</p></div>`;
   const variationPanel = document.getElementById("searchTelemetryVariationPanel");
-  variationPanel.hidden = false;
-  document.getElementById("searchTelemetryVariation").innerHTML = variation.length ? variation.slice(0, 10).map((step, index) => `<div class="search-pv-step"><b>${index + 1}</b><span title="${escapeHtml3(step?.description || step?.actionKey || "\u52A8\u4F5C")}">${escapeHtml3(step?.description || step?.actionKey || "\u52A8\u4F5C")}</span><small>N=${Number(step?.visits) || 0}</small></div>`).join("") : `<div class="search-telemetry-empty">\u5C1A\u672A\u5F62\u6210\u4E3B\u53D8\u5316</div>`;
+  variationPanel.hidden = true;
+  document.getElementById("searchTelemetryVariation").innerHTML = "";
 }
 function updateSearchTelemetryControls(snapshot) {
   const executionMode = String(snapshot?.executionMode || "continuous");
@@ -5238,26 +5220,11 @@ function renderAll() {
 }
 function openScheduleAlphaGoOptionsDialog() {
   pendingAlphaGoCheckpointFile = null;
-  for (const specification of ALPHA_GO_NUMERIC_OPTION_SPECS) {
-    const value = state.options[specification.option];
-    document.getElementById(specification.controlId).value = value ?? "";
-  }
-  document.getElementById("alphaGoDevice").value = state.options.scheduleAlphaGoDevice || "auto";
   const configuredPath = String(state.options.scheduleAlphaGoModelPath || "").trim();
   document.getElementById("alphaGoCheckpointPath").value = configuredPath;
   document.getElementById("alphaGoCheckpointFile").value = "";
   document.getElementById("alphaGoCheckpointHint").textContent = configuredPath ? "\u5F53\u524D checkpoint \u5DF2\u4FDD\u5B58\u5728\u672C\u5730\u670D\u52A1\u4E2D\uFF1B\u91CD\u65B0\u9009\u62E9\u6587\u4EF6\u53EF\u66FF\u6362\u5B83\u3002" : "\u9009\u62E9\u672C\u673A checkpoint \u540E\u5C06\u4E0A\u4F20\u5230\u672C\u5730\u670D\u52A1\uFF0C\u5E76\u7528\u4E8E\u540E\u7EED\u8FD0\u884C\u3002";
   document.getElementById("scheduleAlphaGoOptionsDialog").showModal();
-}
-function readAlphaGoNumericOption(specification) {
-  const rawValue = String(document.getElementById(specification.controlId).value || "").trim();
-  if (!rawValue && specification.optional) return null;
-  const value = Number(rawValue);
-  if (!Number.isFinite(value) || value < specification.minimum || specification.integer && !Number.isInteger(value)) {
-    const unit = specification.integer ? "\u6574\u6570" : `\u4E0D\u5C0F\u4E8E ${specification.minimum} \u7684\u6570\u503C`;
-    throw new Error(`${specification.label}\u5FC5\u987B\u4E3A${unit}`);
-  }
-  return value;
 }
 async function uploadAlphaGoCheckpoint(file) {
   const response = await fetch("/api/model-checkpoints", {
@@ -5273,15 +5240,10 @@ async function uploadAlphaGoCheckpoint(file) {
 }
 async function saveScheduleAlphaGoOptions() {
   const saveButton = document.getElementById("saveScheduleAlphaGoOptionsButton");
-  const nextOptions = {};
-  for (const specification of ALPHA_GO_NUMERIC_OPTION_SPECS) {
-    nextOptions[specification.option] = readAlphaGoNumericOption(specification);
-  }
-  nextOptions.scheduleAlphaGoDevice = document.getElementById("alphaGoDevice").value;
   saveButton.disabled = true;
   try {
-    nextOptions.scheduleAlphaGoModelPath = pendingAlphaGoCheckpointFile ? await uploadAlphaGoCheckpoint(pendingAlphaGoCheckpointFile) : String(document.getElementById("alphaGoCheckpointPath").value || "").trim();
-    Object.assign(state.options, nextOptions);
+    const modelPath = pendingAlphaGoCheckpointFile ? await uploadAlphaGoCheckpoint(pendingAlphaGoCheckpointFile) : String(document.getElementById("alphaGoCheckpointPath").value || "").trim();
+    state.options.scheduleAlphaGoModelPath = modelPath;
     pendingAlphaGoCheckpointFile = null;
     retainSessionSchedulingConfiguration();
     markTestDirty();

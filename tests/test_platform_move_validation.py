@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from realtime_scheduler.move_validation import (
     ATMOSPHERE,
     VACUUM,
@@ -118,6 +120,222 @@ def _dual_transfer_moves() -> list[dict]:
 def test_dual_slot_pick_place_and_full_loadlock_transition_are_physically_valid() -> None:
     """同一 Arm 双槽搬两片、LL 满载充气都应通过平台校验。"""
     assert validate_move_list(None, _dual_transfer_moves(), _dual_chamber_update()) == []
+
+
+def test_dependency_rejects_missing_predecessor() -> None:
+    """PreMoveID 引用不存在的 MoveID 必须在平台侧失败。"""
+    moves = [
+        _move(
+            1,
+            5,
+            0,
+            1,
+            ModuleName="VACRobot",
+            SrcStationList=["PM1"],
+            DestStationList=["LL1"],
+            RobotSlotList=[1],
+            MatIDList=[],
+            PreMoveID=[999],
+        )
+    ]
+
+    issues = validate_move_list(None, moves, _dual_chamber_update())
+
+    assert "不存在的 MoveID=999" in issues[0]
+
+
+def test_dependency_rejects_cycle() -> None:
+    """PreMoveID DAG 中的环不能依赖时间排序侥幸通过。"""
+    moves = [
+        _move(1, 10, 0, 0, ModuleName="LL1", MatIDList=[], PreMoveID=[2]),
+        _move(2, 10, 0, 0, ModuleName="LL1", MatIDList=[], PreMoveID=[1]),
+    ]
+
+    issues = validate_move_list(None, moves, _dual_chamber_update())
+
+    assert "依赖环" in issues[0]
+
+
+def test_dependency_rejects_predecessor_finishing_after_child_starts() -> None:
+    """即使拓扑无环，前驱未完成时也不能启动后继 Move。"""
+    moves = [
+        _move(1, 10, 0, 5, ModuleName="LL1", MatIDList=[]),
+        _move(2, 10, 2, 3, ModuleName="LL1", MatIDList=[], PreMoveID=[1]),
+    ]
+
+    issues = validate_move_list(None, moves, _dual_chamber_update())
+
+    assert "前驱 MoveID=1 尚未结束" in issues[0]
+
+
+def test_platform_rejects_pick_duration_different_from_robot_config() -> None:
+    """平台 validator 必须独立拒绝算法任意填写的 Pick 时长。"""
+    update = _dual_chamber_update()
+    update["Robots"]["VACRobot"]["PickTime"] = {"PM1": 2.0}
+    moves = [
+        _move(
+            1,
+            0,
+            0,
+            3,
+            ModuleName="VACRobot",
+            MatIDList=[101],
+            SrcStationList=["PM1"],
+            SrcSlotList=[1],
+            RobotSlotList=[1],
+        )
+    ]
+
+    issues = validate_move_list(None, moves, update)
+
+    assert "动作时长 3.000000s 与配置 2.000000s 不一致" in issues[0]
+
+
+def test_platform_rejects_process_duration_different_from_selected_visit() -> None:
+    """ProcessMove 时长必须匹配 MatID/StepID/候选模块对应的 Visit。"""
+    stage = SimpleNamespace(
+        stage_type="process",
+        step_id=30,
+        j=1,
+        chamber="PM1",
+        cands=["PM1", "PM2"],
+        proc=10.0,
+        process_time_by_chamber={"PM1": 10.0, "PM2": 20.0},
+        residency=-1.0,
+        qtime=-1.0,
+    )
+    task = SimpleNamespace(
+        wafers=[SimpleNamespace(mat_id=101, stages=[stage])]
+    )
+    moves = [
+        _move(
+            1,
+            9,
+            0,
+            15,
+            ModuleName="PM1",
+            MatIDList=[101],
+            StepIDList=[30],
+            SlotList=[1],
+        )
+    ]
+
+    issues = validate_move_list(task, moves, _dual_chamber_update())
+
+    assert "动作时长 15.000000s 与配置 10.000000s 不一致" in issues[0]
+
+
+def test_platform_rejects_pretrans_duration_different_from_exact_quadruple() -> None:
+    """PreTrans 必须按 Src/Dest/TransType 精确匹配，不能取任意首行。"""
+    update = _dual_chamber_update()
+    update["Robots"]["VACRobot"]["PrepTransTime"] = [
+        {
+            "SrcStation": "PM1",
+            "DestStation": "LL1",
+            "TransType": 0,
+            "Time": 2.5,
+        }
+    ]
+    moves = [
+        _move(
+            1,
+            5,
+            0,
+            4,
+            ModuleName="VACRobot",
+            Robot="VACRobot",
+            SrcStationList=["PM1"],
+            DestStationList=["LL1"],
+            RobotSlotList=[1],
+            MatIDList=[],
+        )
+    ]
+
+    issues = validate_move_list(None, moves, update)
+
+    assert "动作时长 4.000000s 与配置 2.500000s 不一致" in issues[0]
+
+
+def test_platform_rejects_residency_limit_violation() -> None:
+    """加工结束到取片开始超过 Visit Residency 时必须失败。"""
+    stage = SimpleNamespace(
+        stage_type="process",
+        step_id=30,
+        j=1,
+        chamber="PM1",
+        cands=["PM1"],
+        proc=10.0,
+        process_time_by_chamber={"PM1": 10.0},
+        residency=2.0,
+        qtime=-1.0,
+    )
+    task = SimpleNamespace(wafers=[SimpleNamespace(mat_id=101, stages=[stage])])
+    moves = [
+        _move(1, 9, 0, 10, ModuleName="PM1", MatIDList=[101], StepIDList=[30]),
+        _move(
+            2,
+            0,
+            13,
+            14,
+            ModuleName="VACRobot",
+            Robot="VACRobot",
+            SrcStationList=["PM1"],
+            SrcSlotList=[1],
+            RobotSlotList=[1],
+            MatIDList=[101],
+            PreMoveID=[1],
+        ),
+    ]
+
+    issues = validate_move_list(task, moves, _dual_chamber_update())
+
+    assert "驻留 3.000s 超过上限 2.000s" in issues[0]
+
+
+def test_platform_rejects_qtime_between_adjacent_process_steps() -> None:
+    """相邻加工步骤的开始间隔超过 Q-time 时必须失败。"""
+    first_stage = SimpleNamespace(
+        stage_type="process",
+        step_id=30,
+        j=1,
+        chamber="PM1",
+        cands=["PM1"],
+        proc=10.0,
+        process_time_by_chamber={"PM1": 10.0},
+        residency=-1.0,
+        qtime=2.0,
+    )
+    second_stage = SimpleNamespace(
+        stage_type="process",
+        step_id=40,
+        j=2,
+        chamber="PM2",
+        cands=["PM2"],
+        proc=10.0,
+        process_time_by_chamber={"PM2": 10.0},
+        residency=-1.0,
+        qtime=-1.0,
+    )
+    task = SimpleNamespace(
+        wafers=[SimpleNamespace(mat_id=101, stages=[first_stage, second_stage])]
+    )
+    moves = [
+        _move(1, 9, 0, 10, ModuleName="PM1", MatIDList=[101], StepIDList=[30]),
+        _move(
+            2,
+            9,
+            13,
+            23,
+            ModuleName="PM2",
+            MatIDList=[101],
+            StepIDList=[40],
+            PreMoveID=[1],
+        ),
+    ]
+
+    issues = validate_move_list(task, moves, _dual_chamber_update())
+
+    assert "相邻加工间隔 3.000s 超过 Q-time 2.000s" in issues[0]
 
 
 def test_replay_tracks_both_robot_slots_and_both_loadlock_slots() -> None:
