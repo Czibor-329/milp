@@ -1756,10 +1756,10 @@ test("性能分析用首片完工到末片投料剔除启动与收尾", () => {
   assert.equal(performance.waferSystemResidenceTime.meanSeconds, 31.5);
   assert.ok(Math.abs(performance.waferSystemResidenceTime.coefficientOfVariation - (1 / 9)) < 1e-9);
   assert.deepEqual(performance.waferSystemResidenceTimes, [
-    { wafer: "W1", enteredAt: 2, completedAt: 30, duration: 28 },
-    { wafer: "W2", enteredAt: 10, completedAt: 45, duration: 35 },
-    { wafer: "W3", enteredAt: 40, completedAt: 60, duration: 20 },
-    { wafer: "W4", enteredAt: 50, completedAt: 75, duration: 25 },
+    { wafer: "W1", enteredAt: 2, completedAt: 30, duration: 28, chamberDwellSeconds: 0, robotDwellSeconds: 27 },
+    { wafer: "W2", enteredAt: 10, completedAt: 45, duration: 35, chamberDwellSeconds: 0, robotDwellSeconds: 53 },
+    { wafer: "W3", enteredAt: 40, completedAt: 60, duration: 20, chamberDwellSeconds: 0, robotDwellSeconds: 19 },
+    { wafer: "W4", enteredAt: 50, completedAt: 75, duration: 25, chamberDwellSeconds: 0, robotDwellSeconds: 24 },
   ]);
   assert.equal(logic.analyzeSchedulePerformance(performanceMoves, device, "full").completedWaferCount, 4);
 });
@@ -1800,15 +1800,25 @@ test("双 Actor 回放在 Pick 结束后的原子决策边界暂停", async () =
   }
 });
 
-test("逐片晶圆系统驻留图展示柱、均值线和每片时长", () => {
+test("逐片晶圆驻留图可选择单一指标展示", () => {
   const performance = logic.analyzeSchedulePerformance(performanceMoves, device, "steady");
   const chart = logic.renderWaferResidenceChart(performance);
-  assert.match(chart, /系统驻留时间分析/);
-  assert.match(chart, /平均 27\.0 s/);
+  assert.match(chart, /驻留时间分析/);
+  assert.match(chart, /id="residenceMetricSelect"[\s\S]*系统驻留时间[\s\S]*腔室驻留时间[\s\S]*机器手驻留时间/);
+  assert.match(chart, /系统平均 <b>27\.0 s<\/b>/);
   assert.match(chart, /极差\/最小值 <b>75\.0%<\/b>/);
+  assert.match(chart, /系统驻留时间/);
+  assert.match(chart, /腔室驻留时间/);
+  assert.match(chart, /机器手驻留时间/);
   assert.match(chart, /晶圆 W1，系统驻留 28\.0 秒/);
-  assert.match(chart, /晶圆 W2，系统驻留 35\.0 秒/);
-  assert.equal((chart.match(/class="residence-bar-item"/g) ?? []).length, 4);
+  assert.match(chart, /晶圆 W1，腔室驻留 0\.0 秒/);
+  assert.match(chart, /晶圆 W1，机器手驻留 27\.0 秒/);
+  assert.match(chart, /residence-bar-chamber/);
+  assert.match(chart, /residence-bar-robot/);
+  assert.equal((chart.match(/data-residence-metric-chart=/g) ?? []).length, 3);
+  assert.equal((chart.match(/data-residence-metric-chart="(?:chamber|robot)" hidden/g) ?? []).length, 2);
+  assert.doesNotMatch(chart, /residence-metric-head/);
+  assert.equal((chart.match(/class="residence-metric-bar-item"/g) ?? []).length, 12);
 });
 
 test("旧分析响应缺少逐片字段时从当前 MoveList 补齐驻留图", () => {
@@ -1818,12 +1828,30 @@ test("旧分析响应缺少逐片字段时从当前 MoveList 补齐驻留图", (
 
   const hydrated = logic.withWaferResidenceTimes(legacy, performanceMoves, device);
   assert.deepEqual(hydrated.waferSystemResidenceTimes, [
-    { wafer: "W1", enteredAt: 2, completedAt: 30, duration: 28 },
-    { wafer: "W2", enteredAt: 10, completedAt: 45, duration: 35 },
-    { wafer: "W3", enteredAt: 40, completedAt: 60, duration: 20 },
-    { wafer: "W4", enteredAt: 50, completedAt: 75, duration: 25 },
+    { wafer: "W1", enteredAt: 2, completedAt: 30, duration: 28, chamberDwellSeconds: 0, robotDwellSeconds: 27 },
+    { wafer: "W2", enteredAt: 10, completedAt: 45, duration: 35, chamberDwellSeconds: 0, robotDwellSeconds: 53 },
+    { wafer: "W3", enteredAt: 40, completedAt: 60, duration: 20, chamberDwellSeconds: 0, robotDwellSeconds: 19 },
+    { wafer: "W4", enteredAt: 50, completedAt: 75, duration: 25, chamberDwellSeconds: 0, robotDwellSeconds: 24 },
   ]);
   assert.doesNotMatch(logic.renderWaferResidenceChart(hydrated), /没有完成往返 LoadPort/);
+});
+
+test("旧分析响应缺少 LoadLock 利用效率时从当前 MoveList 补算", () => {
+  const moves = [
+    { MoveID: 1, MoveType: 12, ModuleName: "LA", MatIDList: ["W1", "W2"], StartTime: 1, EndTime: 5 },
+    { MoveID: 2, MoveType: 13, ModuleName: "LA", MatIDList: ["W1"], StartTime: 10, EndTime: 14 },
+    { MoveID: 3, MoveType: 12, ModuleName: "LA", MatIDList: [], StartTime: 20, EndTime: 24 },
+    { MoveID: 4, MoveType: 13, ModuleName: "LA", MatIDList: [], StartTime: 30, EndTime: 34 },
+  ];
+  const loadLockDevice = { Stations: { LA: { Type: "LoadLock", Capacity: 2 } } };
+  const legacy = logic.analyzeSchedulePerformance(moves, loadLockDevice, "full");
+  delete legacy.loadLockEfficiency;
+
+  assert.deepEqual(logic.withWaferResidenceTimes(legacy, moves, loadLockDevice).loadLockEfficiency, {
+    cycleCount: 2, waferCycleCount: 2, wafersPerCycle: 1,
+    fullLoadCycleCount: 1, emptyLoadCycleCount: 1,
+    fullLoadCycleRatio: 0.5, emptyLoadCycleRatio: 0.5,
+  });
 });
 
 test("性能分析统计加工腔、机器手非运输驻留和晶圆系统停留", () => {
@@ -1873,6 +1901,10 @@ test("性能分析统计加工腔、机器手非运输驻留和晶圆系统停�
   assert.equal(performance.robotWaferDwellTime.maxSeconds, 3);
   assert.equal(performance.waferSystemResidenceTime.meanSeconds, 19);
   assert.equal(performance.waferSystemResidenceTime.sampleCount, 1);
+  assert.deepEqual(performance.waferSystemResidenceTimes, [{
+    wafer: "W1", enteredAt: 1, completedAt: 20, duration: 19,
+    chamberDwellSeconds: 4, robotDwellSeconds: 4,
+  }]);
 });
 
 test("模块物理占用包含开门、取放和加工，界面隐藏未使用并行腔", () => {
@@ -2080,7 +2112,7 @@ test("清洁与门动作重叠时按物理并集计时", () => {
   assert.equal(pm2.categoryTimes.door, 1);
 });
 
-test("性能分析按顺序配对 LoadLock 抽气和充气携片", () => {
+test("性能分析统计 LoadLock 完整抽充气周期的峰值载荷", () => {
   const performance = logic.analyzeSchedulePerformance([
     { MoveID: 1, MoveType: 10, ModuleName: "LA", LastState: "ATM", CurState: "VAC", MatIDList: ["W1"], StartTime: 1, EndTime: 5 },
     { MoveID: 2, MoveType: 10, ModuleName: "LA", LastState: "VAC", CurState: "ATM", MatIDList: ["W4"], StartTime: 10, EndTime: 14 },
@@ -2088,21 +2120,41 @@ test("性能分析按顺序配对 LoadLock 抽气和充气携片", () => {
     { MoveID: 4, MoveType: 10, ModuleName: "LA", LastState: "VAC", CurState: "ATM", MatIDList: [], StartTime: 30, EndTime: 34 },
   ], device, "full");
 
-  assert.deepEqual(performance.loadLockCycles, [
-    { index: 1, loadLock: "LA", vacuumWafers: ["W1"], ventWafers: ["W4"], startTime: 1, pumpEndTime: 5, ventStartTime: 10, ventEndTime: 14 },
-    { index: 2, loadLock: "LA", vacuumWafers: ["W2", "W3"], ventWafers: [], startTime: 20, pumpEndTime: 24, ventStartTime: 30, ventEndTime: 34 },
-  ]);
+  assert.deepEqual(performance.loadLockEfficiency, {
+    cycleCount: 2, waferCycleCount: 3, wafersPerCycle: 1.5,
+    fullLoadCycleCount: 1, emptyLoadCycleCount: 0,
+    fullLoadCycleRatio: 0.5, emptyLoadCycleRatio: 0,
+  });
 });
 
-test("独立抽气和充气 MoveType 也能组成 LoadLock 循环", () => {
+test("LoadLock 利用效率同时识别满载、空载与跨周期滞留晶圆", () => {
   const performance = logic.analyzeSchedulePerformance([
     { MoveID: 1, MoveType: 12, ModuleName: "LA", MatIDList: ["W5"], StartTime: 1, EndTime: 5 },
-    { MoveID: 2, MoveType: 13, ModuleName: "LA", MatIDList: ["W6"], StartTime: 10, EndTime: 14 },
+    { MoveID: 2, MoveType: 13, ModuleName: "LA", MatIDList: ["W5"], StartTime: 10, EndTime: 14 },
+    { MoveID: 3, MoveType: 12, ModuleName: "LA", MatIDList: ["W5", "W6"], StartTime: 20, EndTime: 24 },
+    { MoveID: 4, MoveType: 13, ModuleName: "LA", MatIDList: ["W5"], StartTime: 30, EndTime: 34 },
+    { MoveID: 5, MoveType: 12, ModuleName: "LA", MatIDList: [], StartTime: 40, EndTime: 44 },
+    { MoveID: 6, MoveType: 13, ModuleName: "LA", MatIDList: [], StartTime: 50, EndTime: 54 },
   ], device, "full");
 
-  assert.deepEqual(performance.loadLockCycles, [
-    { index: 1, loadLock: "LA", vacuumWafers: ["W5"], ventWafers: ["W6"], startTime: 1, pumpEndTime: 5, ventStartTime: 10, ventEndTime: 14 },
-  ]);
+  assert.deepEqual(performance.loadLockEfficiency, {
+    cycleCount: 3, waferCycleCount: 3, wafersPerCycle: 1,
+    fullLoadCycleCount: 1, emptyLoadCycleCount: 1,
+    fullLoadCycleRatio: 1 / 3, emptyLoadCycleRatio: 1 / 3,
+  });
+});
+
+test("LoadLock 利用效率识别 PSE300 的 ATR/VTR 环境状态", () => {
+  const performance = logic.analyzeSchedulePerformance([
+    { MoveID: 1, MoveType: 10, ModuleName: "LA", LastState: "ATR", CurState: "VTR", MatIDList: ["W1"], StartTime: 1, EndTime: 5 },
+    { MoveID: 2, MoveType: 10, ModuleName: "LA", LastState: "VTR", CurState: "ATR", MatIDList: ["W1"], StartTime: 10, EndTime: 14 },
+  ], device, "full");
+
+  assert.deepEqual(performance.loadLockEfficiency, {
+    cycleCount: 1, waferCycleCount: 1, wafersPerCycle: 1,
+    fullLoadCycleCount: 0, emptyLoadCycleCount: 0,
+    fullLoadCycleRatio: 0, emptyLoadCycleRatio: 0,
+  });
 });
 
 test("晶圆必须完成全部加工工序后才标记为已加工", () => {
@@ -2206,4 +2258,29 @@ test("瓶颈分析提供目的、判定原理和最优性说明", () => {
   assert.match(html, /id="bottleneckAnalysisHelpDialog"[\s\S]*为什么不能只看 Makespan？[\s\S]*容量利用率 × 82%[\s\S]*99% 以上[\s\S]*容量组取平均利用率/);
   assert.match(editorSource, /bottleneckAnalysisHelpDialog\.showModal\(\)/);
   assert.match(css, /\.bottleneck-analysis-help-dialog/);
+});
+
+test("驻留时间分析展示逐片腔室和机器手驻留，并提供说明", () => {
+  const workspaceSource = fs.readFileSync(
+    path.join(__dirname, "../realtime_scheduler/frontend/src/workspace_visualizer.ts"),
+    "utf8",
+  );
+  const html = fs.readFileSync(
+    path.join(__dirname, "../realtime_scheduler/frontend/config_editor.html"),
+    "utf8",
+  );
+  const editorSource = fs.readFileSync(
+    path.join(__dirname, "../realtime_scheduler/frontend/src/config_editor.ts"),
+    "utf8",
+  );
+
+  assert.match(workspaceSource, /chamber: \{ title: "腔室驻留时间"/);
+  assert.match(workspaceSource, /robot: \{ title: "机器手驻留时间"/);
+  assert.match(workspaceSource, /renderResidenceMetricChart/);
+  assert.match(workspaceSource, /说明<\/button>/);
+  assert.match(workspaceSource, /id="residenceMetricSelect"/);
+  assert.match(workspaceSource, /id="residenceAnalysisHelpButton"/);
+  assert.match(html, /id="residenceAnalysisHelpDialog"[\s\S]*三种驻留时间分别表示什么？[\s\S]*已扣除显式 PreTrans 搬运时间/);
+  assert.match(editorSource, /residenceAnalysisHelpDialog\.showModal\(\)/);
+  assert.match(editorSource, /data-residence-metric-chart/);
 });

@@ -63,6 +63,8 @@ export interface WaferResidenceTime {
   enteredAt: number;
   completedAt: number;
   duration: number;
+  chamberDwellSeconds?: number;
+  robotDwellSeconds?: number;
 }
 
 export interface ResourcePerformance {
@@ -120,16 +122,15 @@ export interface SchedulePerformance {
   robotWaferDwellTime: DurationMetricSummary;
   waferSystemResidenceTime: DurationMetricSummary;
   waferSystemResidenceTimes: WaferResidenceTime[];
-  loadLockCycles: Array<{
-    index: number;
-    loadLock: string;
-    vacuumWafers: string[];
-    ventWafers: string[];
-    startTime: number;
-    pumpEndTime: number;
-    ventStartTime: number;
-    ventEndTime: number;
-  }>;
+  loadLockEfficiency: {
+    cycleCount: number;
+    waferCycleCount: number;
+    wafersPerCycle: number;
+    fullLoadCycleCount: number;
+    emptyLoadCycleCount: number;
+    fullLoadCycleRatio: number;
+    emptyLoadCycleRatio: number;
+  };
   diagnostics: ScheduleDiagnostic[];
 }
 

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>调度平台</title>
-  <link rel="stylesheet" href="/assets/config_editor.css?v=1.3.5">
+  <link rel="stylesheet" href="/assets/config_editor.css?v=1.3.10">
 </head>
 <body>
   <a class="skip-link" href="#mainContent">跳到主要内容</a>
@@ -40,7 +40,7 @@
         </button>
         <span class="sidebar-footer-label">系统状态</span>
         <div class="service-pill" id="serviceState">本地服务</div>
-        <span class="frontend-version">前端 v1.3.5</span>
+        <span class="frontend-version">前端 v1.3.10</span>
         <a class="theme-toggle" id="adminUsersLink" href="/admin_users.html" hidden>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
           <span>用户管理</span>
@@ -591,6 +591,37 @@
     </section>
   </dialog>
 
+  <dialog class="bottleneck-analysis-help-dialog" id="residenceAnalysisHelpDialog" aria-labelledby="residenceAnalysisHelpDialogTitle">
+    <section class="bottleneck-analysis-help-body">
+      <header class="bottleneck-analysis-help-head">
+        <div>
+          <h3 id="residenceAnalysisHelpDialogTitle">驻留时间分析说明</h3>
+          <p>帮助定位每片晶圆在系统、加工腔和机器手上的等待时间。</p>
+        </div>
+        <button class="btn icon" type="button" id="residenceAnalysisHelpDialogClose" aria-label="关闭驻留时间分析说明">×</button>
+      </header>
+      <div class="bottleneck-analysis-help-content">
+        <section>
+          <h4>三种驻留时间分别表示什么？</h4>
+          <ul>
+            <li><strong>系统驻留：</strong>晶圆离开 LoadPort 到返回 LoadPort 的总历时，反映整片晶圆的周期时间。</li>
+            <li><strong>腔室驻留：</strong>每次加工结束到晶圆完全离开加工腔的等待时间；同一晶圆经过多个加工腔时会累计。</li>
+            <li><strong>机器手驻留：</strong>Pick 完成到 Place 开始期间的持片等待，已扣除显式 PreTrans 搬运时间；跨多个机器手时会累计。</li>
+          </ul>
+        </section>
+        <section>
+          <h4>如何阅读柱状图？</h4>
+          <p>图表按口径拆分为三张：蓝色为系统驻留、紫色为腔室驻留、绿色为机器手驻留。每张图只比较同一种时间，柱上方和悬停提示都显示对应晶圆的准确秒数。</p>
+        </section>
+        <section>
+          <h4>如何用于优化？</h4>
+          <p>优先关注明显高于同批次其他晶圆的柱。腔室驻留偏高通常表示取片或下游资源衔接不足；机器手驻留偏高表示持片等待或搬运调度需要检查；系统驻留偏高则需要结合前两者及 LoadLock 时序查看全流程原因。</p>
+        </section>
+        <p class="bottleneck-analysis-help-footnote">腔室和机器手值是对应驻留段的累计时间，不应与系统驻留简单相加；系统驻留还包含加工、LoadLock 和其他搬运环节。</p>
+      </div>
+    </section>
+  </dialog>
+
 
   <div class="drawer-layer" id="drawerLayer">
     <aside class="drawer" id="stepDrawer" aria-label="路径 Step 详细设置">
@@ -599,7 +630,7 @@
     </aside>
   </div>
 
-  <script type="module" src="/assets/config_editor.js?v=1.3.5"></script>
+  <script type="module" src="/assets/config_editor.js?v=1.3.10"></script>
   <script>
     // 管理员才显示“用户管理”入口。
     (function () {

@@ -498,13 +498,12 @@ def _completion_inside_window(completed_at: float, window: Mapping[str, Any]) ->
     )
 
 
-def _process_chamber_dwell_time(
+def _process_chamber_dwell_samples(
     moves: Sequence[Mapping[str, Any]],
     device: Optional[Mapping[str, Any]],
-    window: Mapping[str, Any],
-) -> Dict[str, Any]:
-    """统计加工完成后至晶圆完全离开工艺腔的驻留时间。"""
-    durations: List[float] = []
+) -> List[Dict[str, Any]]:
+    """收集每片晶圆每次加工结束后至完全离开工艺腔的驻留样本。"""
+    samples: List[Dict[str, Any]] = []
     for process_move in moves:
         chamber = str(process_move["ModuleName"])
         if (
@@ -533,9 +532,26 @@ def _process_chamber_dwell_time(
                 ),
                 None,
             )
-            if removal and _completion_inside_window(float(removal["EndTime"]), window):
-                durations.append(float(removal["EndTime"]) - float(process_move["EndTime"]))
-    return _summarize_durations(durations)
+            if removal:
+                samples.append({
+                    "wafer": material,
+                    "completedAt": float(removal["EndTime"]),
+                    "duration": float(removal["EndTime"]) - float(process_move["EndTime"]),
+                })
+    return samples
+
+
+def _process_chamber_dwell_time(
+    moves: Sequence[Mapping[str, Any]],
+    device: Optional[Mapping[str, Any]],
+    window: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """统计加工完成后至晶圆完全离开工艺腔的驻留时间。"""
+    return _summarize_durations(
+        sample["duration"]
+        for sample in _process_chamber_dwell_samples(moves, device)
+        if _completion_inside_window(sample["completedAt"], window)
+    )
 
 
 def _covered_duration(
@@ -567,11 +583,10 @@ def _covered_duration(
     return total if active_start is None else total + active_end - active_start
 
 
-def _robot_wafer_dwell_time(
+def _robot_wafer_dwell_samples(
     moves: Sequence[Mapping[str, Any]],
-    window: Mapping[str, Any],
-) -> Dict[str, Any]:
-    """统计机器人持片期间的非运输等待时间。"""
+) -> List[Dict[str, Any]]:
+    """收集每片晶圆被机器人持有期间的非运输等待样本。"""
     transport_by_robot: Dict[str, List[Dict[str, float]]] = defaultdict(list)
     for move in moves:
         if (
@@ -585,13 +600,13 @@ def _robot_wafer_dwell_time(
                     "end": float(move["EndTime"]),
                 })
     holding_started_at: Dict[Tuple[str, str], float] = {}
-    durations: List[float] = []
+    samples: List[Dict[str, Any]] = []
 
     def finish_holding(robot: str, materials: Sequence[str], finished_at: float) -> None:
         """结束机器人持片区间并记录扣除运输后的时长。"""
         for material in materials:
             started_at = holding_started_at.pop((robot, material), None)
-            if started_at is None or not _completion_inside_window(finished_at, window):
+            if started_at is None:
                 continue
             raw_duration = max(finished_at - started_at, 0.0)
             transport_duration = _covered_duration(
@@ -599,7 +614,11 @@ def _robot_wafer_dwell_time(
                 started_at,
                 finished_at,
             )
-            durations.append(max(raw_duration - transport_duration, 0.0))
+            samples.append({
+                "wafer": material,
+                "completedAt": finished_at,
+                "duration": max(raw_duration - transport_duration, 0.0),
+            })
 
     for move in moves:
         robot = _move_robot_name(move)
@@ -619,7 +638,19 @@ def _robot_wafer_dwell_time(
             )
             for material in _material_ids(move, "RecvMatList"):
                 holding_started_at[(robot, material)] = float(move["EndTime"])
-    return _summarize_durations(durations)
+    return samples
+
+
+def _robot_wafer_dwell_time(
+    moves: Sequence[Mapping[str, Any]],
+    window: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """统计机器人持片期间的非运输等待时间。"""
+    return _summarize_durations(
+        sample["duration"]
+        for sample in _robot_wafer_dwell_samples(moves)
+        if _completion_inside_window(sample["completedAt"], window)
+    )
 
 
 def _wafer_system_residence_times(
@@ -628,12 +659,20 @@ def _wafer_system_residence_times(
 ) -> List[Dict[str, Any]]:
     """返回完整结果中每片晶圆离开 LoadPort 到返回 LoadPort 的停留时间。"""
     entries, completions = _wafer_boundary_times(moves, device)
+    chamber_dwell_by_wafer: Dict[str, float] = defaultdict(float)
+    robot_dwell_by_wafer: Dict[str, float] = defaultdict(float)
+    for sample in _process_chamber_dwell_samples(moves, device):
+        chamber_dwell_by_wafer[str(sample["wafer"])] += float(sample["duration"])
+    for sample in _robot_wafer_dwell_samples(moves):
+        robot_dwell_by_wafer[str(sample["wafer"])] += float(sample["duration"])
     samples = [
         {
             "wafer": material,
             "enteredAt": entries[material],
             "completedAt": completed_at,
             "duration": completed_at - entries[material],
+            "chamberDwellSeconds": chamber_dwell_by_wafer[material],
+            "robotDwellSeconds": robot_dwell_by_wafer[material],
         }
         for material, completed_at in completions.items()
         if material in entries
@@ -652,9 +691,9 @@ def _load_lock_transition_direction(move: Mapping[str, Any]) -> Optional[str]:
     """判断 LoadLock 环境动作是抽气还是充气。"""
     last_state = str(move.get("LastState") or "").upper()
     current_state = str(move.get("CurState") or "").upper()
-    if last_state == "ATM" and current_state == "VAC":
+    if last_state in {"ATM", "ATR"} and current_state in {"VAC", "VTR"}:
         return "vacuum"
-    if last_state == "VAC" and current_state == "ATM":
+    if last_state in {"VAC", "VTR"} and current_state in {"ATM", "ATR"}:
         return "vent"
     if int(move["MoveType"]) == VACUUM_MOVE_TYPE:
         return "vacuum"
@@ -663,13 +702,36 @@ def _load_lock_transition_direction(move: Mapping[str, Any]) -> Optional[str]:
     return None
 
 
-def _build_load_lock_cycles(
+def _load_lock_capacity(
+    device: Optional[Mapping[str, Any]],
+    name: str,
+) -> int:
+    """读取 LoadLock 容量；旧配置未声明时按双槽处理。"""
+    definition = (device or {}).get("Stations", {}).get(name, {})
+    slots = _list_value(definition.get("Slots"))
+    slot_numbers: List[int] = []
+    for slot in slots:
+        try:
+            slot_numbers.append(int(slot))
+        except (TypeError, ValueError):
+            continue
+    try:
+        declared_capacity = int(definition.get("Capacity") or 0)
+    except (TypeError, ValueError):
+        declared_capacity = 0
+    return max(1, 2, declared_capacity, len(slots), *slot_numbers)
+
+
+def _build_load_lock_efficiency(
     moves: Sequence[Mapping[str, Any]],
     device: Optional[Mapping[str, Any]],
-) -> List[Dict[str, Any]]:
-    """按时间把每个 LoadLock 的抽气与随后一次充气配成一行。"""
-    cycles: List[Dict[str, Any]] = []
-    pending: Dict[str, Dict[str, Any]] = {}
+) -> Dict[str, Any]:
+    """按完整抽充气周期汇总 LoadLock 的晶圆载荷。"""
+    pending: Dict[str, List[str]] = {}
+    cycle_count = 0
+    wafer_cycle_count = 0
+    full_load_cycle_count = 0
+    empty_load_cycle_count = 0
     for move in moves:
         direction = _load_lock_transition_direction(move)
         load_lock = str(move["ModuleName"])
@@ -677,57 +739,28 @@ def _build_load_lock_cycles(
             load_lock, _station_type(device, load_lock),
         ):
             continue
-        start_time = float(move["StartTime"])
-        end_time = float(move["EndTime"])
         if direction == "vacuum":
-            cycle = {
-                "index": 0,
-                "loadLock": load_lock,
-                "vacuumWafers": _material_ids(move),
-                "ventWafers": [],
-                "startTime": start_time,
-                "pumpEndTime": end_time,
-                "ventStartTime": 0,
-                "ventEndTime": 0,
-                "startedAt": start_time,
-                "vacuumEndTime": end_time,
-            }
-            cycles.append(cycle)
-            pending[load_lock] = cycle
-        elif load_lock in pending:
-            pending[load_lock].update({
-                "ventWafers": _material_ids(move),
-                "ventStartTime": start_time,
-                "ventEndTime": end_time,
-            })
-            pending.pop(load_lock)
-        else:
-            cycles.append({
-                "index": 0,
-                "loadLock": load_lock,
-                "vacuumWafers": [],
-                "ventWafers": _material_ids(move),
-                "startTime": start_time,
-                "pumpEndTime": start_time,
-                "ventStartTime": start_time,
-                "ventEndTime": end_time,
-                "startedAt": start_time,
-                "vacuumEndTime": start_time,
-            })
-    cycles.sort(key=lambda cycle: (cycle["startedAt"], _natural_key(cycle["loadLock"])))
-    return [
-        {
-            "index": index + 1,
-            "loadLock": cycle["loadLock"],
-            "vacuumWafers": cycle["vacuumWafers"],
-            "ventWafers": cycle["ventWafers"],
-            "startTime": cycle["startTime"],
-            "pumpEndTime": cycle["pumpEndTime"],
-            "ventStartTime": cycle["ventStartTime"],
-            "ventEndTime": cycle["ventEndTime"],
-        }
-        for index, cycle in enumerate(cycles)
-    ]
+            pending[load_lock] = _material_ids(move)
+            continue
+        pumped_wafers = pending.pop(load_lock, None)
+        if pumped_wafers is None:
+            continue
+        cycle_load = max(len(pumped_wafers), len(_material_ids(move)))
+        cycle_count += 1
+        wafer_cycle_count += cycle_load
+        if cycle_load == 0:
+            empty_load_cycle_count += 1
+        if cycle_load >= _load_lock_capacity(device, load_lock):
+            full_load_cycle_count += 1
+    return {
+        "cycleCount": cycle_count,
+        "waferCycleCount": wafer_cycle_count,
+        "wafersPerCycle": wafer_cycle_count / cycle_count if cycle_count else 0,
+        "fullLoadCycleCount": full_load_cycle_count,
+        "emptyLoadCycleCount": empty_load_cycle_count,
+        "fullLoadCycleRatio": full_load_cycle_count / cycle_count if cycle_count else 0,
+        "emptyLoadCycleRatio": empty_load_cycle_count / cycle_count if cycle_count else 0,
+    }
 
 
 def _short_job_name(value: Any) -> str:
@@ -1192,7 +1225,7 @@ def analyze_schedule_performance(
             if _completion_inside_window(sample["completedAt"], window)
         ),
         "waferSystemResidenceTimes": wafer_system_residence_times,
-        "loadLockCycles": _build_load_lock_cycles(records, device),
+        "loadLockEfficiency": _build_load_lock_efficiency(records, device),
     }
     performance["diagnostics"] = _diagnose_schedule(performance)
     return performance

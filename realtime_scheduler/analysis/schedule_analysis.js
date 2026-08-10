@@ -338,8 +338,8 @@ function summarizeDurations(values) {
 function completionInsideWindow(completedAt, window) {
   return completedAt >= window.start - PERFORMANCE_TIME_TOLERANCE && completedAt <= window.end + PERFORMANCE_TIME_TOLERANCE;
 }
-function processChamberDwellTime(moves, device, window) {
-  const durations = [];
+function processChamberDwellSamples(moves, device) {
+  const samples = [];
   for (const processMove of moves) {
     const chamber = processMove.ModuleName;
     if (processMove.MoveType !== PROCESS_MOVE || !isProcessModule(chamber, stationType(device, chamber))) continue;
@@ -349,11 +349,20 @@ function processChamberDwellTime(moves, device, window) {
         if (PICK_MOVE_TYPES.has(candidate.MoveType) && firstStation(candidate, "SrcStationList") === chamber && materialIds(candidate).includes(material)) return true;
         return candidate.MoveType === SWAP_MOVE && firstStation(candidate, "StationList") === chamber && materialIds(candidate, "SendMatList").includes(material);
       });
-      if (!removal || !completionInsideWindow(removal.EndTime, window)) continue;
-      durations.push(removal.EndTime - processMove.EndTime);
+      if (!removal) continue;
+      samples.push({
+        wafer: material,
+        completedAt: removal.EndTime,
+        duration: removal.EndTime - processMove.EndTime
+      });
     }
   }
-  return summarizeDurations(durations);
+  return samples;
+}
+function processChamberDwellTime(moves, device, window) {
+  return summarizeDurations(
+    processChamberDwellSamples(moves, device).filter((sample) => completionInsideWindow(sample.completedAt, window)).map((sample) => sample.duration)
+  );
 }
 function coveredDuration(intervals, boundaryStart, boundaryEnd) {
   const clipped = intervals.map((interval) => ({
@@ -377,7 +386,7 @@ function coveredDuration(intervals, boundaryStart, boundaryEnd) {
   }
   return activeStart === null ? total : total + activeEnd - activeStart;
 }
-function robotWaferDwellTime(moves, window) {
+function robotWaferDwellSamples(moves) {
   const transportByRobot = /* @__PURE__ */ new Map();
   for (const move of moves) {
     if (move.MoveType !== PRE_TRANS_MOVE || move.EndTime <= move.StartTime) continue;
@@ -388,21 +397,24 @@ function robotWaferDwellTime(moves, window) {
     transportByRobot.set(robot, intervals);
   }
   const holdingStartedAt = /* @__PURE__ */ new Map();
-  const durations = [];
+  const samples = [];
   const finishHolding = (robot, materials, finishedAt) => {
     for (const material of materials) {
       const key = `${robot}\0${material}`;
       const startedAt = holdingStartedAt.get(key);
       if (startedAt === void 0) continue;
       holdingStartedAt.delete(key);
-      if (!completionInsideWindow(finishedAt, window)) continue;
       const rawDuration = Math.max(finishedAt - startedAt, 0);
       const transportDuration = coveredDuration(
         transportByRobot.get(robot) ?? [],
         startedAt,
         finishedAt
       );
-      durations.push(Math.max(rawDuration - transportDuration, 0));
+      samples.push({
+        wafer: material,
+        completedAt: finishedAt,
+        duration: Math.max(rawDuration - transportDuration, 0)
+      });
     }
   };
   for (const move of moves) {
@@ -421,82 +433,84 @@ function robotWaferDwellTime(moves, window) {
       }
     }
   }
-  return summarizeDurations(durations);
+  return samples;
 }
-function waferSystemResidenceTime(moves, device, window) {
+function robotWaferDwellTime(moves, window) {
+  return summarizeDurations(
+    robotWaferDwellSamples(moves).filter((sample) => completionInsideWindow(sample.completedAt, window)).map((sample) => sample.duration)
+  );
+}
+function waferSystemResidenceTimes(moves, device) {
   const boundaries = waferBoundaryTimes(moves, device);
-  const durations = [];
+  const chamberDwellByWafer = /* @__PURE__ */ new Map();
+  const robotDwellByWafer = /* @__PURE__ */ new Map();
+  for (const sample of processChamberDwellSamples(moves, device)) {
+    chamberDwellByWafer.set(sample.wafer, (chamberDwellByWafer.get(sample.wafer) ?? 0) + sample.duration);
+  }
+  for (const sample of robotWaferDwellSamples(moves)) {
+    robotDwellByWafer.set(sample.wafer, (robotDwellByWafer.get(sample.wafer) ?? 0) + sample.duration);
+  }
+  const samples = [];
   for (const [material, completedAt] of boundaries.completions) {
     const enteredAt = boundaries.entries.get(material);
-    if (enteredAt === void 0 || completedAt < enteredAt - PERFORMANCE_TIME_TOLERANCE || !completionInsideWindow(completedAt, window)) continue;
-    durations.push(completedAt - enteredAt);
+    if (enteredAt === void 0 || completedAt < enteredAt - PERFORMANCE_TIME_TOLERANCE) continue;
+    samples.push({
+      wafer: material,
+      enteredAt,
+      completedAt,
+      duration: completedAt - enteredAt,
+      chamberDwellSeconds: chamberDwellByWafer.get(material) ?? 0,
+      robotDwellSeconds: robotDwellByWafer.get(material) ?? 0
+    });
   }
-  return summarizeDurations(durations);
+  return samples.sort((left, right) => left.completedAt - right.completedAt || naturalCompare(left.wafer, right.wafer));
 }
 function loadLockTransitionDirection(move) {
   const lastState = String(move.LastState ?? "").toUpperCase();
   const currentState = String(move.CurState ?? "").toUpperCase();
-  if (lastState === "ATM" && currentState === "VAC") return "vacuum";
-  if (lastState === "VAC" && currentState === "ATM") return "vent";
+  if (["ATM", "ATR"].includes(lastState) && ["VAC", "VTR"].includes(currentState)) return "vacuum";
+  if (["VAC", "VTR"].includes(lastState) && ["ATM", "ATR"].includes(currentState)) return "vent";
   if (move.MoveType === 12) return "vacuum";
   if (move.MoveType === 13) return "vent";
   return null;
 }
-function buildLoadLockCycles(moves, device) {
-  const cycles = [];
+function loadLockCapacity(device, name) {
+  const definition = device?.Stations?.[name] ?? {};
+  const slots = listValue(definition.Slots).map((value) => Number(value)).filter((value) => Number.isFinite(value));
+  return Math.max(1, Number(definition.Capacity) || 0, slots.length, ...slots, 2);
+}
+function buildLoadLockEfficiency(moves, device) {
   const pendingByLoadLock = /* @__PURE__ */ new Map();
+  let cycleCount = 0;
+  let waferCycleCount = 0;
+  let fullLoadCycleCount = 0;
+  let emptyLoadCycleCount = 0;
   for (const move of moves) {
     const direction = loadLockTransitionDirection(move);
     const loadLock = move.ModuleName;
     if (!direction || !isLoadLockName(loadLock, stationType(device, loadLock))) continue;
     if (direction === "vacuum") {
-      const cycle = {
-        index: 0,
-        loadLock,
-        vacuumWafers: materialIds(move),
-        ventWafers: [],
-        startTime: move.StartTime,
-        pumpEndTime: move.EndTime,
-        ventStartTime: 0,
-        ventEndTime: 0,
-        startedAt: move.StartTime,
-        vacuumEndTime: move.EndTime
-      };
-      cycles.push(cycle);
-      pendingByLoadLock.set(loadLock, cycle);
+      pendingByLoadLock.set(loadLock, materialIds(move));
       continue;
     }
-    const pending = pendingByLoadLock.get(loadLock);
-    if (pending) {
-      pending.ventWafers = materialIds(move);
-      pending.ventStartTime = move.StartTime;
-      pending.ventEndTime = move.EndTime;
-      pendingByLoadLock.delete(loadLock);
-      continue;
-    }
-    cycles.push({
-      index: 0,
-      loadLock,
-      vacuumWafers: [],
-      ventWafers: materialIds(move),
-      startTime: move.StartTime,
-      pumpEndTime: move.StartTime,
-      ventStartTime: move.StartTime,
-      ventEndTime: move.EndTime,
-      startedAt: move.StartTime,
-      vacuumEndTime: move.StartTime
-    });
+    const pumpedWafers = pendingByLoadLock.get(loadLock);
+    if (!pumpedWafers) continue;
+    pendingByLoadLock.delete(loadLock);
+    const cycleLoad = Math.max(pumpedWafers.length, materialIds(move).length);
+    cycleCount += 1;
+    waferCycleCount += cycleLoad;
+    if (cycleLoad === 0) emptyLoadCycleCount += 1;
+    if (cycleLoad >= loadLockCapacity(device, loadLock)) fullLoadCycleCount += 1;
   }
-  return cycles.sort((left, right) => left.startedAt - right.startedAt || naturalCompare(left.loadLock, right.loadLock)).map((cycle, index) => ({
-    index: index + 1,
-    loadLock: cycle.loadLock,
-    vacuumWafers: cycle.vacuumWafers,
-    ventWafers: cycle.ventWafers,
-    startTime: cycle.startTime,
-    pumpEndTime: cycle.pumpEndTime,
-    ventStartTime: cycle.ventStartTime,
-    ventEndTime: cycle.ventEndTime
-  }));
+  return {
+    cycleCount,
+    waferCycleCount,
+    wafersPerCycle: cycleCount ? waferCycleCount / cycleCount : 0,
+    fullLoadCycleCount,
+    emptyLoadCycleCount,
+    fullLoadCycleRatio: cycleCount ? fullLoadCycleCount / cycleCount : 0,
+    emptyLoadCycleRatio: cycleCount ? emptyLoadCycleCount / cycleCount : 0
+  };
 }
 function shortJobName(value) {
   const parts = String(value ?? "").split(".").filter(Boolean);
@@ -705,8 +719,11 @@ function analyzeSchedulePerformance(moves, device, mode = "steady", context = nu
   const throughputPerHour = meanDepartureInterval > PERFORMANCE_TIME_TOLERANCE ? 3600 / meanDepartureInterval : 0;
   const chamberDwellTime = processChamberDwellTime(records, device, window);
   const robotDwellTime = robotWaferDwellTime(records, window);
-  const systemResidenceTime = waferSystemResidenceTime(records, device, window);
-  const loadLockCycles = buildLoadLockCycles(records, device);
+  const systemResidenceTimes = waferSystemResidenceTimes(records, device);
+  const systemResidenceTime = summarizeDurations(
+    systemResidenceTimes.filter((sample) => completionInsideWindow(sample.completedAt, window)).map((sample) => sample.duration)
+  );
+  const loadLockEfficiency = buildLoadLockEfficiency(records, device);
   return {
     window,
     resources,
@@ -720,7 +737,8 @@ function analyzeSchedulePerformance(moves, device, mode = "steady", context = nu
     processChamberDwellTime: chamberDwellTime,
     robotWaferDwellTime: robotDwellTime,
     waferSystemResidenceTime: systemResidenceTime,
-    loadLockCycles
+    waferSystemResidenceTimes: systemResidenceTimes,
+    loadLockEfficiency
   };
 }
 function summarizeBottleneckUtilization(performance) {

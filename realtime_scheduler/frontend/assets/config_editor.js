@@ -1842,92 +1842,6 @@ function renderDualActorDecisionLens(decision) {
       <div class="dual-actor-recommendation-list">${groupMarkup}</div>
     </section>`;
 }
-var WAFER_COLOR_PALETTE = [
-  "#d81b60",
-  "#2f9e44",
-  "#5f5bd6",
-  "#e76f51",
-  "#008c95",
-  "#c23b8d",
-  "#2878c8",
-  "#7ca62b",
-  "#b45cc5",
-  "#16856f",
-  "#7a5fb5",
-  "#b66a2c",
-  "#c23b32",
-  "#45a66b",
-  "#4d66c4",
-  "#df6b83",
-  "#2b7a78",
-  "#a33d64",
-  "#7868c8",
-  "#8a6045"
-];
-function waferLabel(value) {
-  const material = String(value || "").trim();
-  return /^W/i.test(material) ? material : `W${material}`;
-}
-function buildWaferColorMap(cycles) {
-  const wafers = /* @__PURE__ */ new Set();
-  for (const cycle of cycles) {
-    for (const wafer of cycle.vacuumWafers) wafers.add(waferLabel(wafer));
-    for (const wafer of cycle.ventWafers) wafers.add(waferLabel(wafer));
-  }
-  const map = /* @__PURE__ */ new Map();
-  let idx = 0;
-  for (const wafer of wafers) {
-    map.set(wafer, WAFER_COLOR_PALETTE[idx % WAFER_COLOR_PALETTE.length]);
-    idx++;
-  }
-  return map;
-}
-function normalizeGanttCycles(cycles) {
-  return cycles.map((cycle) => ({
-    index: Number(cycle.index ?? 0),
-    loadLock: String(cycle.loadLock ?? ""),
-    vacuumWafers: Array.isArray(cycle.vacuumWafers) ? cycle.vacuumWafers.map(String) : [],
-    ventWafers: Array.isArray(cycle.ventWafers) ? cycle.ventWafers.map(String) : [],
-    startTime: Number(cycle.startTime ?? cycle.index ?? 0),
-    pumpEndTime: Number(cycle.pumpEndTime ?? cycle.startTime ?? cycle.index ?? 0),
-    ventStartTime: Number(cycle.ventStartTime ?? 0),
-    ventEndTime: Number(cycle.ventEndTime ?? 0)
-  }));
-}
-function formatGanttTime(seconds) {
-  return seconds >= 1 ? seconds.toFixed(1) : seconds.toFixed(2);
-}
-function renderWaferDots(wafers, waferColors) {
-  if (!wafers.length) return "";
-  return wafers.map((w) => {
-    const label = waferLabel(w);
-    const color = waferColors.get(label) || "#94a3b8";
-    return `<span class="gantt-wafer-dot" style="background:${color}" title="${escapeHtml(label)}"></span>`;
-  }).join("");
-}
-function renderLoadLockGantt(cycles) {
-  if (!cycles.length) return '<div class="loadlock-cycle-empty">MoveList \u4E2D\u6CA1\u6709\u8BC6\u522B\u5230 LoadLock \u62BD\u6C14\u6216\u5145\u6C14\u52A8\u4F5C\u3002</div>';
-  const waferColors = buildWaferColorMap(cycles);
-  const events = [];
-  for (const c of cycles) {
-    events.push({ time: c.startTime, loadLock: c.loadLock, dir: "pump", wafers: c.vacuumWafers });
-    if (c.ventStartTime) events.push({ time: c.ventStartTime, loadLock: c.loadLock, dir: "vent", wafers: c.ventWafers });
-  }
-  events.sort((a, b) => a.time - b.time);
-  function renderCard(dir, wafers, loadLock, time) {
-    const cls = dir === "pump" ? "seq-pump" : "seq-vent";
-    const label = dir === "pump" ? "\u62BD" : "\u5145";
-    const dots = renderWaferDots(wafers, waferColors);
-    const description = `${loadLock} ${label}\u6C14 ${formatGanttTime(time)}s`;
-    return `<div class="seq-card ${cls}" role="img" aria-label="${escapeHtml(description)}" title="${escapeHtml(description)}"><span class="seq-dots">${dots}</span></div>`;
-  }
-  const interleavedCards = events.map((e) => renderCard(e.dir, e.wafers, e.loadLock, e.time)).join("");
-  return `<div class="loadlock-seq">
-    <div class="seq-scroll" aria-label="LoadLock \u5168\u5C40\u4EA4\u9519\u65F6\u5E8F">
-      <div class="seq-cards">${interleavedCards}</div>
-    </div>
-  </div>`;
-}
 function formatPercent(value) {
   return `${(Math.max(0, value) * 100).toFixed(1)}%`;
 }
@@ -1978,12 +1892,113 @@ function groupedBottleneckResources(performance2) {
     };
   }).filter((group) => group.busyTime > PERFORMANCE_DISPLAY_TOLERANCE).sort((left, right) => right.utilization - left.utilization || left.name.localeCompare(right.name, void 0, { numeric: true, sensitivity: "base" })).slice(0, 4);
 }
+function loadLockEfficiencyFromMoves(moves, device) {
+  const pendingByLoadLock = /* @__PURE__ */ new Map();
+  let cycleCount = 0;
+  let waferCycleCount = 0;
+  let fullLoadCycleCount = 0;
+  let emptyLoadCycleCount = 0;
+  const stationType = (name) => String(device?.Stations?.[name]?.Type ?? "");
+  const capacityOf = (name) => {
+    const definition = device?.Stations?.[name] ?? {};
+    const slots = listValue(definition.Slots).map((value) => finiteNumber(value, 0)).filter((value) => value > 0);
+    return Math.max(1, 2, finiteNumber(definition.Capacity, 0), slots.length, ...slots);
+  };
+  const directionOf = (move) => {
+    const lastState = String(move.LastState ?? "").toUpperCase();
+    const currentState = String(move.CurState ?? "").toUpperCase();
+    if (["ATM", "ATR"].includes(lastState) && ["VAC", "VTR"].includes(currentState)) return "vacuum";
+    if (["VAC", "VTR"].includes(lastState) && ["ATM", "ATR"].includes(currentState)) return "vent";
+    if (move.MoveType === PUMP_MOVE) return "vacuum";
+    if (move.MoveType === VENT_MOVE) return "vent";
+    return null;
+  };
+  for (const move of normalizeMoves(moves)) {
+    const direction = directionOf(move);
+    const loadLock = move.ModuleName;
+    if (!direction || !isLoadLockName(loadLock, stationType(loadLock))) continue;
+    if (direction === "vacuum") {
+      pendingByLoadLock.set(loadLock, materialIds(move));
+      continue;
+    }
+    const pumpedWafers = pendingByLoadLock.get(loadLock);
+    if (!pumpedWafers) continue;
+    pendingByLoadLock.delete(loadLock);
+    const cycleLoad = Math.max(pumpedWafers.length, materialIds(move).length);
+    cycleCount += 1;
+    waferCycleCount += cycleLoad;
+    if (cycleLoad === 0) emptyLoadCycleCount += 1;
+    if (cycleLoad >= capacityOf(loadLock)) fullLoadCycleCount += 1;
+  }
+  return {
+    cycleCount,
+    waferCycleCount,
+    wafersPerCycle: cycleCount ? waferCycleCount / cycleCount : 0,
+    fullLoadCycleCount,
+    emptyLoadCycleCount,
+    fullLoadCycleRatio: cycleCount ? fullLoadCycleCount / cycleCount : 0,
+    emptyLoadCycleRatio: cycleCount ? emptyLoadCycleCount / cycleCount : 0
+  };
+}
 function withWaferResidenceTimes(performance2, moves, device) {
-  if (performance2.waferSystemResidenceTimes?.length || !moves.length) return performance2;
   const entries = /* @__PURE__ */ new Map();
   const completions = /* @__PURE__ */ new Map();
   const stationType = (name) => String(device?.Stations?.[name]?.Type ?? "");
-  for (const move of normalizeMoves(moves)) {
+  const chamberDwellByWafer = /* @__PURE__ */ new Map();
+  const robotDwellByWafer = /* @__PURE__ */ new Map();
+  const transportByRobot = /* @__PURE__ */ new Map();
+  const holdingStartedAt = /* @__PURE__ */ new Map();
+  const coveredDuration = (intervals, start, end) => {
+    const clipped = intervals.map((interval) => ({ start: Math.max(interval.start, start), end: Math.min(interval.end, end) })).filter((interval) => interval.end > interval.start + PERFORMANCE_DISPLAY_TOLERANCE).sort((left, right) => left.start - right.start || left.end - right.end);
+    let total = 0;
+    let active = null;
+    for (const interval of clipped) {
+      if (!active) active = interval;
+      else if (interval.start <= active.end + PERFORMANCE_DISPLAY_TOLERANCE) active.end = Math.max(active.end, interval.end);
+      else {
+        total += active.end - active.start;
+        active = interval;
+      }
+    }
+    return active ? total + active.end - active.start : total;
+  };
+  const records = normalizeMoves(moves);
+  for (const move of records) {
+    if (move.MoveType === PRE_TRANS_MOVE && move.EndTime > move.StartTime) {
+      const robot = move.ModuleName;
+      const intervals = transportByRobot.get(robot) ?? [];
+      intervals.push({ start: move.StartTime, end: move.EndTime });
+      transportByRobot.set(robot, intervals);
+    }
+  }
+  for (const processMove of records) {
+    const chamber = processMove.ModuleName;
+    if (processMove.MoveType !== PROCESS_MOVE || !isProcessModule(chamber, stationType(chamber))) continue;
+    for (const wafer of materialIds(processMove)) {
+      const removal = records.find((candidate) => candidate.EndTime >= processMove.EndTime - PERFORMANCE_DISPLAY_TOLERANCE && (PICK_MOVE_TYPES.has(candidate.MoveType) && firstStation(candidate, "SrcStationList") === chamber && materialIds(candidate).includes(wafer) || candidate.MoveType === SWAP_MOVE && firstStation(candidate, "StationList") === chamber && materialIds(candidate, "SendMatList").includes(wafer)));
+      if (removal) chamberDwellByWafer.set(wafer, (chamberDwellByWafer.get(wafer) ?? 0) + removal.EndTime - processMove.EndTime);
+    }
+  }
+  const finishHolding = (robot, wafers, finishedAt) => {
+    for (const wafer of wafers) {
+      const key = `${robot}\0${wafer}`;
+      const startedAt = holdingStartedAt.get(key);
+      if (startedAt === void 0) continue;
+      holdingStartedAt.delete(key);
+      const dwell = Math.max(finishedAt - startedAt - coveredDuration(transportByRobot.get(robot) ?? [], startedAt, finishedAt), 0);
+      robotDwellByWafer.set(wafer, (robotDwellByWafer.get(wafer) ?? 0) + dwell);
+    }
+  };
+  for (const move of records) {
+    const robot = move.ModuleName;
+    if (PICK_MOVE_TYPES.has(move.MoveType)) {
+      for (const wafer of materialIds(move)) holdingStartedAt.set(`${robot}\0${wafer}`, move.EndTime);
+    } else if (PLACE_MOVE_TYPES.has(move.MoveType)) {
+      finishHolding(robot, materialIds(move), move.StartTime);
+    } else if (move.MoveType === SWAP_MOVE) {
+      finishHolding(robot, materialIds(move, "SendMatList"), move.StartTime);
+      for (const wafer of materialIds(move, "RecvMatList")) holdingStartedAt.set(`${robot}\0${wafer}`, move.EndTime);
+    }
     if (PICK_MOVE_TYPES.has(move.MoveType)) {
       const source = firstStation(move, "SrcStationList");
       if (!isLoadPortName(source, stationType(source))) continue;
@@ -2005,14 +2020,28 @@ function withWaferResidenceTimes(performance2, moves, device) {
       }
     }
   }
-  const samples = [];
+  const fallbackSamples = [];
   for (const [wafer, completedAt] of completions) {
     const enteredAt = entries.get(wafer);
     if (enteredAt === void 0 || completedAt < enteredAt - PERFORMANCE_DISPLAY_TOLERANCE) continue;
-    samples.push({ wafer, enteredAt, completedAt, duration: completedAt - enteredAt });
+    fallbackSamples.push({
+      wafer,
+      enteredAt,
+      completedAt,
+      duration: completedAt - enteredAt,
+      chamberDwellSeconds: chamberDwellByWafer.get(wafer) ?? 0,
+      robotDwellSeconds: robotDwellByWafer.get(wafer) ?? 0
+    });
   }
-  samples.sort((left, right) => left.completedAt - right.completedAt || naturalCompare(left.wafer, right.wafer));
-  return samples.length ? { ...performance2, waferSystemResidenceTimes: samples } : performance2;
+  fallbackSamples.sort((left, right) => left.completedAt - right.completedAt || naturalCompare(left.wafer, right.wafer));
+  const fallbackByWafer = new Map(fallbackSamples.map((sample) => [sample.wafer, sample]));
+  const samples = (performance2.waferSystemResidenceTimes?.length ? performance2.waferSystemResidenceTimes : fallbackSamples).map((sample) => ({
+    ...sample,
+    chamberDwellSeconds: sample.chamberDwellSeconds ?? fallbackByWafer.get(sample.wafer)?.chamberDwellSeconds ?? 0,
+    robotDwellSeconds: sample.robotDwellSeconds ?? fallbackByWafer.get(sample.wafer)?.robotDwellSeconds ?? 0
+  }));
+  const hydrated = samples.length ? { ...performance2, waferSystemResidenceTimes: samples } : performance2;
+  return hydrated.loadLockEfficiency ? hydrated : { ...hydrated, loadLockEfficiency: loadLockEfficiencyFromMoves(moves, device) };
 }
 function renderBottleneckAnalysis(performance2) {
   const { window: window2 } = performance2;
@@ -2060,67 +2089,104 @@ function renderBottleneckAnalysis(performance2) {
     <div class="performance-legend" aria-label="\u5360\u7528\u7EC4\u6210\u56FE\u4F8B">${legend}</div>
   `;
 }
-function renderWaferResidenceChart(performance2) {
-  const samples = performance2.waferSystemResidenceTimes ?? [];
-  if (!samples.length) {
-    return `
-      <header class="residence-chart-head"><strong>\u7CFB\u7EDF\u9A7B\u7559\u65F6\u95F4\u5206\u6790</strong></header>
-      <div class="residence-chart-empty">\u5F53\u524D\u7ED3\u679C\u4E2D\u6CA1\u6709\u5B8C\u6210\u5F80\u8FD4 LoadPort \u7684\u6676\u5706\u3002</div>`;
-  }
-  const meanSeconds = samples.reduce((sum, sample) => sum + sample.duration, 0) / samples.length;
-  const maximumSeconds = Math.max(...samples.map((sample) => sample.duration));
-  const minimumSeconds = Math.min(...samples.map((sample) => sample.duration));
-  const rangeToMinimumPercent = minimumSeconds > PERFORMANCE_DISPLAY_TOLERANCE ? (maximumSeconds - minimumSeconds) / minimumSeconds * 100 : null;
-  const plotHeight = 170;
-  const scaleMaximum = Math.max(maximumSeconds, 1) * 1.08;
+function renderResidenceMetricChart(samples, kind) {
+  const definitions = {
+    system: { title: "\u7CFB\u7EDF\u9A7B\u7559\u65F6\u95F4", label: "\u7CFB\u7EDF\u9A7B\u7559", value: (sample) => sample.duration },
+    chamber: { title: "\u8154\u5BA4\u9A7B\u7559\u65F6\u95F4", label: "\u8154\u5BA4\u9A7B\u7559", value: (sample) => sample.chamberDwellSeconds ?? 0 },
+    robot: { title: "\u673A\u5668\u624B\u9A7B\u7559\u65F6\u95F4", label: "\u673A\u5668\u624B\u9A7B\u7559", value: (sample) => sample.robotDwellSeconds ?? 0 }
+  };
+  const metric = definitions[kind];
+  const values = samples.map(metric.value);
+  const meanSeconds = values.reduce((sum, value) => sum + value, 0) / values.length;
+  const maximumSeconds = Math.max(...values, 1);
+  const plotHeight = 120;
+  const scaleMaximum = maximumSeconds * 1.08;
   const meanHeight = Math.min(meanSeconds / scaleMaximum * plotHeight, plotHeight);
   const bars = samples.map((sample) => {
-    const height = Math.max(sample.duration / scaleMaximum * plotHeight, 2);
+    const seconds = metric.value(sample);
+    const height = Math.max(seconds / scaleMaximum * plotHeight, 2);
     const wafer = escapeHtml(String(sample.wafer));
-    const duration = formatSeconds2(sample.duration);
+    const duration = formatSeconds2(seconds);
     return `
-      <li class="residence-bar-item" role="img" aria-label="\u6676\u5706 ${wafer}\uFF0C\u7CFB\u7EDF\u9A7B\u7559 ${duration} \u79D2" title="\u6676\u5706 ${wafer} \xB7 \u79BB\u5F00 ${formatSeconds2(sample.enteredAt)} s \xB7 \u8FD4\u56DE ${formatSeconds2(sample.completedAt)} s \xB7 \u9A7B\u7559 ${duration} s">
+      <li class="residence-metric-bar-item" role="img" aria-label="\u6676\u5706 ${wafer}\uFF0C${metric.label} ${duration} \u79D2" title="\u6676\u5706 ${wafer} \xB7 ${metric.label} ${duration} s">
         <strong>${duration}</strong>
-        <span class="residence-bar-track"><i style="height:${height.toFixed(2)}px"></i></span>
+        <span class="residence-metric-bar residence-bar-${kind}"><i style="height:${height.toFixed(2)}px"></i></span>
         <small>${wafer}</small>
       </li>`;
   }).join("");
   return `
-    <header class="residence-chart-head">
-      <strong>\u7CFB\u7EDF\u9A7B\u7559\u65F6\u95F4\u5206\u6790</strong>
-      <div class="residence-chart-summary">
-        <span>\u5E73\u5747 <b>${formatSeconds2(meanSeconds)} s</b></span>
-        <span>\u6700\u5927 <b>${formatSeconds2(maximumSeconds)} s</b></span>
-        <span>\u6781\u5DEE/\u6700\u5C0F\u503C <b>${rangeToMinimumPercent === null ? "\u2014" : `${rangeToMinimumPercent.toFixed(1)}%`}</b></span>
-        <span>\u6837\u672C <b>${samples.length} \u7247</b></span>
-      </div>
-    </header>
-    <div class="residence-chart-body">
-      <div class="residence-chart-scroll" tabindex="0" aria-label="\u9010\u7247\u6676\u5706\u7CFB\u7EDF\u9A7B\u7559\u65F6\u95F4\u67F1\u72B6\u56FE\uFF0C\u53EF\u6A2A\u5411\u6EDA\u52A8">
-        <div class="residence-chart-plot">
-          <div class="residence-mean-line" style="bottom:${(28 + meanHeight).toFixed(2)}px"><span>\u5E73\u5747 ${formatSeconds2(meanSeconds)} s</span></div>
-          <ol class="residence-bars">${bars}</ol>
+    <div class="residence-metric-chart residence-metric-${kind}" data-residence-metric-chart="${kind}"${kind === "system" ? "" : " hidden"}>
+      <div class="residence-metric-scroll" tabindex="0" aria-label="\u9010\u7247\u6676\u5706${metric.title}\u67F1\u72B6\u56FE\uFF0C\u53EF\u6A2A\u5411\u6EDA\u52A8">
+        <div class="residence-metric-plot">
+          <div class="residence-metric-mean-line" style="bottom:${(26 + meanHeight).toFixed(2)}px"><span>\u5E73\u5747 ${formatSeconds2(meanSeconds)} s</span></div>
+          <ol class="residence-metric-bars">${bars}</ol>
         </div>
       </div>
     </div>`;
 }
-function renderLoadLockCard(performance2) {
-  const ganttCycles = normalizeGanttCycles(performance2.loadLockCycles);
-  const gantt = renderLoadLockGantt(ganttCycles);
+function renderWaferResidenceChart(performance2) {
+  const samples = performance2.waferSystemResidenceTimes ?? [];
+  const helpButton = `<button class="bottleneck-analysis-help residence-analysis-help" id="residenceAnalysisHelpButton" type="button" aria-haspopup="dialog" aria-controls="residenceAnalysisHelpDialog">\u8BF4\u660E</button>`;
+  if (!samples.length) {
+    return `
+      <header class="residence-chart-head"><strong>\u9A7B\u7559\u65F6\u95F4\u5206\u6790</strong>${helpButton}</header>
+      <div class="residence-chart-empty">\u5F53\u524D\u7ED3\u679C\u4E2D\u6CA1\u6709\u5B8C\u6210\u5F80\u8FD4 LoadPort \u7684\u6676\u5706\u3002</div>`;
+  }
+  const systemValues = samples.map((sample) => sample.duration);
+  const systemMeanSeconds = systemValues.reduce((sum, value) => sum + value, 0) / systemValues.length;
+  const maximumSeconds = Math.max(...systemValues);
+  const minimumSeconds = Math.min(...systemValues);
+  const rangeToMinimumPercent = minimumSeconds > PERFORMANCE_DISPLAY_TOLERANCE ? (maximumSeconds - minimumSeconds) / minimumSeconds * 100 : null;
+  const chamberMeanSeconds = samples.reduce((sum, sample) => sum + (sample.chamberDwellSeconds ?? 0), 0) / samples.length;
+  const robotMeanSeconds = samples.reduce((sum, sample) => sum + (sample.robotDwellSeconds ?? 0), 0) / samples.length;
+  const chamberValues = samples.map((sample) => sample.chamberDwellSeconds ?? 0);
+  const robotValues = samples.map((sample) => sample.robotDwellSeconds ?? 0);
+  const summary = (kind, content) => `<div class="residence-chart-summary" data-residence-summary="${kind}"${kind === "system" ? "" : " hidden"}>${content}</div>`;
   return `
-    <header class="loadlock-card-head">
-      <strong>LoadLock \u4EA4\u6362\u65F6\u5E8F</strong>
-      <span>\u663E\u793A\u5168\u90E8 LoadLock \u7684\u62BD\u6C14/\u5145\u6C14\u4EA4\u9519\u5E8F\u5217</span>
+    <header class="residence-chart-head">
+      <strong>\u9A7B\u7559\u65F6\u95F4\u5206\u6790</strong>
+      <label class="residence-metric-control"><span class="visually-hidden">\u9009\u62E9\u9A7B\u7559\u65F6\u95F4\u56FE\u8868</span><select id="residenceMetricSelect" aria-label="\u9009\u62E9\u9A7B\u7559\u65F6\u95F4\u56FE\u8868">
+        <option value="system">\u7CFB\u7EDF\u9A7B\u7559\u65F6\u95F4</option>
+        <option value="chamber">\u8154\u5BA4\u9A7B\u7559\u65F6\u95F4</option>
+        <option value="robot">\u673A\u5668\u624B\u9A7B\u7559\u65F6\u95F4</option>
+      </select></label>
+      ${summary("system", `
+        <span>\u7CFB\u7EDF\u5E73\u5747 <b>${formatSeconds2(systemMeanSeconds)} s</b></span>
+        <span>\u7CFB\u7EDF\u6700\u5927 <b>${formatSeconds2(maximumSeconds)} s</b></span>
+        <span>\u6781\u5DEE/\u6700\u5C0F\u503C <b>${rangeToMinimumPercent === null ? "\u2014" : `${rangeToMinimumPercent.toFixed(1)}%`}</b></span>
+        <span>\u6837\u672C <b>${samples.length} \u7247</b></span>`)}
+      ${summary("chamber", `
+        <span>\u8154\u5BA4\u5E73\u5747 <b>${formatSeconds2(chamberMeanSeconds)} s</b></span>
+        <span>\u8154\u5BA4\u6700\u5927 <b>${formatSeconds2(Math.max(...chamberValues))} s</b></span>
+        <span>\u8154\u5BA4\u7D2F\u8BA1 <b>${formatSeconds2(chamberValues.reduce((sum, value) => sum + value, 0))} s</b></span>
+        <span>\u6837\u672C <b>${samples.length} \u7247</b></span>`)}
+      ${summary("robot", `
+        <span>\u673A\u5668\u624B\u5E73\u5747 <b>${formatSeconds2(robotMeanSeconds)} s</b></span>
+        <span>\u673A\u5668\u624B\u6700\u5927 <b>${formatSeconds2(Math.max(...robotValues))} s</b></span>
+        <span>\u673A\u5668\u624B\u7D2F\u8BA1 <b>${formatSeconds2(robotValues.reduce((sum, value) => sum + value, 0))} s</b></span>
+        <span>\u6837\u672C <b>${samples.length} \u7247</b></span>`)}
+      ${helpButton}
     </header>
-    <div class="loadlock-card-body">${gantt}</div>`;
+    <div class="residence-chart-body">
+      ${renderResidenceMetricChart(samples, "system")}
+      ${renderResidenceMetricChart(samples, "chamber")}
+      ${renderResidenceMetricChart(samples, "robot")}
+    </div>`;
 }
 function renderSchedulePerformance(performance2) {
   const window2 = performance2.window;
-  const bottleneck = performance2.primaryBottleneck;
-  const confidenceLabels = { high: "\u8BC1\u636E\u8F83\u5F3A", medium: "\u8BC1\u636E\u4E2D\u7B49", low: "\u8BC1\u636E\u8F83\u5F31" };
+  const loadLockEfficiency = performance2.loadLockEfficiency ?? {
+    cycleCount: 0,
+    waferCycleCount: 0,
+    wafersPerCycle: 0,
+    fullLoadCycleCount: 0,
+    emptyLoadCycleCount: 0,
+    fullLoadCycleRatio: 0,
+    emptyLoadCycleRatio: 0
+  };
   return `
     <section class="result-card overview-card">
-      <header class="overview-head"><span class="visual-kicker">\u6392\u7A0B\u6982\u89C8</span><strong>KPI \u603B\u89C8</strong></header>
+      <header class="overview-head"><strong>KPI \u603B\u89C8</strong></header>
       <div class="performance-summary">
         <div>
           <span>\u7EDF\u8BA1\u7A97\u53E3</span>
@@ -2128,29 +2194,14 @@ function renderSchedulePerformance(performance2) {
           <small>\u5254\u9664\u5F00\u5934 ${formatSeconds2(window2.trimmedStart)} s / \u7ED3\u5C3E ${formatSeconds2(window2.trimmedEnd)} s</small>
         </div>
         <div>
-          <span>\u6700\u53EF\u80FD\u74F6\u9888</span>
-          <strong>${escapeHtml(bottleneck?.label ?? "\u2014")}</strong>
-          <small>${bottleneck ? `\u5BB9\u91CF\u5229\u7528\u7387 ${formatPercent(bottleneck.utilization)} \xB7 ${confidenceLabels[bottleneck.confidence]} \xB7 \u53E6\u6709 ${Math.max(0, performance2.bottleneckCandidates.length - 1)} \u4E2A\u5019\u9009` : "\u6CA1\u6709\u8DB3\u591F\u7684\u8D44\u6E90\u6D3B\u52A8"}</small>
-        </div>
-        <div>
-          <span>\u51FA\u7AD9\u8282\u62CD</span>
+          <span>\u4EA7\u80FD</span>
           <strong>${performance2.throughputPerHour > 0 ? `${performance2.throughputPerHour.toFixed(1)} \u7247/h` : "\u2014"}</strong>
           <small>\u5E73\u5747\u95F4\u9694 ${formatSeconds2(performance2.meanDepartureInterval)} s \xB7 \u95F4\u9694 CV ${performance2.departureIntervalCv.toFixed(2)} \xB7 ${performance2.completedWaferCount} \u7247\u6837\u672C</small>
         </div>
         <div>
-          <span>\u6676\u5706\u9A7B\u7559\u65F6\u95F4 \xB7 \u52A0\u5DE5\u8154</span>
-          <strong>${performance2.processChamberDwellTime.sampleCount ? `${formatSeconds2(performance2.processChamberDwellTime.meanSeconds)} s` : "\u2014"}</strong>
-          <small>\u52A0\u5DE5\u7ED3\u675F \u2192 \u5B8C\u5168\u79BB\u8154 \xB7 \u4E2D\u4F4D ${formatSeconds2(performance2.processChamberDwellTime.medianSeconds)} s \xB7 \u6700\u5927 ${formatSeconds2(performance2.processChamberDwellTime.maxSeconds)} s \xB7 ${performance2.processChamberDwellTime.sampleCount} \u6B21</small>
-        </div>
-        <div>
-          <span>\u673A\u5668\u624B\u9A7B\u7559\u65F6\u95F4</span>
-          <strong>${performance2.robotWaferDwellTime.sampleCount ? `${formatSeconds2(performance2.robotWaferDwellTime.meanSeconds)} s` : "\u2014"}</strong>
-          <small>Pick \u5B8C\u6210 \u2192 Place \u5F00\u59CB\uFF0C\u5DF2\u6263\u9664 PreTrans \u8FD0\u8F93 \xB7 \u6700\u5927 ${formatSeconds2(performance2.robotWaferDwellTime.maxSeconds)} s \xB7 ${performance2.robotWaferDwellTime.sampleCount} \u6B21</small>
-        </div>
-        <div>
-          <span>\u6676\u5706\u7CFB\u7EDF\u505C\u7559\u65F6\u95F4</span>
-          <strong>${performance2.waferSystemResidenceTime.sampleCount ? `${formatSeconds2(performance2.waferSystemResidenceTime.meanSeconds)} s` : "\u2014"}</strong>
-          <small>\u79BB\u5F00 LP \u2192 \u8FD4\u56DE LP \xB7 CV ${performance2.waferSystemResidenceTime.coefficientOfVariation.toFixed(2)} \xB7 \u6700\u5927 ${formatSeconds2(performance2.waferSystemResidenceTime.maxSeconds)} s \xB7 ${performance2.waferSystemResidenceTime.sampleCount} \u7247</small>
+          <span>LoadLock \u5229\u7528\u6548\u7387</span>
+          <strong>${loadLockEfficiency.cycleCount ? `${loadLockEfficiency.wafersPerCycle.toFixed(2)} \u7247/\u5468\u671F` : "\u2014"}</strong>
+          <small>${loadLockEfficiency.cycleCount ? `${loadLockEfficiency.waferCycleCount} \u7247\xB7\u5468\u671F / ${loadLockEfficiency.cycleCount} \u4E2A\u5B8C\u6574\u62BD\u5145\u6C14\u5468\u671F \xB7 \u6EE1\u8F7D ${formatPercent(loadLockEfficiency.fullLoadCycleRatio)}\uFF08${loadLockEfficiency.fullLoadCycleCount}/${loadLockEfficiency.cycleCount}\uFF09\xB7 \u7A7A\u8F7D ${formatPercent(loadLockEfficiency.emptyLoadCycleRatio)}\uFF08${loadLockEfficiency.emptyLoadCycleCount}/${loadLockEfficiency.cycleCount}\uFF09` : "\u6CA1\u6709\u5B8C\u6574\u7684\u62BD\u6C14\u2014\u5145\u6C14\u5468\u671F"}</small>
         </div>
       </div>
     </section>
@@ -2163,9 +2214,6 @@ function renderSchedulePerformance(performance2) {
       ${renderBottleneckAnalysis(performance2)}
     </section>
 
-    <section class="result-card loadlock-swap-card">
-      ${renderLoadLockCard(performance2)}
-    </section>
     `;
 }
 var VisualizationWorkspace = class {
@@ -6804,12 +6852,35 @@ document.getElementById("pjobRouteDialog").addEventListener("click", (event) => 
 });
 var bottleneckAnalysisHelpDialog = document.getElementById("bottleneckAnalysisHelpDialog");
 document.getElementById("bottleneckAnalysisHelpDialogClose").addEventListener("click", () => bottleneckAnalysisHelpDialog.close());
+var residenceAnalysisHelpDialog = document.getElementById("residenceAnalysisHelpDialog");
+document.getElementById("residenceAnalysisHelpDialogClose").addEventListener("click", () => residenceAnalysisHelpDialog.close());
 document.getElementById("visualPerformance").addEventListener("click", (event) => {
-  if (!(event.target instanceof Element) || !event.target.closest("#bottleneckAnalysisHelpButton")) return;
-  if (!bottleneckAnalysisHelpDialog.open) bottleneckAnalysisHelpDialog.showModal();
+  if (!(event.target instanceof Element)) return;
+  if (event.target.closest("#bottleneckAnalysisHelpButton") && !bottleneckAnalysisHelpDialog.open) {
+    bottleneckAnalysisHelpDialog.showModal();
+  }
+  if (event.target.closest("#residenceAnalysisHelpButton") && !residenceAnalysisHelpDialog.open) {
+    residenceAnalysisHelpDialog.showModal();
+  }
+});
+document.getElementById("visualPerformance").addEventListener("change", (event) => {
+  const select = event.target instanceof HTMLSelectElement && event.target.id === "residenceMetricSelect" ? event.target : null;
+  if (!select) return;
+  const performancePanel = event.currentTarget;
+  if (!(performancePanel instanceof HTMLElement)) return;
+  const selectedMetric = select.value;
+  performancePanel.querySelectorAll("[data-residence-metric-chart]").forEach((chart) => {
+    chart.hidden = chart.dataset.residenceMetricChart !== selectedMetric;
+  });
+  performancePanel.querySelectorAll("[data-residence-summary]").forEach((summary) => {
+    summary.hidden = summary.dataset.residenceSummary !== selectedMetric;
+  });
 });
 document.getElementById("bottleneckAnalysisHelpDialog").addEventListener("click", (event) => {
   if (event.target === bottleneckAnalysisHelpDialog) bottleneckAnalysisHelpDialog.close();
+});
+document.getElementById("residenceAnalysisHelpDialog").addEventListener("click", (event) => {
+  if (event.target === residenceAnalysisHelpDialog) residenceAnalysisHelpDialog.close();
 });
 document.getElementById("pjobRouteProcess").addEventListener("change", (event) => renderPJobRouteDialogGroup(event.target.value));
 document.getElementById("pjobRouteCleanFilter").addEventListener("change", (event) => {

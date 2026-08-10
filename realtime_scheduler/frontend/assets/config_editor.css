@@ -722,49 +722,34 @@
     .performance-number small { margin-left: 5px; }
 
     /* -------- 3. 逐片晶圆系统驻留时间 -------- */
-    .residence-chart-head { display: flex; min-height: 58px; align-items: center; justify-content: space-between; gap: 20px; padding: 14px 24px; border-bottom: 1px solid var(--performance-line); background: #f8fafc; }
-    .residence-chart-head > strong { color: var(--performance-text); font-size: 16px; }
+      .residence-chart-head { display: flex; min-height: 58px; align-items: center; gap: 12px; padding: 14px 24px; border-bottom: 1px solid var(--performance-line); background: #f8fafc; }
+      .residence-chart-head > strong { color: var(--performance-text); font-size: 16px; }
+      .residence-chart-head .residence-chart-summary { margin-left: auto; }
+      .residence-chart-head .residence-analysis-help { min-height: 40px; padding: 8px 11px; border-radius: 9px; font: 750 12px/1.2 inherit; }
+      .residence-metric-control { flex: 0 0 auto; }
+      .residence-metric-control select { min-height: 40px; padding: 8px 34px 8px 10px; border: 1px solid #b9c7d8; border-radius: 9px; color: #1e2d43; background: #fff; font: 650 13px/1.2 inherit; cursor: pointer; }
+      .residence-metric-control select:focus-visible { outline: 3px solid var(--accent-ring); outline-offset: 2px; }
+      .residence-analysis-help:focus-visible { outline: 3px solid var(--accent-ring); outline-offset: 2px; }
     .residence-chart-summary { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
     .residence-chart-summary span { padding: 5px 9px; border: 1px solid #d9e2ef; border-radius: 999px; color: var(--performance-muted); background: #fff; font-size: 10px; white-space: nowrap; }
     .residence-chart-summary b { margin-left: 3px; color: var(--performance-text); font-size: 11px; font-variant-numeric: tabular-nums; }
-    .residence-chart-body { min-width: 0; padding: 18px 24px 16px; }
-    .residence-chart-scroll { max-width: 100%; overflow-x: auto; border-radius: 8px; outline: none; scrollbar-color: #a8b3c3 transparent; }
-    .residence-chart-scroll:focus-visible { outline: 3px solid var(--accent-ring); outline-offset: 2px; }
-    .residence-chart-plot { position: relative; width: max-content; min-width: 100%; padding: 0 18px; background-image: repeating-linear-gradient(to top, transparent 0 41px, #edf1f6 41px 42px); }
-    .residence-bars { display: flex; width: max-content; min-width: 100%; height: 224px; align-items: stretch; gap: 12px; margin: 0; padding: 0; list-style: none; }
-    .residence-bar-item { position: relative; z-index: 2; display: grid; width: 44px; flex: 0 0 44px; grid-template-rows: 26px 170px 28px; justify-items: center; }
-    .residence-bar-item > strong { align-self: end; color: #34435a; font-size: 9px; font-variant-numeric: tabular-nums; }
-    .residence-bar-track { display: flex; width: 32px; height: 170px; align-items: flex-end; overflow: hidden; border-radius: 5px 5px 2px 2px; background: rgba(226,232,240,.58); }
-    .residence-bar-track i { display: block; width: 100%; min-height: 2px; border-radius: 5px 5px 2px 2px; background: linear-gradient(180deg, #5a7edf 0%, #315fc2 100%); box-shadow: inset 0 1px rgba(255,255,255,.25); }
-    .residence-bar-item > small { max-width: 44px; padding-top: 6px; overflow: hidden; color: #34435a; font: 900 12px/1.25 "Fira Code", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
-    .residence-mean-line { position: absolute; z-index: 3; right: 18px; left: 18px; height: 0; border-top: 1px dashed #d08b18; pointer-events: none; }
-    .residence-mean-line span { position: absolute; right: 0; bottom: 4px; padding: 2px 5px; border-radius: 4px; color: #85520a; background: rgba(255,249,235,.94); font-size: 9px; font-weight: 800; }
+    .residence-chart-body { min-width: 0; padding: 18px 24px 20px; }
+    .residence-metric-chart { min-width: 0; }
+    .residence-metric-scroll { max-width: 100%; overflow-x: auto; outline: none; scrollbar-color: #a8b3c3 transparent; }
+    .residence-metric-scroll:focus-visible { outline: 3px solid var(--accent-ring); outline-offset: -3px; }
+    .residence-metric-plot { position: relative; width: max-content; min-width: 100%; padding: 0 18px; background-image: repeating-linear-gradient(to top, transparent 0 30px, #edf1f6 30px 31px); }
+    .residence-metric-bars { display: flex; width: max-content; min-width: 100%; height: 166px; align-items: stretch; gap: 12px; margin: 0; padding: 0; list-style: none; }
+    .residence-metric-bar-item { position: relative; z-index: 2; display: grid; width: 46px; flex: 0 0 46px; grid-template-rows: 20px 120px 26px; justify-items: center; }
+    .residence-metric-bar-item > strong { align-self: end; color: #34435a; font-size: 9px; font-variant-numeric: tabular-nums; }
+    .residence-metric-bar { display: flex; width: 26px; height: 120px; align-items: flex-end; overflow: hidden; border-radius: 5px 5px 2px 2px; background: rgba(226,232,240,.58); }
+    .residence-metric-bar i { display: block; width: 100%; min-height: 2px; border-radius: 5px 5px 2px 2px; box-shadow: inset 0 1px rgba(255,255,255,.25); }
+      .residence-bar-system i { background: linear-gradient(180deg, #5a7edf 0%, #315fc2 100%); }
+      .residence-bar-chamber i { background: linear-gradient(180deg, #9b7ee0 0%, #7652b7 100%); }
+      .residence-bar-robot i { background: linear-gradient(180deg, #54ad9f 0%, #2b7f75 100%); }
+    .residence-metric-bar-item > small { max-width: 46px; padding-top: 5px; overflow: hidden; color: #34435a; font: 900 11px/1.25 "Fira Code", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+    .residence-metric-mean-line { position: absolute; z-index: 3; right: 18px; left: 18px; height: 0; border-top: 1px dashed #d08b18; pointer-events: none; }
+    .residence-metric-mean-line span { position: absolute; right: 0; bottom: 4px; padding: 2px 5px; border-radius: 4px; color: #85520a; background: rgba(255,249,235,.94); font-size: 9px; font-weight: 800; }
     .residence-chart-empty { padding: 36px 24px; color: var(--performance-muted); font-size: 12px; text-align: center; }
-
-    /* -------- 4. LoadLock 交换时序卡片 -------- */
-    .loadlock-card-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; padding: 16px 24px; border-bottom: 1px solid var(--performance-line); background: #f8fafc; }
-    .loadlock-card-head strong { display: block; color: var(--performance-text); font-size: 16px; }
-    .loadlock-card-head span { display: block; margin-top: 4px; color: var(--performance-muted); font-size: 12px; }
-    .loadlock-card-body { min-width: 0; padding: 14px 0 0; }
-    .loadlock-seq {
-      min-width: 0;
-      max-width: 100%;
-      --loadlock-pump: #3e6696;
-      --loadlock-pump-border: #31547f;
-      --loadlock-vent: #dfa13d;
-      --loadlock-vent-border: #c88a29;
-      padding: 0 24px 14px;
-    }
-    /* -------- 全局交错序列（横向滚动卡片） -------- */
-    .seq-scroll { max-width: 100%; overflow-x: auto; padding: 6px 0 8px; scrollbar-color: #a8b3c3 transparent; }
-    .seq-cards { display: flex; width: max-content; min-width: 100%; gap: 5px; }
-    /* -------- 每张卡片 -------- */
-    .seq-card { display: inline-flex; min-width: 44px; min-height: 28px; flex-shrink: 0; align-items: center; justify-content: center; padding: 5px 9px; border: 1px solid; border-radius: 7px; box-shadow: inset 0 1px rgba(255,255,255,.22), 0 1px 2px rgba(15,23,42,.08); cursor: default; }
-    .seq-pump { border-color: var(--loadlock-pump-border); background: var(--loadlock-pump); }
-    .seq-vent { border-color: var(--loadlock-vent-border); background: var(--loadlock-vent); }
-    .seq-dots { display: flex; align-items: center; justify-content: center; gap: 5px; min-height: 14px; }
-    .gantt-wafer-dot { width: 12px; height: 12px; flex-shrink: 0; border: 2px solid rgba(255,255,255,.94); border-radius: 50%; box-shadow: 0 0 0 1px rgba(15,23,42,.28), 0 1px 2px rgba(15,23,42,.22); }
-    .loadlock-cycle-empty { padding: 24px 18px; color: var(--performance-muted); font-size: 12px; text-align: center; }
 
     .visual-workspace-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(340px, 380px); gap: 14px; align-items: start; }
     .device-stage { min-width: 0; }
@@ -1065,7 +1050,7 @@
     @media (max-width: 1180px) { .visual-overview { grid-template-columns: repeat(3, minmax(0, 1fr)); } .visual-source { grid-column: span 3; } .visual-stat:nth-child(5) { border-left: 0; } .visual-workspace-layout { grid-template-columns: 1fr; } .playback-inspector { position: static; grid-template-columns: minmax(0, 1.25fr) minmax(280px, .75fr); } .performance-grid { grid-template-columns: 1fr; } .group-chart-grid { grid-template-columns: 1fr; } }
     @media (max-width: 1040px) { .layout { grid-template-columns: 1fr; } .side { position: static; grid-row: 1; } .batch-results { grid-template-columns: repeat(2, minmax(0, 1fr)); } .device-config-layout { grid-template-columns: 1fr; } .device-config-nav { padding: 8px; } .device-config-nav-title { display: none; } .device-config-nav-item { max-width: 260px; } .robot-slot-grid { grid-template-columns: 1fr; } }
     @media (max-width: 900px) { .cjob-controls { grid-template-columns: 1fr 1fr; } .bottleneck-candidate-list li { grid-template-columns: 30px minmax(0, 1fr) 90px; } .candidate-score { display: none; } }
-    @media (max-width: 700px) { .shell { padding: 12px 14px 48px; } .topbar { overflow-x: auto; } .tabs { flex: 0 0 auto; } .tab { min-width: 88px; } .grid > * { grid-column: span 12 !important; } .route-panel-head { position: static; align-items: stretch; flex-direction: column; } .route-panel-actions, .route-filter-bar { align-items: stretch; flex-wrap: wrap; } .route-filter-field { flex: 1 1 145px; } .route-filter-field .compact-select, .route-filter-field:last-child .compact-select { width: 100%; } .route-panel-actions > .btn { align-self: flex-end; } .route-meta-grid, .cjob-controls, .clean-fields { grid-template-columns: 1fr; } .route-process-head, .route-type-head { align-items: flex-start; flex-wrap: wrap; } .route-count { width: 100%; margin-left: 30px; } .route-summary-head { grid-template-columns: 1fr; padding: 8px 10px; } .route-summary-toggle { grid-template-columns: auto minmax(0, 1fr); } .route-summary-primary { flex-wrap: wrap; } .route-summary-primary strong { flex-basis: calc(100% - 72px); } .route-property-tags { margin-left: 39px; } .route-summary-actions { justify-content: flex-start; flex-wrap: wrap; padding-left: 13px; } .round-head, .robot-slot-panel-head { align-items: flex-start; flex-direction: column; } .candidate-picker-menu { grid-template-columns: 1fr; } .drawer { width: 100vw; max-width: 100vw; } .drawer-head, .drawer-body { padding-right: 16px; padding-left: 16px; } .step-meta-list { grid-template-columns: 1fr 1fr; row-gap: 12px; } .step-meta-list > div:nth-child(3) { padding-left: 0; border-left: 0; } .step-edit-grid, .step-system-grid, .batch-results { grid-template-columns: 1fr; } .readonly-field.wide { grid-column: auto; } .clean-choice { flex: 1 1 calc(50% - 8px); justify-content: flex-start; } .result-actions { grid-template-columns: 1fr; } .visual-toolbar { align-items: stretch; flex-direction: column; padding: 18px; } .visual-toolbar-actions { justify-content: flex-start; } .visual-overview { grid-template-columns: 1fr 1fr; } .visual-source { grid-column: span 2; } .visual-stat { border-top: 1px solid var(--line); } .visual-stat:nth-child(even) { border-left: 0; } .timeline-console { grid-template-columns: 1fr; } .timeline-play { width: 100%; } .timeline-speed { justify-content: space-between; } .performance-head { align-items: stretch; flex-direction: column; padding: 20px; } .performance-head label { min-width: 0; } .performance-summary { grid-template-columns: 1fr; } .performance-summary > div { padding: 18px 20px; border-top: 1px solid #e7edf4; border-left: 0; } .performance-summary > div:first-child { border-top: 0; } .bottleneck-candidates { padding: 18px 20px; } .bottleneck-candidate-head { align-items: flex-start; flex-direction: column; gap: 4px; } .bottleneck-candidate-list li { grid-template-columns: 28px minmax(0, 1fr); } .candidate-metrics { display: none; } .candidate-main > div { align-items: flex-start; flex-direction: column; gap: 4px; } .candidate-main small { white-space: normal; } .performance-window-note { padding-right: 20px; padding-left: 20px; } .performance-legend { padding-right: 20px; padding-left: 20px; } .loadlock-cycle-head { padding-right: 14px; padding-left: 14px; } .loadlock-cycle-table-wrap { padding-right: 14px; padding-left: 14px; } .equipment-grid, .lock-zone .equipment-grid, .robot-grid { grid-template-columns: 1fr; } .group-analysis-head { flex-direction: column; } .group-kpi-grid { grid-template-columns: 1fr; } .group-frequency-card { grid-template-columns: 1fr; } .test-group-analysis { padding: 16px; } .robot-slot-visual { flex-wrap: wrap; } }
+    @media (max-width: 700px) { .shell { padding: 12px 14px 48px; } .topbar { overflow-x: auto; } .tabs { flex: 0 0 auto; } .tab { min-width: 88px; } .grid > * { grid-column: span 12 !important; } .route-panel-head { position: static; align-items: stretch; flex-direction: column; } .route-panel-actions, .route-filter-bar { align-items: stretch; flex-wrap: wrap; } .route-filter-field { flex: 1 1 145px; } .route-filter-field .compact-select, .route-filter-field:last-child .compact-select { width: 100%; } .route-panel-actions > .btn { align-self: flex-end; } .route-meta-grid, .cjob-controls, .clean-fields { grid-template-columns: 1fr; } .route-process-head, .route-type-head { align-items: flex-start; flex-wrap: wrap; } .route-count { width: 100%; margin-left: 30px; } .route-summary-head { grid-template-columns: 1fr; padding: 8px 10px; } .route-summary-toggle { grid-template-columns: auto minmax(0, 1fr); } .route-summary-primary { flex-wrap: wrap; } .route-summary-primary strong { flex-basis: calc(100% - 72px); } .route-property-tags { margin-left: 39px; } .route-summary-actions { justify-content: flex-start; flex-wrap: wrap; padding-left: 13px; } .round-head, .robot-slot-panel-head { align-items: flex-start; flex-direction: column; } .candidate-picker-menu { grid-template-columns: 1fr; } .drawer { width: 100vw; max-width: 100vw; } .drawer-head, .drawer-body { padding-right: 16px; padding-left: 16px; } .step-meta-list { grid-template-columns: 1fr 1fr; row-gap: 12px; } .step-meta-list > div:nth-child(3) { padding-left: 0; border-left: 0; } .step-edit-grid, .step-system-grid, .batch-results { grid-template-columns: 1fr; } .readonly-field.wide { grid-column: auto; } .clean-choice { flex: 1 1 calc(50% - 8px); justify-content: flex-start; } .result-actions { grid-template-columns: 1fr; } .visual-toolbar { align-items: stretch; flex-direction: column; padding: 18px; } .visual-toolbar-actions { justify-content: flex-start; } .visual-overview { grid-template-columns: 1fr 1fr; } .visual-source { grid-column: span 2; } .visual-stat { border-top: 1px solid var(--line); } .visual-stat:nth-child(even) { border-left: 0; } .timeline-console { grid-template-columns: 1fr; } .timeline-play { width: 100%; } .timeline-speed { justify-content: space-between; } .performance-head { align-items: stretch; flex-direction: column; padding: 20px; } .performance-head label { min-width: 0; } .performance-summary { grid-template-columns: 1fr; } .performance-summary > div { padding: 18px 20px; border-top: 1px solid #e7edf4; border-left: 0; } .performance-summary > div:first-child { border-top: 0; } .bottleneck-candidates { padding: 18px 20px; } .bottleneck-candidate-head { align-items: flex-start; flex-direction: column; gap: 4px; } .bottleneck-candidate-list li { grid-template-columns: 28px minmax(0, 1fr); } .candidate-metrics { display: none; } .candidate-main > div { align-items: flex-start; flex-direction: column; gap: 4px; } .candidate-main small { white-space: normal; } .performance-window-note { padding-right: 20px; padding-left: 20px; } .performance-legend { padding-right: 20px; padding-left: 20px; } .equipment-grid, .lock-zone .equipment-grid, .robot-grid { grid-template-columns: 1fr; } .group-analysis-head { flex-direction: column; } .group-kpi-grid { grid-template-columns: 1fr; } .group-frequency-card { grid-template-columns: 1fr; } .test-group-analysis { padding: 16px; } .robot-slot-visual { flex-wrap: wrap; } }
     @media (max-width: 700px) { .pjob-route-card-head > .route-property-tags { margin-left: 0; } }
     @media (max-width: 1040px) {
       .device-config-layout { grid-template-columns: 1fr; }
@@ -1185,8 +1170,8 @@
     body.theme-dark .device-transition-kind, body.theme-dark .device-time-section > header > span { color: #aec3f3; background: #283b66; }
     body.theme-dark .device-transfer-type.type-empty { color: #b4bfcd; background: #303a47; }
     body.theme-dark .device-transfer-type.type-loaded { color: #91d3b7; background: #244238; }
-    body.theme-dark .app-content :is(.workspace-device-controls > select, .workspace-icon-button, .clean-type-group, .clean-card, .round-card, .cjob-card, .cjob-head, .cjob-controls, .route-process-group, .route-type-group, .route-type-head, .route-summary-card, .route-summary-head, .candidate-picker summary, .candidate-picker-menu, .algorithm-hover-info, .test-group-analysis, .group-kpi-grid article, .group-chart-card, .group-analysis-table-wrap, .visual-content, .visual-overview, .timeline-console, .result-card, .performance-summary, .bottleneck-analysis-head, .bottleneck-analysis-list li, .bl-candidate-bars, .other-resources-section, .loadlock-card-head, .equipment-schematic, .schematic-head, .decision-lens-panel, .active-moves-panel, .visual-legend, .drawer, .step-overview-card, .step-editor-card, .step-system-details, .step-meta-list, .step-number-control, .clean-choice, .robot-slot-card, .robot-slot-notice, .robot-slot-empty) { border-color: var(--line); color: var(--ink); background: var(--surface); box-shadow: none; }
-    body.theme-dark .app-content :is(.cjob-controls, .route-type-head, .route-summary-head, .test-group-analysis, .visual-content, .bottleneck-analysis-head, .bl-candidate-bars, .other-resources-section, .loadlock-card-head, .schematic-head, .decision-alternative-empty, .visual-legend, .step-meta-list) { background: var(--soft); }
+    body.theme-dark .app-content :is(.workspace-device-controls > select, .workspace-icon-button, .clean-type-group, .clean-card, .round-card, .cjob-card, .cjob-head, .cjob-controls, .route-process-group, .route-type-group, .route-type-head, .route-summary-card, .route-summary-head, .candidate-picker summary, .candidate-picker-menu, .algorithm-hover-info, .test-group-analysis, .group-kpi-grid article, .group-chart-card, .group-analysis-table-wrap, .visual-content, .visual-overview, .timeline-console, .result-card, .performance-summary, .bottleneck-analysis-head, .bottleneck-analysis-list li, .bl-candidate-bars, .other-resources-section, .equipment-schematic, .schematic-head, .decision-lens-panel, .active-moves-panel, .visual-legend, .drawer, .step-overview-card, .step-editor-card, .step-system-details, .step-meta-list, .step-number-control, .clean-choice, .robot-slot-card, .robot-slot-notice, .robot-slot-empty) { border-color: var(--line); color: var(--ink); background: var(--surface); box-shadow: none; }
+    body.theme-dark .app-content :is(.cjob-controls, .route-type-head, .route-summary-head, .test-group-analysis, .visual-content, .bottleneck-analysis-head, .bl-candidate-bars, .other-resources-section, .schematic-head, .decision-alternative-empty, .visual-legend, .step-meta-list) { background: var(--soft); }
     body.theme-dark .app-content .cjob-controls { background: transparent; }
     body.theme-dark .app-content .pjob-row { border-color: var(--line); background: var(--surface); }
     body.theme-dark .route-summary-primary strong { color: #e1e5ec; }
@@ -1241,7 +1226,10 @@
     body.theme-dark .resource-utilization-name strong, body.theme-dark .resource-utilization-percent { color: var(--ink); }
     body.theme-dark .bottleneck-window-control, body.theme-dark .additional-resource-details summary { color: #d7d9df; }
     body.theme-dark .bottleneck-analysis-help { border-color: #4d5f77; color: #c7d8f4; background: #273344; }
-    body.theme-dark .bottleneck-analysis-help:hover { border-color: #7597e8; color: #fff; background: #31415a; }
+      body.theme-dark .bottleneck-analysis-help:hover { border-color: #7597e8; color: #fff; background: #31415a; }
+      body.theme-dark .residence-analysis-help { border-color: #4d5f77; color: #c7d8f4; background: #273344; }
+      body.theme-dark .residence-analysis-help:hover { border-color: #7597e8; color: #fff; background: #31415a; }
+      body.theme-dark .residence-metric-control select { border-color: #4d5f77; color: var(--ink); background: #273344; }
     body.theme-dark dialog.bottleneck-analysis-help-dialog { border-color: var(--line); color: var(--ink); background: var(--surface); }
     body.theme-dark .bottleneck-analysis-help-head { border-color: var(--line); background: var(--soft); }
     body.theme-dark .bottleneck-analysis-help-content { color: var(--muted); }
@@ -1654,8 +1642,9 @@
       .reference-grid-canvas { min-width: 580px; }
       .petri-center-column .device-stage { overflow-x: auto; }
       .residence-chart-head { align-items: flex-start; flex-direction: column; gap: 8px; padding-right: 20px; padding-left: 20px; }
-      .residence-chart-summary { justify-content: flex-start; }
-      .residence-chart-body { padding-right: 14px; padding-left: 14px; }
+        .residence-chart-head .residence-chart-summary { margin-left: 0; }
+        .residence-chart-summary { justify-content: flex-start; }
+        .residence-chart-body { padding-right: 14px; padding-left: 14px; }
     }
     @media (max-width: 560px) {
       .petri-top-playback-controls { column-gap: 8px; padding: 10px; }

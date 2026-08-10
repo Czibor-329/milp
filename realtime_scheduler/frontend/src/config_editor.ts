@@ -4005,12 +4005,37 @@ document.getElementById("pjobRouteDialog").addEventListener("cancel", event => {
 document.getElementById("pjobRouteDialog").addEventListener("click", event => { if (event.target.id === "pjobRouteDialog") closePJobRoutePicker(); });
 const bottleneckAnalysisHelpDialog = document.getElementById("bottleneckAnalysisHelpDialog") as HTMLDialogElement;
 document.getElementById("bottleneckAnalysisHelpDialogClose").addEventListener("click", () => bottleneckAnalysisHelpDialog.close());
+const residenceAnalysisHelpDialog = document.getElementById("residenceAnalysisHelpDialog") as HTMLDialogElement;
+document.getElementById("residenceAnalysisHelpDialogClose").addEventListener("click", () => residenceAnalysisHelpDialog.close());
 document.getElementById("visualPerformance").addEventListener("click", event => {
-  if (!(event.target instanceof Element) || !event.target.closest("#bottleneckAnalysisHelpButton")) return;
-  if (!bottleneckAnalysisHelpDialog.open) bottleneckAnalysisHelpDialog.showModal();
+  if (!(event.target instanceof Element)) return;
+  if (event.target.closest("#bottleneckAnalysisHelpButton") && !bottleneckAnalysisHelpDialog.open) {
+    bottleneckAnalysisHelpDialog.showModal();
+  }
+  if (event.target.closest("#residenceAnalysisHelpButton") && !residenceAnalysisHelpDialog.open) {
+    residenceAnalysisHelpDialog.showModal();
+  }
+});
+document.getElementById("visualPerformance").addEventListener("change", event => {
+  const select = event.target instanceof HTMLSelectElement && event.target.id === "residenceMetricSelect"
+    ? event.target
+    : null;
+  if (!select) return;
+  const performancePanel = event.currentTarget;
+  if (!(performancePanel instanceof HTMLElement)) return;
+  const selectedMetric = select.value;
+  performancePanel.querySelectorAll<HTMLElement>("[data-residence-metric-chart]").forEach(chart => {
+    chart.hidden = chart.dataset.residenceMetricChart !== selectedMetric;
+  });
+  performancePanel.querySelectorAll<HTMLElement>("[data-residence-summary]").forEach(summary => {
+    summary.hidden = summary.dataset.residenceSummary !== selectedMetric;
+  });
 });
 document.getElementById("bottleneckAnalysisHelpDialog").addEventListener("click", event => {
   if (event.target === bottleneckAnalysisHelpDialog) bottleneckAnalysisHelpDialog.close();
+});
+document.getElementById("residenceAnalysisHelpDialog").addEventListener("click", event => {
+  if (event.target === residenceAnalysisHelpDialog) residenceAnalysisHelpDialog.close();
 });
 document.getElementById("pjobRouteProcess").addEventListener("change", event => renderPJobRouteDialogGroup(event.target.value));
 document.getElementById("pjobRouteCleanFilter").addEventListener("change", event => {
