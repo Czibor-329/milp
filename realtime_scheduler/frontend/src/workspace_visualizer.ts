@@ -2741,7 +2741,10 @@ function renderBottleneckAnalysis(performance: SchedulePerformance): string {
       <div>
         <strong>瓶颈分析</strong>
       </div>
-      <label class="bottleneck-window-control"><span class="visually-hidden">统计口径</span><div class="bottleneck-window-slot"></div></label>
+      <div class="bottleneck-analysis-actions">
+        <button class="bottleneck-analysis-help" id="bottleneckAnalysisHelpButton" type="button" aria-haspopup="dialog" aria-controls="bottleneckAnalysisHelpDialog">瓶颈分析说明</button>
+        <label class="bottleneck-window-control"><span class="visually-hidden">统计口径</span><div class="bottleneck-window-slot"></div></label>
+      </div>
     </header>
     <div class="resource-utilization-head" aria-hidden="true"><span>资源</span><span>利用率</span><span>占用组成</span><span>活跃时长</span><span>瓶颈证据得分</span></div>
     <ol class="resource-utilization-list">

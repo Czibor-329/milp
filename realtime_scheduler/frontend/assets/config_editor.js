@@ -2048,7 +2048,10 @@ function renderBottleneckAnalysis(performance2) {
       <div>
         <strong>\u74F6\u9888\u5206\u6790</strong>
       </div>
-      <label class="bottleneck-window-control"><span class="visually-hidden">\u7EDF\u8BA1\u53E3\u5F84</span><div class="bottleneck-window-slot"></div></label>
+      <div class="bottleneck-analysis-actions">
+        <button class="bottleneck-analysis-help" id="bottleneckAnalysisHelpButton" type="button" aria-haspopup="dialog" aria-controls="bottleneckAnalysisHelpDialog">\u74F6\u9888\u5206\u6790\u8BF4\u660E</button>
+        <label class="bottleneck-window-control"><span class="visually-hidden">\u7EDF\u8BA1\u53E3\u5F84</span><div class="bottleneck-window-slot"></div></label>
+      </div>
     </header>
     <div class="resource-utilization-head" aria-hidden="true"><span>\u8D44\u6E90</span><span>\u5229\u7528\u7387</span><span>\u5360\u7528\u7EC4\u6210</span><span>\u6D3B\u8DC3\u65F6\u957F</span><span>\u74F6\u9888\u8BC1\u636E\u5F97\u5206</span></div>
     <ol class="resource-utilization-list">
@@ -3145,6 +3148,17 @@ var PROCESSING_STATION_TYPES = /* @__PURE__ */ new Set([
 var FIRST_ROBOT_SLOT_ID = 1;
 var DUAL_ARM_SLOT_COUNT = 2;
 var SEARCH_TELEMETRY_POLL_MILLISECONDS = 75;
+var STATION_ACTION_TIME_FIELDS = [
+  { key: "PickPrepareTime", label: "\u53D6\u7247\u51C6\u5907" },
+  { key: "PickCompleteTime", label: "\u53D6\u7247\u5B8C\u6210" },
+  { key: "PlacePrepareTime", label: "\u653E\u7247\u51C6\u5907" },
+  { key: "PlaceCompleteTime", label: "\u653E\u7247\u5B8C\u6210" },
+  { key: "PostCompleteTime", label: "\u52A8\u4F5C\u540E\u5904\u7406" }
+];
+var ROBOT_ACTION_TIME_FIELDS = [
+  { key: "PickTime", label: "\u53D6\u7247" },
+  { key: "PlaceTime", label: "\u653E\u7247" }
+];
 var state = {
   workspaceDevices: [],
   workspaceDevice: null,
@@ -3172,6 +3186,14 @@ var state = {
   robotScopes: {},
   robotSlots: {},
   robotSlotsSaving: /* @__PURE__ */ new Set(),
+  deviceConfigSection: "station-time",
+  deviceStationName: "",
+  deviceRobotName: "",
+  deviceRobotTransferSources: {},
+  deviceTimingDraft: null,
+  deviceTimingDirty: false,
+  deviceTimingSaving: false,
+  deviceTimingStatusMessage: "\u9009\u62E9\u8BBE\u5907\u540E\u5F00\u59CB\u914D\u7F6E",
   strategy: "heuristic",
   availableAlgorithms: [],
   algorithmMetadata: {},
@@ -3553,6 +3575,277 @@ function applyDeviceTopology(device, deviceName, rawRobotSlots = {}) {
   state.robotScopes = Object.fromEntries(Object.entries(state.device.Robots).map(([name, robot]) => [name, [...new Set(Object.values(robot.ArmInfo || {}).filter((arm) => arm.IsEnable !== false).flatMap((arm) => arm.AccessibleStations || []))]]));
   visualizationWorkspace.setDevice(state.device);
   if (!state.loadPorts.length || !state.processModules.length) throw new Error("\u8BBE\u5907\u5FC5\u987B\u5305\u542B LoadPort \u548C ProcessChamber");
+}
+function buildDeviceTimingDraft(device) {
+  const draft = { stations: {}, robots: {} };
+  Object.entries(device?.Stations || {}).forEach(([stationName, station]) => {
+    const timing = {};
+    [...STATION_ACTION_TIME_FIELDS, { key: "AlignmentTime" }].forEach(({ key }) => {
+      if (station?.[key] && typeof station[key] === "object" && !Array.isArray(station[key])) {
+        timing[key] = structuredClone(station[key]);
+      }
+    });
+    if (Array.isArray(station?.PrePrepareTime)) {
+      timing.PrePrepareTime = station.PrePrepareTime.map((row) => Number(row?.Time) || 0);
+    }
+    draft.stations[stationName] = timing;
+  });
+  Object.entries(device?.Robots || {}).forEach(([robotName, robot]) => {
+    const timing = {};
+    ROBOT_ACTION_TIME_FIELDS.forEach(({ key }) => {
+      if (robot?.[key] && typeof robot[key] === "object" && !Array.isArray(robot[key])) {
+        timing[key] = structuredClone(robot[key]);
+      }
+    });
+    if (Array.isArray(robot?.PrepTransTime)) {
+      timing.PrepTransTime = robot.PrepTransTime.map((row) => Number(row?.Time) || 0);
+    }
+    draft.robots[robotName] = timing;
+  });
+  return draft;
+}
+function deviceTimeInput(value, label, dataset) {
+  const attributes = Object.entries(dataset).map(([name, item]) => `data-${name}="${escapeHtml3(item)}"`).join(" ");
+  const numericValue = Number(value);
+  return `<label class="device-time-input"><input type="number" min="0" step="any" inputmode="decimal" required value="${Number.isFinite(numericValue) ? numericValue : 0}" aria-label="${escapeHtml3(label)}" ${attributes}><span>s</span></label>`;
+}
+function renderDeviceConfigHeader() {
+  const hasDevice = Boolean(state.workspaceDeviceId && state.baseDevice);
+  document.getElementById("deviceConfigSelectedName").textContent = hasDevice ? displayDeviceName(state.deviceName) : "\u5C1A\u672A\u9009\u62E9\u8BBE\u5907";
+  const status = document.getElementById("deviceTimingStatus");
+  status.textContent = state.deviceTimingSaving ? "\u6B63\u5728\u4FDD\u5B58\u65F6\u95F4\u53C2\u6570\u2026" : state.deviceTimingDirty ? "\u6709\u5C1A\u672A\u4FDD\u5B58\u7684\u65F6\u95F4\u4FEE\u6539" : state.deviceTimingStatusMessage;
+  status.classList.toggle("is-dirty", state.deviceTimingDirty);
+  status.classList.toggle("is-saving", state.deviceTimingSaving);
+  document.getElementById("resetDeviceTimingButton").disabled = !hasDevice || !state.deviceTimingDirty || state.deviceTimingSaving;
+  document.getElementById("saveDeviceTimingButton").disabled = !hasDevice || !state.deviceTimingDirty || state.deviceTimingSaving;
+}
+function renderDeviceTimingSelectors() {
+  const stationSelect = document.getElementById("deviceStationSelect");
+  const robotSelect = document.getElementById("deviceRobotSelect");
+  if (!state.stationNames.includes(state.deviceStationName)) state.deviceStationName = state.stationNames[0] || "";
+  if (!state.robotNames.includes(state.deviceRobotName)) state.deviceRobotName = state.robotNames[0] || "";
+  stationSelect.innerHTML = state.stationNames.length ? state.stationNames.map((name) => `<option value="${escapeHtml3(name)}" ${name === state.deviceStationName ? "selected" : ""}>${escapeHtml3(name)}</option>`).join("") : `<option value="">\u8BF7\u5148\u9009\u62E9\u8BBE\u5907</option>`;
+  robotSelect.innerHTML = state.robotNames.length ? state.robotNames.map((name) => `<option value="${escapeHtml3(name)}" ${name === state.deviceRobotName ? "selected" : ""}>${escapeHtml3(name)}</option>`).join("") : `<option value="">\u8BF7\u5148\u9009\u62E9\u8BBE\u5907</option>`;
+  stationSelect.disabled = !state.stationNames.length;
+  robotSelect.disabled = !state.robotNames.length;
+}
+function renderDeviceStationTiming() {
+  const container = document.getElementById("deviceStationTimingEditor");
+  const stationName = state.deviceStationName;
+  const station = state.baseDevice?.Stations?.[stationName];
+  const timing = state.deviceTimingDraft?.stations?.[stationName];
+  if (!station || !timing) {
+    container.innerHTML = `<div class="device-config-empty"><strong>\u6682\u65E0\u53EF\u914D\u7F6E\u7AD9\u70B9</strong><span>\u9009\u62E9\u6216\u5BFC\u5165\u8BBE\u5907\u540E\uFF0C\u53EF\u5728\u8FD9\u91CC\u6821\u51C6\u7AD9\u70B9\u52A8\u4F5C\u65F6\u95F4\u3002</span></div>`;
+    return;
+  }
+  const actionControllers = [...new Set(STATION_ACTION_TIME_FIELDS.flatMap(
+    ({ key }) => Object.keys(timing[key] || {})
+  ))].sort((left, right) => left.localeCompare(right, void 0, { numeric: true }));
+  const actionRows = actionControllers.map((controller) => `
+    <tr>
+      <th scope="row"><strong>${escapeHtml3(controller)}</strong><small>\u63A7\u5236\u673A\u5668\u624B</small></th>
+      ${STATION_ACTION_TIME_FIELDS.map(({ key, label }) => {
+    if (!Object.prototype.hasOwnProperty.call(timing[key] || {}, controller)) return `<td><span class="device-time-unavailable">\u2014</span></td>`;
+    return `<td>${deviceTimeInput(timing[key][controller], `${stationName} ${controller} ${label}`, {
+      "device-timing-target": "station-map",
+      "device-name": stationName,
+      "timing-field": key,
+      "timing-key": controller
+    })}</td>`;
+  }).join("")}
+    </tr>
+  `).join("");
+  const alignmentEntries = Object.entries(timing.AlignmentTime || {});
+  const prePrepareRows = Array.isArray(station.PrePrepareTime) ? station.PrePrepareTime : [];
+  const specialRows = [
+    ...alignmentEntries.map(([slotId, value]) => `
+      <div class="device-transition-row">
+        <span class="device-transition-kind">\u5BF9\u51C6</span>
+        <strong>Slot ${escapeHtml3(slotId)}</strong>
+        <span class="device-transition-route">\u6676\u5706\u5B9A\u4F4D\u65F6\u95F4</span>
+        ${deviceTimeInput(value, `${stationName} Slot ${slotId} \u5BF9\u51C6\u65F6\u95F4`, {
+      "device-timing-target": "station-map",
+      "device-name": stationName,
+      "timing-field": "AlignmentTime",
+      "timing-key": slotId
+    })}
+      </div>
+    `),
+    ...prePrepareRows.map((row, index) => `
+      <div class="device-transition-row">
+        <span class="device-transition-kind">${escapeHtml3(row?.PrePrepareType || "\u72B6\u6001\u5207\u6362")}</span>
+        <strong>${escapeHtml3(row?.LastItem || "\u2014")} <i aria-hidden="true">\u2192</i> ${escapeHtml3(row?.CurrentItem || "\u2014")}</strong>
+        <span class="device-transition-route">${escapeHtml3(row?.PrePrepareType === "PumpTime" ? "\u62BD\u6C14" : row?.PrePrepareType === "VentTime" ? "\u5145\u6C14" : "\u9884\u5904\u7406")}</span>
+        ${deviceTimeInput(timing.PrePrepareTime?.[index] ?? row?.Time ?? 0, `${stationName} ${row?.PrePrepareType || "\u72B6\u6001\u5207\u6362"}`, {
+      "device-timing-target": "station-sequence",
+      "device-name": stationName,
+      "timing-field": "PrePrepareTime",
+      "timing-index": index
+    })}
+      </div>
+    `)
+  ];
+  const timingCount = actionControllers.reduce((count, controller) => count + STATION_ACTION_TIME_FIELDS.filter(
+    ({ key }) => Object.prototype.hasOwnProperty.call(timing[key] || {}, controller)
+  ).length, 0) + specialRows.length;
+  container.innerHTML = `
+    <div class="device-timing-overview">
+      <div><span>\u7AD9\u70B9\u7C7B\u578B</span><strong>${escapeHtml3(station.Type || "Station")}</strong></div>
+      <div><span>\u5BB9\u91CF</span><strong>${Number(station.Capacity) || 0} <small>\u69FD</small></strong></div>
+      <div><span>\u5173\u8054\u673A\u5668\u624B</span><strong>${actionControllers.length} <small>\u53F0</small></strong></div>
+      <div><span>\u8BA1\u65F6\u53C2\u6570</span><strong>${timingCount} <small>\u9879</small></strong></div>
+    </div>
+    <section class="device-time-section" aria-labelledby="stationActionTimingTitle">
+      <header><div><h3 id="stationActionTimingTitle">\u53D6\u653E\u7247\u52A8\u4F5C</h3><p>\u7AD9\u70B9\u4E0E\u5BF9\u5E94\u673A\u5668\u624B\u534F\u540C\u52A8\u4F5C\u7684\u5206\u6BB5\u8017\u65F6\u3002</p></div><span>${actionControllers.length} \u7EC4\u63A7\u5236\u5173\u7CFB</span></header>
+      ${actionRows ? `<div class="device-time-table-wrap"><table class="device-time-table"><thead><tr><th>\u673A\u5668\u624B</th>${STATION_ACTION_TIME_FIELDS.map(({ label }) => `<th>${label}</th>`).join("")}</tr></thead><tbody>${actionRows}</tbody></table></div>` : `<div class="device-time-inline-empty">\u5F53\u524D\u7AD9\u70B9\u672A\u58F0\u660E\u53D6\u653E\u7247\u5206\u6BB5\u65F6\u95F4\u3002</div>`}
+    </section>
+    <section class="device-time-section" aria-labelledby="stationTransitionTimingTitle">
+      <header><div><h3 id="stationTransitionTimingTitle">\u4E13\u9879\u5904\u7406\u4E0E\u72B6\u6001\u5207\u6362</h3><p>LoadLock \u62BD\u5145\u6C14\u3001Aligner \u5BF9\u51C6\u7B49\u7AD9\u70B9\u4E13\u5C5E\u65F6\u95F4\u3002</p></div><span>${specialRows.length} \u9879</span></header>
+      ${specialRows.length ? `<div class="device-transition-list">${specialRows.join("")}</div>` : `<div class="device-time-inline-empty">\u5F53\u524D\u7AD9\u70B9\u6CA1\u6709\u989D\u5916\u7684\u72B6\u6001\u5207\u6362\u65F6\u95F4\u3002</div>`}
+    </section>`;
+}
+function renderDeviceRobotTiming() {
+  const container = document.getElementById("deviceRobotTimingEditor");
+  const robotName = state.deviceRobotName;
+  const robot = state.baseDevice?.Robots?.[robotName];
+  const timing = state.deviceTimingDraft?.robots?.[robotName];
+  if (!robot || !timing) {
+    container.innerHTML = `<div class="device-config-empty"><strong>\u6682\u65E0\u53EF\u914D\u7F6E\u673A\u5668\u624B</strong><span>\u5F53\u524D\u8BBE\u5907\u6CA1\u6709\u58F0\u660E\u673A\u5668\u624B\u65F6\u95F4\u53C2\u6570\u3002</span></div>`;
+    return;
+  }
+  const actionStations = [...new Set(ROBOT_ACTION_TIME_FIELDS.flatMap(
+    ({ key }) => Object.keys(timing[key] || {})
+  ))].sort((left, right) => left.localeCompare(right, void 0, { numeric: true }));
+  const actionRows = actionStations.map((stationName) => `
+    <tr><th scope="row"><strong>${escapeHtml3(stationName)}</strong><small>\u76EE\u6807\u7AD9\u70B9</small></th>${ROBOT_ACTION_TIME_FIELDS.map(({ key, label }) => {
+    if (!Object.prototype.hasOwnProperty.call(timing[key] || {}, stationName)) return `<td><span class="device-time-unavailable">\u2014</span></td>`;
+    return `<td>${deviceTimeInput(timing[key][stationName], `${robotName} \u5728 ${stationName} \u7684${label}\u65F6\u95F4`, {
+      "device-timing-target": "robot-map",
+      "device-name": robotName,
+      "timing-field": key,
+      "timing-key": stationName
+    })}</td>`;
+  }).join("")}</tr>
+  `).join("");
+  const transferRows = Array.isArray(robot.PrepTransTime) ? robot.PrepTransTime : [];
+  const sources = [...new Set(transferRows.map((row) => String(row?.SrcStation || "")).filter(Boolean))].sort((left, right) => left.localeCompare(right, void 0, { numeric: true }));
+  let selectedSource = state.deviceRobotTransferSources[robotName];
+  if (!sources.includes(selectedSource)) selectedSource = sources[0] || "";
+  state.deviceRobotTransferSources[robotName] = selectedSource;
+  const visibleTransfers = transferRows.map((row, index) => ({ row, index })).filter(({ row }) => String(row?.SrcStation || "") === selectedSource);
+  const transferTableRows = visibleTransfers.map(({ row, index }) => `
+    <tr>
+      <th scope="row"><strong>${escapeHtml3(row?.DestStation || "\u2014")}</strong><small>${Number(row?.TransType) === 1 ? "\u8F7D\u7247\u79FB\u52A8" : "\u7A7A\u8F7D\u79FB\u52A8"}</small></th>
+      <td><span class="device-transfer-type type-${Number(row?.TransType) === 1 ? "loaded" : "empty"}">${Number(row?.TransType) === 1 ? "\u8F7D\u7247" : "\u7A7A\u8F7D"}</span></td>
+      <td>${deviceTimeInput(timing.PrepTransTime?.[index] ?? row?.Time ?? 0, `${robotName} \u4ECE ${row?.SrcStation || "\u2014"} \u5230 ${row?.DestStation || "\u2014"} \u7684\u79FB\u52A8\u65F6\u95F4`, {
+    "device-timing-target": "robot-sequence",
+    "device-name": robotName,
+    "timing-field": "PrepTransTime",
+    "timing-index": index
+  })}</td>
+    </tr>
+  `).join("");
+  const activeArms = Object.values(robot.ArmInfo || {}).filter((arm) => arm?.IsEnable !== false).length;
+  container.innerHTML = `
+    <div class="device-timing-overview">
+      <div><span>\u673A\u5668\u624B\u7C7B\u578B</span><strong>${escapeHtml3(robot.Type || "Robot")}</strong></div>
+      <div><span>\u542F\u7528\u624B\u81C2</span><strong>${activeArms} <small>\u6761</small></strong></div>
+      <div><span>\u670D\u52A1\u7AD9\u70B9</span><strong>${actionStations.length} <small>\u4E2A</small></strong></div>
+      <div><span>\u79FB\u52A8\u89C4\u5219</span><strong>${transferRows.length} <small>\u6761</small></strong></div>
+    </div>
+    <section class="device-time-section robot-action-section" aria-labelledby="robotActionTimingTitle">
+      <header><div><h3 id="robotActionTimingTitle">\u53D6\u7247\u4E0E\u653E\u7247</h3><p>\u540C\u4E00\u673A\u5668\u624B\u5728\u4E0D\u540C\u7AD9\u70B9\u53EF\u4F7F\u7528\u72EC\u7ACB\u52A8\u4F5C\u65F6\u95F4\u3002</p></div><span>${actionStations.length} \u4E2A\u7AD9\u70B9</span></header>
+      ${actionRows ? `<div class="device-time-table-wrap"><table class="device-time-table compact"><thead><tr><th>\u7AD9\u70B9</th>${ROBOT_ACTION_TIME_FIELDS.map(({ label }) => `<th>${label}\u65F6\u95F4</th>`).join("")}</tr></thead><tbody>${actionRows}</tbody></table></div>` : `<div class="device-time-inline-empty">\u5F53\u524D\u673A\u5668\u624B\u672A\u58F0\u660E\u53D6\u653E\u7247\u65F6\u95F4\u3002</div>`}
+    </section>
+    <section class="device-time-section" aria-labelledby="robotTransferTimingTitle">
+      <header class="device-transfer-head"><div><h3 id="robotTransferTimingTitle">\u7AD9\u70B9\u95F4\u79FB\u52A8</h3><p>\u6309\u8D77\u70B9\u67E5\u770B\u79FB\u52A8\u89C4\u5219\uFF0C\u907F\u514D\u5728\u5927\u578B\u8BBE\u5907\u4E2D\u4E00\u6B21\u5C55\u793A\u6574\u5F20\u77E9\u9635\u3002</p></div><label><span>\u8D77\u70B9</span><select data-robot-transfer-source="${escapeHtml3(robotName)}" ${sources.length ? "" : "disabled"}>${sources.length ? sources.map((source) => `<option value="${escapeHtml3(source)}" ${source === selectedSource ? "selected" : ""}>${escapeHtml3(source)}</option>`).join("") : `<option>\u65E0\u79FB\u52A8\u89C4\u5219</option>`}</select></label></header>
+      ${transferTableRows ? `<div class="device-time-table-wrap"><table class="device-time-table transfer"><thead><tr><th>\u76EE\u6807\u7AD9\u70B9</th><th>\u642C\u8FD0\u7C7B\u578B</th><th>\u79FB\u52A8\u65F6\u95F4</th></tr></thead><tbody>${transferTableRows}</tbody></table></div>` : `<div class="device-time-inline-empty">\u5F53\u524D\u8D77\u70B9\u6CA1\u6709\u53EF\u914D\u7F6E\u7684\u79FB\u52A8\u65F6\u95F4\u3002</div>`}
+    </section>`;
+}
+function renderDeviceTimingConfiguration() {
+  renderDeviceConfigHeader();
+  renderDeviceTimingSelectors();
+  document.querySelectorAll("[data-device-config-section]").forEach((button) => {
+    const active = button.dataset.deviceConfigSection === state.deviceConfigSection;
+    button.classList.toggle("active", active);
+    if (active) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
+  });
+  document.querySelectorAll("[data-device-config-view]").forEach((view) => {
+    const active = view.dataset.deviceConfigView === state.deviceConfigSection;
+    view.hidden = !active;
+    view.classList.toggle("active", active);
+  });
+  if (state.deviceConfigSection === "station-time") renderDeviceStationTiming();
+  if (state.deviceConfigSection === "robot-time") renderDeviceRobotTiming();
+  if (state.deviceConfigSection === "robot-slot") renderRobotSlots();
+}
+function resetDeviceTimingDraft(message = "\u5F53\u524D\u8BBE\u5907\u65F6\u95F4\u53C2\u6570\u5DF2\u52A0\u8F7D") {
+  state.deviceTimingDraft = state.baseDevice ? buildDeviceTimingDraft(state.baseDevice) : null;
+  state.deviceTimingDirty = false;
+  state.deviceTimingSaving = false;
+  state.deviceTimingStatusMessage = state.baseDevice ? message : "\u9009\u62E9\u8BBE\u5907\u540E\u5F00\u59CB\u914D\u7F6E";
+  renderDeviceTimingConfiguration();
+}
+function markDeviceTimingDirty() {
+  if (!state.deviceTimingDraft || !state.workspaceDeviceId) return;
+  state.deviceTimingDirty = true;
+  state.deviceTimingStatusMessage = "\u6709\u5C1A\u672A\u4FDD\u5B58\u7684\u65F6\u95F4\u4FEE\u6539";
+  renderDeviceConfigHeader();
+}
+function updateDeviceTimingFromControl(control) {
+  const value = Number(control.value);
+  const valid = control.value.trim() !== "" && Number.isFinite(value) && value >= 0;
+  control.setCustomValidity(valid ? "" : "\u8BF7\u8F93\u5165\u5927\u4E8E\u6216\u7B49\u4E8E 0 \u7684\u6709\u9650\u79D2\u6570");
+  control.classList.toggle("is-invalid", !valid);
+  const section = control.dataset.deviceTimingTarget?.startsWith("station") ? "stations" : "robots";
+  const item = state.deviceTimingDraft?.[section]?.[control.dataset.deviceName];
+  if (!item) return;
+  if (control.dataset.deviceTimingTarget?.endsWith("map")) {
+    item[control.dataset.timingField][control.dataset.timingKey] = valid ? value : Number.NaN;
+  } else {
+    item[control.dataset.timingField][Number(control.dataset.timingIndex)] = valid ? value : Number.NaN;
+  }
+  markDeviceTimingDirty();
+}
+function validateDeviceTimingDraft() {
+  let invalidLabel = "";
+  Object.entries(state.deviceTimingDraft || {}).some(([sectionName, items]) => Object.entries(items).some(([itemName, fields]) => Object.entries(fields).some(([fieldName, values]) => {
+    const rows = Array.isArray(values) ? values.map((value, index) => [index, value]) : Object.entries(values || {});
+    const invalid = rows.find(([, value]) => !Number.isFinite(Number(value)) || Number(value) < 0);
+    if (!invalid) return false;
+    invalidLabel = `${sectionName}.${itemName}.${fieldName}.${invalid[0]}`;
+    return true;
+  })));
+  if (invalidLabel) throw new Error(`${invalidLabel} \u5FC5\u987B\u662F\u5927\u4E8E\u6216\u7B49\u4E8E 0 \u7684\u6709\u9650\u79D2\u6570`);
+}
+async function saveDeviceTiming() {
+  if (!state.deviceTimingDirty || state.deviceTimingSaving || !state.workspaceDeviceId) return;
+  validateDeviceTimingDraft();
+  state.deviceTimingSaving = true;
+  renderDeviceConfigHeader();
+  try {
+    const result = await requestJson(`/api/workspaces/${state.workspaceDeviceId}/device-timing`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ timing: state.deviceTimingDraft })
+    });
+    state.workspaceDevice.device = structuredClone(result.device);
+    applyDeviceTopology(result.device, state.deviceName, state.robotSlots);
+    resetRunResult();
+    resetDeviceTimingDraft("\u65F6\u95F4\u53C2\u6570\u5DF2\u4FDD\u5B58\u5E76\u5E94\u7528\u5230\u5168\u90E8\u6D4B\u8BD5");
+    setWorkspaceStatus("\u8BBE\u5907\u65F6\u95F4\u53C2\u6570\u5DF2\u4FDD\u5B58", "saved");
+  } catch (error) {
+    state.deviceTimingSaving = false;
+    state.deviceTimingStatusMessage = `\u4FDD\u5B58\u5931\u8D25\uFF1A${error.message}`;
+    renderDeviceConfigHeader();
+    throw error;
+  }
+}
+function switchDeviceConfigSection(sectionName) {
+  if (!document.querySelector(`[data-device-config-view="${sectionName}"]`)) return;
+  state.deviceConfigSection = sectionName;
+  renderDeviceTimingConfiguration();
 }
 function shortestDevicePath(source, destination) {
   const queue = [[`S:${source}`]], visited = new Set(queue[0]);
@@ -4410,6 +4703,7 @@ async function selectWorkspaceDevice(deviceId, preferredTestId = "") {
   state.activeTestGroup = "";
   state.testCaseGroup = "";
   applyDeviceTopology(result.device.device, result.device.name, result.device.robotSlots);
+  resetDeviceTimingDraft();
   state.routes = Array.isArray(result.device.routes) ? structuredClone(result.device.routes) : [];
   state.cleans = Array.isArray(result.device.cleans) ? structuredClone(result.device.cleans).map(normalizeClean) : [];
   if (!result.device.tests.length) {
@@ -4449,7 +4743,15 @@ function resetWorkspaceSelection() {
   state.robotNames = [];
   state.robotScopes = {};
   state.robotSlots = {};
+  state.deviceStationName = "";
+  state.deviceRobotName = "";
+  state.deviceRobotTransferSources = {};
+  state.deviceTimingDraft = null;
+  state.deviceTimingDirty = false;
+  state.deviceTimingSaving = false;
+  state.deviceTimingStatusMessage = "\u9009\u62E9\u8BBE\u5907\u540E\u5F00\u59CB\u914D\u7F6E";
   renderWorkspaceControls();
+  renderDeviceTimingConfiguration();
   resetRunResult();
 }
 async function deleteWorkspaceDevice() {
@@ -4477,6 +4779,7 @@ function switchTab(name) {
   document.querySelectorAll("[data-tab-view]").forEach((view) => view.classList.toggle("active", view.dataset.tabView === name));
   document.getElementById("scheduleSide").classList.toggle("is-hidden", name !== "schedule");
   document.getElementById("pageLayout").classList.toggle("editor-mode", name !== "schedule");
+  if (name === "device-config") renderDeviceTimingConfiguration();
   if (name !== "route") closeStepDrawer();
 }
 var THEME_STORAGE_KEY = "realtime-scheduler-theme";
@@ -6499,6 +6802,15 @@ document.getElementById("pjobRouteDialog").addEventListener("cancel", (event) =>
 document.getElementById("pjobRouteDialog").addEventListener("click", (event) => {
   if (event.target.id === "pjobRouteDialog") closePJobRoutePicker();
 });
+var bottleneckAnalysisHelpDialog = document.getElementById("bottleneckAnalysisHelpDialog");
+document.getElementById("bottleneckAnalysisHelpDialogClose").addEventListener("click", () => bottleneckAnalysisHelpDialog.close());
+document.getElementById("visualPerformance").addEventListener("click", (event) => {
+  if (!(event.target instanceof Element) || !event.target.closest("#bottleneckAnalysisHelpButton")) return;
+  if (!bottleneckAnalysisHelpDialog.open) bottleneckAnalysisHelpDialog.showModal();
+});
+document.getElementById("bottleneckAnalysisHelpDialog").addEventListener("click", (event) => {
+  if (event.target === bottleneckAnalysisHelpDialog) bottleneckAnalysisHelpDialog.close();
+});
 document.getElementById("pjobRouteProcess").addEventListener("change", (event) => renderPJobRouteDialogGroup(event.target.value));
 document.getElementById("pjobRouteCleanFilter").addEventListener("change", (event) => {
   if (!pjobRoutePickerContext) return;
@@ -6555,6 +6867,7 @@ document.getElementById("deviceFile").addEventListener("change", (event) => load
 }));
 document.getElementById("deviceSelect").addEventListener("change", (event) => (async () => {
   if (state.dirty) await saveCurrentTest(true);
+  if (state.deviceTimingDirty) await saveDeviceTiming();
   await selectWorkspaceDevice(event.target.value);
 })().catch((error) => writeTerminal(`$ \u8BBE\u5907\u5207\u6362\u5931\u8D25
   ${error.message}`, true)));
@@ -6563,6 +6876,17 @@ document.getElementById("deleteDeviceButton").addEventListener("click", () => de
   writeTerminal(`$ \u5220\u9664\u8BBE\u5907\u5931\u8D25
   ${error.message}`, true);
 }));
+document.getElementById("saveDeviceTimingButton").addEventListener("click", () => saveDeviceTiming().catch((error) => writeTerminal(`$ \u8BBE\u5907\u65F6\u95F4\u4FDD\u5B58\u5931\u8D25
+  ${error.message}`, true)));
+document.getElementById("resetDeviceTimingButton").addEventListener("click", () => resetDeviceTimingDraft("\u5DF2\u64A4\u9500\u5C1A\u672A\u4FDD\u5B58\u7684\u65F6\u95F4\u4FEE\u6539"));
+document.getElementById("deviceStationSelect").addEventListener("change", (event) => {
+  state.deviceStationName = event.target.value;
+  renderDeviceStationTiming();
+});
+document.getElementById("deviceRobotSelect").addEventListener("change", (event) => {
+  state.deviceRobotName = event.target.value;
+  renderDeviceRobotTiming();
+});
 document.getElementById("testGroupSelect").addEventListener("change", (event) => selectWorkspaceGroup(event.target.value).catch((error) => writeTerminal(`$ \u6D4B\u8BD5\u7EC4\u522B\u5207\u6362\u5931\u8D25
   ${error.message}`, true)));
 document.getElementById("testCaseSelect").addEventListener("change", (event) => selectWorkspaceTest(event.target.value).catch((error) => writeTerminal(`$ \u6D4B\u8BD5\u96C6\u5207\u6362\u5931\u8D25
@@ -6698,9 +7022,16 @@ document.addEventListener("keydown", (event) => {
   if (card && event.key === "Enter") openStepDrawer(Number(card.dataset.routeIndex), Number(card.dataset.stageIndex));
 });
 document.addEventListener("input", (event) => {
+  if (event.target.matches("[data-device-timing-target]")) updateDeviceTimingFromControl(event.target);
   if (event.target.matches("[data-scope], [data-option], [data-time-index], [data-round-time-index]")) updateStateFromControl(event.target);
 });
 document.addEventListener("change", (event) => {
+  const transferSource = event.target.closest?.("[data-robot-transfer-source]");
+  if (transferSource) {
+    state.deviceRobotTransferSources[transferSource.dataset.robotTransferSource] = transferSource.value;
+    renderDeviceRobotTiming();
+    return;
+  }
   if (event.target.matches("[data-scope], [data-option], [data-time-index], [data-round-time-index]")) {
     updateStateFromControl(event.target);
     if (["name", "cleanType", "recipeTime", "wacRecipeTime", "jobType", "waferCount", "bufferOption", ...ROUTE_CLEAN_KEYS].includes(event.target.dataset.key) || event.target.dataset.timeIndex !== void 0 || event.target.dataset.roundTimeIndex !== void 0 || ["stage-candidates", "stage-candidate-toggle", "cjob", "pjob"].includes(event.target.dataset.scope)) renderAll();
@@ -6727,6 +7058,11 @@ document.addEventListener("change", (event) => {
 document.addEventListener("click", (event) => {
   const tab = event.target.closest("[data-tab-target]");
   if (tab) switchTab(tab.dataset.tabTarget);
+  const deviceConfigSection = event.target.closest("[data-device-config-section]");
+  if (deviceConfigSection) {
+    switchDeviceConfigSection(deviceConfigSection.dataset.deviceConfigSection);
+    return;
+  }
   const robotSlotChoice = event.target.closest("[data-robot-slot-name][data-robot-arm-count]");
   if (robotSlotChoice && !robotSlotChoice.disabled) {
     setRobotArmCount(robotSlotChoice.dataset.robotSlotName, Number(robotSlotChoice.dataset.robotArmCount)).catch((error) => writeTerminal(`$ \u673A\u5668\u624B\u69FD\u4F4D\u4FDD\u5B58\u5931\u8D25
@@ -6756,18 +7092,29 @@ document.addEventListener("click", (event) => {
   if (card) openStepDrawer(Number(card.dataset.routeIndex), Number(card.dataset.stageIndex));
 });
 window.addEventListener("pagehide", () => {
-  if (!state.dirty || !state.workspaceDeviceId || !state.testCaseId) return;
-  fetch(`/api/workspaces/${state.workspaceDeviceId}/tests/${state.testCaseId}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(currentTestSnapshot()),
-    keepalive: true
-  }).catch(() => {
-  });
+  if (state.deviceTimingDirty && state.workspaceDeviceId && state.deviceTimingDraft) {
+    fetch(`/api/workspaces/${state.workspaceDeviceId}/device-timing`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ timing: state.deviceTimingDraft }),
+      keepalive: true
+    }).catch(() => {
+    });
+  }
+  if (state.dirty && state.workspaceDeviceId && state.testCaseId) {
+    fetch(`/api/workspaces/${state.workspaceDeviceId}/tests/${state.testCaseId}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(currentTestSnapshot()),
+      keepalive: true
+    }).catch(() => {
+    });
+  }
 });
 initializeThemeToggle();
 initializeCompactSelects();
 renderAll();
 renderWorkspaceControls();
+renderDeviceTimingConfiguration();
 checkService();
 loadWorkspaceCatalog().catch((error) => setWorkspaceStatus(`\u6D4B\u8BD5\u96C6\u8BFB\u53D6\u5931\u8D25\uFF1A${error.message}`, "dirty"));

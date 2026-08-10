@@ -2183,3 +2183,27 @@ test("瓶颈分析隐藏说明、窗口详情和统计口径可见标签", () =>
   assert.doesNotMatch(source, /class="bottleneck-window-control">统计口径/);
   assert.match(source, /class="visually-hidden">统计口径<\/span>/);
 });
+
+test("瓶颈分析提供目的、判定原理和最优性说明", () => {
+  const workspaceSource = fs.readFileSync(
+    path.join(__dirname, "../realtime_scheduler/frontend/src/workspace_visualizer.ts"),
+    "utf8",
+  );
+  const html = fs.readFileSync(
+    path.join(__dirname, "../realtime_scheduler/frontend/config_editor.html"),
+    "utf8",
+  );
+  const editorSource = fs.readFileSync(
+    path.join(__dirname, "../realtime_scheduler/frontend/src/config_editor.ts"),
+    "utf8",
+  );
+  const css = fs.readFileSync(
+    path.join(__dirname, "../realtime_scheduler/frontend/assets/config_editor.css"),
+    "utf8",
+  );
+
+  assert.match(workspaceSource, /id="bottleneckAnalysisHelpButton"/);
+  assert.match(html, /id="bottleneckAnalysisHelpDialog"[\s\S]*为什么不能只看 Makespan？[\s\S]*容量利用率 × 82%[\s\S]*99% 以上[\s\S]*容量组取平均利用率/);
+  assert.match(editorSource, /bottleneckAnalysisHelpDialog\.showModal\(\)/);
+  assert.match(css, /\.bottleneck-analysis-help-dialog/);
+});
