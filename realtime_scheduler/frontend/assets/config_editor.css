@@ -1096,9 +1096,9 @@
     .documentation-callout.is-warning { border-color: #f0d49b; border-left-color: #bd7600; background: #fff9ec; }
     .documentation-callout strong { display: block; margin-bottom: 3px; color: #233752; }
     .documentation-callout p { margin: 0; color: #53647b; }
-    .documentation-code { margin: 20px 0; overflow: hidden; border: 1px solid #26354c; border-radius: 12px; background: #101827; box-shadow: 0 9px 24px rgba(15,23,42,.10); }
-    .documentation-code figcaption { padding: 9px 14px; border-bottom: 1px solid #2b3a52; color: #91a4c0; background: #182236; font: 750 11px/1.5 "Cascadia Code", Consolas, monospace; }
-    .documentation-code pre { margin: 0; padding: 18px; overflow: auto; color: #d8e3f2; }
+    .documentation-code { margin: 22px 0; overflow: hidden; border: 1px solid #d7e2f1; border-radius: 12px; background: #f8fbff; box-shadow: 0 6px 18px rgba(47,86,137,.08); }
+    .documentation-code figcaption { padding: 9px 14px; border-bottom: 1px solid #dce6f3; color: #537096; background: #edf4fc; font: 750 11px/1.5 "Cascadia Code", Consolas, monospace; }
+    .documentation-code pre { margin: 0; padding: 18px; overflow: auto; color: #263b58; background: #f8fbff; }
     .documentation-code pre code { padding: 0; border: 0; color: inherit; background: transparent; font: 14px/1.72 "Cascadia Code", Consolas, monospace; }
     .documentation-table-wrap { margin: 20px 0; overflow: auto; border: 1px solid #d8e1ed; border-radius: 12px; }
     .documentation-table-wrap table { width: 100%; min-width: 620px; border-collapse: collapse; text-align: left; }
@@ -1131,6 +1131,9 @@
     body.theme-dark .documentation-markdown blockquote, body.theme-dark .documentation-callout { border-color: #46536a; background: #27292d; }
     body.theme-dark .documentation-callout strong { color: var(--ink); }
     body.theme-dark .documentation-callout p { color: #b5bdc9; }
+    body.theme-dark .documentation-code { border-color: #46536a; background: #252d3b; box-shadow: none; }
+    body.theme-dark .documentation-code figcaption { border-color: #46536a; color: #b9c9e6; background: #303b4d; }
+    body.theme-dark .documentation-code pre { color: #e1e8f3; background: #252d3b; }
     body.theme-dark .documentation-table-wrap { border-color: var(--line); }
     body.theme-dark .documentation-table-wrap thead th, body.theme-dark .documentation-table-wrap tbody th { color: var(--ink); background: #27292d; }
     body.theme-dark .documentation-table-wrap th, body.theme-dark .documentation-table-wrap td { border-color: var(--line); }

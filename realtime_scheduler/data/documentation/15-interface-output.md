@@ -8,6 +8,8 @@ description: 完整列出 Move 基类及子类型、Move 状态、输出对象�
 
 # 标准接口：Move、输出与事件参数
 
+本页说明平台与算法之间交换的结果格式，主要面向开发和对接人员。普通使用者只需在结果页查看“校验”和“总耗时”，无需阅读或导出这些字段。
+
 算法通过 `IOutputParams` 输出绝对时间 MoveList 和辅助规划信息。Move 子类型继承 `IMove` 公共字段，再增加各自动作所需的 Station、Slot、Arm、Recipe 或状态字段。
 
 ## IMove 公共字段
