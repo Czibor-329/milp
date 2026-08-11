@@ -174,6 +174,17 @@ API_SCHEMA_VERSION = "cjob-pjob-v3"
 HEURISTIC_BASELINE_SCHEMA_VERSION = "petri-look-dynamic-v1"
 FIRST_ROBOT_SLOT_ID = 1
 DUAL_ARM_SLOT_COUNT = 2
+STATION_TIME_MAPPING_FIELDS = frozenset({
+    "PickPrepareTime",
+    "PickCompleteTime",
+    "PlacePrepareTime",
+    "PlaceCompleteTime",
+    "PostCompleteTime",
+    "AlignmentTime",
+})
+STATION_TIME_SEQUENCE_FIELDS = frozenset({"PrePrepareTime"})
+ROBOT_TIME_MAPPING_FIELDS = frozenset({"PickTime", "PlaceTime"})
+ROBOT_TIME_SEQUENCE_FIELDS = frozenset({"PrepTransTime"})
 PROCESSING_STATION_TYPES = frozenset({
     "processchamber",
     "multiprocesschamber",
@@ -3392,6 +3403,136 @@ def update_workspace_robot_slots(
         return deepcopy(normalized)
 
 
+def _device_time_value(raw_value: Any, label: str) -> float:
+    """把设备时间规范为非负有限秒数；无效值使用带字段上下文的错误拒绝。"""
+    if isinstance(raw_value, bool):
+        raise ValueError(f"{label} 必须是非负秒数")
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{label} 必须是非负秒数") from None
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"{label} 必须是非负有限秒数")
+    return value
+
+
+def _apply_time_mapping_updates(
+    target: Dict[str, Any],
+    raw_values: Any,
+    label: str,
+) -> None:
+    """校验并覆盖已有计时映射，禁止借时间接口新增未知 Robot、Station 或 Slot。"""
+    if not isinstance(raw_values, Mapping):
+        raise ValueError(f"{label} 必须是对象")
+    unknown_keys = sorted(str(key) for key in raw_values if str(key) not in target)
+    if unknown_keys:
+        raise ValueError(f"{label} 包含未知项：{', '.join(unknown_keys)}")
+    for key, raw_value in raw_values.items():
+        normalized_key = str(key)
+        target[normalized_key] = _device_time_value(
+            raw_value,
+            f"{label}.{normalized_key}",
+        )
+
+
+def _apply_time_sequence_updates(
+    target: List[Any],
+    raw_values: Any,
+    label: str,
+) -> None:
+    """按原设备声明顺序覆盖转移时间，仅修改每条记录的 Time 并保留其余协议字段。"""
+    if not isinstance(raw_values, Sequence) or isinstance(raw_values, (str, bytes)):
+        raise ValueError(f"{label} 必须是数组")
+    if len(raw_values) != len(target):
+        raise ValueError(f"{label} 数量与设备定义不一致")
+    for index, raw_value in enumerate(raw_values):
+        row = target[index]
+        if not isinstance(row, dict):
+            raise ValueError(f"{label}[{index}] 不是有效计时记录")
+        row["Time"] = _device_time_value(raw_value, f"{label}[{index}].Time")
+
+
+def apply_device_timing_updates(device_data: Dict[str, Any], raw_timing: Any) -> None:
+    """把页面提交的站点与机器手时间应用到设备拓扑，并严格限制可编辑字段。"""
+    if not isinstance(raw_timing, Mapping):
+        raise ValueError("设备时间配置必须是对象")
+    sections = {
+        "stations": (
+            device_data.get("Stations"),
+            STATION_TIME_MAPPING_FIELDS,
+            STATION_TIME_SEQUENCE_FIELDS,
+        ),
+        "robots": (
+            device_data.get("Robots"),
+            ROBOT_TIME_MAPPING_FIELDS,
+            ROBOT_TIME_SEQUENCE_FIELDS,
+        ),
+    }
+    unknown_sections = sorted(str(key) for key in raw_timing if str(key) not in sections)
+    if unknown_sections:
+        raise ValueError(f"设备时间配置包含未知分类：{', '.join(unknown_sections)}")
+
+    for section_name, raw_items in raw_timing.items():
+        topology_items, mapping_fields, sequence_fields = sections[str(section_name)]
+        if not isinstance(topology_items, dict):
+            raise ValueError(f"设备缺少 {section_name} 定义")
+        if not isinstance(raw_items, Mapping):
+            raise ValueError(f"{section_name} 时间配置必须是对象")
+        unknown_names = sorted(str(name) for name in raw_items if str(name) not in topology_items)
+        if unknown_names:
+            raise ValueError(f"{section_name} 包含未知设备：{', '.join(unknown_names)}")
+        for item_name, raw_fields in raw_items.items():
+            normalized_name = str(item_name)
+            target_item = topology_items[normalized_name]
+            if not isinstance(target_item, dict) or not isinstance(raw_fields, Mapping):
+                raise ValueError(f"{section_name}.{normalized_name} 时间配置无效")
+            supported_fields = mapping_fields | sequence_fields
+            unknown_fields = sorted(
+                str(field_name)
+                for field_name in raw_fields
+                if str(field_name) not in supported_fields
+            )
+            if unknown_fields:
+                raise ValueError(
+                    f"{section_name}.{normalized_name} 包含不可编辑字段："
+                    f"{', '.join(unknown_fields)}"
+                )
+            for field_name, raw_values in raw_fields.items():
+                normalized_field = str(field_name)
+                current_values = target_item.get(normalized_field)
+                label = f"{section_name}.{normalized_name}.{normalized_field}"
+                if normalized_field in mapping_fields:
+                    if not isinstance(current_values, dict):
+                        raise ValueError(f"{label} 不存在或不是计时映射")
+                    _apply_time_mapping_updates(current_values, raw_values, label)
+                else:
+                    if not isinstance(current_values, list):
+                        raise ValueError(f"{label} 不存在或不是计时数组")
+                    _apply_time_sequence_updates(current_values, raw_values, label)
+
+
+def update_workspace_device_timing(
+    device_id: str,
+    raw_timing: Any,
+    path: Path = WORKSPACE_STORE_PATH,
+) -> Dict[str, Any]:
+    """保存设备级时间参数、刷新拓扑镜像，并使基于旧时间计算的 Baseline 失效。"""
+    with _workspace_catalog_guard(path):
+        catalog = _read_workspace_catalog_unlocked(path)
+        device = next((item for item in catalog["devices"] if item.get("id") == device_id), None)
+        if device is None:
+            raise ValueError(f"设备不存在：{device_id}")
+        device_data = device.get("device")
+        if not isinstance(device_data, dict):
+            raise ValueError("设备拓扑无效")
+        apply_device_timing_updates(device_data, raw_timing)
+        device["fingerprint"] = _device_fingerprint(device_data)
+        _invalidate_stale_device_baselines(device)
+        device["updatedAt"] = _workspace_timestamp()
+        _write_workspace_catalog_unlocked(path, catalog)
+        return deepcopy(device_data)
+
+
 def _unique_workspace_name(name: str, existing_names: Iterable[str]) -> str:
     """为设备或测试集生成易读且不重复的名称。"""
     normalized = name.strip() or "未命名"
@@ -4769,6 +4910,21 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                     raise ValueError("账号不存在")
                 self._send_json({"ok": True})
             except (ValueError, TypeError) as error:
+                self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
+            return
+        if len(parts) == 4 and parts[:2] == ["api", "workspaces"] and parts[3] == "device-timing":
+            if self._deny_device(parts[2]):
+                self._send_json(
+                    {"ok": False, "error": "设备不存在"}, HTTPStatus.NOT_FOUND
+                )
+                return
+            try:
+                payload = self._read_json_object()
+                device_data = update_workspace_device_timing(
+                    parts[2], payload.get("timing"),
+                )
+                self._send_json({"ok": True, "device": device_data})
+            except Exception as error:  # noqa: BLE001
                 self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
             return
         if len(parts) == 4 and parts[:2] == ["api", "workspaces"] and parts[3] == "robot-slots":

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>调度平台</title>
-  <link rel="stylesheet" href="/assets/config_editor.css?v=1.3.8">
+  <link rel="stylesheet" href="/assets/config_editor.css?v=1.3.11">
 </head>
 <body>
   <a class="skip-link" href="#mainContent">跳到主要内容</a>
@@ -43,7 +43,7 @@
         </button>
         <span class="sidebar-footer-label">系统状态</span>
         <div class="service-pill" id="serviceState">本地服务</div>
-        <span class="frontend-version">前端 v1.3.8</span>
+        <span class="frontend-version">前端 v1.3.11</span>
         <a class="theme-toggle" id="adminUsersLink" href="/admin_users.html" hidden>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
           <span>用户管理</span>
@@ -325,33 +325,88 @@
           <header class="device-config-heading">
             <div>
               <h1>设备配置</h1>
-              <p>统一管理当前设备的硬件能力；后续设备选项将在此处继续扩展。</p>
+              <p>统一校准设备动作时间、机器手搬运时间与槽位能力，保存后应用到当前设备的全部测试。</p>
+            </div>
+            <div class="device-config-heading-actions">
+              <div class="device-config-save-state">
+                <span id="deviceConfigSelectedName">尚未选择设备</span>
+                <strong id="deviceTimingStatus" role="status" aria-live="polite">选择设备后开始配置</strong>
+              </div>
+              <button class="btn" id="resetDeviceTimingButton" type="button" disabled>撤销时间修改</button>
+              <button class="btn primary" id="saveDeviceTimingButton" type="button" disabled>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h12l2 2v14H5zM8 4v6h7V4M8 20v-6h8v6"/></svg>
+                保存时间参数
+              </button>
             </div>
           </header>
           <div class="device-config-layout">
             <nav class="device-config-nav" aria-label="设备配置分类">
               <div class="device-config-nav-title">配置分类</div>
-              <div class="device-config-nav-item active" aria-current="page">
+              <button class="device-config-nav-item active" type="button" data-device-config-section="station-time" aria-current="page">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 7v5l3 2"/></svg>
+                <span><strong>设备时间</strong><small>站点动作 / 状态切换</small></span>
+              </button>
+              <button class="device-config-nav-item" type="button" data-device-config-section="robot-time">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 18h14M8 18v-4l4-2 3-5 3 2-3 6-3 3"/><circle cx="18" cy="7" r="2"/><path d="M6 14h4"/></svg>
+                <span><strong>机器手时间</strong><small>取放片 / 站点间移动</small></span>
+              </button>
+              <button class="device-config-nav-item" type="button" data-device-config-section="robot-slot">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="7" width="16" height="11" rx="3"/><path d="M12 3v4M8 12h.01M16 12h.01M8 18v3m8-3v3"/></svg>
                 <span><strong>机器手槽位</strong><small>单臂 / 双臂模式</small></span>
-              </div>
+              </button>
             </nav>
-            <article class="panel robot-slot-panel">
-              <div class="panel-head robot-slot-panel-head">
-                <div>
-                  <h2>机器手可用槽位</h2>
-                  <p>按设备设置单臂或双臂；保存后应用到当前设备下的全部测试。</p>
+            <div class="device-config-content">
+              <article class="panel device-timing-panel active" data-device-config-view="station-time">
+                <div class="panel-head device-timing-panel-head">
+                  <div>
+                    <h2>设备动作时间</h2>
+                    <p>按站点校准开门、准备、取放片完成及状态切换时间。</p>
+                  </div>
+                  <label class="device-config-picker" for="deviceStationSelect"><span>当前站点</span><select id="deviceStationSelect"><option value="">请先选择设备</option></select></label>
                 </div>
-                <div class="robot-slot-summary" id="robotSlotSummary">请先选择设备</div>
-              </div>
-              <div class="panel-body">
-                <div class="robot-slot-notice">
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8v5m0 3h.01"/><circle cx="12" cy="12" r="9"/></svg>
-                  <span>切换会同步更新 Robots.Slot、Capacity、CanMultiTrans 和 ArmInfo；下次运行及批量测试会自动使用新配置。</span>
+                <div class="panel-body device-timing-body">
+                  <div class="device-config-notice">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8v5m0 3h.01"/><circle cx="12" cy="12" r="9"/></svg>
+                    <span>所有数值单位均为秒。这里只编辑设备文件已经声明的计时项，不会改变站点容量、可达关系或运行状态。</span>
+                  </div>
+                  <div id="deviceStationTimingEditor"></div>
                 </div>
-                <div class="robot-slot-grid" id="robotSlotList"></div>
-              </div>
-            </article>
+              </article>
+
+              <article class="panel device-timing-panel" data-device-config-view="robot-time" hidden>
+                <div class="panel-head device-timing-panel-head">
+                  <div>
+                    <h2>机器手动作时间</h2>
+                    <p>分别校准各站点取片、放片以及站点间移动耗时。</p>
+                  </div>
+                  <label class="device-config-picker" for="deviceRobotSelect"><span>当前机器手</span><select id="deviceRobotSelect"><option value="">请先选择设备</option></select></label>
+                </div>
+                <div class="panel-body device-timing-body">
+                  <div class="device-config-notice">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8v5m0 3h.01"/><circle cx="12" cy="12" r="9"/></svg>
+                    <span>机器手的取放片时间按目标站点配置；移动时间按起点、终点和搬运类型精确匹配。</span>
+                  </div>
+                  <div id="deviceRobotTimingEditor"></div>
+                </div>
+              </article>
+
+              <article class="panel robot-slot-panel device-timing-panel" data-device-config-view="robot-slot" hidden>
+                <div class="panel-head robot-slot-panel-head">
+                  <div>
+                    <h2>机器手可用槽位</h2>
+                    <p>按设备设置单臂或双臂；切换后立即应用到当前设备下的全部测试。</p>
+                  </div>
+                  <div class="robot-slot-summary" id="robotSlotSummary">请先选择设备</div>
+                </div>
+                <div class="panel-body">
+                  <div class="robot-slot-notice">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8v5m0 3h.01"/><circle cx="12" cy="12" r="9"/></svg>
+                    <span>切换会同步更新 Capacity 与 ArmInfo；下次运行及批量测试会自动使用新配置。</span>
+                  </div>
+                  <div class="robot-slot-grid" id="robotSlotList"></div>
+                </div>
+              </article>
+            </div>
           </div>
         </div>
 
@@ -500,6 +555,85 @@
     </section>
   </dialog>
 
+  <dialog class="bottleneck-analysis-help-dialog" id="bottleneckAnalysisHelpDialog" aria-labelledby="bottleneckAnalysisHelpDialogTitle">
+    <section class="bottleneck-analysis-help-body">
+      <header class="bottleneck-analysis-help-head">
+        <div>
+          <h3 id="bottleneckAnalysisHelpDialogTitle">瓶颈分析说明</h3>
+          <p>帮助判断当前排程是否还有缩短空间，以及优先优化哪里。</p>
+        </div>
+        <button class="btn icon" type="button" id="bottleneckAnalysisHelpDialogClose" aria-label="关闭瓶颈分析说明">×</button>
+      </header>
+      <div class="bottleneck-analysis-help-content">
+        <section>
+          <h4>为什么不能只看 Makespan？</h4>
+          <p>Makespan（总完工时间）只能告诉我们这次排程用了多久，不能单独判断它是否已经最优，也无法指出应优先优化哪一台设备。瓶颈分析通过识别最受限的资源，判断排程还有没有可压缩的空闲时间。</p>
+        </section>
+        <section>
+          <h4>系统如何判断瓶颈？</h4>
+          <ul>
+            <li><strong>容量利用率：</strong>资源活跃时长占统计窗口的比例，是主要依据。</li>
+            <li><strong>运行连续性：</strong>最长空闲时间越短，说明资源越持续繁忙。</li>
+            <li><strong>同类相对强度：</strong>与同类资源比较，判断它是否更加紧张。</li>
+          </ul>
+          <p>瓶颈证据得分 = 容量利用率 × 82% + 运行连续性 × 12% + 同类相对强度 × 6%。分数越高，成为瓶颈的可能性越大；72 分及以上为证据较强，45–71 分为证据中等。接近最高分的资源会同时保留为候选。</p>
+        </section>
+        <section>
+          <h4>如何阅读结果？</h4>
+          <ul>
+            <li><strong>利用率：</strong>资源在统计窗口内被占用的比例；重叠活动只计算一次。</li>
+            <li><strong>占用组成：</strong>显示加工、清洁、开关门、取放/搬运、抽充气等活动的时间构成。</li>
+            <li><strong>瓶颈证据得分：</strong>综合利用率、连续性和同类比较得到的分数。</li>
+          </ul>
+        </section>
+        <section class="bottleneck-analysis-optimal-note">
+          <h4>何时可认为已达到最优？</h4>
+          <p>当首位瓶颈的容量利用率达到 <strong>99% 以上</strong>，说明它在统计窗口内几乎没有空闲。在当前设备数量、工艺时间和排程规则下，可认为当前 Makespan 已达到最优，或仅剩极小的边界压缩空间。</p>
+        </section>
+        <section>
+          <h4>统计窗口</h4>
+          <p><strong>剔除启动 / 收尾</strong> 会尽量排除启动填充和末批排空，更适合判断持续运行时的瓶颈；<strong>完整周期</strong> 则包含整次排程，适合观察全流程占用。</p>
+        </section>
+        <section>
+          <h4>为什么有些设备会合并显示？</h4>
+          <p>并行执行同一道工序的工艺腔、以及多个 LoadLock，会按容量组取平均利用率，避免因为设备数量较多而被误判为瓶颈。</p>
+        </section>
+        <p class="bottleneck-analysis-help-footnote">该结论仅适用于当前排程模型和统计窗口，不等同于设备实际 OEE。</p>
+      </div>
+    </section>
+  </dialog>
+
+  <dialog class="bottleneck-analysis-help-dialog" id="residenceAnalysisHelpDialog" aria-labelledby="residenceAnalysisHelpDialogTitle">
+    <section class="bottleneck-analysis-help-body">
+      <header class="bottleneck-analysis-help-head">
+        <div>
+          <h3 id="residenceAnalysisHelpDialogTitle">驻留时间分析说明</h3>
+          <p>帮助定位每片晶圆在系统、加工腔和机器手上的等待时间。</p>
+        </div>
+        <button class="btn icon" type="button" id="residenceAnalysisHelpDialogClose" aria-label="关闭驻留时间分析说明">×</button>
+      </header>
+      <div class="bottleneck-analysis-help-content">
+        <section>
+          <h4>三种驻留时间分别表示什么？</h4>
+          <ul>
+            <li><strong>系统驻留：</strong>晶圆离开 LoadPort 到返回 LoadPort 的总历时，反映整片晶圆的周期时间。</li>
+            <li><strong>腔室驻留：</strong>每次加工结束到晶圆完全离开加工腔的等待时间；同一晶圆经过多个加工腔时会累计。</li>
+            <li><strong>机器手驻留：</strong>Pick 完成到 Place 开始期间的持片等待，已扣除显式 PreTrans 搬运时间；跨多个机器手时会累计。</li>
+          </ul>
+        </section>
+        <section>
+          <h4>如何阅读柱状图？</h4>
+          <p>图表按口径拆分为三张：蓝色为系统驻留、紫色为腔室驻留、绿色为机器手驻留。每张图只比较同一种时间，柱上方和悬停提示都显示对应晶圆的准确秒数。</p>
+        </section>
+        <section>
+          <h4>如何用于优化？</h4>
+          <p>优先关注明显高于同批次其他晶圆的柱。腔室驻留偏高通常表示取片或下游资源衔接不足；机器手驻留偏高表示持片等待或搬运调度需要检查；系统驻留偏高则需要结合前两者及 LoadLock 时序查看全流程原因。</p>
+        </section>
+        <p class="bottleneck-analysis-help-footnote">腔室和机器手值是对应驻留段的累计时间，不应与系统驻留简单相加；系统驻留还包含加工、LoadLock 和其他搬运环节。</p>
+      </div>
+    </section>
+  </dialog>
+
 
   <div class="drawer-layer" id="drawerLayer">
     <aside class="drawer" id="stepDrawer" aria-label="路径 Step 详细设置">
@@ -508,7 +642,7 @@
     </aside>
   </div>
 
-  <script type="module" src="/assets/config_editor.js?v=1.3.8"></script>
+  <script type="module" src="/assets/config_editor.js?v=1.3.11"></script>
   <script>
     // 管理员才显示“用户管理”入口。
     (function () {

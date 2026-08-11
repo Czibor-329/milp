@@ -65,6 +65,8 @@ class BackendAnalysisTests(unittest.TestCase):
                     "enteredAt": 1.0,
                     "completedAt": 5.0,
                     "duration": 4.0,
+                    "chamberDwellSeconds": 0.0,
+                    "robotDwellSeconds": 3.0,
                 }
             ],
             result["waferSystemResidenceTimes"],
@@ -101,6 +103,47 @@ class BackendAnalysisTests(unittest.TestCase):
             ],
         )
         self.assertEqual(["PM1", "PM2"], context["processStages"][0]["resourceNames"])
+
+    def test_load_lock_efficiency_counts_completed_cycles_and_repeated_loads(self) -> None:
+        """同一晶圆跨多个抽充气周期时，每个周期都应贡献一次载荷。"""
+        result = analyze_schedule_performance(
+            [
+                {"MoveType": 12, "ModuleName": "LA", "MatIDList": ["W1"], "StartTime": 0, "EndTime": 1},
+                {"MoveType": 13, "ModuleName": "LA", "MatIDList": ["W1"], "StartTime": 2, "EndTime": 3},
+                {"MoveType": 12, "ModuleName": "LA", "MatIDList": ["W1", "W2"], "StartTime": 4, "EndTime": 5},
+                {"MoveType": 13, "ModuleName": "LA", "MatIDList": ["W1"], "StartTime": 6, "EndTime": 7},
+                {"MoveType": 12, "ModuleName": "LA", "MatIDList": [], "StartTime": 8, "EndTime": 9},
+                {"MoveType": 13, "ModuleName": "LA", "MatIDList": [], "StartTime": 10, "EndTime": 11},
+                {"MoveType": 12, "ModuleName": "LA", "MatIDList": ["W3"], "StartTime": 12, "EndTime": 13},
+            ],
+            {"Stations": {"LA": {"Type": "LoadLock", "Capacity": 2}}},
+            mode="full",
+        )
+        self.assertEqual(
+            {
+                "cycleCount": 3,
+                "waferCycleCount": 3,
+                "wafersPerCycle": 1,
+                "fullLoadCycleCount": 1,
+                "emptyLoadCycleCount": 1,
+                "fullLoadCycleRatio": 1 / 3,
+                "emptyLoadCycleRatio": 1 / 3,
+            },
+            result["loadLockEfficiency"],
+        )
+
+    def test_load_lock_efficiency_recognizes_pse300_atr_vtr_transitions(self) -> None:
+        """PSE300 以 ATR/VTR（而非 ATM/VAC）记录 MoveType=10 环境切换。"""
+        result = analyze_schedule_performance(
+            [
+                {"MoveType": 10, "ModuleName": "LA", "LastState": "ATR", "CurState": "VTR", "MatIDList": ["W1"], "StartTime": 0, "EndTime": 1},
+                {"MoveType": 10, "ModuleName": "LA", "LastState": "VTR", "CurState": "ATR", "MatIDList": ["W1"], "StartTime": 2, "EndTime": 3},
+            ],
+            {"Stations": {"LA": {"Type": "LoadLock", "Capacity": 2}}},
+            mode="full",
+        )
+        self.assertEqual(1, result["loadLockEfficiency"]["cycleCount"])
+        self.assertEqual(1, result["loadLockEfficiency"]["waferCycleCount"])
 
     def test_group_analysis_reports_comparison_and_cpu_metrics(self) -> None:
         """测试组统计应在服务端统一计算比较指标与 CPU 分位数。"""

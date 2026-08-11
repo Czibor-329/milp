@@ -1842,92 +1842,6 @@ function renderDualActorDecisionLens(decision) {
       <div class="dual-actor-recommendation-list">${groupMarkup}</div>
     </section>`;
 }
-var WAFER_COLOR_PALETTE = [
-  "#d81b60",
-  "#2f9e44",
-  "#5f5bd6",
-  "#e76f51",
-  "#008c95",
-  "#c23b8d",
-  "#2878c8",
-  "#7ca62b",
-  "#b45cc5",
-  "#16856f",
-  "#7a5fb5",
-  "#b66a2c",
-  "#c23b32",
-  "#45a66b",
-  "#4d66c4",
-  "#df6b83",
-  "#2b7a78",
-  "#a33d64",
-  "#7868c8",
-  "#8a6045"
-];
-function waferLabel(value) {
-  const material = String(value || "").trim();
-  return /^W/i.test(material) ? material : `W${material}`;
-}
-function buildWaferColorMap(cycles) {
-  const wafers = /* @__PURE__ */ new Set();
-  for (const cycle of cycles) {
-    for (const wafer of cycle.vacuumWafers) wafers.add(waferLabel(wafer));
-    for (const wafer of cycle.ventWafers) wafers.add(waferLabel(wafer));
-  }
-  const map = /* @__PURE__ */ new Map();
-  let idx = 0;
-  for (const wafer of wafers) {
-    map.set(wafer, WAFER_COLOR_PALETTE[idx % WAFER_COLOR_PALETTE.length]);
-    idx++;
-  }
-  return map;
-}
-function normalizeGanttCycles(cycles) {
-  return cycles.map((cycle) => ({
-    index: Number(cycle.index ?? 0),
-    loadLock: String(cycle.loadLock ?? ""),
-    vacuumWafers: Array.isArray(cycle.vacuumWafers) ? cycle.vacuumWafers.map(String) : [],
-    ventWafers: Array.isArray(cycle.ventWafers) ? cycle.ventWafers.map(String) : [],
-    startTime: Number(cycle.startTime ?? cycle.index ?? 0),
-    pumpEndTime: Number(cycle.pumpEndTime ?? cycle.startTime ?? cycle.index ?? 0),
-    ventStartTime: Number(cycle.ventStartTime ?? 0),
-    ventEndTime: Number(cycle.ventEndTime ?? 0)
-  }));
-}
-function formatGanttTime(seconds) {
-  return seconds >= 1 ? seconds.toFixed(1) : seconds.toFixed(2);
-}
-function renderWaferDots(wafers, waferColors) {
-  if (!wafers.length) return "";
-  return wafers.map((w) => {
-    const label = waferLabel(w);
-    const color = waferColors.get(label) || "#94a3b8";
-    return `<span class="gantt-wafer-dot" style="background:${color}" title="${escapeHtml(label)}"></span>`;
-  }).join("");
-}
-function renderLoadLockGantt(cycles) {
-  if (!cycles.length) return '<div class="loadlock-cycle-empty">MoveList \u4E2D\u6CA1\u6709\u8BC6\u522B\u5230 LoadLock \u62BD\u6C14\u6216\u5145\u6C14\u52A8\u4F5C\u3002</div>';
-  const waferColors = buildWaferColorMap(cycles);
-  const events = [];
-  for (const c of cycles) {
-    events.push({ time: c.startTime, loadLock: c.loadLock, dir: "pump", wafers: c.vacuumWafers });
-    if (c.ventStartTime) events.push({ time: c.ventStartTime, loadLock: c.loadLock, dir: "vent", wafers: c.ventWafers });
-  }
-  events.sort((a, b) => a.time - b.time);
-  function renderCard(dir, wafers, loadLock, time) {
-    const cls = dir === "pump" ? "seq-pump" : "seq-vent";
-    const label = dir === "pump" ? "\u62BD" : "\u5145";
-    const dots = renderWaferDots(wafers, waferColors);
-    const description = `${loadLock} ${label}\u6C14 ${formatGanttTime(time)}s`;
-    return `<div class="seq-card ${cls}" role="img" aria-label="${escapeHtml(description)}" title="${escapeHtml(description)}"><span class="seq-dots">${dots}</span></div>`;
-  }
-  const interleavedCards = events.map((e) => renderCard(e.dir, e.wafers, e.loadLock, e.time)).join("");
-  return `<div class="loadlock-seq">
-    <div class="seq-scroll" aria-label="LoadLock \u5168\u5C40\u4EA4\u9519\u65F6\u5E8F">
-      <div class="seq-cards">${interleavedCards}</div>
-    </div>
-  </div>`;
-}
 function formatPercent(value) {
   return `${(Math.max(0, value) * 100).toFixed(1)}%`;
 }
@@ -1978,12 +1892,113 @@ function groupedBottleneckResources(performance2) {
     };
   }).filter((group) => group.busyTime > PERFORMANCE_DISPLAY_TOLERANCE).sort((left, right) => right.utilization - left.utilization || left.name.localeCompare(right.name, void 0, { numeric: true, sensitivity: "base" })).slice(0, 4);
 }
+function loadLockEfficiencyFromMoves(moves, device) {
+  const pendingByLoadLock = /* @__PURE__ */ new Map();
+  let cycleCount = 0;
+  let waferCycleCount = 0;
+  let fullLoadCycleCount = 0;
+  let emptyLoadCycleCount = 0;
+  const stationType = (name) => String(device?.Stations?.[name]?.Type ?? "");
+  const capacityOf = (name) => {
+    const definition = device?.Stations?.[name] ?? {};
+    const slots = listValue(definition.Slots).map((value) => finiteNumber(value, 0)).filter((value) => value > 0);
+    return Math.max(1, 2, finiteNumber(definition.Capacity, 0), slots.length, ...slots);
+  };
+  const directionOf = (move) => {
+    const lastState = String(move.LastState ?? "").toUpperCase();
+    const currentState = String(move.CurState ?? "").toUpperCase();
+    if (["ATM", "ATR"].includes(lastState) && ["VAC", "VTR"].includes(currentState)) return "vacuum";
+    if (["VAC", "VTR"].includes(lastState) && ["ATM", "ATR"].includes(currentState)) return "vent";
+    if (move.MoveType === PUMP_MOVE) return "vacuum";
+    if (move.MoveType === VENT_MOVE) return "vent";
+    return null;
+  };
+  for (const move of normalizeMoves(moves)) {
+    const direction = directionOf(move);
+    const loadLock = move.ModuleName;
+    if (!direction || !isLoadLockName(loadLock, stationType(loadLock))) continue;
+    if (direction === "vacuum") {
+      pendingByLoadLock.set(loadLock, materialIds(move));
+      continue;
+    }
+    const pumpedWafers = pendingByLoadLock.get(loadLock);
+    if (!pumpedWafers) continue;
+    pendingByLoadLock.delete(loadLock);
+    const cycleLoad = Math.max(pumpedWafers.length, materialIds(move).length);
+    cycleCount += 1;
+    waferCycleCount += cycleLoad;
+    if (cycleLoad === 0) emptyLoadCycleCount += 1;
+    if (cycleLoad >= capacityOf(loadLock)) fullLoadCycleCount += 1;
+  }
+  return {
+    cycleCount,
+    waferCycleCount,
+    wafersPerCycle: cycleCount ? waferCycleCount / cycleCount : 0,
+    fullLoadCycleCount,
+    emptyLoadCycleCount,
+    fullLoadCycleRatio: cycleCount ? fullLoadCycleCount / cycleCount : 0,
+    emptyLoadCycleRatio: cycleCount ? emptyLoadCycleCount / cycleCount : 0
+  };
+}
 function withWaferResidenceTimes(performance2, moves, device) {
-  if (performance2.waferSystemResidenceTimes?.length || !moves.length) return performance2;
   const entries = /* @__PURE__ */ new Map();
   const completions = /* @__PURE__ */ new Map();
   const stationType = (name) => String(device?.Stations?.[name]?.Type ?? "");
-  for (const move of normalizeMoves(moves)) {
+  const chamberDwellByWafer = /* @__PURE__ */ new Map();
+  const robotDwellByWafer = /* @__PURE__ */ new Map();
+  const transportByRobot = /* @__PURE__ */ new Map();
+  const holdingStartedAt = /* @__PURE__ */ new Map();
+  const coveredDuration = (intervals, start, end) => {
+    const clipped = intervals.map((interval) => ({ start: Math.max(interval.start, start), end: Math.min(interval.end, end) })).filter((interval) => interval.end > interval.start + PERFORMANCE_DISPLAY_TOLERANCE).sort((left, right) => left.start - right.start || left.end - right.end);
+    let total = 0;
+    let active = null;
+    for (const interval of clipped) {
+      if (!active) active = interval;
+      else if (interval.start <= active.end + PERFORMANCE_DISPLAY_TOLERANCE) active.end = Math.max(active.end, interval.end);
+      else {
+        total += active.end - active.start;
+        active = interval;
+      }
+    }
+    return active ? total + active.end - active.start : total;
+  };
+  const records = normalizeMoves(moves);
+  for (const move of records) {
+    if (move.MoveType === PRE_TRANS_MOVE && move.EndTime > move.StartTime) {
+      const robot = move.ModuleName;
+      const intervals = transportByRobot.get(robot) ?? [];
+      intervals.push({ start: move.StartTime, end: move.EndTime });
+      transportByRobot.set(robot, intervals);
+    }
+  }
+  for (const processMove of records) {
+    const chamber = processMove.ModuleName;
+    if (processMove.MoveType !== PROCESS_MOVE || !isProcessModule(chamber, stationType(chamber))) continue;
+    for (const wafer of materialIds(processMove)) {
+      const removal = records.find((candidate) => candidate.EndTime >= processMove.EndTime - PERFORMANCE_DISPLAY_TOLERANCE && (PICK_MOVE_TYPES.has(candidate.MoveType) && firstStation(candidate, "SrcStationList") === chamber && materialIds(candidate).includes(wafer) || candidate.MoveType === SWAP_MOVE && firstStation(candidate, "StationList") === chamber && materialIds(candidate, "SendMatList").includes(wafer)));
+      if (removal) chamberDwellByWafer.set(wafer, (chamberDwellByWafer.get(wafer) ?? 0) + removal.EndTime - processMove.EndTime);
+    }
+  }
+  const finishHolding = (robot, wafers, finishedAt) => {
+    for (const wafer of wafers) {
+      const key = `${robot}\0${wafer}`;
+      const startedAt = holdingStartedAt.get(key);
+      if (startedAt === void 0) continue;
+      holdingStartedAt.delete(key);
+      const dwell = Math.max(finishedAt - startedAt - coveredDuration(transportByRobot.get(robot) ?? [], startedAt, finishedAt), 0);
+      robotDwellByWafer.set(wafer, (robotDwellByWafer.get(wafer) ?? 0) + dwell);
+    }
+  };
+  for (const move of records) {
+    const robot = move.ModuleName;
+    if (PICK_MOVE_TYPES.has(move.MoveType)) {
+      for (const wafer of materialIds(move)) holdingStartedAt.set(`${robot}\0${wafer}`, move.EndTime);
+    } else if (PLACE_MOVE_TYPES.has(move.MoveType)) {
+      finishHolding(robot, materialIds(move), move.StartTime);
+    } else if (move.MoveType === SWAP_MOVE) {
+      finishHolding(robot, materialIds(move, "SendMatList"), move.StartTime);
+      for (const wafer of materialIds(move, "RecvMatList")) holdingStartedAt.set(`${robot}\0${wafer}`, move.EndTime);
+    }
     if (PICK_MOVE_TYPES.has(move.MoveType)) {
       const source = firstStation(move, "SrcStationList");
       if (!isLoadPortName(source, stationType(source))) continue;
@@ -2005,14 +2020,28 @@ function withWaferResidenceTimes(performance2, moves, device) {
       }
     }
   }
-  const samples = [];
+  const fallbackSamples = [];
   for (const [wafer, completedAt] of completions) {
     const enteredAt = entries.get(wafer);
     if (enteredAt === void 0 || completedAt < enteredAt - PERFORMANCE_DISPLAY_TOLERANCE) continue;
-    samples.push({ wafer, enteredAt, completedAt, duration: completedAt - enteredAt });
+    fallbackSamples.push({
+      wafer,
+      enteredAt,
+      completedAt,
+      duration: completedAt - enteredAt,
+      chamberDwellSeconds: chamberDwellByWafer.get(wafer) ?? 0,
+      robotDwellSeconds: robotDwellByWafer.get(wafer) ?? 0
+    });
   }
-  samples.sort((left, right) => left.completedAt - right.completedAt || naturalCompare(left.wafer, right.wafer));
-  return samples.length ? { ...performance2, waferSystemResidenceTimes: samples } : performance2;
+  fallbackSamples.sort((left, right) => left.completedAt - right.completedAt || naturalCompare(left.wafer, right.wafer));
+  const fallbackByWafer = new Map(fallbackSamples.map((sample) => [sample.wafer, sample]));
+  const samples = (performance2.waferSystemResidenceTimes?.length ? performance2.waferSystemResidenceTimes : fallbackSamples).map((sample) => ({
+    ...sample,
+    chamberDwellSeconds: sample.chamberDwellSeconds ?? fallbackByWafer.get(sample.wafer)?.chamberDwellSeconds ?? 0,
+    robotDwellSeconds: sample.robotDwellSeconds ?? fallbackByWafer.get(sample.wafer)?.robotDwellSeconds ?? 0
+  }));
+  const hydrated = samples.length ? { ...performance2, waferSystemResidenceTimes: samples } : performance2;
+  return hydrated.loadLockEfficiency ? hydrated : { ...hydrated, loadLockEfficiency: loadLockEfficiencyFromMoves(moves, device) };
 }
 function renderBottleneckAnalysis(performance2) {
   const { window: window2 } = performance2;
@@ -2048,7 +2077,10 @@ function renderBottleneckAnalysis(performance2) {
       <div>
         <strong>\u74F6\u9888\u5206\u6790</strong>
       </div>
-      <label class="bottleneck-window-control"><span class="visually-hidden">\u7EDF\u8BA1\u53E3\u5F84</span><div class="bottleneck-window-slot"></div></label>
+      <div class="bottleneck-analysis-actions">
+        <button class="bottleneck-analysis-help" id="bottleneckAnalysisHelpButton" type="button" aria-haspopup="dialog" aria-controls="bottleneckAnalysisHelpDialog">\u74F6\u9888\u5206\u6790\u8BF4\u660E</button>
+        <label class="bottleneck-window-control"><span class="visually-hidden">\u7EDF\u8BA1\u53E3\u5F84</span><div class="bottleneck-window-slot"></div></label>
+      </div>
     </header>
     <div class="resource-utilization-head" aria-hidden="true"><span>\u8D44\u6E90</span><span>\u5229\u7528\u7387</span><span>\u5360\u7528\u7EC4\u6210</span><span>\u6D3B\u8DC3\u65F6\u957F</span><span>\u74F6\u9888\u8BC1\u636E\u5F97\u5206</span></div>
     <ol class="resource-utilization-list">
@@ -2057,67 +2089,104 @@ function renderBottleneckAnalysis(performance2) {
     <div class="performance-legend" aria-label="\u5360\u7528\u7EC4\u6210\u56FE\u4F8B">${legend}</div>
   `;
 }
-function renderWaferResidenceChart(performance2) {
-  const samples = performance2.waferSystemResidenceTimes ?? [];
-  if (!samples.length) {
-    return `
-      <header class="residence-chart-head"><strong>\u7CFB\u7EDF\u9A7B\u7559\u65F6\u95F4\u5206\u6790</strong></header>
-      <div class="residence-chart-empty">\u5F53\u524D\u7ED3\u679C\u4E2D\u6CA1\u6709\u5B8C\u6210\u5F80\u8FD4 LoadPort \u7684\u6676\u5706\u3002</div>`;
-  }
-  const meanSeconds = samples.reduce((sum, sample) => sum + sample.duration, 0) / samples.length;
-  const maximumSeconds = Math.max(...samples.map((sample) => sample.duration));
-  const minimumSeconds = Math.min(...samples.map((sample) => sample.duration));
-  const rangeToMinimumPercent = minimumSeconds > PERFORMANCE_DISPLAY_TOLERANCE ? (maximumSeconds - minimumSeconds) / minimumSeconds * 100 : null;
-  const plotHeight = 170;
-  const scaleMaximum = Math.max(maximumSeconds, 1) * 1.08;
+function renderResidenceMetricChart(samples, kind) {
+  const definitions = {
+    system: { title: "\u7CFB\u7EDF\u9A7B\u7559\u65F6\u95F4", label: "\u7CFB\u7EDF\u9A7B\u7559", value: (sample) => sample.duration },
+    chamber: { title: "\u8154\u5BA4\u9A7B\u7559\u65F6\u95F4", label: "\u8154\u5BA4\u9A7B\u7559", value: (sample) => sample.chamberDwellSeconds ?? 0 },
+    robot: { title: "\u673A\u5668\u624B\u9A7B\u7559\u65F6\u95F4", label: "\u673A\u5668\u624B\u9A7B\u7559", value: (sample) => sample.robotDwellSeconds ?? 0 }
+  };
+  const metric = definitions[kind];
+  const values = samples.map(metric.value);
+  const meanSeconds = values.reduce((sum, value) => sum + value, 0) / values.length;
+  const maximumSeconds = Math.max(...values, 1);
+  const plotHeight = 120;
+  const scaleMaximum = maximumSeconds * 1.08;
   const meanHeight = Math.min(meanSeconds / scaleMaximum * plotHeight, plotHeight);
   const bars = samples.map((sample) => {
-    const height = Math.max(sample.duration / scaleMaximum * plotHeight, 2);
+    const seconds = metric.value(sample);
+    const height = Math.max(seconds / scaleMaximum * plotHeight, 2);
     const wafer = escapeHtml(String(sample.wafer));
-    const duration = formatSeconds2(sample.duration);
+    const duration = formatSeconds2(seconds);
     return `
-      <li class="residence-bar-item" role="img" aria-label="\u6676\u5706 ${wafer}\uFF0C\u7CFB\u7EDF\u9A7B\u7559 ${duration} \u79D2" title="\u6676\u5706 ${wafer} \xB7 \u79BB\u5F00 ${formatSeconds2(sample.enteredAt)} s \xB7 \u8FD4\u56DE ${formatSeconds2(sample.completedAt)} s \xB7 \u9A7B\u7559 ${duration} s">
+      <li class="residence-metric-bar-item" role="img" aria-label="\u6676\u5706 ${wafer}\uFF0C${metric.label} ${duration} \u79D2" title="\u6676\u5706 ${wafer} \xB7 ${metric.label} ${duration} s">
         <strong>${duration}</strong>
-        <span class="residence-bar-track"><i style="height:${height.toFixed(2)}px"></i></span>
+        <span class="residence-metric-bar residence-bar-${kind}"><i style="height:${height.toFixed(2)}px"></i></span>
         <small>${wafer}</small>
       </li>`;
   }).join("");
   return `
-    <header class="residence-chart-head">
-      <strong>\u7CFB\u7EDF\u9A7B\u7559\u65F6\u95F4\u5206\u6790</strong>
-      <div class="residence-chart-summary">
-        <span>\u5E73\u5747 <b>${formatSeconds2(meanSeconds)} s</b></span>
-        <span>\u6700\u5927 <b>${formatSeconds2(maximumSeconds)} s</b></span>
-        <span>\u6781\u5DEE/\u6700\u5C0F\u503C <b>${rangeToMinimumPercent === null ? "\u2014" : `${rangeToMinimumPercent.toFixed(1)}%`}</b></span>
-        <span>\u6837\u672C <b>${samples.length} \u7247</b></span>
-      </div>
-    </header>
-    <div class="residence-chart-body">
-      <div class="residence-chart-scroll" tabindex="0" aria-label="\u9010\u7247\u6676\u5706\u7CFB\u7EDF\u9A7B\u7559\u65F6\u95F4\u67F1\u72B6\u56FE\uFF0C\u53EF\u6A2A\u5411\u6EDA\u52A8">
-        <div class="residence-chart-plot">
-          <div class="residence-mean-line" style="bottom:${(28 + meanHeight).toFixed(2)}px"><span>\u5E73\u5747 ${formatSeconds2(meanSeconds)} s</span></div>
-          <ol class="residence-bars">${bars}</ol>
+    <div class="residence-metric-chart residence-metric-${kind}" data-residence-metric-chart="${kind}"${kind === "system" ? "" : " hidden"}>
+      <div class="residence-metric-scroll" tabindex="0" aria-label="\u9010\u7247\u6676\u5706${metric.title}\u67F1\u72B6\u56FE\uFF0C\u53EF\u6A2A\u5411\u6EDA\u52A8">
+        <div class="residence-metric-plot">
+          <div class="residence-metric-mean-line" style="bottom:${(26 + meanHeight).toFixed(2)}px"><span>\u5E73\u5747 ${formatSeconds2(meanSeconds)} s</span></div>
+          <ol class="residence-metric-bars">${bars}</ol>
         </div>
       </div>
     </div>`;
 }
-function renderLoadLockCard(performance2) {
-  const ganttCycles = normalizeGanttCycles(performance2.loadLockCycles);
-  const gantt = renderLoadLockGantt(ganttCycles);
+function renderWaferResidenceChart(performance2) {
+  const samples = performance2.waferSystemResidenceTimes ?? [];
+  const helpButton = `<button class="bottleneck-analysis-help residence-analysis-help" id="residenceAnalysisHelpButton" type="button" aria-haspopup="dialog" aria-controls="residenceAnalysisHelpDialog">\u8BF4\u660E</button>`;
+  if (!samples.length) {
+    return `
+      <header class="residence-chart-head"><strong>\u9A7B\u7559\u65F6\u95F4\u5206\u6790</strong>${helpButton}</header>
+      <div class="residence-chart-empty">\u5F53\u524D\u7ED3\u679C\u4E2D\u6CA1\u6709\u5B8C\u6210\u5F80\u8FD4 LoadPort \u7684\u6676\u5706\u3002</div>`;
+  }
+  const systemValues = samples.map((sample) => sample.duration);
+  const systemMeanSeconds = systemValues.reduce((sum, value) => sum + value, 0) / systemValues.length;
+  const maximumSeconds = Math.max(...systemValues);
+  const minimumSeconds = Math.min(...systemValues);
+  const rangeToMinimumPercent = minimumSeconds > PERFORMANCE_DISPLAY_TOLERANCE ? (maximumSeconds - minimumSeconds) / minimumSeconds * 100 : null;
+  const chamberMeanSeconds = samples.reduce((sum, sample) => sum + (sample.chamberDwellSeconds ?? 0), 0) / samples.length;
+  const robotMeanSeconds = samples.reduce((sum, sample) => sum + (sample.robotDwellSeconds ?? 0), 0) / samples.length;
+  const chamberValues = samples.map((sample) => sample.chamberDwellSeconds ?? 0);
+  const robotValues = samples.map((sample) => sample.robotDwellSeconds ?? 0);
+  const summary = (kind, content) => `<div class="residence-chart-summary" data-residence-summary="${kind}"${kind === "system" ? "" : " hidden"}>${content}</div>`;
   return `
-    <header class="loadlock-card-head">
-      <strong>LoadLock \u4EA4\u6362\u65F6\u5E8F</strong>
-      <span>\u663E\u793A\u5168\u90E8 LoadLock \u7684\u62BD\u6C14/\u5145\u6C14\u4EA4\u9519\u5E8F\u5217</span>
+    <header class="residence-chart-head">
+      <strong>\u9A7B\u7559\u65F6\u95F4\u5206\u6790</strong>
+      <label class="residence-metric-control"><span class="visually-hidden">\u9009\u62E9\u9A7B\u7559\u65F6\u95F4\u56FE\u8868</span><select id="residenceMetricSelect" aria-label="\u9009\u62E9\u9A7B\u7559\u65F6\u95F4\u56FE\u8868">
+        <option value="system">\u7CFB\u7EDF\u9A7B\u7559\u65F6\u95F4</option>
+        <option value="chamber">\u8154\u5BA4\u9A7B\u7559\u65F6\u95F4</option>
+        <option value="robot">\u673A\u5668\u624B\u9A7B\u7559\u65F6\u95F4</option>
+      </select></label>
+      ${summary("system", `
+        <span>\u7CFB\u7EDF\u5E73\u5747 <b>${formatSeconds2(systemMeanSeconds)} s</b></span>
+        <span>\u7CFB\u7EDF\u6700\u5927 <b>${formatSeconds2(maximumSeconds)} s</b></span>
+        <span>\u6781\u5DEE/\u6700\u5C0F\u503C <b>${rangeToMinimumPercent === null ? "\u2014" : `${rangeToMinimumPercent.toFixed(1)}%`}</b></span>
+        <span>\u6837\u672C <b>${samples.length} \u7247</b></span>`)}
+      ${summary("chamber", `
+        <span>\u8154\u5BA4\u5E73\u5747 <b>${formatSeconds2(chamberMeanSeconds)} s</b></span>
+        <span>\u8154\u5BA4\u6700\u5927 <b>${formatSeconds2(Math.max(...chamberValues))} s</b></span>
+        <span>\u8154\u5BA4\u7D2F\u8BA1 <b>${formatSeconds2(chamberValues.reduce((sum, value) => sum + value, 0))} s</b></span>
+        <span>\u6837\u672C <b>${samples.length} \u7247</b></span>`)}
+      ${summary("robot", `
+        <span>\u673A\u5668\u624B\u5E73\u5747 <b>${formatSeconds2(robotMeanSeconds)} s</b></span>
+        <span>\u673A\u5668\u624B\u6700\u5927 <b>${formatSeconds2(Math.max(...robotValues))} s</b></span>
+        <span>\u673A\u5668\u624B\u7D2F\u8BA1 <b>${formatSeconds2(robotValues.reduce((sum, value) => sum + value, 0))} s</b></span>
+        <span>\u6837\u672C <b>${samples.length} \u7247</b></span>`)}
+      ${helpButton}
     </header>
-    <div class="loadlock-card-body">${gantt}</div>`;
+    <div class="residence-chart-body">
+      ${renderResidenceMetricChart(samples, "system")}
+      ${renderResidenceMetricChart(samples, "chamber")}
+      ${renderResidenceMetricChart(samples, "robot")}
+    </div>`;
 }
 function renderSchedulePerformance(performance2) {
   const window2 = performance2.window;
-  const bottleneck = performance2.primaryBottleneck;
-  const confidenceLabels = { high: "\u8BC1\u636E\u8F83\u5F3A", medium: "\u8BC1\u636E\u4E2D\u7B49", low: "\u8BC1\u636E\u8F83\u5F31" };
+  const loadLockEfficiency = performance2.loadLockEfficiency ?? {
+    cycleCount: 0,
+    waferCycleCount: 0,
+    wafersPerCycle: 0,
+    fullLoadCycleCount: 0,
+    emptyLoadCycleCount: 0,
+    fullLoadCycleRatio: 0,
+    emptyLoadCycleRatio: 0
+  };
   return `
     <section class="result-card overview-card">
-      <header class="overview-head"><span class="visual-kicker">\u6392\u7A0B\u6982\u89C8</span><strong>KPI \u603B\u89C8</strong></header>
+      <header class="overview-head"><strong>KPI \u603B\u89C8</strong></header>
       <div class="performance-summary">
         <div>
           <span>\u7EDF\u8BA1\u7A97\u53E3</span>
@@ -2125,29 +2194,14 @@ function renderSchedulePerformance(performance2) {
           <small>\u5254\u9664\u5F00\u5934 ${formatSeconds2(window2.trimmedStart)} s / \u7ED3\u5C3E ${formatSeconds2(window2.trimmedEnd)} s</small>
         </div>
         <div>
-          <span>\u6700\u53EF\u80FD\u74F6\u9888</span>
-          <strong>${escapeHtml(bottleneck?.label ?? "\u2014")}</strong>
-          <small>${bottleneck ? `\u5BB9\u91CF\u5229\u7528\u7387 ${formatPercent(bottleneck.utilization)} \xB7 ${confidenceLabels[bottleneck.confidence]} \xB7 \u53E6\u6709 ${Math.max(0, performance2.bottleneckCandidates.length - 1)} \u4E2A\u5019\u9009` : "\u6CA1\u6709\u8DB3\u591F\u7684\u8D44\u6E90\u6D3B\u52A8"}</small>
-        </div>
-        <div>
-          <span>\u51FA\u7AD9\u8282\u62CD</span>
+          <span>\u4EA7\u80FD</span>
           <strong>${performance2.throughputPerHour > 0 ? `${performance2.throughputPerHour.toFixed(1)} \u7247/h` : "\u2014"}</strong>
           <small>\u5E73\u5747\u95F4\u9694 ${formatSeconds2(performance2.meanDepartureInterval)} s \xB7 \u95F4\u9694 CV ${performance2.departureIntervalCv.toFixed(2)} \xB7 ${performance2.completedWaferCount} \u7247\u6837\u672C</small>
         </div>
         <div>
-          <span>\u6676\u5706\u9A7B\u7559\u65F6\u95F4 \xB7 \u52A0\u5DE5\u8154</span>
-          <strong>${performance2.processChamberDwellTime.sampleCount ? `${formatSeconds2(performance2.processChamberDwellTime.meanSeconds)} s` : "\u2014"}</strong>
-          <small>\u52A0\u5DE5\u7ED3\u675F \u2192 \u5B8C\u5168\u79BB\u8154 \xB7 \u4E2D\u4F4D ${formatSeconds2(performance2.processChamberDwellTime.medianSeconds)} s \xB7 \u6700\u5927 ${formatSeconds2(performance2.processChamberDwellTime.maxSeconds)} s \xB7 ${performance2.processChamberDwellTime.sampleCount} \u6B21</small>
-        </div>
-        <div>
-          <span>\u673A\u5668\u624B\u9A7B\u7559\u65F6\u95F4</span>
-          <strong>${performance2.robotWaferDwellTime.sampleCount ? `${formatSeconds2(performance2.robotWaferDwellTime.meanSeconds)} s` : "\u2014"}</strong>
-          <small>Pick \u5B8C\u6210 \u2192 Place \u5F00\u59CB\uFF0C\u5DF2\u6263\u9664 PreTrans \u8FD0\u8F93 \xB7 \u6700\u5927 ${formatSeconds2(performance2.robotWaferDwellTime.maxSeconds)} s \xB7 ${performance2.robotWaferDwellTime.sampleCount} \u6B21</small>
-        </div>
-        <div>
-          <span>\u6676\u5706\u7CFB\u7EDF\u505C\u7559\u65F6\u95F4</span>
-          <strong>${performance2.waferSystemResidenceTime.sampleCount ? `${formatSeconds2(performance2.waferSystemResidenceTime.meanSeconds)} s` : "\u2014"}</strong>
-          <small>\u79BB\u5F00 LP \u2192 \u8FD4\u56DE LP \xB7 CV ${performance2.waferSystemResidenceTime.coefficientOfVariation.toFixed(2)} \xB7 \u6700\u5927 ${formatSeconds2(performance2.waferSystemResidenceTime.maxSeconds)} s \xB7 ${performance2.waferSystemResidenceTime.sampleCount} \u7247</small>
+          <span>LoadLock \u5229\u7528\u6548\u7387</span>
+          <strong>${loadLockEfficiency.cycleCount ? `${loadLockEfficiency.wafersPerCycle.toFixed(2)} \u7247/\u5468\u671F` : "\u2014"}</strong>
+          <small>${loadLockEfficiency.cycleCount ? `${loadLockEfficiency.waferCycleCount} \u7247\xB7\u5468\u671F / ${loadLockEfficiency.cycleCount} \u4E2A\u5B8C\u6574\u62BD\u5145\u6C14\u5468\u671F \xB7 \u6EE1\u8F7D ${formatPercent(loadLockEfficiency.fullLoadCycleRatio)}\uFF08${loadLockEfficiency.fullLoadCycleCount}/${loadLockEfficiency.cycleCount}\uFF09\xB7 \u7A7A\u8F7D ${formatPercent(loadLockEfficiency.emptyLoadCycleRatio)}\uFF08${loadLockEfficiency.emptyLoadCycleCount}/${loadLockEfficiency.cycleCount}\uFF09` : "\u6CA1\u6709\u5B8C\u6574\u7684\u62BD\u6C14\u2014\u5145\u6C14\u5468\u671F"}</small>
         </div>
       </div>
     </section>
@@ -2160,9 +2214,6 @@ function renderSchedulePerformance(performance2) {
       ${renderBottleneckAnalysis(performance2)}
     </section>
 
-    <section class="result-card loadlock-swap-card">
-      ${renderLoadLockCard(performance2)}
-    </section>
     `;
 }
 var VisualizationWorkspace = class {
@@ -3434,6 +3485,17 @@ var PROCESSING_STATION_TYPES = /* @__PURE__ */ new Set([
 var FIRST_ROBOT_SLOT_ID = 1;
 var DUAL_ARM_SLOT_COUNT = 2;
 var SEARCH_TELEMETRY_POLL_MILLISECONDS = 75;
+var STATION_ACTION_TIME_FIELDS = [
+  { key: "PickPrepareTime", label: "\u53D6\u7247\u51C6\u5907" },
+  { key: "PickCompleteTime", label: "\u53D6\u7247\u5B8C\u6210" },
+  { key: "PlacePrepareTime", label: "\u653E\u7247\u51C6\u5907" },
+  { key: "PlaceCompleteTime", label: "\u653E\u7247\u5B8C\u6210" },
+  { key: "PostCompleteTime", label: "\u52A8\u4F5C\u540E\u5904\u7406" }
+];
+var ROBOT_ACTION_TIME_FIELDS = [
+  { key: "PickTime", label: "\u53D6\u7247" },
+  { key: "PlaceTime", label: "\u653E\u7247" }
+];
 var state = {
   workspaceDevices: [],
   workspaceDevice: null,
@@ -3461,6 +3523,14 @@ var state = {
   robotScopes: {},
   robotSlots: {},
   robotSlotsSaving: /* @__PURE__ */ new Set(),
+  deviceConfigSection: "station-time",
+  deviceStationName: "",
+  deviceRobotName: "",
+  deviceRobotTransferSources: {},
+  deviceTimingDraft: null,
+  deviceTimingDirty: false,
+  deviceTimingSaving: false,
+  deviceTimingStatusMessage: "\u9009\u62E9\u8BBE\u5907\u540E\u5F00\u59CB\u914D\u7F6E",
   strategy: "heuristic",
   availableAlgorithms: [],
   algorithmMetadata: {},
@@ -3842,6 +3912,277 @@ function applyDeviceTopology(device, deviceName, rawRobotSlots = {}) {
   state.robotScopes = Object.fromEntries(Object.entries(state.device.Robots).map(([name, robot]) => [name, [...new Set(Object.values(robot.ArmInfo || {}).filter((arm) => arm.IsEnable !== false).flatMap((arm) => arm.AccessibleStations || []))]]));
   visualizationWorkspace.setDevice(state.device);
   if (!state.loadPorts.length || !state.processModules.length) throw new Error("\u8BBE\u5907\u5FC5\u987B\u5305\u542B LoadPort \u548C ProcessChamber");
+}
+function buildDeviceTimingDraft(device) {
+  const draft = { stations: {}, robots: {} };
+  Object.entries(device?.Stations || {}).forEach(([stationName, station]) => {
+    const timing = {};
+    [...STATION_ACTION_TIME_FIELDS, { key: "AlignmentTime" }].forEach(({ key }) => {
+      if (station?.[key] && typeof station[key] === "object" && !Array.isArray(station[key])) {
+        timing[key] = structuredClone(station[key]);
+      }
+    });
+    if (Array.isArray(station?.PrePrepareTime)) {
+      timing.PrePrepareTime = station.PrePrepareTime.map((row) => Number(row?.Time) || 0);
+    }
+    draft.stations[stationName] = timing;
+  });
+  Object.entries(device?.Robots || {}).forEach(([robotName, robot]) => {
+    const timing = {};
+    ROBOT_ACTION_TIME_FIELDS.forEach(({ key }) => {
+      if (robot?.[key] && typeof robot[key] === "object" && !Array.isArray(robot[key])) {
+        timing[key] = structuredClone(robot[key]);
+      }
+    });
+    if (Array.isArray(robot?.PrepTransTime)) {
+      timing.PrepTransTime = robot.PrepTransTime.map((row) => Number(row?.Time) || 0);
+    }
+    draft.robots[robotName] = timing;
+  });
+  return draft;
+}
+function deviceTimeInput(value, label, dataset) {
+  const attributes = Object.entries(dataset).map(([name, item]) => `data-${name}="${escapeHtml4(item)}"`).join(" ");
+  const numericValue = Number(value);
+  return `<label class="device-time-input"><input type="number" min="0" step="any" inputmode="decimal" required value="${Number.isFinite(numericValue) ? numericValue : 0}" aria-label="${escapeHtml4(label)}" ${attributes}><span>s</span></label>`;
+}
+function renderDeviceConfigHeader() {
+  const hasDevice = Boolean(state.workspaceDeviceId && state.baseDevice);
+  document.getElementById("deviceConfigSelectedName").textContent = hasDevice ? displayDeviceName(state.deviceName) : "\u5C1A\u672A\u9009\u62E9\u8BBE\u5907";
+  const status = document.getElementById("deviceTimingStatus");
+  status.textContent = state.deviceTimingSaving ? "\u6B63\u5728\u4FDD\u5B58\u65F6\u95F4\u53C2\u6570\u2026" : state.deviceTimingDirty ? "\u6709\u5C1A\u672A\u4FDD\u5B58\u7684\u65F6\u95F4\u4FEE\u6539" : state.deviceTimingStatusMessage;
+  status.classList.toggle("is-dirty", state.deviceTimingDirty);
+  status.classList.toggle("is-saving", state.deviceTimingSaving);
+  document.getElementById("resetDeviceTimingButton").disabled = !hasDevice || !state.deviceTimingDirty || state.deviceTimingSaving;
+  document.getElementById("saveDeviceTimingButton").disabled = !hasDevice || !state.deviceTimingDirty || state.deviceTimingSaving;
+}
+function renderDeviceTimingSelectors() {
+  const stationSelect = document.getElementById("deviceStationSelect");
+  const robotSelect = document.getElementById("deviceRobotSelect");
+  if (!state.stationNames.includes(state.deviceStationName)) state.deviceStationName = state.stationNames[0] || "";
+  if (!state.robotNames.includes(state.deviceRobotName)) state.deviceRobotName = state.robotNames[0] || "";
+  stationSelect.innerHTML = state.stationNames.length ? state.stationNames.map((name) => `<option value="${escapeHtml4(name)}" ${name === state.deviceStationName ? "selected" : ""}>${escapeHtml4(name)}</option>`).join("") : `<option value="">\u8BF7\u5148\u9009\u62E9\u8BBE\u5907</option>`;
+  robotSelect.innerHTML = state.robotNames.length ? state.robotNames.map((name) => `<option value="${escapeHtml4(name)}" ${name === state.deviceRobotName ? "selected" : ""}>${escapeHtml4(name)}</option>`).join("") : `<option value="">\u8BF7\u5148\u9009\u62E9\u8BBE\u5907</option>`;
+  stationSelect.disabled = !state.stationNames.length;
+  robotSelect.disabled = !state.robotNames.length;
+}
+function renderDeviceStationTiming() {
+  const container = document.getElementById("deviceStationTimingEditor");
+  const stationName = state.deviceStationName;
+  const station = state.baseDevice?.Stations?.[stationName];
+  const timing = state.deviceTimingDraft?.stations?.[stationName];
+  if (!station || !timing) {
+    container.innerHTML = `<div class="device-config-empty"><strong>\u6682\u65E0\u53EF\u914D\u7F6E\u7AD9\u70B9</strong><span>\u9009\u62E9\u6216\u5BFC\u5165\u8BBE\u5907\u540E\uFF0C\u53EF\u5728\u8FD9\u91CC\u6821\u51C6\u7AD9\u70B9\u52A8\u4F5C\u65F6\u95F4\u3002</span></div>`;
+    return;
+  }
+  const actionControllers = [...new Set(STATION_ACTION_TIME_FIELDS.flatMap(
+    ({ key }) => Object.keys(timing[key] || {})
+  ))].sort((left, right) => left.localeCompare(right, void 0, { numeric: true }));
+  const actionRows = actionControllers.map((controller) => `
+    <tr>
+      <th scope="row"><strong>${escapeHtml4(controller)}</strong><small>\u63A7\u5236\u673A\u5668\u624B</small></th>
+      ${STATION_ACTION_TIME_FIELDS.map(({ key, label }) => {
+    if (!Object.prototype.hasOwnProperty.call(timing[key] || {}, controller)) return `<td><span class="device-time-unavailable">\u2014</span></td>`;
+    return `<td>${deviceTimeInput(timing[key][controller], `${stationName} ${controller} ${label}`, {
+      "device-timing-target": "station-map",
+      "device-name": stationName,
+      "timing-field": key,
+      "timing-key": controller
+    })}</td>`;
+  }).join("")}
+    </tr>
+  `).join("");
+  const alignmentEntries = Object.entries(timing.AlignmentTime || {});
+  const prePrepareRows = Array.isArray(station.PrePrepareTime) ? station.PrePrepareTime : [];
+  const specialRows = [
+    ...alignmentEntries.map(([slotId, value]) => `
+      <div class="device-transition-row">
+        <span class="device-transition-kind">\u5BF9\u51C6</span>
+        <strong>Slot ${escapeHtml4(slotId)}</strong>
+        <span class="device-transition-route">\u6676\u5706\u5B9A\u4F4D\u65F6\u95F4</span>
+        ${deviceTimeInput(value, `${stationName} Slot ${slotId} \u5BF9\u51C6\u65F6\u95F4`, {
+      "device-timing-target": "station-map",
+      "device-name": stationName,
+      "timing-field": "AlignmentTime",
+      "timing-key": slotId
+    })}
+      </div>
+    `),
+    ...prePrepareRows.map((row, index) => `
+      <div class="device-transition-row">
+        <span class="device-transition-kind">${escapeHtml4(row?.PrePrepareType || "\u72B6\u6001\u5207\u6362")}</span>
+        <strong>${escapeHtml4(row?.LastItem || "\u2014")} <i aria-hidden="true">\u2192</i> ${escapeHtml4(row?.CurrentItem || "\u2014")}</strong>
+        <span class="device-transition-route">${escapeHtml4(row?.PrePrepareType === "PumpTime" ? "\u62BD\u6C14" : row?.PrePrepareType === "VentTime" ? "\u5145\u6C14" : "\u9884\u5904\u7406")}</span>
+        ${deviceTimeInput(timing.PrePrepareTime?.[index] ?? row?.Time ?? 0, `${stationName} ${row?.PrePrepareType || "\u72B6\u6001\u5207\u6362"}`, {
+      "device-timing-target": "station-sequence",
+      "device-name": stationName,
+      "timing-field": "PrePrepareTime",
+      "timing-index": index
+    })}
+      </div>
+    `)
+  ];
+  const timingCount = actionControllers.reduce((count, controller) => count + STATION_ACTION_TIME_FIELDS.filter(
+    ({ key }) => Object.prototype.hasOwnProperty.call(timing[key] || {}, controller)
+  ).length, 0) + specialRows.length;
+  container.innerHTML = `
+    <div class="device-timing-overview">
+      <div><span>\u7AD9\u70B9\u7C7B\u578B</span><strong>${escapeHtml4(station.Type || "Station")}</strong></div>
+      <div><span>\u5BB9\u91CF</span><strong>${Number(station.Capacity) || 0} <small>\u69FD</small></strong></div>
+      <div><span>\u5173\u8054\u673A\u5668\u624B</span><strong>${actionControllers.length} <small>\u53F0</small></strong></div>
+      <div><span>\u8BA1\u65F6\u53C2\u6570</span><strong>${timingCount} <small>\u9879</small></strong></div>
+    </div>
+    <section class="device-time-section" aria-labelledby="stationActionTimingTitle">
+      <header><div><h3 id="stationActionTimingTitle">\u53D6\u653E\u7247\u52A8\u4F5C</h3><p>\u7AD9\u70B9\u4E0E\u5BF9\u5E94\u673A\u5668\u624B\u534F\u540C\u52A8\u4F5C\u7684\u5206\u6BB5\u8017\u65F6\u3002</p></div><span>${actionControllers.length} \u7EC4\u63A7\u5236\u5173\u7CFB</span></header>
+      ${actionRows ? `<div class="device-time-table-wrap"><table class="device-time-table"><thead><tr><th>\u673A\u5668\u624B</th>${STATION_ACTION_TIME_FIELDS.map(({ label }) => `<th>${label}</th>`).join("")}</tr></thead><tbody>${actionRows}</tbody></table></div>` : `<div class="device-time-inline-empty">\u5F53\u524D\u7AD9\u70B9\u672A\u58F0\u660E\u53D6\u653E\u7247\u5206\u6BB5\u65F6\u95F4\u3002</div>`}
+    </section>
+    <section class="device-time-section" aria-labelledby="stationTransitionTimingTitle">
+      <header><div><h3 id="stationTransitionTimingTitle">\u4E13\u9879\u5904\u7406\u4E0E\u72B6\u6001\u5207\u6362</h3><p>LoadLock \u62BD\u5145\u6C14\u3001Aligner \u5BF9\u51C6\u7B49\u7AD9\u70B9\u4E13\u5C5E\u65F6\u95F4\u3002</p></div><span>${specialRows.length} \u9879</span></header>
+      ${specialRows.length ? `<div class="device-transition-list">${specialRows.join("")}</div>` : `<div class="device-time-inline-empty">\u5F53\u524D\u7AD9\u70B9\u6CA1\u6709\u989D\u5916\u7684\u72B6\u6001\u5207\u6362\u65F6\u95F4\u3002</div>`}
+    </section>`;
+}
+function renderDeviceRobotTiming() {
+  const container = document.getElementById("deviceRobotTimingEditor");
+  const robotName = state.deviceRobotName;
+  const robot = state.baseDevice?.Robots?.[robotName];
+  const timing = state.deviceTimingDraft?.robots?.[robotName];
+  if (!robot || !timing) {
+    container.innerHTML = `<div class="device-config-empty"><strong>\u6682\u65E0\u53EF\u914D\u7F6E\u673A\u5668\u624B</strong><span>\u5F53\u524D\u8BBE\u5907\u6CA1\u6709\u58F0\u660E\u673A\u5668\u624B\u65F6\u95F4\u53C2\u6570\u3002</span></div>`;
+    return;
+  }
+  const actionStations = [...new Set(ROBOT_ACTION_TIME_FIELDS.flatMap(
+    ({ key }) => Object.keys(timing[key] || {})
+  ))].sort((left, right) => left.localeCompare(right, void 0, { numeric: true }));
+  const actionRows = actionStations.map((stationName) => `
+    <tr><th scope="row"><strong>${escapeHtml4(stationName)}</strong><small>\u76EE\u6807\u7AD9\u70B9</small></th>${ROBOT_ACTION_TIME_FIELDS.map(({ key, label }) => {
+    if (!Object.prototype.hasOwnProperty.call(timing[key] || {}, stationName)) return `<td><span class="device-time-unavailable">\u2014</span></td>`;
+    return `<td>${deviceTimeInput(timing[key][stationName], `${robotName} \u5728 ${stationName} \u7684${label}\u65F6\u95F4`, {
+      "device-timing-target": "robot-map",
+      "device-name": robotName,
+      "timing-field": key,
+      "timing-key": stationName
+    })}</td>`;
+  }).join("")}</tr>
+  `).join("");
+  const transferRows = Array.isArray(robot.PrepTransTime) ? robot.PrepTransTime : [];
+  const sources = [...new Set(transferRows.map((row) => String(row?.SrcStation || "")).filter(Boolean))].sort((left, right) => left.localeCompare(right, void 0, { numeric: true }));
+  let selectedSource = state.deviceRobotTransferSources[robotName];
+  if (!sources.includes(selectedSource)) selectedSource = sources[0] || "";
+  state.deviceRobotTransferSources[robotName] = selectedSource;
+  const visibleTransfers = transferRows.map((row, index) => ({ row, index })).filter(({ row }) => String(row?.SrcStation || "") === selectedSource);
+  const transferTableRows = visibleTransfers.map(({ row, index }) => `
+    <tr>
+      <th scope="row"><strong>${escapeHtml4(row?.DestStation || "\u2014")}</strong><small>${Number(row?.TransType) === 1 ? "\u8F7D\u7247\u79FB\u52A8" : "\u7A7A\u8F7D\u79FB\u52A8"}</small></th>
+      <td><span class="device-transfer-type type-${Number(row?.TransType) === 1 ? "loaded" : "empty"}">${Number(row?.TransType) === 1 ? "\u8F7D\u7247" : "\u7A7A\u8F7D"}</span></td>
+      <td>${deviceTimeInput(timing.PrepTransTime?.[index] ?? row?.Time ?? 0, `${robotName} \u4ECE ${row?.SrcStation || "\u2014"} \u5230 ${row?.DestStation || "\u2014"} \u7684\u79FB\u52A8\u65F6\u95F4`, {
+    "device-timing-target": "robot-sequence",
+    "device-name": robotName,
+    "timing-field": "PrepTransTime",
+    "timing-index": index
+  })}</td>
+    </tr>
+  `).join("");
+  const activeArms = Object.values(robot.ArmInfo || {}).filter((arm) => arm?.IsEnable !== false).length;
+  container.innerHTML = `
+    <div class="device-timing-overview">
+      <div><span>\u673A\u5668\u624B\u7C7B\u578B</span><strong>${escapeHtml4(robot.Type || "Robot")}</strong></div>
+      <div><span>\u542F\u7528\u624B\u81C2</span><strong>${activeArms} <small>\u6761</small></strong></div>
+      <div><span>\u670D\u52A1\u7AD9\u70B9</span><strong>${actionStations.length} <small>\u4E2A</small></strong></div>
+      <div><span>\u79FB\u52A8\u89C4\u5219</span><strong>${transferRows.length} <small>\u6761</small></strong></div>
+    </div>
+    <section class="device-time-section robot-action-section" aria-labelledby="robotActionTimingTitle">
+      <header><div><h3 id="robotActionTimingTitle">\u53D6\u7247\u4E0E\u653E\u7247</h3><p>\u540C\u4E00\u673A\u5668\u624B\u5728\u4E0D\u540C\u7AD9\u70B9\u53EF\u4F7F\u7528\u72EC\u7ACB\u52A8\u4F5C\u65F6\u95F4\u3002</p></div><span>${actionStations.length} \u4E2A\u7AD9\u70B9</span></header>
+      ${actionRows ? `<div class="device-time-table-wrap"><table class="device-time-table compact"><thead><tr><th>\u7AD9\u70B9</th>${ROBOT_ACTION_TIME_FIELDS.map(({ label }) => `<th>${label}\u65F6\u95F4</th>`).join("")}</tr></thead><tbody>${actionRows}</tbody></table></div>` : `<div class="device-time-inline-empty">\u5F53\u524D\u673A\u5668\u624B\u672A\u58F0\u660E\u53D6\u653E\u7247\u65F6\u95F4\u3002</div>`}
+    </section>
+    <section class="device-time-section" aria-labelledby="robotTransferTimingTitle">
+      <header class="device-transfer-head"><div><h3 id="robotTransferTimingTitle">\u7AD9\u70B9\u95F4\u79FB\u52A8</h3><p>\u6309\u8D77\u70B9\u67E5\u770B\u79FB\u52A8\u89C4\u5219\uFF0C\u907F\u514D\u5728\u5927\u578B\u8BBE\u5907\u4E2D\u4E00\u6B21\u5C55\u793A\u6574\u5F20\u77E9\u9635\u3002</p></div><label><span>\u8D77\u70B9</span><select data-robot-transfer-source="${escapeHtml4(robotName)}" ${sources.length ? "" : "disabled"}>${sources.length ? sources.map((source) => `<option value="${escapeHtml4(source)}" ${source === selectedSource ? "selected" : ""}>${escapeHtml4(source)}</option>`).join("") : `<option>\u65E0\u79FB\u52A8\u89C4\u5219</option>`}</select></label></header>
+      ${transferTableRows ? `<div class="device-time-table-wrap"><table class="device-time-table transfer"><thead><tr><th>\u76EE\u6807\u7AD9\u70B9</th><th>\u642C\u8FD0\u7C7B\u578B</th><th>\u79FB\u52A8\u65F6\u95F4</th></tr></thead><tbody>${transferTableRows}</tbody></table></div>` : `<div class="device-time-inline-empty">\u5F53\u524D\u8D77\u70B9\u6CA1\u6709\u53EF\u914D\u7F6E\u7684\u79FB\u52A8\u65F6\u95F4\u3002</div>`}
+    </section>`;
+}
+function renderDeviceTimingConfiguration() {
+  renderDeviceConfigHeader();
+  renderDeviceTimingSelectors();
+  document.querySelectorAll("[data-device-config-section]").forEach((button) => {
+    const active = button.dataset.deviceConfigSection === state.deviceConfigSection;
+    button.classList.toggle("active", active);
+    if (active) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
+  });
+  document.querySelectorAll("[data-device-config-view]").forEach((view) => {
+    const active = view.dataset.deviceConfigView === state.deviceConfigSection;
+    view.hidden = !active;
+    view.classList.toggle("active", active);
+  });
+  if (state.deviceConfigSection === "station-time") renderDeviceStationTiming();
+  if (state.deviceConfigSection === "robot-time") renderDeviceRobotTiming();
+  if (state.deviceConfigSection === "robot-slot") renderRobotSlots();
+}
+function resetDeviceTimingDraft(message = "\u5F53\u524D\u8BBE\u5907\u65F6\u95F4\u53C2\u6570\u5DF2\u52A0\u8F7D") {
+  state.deviceTimingDraft = state.baseDevice ? buildDeviceTimingDraft(state.baseDevice) : null;
+  state.deviceTimingDirty = false;
+  state.deviceTimingSaving = false;
+  state.deviceTimingStatusMessage = state.baseDevice ? message : "\u9009\u62E9\u8BBE\u5907\u540E\u5F00\u59CB\u914D\u7F6E";
+  renderDeviceTimingConfiguration();
+}
+function markDeviceTimingDirty() {
+  if (!state.deviceTimingDraft || !state.workspaceDeviceId) return;
+  state.deviceTimingDirty = true;
+  state.deviceTimingStatusMessage = "\u6709\u5C1A\u672A\u4FDD\u5B58\u7684\u65F6\u95F4\u4FEE\u6539";
+  renderDeviceConfigHeader();
+}
+function updateDeviceTimingFromControl(control) {
+  const value = Number(control.value);
+  const valid = control.value.trim() !== "" && Number.isFinite(value) && value >= 0;
+  control.setCustomValidity(valid ? "" : "\u8BF7\u8F93\u5165\u5927\u4E8E\u6216\u7B49\u4E8E 0 \u7684\u6709\u9650\u79D2\u6570");
+  control.classList.toggle("is-invalid", !valid);
+  const section = control.dataset.deviceTimingTarget?.startsWith("station") ? "stations" : "robots";
+  const item = state.deviceTimingDraft?.[section]?.[control.dataset.deviceName];
+  if (!item) return;
+  if (control.dataset.deviceTimingTarget?.endsWith("map")) {
+    item[control.dataset.timingField][control.dataset.timingKey] = valid ? value : Number.NaN;
+  } else {
+    item[control.dataset.timingField][Number(control.dataset.timingIndex)] = valid ? value : Number.NaN;
+  }
+  markDeviceTimingDirty();
+}
+function validateDeviceTimingDraft() {
+  let invalidLabel = "";
+  Object.entries(state.deviceTimingDraft || {}).some(([sectionName, items]) => Object.entries(items).some(([itemName, fields]) => Object.entries(fields).some(([fieldName, values]) => {
+    const rows = Array.isArray(values) ? values.map((value, index) => [index, value]) : Object.entries(values || {});
+    const invalid = rows.find(([, value]) => !Number.isFinite(Number(value)) || Number(value) < 0);
+    if (!invalid) return false;
+    invalidLabel = `${sectionName}.${itemName}.${fieldName}.${invalid[0]}`;
+    return true;
+  })));
+  if (invalidLabel) throw new Error(`${invalidLabel} \u5FC5\u987B\u662F\u5927\u4E8E\u6216\u7B49\u4E8E 0 \u7684\u6709\u9650\u79D2\u6570`);
+}
+async function saveDeviceTiming() {
+  if (!state.deviceTimingDirty || state.deviceTimingSaving || !state.workspaceDeviceId) return;
+  validateDeviceTimingDraft();
+  state.deviceTimingSaving = true;
+  renderDeviceConfigHeader();
+  try {
+    const result = await requestJson(`/api/workspaces/${state.workspaceDeviceId}/device-timing`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ timing: state.deviceTimingDraft })
+    });
+    state.workspaceDevice.device = structuredClone(result.device);
+    applyDeviceTopology(result.device, state.deviceName, state.robotSlots);
+    resetRunResult();
+    resetDeviceTimingDraft("\u65F6\u95F4\u53C2\u6570\u5DF2\u4FDD\u5B58\u5E76\u5E94\u7528\u5230\u5168\u90E8\u6D4B\u8BD5");
+    setWorkspaceStatus("\u8BBE\u5907\u65F6\u95F4\u53C2\u6570\u5DF2\u4FDD\u5B58", "saved");
+  } catch (error) {
+    state.deviceTimingSaving = false;
+    state.deviceTimingStatusMessage = `\u4FDD\u5B58\u5931\u8D25\uFF1A${error.message}`;
+    renderDeviceConfigHeader();
+    throw error;
+  }
+}
+function switchDeviceConfigSection(sectionName) {
+  if (!document.querySelector(`[data-device-config-view="${sectionName}"]`)) return;
+  state.deviceConfigSection = sectionName;
+  renderDeviceTimingConfiguration();
 }
 function shortestDevicePath(source, destination) {
   const queue = [[`S:${source}`]], visited = new Set(queue[0]);
@@ -4699,6 +5040,7 @@ async function selectWorkspaceDevice(deviceId, preferredTestId = "") {
   state.activeTestGroup = "";
   state.testCaseGroup = "";
   applyDeviceTopology(result.device.device, result.device.name, result.device.robotSlots);
+  resetDeviceTimingDraft();
   state.routes = Array.isArray(result.device.routes) ? structuredClone(result.device.routes) : [];
   state.cleans = Array.isArray(result.device.cleans) ? structuredClone(result.device.cleans).map(normalizeClean) : [];
   if (!result.device.tests.length) {
@@ -4738,7 +5080,15 @@ function resetWorkspaceSelection() {
   state.robotNames = [];
   state.robotScopes = {};
   state.robotSlots = {};
+  state.deviceStationName = "";
+  state.deviceRobotName = "";
+  state.deviceRobotTransferSources = {};
+  state.deviceTimingDraft = null;
+  state.deviceTimingDirty = false;
+  state.deviceTimingSaving = false;
+  state.deviceTimingStatusMessage = "\u9009\u62E9\u8BBE\u5907\u540E\u5F00\u59CB\u914D\u7F6E";
   renderWorkspaceControls();
+  renderDeviceTimingConfiguration();
   resetRunResult();
 }
 async function deleteWorkspaceDevice() {
@@ -4769,6 +5119,7 @@ function switchTab(name) {
   document.getElementById("pageLayout").classList.toggle("documentation-mode", name === "documentation");
   document.body.classList.toggle("documentation-mode", name === "documentation");
   if (name === "documentation") void documentationView.load();
+  if (name === "device-config") renderDeviceTimingConfiguration();
   if (name !== "route") closeStepDrawer();
 }
 var THEME_STORAGE_KEY = "realtime-scheduler-theme";
@@ -6791,6 +7142,38 @@ document.getElementById("pjobRouteDialog").addEventListener("cancel", (event) =>
 document.getElementById("pjobRouteDialog").addEventListener("click", (event) => {
   if (event.target.id === "pjobRouteDialog") closePJobRoutePicker();
 });
+var bottleneckAnalysisHelpDialog = document.getElementById("bottleneckAnalysisHelpDialog");
+document.getElementById("bottleneckAnalysisHelpDialogClose").addEventListener("click", () => bottleneckAnalysisHelpDialog.close());
+var residenceAnalysisHelpDialog = document.getElementById("residenceAnalysisHelpDialog");
+document.getElementById("residenceAnalysisHelpDialogClose").addEventListener("click", () => residenceAnalysisHelpDialog.close());
+document.getElementById("visualPerformance").addEventListener("click", (event) => {
+  if (!(event.target instanceof Element)) return;
+  if (event.target.closest("#bottleneckAnalysisHelpButton") && !bottleneckAnalysisHelpDialog.open) {
+    bottleneckAnalysisHelpDialog.showModal();
+  }
+  if (event.target.closest("#residenceAnalysisHelpButton") && !residenceAnalysisHelpDialog.open) {
+    residenceAnalysisHelpDialog.showModal();
+  }
+});
+document.getElementById("visualPerformance").addEventListener("change", (event) => {
+  const select = event.target instanceof HTMLSelectElement && event.target.id === "residenceMetricSelect" ? event.target : null;
+  if (!select) return;
+  const performancePanel = event.currentTarget;
+  if (!(performancePanel instanceof HTMLElement)) return;
+  const selectedMetric = select.value;
+  performancePanel.querySelectorAll("[data-residence-metric-chart]").forEach((chart) => {
+    chart.hidden = chart.dataset.residenceMetricChart !== selectedMetric;
+  });
+  performancePanel.querySelectorAll("[data-residence-summary]").forEach((summary) => {
+    summary.hidden = summary.dataset.residenceSummary !== selectedMetric;
+  });
+});
+document.getElementById("bottleneckAnalysisHelpDialog").addEventListener("click", (event) => {
+  if (event.target === bottleneckAnalysisHelpDialog) bottleneckAnalysisHelpDialog.close();
+});
+document.getElementById("residenceAnalysisHelpDialog").addEventListener("click", (event) => {
+  if (event.target === residenceAnalysisHelpDialog) residenceAnalysisHelpDialog.close();
+});
 document.getElementById("pjobRouteProcess").addEventListener("change", (event) => renderPJobRouteDialogGroup(event.target.value));
 document.getElementById("pjobRouteCleanFilter").addEventListener("change", (event) => {
   if (!pjobRoutePickerContext) return;
@@ -6847,6 +7230,7 @@ document.getElementById("deviceFile").addEventListener("change", (event) => load
 }));
 document.getElementById("deviceSelect").addEventListener("change", (event) => (async () => {
   if (state.dirty) await saveCurrentTest(true);
+  if (state.deviceTimingDirty) await saveDeviceTiming();
   await selectWorkspaceDevice(event.target.value);
 })().catch((error) => writeTerminal(`$ \u8BBE\u5907\u5207\u6362\u5931\u8D25
   ${error.message}`, true)));
@@ -6855,6 +7239,17 @@ document.getElementById("deleteDeviceButton").addEventListener("click", () => de
   writeTerminal(`$ \u5220\u9664\u8BBE\u5907\u5931\u8D25
   ${error.message}`, true);
 }));
+document.getElementById("saveDeviceTimingButton").addEventListener("click", () => saveDeviceTiming().catch((error) => writeTerminal(`$ \u8BBE\u5907\u65F6\u95F4\u4FDD\u5B58\u5931\u8D25
+  ${error.message}`, true)));
+document.getElementById("resetDeviceTimingButton").addEventListener("click", () => resetDeviceTimingDraft("\u5DF2\u64A4\u9500\u5C1A\u672A\u4FDD\u5B58\u7684\u65F6\u95F4\u4FEE\u6539"));
+document.getElementById("deviceStationSelect").addEventListener("change", (event) => {
+  state.deviceStationName = event.target.value;
+  renderDeviceStationTiming();
+});
+document.getElementById("deviceRobotSelect").addEventListener("change", (event) => {
+  state.deviceRobotName = event.target.value;
+  renderDeviceRobotTiming();
+});
 document.getElementById("testGroupSelect").addEventListener("change", (event) => selectWorkspaceGroup(event.target.value).catch((error) => writeTerminal(`$ \u6D4B\u8BD5\u7EC4\u522B\u5207\u6362\u5931\u8D25
   ${error.message}`, true)));
 document.getElementById("testCaseSelect").addEventListener("change", (event) => selectWorkspaceTest(event.target.value).catch((error) => writeTerminal(`$ \u6D4B\u8BD5\u96C6\u5207\u6362\u5931\u8D25
@@ -6990,9 +7385,16 @@ document.addEventListener("keydown", (event) => {
   if (card && event.key === "Enter") openStepDrawer(Number(card.dataset.routeIndex), Number(card.dataset.stageIndex));
 });
 document.addEventListener("input", (event) => {
+  if (event.target.matches("[data-device-timing-target]")) updateDeviceTimingFromControl(event.target);
   if (event.target.matches("[data-scope], [data-option], [data-time-index], [data-round-time-index]")) updateStateFromControl(event.target);
 });
 document.addEventListener("change", (event) => {
+  const transferSource = event.target.closest?.("[data-robot-transfer-source]");
+  if (transferSource) {
+    state.deviceRobotTransferSources[transferSource.dataset.robotTransferSource] = transferSource.value;
+    renderDeviceRobotTiming();
+    return;
+  }
   if (event.target.matches("[data-scope], [data-option], [data-time-index], [data-round-time-index]")) {
     updateStateFromControl(event.target);
     if (["name", "cleanType", "recipeTime", "wacRecipeTime", "jobType", "waferCount", "bufferOption", ...ROUTE_CLEAN_KEYS].includes(event.target.dataset.key) || event.target.dataset.timeIndex !== void 0 || event.target.dataset.roundTimeIndex !== void 0 || ["stage-candidates", "stage-candidate-toggle", "cjob", "pjob"].includes(event.target.dataset.scope)) renderAll();
@@ -7019,6 +7421,11 @@ document.addEventListener("change", (event) => {
 document.addEventListener("click", (event) => {
   const tab = event.target.closest("[data-tab-target]");
   if (tab) switchTab(tab.dataset.tabTarget);
+  const deviceConfigSection = event.target.closest("[data-device-config-section]");
+  if (deviceConfigSection) {
+    switchDeviceConfigSection(deviceConfigSection.dataset.deviceConfigSection);
+    return;
+  }
   const robotSlotChoice = event.target.closest("[data-robot-slot-name][data-robot-arm-count]");
   if (robotSlotChoice && !robotSlotChoice.disabled) {
     setRobotArmCount(robotSlotChoice.dataset.robotSlotName, Number(robotSlotChoice.dataset.robotArmCount)).catch((error) => writeTerminal(`$ \u673A\u5668\u624B\u69FD\u4F4D\u4FDD\u5B58\u5931\u8D25
@@ -7048,18 +7455,29 @@ document.addEventListener("click", (event) => {
   if (card) openStepDrawer(Number(card.dataset.routeIndex), Number(card.dataset.stageIndex));
 });
 window.addEventListener("pagehide", () => {
-  if (!state.dirty || !state.workspaceDeviceId || !state.testCaseId) return;
-  fetch(`/api/workspaces/${state.workspaceDeviceId}/tests/${state.testCaseId}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(currentTestSnapshot()),
-    keepalive: true
-  }).catch(() => {
-  });
+  if (state.deviceTimingDirty && state.workspaceDeviceId && state.deviceTimingDraft) {
+    fetch(`/api/workspaces/${state.workspaceDeviceId}/device-timing`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ timing: state.deviceTimingDraft }),
+      keepalive: true
+    }).catch(() => {
+    });
+  }
+  if (state.dirty && state.workspaceDeviceId && state.testCaseId) {
+    fetch(`/api/workspaces/${state.workspaceDeviceId}/tests/${state.testCaseId}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(currentTestSnapshot()),
+      keepalive: true
+    }).catch(() => {
+    });
+  }
 });
 initializeThemeToggle();
 initializeCompactSelects();
 renderAll();
 renderWorkspaceControls();
+renderDeviceTimingConfiguration();
 checkService();
 loadWorkspaceCatalog().catch((error) => setWorkspaceStatus(`\u6D4B\u8BD5\u96C6\u8BFB\u53D6\u5931\u8D25\uFF1A${error.message}`, "dirty"));

@@ -60,15 +60,17 @@ export interface BottleneckCandidate {
   confidence: BottleneckConfidence;
   evidence: string[];
 }
-export interface LoadLockCycle {
-  index: number;
-  loadLock: string;
-  vacuumWafers: string[];
-  ventWafers: string[];
-  startTime: number;
-  pumpEndTime: number;
-  ventStartTime: number;
-  ventEndTime: number;
+export interface LoadLockEfficiency {
+  /** 完整抽气—充气配对的周期数（n）。 */
+  cycleCount: number;
+  /** 各周期峰值装载片数之和（m，单位：片·周期）。 */
+  waferCycleCount: number;
+  /** m / n，单位：片/周期。 */
+  wafersPerCycle: number;
+  fullLoadCycleCount: number;
+  emptyLoadCycleCount: number;
+  fullLoadCycleRatio: number;
+  emptyLoadCycleRatio: number;
 }
 export interface DurationMetricSummary {
   totalSeconds: number;
@@ -83,6 +85,10 @@ export interface WaferResidenceTime {
   enteredAt: number;
   completedAt: number;
   duration: number;
+  /** 晶圆在所有加工腔内的驻留时间之和。 */
+  chamberDwellSeconds: number;
+  /** 晶圆被所有机器手持有的非运输驻留时间之和。 */
+  robotDwellSeconds: number;
 }
 export interface SchedulePerformance {
   window: PerformanceWindow;
@@ -97,7 +103,7 @@ export interface SchedulePerformance {
   robotWaferDwellTime: DurationMetricSummary;
   waferSystemResidenceTime: DurationMetricSummary;
   waferSystemResidenceTimes: WaferResidenceTime[];
-  loadLockCycles: LoadLockCycle[];
+  loadLockEfficiency: LoadLockEfficiency;
 }
 export interface BottleneckUtilizationSummary {
   resourceName: string; utilization: number; windowLabel: string;
@@ -534,13 +540,18 @@ function completionInsideWindow(completedAt: number, window: PerformanceWindow):
   );
 }
 
-/** 统计加工完成后至晶圆被完全移出加工腔的驻留时间。 */
-function processChamberDwellTime(
+interface WaferDwellSample {
+  wafer: string;
+  completedAt: number;
+  duration: number;
+}
+
+/** 收集每片晶圆每次加工结束后至完全离开加工腔的驻留样本。 */
+function processChamberDwellSamples(
   moves: NormalizedMove[],
   device: DeviceDefinition | null,
-  window: PerformanceWindow,
-): DurationMetricSummary {
-  const durations: number[] = [];
+): WaferDwellSample[] {
+  const samples: WaferDwellSample[] = [];
   for (const processMove of moves) {
     const chamber = processMove.ModuleName;
     if (
@@ -561,11 +572,28 @@ function processChamberDwellTime(
           && materialIds(candidate, "SendMatList").includes(material)
         );
       });
-      if (!removal || !completionInsideWindow(removal.EndTime, window)) continue;
-      durations.push(removal.EndTime - processMove.EndTime);
+      if (!removal) continue;
+      samples.push({
+        wafer: material,
+        completedAt: removal.EndTime,
+        duration: removal.EndTime - processMove.EndTime,
+      });
     }
   }
-  return summarizeDurations(durations);
+  return samples;
+}
+
+/** 统计加工完成后至晶圆被完全移出加工腔的驻留时间。 */
+function processChamberDwellTime(
+  moves: NormalizedMove[],
+  device: DeviceDefinition | null,
+  window: PerformanceWindow,
+): DurationMetricSummary {
+  return summarizeDurations(
+    processChamberDwellSamples(moves, device)
+      .filter(sample => completionInsideWindow(sample.completedAt, window))
+      .map(sample => sample.duration),
+  );
 }
 
 interface PlainInterval {
@@ -604,11 +632,10 @@ function coveredDuration(
   return activeStart === null ? total : total + activeEnd - activeStart;
 }
 
-/** 统计晶圆被机器人持有期间的非运输等待，剔除显式 PreTrans 区间。 */
-function robotWaferDwellTime(
+/** 收集每片晶圆被机器人持有期间的非运输等待样本，剔除显式 PreTrans 区间。 */
+function robotWaferDwellSamples(
   moves: NormalizedMove[],
-  window: PerformanceWindow,
-): DurationMetricSummary {
+): WaferDwellSample[] {
   const transportByRobot = new Map<string, PlainInterval[]>();
   for (const move of moves) {
     if (move.MoveType !== PRE_TRANS_MOVE || move.EndTime <= move.StartTime) continue;
@@ -620,7 +647,7 @@ function robotWaferDwellTime(
   }
 
   const holdingStartedAt = new Map<string, number>();
-  const durations: number[] = [];
+  const samples: WaferDwellSample[] = [];
   const finishHolding = (
     robot: string,
     materials: string[],
@@ -631,14 +658,17 @@ function robotWaferDwellTime(
       const startedAt = holdingStartedAt.get(key);
       if (startedAt === undefined) continue;
       holdingStartedAt.delete(key);
-      if (!completionInsideWindow(finishedAt, window)) continue;
       const rawDuration = Math.max(finishedAt - startedAt, 0);
       const transportDuration = coveredDuration(
         transportByRobot.get(robot) ?? [],
         startedAt,
         finishedAt,
       );
-      durations.push(Math.max(rawDuration - transportDuration, 0));
+      samples.push({
+        wafer: material,
+        completedAt: finishedAt,
+        duration: Math.max(rawDuration - transportDuration, 0),
+      });
     }
   };
 
@@ -658,7 +688,19 @@ function robotWaferDwellTime(
       }
     }
   }
-  return summarizeDurations(durations);
+  return samples;
+}
+
+/** 统计晶圆被机器人持有期间的非运输等待，剔除显式 PreTrans 区间。 */
+function robotWaferDwellTime(
+  moves: NormalizedMove[],
+  window: PerformanceWindow,
+): DurationMetricSummary {
+  return summarizeDurations(
+    robotWaferDwellSamples(moves)
+      .filter(sample => completionInsideWindow(sample.completedAt, window))
+      .map(sample => sample.duration),
+  );
 }
 
 /** 返回完整结果中每片晶圆离开 LoadPort 到返回 LoadPort 的系统停留时间。 */
@@ -667,6 +709,14 @@ function waferSystemResidenceTimes(
   device: DeviceDefinition | null,
 ): WaferResidenceTime[] {
   const boundaries = waferBoundaryTimes(moves, device);
+  const chamberDwellByWafer = new Map<string, number>();
+  const robotDwellByWafer = new Map<string, number>();
+  for (const sample of processChamberDwellSamples(moves, device)) {
+    chamberDwellByWafer.set(sample.wafer, (chamberDwellByWafer.get(sample.wafer) ?? 0) + sample.duration);
+  }
+  for (const sample of robotWaferDwellSamples(moves)) {
+    robotDwellByWafer.set(sample.wafer, (robotDwellByWafer.get(sample.wafer) ?? 0) + sample.duration);
+  }
   const samples: WaferResidenceTime[] = [];
   for (const [material, completedAt] of boundaries.completions) {
     const enteredAt = boundaries.entries.get(material);
@@ -679,6 +729,8 @@ function waferSystemResidenceTimes(
       enteredAt,
       completedAt,
       duration: completedAt - enteredAt,
+      chamberDwellSeconds: chamberDwellByWafer.get(material) ?? 0,
+      robotDwellSeconds: robotDwellByWafer.get(material) ?? 0,
     });
   }
   return samples.sort((left, right) => (
@@ -686,83 +738,65 @@ function waferSystemResidenceTimes(
   ));
 }
 
-interface PendingLoadLockCycle extends LoadLockCycle {
-  startedAt: number;
-  vacuumEndTime: number;
-}
-
 /** 判断 LoadLock 环境动作是抽气还是充气。 */
 function loadLockTransitionDirection(move: NormalizedMove): "vacuum" | "vent" | null {
   const lastState = String(move.LastState ?? "").toUpperCase();
   const currentState = String(move.CurState ?? "").toUpperCase();
-  if (lastState === "ATM" && currentState === "VAC") return "vacuum";
-  if (lastState === "VAC" && currentState === "ATM") return "vent";
+  if (["ATM", "ATR"].includes(lastState) && ["VAC", "VTR"].includes(currentState)) return "vacuum";
+  if (["VAC", "VTR"].includes(lastState) && ["ATM", "ATR"].includes(currentState)) return "vent";
   if (move.MoveType === 12) return "vacuum";
   if (move.MoveType === 13) return "vent";
   return null;
 }
 
-/** 按时间把每个 LoadLock 的一次抽气和随后一次充气配成一行。 */
-function buildLoadLockCycles(
+/** 读取 LoadLock 声明的容量；未声明时以双槽 LoadLock 作为默认值。 */
+function loadLockCapacity(device: DeviceDefinition | null, name: string): number {
+  const definition = device?.Stations?.[name] ?? {};
+  const slots = listValue(definition.Slots).map(value => Number(value)).filter(value => Number.isFinite(value));
+  return Math.max(1, Number(definition.Capacity) || 0, slots.length, ...slots, 2);
+}
+
+/**
+ * 汇总 LoadLock 的抽充气周期装载情况。
+ *
+ * 每个完整周期以抽气、充气两个阶段中较高的在腔片数作为该周期的晶圆载荷；
+ * 这样同一晶圆即使滞留并跨越多个抽充气周期，也会在每个实际经历的周期计入一次。
+ */
+function buildLoadLockEfficiency(
   moves: NormalizedMove[],
   device: DeviceDefinition | null,
-): LoadLockCycle[] {
-  const cycles: PendingLoadLockCycle[] = [];
-  const pendingByLoadLock = new Map<string, PendingLoadLockCycle>();
+): LoadLockEfficiency {
+  const pendingByLoadLock = new Map<string, string[]>();
+  let cycleCount = 0;
+  let waferCycleCount = 0;
+  let fullLoadCycleCount = 0;
+  let emptyLoadCycleCount = 0;
   for (const move of moves) {
     const direction = loadLockTransitionDirection(move);
     const loadLock = move.ModuleName;
     if (!direction || !isLoadLockName(loadLock, stationType(device, loadLock))) continue;
     if (direction === "vacuum") {
-      const cycle: PendingLoadLockCycle = {
-        index: 0,
-        loadLock,
-        vacuumWafers: materialIds(move),
-        ventWafers: [],
-        startTime: move.StartTime,
-        pumpEndTime: move.EndTime,
-        ventStartTime: 0,
-        ventEndTime: 0,
-        startedAt: move.StartTime,
-        vacuumEndTime: move.EndTime,
-      };
-      cycles.push(cycle);
-      pendingByLoadLock.set(loadLock, cycle);
+      pendingByLoadLock.set(loadLock, materialIds(move));
       continue;
     }
-    const pending = pendingByLoadLock.get(loadLock);
-    if (pending) {
-      pending.ventWafers = materialIds(move);
-      pending.ventStartTime = move.StartTime;
-      pending.ventEndTime = move.EndTime;
-      pendingByLoadLock.delete(loadLock);
-      continue;
-    }
-    cycles.push({
-      index: 0,
-      loadLock,
-      vacuumWafers: [],
-      ventWafers: materialIds(move),
-      startTime: move.StartTime,
-      pumpEndTime: move.StartTime,
-      ventStartTime: move.StartTime,
-      ventEndTime: move.EndTime,
-      startedAt: move.StartTime,
-      vacuumEndTime: move.StartTime,
-    });
+    const pumpedWafers = pendingByLoadLock.get(loadLock);
+    if (!pumpedWafers) continue;
+    pendingByLoadLock.delete(loadLock);
+    const cycleLoad = Math.max(pumpedWafers.length, materialIds(move).length);
+    cycleCount += 1;
+    waferCycleCount += cycleLoad;
+    if (cycleLoad === 0) emptyLoadCycleCount += 1;
+    if (cycleLoad >= loadLockCapacity(device, loadLock)) fullLoadCycleCount += 1;
   }
-  return cycles
-    .sort((left, right) => left.startedAt - right.startedAt || naturalCompare(left.loadLock, right.loadLock))
-    .map((cycle, index) => ({
-      index: index + 1,
-      loadLock: cycle.loadLock,
-      vacuumWafers: cycle.vacuumWafers,
-      ventWafers: cycle.ventWafers,
-      startTime: cycle.startTime,
-      pumpEndTime: cycle.pumpEndTime,
-      ventStartTime: cycle.ventStartTime,
-      ventEndTime: cycle.ventEndTime,
-    }));
+  return {
+    cycleCount,
+    waferCycleCount,
+    wafersPerCycle: cycleCount ? waferCycleCount / cycleCount : 0,
+    fullLoadCycleCount,
+    emptyLoadCycleCount,
+    fullLoadCycleRatio: cycleCount ? fullLoadCycleCount / cycleCount : 0,
+    emptyLoadCycleRatio: cycleCount ? emptyLoadCycleCount / cycleCount : 0,
+  };
 }
 
 interface RawBottleneckCandidate {
@@ -1070,7 +1104,7 @@ export function analyzeSchedulePerformance(
       .filter(sample => completionInsideWindow(sample.completedAt, window))
       .map(sample => sample.duration),
   );
-  const loadLockCycles = buildLoadLockCycles(records, device);
+  const loadLockEfficiency = buildLoadLockEfficiency(records, device);
   return {
     window,
     resources,
@@ -1085,7 +1119,7 @@ export function analyzeSchedulePerformance(
     robotWaferDwellTime: robotDwellTime,
     waferSystemResidenceTime: systemResidenceTime,
     waferSystemResidenceTimes: systemResidenceTimes,
-    loadLockCycles,
+    loadLockEfficiency,
   };
 }
 /** 将完整性能诊断压缩为结果预览所需的瓶颈摘要。 */

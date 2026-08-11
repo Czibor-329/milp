@@ -218,13 +218,20 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual([], algorithms_after_disable)
 
     def test_frontend_contains_extensible_device_config_and_robot_slot_save(self) -> None:
-        """页面应提供可扩展设备配置入口，并独立保存机器手单臂/双臂配置。"""
+        """设备配置页应提供站点时间、机器手时间和独立槽位配置。"""
         source = _editor_source()
         for marker in (
             'data-tab-target="device-config"',
             'data-tab-view="device-config"',
             "设备配置分类",
+            "设备时间",
+            "机器手时间",
             "机器手槽位",
+            'id="deviceStationTimingEditor"',
+            'id="deviceRobotTimingEditor"',
+            'id="saveDeviceTimingButton"',
+            '"device-timing-target":',
+            "/device-timing",
             'id="robotSlotList"',
             'data-robot-arm-count="1"',
             'data-robot-arm-count="2"',
@@ -380,6 +387,64 @@ class ConfigEditorServerTests(unittest.TestCase):
                 self.device,
                 {**selection, "VTR": [999]},
             )
+
+    def test_workspace_device_timing_is_validated_and_persisted(self) -> None:
+        """站点与机器手时间应持久化，且未知拓扑项和负数必须被拒绝。"""
+        with tempfile.TemporaryDirectory() as directory:
+            store_path = Path(directory) / "workspaces.json"
+            workspace_device, _ = import_workspace_device(
+                "device.json", self.device, store_path,
+            )
+            imported_device = workspace_device["device"]
+            station_name, station = next(
+                (name, item)
+                for name, item in imported_device["Stations"].items()
+                if item.get("PickPrepareTime")
+            )
+            station_robot = next(iter(station["PickPrepareTime"]))
+            robot_name, robot = next(
+                (name, item)
+                for name, item in imported_device["Robots"].items()
+                if item.get("PickTime") and item.get("PrepTransTime")
+            )
+            robot_station = next(iter(robot["PickTime"]))
+            transfer_times = [float(row["Time"]) for row in robot["PrepTransTime"]]
+            transfer_times[0] = 8.75
+            timing = {
+                "stations": {
+                    station_name: {"PickPrepareTime": {station_robot: 6.25}},
+                },
+                "robots": {
+                    robot_name: {
+                        "PickTime": {robot_station: 7.5},
+                        "PrepTransTime": transfer_times,
+                    },
+                },
+            }
+            saved = config_server.update_workspace_device_timing(
+                workspace_device["id"], timing, store_path,
+            )
+            reloaded = get_workspace_device(workspace_device["id"], store_path)
+            with self.assertRaisesRegex(ValueError, "未知设备"):
+                config_server.update_workspace_device_timing(
+                    workspace_device["id"],
+                    {"stations": {"UNKNOWN": {}}},
+                    store_path,
+                )
+            with self.assertRaisesRegex(ValueError, "非负有限秒数"):
+                config_server.update_workspace_device_timing(
+                    workspace_device["id"],
+                    {"robots": {robot_name: {"PickTime": {robot_station: -1}}}},
+                    store_path,
+                )
+
+        self.assertEqual(6.25, saved["Stations"][station_name]["PickPrepareTime"][station_robot])
+        self.assertEqual(7.5, saved["Robots"][robot_name]["PickTime"][robot_station])
+        self.assertEqual(8.75, reloaded["device"]["Robots"][robot_name]["PrepTransTime"][0]["Time"])
+        self.assertEqual(
+            imported_device["Stations"][station_name]["Capacity"],
+            reloaded["device"]["Stations"][station_name]["Capacity"],
+        )
 
     def test_frontend_limits_buffer_and_hides_automatic_load_port(self) -> None:
         """页面应限制 BufferOption，但不展示由系统自动分配的 LoadPort。"""

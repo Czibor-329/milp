@@ -2459,100 +2459,6 @@ function renderDualActorDecisionLens(decision: DecisionTraceStep): string {
     </section>`;
 }
 
-const WAFER_COLOR_PALETTE = [
-  "#d81b60", "#2f9e44", "#5f5bd6", "#e76f51", "#008c95",
-  "#c23b8d", "#2878c8", "#7ca62b", "#b45cc5", "#16856f",
-  "#7a5fb5", "#b66a2c", "#c23b32", "#45a66b", "#4d66c4",
-  "#df6b83", "#2b7a78", "#a33d64", "#7868c8", "#8a6045",
-];
-
-/** 把协议中的晶圆编号转成一致的短标签。 */
-function waferLabel(value: string): string {
-  const material = String(value || "").trim();
-  return /^W/i.test(material) ? material : `W${material}`;
-}
-
-/** 为所有出现过晶圆分配唯一颜色。 */
-function buildWaferColorMap(cycles: GanttCycle[]): Map<string, string> {
-  const wafers = new Set<string>();
-  for (const cycle of cycles) {
-    for (const wafer of cycle.vacuumWafers) wafers.add(waferLabel(wafer));
-    for (const wafer of cycle.ventWafers) wafers.add(waferLabel(wafer));
-  }
-  const map = new Map<string, string>();
-  let idx = 0;
-  for (const wafer of wafers) {
-    map.set(wafer, WAFER_COLOR_PALETTE[idx % WAFER_COLOR_PALETTE.length]);
-    idx++;
-  }
-  return map;
-}
-
-type GanttCycle = {
-  index: number; loadLock: string;
-  vacuumWafers: string[]; ventWafers: string[];
-  startTime: number; pumpEndTime: number;
-  ventStartTime: number; ventEndTime: number;
-};
-
-function normalizeGanttCycles(cycles: unknown[]): GanttCycle[] {
-  return cycles.map((cycle: any) => ({
-    index: Number(cycle.index ?? 0),
-    loadLock: String(cycle.loadLock ?? ""),
-    vacuumWafers: Array.isArray(cycle.vacuumWafers) ? cycle.vacuumWafers.map(String) : [],
-    ventWafers: Array.isArray(cycle.ventWafers) ? cycle.ventWafers.map(String) : [],
-    startTime: Number(cycle.startTime ?? cycle.index ?? 0),
-    pumpEndTime: Number(cycle.pumpEndTime ?? cycle.startTime ?? cycle.index ?? 0),
-    ventStartTime: Number(cycle.ventStartTime ?? 0),
-    ventEndTime: Number(cycle.ventEndTime ?? 0),
-  }));
-}
-
-function formatGanttTime(seconds: number): string {
-  return seconds >= 1 ? seconds.toFixed(1) : seconds.toFixed(2);
-}
-
-function renderWaferDots(wafers: string[], waferColors: Map<string, string>): string {
-  if (!wafers.length) return "";
-  return wafers.map(w => {
-    const label = waferLabel(w);
-    const color = waferColors.get(label) || "#94a3b8";
-    return `<span class="gantt-wafer-dot" style="background:${color}" title="${escapeHtml(label)}"></span>`;
-  }).join("");
-}
-
-/** 绘制 LoadLock 环境切换时序 —— 仅保留所有 LoadLock 的全局交错序列。 */
-function renderLoadLockGantt(cycles: GanttCycle[]): string {
-  if (!cycles.length) return '<div class="loadlock-cycle-empty">MoveList 中没有识别到 LoadLock 抽气或充气动作。</div>';
-
-  const waferColors = buildWaferColorMap(cycles);
-
-  /* ---------- 收集所有抽气/充气事件，按时间排序 ---------- */
-  interface SequenceEvent { time: number; loadLock: string; dir: "pump" | "vent"; wafers: string[]; }
-  const events: SequenceEvent[] = [];
-  for (const c of cycles) {
-    events.push({ time: c.startTime, loadLock: c.loadLock, dir: "pump", wafers: c.vacuumWafers });
-    if (c.ventStartTime) events.push({ time: c.ventStartTime, loadLock: c.loadLock, dir: "vent", wafers: c.ventWafers });
-  }
-  events.sort((a, b) => a.time - b.time);
-
-  function renderCard(dir: "pump" | "vent", wafers: string[], loadLock: string, time: number): string {
-    const cls = dir === "pump" ? "seq-pump" : "seq-vent";
-    const label = dir === "pump" ? "抽" : "充";
-    const dots = renderWaferDots(wafers, waferColors);
-    const description = `${loadLock} ${label}气 ${formatGanttTime(time)}s`;
-    return `<div class="seq-card ${cls}" role="img" aria-label="${escapeHtml(description)}" title="${escapeHtml(description)}"><span class="seq-dots">${dots}</span></div>`;
-  }
-
-  const interleavedCards = events.map(e => renderCard(e.dir, e.wafers, e.loadLock, e.time)).join("");
-
-  return `<div class="loadlock-seq">
-    <div class="seq-scroll" aria-label="LoadLock 全局交错时序">
-      <div class="seq-cards">${interleavedCards}</div>
-    </div>
-  </div>`;
-}
-
 /** 把比例格式化为一位小数百分比。 */
 function formatPercent(value: number): string {
   return `${(Math.max(0, value) * 100).toFixed(1)}%`;
@@ -2650,18 +2556,128 @@ export function groupedBottleneckResources(
     .slice(0, 4);
 }
 
-/** 从当前 MoveList 补齐旧版分析响应缺少的逐片系统驻留明细。 */
+/** 用当前 MoveList 为旧分析响应补齐 LoadLock 周期利用效率。 */
+function loadLockEfficiencyFromMoves(
+  moves: MoveRecord[],
+  device: DeviceDefinition | null,
+): SchedulePerformance["loadLockEfficiency"] {
+  const pendingByLoadLock = new Map<string, string[]>();
+  let cycleCount = 0;
+  let waferCycleCount = 0;
+  let fullLoadCycleCount = 0;
+  let emptyLoadCycleCount = 0;
+  const stationType = (name: string): string => String(device?.Stations?.[name]?.Type ?? "");
+  const capacityOf = (name: string): number => {
+    const definition = device?.Stations?.[name] ?? {};
+    const slots = listValue(definition.Slots).map(value => finiteNumber(value, 0)).filter(value => value > 0);
+    return Math.max(1, 2, finiteNumber(definition.Capacity, 0), slots.length, ...slots);
+  };
+  const directionOf = (move: NormalizedMove): "vacuum" | "vent" | null => {
+    const lastState = String(move.LastState ?? "").toUpperCase();
+    const currentState = String(move.CurState ?? "").toUpperCase();
+    if (["ATM", "ATR"].includes(lastState) && ["VAC", "VTR"].includes(currentState)) return "vacuum";
+    if (["VAC", "VTR"].includes(lastState) && ["ATM", "ATR"].includes(currentState)) return "vent";
+    if (move.MoveType === PUMP_MOVE) return "vacuum";
+    if (move.MoveType === VENT_MOVE) return "vent";
+    return null;
+  };
+
+  for (const move of normalizeMoves(moves)) {
+    const direction = directionOf(move);
+    const loadLock = move.ModuleName;
+    if (!direction || !isLoadLockName(loadLock, stationType(loadLock))) continue;
+    if (direction === "vacuum") {
+      pendingByLoadLock.set(loadLock, materialIds(move));
+      continue;
+    }
+    const pumpedWafers = pendingByLoadLock.get(loadLock);
+    if (!pumpedWafers) continue;
+    pendingByLoadLock.delete(loadLock);
+    const cycleLoad = Math.max(pumpedWafers.length, materialIds(move).length);
+    cycleCount += 1;
+    waferCycleCount += cycleLoad;
+    if (cycleLoad === 0) emptyLoadCycleCount += 1;
+    if (cycleLoad >= capacityOf(loadLock)) fullLoadCycleCount += 1;
+  }
+  return {
+    cycleCount,
+    waferCycleCount,
+    wafersPerCycle: cycleCount ? waferCycleCount / cycleCount : 0,
+    fullLoadCycleCount,
+    emptyLoadCycleCount,
+    fullLoadCycleRatio: cycleCount ? fullLoadCycleCount / cycleCount : 0,
+    emptyLoadCycleRatio: cycleCount ? emptyLoadCycleCount / cycleCount : 0,
+  };
+}
+
+/** 从当前 MoveList 补齐旧版分析响应缺少的逐片驻留与 LoadLock 效率明细。 */
 export function withWaferResidenceTimes(
   performance: SchedulePerformance,
   moves: MoveRecord[],
   device: DeviceDefinition | null,
 ): SchedulePerformance {
-  if (performance.waferSystemResidenceTimes?.length || !moves.length) return performance;
   const entries = new Map<string, number>();
   const completions = new Map<string, number>();
   const stationType = (name: string): string => String(device?.Stations?.[name]?.Type ?? "");
+  const chamberDwellByWafer = new Map<string, number>();
+  const robotDwellByWafer = new Map<string, number>();
+  const transportByRobot = new Map<string, Array<{ start: number; end: number }>>();
+  const holdingStartedAt = new Map<string, number>();
+  const coveredDuration = (intervals: Array<{ start: number; end: number }>, start: number, end: number): number => {
+    const clipped = intervals.map(interval => ({ start: Math.max(interval.start, start), end: Math.min(interval.end, end) }))
+      .filter(interval => interval.end > interval.start + PERFORMANCE_DISPLAY_TOLERANCE)
+      .sort((left, right) => left.start - right.start || left.end - right.end);
+    let total = 0;
+    let active: { start: number; end: number } | null = null;
+    for (const interval of clipped) {
+      if (!active) active = interval;
+      else if (interval.start <= active.end + PERFORMANCE_DISPLAY_TOLERANCE) active.end = Math.max(active.end, interval.end);
+      else { total += active.end - active.start; active = interval; }
+    }
+    return active ? total + active.end - active.start : total;
+  };
 
-  for (const move of normalizeMoves(moves)) {
+  const records = normalizeMoves(moves);
+  for (const move of records) {
+    if (move.MoveType === PRE_TRANS_MOVE && move.EndTime > move.StartTime) {
+      const robot = move.ModuleName;
+      const intervals = transportByRobot.get(robot) ?? [];
+      intervals.push({ start: move.StartTime, end: move.EndTime });
+      transportByRobot.set(robot, intervals);
+    }
+  }
+  for (const processMove of records) {
+    const chamber = processMove.ModuleName;
+    if (processMove.MoveType !== PROCESS_MOVE || !isProcessModule(chamber, stationType(chamber))) continue;
+    for (const wafer of materialIds(processMove)) {
+      const removal = records.find(candidate => candidate.EndTime >= processMove.EndTime - PERFORMANCE_DISPLAY_TOLERANCE && (
+        (PICK_MOVE_TYPES.has(candidate.MoveType) && firstStation(candidate, "SrcStationList") === chamber && materialIds(candidate).includes(wafer))
+        || (candidate.MoveType === SWAP_MOVE && firstStation(candidate, "StationList") === chamber && materialIds(candidate, "SendMatList").includes(wafer))
+      ));
+      if (removal) chamberDwellByWafer.set(wafer, (chamberDwellByWafer.get(wafer) ?? 0) + removal.EndTime - processMove.EndTime);
+    }
+  }
+  const finishHolding = (robot: string, wafers: string[], finishedAt: number): void => {
+    for (const wafer of wafers) {
+      const key = `${robot}\u0000${wafer}`;
+      const startedAt = holdingStartedAt.get(key);
+      if (startedAt === undefined) continue;
+      holdingStartedAt.delete(key);
+      const dwell = Math.max(finishedAt - startedAt - coveredDuration(transportByRobot.get(robot) ?? [], startedAt, finishedAt), 0);
+      robotDwellByWafer.set(wafer, (robotDwellByWafer.get(wafer) ?? 0) + dwell);
+    }
+  };
+  for (const move of records) {
+    const robot = move.ModuleName;
+    if (PICK_MOVE_TYPES.has(move.MoveType)) {
+      for (const wafer of materialIds(move)) holdingStartedAt.set(`${robot}\u0000${wafer}`, move.EndTime);
+    } else if (PLACE_MOVE_TYPES.has(move.MoveType)) {
+      finishHolding(robot, materialIds(move), move.StartTime);
+    } else if (move.MoveType === SWAP_MOVE) {
+      finishHolding(robot, materialIds(move, "SendMatList"), move.StartTime);
+      for (const wafer of materialIds(move, "RecvMatList")) holdingStartedAt.set(`${robot}\u0000${wafer}`, move.EndTime);
+    }
+
     if (PICK_MOVE_TYPES.has(move.MoveType)) {
       const source = firstStation(move, "SrcStationList");
       if (!isLoadPortName(source, stationType(source))) continue;
@@ -2684,19 +2700,35 @@ export function withWaferResidenceTimes(
     }
   }
 
-  const samples: WaferResidenceTime[] = [];
+  const fallbackSamples: WaferResidenceTime[] = [];
   for (const [wafer, completedAt] of completions) {
     const enteredAt = entries.get(wafer);
     if (
       enteredAt === undefined
       || completedAt < enteredAt - PERFORMANCE_DISPLAY_TOLERANCE
     ) continue;
-    samples.push({ wafer, enteredAt, completedAt, duration: completedAt - enteredAt });
+    fallbackSamples.push({
+      wafer, enteredAt, completedAt, duration: completedAt - enteredAt,
+      chamberDwellSeconds: chamberDwellByWafer.get(wafer) ?? 0,
+      robotDwellSeconds: robotDwellByWafer.get(wafer) ?? 0,
+    });
   }
-  samples.sort((left, right) => (
+  fallbackSamples.sort((left, right) => (
     left.completedAt - right.completedAt || naturalCompare(left.wafer, right.wafer)
   ));
-  return samples.length ? { ...performance, waferSystemResidenceTimes: samples } : performance;
+  const fallbackByWafer = new Map(fallbackSamples.map(sample => [sample.wafer, sample]));
+  const samples = (performance.waferSystemResidenceTimes?.length
+    ? performance.waferSystemResidenceTimes
+    : fallbackSamples
+  ).map(sample => ({
+    ...sample,
+    chamberDwellSeconds: sample.chamberDwellSeconds ?? fallbackByWafer.get(sample.wafer)?.chamberDwellSeconds ?? 0,
+    robotDwellSeconds: sample.robotDwellSeconds ?? fallbackByWafer.get(sample.wafer)?.robotDwellSeconds ?? 0,
+  }));
+  const hydrated = samples.length ? { ...performance, waferSystemResidenceTimes: samples } : performance;
+  return hydrated.loadLockEfficiency
+    ? hydrated
+    : { ...hydrated, loadLockEfficiency: loadLockEfficiencyFromMoves(moves, device) };
 }
 
 /** 渲染合并后的瓶颈分析区域：候选排序 + 各资源占用比例。 */
@@ -2741,7 +2773,10 @@ function renderBottleneckAnalysis(performance: SchedulePerformance): string {
       <div>
         <strong>瓶颈分析</strong>
       </div>
-      <label class="bottleneck-window-control"><span class="visually-hidden">统计口径</span><div class="bottleneck-window-slot"></div></label>
+      <div class="bottleneck-analysis-actions">
+        <button class="bottleneck-analysis-help" id="bottleneckAnalysisHelpButton" type="button" aria-haspopup="dialog" aria-controls="bottleneckAnalysisHelpDialog">瓶颈分析说明</button>
+        <label class="bottleneck-window-control"><span class="visually-hidden">统计口径</span><div class="bottleneck-window-slot"></div></label>
+      </div>
     </header>
     <div class="resource-utilization-head" aria-hidden="true"><span>资源</span><span>利用率</span><span>占用组成</span><span>活跃时长</span><span>瓶颈证据得分</span></div>
     <ol class="resource-utilization-list">
@@ -2751,77 +2786,121 @@ function renderBottleneckAnalysis(performance: SchedulePerformance): string {
   `;
 }
 
-/** 渲染逐片晶圆的系统驻留时间柱状图。 */
-export function renderWaferResidenceChart(performance: SchedulePerformance): string {
-  const samples = performance.waferSystemResidenceTimes ?? [];
-  if (!samples.length) {
-    return `
-      <header class="residence-chart-head"><strong>系统驻留时间分析</strong></header>
-      <div class="residence-chart-empty">当前结果中没有完成往返 LoadPort 的晶圆。</div>`;
-  }
+type ResidenceMetricKind = "system" | "chamber" | "robot";
 
-  const meanSeconds = samples.reduce((sum, sample) => sum + sample.duration, 0) / samples.length;
-  const maximumSeconds = Math.max(...samples.map(sample => sample.duration));
-  const minimumSeconds = Math.min(...samples.map(sample => sample.duration));
-  const rangeToMinimumPercent = minimumSeconds > PERFORMANCE_DISPLAY_TOLERANCE
-    ? (maximumSeconds - minimumSeconds) / minimumSeconds * 100
-    : null;
-  const plotHeight = 170;
-  const scaleMaximum = Math.max(maximumSeconds, 1) * 1.08;
+/** 渲染单一驻留口径的逐片柱状图，避免不同量级的时间互相遮蔽。 */
+function renderResidenceMetricChart(
+  samples: WaferResidenceTime[],
+  kind: ResidenceMetricKind,
+): string {
+  const definitions: Record<ResidenceMetricKind, { title: string; label: string; value: (sample: WaferResidenceTime) => number }> = {
+    system: { title: "系统驻留时间", label: "系统驻留", value: sample => sample.duration },
+    chamber: { title: "腔室驻留时间", label: "腔室驻留", value: sample => sample.chamberDwellSeconds ?? 0 },
+    robot: { title: "机器手驻留时间", label: "机器手驻留", value: sample => sample.robotDwellSeconds ?? 0 },
+  };
+  const metric = definitions[kind];
+  const values = samples.map(metric.value);
+  const meanSeconds = values.reduce((sum, value) => sum + value, 0) / values.length;
+  const maximumSeconds = Math.max(...values, 1);
+  const plotHeight = 120;
+  const scaleMaximum = maximumSeconds * 1.08;
   const meanHeight = Math.min(meanSeconds / scaleMaximum * plotHeight, plotHeight);
   const bars = samples.map(sample => {
-    const height = Math.max(sample.duration / scaleMaximum * plotHeight, 2);
+    const seconds = metric.value(sample);
+    const height = Math.max(seconds / scaleMaximum * plotHeight, 2);
     const wafer = escapeHtml(String(sample.wafer));
-    const duration = formatSeconds(sample.duration);
+    const duration = formatSeconds(seconds);
     return `
-      <li class="residence-bar-item" role="img" aria-label="晶圆 ${wafer}，系统驻留 ${duration} 秒" title="晶圆 ${wafer} · 离开 ${formatSeconds(sample.enteredAt)} s · 返回 ${formatSeconds(sample.completedAt)} s · 驻留 ${duration} s">
+      <li class="residence-metric-bar-item" role="img" aria-label="晶圆 ${wafer}，${metric.label} ${duration} 秒" title="晶圆 ${wafer} · ${metric.label} ${duration} s">
         <strong>${duration}</strong>
-        <span class="residence-bar-track"><i style="height:${height.toFixed(2)}px"></i></span>
+        <span class="residence-metric-bar residence-bar-${kind}"><i style="height:${height.toFixed(2)}px"></i></span>
         <small>${wafer}</small>
       </li>`;
   }).join("");
-
   return `
-    <header class="residence-chart-head">
-      <strong>系统驻留时间分析</strong>
-      <div class="residence-chart-summary">
-        <span>平均 <b>${formatSeconds(meanSeconds)} s</b></span>
-        <span>最大 <b>${formatSeconds(maximumSeconds)} s</b></span>
-        <span>极差/最小值 <b>${rangeToMinimumPercent === null ? "—" : `${rangeToMinimumPercent.toFixed(1)}%`}</b></span>
-        <span>样本 <b>${samples.length} 片</b></span>
-      </div>
-    </header>
-    <div class="residence-chart-body">
-      <div class="residence-chart-scroll" tabindex="0" aria-label="逐片晶圆系统驻留时间柱状图，可横向滚动">
-        <div class="residence-chart-plot">
-          <div class="residence-mean-line" style="bottom:${(28 + meanHeight).toFixed(2)}px"><span>平均 ${formatSeconds(meanSeconds)} s</span></div>
-          <ol class="residence-bars">${bars}</ol>
+    <div class="residence-metric-chart residence-metric-${kind}" data-residence-metric-chart="${kind}"${kind === "system" ? "" : " hidden"}>
+      <div class="residence-metric-scroll" tabindex="0" aria-label="逐片晶圆${metric.title}柱状图，可横向滚动">
+        <div class="residence-metric-plot">
+          <div class="residence-metric-mean-line" style="bottom:${(26 + meanHeight).toFixed(2)}px"><span>平均 ${formatSeconds(meanSeconds)} s</span></div>
+          <ol class="residence-metric-bars">${bars}</ol>
         </div>
       </div>
     </div>`;
 }
 
-/** 渲染 LoadLock 交换时序独立卡片。 */
-function renderLoadLockCard(performance: SchedulePerformance): string {
-  const ganttCycles = normalizeGanttCycles(performance.loadLockCycles);
-  const gantt = renderLoadLockGantt(ganttCycles);
+/** 渲染逐片晶圆的系统、腔室与机器手驻留时间图表。 */
+export function renderWaferResidenceChart(performance: SchedulePerformance): string {
+  const samples = performance.waferSystemResidenceTimes ?? [];
+  const helpButton = `<button class="bottleneck-analysis-help residence-analysis-help" id="residenceAnalysisHelpButton" type="button" aria-haspopup="dialog" aria-controls="residenceAnalysisHelpDialog">说明</button>`;
+  if (!samples.length) {
+    return `
+      <header class="residence-chart-head"><strong>驻留时间分析</strong>${helpButton}</header>
+      <div class="residence-chart-empty">当前结果中没有完成往返 LoadPort 的晶圆。</div>`;
+  }
+
+  const systemValues = samples.map(sample => sample.duration);
+  const systemMeanSeconds = systemValues.reduce((sum, value) => sum + value, 0) / systemValues.length;
+  const maximumSeconds = Math.max(...systemValues);
+  const minimumSeconds = Math.min(...systemValues);
+  const rangeToMinimumPercent = minimumSeconds > PERFORMANCE_DISPLAY_TOLERANCE
+    ? (maximumSeconds - minimumSeconds) / minimumSeconds * 100
+    : null;
+  const chamberMeanSeconds = samples.reduce((sum, sample) => sum + (sample.chamberDwellSeconds ?? 0), 0) / samples.length;
+  const robotMeanSeconds = samples.reduce((sum, sample) => sum + (sample.robotDwellSeconds ?? 0), 0) / samples.length;
+  const chamberValues = samples.map(sample => sample.chamberDwellSeconds ?? 0);
+  const robotValues = samples.map(sample => sample.robotDwellSeconds ?? 0);
+  const summary = (kind: ResidenceMetricKind, content: string): string => (
+    `<div class="residence-chart-summary" data-residence-summary="${kind}"${kind === "system" ? "" : " hidden"}>${content}</div>`
+  );
+
   return `
-    <header class="loadlock-card-head">
-      <strong>LoadLock 交换时序</strong>
-      <span>显示全部 LoadLock 的抽气/充气交错序列</span>
+    <header class="residence-chart-head">
+      <strong>驻留时间分析</strong>
+      <label class="residence-metric-control"><span class="visually-hidden">选择驻留时间图表</span><select id="residenceMetricSelect" aria-label="选择驻留时间图表">
+        <option value="system">系统驻留时间</option>
+        <option value="chamber">腔室驻留时间</option>
+        <option value="robot">机器手驻留时间</option>
+      </select></label>
+      ${summary("system", `
+        <span>系统平均 <b>${formatSeconds(systemMeanSeconds)} s</b></span>
+        <span>系统最大 <b>${formatSeconds(maximumSeconds)} s</b></span>
+        <span>极差/最小值 <b>${rangeToMinimumPercent === null ? "—" : `${rangeToMinimumPercent.toFixed(1)}%`}</b></span>
+        <span>样本 <b>${samples.length} 片</b></span>`)}
+      ${summary("chamber", `
+        <span>腔室平均 <b>${formatSeconds(chamberMeanSeconds)} s</b></span>
+        <span>腔室最大 <b>${formatSeconds(Math.max(...chamberValues))} s</b></span>
+        <span>腔室累计 <b>${formatSeconds(chamberValues.reduce((sum, value) => sum + value, 0))} s</b></span>
+        <span>样本 <b>${samples.length} 片</b></span>`)}
+      ${summary("robot", `
+        <span>机器手平均 <b>${formatSeconds(robotMeanSeconds)} s</b></span>
+        <span>机器手最大 <b>${formatSeconds(Math.max(...robotValues))} s</b></span>
+        <span>机器手累计 <b>${formatSeconds(robotValues.reduce((sum, value) => sum + value, 0))} s</b></span>
+        <span>样本 <b>${samples.length} 片</b></span>`)}
+      ${helpButton}
     </header>
-    <div class="loadlock-card-body">${gantt}</div>`;
+    <div class="residence-chart-body">
+      ${renderResidenceMetricChart(samples, "system")}
+      ${renderResidenceMetricChart(samples, "chamber")}
+      ${renderResidenceMetricChart(samples, "robot")}
+    </div>`;
 }
 
-/** 绘制排程诊断面板 —— 总览、逐片驻留、瓶颈分析与 LoadLock 时序。 */
+/** 绘制排程诊断面板 —— 总览、逐片驻留与瓶颈分析。 */
 function renderSchedulePerformance(performance: SchedulePerformance): string {
   const window = performance.window;
-  const bottleneck = performance.primaryBottleneck;
-  const confidenceLabels = { high: "证据较强", medium: "证据中等", low: "证据较弱" };
-
+  // 兼容缓存的旧分析响应：服务端升级前的结果没有这个字段，也应能打开结果页。
+  const loadLockEfficiency = performance.loadLockEfficiency ?? {
+    cycleCount: 0,
+    waferCycleCount: 0,
+    wafersPerCycle: 0,
+    fullLoadCycleCount: 0,
+    emptyLoadCycleCount: 0,
+    fullLoadCycleRatio: 0,
+    emptyLoadCycleRatio: 0,
+  };
   return `
     <section class="result-card overview-card">
-      <header class="overview-head"><span class="visual-kicker">排程概览</span><strong>KPI 总览</strong></header>
+      <header class="overview-head"><strong>KPI 总览</strong></header>
       <div class="performance-summary">
         <div>
           <span>统计窗口</span>
@@ -2829,29 +2908,16 @@ function renderSchedulePerformance(performance: SchedulePerformance): string {
           <small>剔除开头 ${formatSeconds(window.trimmedStart)} s / 结尾 ${formatSeconds(window.trimmedEnd)} s</small>
         </div>
         <div>
-          <span>最可能瓶颈</span>
-          <strong>${escapeHtml(bottleneck?.label ?? "—")}</strong>
-          <small>${bottleneck ? `容量利用率 ${formatPercent(bottleneck.utilization)} · ${confidenceLabels[bottleneck.confidence]} · 另有 ${Math.max(0, performance.bottleneckCandidates.length - 1)} 个候选` : "没有足够的资源活动"}</small>
-        </div>
-        <div>
-          <span>出站节拍</span>
+          <span>产能</span>
           <strong>${performance.throughputPerHour > 0 ? `${performance.throughputPerHour.toFixed(1)} 片/h` : "—"}</strong>
           <small>平均间隔 ${formatSeconds(performance.meanDepartureInterval)} s · 间隔 CV ${performance.departureIntervalCv.toFixed(2)} · ${performance.completedWaferCount} 片样本</small>
         </div>
         <div>
-          <span>晶圆驻留时间 · 加工腔</span>
-          <strong>${performance.processChamberDwellTime.sampleCount ? `${formatSeconds(performance.processChamberDwellTime.meanSeconds)} s` : "—"}</strong>
-          <small>加工结束 → 完全离腔 · 中位 ${formatSeconds(performance.processChamberDwellTime.medianSeconds)} s · 最大 ${formatSeconds(performance.processChamberDwellTime.maxSeconds)} s · ${performance.processChamberDwellTime.sampleCount} 次</small>
-        </div>
-        <div>
-          <span>机器手驻留时间</span>
-          <strong>${performance.robotWaferDwellTime.sampleCount ? `${formatSeconds(performance.robotWaferDwellTime.meanSeconds)} s` : "—"}</strong>
-          <small>Pick 完成 → Place 开始，已扣除 PreTrans 运输 · 最大 ${formatSeconds(performance.robotWaferDwellTime.maxSeconds)} s · ${performance.robotWaferDwellTime.sampleCount} 次</small>
-        </div>
-        <div>
-          <span>晶圆系统停留时间</span>
-          <strong>${performance.waferSystemResidenceTime.sampleCount ? `${formatSeconds(performance.waferSystemResidenceTime.meanSeconds)} s` : "—"}</strong>
-          <small>离开 LP → 返回 LP · CV ${performance.waferSystemResidenceTime.coefficientOfVariation.toFixed(2)} · 最大 ${formatSeconds(performance.waferSystemResidenceTime.maxSeconds)} s · ${performance.waferSystemResidenceTime.sampleCount} 片</small>
+          <span>LoadLock 利用效率</span>
+          <strong>${loadLockEfficiency.cycleCount ? `${loadLockEfficiency.wafersPerCycle.toFixed(2)} 片/周期` : "—"}</strong>
+          <small>${loadLockEfficiency.cycleCount
+            ? `${loadLockEfficiency.waferCycleCount} 片·周期 / ${loadLockEfficiency.cycleCount} 个完整抽充气周期 · 满载 ${formatPercent(loadLockEfficiency.fullLoadCycleRatio)}（${loadLockEfficiency.fullLoadCycleCount}/${loadLockEfficiency.cycleCount}）· 空载 ${formatPercent(loadLockEfficiency.emptyLoadCycleRatio)}（${loadLockEfficiency.emptyLoadCycleCount}/${loadLockEfficiency.cycleCount}）`
+            : "没有完整的抽气—充气周期"}</small>
         </div>
       </div>
     </section>
@@ -2864,9 +2930,6 @@ function renderSchedulePerformance(performance: SchedulePerformance): string {
       ${renderBottleneckAnalysis(performance)}
     </section>
 
-    <section class="result-card loadlock-swap-card">
-      ${renderLoadLockCard(performance)}
-    </section>
     `;
 }
 
