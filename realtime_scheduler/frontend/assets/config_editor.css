@@ -1051,7 +1051,7 @@
     /* -------- 本地中文 Markdown 文档 -------- */
     body.documentation-mode { background: var(--surface); }
     body.documentation-mode .topbar { display: none; }
-    body.documentation-mode .app-content { width: min(100%, 1680px); padding-top: 0; padding-right: clamp(22px, 3vw, 52px); padding-left: clamp(22px, 3vw, 52px); }
+    body.documentation-mode .app-content { width: min(100%, 1840px); padding-top: 0; padding-right: clamp(22px, 2.5vw, 46px); padding-left: clamp(22px, 2.5vw, 46px); }
     .layout.documentation-mode .main { width: 100%; }
     .documentation-root { width: 100%; min-width: 0; min-height: 70vh; }
     .documentation-state { display: grid; min-height: 460px; place-items: center; align-content: center; gap: 8px; padding: 40px; color: var(--muted); text-align: center; }
@@ -1061,7 +1061,7 @@
     .documentation-state .btn { margin-top: 10px; }
     .documentation-spinner { width: 30px; height: 30px; border: 3px solid #dce6fb; border-top-color: var(--brand); border-radius: 50%; animation: documentation-spin .8s linear infinite; }
     @keyframes documentation-spin { to { transform: rotate(360deg); } }
-    .documentation-layout { display: grid; grid-template-columns: 230px minmax(460px, 800px) 210px; justify-content: center; gap: clamp(30px, 3.5vw, 58px); align-items: start; padding: 34px 0 72px; }
+    .documentation-layout { display: grid; grid-template-columns: 230px minmax(460px, 920px) 230px; justify-content: center; gap: clamp(30px, 3vw, 52px); align-items: start; padding: 34px 0 72px; }
     .documentation-navigation, .documentation-on-page { position: sticky; top: 28px; max-height: calc(100dvh - 56px); overflow: auto; scrollbar-width: thin; }
     .documentation-navigation { display: grid; gap: 26px; padding-right: 6px; }
     .documentation-navigation section { display: grid; gap: 3px; }
@@ -1081,6 +1081,10 @@
     .documentation-markdown a { color: #2059b7; text-decoration-color: #a9bee6; text-underline-offset: 3px; }
     .documentation-markdown a:hover { color: #123f96; text-decoration-color: currentColor; }
     .documentation-markdown code { padding: 2px 6px; border: 1px solid #d8e3f2; border-radius: 5px; color: #174fb4; background: #f2f6fd; font: 14px/1.55 "Cascadia Code", Consolas, monospace; }
+    .documentation-markdown .katex { color: #223653; font-size: 1.04em; }
+    .documentation-math-block { margin: 24px 0 26px; padding: 4px 0 6px; overflow-x: auto; overflow-y: hidden; color: #223653; text-align: center; scrollbar-width: thin; }
+    .documentation-math-block .katex-display { margin: 0; }
+    .documentation-math-error { padding: 2px 5px; border-bottom: 1px dashed #c43d4d; color: #a52736; font-family: "Cascadia Code", Consolas, monospace; }
     .documentation-markdown ul, .documentation-markdown ol { display: grid; gap: 8px; margin: 18px 0 22px; padding-left: 24px; }
     .documentation-markdown li { padding-left: 4px; }
     .documentation-markdown li::marker { color: #5274b7; font-weight: 800; }
@@ -1103,7 +1107,7 @@
     .documentation-table-wrap tbody th { width: 22%; color: #243a56; background: #fbfcfe; font-size: 14px; }
     .documentation-table-wrap tbody td { color: #53647b; font-size: 14px; }
     .documentation-table-wrap tbody tr:last-child > * { border-bottom: 0; }
-    .documentation-on-page { display: grid; align-content: start; gap: 2px; padding-left: 18px; border-left: 1px solid var(--line); }
+    .documentation-on-page { display: grid; align-content: start; gap: 2px; padding-left: 32px; border-left: 0; }
     .documentation-on-page > strong { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
     .documentation-on-page a { padding: 7px 0; color: #6b7789; font-size: 14px; line-height: 1.5; text-decoration: none; }
     .documentation-on-page a.is-level-3 { padding-left: 14px; }
@@ -1123,6 +1127,7 @@
     body.theme-dark .documentation-navigation a:hover, body.theme-dark .documentation-pagination a:hover { background: #292c31; }
     body.theme-dark .documentation-navigation a[aria-current="page"] { color: #aac3ff; background: #29344a; }
     body.theme-dark .documentation-markdown code { border-color: #46536a; color: #a9c1ff; background: #252d3b; }
+    body.theme-dark .documentation-markdown .katex, body.theme-dark .documentation-math-block { color: #d6deec; }
     body.theme-dark .documentation-markdown blockquote, body.theme-dark .documentation-callout { border-color: #46536a; background: #27292d; }
     body.theme-dark .documentation-callout strong { color: var(--ink); }
     body.theme-dark .documentation-callout p { color: #b5bdc9; }

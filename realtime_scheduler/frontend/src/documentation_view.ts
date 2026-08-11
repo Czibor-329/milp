@@ -1,3 +1,5 @@
+import * as katex from "katex";
+
 /**
  * 本地中文 Markdown 文档视图。
  *
@@ -50,11 +52,32 @@ function safeHref(rawHref: string): string {
   return /^(?:https?:\/\/|mailto:|\/|#)/i.test(href) ? href : "#";
 }
 
-/** 渲染常用行内 Markdown；占位符确保代码内容不会再次参与格式匹配。 */
+/** 将受控 LaTeX 片段转换为同时包含可视公式与无障碍 MathML 的 HTML。 */
+function renderMath(source: string, displayMode: boolean): string {
+  const formula = source.trim();
+  if (!formula) return "";
+  try {
+    return katex.renderToString(formula, {
+      displayMode,
+      output: "htmlAndMathml",
+      strict: "ignore",
+      throwOnError: true,
+      trust: false,
+    });
+  } catch {
+    return `<span class="documentation-math-error" title="公式语法无法解析">${escapeHtml(formula)}</span>`;
+  }
+}
+
+/** 渲染常用行内 Markdown；占位符确保代码与公式内容不会再次参与格式匹配。 */
 function renderInline(source: string): string {
   const tokens: string[] = [];
-  const tokenized = source.replace(/`([^`]+)`/g, (_match, code: string) => {
+  const withCode = source.replace(/`([^`]+)`/g, (_match, code: string) => {
     const index = tokens.push(`<code>${escapeHtml(code)}</code>`) - 1;
+    return `\u0000${index}\u0000`;
+  });
+  const tokenized = withCode.replace(/\\\((.+?)\\\)/g, (_match, formula: string) => {
+    const index = tokens.push(renderMath(formula, false)) - 1;
     return `\u0000${index}\u0000`;
   });
   const escaped = escapeHtml(tokenized)
@@ -95,6 +118,7 @@ function isTableSeparator(line: string): boolean {
 function startsBlock(lines: string[], index: number): boolean {
   const line = lines[index] || "";
   return /^#{1,3}\s+/.test(line)
+    || /^\s*\\\[/.test(line)
     || /^```/.test(line)
     || /^>\s?/.test(line)
     || /^\s*(?:[-+*]|\d+\.)\s+/.test(line)
@@ -125,6 +149,31 @@ function renderMarkdown(markdown: string): RenderedMarkdown {
       if (level > 1) headings.push({ id, level, text });
       html.push(`<h${level} id="${escapeHtml(id)}">${renderInline(text)}</h${level}>`);
       index += 1;
+      continue;
+    }
+
+    const blockMath = /^\s*\\\[(.*)$/.exec(line);
+    if (blockMath) {
+      const formulaLines: string[] = [];
+      let remainder = blockMath[1];
+      const closesOnFirstLine = /\\\]\s*$/.test(remainder);
+      if (closesOnFirstLine) {
+        formulaLines.push(remainder.replace(/\\\]\s*$/, ""));
+        index += 1;
+      } else {
+        if (remainder.trim()) formulaLines.push(remainder);
+        index += 1;
+        while (index < lines.length && !/\\\]\s*$/.test(lines[index])) {
+          formulaLines.push(lines[index]);
+          index += 1;
+        }
+        if (index < lines.length) {
+          const closingLine = lines[index].replace(/\\\]\s*$/, "");
+          if (closingLine.trim()) formulaLines.push(closingLine);
+          index += 1;
+        }
+      }
+      html.push(`<div class="documentation-math-block">${renderMath(formulaLines.join("\n"), true)}</div>`);
       continue;
     }
 
