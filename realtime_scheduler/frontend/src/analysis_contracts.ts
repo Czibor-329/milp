@@ -94,20 +94,6 @@ export interface BottleneckCandidate {
   evidence: string[];
 }
 
-export interface ScheduleDiagnostic {
-  title: string;
-  confidence: "strong" | "moderate" | "exploratory";
-  finding: string;
-  evidence: Array<{ label: string; value: string; interpretation: string }>;
-  nextExperiment: {
-    id: string;
-    label: string;
-    change: string;
-    expectedSignal: string;
-  };
-  limitation: string;
-}
-
 export interface SchedulePerformance {
   window: PerformanceWindow;
   resources: ResourcePerformance[];
@@ -131,7 +117,6 @@ export interface SchedulePerformance {
     fullLoadCycleRatio: number;
     emptyLoadCycleRatio: number;
   };
-  diagnostics: ScheduleDiagnostic[];
 }
 
 export interface BottleneckUtilizationSummary {

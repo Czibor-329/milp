@@ -32,6 +32,55 @@ LOAD_PORT_TYPE = "loadport"
 DOORLESS_STATION_NAMES = frozenset({"Cooler", "Cool"})
 
 
+class ValidationErrorCode(str, Enum):
+    """MoveList 输出校验的稳定错误码。"""
+
+    MOVE_ITEM_INVALID = "MVL-FMT-001"
+    MOVE_ID_INVALID = "MVL-FMT-002"
+    MOVE_ID_DUPLICATE = "MVL-FMT-003"
+    PREDECESSOR_FORMAT_INVALID = "MVL-DEP-001"
+    PREDECESSOR_VALUE_INVALID = "MVL-DEP-002"
+    PREDECESSOR_SELF_REFERENCE = "MVL-DEP-003"
+    PREDECESSOR_MISSING = "MVL-DEP-004"
+    PREDECESSOR_TIME_CONFLICT = "MVL-DEP-005"
+    DEPENDENCY_CYCLE = "MVL-DEP-006"
+    TIME_INVALID = "MVL-TIME-001"
+    TIME_REVERSED = "MVL-TIME-002"
+    TIMING_CONFIG_MISSING = "MVL-TIME-003"
+    TIMING_CONFIG_INVALID = "MVL-TIME-004"
+    DURATION_MISMATCH = "MVL-TIME-005"
+    POST_PROCESS_PICK_MISSING = "MVL-ROUTE-001"
+    RESIDENCY_EXCEEDED = "MVL-ROUTE-002"
+    QTIME_EXCEEDED = "MVL-ROUTE-003"
+    INITIAL_MATERIAL_CONFLICT = "MVL-STATE-001"
+    MOVE_TYPE_UNSUPPORTED = "MVL-MOVE-001"
+    PARALLEL_ARRAY_INVALID = "MVL-MOVE-002"
+    DUPLICATE_RESOURCE_REFERENCE = "MVL-MOVE-003"
+    ROBOT_UNKNOWN = "MVL-RES-001"
+    STATION_UNKNOWN = "MVL-RES-002"
+    STATION_SLOT_UNKNOWN = "MVL-RES-003"
+    ROBOT_BUSY = "MVL-ROBOT-001"
+    ROBOT_SLOT_DISABLED = "MVL-ROBOT-002"
+    ROBOT_HAND_STATE_INVALID = "MVL-ROBOT-003"
+    ROBOT_SWAP_UNSUPPORTED = "MVL-ROBOT-004"
+    ROBOT_UNREACHABLE = "MVL-ROBOT-005"
+    ROBOT_ALIGNMENT_INVALID = "MVL-ROBOT-006"
+    STATION_DOOR_STATE_INVALID = "MVL-STATION-001"
+    STATION_TRANSFER_BUSY = "MVL-STATION-002"
+    STATION_ENVIRONMENT_BUSY = "MVL-STATION-003"
+    STATION_PROCESS_BUSY = "MVL-STATION-004"
+    STATION_SLOT_BUSY = "MVL-STATION-005"
+    PICK_SOURCE_INVALID = "MVL-PICK-001"
+    PLACE_TARGET_INVALID = "MVL-PLACE-001"
+    PRETRANS_STATE_INVALID = "MVL-PRETRANS-001"
+    PROCESS_STATE_INVALID = "MVL-PROCESS-001"
+    LOADLOCK_REQUIRED = "MVL-LL-001"
+    LOADLOCK_ENVIRONMENT_INVALID = "MVL-LL-002"
+    LOADLOCK_CONTENT_INVALID = "MVL-LL-003"
+    SWAP_INPUT_INVALID = "MVL-SWAP-001"
+    SWAP_STATE_INVALID = "MVL-SWAP-002"
+
+
 class DoorState(str, Enum):
     """设备门的稳定开闭状态。"""
 
@@ -128,13 +177,13 @@ class RobotState:
     def swap_slot_error(self, receive_slot: int, send_slot: int) -> Optional[str]:
         """校验原子换片使用的两个机器人手槽。"""
         if not self.can_swap or len(self.hands) < 2:
-            return f"{self.name} 不支持双臂换片"
+            return _global_issue(ValidationErrorCode.ROBOT_SWAP_UNSUPPORTED, f"{self.name} 不支持双臂换片")
         if receive_slot == send_slot:
-            return f"{self.name} 换片的接收手槽和发送手槽必须不同"
+            return _global_issue(ValidationErrorCode.SWAP_INPUT_INVALID, f"{self.name} 换片的接收手槽和发送手槽必须不同")
         if receive_slot not in self.hands:
-            return f"{self.name} 未启用手槽 {receive_slot}"
+            return _global_issue(ValidationErrorCode.ROBOT_SLOT_DISABLED, f"{self.name} 未启用手槽 {receive_slot}")
         if send_slot not in self.hands:
-            return f"{self.name} 未启用手槽 {send_slot}"
+            return _global_issue(ValidationErrorCode.ROBOT_SLOT_DISABLED, f"{self.name} 未启用手槽 {send_slot}")
         return None
 
 
@@ -213,7 +262,12 @@ class MachineState:
         for station_name, slot_id, material in _initial_materials(task, payload):
             station = state.ensure_station(station_name, slot_id)
             if station.slots[slot_id].material is not None:
-                raise ValueError(f"初始物料在 {station_name}#{slot_id} 发生冲突")
+                raise ValueError(
+                    _global_issue(
+                        ValidationErrorCode.INITIAL_MATERIAL_CONFLICT,
+                        f"初始物料在 {station_name}#{slot_id} 发生冲突",
+                    )
+                )
             station.slots[slot_id] = SlotState(SlotPhase.COMPLETED, material)
         return state
 
@@ -351,6 +405,14 @@ def validate_move_list(
     check_residency: bool = True,
 ) -> List[str]:
     """按时间线校验 MoveList；覆盖依赖 DAG、Route 时限与物理状态。"""
+    for index, move in enumerate(moves):
+        if not isinstance(move, Mapping):
+            return [
+                _global_issue(
+                    ValidationErrorCode.MOVE_ITEM_INVALID,
+                    f"MoveList[{index}] 必须是 JSON 对象",
+                )
+            ]
     dependency_error = _validate_move_dependencies(moves)
     if dependency_error:
         return [dependency_error]
@@ -372,9 +434,9 @@ def validate_move_list(
         start_time = _number(move.get("StartTime"))
         end_time = _number(move.get("EndTime"))
         if start_time is None or end_time is None:
-            return [_issue(move, "StartTime 和 EndTime 必须是有限数字")]
+            return [_issue(move, ValidationErrorCode.TIME_INVALID, "StartTime 和 EndTime 必须是有限数字")]
         if end_time + TIME_TOLERANCE < start_time:
-            return [_issue(move, "EndTime 不能早于 StartTime")]
+            return [_issue(move, ValidationErrorCode.TIME_REVERSED, "EndTime 不能早于 StartTime")]
         _finish_until(scheduled, start_time)
         error = _start_move(state, move, end_time, ordered_moves, scheduled)
         if error:
@@ -389,10 +451,10 @@ def _validate_move_dependencies(moves: Sequence[Mapping[str, Any]]) -> Optional[
     for move in moves:
         raw_move_id = move.get("MoveID")
         if isinstance(raw_move_id, bool) or not isinstance(raw_move_id, int):
-            return _issue(move, "MoveID 必须是整数")
+            return _issue(move, ValidationErrorCode.MOVE_ID_INVALID, "MoveID 必须是整数")
         move_id = int(raw_move_id)
         if move_id in by_id:
-            return _issue(move, f"MoveID={move_id} 重复")
+            return _issue(move, ValidationErrorCode.MOVE_ID_DUPLICATE, f"MoveID={move_id} 重复")
         by_id[move_id] = move
 
     predecessors: Dict[int, Set[int]] = {}
@@ -400,17 +462,17 @@ def _validate_move_dependencies(moves: Sequence[Mapping[str, Any]]) -> Optional[
     for move_id, move in by_id.items():
         raw_values = move.get("PreMoveID") or []
         if not isinstance(raw_values, Sequence) or isinstance(raw_values, (str, bytes)):
-            return _issue(move, "PreMoveID 必须是整数数组")
+            return _issue(move, ValidationErrorCode.PREDECESSOR_FORMAT_INVALID, "PreMoveID 必须是整数数组")
         parsed: Set[int] = set()
         for raw_value in raw_values:
             if isinstance(raw_value, bool) or not isinstance(raw_value, int):
-                return _issue(move, f"PreMoveID 包含非整数引用: {raw_value}")
+                return _issue(move, ValidationErrorCode.PREDECESSOR_VALUE_INVALID, f"PreMoveID 包含非整数引用: {raw_value}")
             predecessor_id = int(raw_value)
             if predecessor_id == move_id:
-                return _issue(move, "PreMoveID 不能引用自身")
+                return _issue(move, ValidationErrorCode.PREDECESSOR_SELF_REFERENCE, "PreMoveID 不能引用自身")
             predecessor = by_id.get(predecessor_id)
             if predecessor is None:
-                return _issue(move, f"PreMoveID 引用了不存在的 MoveID={predecessor_id}")
+                return _issue(move, ValidationErrorCode.PREDECESSOR_MISSING, f"PreMoveID 引用了不存在的 MoveID={predecessor_id}")
             predecessor_end = _number(predecessor.get("EndTime"))
             current_start = _number(move.get("StartTime"))
             if (
@@ -420,6 +482,7 @@ def _validate_move_dependencies(moves: Sequence[Mapping[str, Any]]) -> Optional[
             ):
                 return _issue(
                     move,
+                    ValidationErrorCode.PREDECESSOR_TIME_CONFLICT,
                     f"前驱 MoveID={predecessor_id} 尚未结束（EndTime={predecessor_end}）",
                 )
             parsed.add(predecessor_id)
@@ -437,7 +500,10 @@ def _validate_move_dependencies(moves: Sequence[Mapping[str, Any]]) -> Optional[
                 ready.append(successor)
     if visited != len(by_id):
         cyclic = sorted(move_id for move_id, values in predecessors.items() if values)
-        return f"MoveList 的 PreMoveID 存在依赖环: {cyclic}"
+        return _global_issue(
+            ValidationErrorCode.DEPENDENCY_CYCLE,
+            f"MoveList 的 PreMoveID 存在依赖环: {cyclic}",
+        )
     return None
 
 
@@ -472,9 +538,16 @@ def _validate_configured_durations(
                 if station_name not in raw_timing:
                     return _issue(
                         move,
+                        ValidationErrorCode.TIMING_CONFIG_MISSING,
                         f"{robot_name} 缺少 {timing_field}[{station_name}]",
                     )
-                expected = float(raw_timing[station_name])
+                expected = _number(raw_timing[station_name])
+                if expected is None or expected < 0.0:
+                    return _issue(
+                        move,
+                        ValidationErrorCode.TIMING_CONFIG_INVALID,
+                        f"{robot_name} 的 {timing_field}[{station_name}] 必须是非负有限数字",
+                    )
         elif move_type == PRE_TRANS_MOVE and isinstance(robot, Mapping):
             entries = robot.get("PrepTransTime")
             if isinstance(entries, Sequence) and not isinstance(entries, (str, bytes)) and entries:
@@ -497,18 +570,24 @@ def _validate_configured_durations(
                 transfer_index: Dict[Tuple[str, str, int], float] = {}
                 for item in entries:
                     if not isinstance(item, Mapping) or "TransType" not in item:
-                        return _issue(move, f"{robot_name} 的 PrepTransTime 缺少 TransType")
+                        return _issue(move, ValidationErrorCode.TIMING_CONFIG_INVALID, f"{robot_name} 的 PrepTransTime 缺少 TransType")
+                    raw_transfer_type = item.get("TransType")
+                    if isinstance(raw_transfer_type, bool) or not isinstance(raw_transfer_type, int):
+                        return _issue(move, ValidationErrorCode.TIMING_CONFIG_INVALID, f"{robot_name} 的 PrepTransTime.TransType 必须是整数")
+                    transfer_time = _number(item.get("Time"))
+                    if transfer_time is None or transfer_time < 0.0:
+                        return _issue(move, ValidationErrorCode.TIMING_CONFIG_INVALID, f"{robot_name} 的 PrepTransTime.Time 必须是非负有限数字")
                     key = (
                         str(item.get("SrcStation") or ""),
                         str(item.get("DestStation") or ""),
-                        int(item["TransType"]),
+                        raw_transfer_type,
                     )
                     if key in transfer_index:
-                        return _issue(move, f"{robot_name} 的 PrepTransTime 重复四元组 {key}")
-                    transfer_index[key] = float(item.get("Time", 0.0))
+                        return _issue(move, ValidationErrorCode.TIMING_CONFIG_INVALID, f"{robot_name} 的 PrepTransTime 重复四元组 {key}")
+                    transfer_index[key] = transfer_time
                 lookup = (source, destination, trans_type)
                 if lookup not in transfer_index:
-                    return _issue(move, f"{robot_name} 缺少 PrepTransTime 四元组 {lookup}")
+                    return _issue(move, ValidationErrorCode.TIMING_CONFIG_MISSING, f"{robot_name} 缺少 PrepTransTime 四元组 {lookup}")
                 expected = transfer_index[lookup]
         elif move_type == PROCESS_MOVE and task is not None:
             expected = _process_move_expected_duration(task, move)
@@ -516,6 +595,7 @@ def _validate_configured_durations(
         if expected is not None and abs(actual - expected) > TIME_TOLERANCE:
             return _issue(
                 move,
+                ValidationErrorCode.DURATION_MISMATCH,
                 f"动作时长 {actual:.6f}s 与配置 {expected:.6f}s 不一致",
             )
     return None
@@ -636,12 +716,14 @@ def _validate_route_time_limits(
                 if departure is None:
                     return _issue(
                         process_move,
+                        ValidationErrorCode.POST_PROCESS_PICK_MISSING,
                         f"加工完成后缺少物料 {material_key} 的取片动作",
                     )
                 elapsed = (_number(departure.get("StartTime")) or process_end) - process_end
                 if elapsed > residency + TIME_TOLERANCE:
                     return _issue(
                         departure,
+                        ValidationErrorCode.RESIDENCY_EXCEEDED,
                         f"物料 {material_key} 驻留 {elapsed:.3f}s 超过上限 {residency:.3f}s",
                     )
             qtime = float(getattr(stage, "qtime", -1.0))
@@ -651,6 +733,7 @@ def _validate_route_time_limits(
                 if elapsed > qtime + TIME_TOLERANCE:
                     return _issue(
                         next_move,
+                        ValidationErrorCode.QTIME_EXCEEDED,
                         f"物料 {material_key} 相邻加工间隔 {elapsed:.3f}s 超过 Q-time {qtime:.3f}s",
                     )
     return None
@@ -735,12 +818,13 @@ def _robot_alignment_issue(
                 reachable = "、".join(sorted({candidate[0] for candidate in options}))
                 return _issue(
                     move,
+                    ValidationErrorCode.ROBOT_ALIGNMENT_INVALID,
                     f"{robot.name}#{robot_slot_id} 无法对准 {station_name}#{station_slot_id}（当前手槽可及站：{reachable or '无'}）",
                 )
         return None
     station_names = {station_name for station_name, _, _ in station_refs}
     if robot.position is not None and robot.position not in station_names:
-        return _issue(move, f"{robot.name} 当前指向 {robot.position}，不在组合站点 {sorted(station_names)}")
+        return _issue(move, ValidationErrorCode.ROBOT_ALIGNMENT_INVALID, f"{robot.name} 当前指向 {robot.position}，不在组合站点 {sorted(station_names)}")
     return None
 
 
@@ -750,11 +834,12 @@ def _pretrans_source_issue(robot: RobotState, move: Mapping[str, Any], source: s
         if source and source not in _robot_target_stations(robot):
             return _issue(
                 move,
+                ValidationErrorCode.PRETRANS_STATE_INVALID,
                 f"{robot.name} 无法从 {source} 转位（当前手槽指向站：{sorted(_robot_target_stations(robot))}）",
             )
         return None
     if robot.position is not None and source and robot.position != source:
-        return _issue(move, f"{robot.name} 当前指向 {robot.position}，不是 {source}")
+        return _issue(move, ValidationErrorCode.PRETRANS_STATE_INVALID, f"{robot.name} 当前指向 {robot.position}，不是 {source}")
     return None
 
 
@@ -808,7 +893,7 @@ def _start_move(
     }
     handler = handlers.get(move.get("MoveType"))
     if handler is None:
-        return _issue(move, f"不支持 MoveType={move.get('MoveType')}")
+        return _issue(move, ValidationErrorCode.MOVE_TYPE_UNSUPPORTED, f"不支持 MoveType={move.get('MoveType')}")
     return handler(state, move, end_time, all_moves, scheduled)
 
 
@@ -884,26 +969,26 @@ def _start_pick(state: MachineState, move: Mapping[str, Any], end_time: float, _
         return error
     start_time = _start_time(move)
     if not _available(robot.busy_until, start_time):
-        return _issue(move, f"{robot.name} 正在执行其他动作")
+        return _issue(move, ValidationErrorCode.ROBOT_BUSY, f"{robot.name} 正在执行其他动作")
     transfers: List[Tuple[StationState, SlotState, int, int, MaterialState]] = []
     for station_name, station_slot_id, robot_slot_id, material_id, index in rows:
         station = state.stations.get(station_name)
         if station is None:
-            return _issue(move, f"未知站点 {station_name}")
+            return _issue(move, ValidationErrorCode.STATION_UNKNOWN, f"未知站点 {station_name}")
         error = _station_access_error(robot, station, start_time, move)
         if error:
             return error
         slot = station.slots.get(station_slot_id)
         if slot is None:
-            return _issue(move, f"{station_name} 不存在槽位 {station_slot_id}")
+            return _issue(move, ValidationErrorCode.STATION_SLOT_UNKNOWN, f"{station_name} 不存在槽位 {station_slot_id}")
         if robot_slot_id not in robot.hands:
-            return _issue(move, f"{robot.name} 未启用手槽 {robot_slot_id}")
+            return _issue(move, ValidationErrorCode.ROBOT_SLOT_DISABLED, f"{robot.name} 未启用手槽 {robot_slot_id}")
         if robot.hands[robot_slot_id] is not None:
-            return _issue(move, f"{robot.name}#{robot_slot_id} 不是空手")
+            return _issue(move, ValidationErrorCode.ROBOT_HAND_STATE_INVALID, f"{robot.name}#{robot_slot_id} 不是空手")
         if not _available(slot.busy_until, start_time):
-            return _issue(move, f"{station_name}#{station_slot_id} 正在{slot.busy_action}")
+            return _issue(move, ValidationErrorCode.STATION_SLOT_BUSY, f"{station_name}#{station_slot_id} 正在{slot.busy_action}")
         if slot.phase is not SlotPhase.COMPLETED or not _material_matches(slot.material, material_id):
-            return _issue(move, f"{station_name}#{station_slot_id} 没有匹配的已完成物料")
+            return _issue(move, ValidationErrorCode.PICK_SOURCE_INVALID, f"{station_name}#{station_slot_id} 没有匹配的已完成物料")
         transfers.append((station, slot, station_slot_id, robot_slot_id, _material_with_metadata(slot.material, move, index)))
     alignment_error = _robot_alignment_issue(robot, move, [(row[0], row[1], row[2]) for row in rows])
     if alignment_error:
@@ -940,27 +1025,27 @@ def _start_place(state: MachineState, move: Mapping[str, Any], end_time: float, 
         return error
     start_time = _start_time(move)
     if not _available(robot.busy_until, start_time):
-        return _issue(move, f"{robot.name} 正在执行其他动作")
+        return _issue(move, ValidationErrorCode.ROBOT_BUSY, f"{robot.name} 正在执行其他动作")
     transfers: List[Tuple[StationState, SlotState, int, int, MaterialState]] = []
     for station_name, station_slot_id, robot_slot_id, material_id, index in rows:
         station = state.stations.get(station_name)
         if station is None:
-            return _issue(move, f"未知站点 {station_name}")
+            return _issue(move, ValidationErrorCode.STATION_UNKNOWN, f"未知站点 {station_name}")
         error = _station_access_error(robot, station, start_time, move)
         if error:
             return error
         slot = station.slots.get(station_slot_id)
         if slot is None:
-            return _issue(move, f"{station_name} 不存在槽位 {station_slot_id}")
+            return _issue(move, ValidationErrorCode.STATION_SLOT_UNKNOWN, f"{station_name} 不存在槽位 {station_slot_id}")
         if robot_slot_id not in robot.hands:
-            return _issue(move, f"{robot.name} 未启用手槽 {robot_slot_id}")
+            return _issue(move, ValidationErrorCode.ROBOT_SLOT_DISABLED, f"{robot.name} 未启用手槽 {robot_slot_id}")
         material = robot.hands.get(robot_slot_id)
         if material is None or not _material_matches(material, material_id):
-            return _issue(move, f"{robot.name}#{robot_slot_id} 没有匹配物料")
+            return _issue(move, ValidationErrorCode.ROBOT_HAND_STATE_INVALID, f"{robot.name}#{robot_slot_id} 没有匹配物料")
         if slot.phase not in {SlotPhase.EMPTY, SlotPhase.CLEANED}:
-            return _issue(move, f"{station_name}#{station_slot_id} 不是可放片空槽")
+            return _issue(move, ValidationErrorCode.PLACE_TARGET_INVALID, f"{station_name}#{station_slot_id} 不是可放片空槽")
         if not _available(slot.busy_until, start_time):
-            return _issue(move, f"{station_name}#{station_slot_id} 正在{slot.busy_action}")
+            return _issue(move, ValidationErrorCode.STATION_SLOT_BUSY, f"{station_name}#{station_slot_id} 正在{slot.busy_action}")
         transfers.append((station, slot, station_slot_id, robot_slot_id, _material_with_metadata(material, move, index)))
     alignment_error = _robot_alignment_issue(robot, move, [(row[0], row[1], row[2]) for row in rows])
     if alignment_error:
@@ -991,19 +1076,19 @@ def _start_pretrans(state: MachineState, move: Mapping[str, Any], end_time: floa
     source = _first_text(move, "SrcStationList")
     destination = _first_text(move, "DestStationList")
     if not destination:
-        return _issue(move, "转位缺少 DestStationList")
+        return _issue(move, ValidationErrorCode.PRETRANS_STATE_INVALID, "转位缺少 DestStationList")
     if not _available(robot.busy_until, _start_time(move)):
-        return _issue(move, f"{robot.name} 正在执行其他动作")
+        return _issue(move, ValidationErrorCode.ROBOT_BUSY, f"{robot.name} 正在执行其他动作")
     source_error = _pretrans_source_issue(robot, move, source)
     if source_error:
         return source_error
     for station_name in (source, destination):
         if station_name and robot.scope and station_name not in robot.scope:
-            return _issue(move, f"{robot.name} 无法访问 {station_name}")
+            return _issue(move, ValidationErrorCode.ROBOT_UNREACHABLE, f"{robot.name} 无法访问 {station_name}")
     robot_slots = _integer_values(move, "RobotSlotList")
     material_ids = _values(move, "MatIDList")
     if material_ids and len(robot_slots) != len(material_ids):
-        return _issue(move, "MatIDList 与 RobotSlotList 数量不一致")
+        return _issue(move, ValidationErrorCode.PARALLEL_ARRAY_INVALID, "MatIDList 与 RobotSlotList 数量不一致")
     for index, material_id in enumerate(material_ids):
         material = robot.hands.get(robot_slots[index])
         if material is None and _pretrans_is_linked_empty_pick(
@@ -1015,7 +1100,7 @@ def _start_pretrans(state: MachineState, move: Mapping[str, Any], end_time: floa
         ):
             continue
         if not _material_matches(material, material_id):
-            return _issue(move, f"{robot.name}#{robot_slots[index]} 持有物料与 Move 不匹配")
+            return _issue(move, ValidationErrorCode.ROBOT_HAND_STATE_INVALID, f"{robot.name}#{robot_slots[index]} 持有物料与 Move 不匹配")
     robot.busy_until = end_time
     _schedule(scheduled, move, end_time, lambda: _apply_pretrans_landing(robot, move))
     return None
@@ -1080,22 +1165,23 @@ def _start_prepare(state: MachineState, move: Mapping[str, Any], end_time: float
     station_name = _station_name(move)
     station = state.stations.get(station_name)
     if station is None:
-        return _issue(move, f"未知站点 {station_name or '<empty>'}")
+        return _issue(move, ValidationErrorCode.STATION_UNKNOWN, f"未知站点 {station_name or '<empty>'}")
     start_time = _start_time(move)
     if station.door is not DoorState.CLOSED:
-        return _issue(move, f"{station.name} 当前不是关门状态")
+        return _issue(move, ValidationErrorCode.STATION_DOOR_STATE_INVALID, f"{station.name} 当前不是关门状态")
     if not _available(station.door_busy_until, start_time) or not _available(station.transfer_busy_until, start_time):
-        return _issue(move, f"{station.name} 门机构或取放资源正在忙")
+        return _issue(move, ValidationErrorCode.STATION_TRANSFER_BUSY, f"{station.name} 门机构或取放资源正在忙")
     if not _available(station.environment_busy_until, start_time):
-        return _issue(move, f"{station.name} 正在切换环境")
+        return _issue(move, ValidationErrorCode.STATION_ENVIRONMENT_BUSY, f"{station.name} 正在切换环境")
     if _has_active_process(station, start_time):
-        return _issue(move, f"{station.name} 存在尚未完成的加工或清洁")
+        return _issue(move, ValidationErrorCode.STATION_PROCESS_BUSY, f"{station.name} 存在尚未完成的加工或清洁")
     if isinstance(station, LoadLockState):
         related = _related_move(move, all_moves)
         expected = _required_environment(state, station, move, related)
         if expected is not None and station.environment != expected:
             return _issue(
                 move,
+                ValidationErrorCode.LOADLOCK_ENVIRONMENT_INVALID,
                 f"{station.name}.CurState为{_environment_label(station, expected)}，不是{_environment_label(station, station.environment)}",
             )
         station.last_environment_transition_was_empty = False
@@ -1109,12 +1195,12 @@ def _start_complete(state: MachineState, move: Mapping[str, Any], end_time: floa
     station_name = _station_name(move)
     station = state.stations.get(station_name)
     if station is None:
-        return _issue(move, f"未知站点 {station_name or '<empty>'}")
+        return _issue(move, ValidationErrorCode.STATION_UNKNOWN, f"未知站点 {station_name or '<empty>'}")
     if not _is_doorless(station) and station.door is not DoorState.OPEN:
-        return _issue(move, f"{station.name} 当前不是开门状态")
+        return _issue(move, ValidationErrorCode.STATION_DOOR_STATE_INVALID, f"{station.name} 当前不是开门状态")
     start_time = _start_time(move)
     if not _available(station.door_busy_until, start_time) or not _available(station.transfer_busy_until, start_time):
-        return _issue(move, f"{station.name} 门机构或取放资源正在忙")
+        return _issue(move, ValidationErrorCode.STATION_TRANSFER_BUSY, f"{station.name} 门机构或取放资源正在忙")
     station.door_busy_until = end_time
     _schedule(scheduled, move, end_time, lambda: setattr(station, "door", DoorState.CLOSED))
     return None
@@ -1131,38 +1217,38 @@ def _start_process(state: MachineState, move: Mapping[str, Any], end_time: float
         return None
     station = state.stations.get(station_name)
     if station is None:
-        return _issue(move, f"未知站点 {station_name or '<empty>'}")
+        return _issue(move, ValidationErrorCode.STATION_UNKNOWN, f"未知站点 {station_name or '<empty>'}")
     start_time = _start_time(move)
     if station.door is not DoorState.CLOSED:
-        return _issue(move, f"{station.name} 加工或清洁时必须关门")
+        return _issue(move, ValidationErrorCode.STATION_DOOR_STATE_INVALID, f"{station.name} 加工或清洁时必须关门")
     if not _available(station.door_busy_until, start_time) or not _available(station.transfer_busy_until, start_time):
-        return _issue(move, f"{station.name} 正在执行开关门或取放动作")
+        return _issue(move, ValidationErrorCode.STATION_TRANSFER_BUSY, f"{station.name} 正在执行开关门或取放动作")
     if material_ids and len(slot_ids) != len(material_ids):
-        return _issue(move, "MatIDList 与 SlotList 数量不一致")
+        return _issue(move, ValidationErrorCode.PARALLEL_ARRAY_INVALID, "MatIDList 与 SlotList 数量不一致")
     if not slot_ids:
         # 兼容只声明腔室占用窗口的旧版 ProcessMove；没有物料和槽位时无法产生
         # 逐槽状态变化，但仍可验证门与共享资源，供跨代计划保留该物理时间窗。
         if material_ids:
-            return _issue(move, "加工动作携带物料时必须提供 SlotList")
+            return _issue(move, ValidationErrorCode.PROCESS_STATE_INVALID, "加工动作携带物料时必须提供 SlotList")
         _schedule(scheduled, move, end_time, lambda: None)
         return None
     if len(set(slot_ids)) != len(slot_ids):
-        return _issue(move, "加工或清洁不能重复引用同一槽位")
+        return _issue(move, ValidationErrorCode.DUPLICATE_RESOURCE_REFERENCE, "加工或清洁不能重复引用同一槽位")
     targets: List[Tuple[SlotState, Optional[MaterialState], int]] = []
     for index, slot_id in enumerate(slot_ids):
         slot = station.slots.get(slot_id)
         if slot is None:
-            return _issue(move, f"{station.name} 不存在槽位 {slot_id}")
+            return _issue(move, ValidationErrorCode.STATION_SLOT_UNKNOWN, f"{station.name} 不存在槽位 {slot_id}")
         if not _available(slot.busy_until, start_time):
-            return _issue(move, f"{station.name}#{slot_id} 正在{slot.busy_action}")
+            return _issue(move, ValidationErrorCode.STATION_SLOT_BUSY, f"{station.name}#{slot_id} 正在{slot.busy_action}")
         material_id = material_ids[index] if material_ids else None
         if material_id is None:
             if slot.phase not in {SlotPhase.EMPTY, SlotPhase.CLEANED}:
-                return _issue(move, f"{station.name}#{slot_id} 有物料，不能执行无片清洁")
+                return _issue(move, ValidationErrorCode.PROCESS_STATE_INVALID, f"{station.name}#{slot_id} 有物料，不能执行无片清洁")
             material = None
         else:
             if slot.phase is not SlotPhase.UNPROCESSED or not _material_matches(slot.material, material_id):
-                return _issue(move, f"{station.name}#{slot_id} 没有待加工的匹配物料")
+                return _issue(move, ValidationErrorCode.PROCESS_STATE_INVALID, f"{station.name}#{slot_id} 没有待加工的匹配物料")
             material = slot.material
         targets.append((slot, material, slot_id))
     for slot, material, _ in targets:
@@ -1182,14 +1268,14 @@ def _start_preprepare(state: MachineState, move: Mapping[str, Any], end_time: fl
     station_name = _station_name(move)
     station = state.stations.get(station_name)
     if not isinstance(station, LoadLockState):
-        return _issue(move, f"{station_name or '<empty>'} 不是 LoadLock，不能切换环境")
+        return _issue(move, ValidationErrorCode.LOADLOCK_REQUIRED, f"{station_name or '<empty>'} 不是 LoadLock，不能切换环境")
     start_time = _start_time(move)
     if station.door is not DoorState.CLOSED:
-        return _issue(move, f"{station.name} 切换环境时必须关门")
+        return _issue(move, ValidationErrorCode.STATION_DOOR_STATE_INVALID, f"{station.name} 切换环境时必须关门")
     if not _available(station.door_busy_until, start_time) or not _available(station.transfer_busy_until, start_time):
-        return _issue(move, f"{station.name} 正在开关门或取放物料")
+        return _issue(move, ValidationErrorCode.STATION_TRANSFER_BUSY, f"{station.name} 正在开关门或取放物料")
     if not _available(station.environment_busy_until, start_time):
-        return _issue(move, f"{station.name} 正在切换环境")
+        return _issue(move, ValidationErrorCode.STATION_ENVIRONMENT_BUSY, f"{station.name} 正在切换环境")
     last_state = _environment_state(station, move.get("LastState"))
     current_state = _environment_state(station, move.get("CurState"))
     raw_last = str(move.get("LastState") or "").strip().upper()
@@ -1206,13 +1292,15 @@ def _start_preprepare(state: MachineState, move: Mapping[str, Any], end_time: fl
     if state_space_violation:
         violation = _issue(
             move,
+            ValidationErrorCode.LOADLOCK_ENVIRONMENT_INVALID,
             f"{station.name} 的 LastState/CurState 不在其 PrePrepareTime 状态空间内：({raw_last}, {raw_current})",
         )
     elif last_state not in {ATMOSPHERE, VACUUM} or current_state not in {ATMOSPHERE, VACUUM}:
-        violation = _issue(move, "LastState 和 CurState 必须是有效压力态")
+        violation = _issue(move, ValidationErrorCode.LOADLOCK_ENVIRONMENT_INVALID, "LastState 和 CurState 必须是有效压力态")
     elif station.environment != last_state:
         violation = _issue(
             move,
+            ValidationErrorCode.LOADLOCK_ENVIRONMENT_INVALID,
             f"{station.name}.CurState为{_environment_label(station, last_state)}，不是{_environment_label(station, station.environment)}",
         )
     if violation is not None:
@@ -1229,24 +1317,24 @@ def _start_preprepare(state: MachineState, move: Mapping[str, Any], end_time: fl
     material_ids = _values(move, "MatIDList")
     slot_ids = _integer_values(move, "SlotList")
     if material_ids and slot_ids and len(material_ids) != len(slot_ids):
-        return _issue(move, "MatIDList 与 SlotList 数量不一致")
+        return _issue(move, ValidationErrorCode.PARALLEL_ARRAY_INVALID, "MatIDList 与 SlotList 数量不一致")
     if material_ids and not slot_ids:
         inferred_slots = []
         for material_id in material_ids:
             inferred = next((slot_id for slot_id, slot in station.slots.items() if _material_matches(slot.material, material_id)), None)
             if inferred is None:
-                return _issue(move, f"{station.name} 中找不到物料 {material_id}")
+                return _issue(move, ValidationErrorCode.LOADLOCK_CONTENT_INVALID, f"{station.name} 中找不到物料 {material_id}")
             inferred_slots.append(inferred)
         slot_ids = inferred_slots
     targets = [station.slots[slot_id] for slot_id in slot_ids if slot_id in station.slots]
     if len(targets) != len(slot_ids):
-        return _issue(move, f"{station.name} 的 SlotList 包含无效槽位")
+        return _issue(move, ValidationErrorCode.LOADLOCK_CONTENT_INVALID, f"{station.name} 的 SlotList 包含无效槽位")
     for index, slot in enumerate(targets):
         material_id = material_ids[index] if material_ids else None
         if material_id is not None and not _material_matches(slot.material, material_id):
-            return _issue(move, f"{station.name}#{slot_ids[index]} 没有匹配物料")
+            return _issue(move, ValidationErrorCode.LOADLOCK_CONTENT_INVALID, f"{station.name}#{slot_ids[index]} 没有匹配物料")
         if not _available(slot.busy_until, start_time):
-            return _issue(move, f"{station.name}#{slot_ids[index]} 正在{slot.busy_action}")
+            return _issue(move, ValidationErrorCode.STATION_SLOT_BUSY, f"{station.name}#{slot_ids[index]} 正在{slot.busy_action}")
         _reserve_slot(slot, end_time, "抽充气")
     station.environment_busy_until = end_time
 
@@ -1269,9 +1357,9 @@ def _start_swap(state: MachineState, move: Mapping[str, Any], end_time: float, _
         return robot
     stations = [str(value) for value in _values(move, "StationList")]
     if not stations:
-        return _issue(move, "SwapMove 缺少 StationList")
+        return _issue(move, ValidationErrorCode.SWAP_INPUT_INVALID, "SwapMove 缺少 StationList")
     if len(set(stations)) != 1:
-        return _issue(move, "SwapMove 必须引用同一个站点")
+        return _issue(move, ValidationErrorCode.SWAP_INPUT_INVALID, "SwapMove 必须引用同一个站点")
     receive_materials = _values(move, "RecvMatList")
     send_materials = _values(move, "SendMatList")
     station_send_slots = _integer_values(move, "StnSendSlotList")
@@ -1281,29 +1369,29 @@ def _start_swap(state: MachineState, move: Mapping[str, Any], end_time: float, _
     send_count = len(send_materials)
     recv_count = len(receive_materials)
     if not send_count and not recv_count:
-        return _issue(move, "SwapMove 必须声明至少一个 Send 或 Recv 晶圆")
+        return _issue(move, ValidationErrorCode.SWAP_INPUT_INVALID, "SwapMove 必须声明至少一个 Send 或 Recv 晶圆")
     # Send 组：机器人送出晶圆进入腔室，站侧使用 StnRecvSlotList（进入槽位）。
     if len(robot_send_slots) != send_count or len(station_receive_slots) != send_count:
         lengths = (send_count, len(robot_send_slots), len(station_receive_slots))
-        return _issue(move, f"SwapMove 的 Send 组数组数量不一致：SendMatList={lengths[0]} SendSlotList={lengths[1]} StnRecvSlotList={lengths[2]}")
+        return _issue(move, ValidationErrorCode.SWAP_INPUT_INVALID, f"SwapMove 的 Send 组数组数量不一致：SendMatList={lengths[0]} SendSlotList={lengths[1]} StnRecvSlotList={lengths[2]}")
     # Recv 组：机器人拿回晶圆离开腔室，站侧使用 StnSendSlotList（离开槽位）。
     if len(robot_receive_slots) != recv_count or len(station_send_slots) != recv_count:
         lengths = (recv_count, len(robot_receive_slots), len(station_send_slots))
-        return _issue(move, f"SwapMove 的 Recv 组数组数量不一致：RecvMatList={lengths[0]} RecvSlotList={lengths[1]} StnSendSlotList={lengths[2]}")
+        return _issue(move, ValidationErrorCode.SWAP_INPUT_INVALID, f"SwapMove 的 Recv 组数组数量不一致：RecvMatList={lengths[0]} RecvSlotList={lengths[1]} StnSendSlotList={lengths[2]}")
     start_time = _start_time(move)
     physical_stations: List[StationState] = []
     for station_name in stations:
         station = state.stations.get(station_name)
         if station is None:
-            return _issue(move, f"未知站点 {station_name}")
+            return _issue(move, ValidationErrorCode.STATION_UNKNOWN, f"未知站点 {station_name}")
         error = _station_access_error(robot, station, start_time, move)
         if error:
             return error
         physical_stations.append(station)
     if not _available(robot.busy_until, start_time):
-        return _issue(move, f"{robot.name} 正在执行其他动作")
+        return _issue(move, ValidationErrorCode.ROBOT_BUSY, f"{robot.name} 正在执行其他动作")
     if not robot.can_swap or len(robot.hands) < 2:
-        return _issue(move, f"{robot.name} 不支持双臂换片")
+        return _issue(move, ValidationErrorCode.ROBOT_SWAP_UNSUPPORTED, f"{robot.name} 不支持双臂换片")
     station = physical_stations[0]
     send_rows = [
         (send_materials[i], robot_send_slots[i], station_receive_slots[i], i)
@@ -1316,39 +1404,39 @@ def _start_swap(state: MachineState, move: Mapping[str, Any], end_time: float, _
     send_robot_slots = {row[1] for row in send_rows}
     recv_robot_slots = {row[1] for row in recv_rows}
     if len(send_robot_slots) != send_count or len(recv_robot_slots) != recv_count:
-        return _issue(move, "SwapMove 的 Send/Recv 手槽不能重复")
+        return _issue(move, ValidationErrorCode.SWAP_INPUT_INVALID, "SwapMove 的 Send/Recv 手槽不能重复")
     if send_robot_slots & recv_robot_slots:
-        return _issue(move, "SwapMove 的 Send 与 Recv 不能共用同一个手槽")
+        return _issue(move, ValidationErrorCode.SWAP_INPUT_INVALID, "SwapMove 的 Send 与 Recv 不能共用同一个手槽")
     for slot_id in send_robot_slots | recv_robot_slots:
         if slot_id not in robot.hands:
-            return _issue(move, f"{robot.name} 未启用手槽 {slot_id}")
+            return _issue(move, ValidationErrorCode.ROBOT_SLOT_DISABLED, f"{robot.name} 未启用手槽 {slot_id}")
     send_station_slots = {row[2] for row in send_rows}
     recv_station_slots = {row[2] for row in recv_rows}
     if len(send_station_slots) != send_count or len(recv_station_slots) != recv_count:
-        return _issue(move, "SwapMove 的站槽位不能重复使用")
+        return _issue(move, ValidationErrorCode.SWAP_INPUT_INVALID, "SwapMove 的站槽位不能重复使用")
     # Recv 组校验：站槽位有匹配的已完成物料、目标手槽为空。
     for material_id, robot_slot_id, station_slot_id, _ in recv_rows:
         slot = station.slots.get(station_slot_id)
         if slot is None:
-            return _issue(move, f"{station.name} 不存在槽位 {station_slot_id}")
+            return _issue(move, ValidationErrorCode.STATION_SLOT_UNKNOWN, f"{station.name} 不存在槽位 {station_slot_id}")
         if slot.phase is not SlotPhase.COMPLETED or not _material_matches(slot.material, material_id):
-            return _issue(move, f"{station.name}#{station_slot_id} 没有可换出的物料")
+            return _issue(move, ValidationErrorCode.SWAP_STATE_INVALID, f"{station.name}#{station_slot_id} 没有可换出的物料")
         if robot.hands.get(robot_slot_id) is not None:
-            return _issue(move, f"{robot.name}#{robot_slot_id} 不是空手")
+            return _issue(move, ValidationErrorCode.SWAP_STATE_INVALID, f"{robot.name}#{robot_slot_id} 不是空手")
         if not _available(slot.busy_until, start_time):
-            return _issue(move, f"{station.name}#{station_slot_id} 正在{slot.busy_action}")
+            return _issue(move, ValidationErrorCode.STATION_SLOT_BUSY, f"{station.name}#{station_slot_id} 正在{slot.busy_action}")
     # Send 组校验：手上有匹配物料；目标槽位可放（换片槽位由 Recv 组腾空，跳过空槽检查）。
     for material_id, robot_slot_id, station_slot_id, _ in send_rows:
         slot = station.slots.get(station_slot_id)
         if slot is None:
-            return _issue(move, f"{station.name} 不存在槽位 {station_slot_id}")
+            return _issue(move, ValidationErrorCode.STATION_SLOT_UNKNOWN, f"{station.name} 不存在槽位 {station_slot_id}")
         material = robot.hands.get(robot_slot_id)
         if material is None or not _material_matches(material, material_id):
-            return _issue(move, f"{robot.name}#{robot_slot_id} 没有可换入的物料")
+            return _issue(move, ValidationErrorCode.SWAP_STATE_INVALID, f"{robot.name}#{robot_slot_id} 没有可换入的物料")
         if station_slot_id not in recv_station_slots and slot.phase not in {SlotPhase.EMPTY, SlotPhase.CLEANED}:
-            return _issue(move, f"{station.name}#{station_slot_id} 不是可直接放片的空槽")
+            return _issue(move, ValidationErrorCode.SWAP_STATE_INVALID, f"{station.name}#{station_slot_id} 不是可直接放片的空槽")
         if not _available(slot.busy_until, start_time):
-            return _issue(move, f"{station.name}#{station_slot_id} 正在{slot.busy_action}")
+            return _issue(move, ValidationErrorCode.STATION_SLOT_BUSY, f"{station.name}#{station_slot_id} 正在{slot.busy_action}")
     station_refs = [
         (station.name, station_receive_slots[i], robot_send_slots[i]) for i in range(send_count)
     ] + [
@@ -1395,11 +1483,11 @@ def _transport_rows(move: Mapping[str, Any], station_key: str, station_slot_key:
     robot_slots = _integer_values(move, robot_slot_key)
     count = len(materials)
     if not count:
-        return _issue(move, f"{material_key} 不能为空")
+        return _issue(move, ValidationErrorCode.PARALLEL_ARRAY_INVALID, f"{material_key} 不能为空")
     if len(stations) == 1 and count > 1:
         stations *= count
     if any(len(values) != count for values in (stations, station_slots, robot_slots)):
-        return _issue(move, f"{material_key} 与站点/槽位数组数量不一致")
+        return _issue(move, ValidationErrorCode.PARALLEL_ARRAY_INVALID, f"{material_key} 与站点/槽位数组数量不一致")
     return [(stations[index], station_slots[index], robot_slots[index], materials[index], index) for index in range(count)]
 
 
@@ -1409,22 +1497,22 @@ def _validate_distinct_transport_rows(move: Mapping[str, Any], rows: Sequence[Tu
     robot_slots = [row[2] for row in rows]
     materials = [str(row[3]) for row in rows]
     if len(set(station_refs)) != len(station_refs):
-        return _issue(move, "同一动作不能重复引用站点槽位")
+        return _issue(move, ValidationErrorCode.DUPLICATE_RESOURCE_REFERENCE, "同一动作不能重复引用站点槽位")
     if len(set(robot_slots)) != len(robot_slots):
-        return _issue(move, "同一动作不能重复引用机器人手槽")
+        return _issue(move, ValidationErrorCode.DUPLICATE_RESOURCE_REFERENCE, "同一动作不能重复引用机器人手槽")
     if len(set(materials)) != len(materials):
-        return _issue(move, "同一动作不能重复引用物料")
+        return _issue(move, ValidationErrorCode.DUPLICATE_RESOURCE_REFERENCE, "同一动作不能重复引用物料")
     return None
 
 
 def _station_access_error(robot: RobotState, station: StationState, start_time: float, move: Mapping[str, Any]) -> Optional[str]:
     """校验机器人可达性、腔门和站点共享取放资源。"""
     if robot.scope and station.name not in robot.scope:
-        return _issue(move, f"{robot.name} 无法访问 {station.name}")
+        return _issue(move, ValidationErrorCode.ROBOT_UNREACHABLE, f"{robot.name} 无法访问 {station.name}")
     if not _is_doorless(station) and station.door is not DoorState.OPEN:
-        return _issue(move, f"{station.name} 门当前为关门")
+        return _issue(move, ValidationErrorCode.STATION_DOOR_STATE_INVALID, f"{station.name} 门当前为关门")
     if not _available(station.transfer_busy_until, start_time):
-        return _issue(move, f"{station.name} 正在执行取放动作")
+        return _issue(move, ValidationErrorCode.STATION_TRANSFER_BUSY, f"{station.name} 正在执行取放动作")
     return None
 
 
@@ -1867,7 +1955,11 @@ def _robot(state: MachineState, move: Mapping[str, Any]) -> "RobotState | str":
     """读取动作引用的机器人，缺失时返回统一错误。"""
     name = str(move.get("Robot") or move.get("ModuleName") or "")
     robot = state.resolve_robot(name)
-    return robot if robot is not None else _issue(move, f"未知机器人 {name or '<empty>'}")
+    return robot if robot is not None else _issue(
+        move,
+        ValidationErrorCode.ROBOT_UNKNOWN,
+        f"未知机器人 {name or '<empty>'}",
+    )
 
 
 def _station_name(move: Mapping[str, Any]) -> str:
@@ -1955,9 +2047,21 @@ def _finish_until(scheduled: List[_ScheduledCompletion], timestamp: float) -> No
         scheduled.remove(item)
 
 
-def _issue(move: Mapping[str, Any], message: str) -> str:
-    """生成包含 MoveID 和动作类型的稳定错误文本。"""
-    return f"MoveID={move.get('MoveID', '?')} MoveType={move.get('MoveType', '?')}：{message}"
+def _global_issue(error_code: ValidationErrorCode, message: str) -> str:
+    """生成不绑定具体 Move 的稳定错误文本。"""
+    return f"[{error_code.value}] {message}"
+
+
+def _issue(
+    move: Mapping[str, Any],
+    error_code: ValidationErrorCode,
+    message: str,
+) -> str:
+    """生成包含错误码、MoveID 和动作类型的稳定错误文本。"""
+    return (
+        f"[{error_code.value}] MoveID={move.get('MoveID', '?')} "
+        f"MoveType={move.get('MoveType', '?')}：{message}"
+    )
 
 
 __all__ = [
@@ -1977,6 +2081,7 @@ __all__ = [
     "SWAP_MOVE",
     "SlotPhase",
     "SlotState",
+    "ValidationErrorCode",
     "release_completed_load_port_materials",
     "validate_move_list",
 ]

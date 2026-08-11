@@ -10,6 +10,7 @@ from realtime_scheduler.move_validation import (
     LoadLockState,
     MoveStateReplay,
     SlotPhase,
+    ValidationErrorCode,
     validate_move_list,
 )
 
@@ -122,6 +123,16 @@ def test_dual_slot_pick_place_and_full_loadlock_transition_are_physically_valid(
     assert validate_move_list(None, _dual_transfer_moves(), _dual_chamber_update()) == []
 
 
+def test_validation_error_codes_are_unique_and_non_object_moves_are_coded() -> None:
+    """每类输出校验错误都必须有唯一稳定码，非法 Move 元素也不能抛普通异常。"""
+    codes = [error_code.value for error_code in ValidationErrorCode]
+
+    assert len(codes) == len(set(codes))
+    assert validate_move_list(None, ["invalid"], {}) == [
+        "[MVL-FMT-001] MoveList[0] 必须是 JSON 对象"
+    ]
+
+
 def test_dependency_rejects_missing_predecessor() -> None:
     """PreMoveID 引用不存在的 MoveID 必须在平台侧失败。"""
     moves = [
@@ -189,6 +200,30 @@ def test_platform_rejects_pick_duration_different_from_robot_config() -> None:
     issues = validate_move_list(None, moves, update)
 
     assert "动作时长 3.000000s 与配置 2.000000s 不一致" in issues[0]
+
+
+def test_platform_reports_invalid_pick_timing_config_with_error_code() -> None:
+    """非法设备计时应返回可查询错误码，不得在 float 转换处崩溃。"""
+    update = _dual_chamber_update()
+    update["Robots"]["VACRobot"]["PickTime"] = {"PM1": "invalid"}
+    moves = [
+        _move(
+            1,
+            0,
+            0,
+            2,
+            ModuleName="VACRobot",
+            MatIDList=[101],
+            SrcStationList=["PM1"],
+            SrcSlotList=[1],
+            RobotSlotList=[1],
+        )
+    ]
+
+    issues = validate_move_list(None, moves, update)
+
+    assert issues[0].startswith("[MVL-TIME-004]")
+    assert "必须是非负有限数字" in issues[0]
 
 
 def test_platform_rejects_process_duration_different_from_selected_visit() -> None:
@@ -438,7 +473,7 @@ def test_empty_pretrans_material_annotation_requires_matching_linked_pick() -> N
     ]
 
     issues = validate_move_list(None, moves, _dual_chamber_update())
-    assert issues == ["MoveID=2 MoveType=5：VACRobot#1 持有物料与 Move 不匹配"]
+    assert issues == ["[MVL-ROBOT-003] MoveID=2 MoveType=5：VACRobot#1 持有物料与 Move 不匹配"]
 
 
 def test_standard_algorithm_swap_move_with_repeated_station_passes() -> None:
@@ -471,7 +506,7 @@ def test_swap_move_rejects_distinct_stations() -> None:
               RecvSlotList=[1], SendSlotList=[2], RecvMatList=[101], SendMatList=[102]),
     ]
     issues = validate_move_list(None, moves, _dual_chamber_update())
-    assert issues == ["MoveID=2 MoveType=4：SwapMove 必须引用同一个站点"]
+    assert issues == ["[MVL-SWAP-001] MoveID=2 MoveType=4：SwapMove 必须引用同一个站点"]
 
 
 def _three_slot_robot_update() -> dict:

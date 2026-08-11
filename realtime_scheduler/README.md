@@ -3,7 +3,7 @@
 此目录集中保存实时调度平台的前端、服务端和本地数据：
 
 - `server.py`：本地调度服务、工作区接口、分析 API 与静态资源入口，不承载页面分析实现。
-- `backend/analysis.py`：服务端唯一的 MoveList、瓶颈、诊断和测试组分析实现。
+- `backend/analysis.py`：服务端唯一的 MoveList 性能、瓶颈和测试组分析实现。
 - 内置 `heuristic/loadlock-macro/e2e-ctq/dual-actor-e2e`：统一调用独立算法仓库
   `alg/infer/scheduler.py` 的 `init/update`，`update` 的可选 `algorithm`
   参数决定算法。

@@ -71,7 +71,7 @@ class BackendAnalysisTests(unittest.TestCase):
             ],
             result["waferSystemResidenceTimes"],
         )
-        self.assertIn("diagnostics", result)
+        self.assertNotIn("diagnostics", result)
 
     def test_context_is_built_on_backend_from_routes_and_rounds(self) -> None:
         """工序容量上下文应由后端从原始 Route/PJob 配置构建。"""

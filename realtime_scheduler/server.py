@@ -1140,8 +1140,9 @@ def _alg_output_info(
 def _validation_issue_records(
     validation_issues: Sequence[Any],
 ) -> List[Dict[str, Any]]:
-    """把校验文案转换成甘特图可定位的结构化错误记录。"""
+    """把带稳定错误码的校验文案转换成甘特图可定位记录。"""
     records: List[Dict[str, Any]] = []
+    error_code_pattern = re.compile(r"^\[([A-Z0-9]+(?:-[A-Z0-9]+)+)\]")
     move_id_pattern = re.compile(
         r"(?:\bMoveID\b|\bid\b)\s*[=:]\s*(-?\d+)",
         re.IGNORECASE,
@@ -1150,6 +1151,9 @@ def _validation_issue_records(
         message = str(issue)
         match = move_id_pattern.search(message)
         record: Dict[str, Any] = {"Message": message}
+        error_code_match = error_code_pattern.match(message)
+        if error_code_match is not None:
+            record["Code"] = error_code_match.group(1)
         if match is not None:
             record["MoveID"] = int(match.group(1))
         records.append(record)

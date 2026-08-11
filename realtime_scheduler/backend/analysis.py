@@ -1,6 +1,6 @@
 """服务端调度结果分析。
 
-本模块是 MoveList 性能指标、瓶颈诊断和测试组统计的唯一实现。它只接收普通
+本模块是 MoveList 性能指标、瓶颈分析和测试组统计的唯一实现。它只接收普通
 Python 对象并返回可 JSON 序列化的字典，不读取 HTTP、文件、DOM 或进程全局状态。
 HTTP 层负责解析请求和读取已保存结果，前端只负责展示本模块返回的结构化结果。
 """
@@ -980,137 +980,13 @@ def _rank_bottleneck_candidates(
     return [candidate for candidate in ranked if candidate["score"] >= threshold][:5]
 
 
-def _diagnose_schedule(performance: Mapping[str, Any]) -> List[Dict[str, Any]]:
-    """将轨迹证据转成可证伪的诊断假设和下一步实验。"""
-    diagnostics: List[Dict[str, Any]] = []
-    for candidate in performance["bottleneckCandidates"][:2]:
-        confidence = (
-            "strong" if candidate["confidence"] == "high"
-            else "moderate" if candidate["confidence"] == "medium"
-            else "exploratory"
-        )
-        if candidate["kind"] == "process-group":
-            diagnostics.append({
-                "title": "优先验证工艺容量是否限制节拍",
-                "confidence": confidence,
-                "finding": (
-                    f"{candidate['label']} 是当前最可能的容量约束；"
-                    "先验证加工时长变化是否会同步改变总体完工时间。"
-                ),
-                "evidence": [
-                    {
-                        "label": "容量利用率",
-                        "value": f"{max(0.0, candidate['utilization']) * 100:.1f}%",
-                        "interpretation": "同组并行腔室在统计窗口内的平均忙碌程度。",
-                    },
-                    {
-                        "label": "加工后驻留",
-                        "value": (
-                            f"{max(0.0, performance['processChamberDwellTime']['meanSeconds']):.2f} s"
-                        ),
-                        "interpretation": "若同时偏高，说明腔室释放还可能被下游搬运阻塞。",
-                    },
-                ],
-                "nextExperiment": {
-                    "id": "processing-time-compare",
-                    "label": "对比加工时长变化",
-                    "change": "复制当前测试，小幅调整加工与清洁时长后重新运行并对比。",
-                    "expectedSignal": "若瓶颈判断成立，makespan 会敏感上升，且该资源仍保持主要候选。",
-                },
-                "limitation": "这是由执行轨迹重建的因果假设，不是算法内部候选动作打分。",
-            })
-        elif candidate["kind"] == "robot":
-            diagnostics.append({
-                "title": "优先验证搬运资源是否造成排队",
-                "confidence": confidence,
-                "finding": f"{candidate['label']} 的占用与连续忙碌证据最强，可能限制工艺腔及时上下片。",
-                "evidence": [
-                    {
-                        "label": "容量利用率",
-                        "value": f"{max(0.0, candidate['utilization']) * 100:.1f}%",
-                        "interpretation": "传输动作占据该机器人可服务窗口的比例。",
-                    },
-                    {
-                        "label": "手上驻留",
-                        "value": (
-                            f"{max(0.0, performance['robotWaferDwellTime']['meanSeconds']):.2f} s"
-                        ),
-                        "interpretation": "晶圆被取出后等待放置的平均时间，已剔除显式运输区间。",
-                    },
-                ],
-                "nextExperiment": {
-                    "id": "release-sequence-review",
-                    "label": "对比搬运优先级",
-                    "change": "复制当前测试，仅调整释放或派工优先级后重新运行。",
-                    "expectedSignal": "若搬运次序是主因，机器手驻留和总体完工时间应同步下降。",
-                },
-                "limitation": "当前只能观察已执行动作，无法宣称算法当时没有评估其他可行动作。",
-            })
-        else:
-            diagnostics.append({
-                "title": "优先验证真空交接是否限制流量",
-                "confidence": confidence,
-                "finding": f"{candidate['label']} 在抽充气与交接阶段形成较高容量占用，可能放大真空端等待。",
-                "evidence": [
-                    {
-                        "label": "容量利用率",
-                        "value": f"{max(0.0, candidate['utilization']) * 100:.1f}%",
-                        "interpretation": "LoadLock 组在统计窗口内处理交接工作的平均占用。",
-                    },
-                    {
-                        "label": "连续性",
-                        "value": f"{max(0.0, candidate['continuity']) * 100:.1f}%",
-                        "interpretation": "反映 LoadLock 容量活动是否持续，越高表示空闲断点越少。",
-                    },
-                ],
-                "nextExperiment": {
-                    "id": "loadlock-policy-compare",
-                    "label": "对比 LoadLock 管理策略",
-                    "change": "保持测试组不变，仅切换 LoadLock 管理器后重新运行。",
-                    "expectedSignal": "若交接策略是主因，真空等待与 makespan 应同时变化。",
-                },
-                "limitation": "LoadLock 占用可能是上游释放或下游加工拥塞的结果，需要配对实验区分。",
-            })
-    if performance["departureIntervalCv"] >= 0.25:
-        diagnostics.append({
-            "title": "出站节拍波动需要单独验证",
-            "confidence": (
-                "moderate" if performance["completedWaferCount"] >= 8 else "exploratory"
-            ),
-            "finding": (
-                f"出站间隔 CV 为 {performance['departureIntervalCv']:.2f}，"
-                "均值无法代表局部拥塞或饥饿。"
-            ),
-            "evidence": [
-                {
-                    "label": "出站间隔 CV",
-                    "value": f"{performance['departureIntervalCv']:.2f}",
-                    "interpretation": "越高表示相邻晶圆完成间隔越不均匀。",
-                },
-                {
-                    "label": "完整晶圆样本",
-                    "value": f"{performance['completedWaferCount']} 片",
-                    "interpretation": "样本越少，波动判断越应视作探索性线索。",
-                },
-            ],
-            "nextExperiment": {
-                "id": "load-level-compare",
-                "label": "补齐负载梯度测试",
-                "change": "复制当前测试，分别降低与提高晶圆规模，再对比节拍 CV 与吞吐。",
-                "expectedSignal": "若波动来自容量临界点，中高负载用例的 CV 会持续升高。",
-            },
-            "limitation": "CV 只描述波动，不直接说明调度策略或设备容量谁是根因。",
-        })
-    return diagnostics
-
-
 def analyze_schedule_performance(
     moves: Sequence[Mapping[str, Any]],
     device: Optional[Mapping[str, Any]],
     mode: str = "steady",
     context: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """计算服务端 MoveList 性能、瓶颈候选、驻留时间和诊断建议。
+    """计算服务端 MoveList 性能、瓶颈候选和驻留时间。
 
     参数:
         moves: MoveList 动作列表。
@@ -1227,7 +1103,6 @@ def analyze_schedule_performance(
         "waferSystemResidenceTimes": wafer_system_residence_times,
         "loadLockEfficiency": _build_load_lock_efficiency(records, device),
     }
-    performance["diagnostics"] = _diagnose_schedule(performance)
     return performance
 
 

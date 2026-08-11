@@ -16,9 +16,10 @@ Node 回归测试所需的纯函数兼容实现，不被浏览器生产入口导
   - `analyzeTestGroupPerformance`：计算逐测试基线对比、胜/平/退化、CPU Time
     分位数、瓶颈频次、吞吐与出站波动等组级统计。
 
-MoveList 的物理与状态合法性校验仍以算法仓库
-`alg/src/validation/__init__.py` 导出的 `validate_move_list` 为唯一实现。服务端和
-其他 Python 使用方应直接复用该入口，不在页面中复制校验规则。
+MoveList 的平台侧物理与状态合法性校验以
+`realtime_scheduler/move_validation.py` 导出的 `validate_move_list` 为统一实现。
+服务端和其他 Python 使用方应直接复用该入口，不在页面中复制校验规则；失败文本
+使用稳定的 `MVL-*` 错误码，并保留 MoveID/MoveType 供甘特图定位。
 
 ## 指标边界
 
