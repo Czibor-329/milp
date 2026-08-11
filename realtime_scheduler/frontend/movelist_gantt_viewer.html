@@ -492,6 +492,12 @@
       width: 92px;
     }
 
+    #makespanValue {
+      color: var(--text-strong, #0f172a);
+      font-weight: 800;
+      font-variant-numeric: tabular-nums;
+    }
+
     .field.search-field input {
       width: min(260px, 30vw);
     }
@@ -519,34 +525,32 @@
       font-weight: 650;
     }
 
-    .move-filters {
+    .move-legend {
       display: flex;
       flex-wrap: wrap;
       align-items: center;
       gap: 6px;
-      min-width: 220px;
-      max-width: 100%;
-      flex: 1 1 320px;
+      padding: 6px 12px;
+      border-bottom: 1px solid var(--line-soft);
+      background: var(--panel-tint);
     }
 
-    .move-chip {
+    .move-legend:empty {
+      display: none;
+    }
+
+    .legend-item {
       display: inline-flex;
       align-items: center;
       gap: 6px;
-      height: 28px;
-      border: 1px solid var(--line-soft);
-      border-radius: 6px;
+      height: 24px;
       padding: 0 8px;
+      border: 1px solid var(--line-soft);
+      border-radius: 999px;
       background: #ffffff;
       color: var(--muted-strong);
       font-size: 12px;
       white-space: nowrap;
-      user-select: none;
-      box-shadow: 0 1px 0 rgba(15, 23, 42, 0.03);
-    }
-
-    .move-chip.off {
-      opacity: 0.48;
     }
 
     .stats-panel {
@@ -682,7 +686,7 @@
     .workspace {
       min-height: 0;
       display: grid;
-      grid-template-rows: minmax(0, 1fr);
+      grid-template-rows: auto minmax(0, 1fr);
       background: #ffffff;
       border: 1px solid var(--line-soft);
       border-radius: var(--radius);
@@ -1181,9 +1185,7 @@
             <div class="toolbar-rows">
               <div class="toolbar-row">
                 <div class="toolbar-group">
-                  <label class="field">Start <input id="startInput" type="number" step="1" disabled></label>
-                  <label class="field">End <input id="endInput" type="number" step="1" disabled></label>
-                  <button id="applyRangeBtn" type="button" disabled>Apply</button>
+                  <label class="field">Makespan <strong id="makespanValue">–</strong></label>
                   <button id="fitBtn" type="button" disabled>Fit</button>
                 </div>
                 <div class="toolbar-group">
@@ -1204,9 +1206,7 @@
                 </div>
                 <label class="switch"><input id="hideDoorToggle" type="checkbox" disabled> Hide door/pre-trans</label>
                 <label class="switch"><input id="showRemovedMovesToggle" type="checkbox" checked disabled> Show removed moves</label>
-              </div>
-              <div class="toolbar-row">
-                <div class="move-filters" id="moveFilters"></div>
+                <label class="switch"><input id="showTimelineToggle" type="checkbox" checked disabled> Show timeline</label>
               </div>
             </div>
             <div class="toolbar-file-btns">
@@ -1222,6 +1222,7 @@
       <div class="tabs" id="tabs"></div>
 
       <section class="workspace" aria-label="Gantt chart">
+        <div class="move-legend" id="moveLegend" aria-label="Move type legend"></div>
         <div class="chart-scroll" id="chartScroll">
           <div class="chart-empty" id="chartEmpty">Open a movelist file to render the chart.</div>
           <svg class="gantt-svg hidden" id="ganttSvg" role="img" aria-label="Movelist Gantt chart"></svg>
@@ -1285,9 +1286,7 @@
       fileSearch: document.getElementById("fileSearch"),
       fileList: document.getElementById("fileList"),
       tabs: document.getElementById("tabs"),
-      startInput: document.getElementById("startInput"),
-      endInput: document.getElementById("endInput"),
-      applyRangeBtn: document.getElementById("applyRangeBtn"),
+      makespanValue: document.getElementById("makespanValue"),
       fitBtn: document.getElementById("fitBtn"),
       searchTypeSelect: document.getElementById("searchTypeSelect"),
       moveSearchInput: document.getElementById("moveSearchInput"),
@@ -1298,7 +1297,8 @@
       setProbeTimeBtn: document.getElementById("setProbeTimeBtn"),
       hideDoorToggle: document.getElementById("hideDoorToggle"),
       showRemovedMovesToggle: document.getElementById("showRemovedMovesToggle"),
-      moveFilters: document.getElementById("moveFilters"),
+      showTimelineToggle: document.getElementById("showTimelineToggle"),
+      moveLegend: document.getElementById("moveLegend"),
       statsPanel: document.getElementById("statsPanel"),
       chartScroll: document.getElementById("chartScroll"),
       chartEmpty: document.getElementById("chartEmpty"),
@@ -1684,8 +1684,8 @@
         t1: null,
         hideDoor: false,
         showRemovedMoves: true,
+        showTimeline: true,
         laneFilter: "",
-        moveTypes: {},
         selected: null,
         searchType: "moveId",
         searchQuery: "",
@@ -1760,7 +1760,11 @@
         dataset.parsed = true;
         dataset.stats = {
           count: dataset.records.length,
-          positive: dataset.records.filter((rec) => rec.end > rec.start + 1e-9).length
+          positive: dataset.records.filter((rec) => rec.end > rec.start + 1e-9).length,
+          makespan: dataset.records.reduce(
+            (max, rec) => (Number.isFinite(rec.end) ? Math.max(max, rec.end) : max),
+            0
+          )
         };
       } catch (error) {
         dataset.error = error instanceof Error ? error.message : String(error);
@@ -1943,9 +1947,6 @@
 
     function setControlsEnabled(enabled) {
       for (const el of [
-        dom.startInput,
-        dom.endInput,
-        dom.applyRangeBtn,
         dom.fitBtn,
         dom.searchTypeSelect,
         dom.moveSearchInput,
@@ -1954,52 +1955,35 @@
         dom.probeTimeInput,
         dom.setProbeTimeBtn,
         dom.hideDoorToggle,
-        dom.showRemovedMovesToggle
+        dom.showRemovedMovesToggle,
+        dom.showTimelineToggle
       ]) {
         el.disabled = !enabled;
       }
-      dom.moveFilters.querySelectorAll("input").forEach((input) => {
-        input.disabled = !enabled;
-      });
     }
 
     function syncControls(dataset) {
       const model = buildModel(dataset);
-      for (const mt of model.presentMoveTypes) {
-        if (dataset.view.moveTypes[String(mt)] === undefined) dataset.view.moveTypes[String(mt)] = true;
-      }
       fitViewIfNeeded(dataset, model);
-      dom.startInput.value = fmt(dataset.view.t0);
-      dom.endInput.value = fmt(dataset.view.t1);
+      dom.makespanValue.textContent = fmt(dataset.stats && dataset.stats.makespan);
       syncSearchControls(dataset);
       dom.probeTimeInput.value = fmt(state.probe.time);
       dom.hideDoorToggle.checked = dataset.view.hideDoor;
       dom.showRemovedMovesToggle.checked = dataset.view.showRemovedMoves;
-      renderMoveFilters(dataset, model);
+      dom.showTimelineToggle.checked = dataset.view.showTimeline;
+      renderMoveLegend(model);
     }
 
-    function renderMoveFilters(dataset, model) {
-      dom.moveFilters.innerHTML = model.presentMoveTypes.map((mt) => {
-        const checked = dataset.view.moveTypes[String(mt)] !== false;
+    function renderMoveLegend(model) {
+      dom.moveLegend.innerHTML = model.presentMoveTypes.map((mt) => {
         const name = S.MOVETYPE_NAMES[mt] || String(mt);
         const color = S.MOVETYPE_COLORS[mt] || "#aaaaaa";
         return `
-          <label class="move-chip${checked ? "" : " off"}" title="${escapeHtml(name)}">
-            <input type="checkbox" data-move-type="${mt}" ${checked ? "checked" : ""}>
+          <span class="legend-item" title="${escapeHtml(name)}">
             <span class="swatch" style="background:${escapeHtml(color)}"></span>
             <span>${escapeHtml(name)}</span>
-          </label>`;
+          </span>`;
       }).join("");
-      dom.moveFilters.querySelectorAll("input").forEach((input) => {
-        input.addEventListener("change", () => {
-          const current = activeDataset();
-          if (!current) return;
-          current.view.moveTypes[String(input.dataset.moveType)] = input.checked;
-          current.view.searchCursor = -1;
-          renderMoveFilters(current, buildModel(current));
-          renderCurrent();
-        });
-      });
     }
 
     function fitViewIfNeeded(dataset, model) {
@@ -2038,27 +2022,6 @@
       const model = buildModel(dataset);
       dataset.view.t0 = model.domainMin;
       dataset.view.t1 = model.domainMax;
-      dom.startInput.value = fmt(dataset.view.t0);
-      dom.endInput.value = fmt(dataset.view.t1);
-      renderCurrent();
-    }
-
-    function applyRangeFromInputs() {
-      const dataset = activeDataset();
-      if (!dataset) return;
-      const model = buildModel(dataset);
-      const t0 = Number(dom.startInput.value);
-      const t1 = Number(dom.endInput.value);
-      if (!Number.isFinite(t0) || !Number.isFinite(t1) || t1 <= t0) {
-        dom.startInput.value = fmt(dataset.view.t0);
-        dom.endInput.value = fmt(dataset.view.t1);
-        return;
-      }
-      dataset.view.t0 = t0;
-      dataset.view.t1 = t1;
-      clampView(dataset, model);
-      dom.startInput.value = fmt(dataset.view.t0);
-      dom.endInput.value = fmt(dataset.view.t1);
       renderCurrent();
     }
 
@@ -2072,18 +2035,11 @@
       });
     }
 
-    function barPassesStaticFilters(dataset, bar, laneSet) {
-      if (!laneSet.has(bar.lane)) return false;
-      if (dataset.view.moveTypes[String(bar.moveType)] === false) return false;
-      return true;
-    }
-
     function filteredBars(dataset, model, lanes) {
       const laneSet = new Set(lanes);
       const view = dataset.view;
       return model.bars.filter((bar) => {
-        if (!barPassesStaticFilters(dataset, bar, laneSet)) return false;
-        return bar.end >= view.t0 && bar.start <= view.t1;
+        return laneSet.has(bar.lane) && bar.end >= view.t0 && bar.start <= view.t1;
       });
     }
 
@@ -2113,7 +2069,7 @@
       if (!query) return [];
       const laneSet = new Set(lanes);
       return model.bars
-        .filter((bar) => barPassesStaticFilters(dataset, bar, laneSet))
+        .filter((bar) => laneSet.has(bar.lane))
         .filter((bar) => {
           return searchValues(bar, dataset.view.searchType).includes(query);
         })
@@ -2326,7 +2282,8 @@
       const dataset = activeDataset();
       if (!dataset || !dataset.parsed || dataset.error) return;
       const model = buildModel(dataset);
-      syncControlsLight(dataset, model);
+      syncControlsLight(dataset);
+      renderMoveLegend(model);
 
       if (!model.records.length || !model.laneOrder.length) {
         renderEmpty("No records with positive duration.");
@@ -2348,7 +2305,7 @@
       const labelW = 140;
       const rightPad = 18;
       const topPad = 34;
-      const bottomPad = 46;
+      const bottomPad = dataset.view.showTimeline ? 46 : 12;
       const minPlotW = 680;
       const scrollRect = dom.chartScroll.getBoundingClientRect();
       const totalW = Math.max(minPlotW + labelW + rightPad, Math.floor(scrollRect.width || 900));
@@ -2391,8 +2348,10 @@
       const tickStep = niceTickInterval(span, Math.max(5, Math.floor(plotW / 110)));
       const tickStart = Math.ceil(dataset.view.t0 / tickStep) * tickStep;
       const ticks = [];
-      for (let t = tickStart; t <= dataset.view.t1 + tickStep * 0.5; t += tickStep) {
-        ticks.push(t);
+      if (dataset.view.showTimeline) {
+        for (let t = tickStart; t <= dataset.view.t1 + tickStep * 0.5; t += tickStep) {
+          ticks.push(t);
+        }
       }
 
       const laneLines = lanes.map((lane) => {
@@ -2514,7 +2473,7 @@
         ${barMarkup}
         ${recomputeLabelMarkup}
         <line x1="${labelW}" y1="${topPad + yTop}" x2="${labelW + plotW}" y2="${topPad + yTop}" stroke="#718198" stroke-width="1.2"/>
-        <text class="axis-title" x="${labelW + plotW / 2}" y="${totalH - 6}" text-anchor="middle">Time (s)</text>
+        ${dataset.view.showTimeline ? `<text class="axis-title" x="${labelW + plotW / 2}" y="${totalH - 6}" text-anchor="middle">Time (s)</text>` : ""}
         ${probeMarkup}
       `;
 
@@ -2525,18 +2484,13 @@
       setStatus(`${dataset.name}: ${bars.length} visible blocks, ${lanes.length} lanes, ${fmt(dataset.view.t0)}-${fmt(dataset.view.t1)}s`);
     }
 
-    function syncControlsLight(dataset, model) {
-      for (const mt of model.presentMoveTypes) {
-        if (dataset.view.moveTypes[String(mt)] === undefined) dataset.view.moveTypes[String(mt)] = true;
-      }
-      dom.startInput.value = fmt(dataset.view.t0);
-      dom.endInput.value = fmt(dataset.view.t1);
+    function syncControlsLight(dataset) {
+      dom.makespanValue.textContent = fmt(dataset.stats && dataset.stats.makespan);
       syncSearchControls(dataset);
       dom.probeTimeInput.value = fmt(state.probe.time);
       dom.hideDoorToggle.checked = dataset.view.hideDoor;
-      const existing = Array.from(dom.moveFilters.querySelectorAll("input")).map((input) => Number(input.dataset.moveType)).join(",");
-      const wanted = model.presentMoveTypes.join(",");
-      if (existing !== wanted) renderMoveFilters(dataset, model);
+      dom.showRemovedMovesToggle.checked = dataset.view.showRemovedMoves;
+      dom.showTimelineToggle.checked = dataset.view.showTimeline;
     }
 
     function hashCode(value) {
@@ -2686,7 +2640,7 @@
       const plotW = w - padL - padR;
       const domainSpan = Math.max(1e-9, model.domainMax - model.domainMin);
       const xFor = (t) => padL + (t - model.domainMin) / domainSpan * plotW;
-      const enabledBars = model.bars.filter((bar) => dataset.view.moveTypes[String(bar.moveType)] !== false);
+      const enabledBars = model.bars;
       const sampleStep = Math.max(1, Math.ceil(enabledBars.length / 700));
       const overviewBars = enabledBars.filter((_bar, index) => index % sampleStep === 0).map((bar) => {
         const x0 = xFor(bar.start);
@@ -3013,7 +2967,6 @@
       dom.filesInput.value = "";
     });
     dom.fileSearch.addEventListener("input", renderFileList);
-    dom.applyRangeBtn.addEventListener("click", applyRangeFromInputs);
     dom.searchTypeSelect.addEventListener("change", () => {
       const dataset = activeDataset();
       if (!dataset) return;
@@ -3041,12 +2994,6 @@
     dom.probeTimeInput.addEventListener("keydown", (event) => {
       if (event.key === "Enter") setProbeTimeFromInput();
     });
-    dom.startInput.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") applyRangeFromInputs();
-    });
-    dom.endInput.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") applyRangeFromInputs();
-    });
     dom.fitBtn.addEventListener("click", () => {
       const dataset = activeDataset();
       if (dataset) setFullRange(dataset);
@@ -3073,6 +3020,12 @@
       dataset.view.searchCursor = -1;
       clearDetails();
       syncControls(dataset);
+      renderCurrent();
+    });
+    dom.showTimelineToggle.addEventListener("change", () => {
+      const dataset = activeDataset();
+      if (!dataset) return;
+      dataset.view.showTimeline = dom.showTimelineToggle.checked;
       renderCurrent();
     });
     dom.clearSelectionBtn.addEventListener("click", clearDetails);
