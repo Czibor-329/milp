@@ -43,8 +43,12 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+# 直接执行 ``python realtime_scheduler/server.py`` 时，脚本目录会排在仓库根目录
+# 之前；若环境中恰好安装过旧版同名包，就可能读取到过期模块。始终把当前仓库
+# 放到首位，确保服务端、Markdown 文档加载器与本次检出的源码保持一致。
+if str(ROOT) in sys.path:
+    sys.path.remove(str(ROOT))
+sys.path.insert(0, str(ROOT))
 
 # 算法实现位于独立仓库。开发环境默认放在父仓库的 alg/，部署时可通过
 # CT_ALGORITHM_ROOT 指向任意独立检出的算法仓库。算法仓库是可选依赖：
@@ -145,6 +149,7 @@ from realtime_scheduler.move_validation import (
 )
 from realtime_scheduler.replay_machine import ReplayMachine
 from realtime_scheduler import auth as _auth
+from realtime_scheduler.documentation import DocumentationError, load_documentation
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -188,6 +193,7 @@ LOGIN_PATH = FRONTEND_DIR / "login.html"
 ADMIN_USERS_PATH = FRONTEND_DIR / "admin_users.html"
 FRONTEND_ASSET_DIR = FRONTEND_DIR / "assets"
 USERS_PATH = DATA_DIR / _auth.USER_FILE_NAME
+DOCUMENTATION_DIR = DATA_DIR / "documentation"
 E2E_CTQ_MODEL_PATH = ALGORITHM_ROOT / "results" / "models" / "e2e_ctq_policy.npz"
 DUAL_ACTOR_MODEL_PATH = (
     ALGORITHM_ROOT / "results" / "dual_actor_primitive_v1_candidate.npz"
@@ -4180,6 +4186,17 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                 )
                 return
             self._send_json({"ok": True, **info})
+            return
+        if path == "/api/documentation":
+            try:
+                document = load_documentation(DOCUMENTATION_DIR)
+            except DocumentationError as error:
+                self._send_json(
+                    {"ok": False, "error": str(error)},
+                    HTTPStatus.NOT_FOUND,
+                )
+                return
+            self._send_json({"ok": True, "document": document})
             return
         if path == "/api/admin/users":
             if self._require_admin() is None:

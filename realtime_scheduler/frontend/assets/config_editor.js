@@ -2953,6 +2953,294 @@ function renderTestGroupAnalysis(summary, groupName) {
     </details>`;
 }
 
+// src/documentation_view.ts
+function escapeHtml3(value) {
+  return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+function safeHref(rawHref) {
+  const href = rawHref.trim();
+  return /^(?:https?:\/\/|mailto:|\/|#)/i.test(href) ? href : "#";
+}
+function renderInline(source) {
+  const tokens = [];
+  const tokenized = source.replace(/`([^`]+)`/g, (_match, code) => {
+    const index = tokens.push(`<code>${escapeHtml3(code)}</code>`) - 1;
+    return `\0${index}\0`;
+  });
+  const escaped = escapeHtml3(tokenized).replace(/\[([^\]]+)\]\(([^\s)]+)(?:\s+&quot;([^&]*)&quot;)?\)/g, (_match, label, href, title) => {
+    const safe = escapeHtml3(safeHref(href));
+    const external = /^https?:\/\//i.test(href);
+    const titleAttribute = title ? ` title="${escapeHtml3(title)}"` : "";
+    const externalAttributes = external ? ' target="_blank" rel="noreferrer"' : "";
+    return `<a href="${safe}"${titleAttribute}${externalAttributes}>${label}</a>`;
+  }).replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>").replace(/__([^_]+)__/g, "<strong>$1</strong>").replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, "<em>$1</em>");
+  return escaped.replace(/\u0000(\d+)\u0000/g, (_match, index) => tokens[Number(index)] || "");
+}
+function headingId(text, counts) {
+  const base = text.replace(/[`*_~]/g, "").trim().toLocaleLowerCase("zh-CN").replace(/[^\p{Letter}\p{Number}]+/gu, "-").replace(/^-+|-+$/g, "") || "section";
+  const count = counts.get(base) || 0;
+  counts.set(base, count + 1);
+  return count ? `${base}-${count + 1}` : base;
+}
+function splitTableRow(line) {
+  return line.trim().replace(/^\||\|$/g, "").split("|").map((cell) => cell.trim());
+}
+function isTableSeparator(line) {
+  const cells = splitTableRow(line);
+  return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+function startsBlock(lines, index) {
+  const line = lines[index] || "";
+  return /^#{1,3}\s+/.test(line) || /^```/.test(line) || /^>\s?/.test(line) || /^\s*(?:[-+*]|\d+\.)\s+/.test(line) || /^\s*(?:---+|___+|\*\*\*+)\s*$/.test(line) || line.includes("|") && isTableSeparator(lines[index + 1] || "");
+}
+function renderMarkdown(markdown) {
+  const lines = markdown.replace(/\r\n?/g, "\n").split("\n");
+  const html = [];
+  const headings = [];
+  const headingCounts = /* @__PURE__ */ new Map();
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index];
+    if (!line.trim()) {
+      index += 1;
+      continue;
+    }
+    const heading = /^(#{1,3})\s+(.+?)\s*$/.exec(line);
+    if (heading) {
+      const level = heading[1].length;
+      const text = heading[2].replace(/\s+#+\s*$/, "").trim();
+      const id = headingId(text, headingCounts);
+      if (level > 1) headings.push({ id, level, text });
+      html.push(`<h${level} id="${escapeHtml3(id)}">${renderInline(text)}</h${level}>`);
+      index += 1;
+      continue;
+    }
+    const fence = /^```\s*([\w+-]*)\s*$/.exec(line);
+    if (fence) {
+      const codeLines = [];
+      index += 1;
+      while (index < lines.length && !/^```\s*$/.test(lines[index])) {
+        codeLines.push(lines[index]);
+        index += 1;
+      }
+      if (index < lines.length) index += 1;
+      const language = fence[1] || "text";
+      html.push(`<figure class="documentation-code"><figcaption>${escapeHtml3(language)}</figcaption><pre><code>${escapeHtml3(codeLines.join("\n"))}</code></pre></figure>`);
+      continue;
+    }
+    if (line.includes("|") && isTableSeparator(lines[index + 1] || "")) {
+      const headers = splitTableRow(line);
+      index += 2;
+      const rows = [];
+      while (index < lines.length && lines[index].trim() && lines[index].includes("|")) {
+        rows.push(splitTableRow(lines[index]));
+        index += 1;
+      }
+      html.push(`<div class="documentation-table-wrap"><table><thead><tr>${headers.map((cell) => `<th scope="col">${renderInline(cell)}</th>`).join("")}</tr></thead><tbody>${rows.map((row) => `<tr>${headers.map((_header, cellIndex) => `${cellIndex === 0 ? '<th scope="row">' : "<td>"}${renderInline(row[cellIndex] || "")}${cellIndex === 0 ? "</th>" : "</td>"}`).join("")}</tr>`).join("")}</tbody></table></div>`);
+      continue;
+    }
+    if (/^>\s?/.test(line)) {
+      const quoted = [];
+      while (index < lines.length && /^>\s?/.test(lines[index])) {
+        quoted.push(lines[index].replace(/^>\s?/, ""));
+        index += 1;
+      }
+      const callout = /^\[!(NOTE|TIP|IMPORTANT|WARNING)\]\s*(.*)$/i.exec(quoted[0] || "");
+      if (callout) {
+        const tone = callout[1].toLocaleLowerCase();
+        const body = [callout[2], ...quoted.slice(1)].filter(Boolean).join(" ");
+        const labels = { note: "\u8BF4\u660E", tip: "\u63D0\u793A", important: "\u91CD\u8981", warning: "\u6CE8\u610F" };
+        html.push(`<aside class="documentation-callout is-${tone}" role="note"><strong>${labels[tone]}</strong><p>${renderInline(body)}</p></aside>`);
+      } else {
+        html.push(`<blockquote>${renderInline(quoted.join(" "))}</blockquote>`);
+      }
+      continue;
+    }
+    const listMatch = /^\s*([-+*]|\d+\.)\s+(.+)$/.exec(line);
+    if (listMatch) {
+      const ordered = /\d+\./.test(listMatch[1]);
+      const items = [];
+      const listPattern = ordered ? /^\s*\d+\.\s+(.+)$/ : /^\s*[-+*]\s+(.+)$/;
+      while (index < lines.length) {
+        const item = listPattern.exec(lines[index]);
+        if (!item) break;
+        items.push(item[1]);
+        index += 1;
+      }
+      const tag = ordered ? "ol" : "ul";
+      html.push(`<${tag}>${items.map((item) => `<li>${renderInline(item)}</li>`).join("")}</${tag}>`);
+      continue;
+    }
+    if (/^\s*(?:---+|___+|\*\*\*+)\s*$/.test(line)) {
+      html.push("<hr>");
+      index += 1;
+      continue;
+    }
+    const paragraph = [line.trim()];
+    index += 1;
+    while (index < lines.length && lines[index].trim() && !startsBlock(lines, index)) {
+      paragraph.push(lines[index].trim());
+      index += 1;
+    }
+    html.push(`<p>${renderInline(paragraph.join(" "))}</p>`);
+  }
+  return { html: html.join("\n"), headings };
+}
+function groupedPages(pages) {
+  const groups = /* @__PURE__ */ new Map();
+  pages.forEach((page) => groups.set(page.group, [...groups.get(page.group) || [], page]));
+  return Array.from(groups.entries());
+}
+function documentationHash(slug, heading = "") {
+  return `#documentation/${encodeURIComponent(slug)}${heading ? `/${encodeURIComponent(heading)}` : ""}`;
+}
+function hashLocation() {
+  const match = /^#documentation\/([^/]+)(?:\/(.+))?$/.exec(window.location.hash);
+  if (!match) return null;
+  return {
+    slug: decodeURIComponent(match[1]),
+    heading: match[2] ? decodeURIComponent(match[2]) : ""
+  };
+}
+var DocumentationView = class {
+  root;
+  document = null;
+  activeSlug = "";
+  loadingPromise = null;
+  observer = null;
+  constructor(root) {
+    this.root = root;
+    this.root.addEventListener("click", (event) => this.handleClick(event));
+    window.addEventListener("hashchange", () => this.syncFromHash());
+  }
+  load(force = false) {
+    if (this.document && !force) {
+      this.syncFromHash();
+      return Promise.resolve();
+    }
+    if (this.loadingPromise && !force) return this.loadingPromise;
+    this.renderLoading();
+    this.loadingPromise = this.fetchAndRender().finally(() => {
+      this.loadingPromise = null;
+    });
+    return this.loadingPromise;
+  }
+  async fetchAndRender() {
+    try {
+      const response = await fetch("/api/documentation", { cache: "no-store" });
+      const payload = await response.json();
+      if (!response.ok || !payload.ok || !payload.document?.pages.length) {
+        throw new Error(payload.error || "\u6587\u6863\u63A5\u53E3\u672A\u8FD4\u56DE Markdown \u9875\u9762");
+      }
+      this.document = payload.document;
+      const requested = hashLocation();
+      this.activeSlug = payload.document.pages.some((page) => page.slug === requested?.slug) ? requested.slug : payload.document.pages[0].slug;
+      this.renderPage(requested?.heading || "");
+    } catch (error) {
+      this.document = null;
+      this.renderError(error instanceof Error ? error.message : "\u6587\u6863\u52A0\u8F7D\u5931\u8D25");
+    }
+  }
+  renderLoading() {
+    this.root.setAttribute("aria-busy", "true");
+    this.root.innerHTML = `<div class="documentation-state" role="status"><span class="documentation-spinner" aria-hidden="true"></span><strong>\u6B63\u5728\u8BFB\u53D6\u672C\u5730 Markdown</strong><p>\u5185\u5BB9\u6765\u81EA realtime_scheduler/data/documentation\uFF0C\u4E0D\u4F1A\u8FDB\u5165 Git\u3002</p></div>`;
+  }
+  renderError(message) {
+    this.root.removeAttribute("aria-busy");
+    this.root.innerHTML = `<div class="documentation-state is-error" role="alert"><span aria-hidden="true">!</span><strong>\u6587\u6863\u6682\u4E0D\u53EF\u7528</strong><p>${escapeHtml3(message)}</p><button class="btn primary" type="button" data-documentation-retry>\u91CD\u65B0\u8BFB\u53D6</button></div>`;
+  }
+  renderPage(pendingHeading = "") {
+    if (!this.document) return;
+    const pageIndex = this.document.pages.findIndex((page2) => page2.slug === this.activeSlug);
+    const page = this.document.pages[Math.max(0, pageIndex)];
+    const rendered = renderMarkdown(page.markdown);
+    const previous = pageIndex > 0 ? this.document.pages[pageIndex - 1] : null;
+    const next = pageIndex < this.document.pages.length - 1 ? this.document.pages[pageIndex + 1] : null;
+    this.root.removeAttribute("aria-busy");
+    this.root.innerHTML = `<div class="documentation-layout">
+      <nav class="documentation-navigation" aria-label="\u6587\u6863\u9875\u9762">
+        ${groupedPages(this.document.pages).map(([group, pages]) => `<section><strong>${escapeHtml3(group)}</strong>${pages.map((item) => `<a href="${documentationHash(item.slug)}" data-documentation-page="${escapeHtml3(item.slug)}"${item.slug === page.slug ? ' aria-current="page"' : ""}>${escapeHtml3(item.title)}</a>`).join("")}</section>`).join("")}
+      </nav>
+      <main class="documentation-content" data-documentation-content>
+        <p class="documentation-breadcrumb">\u4F7F\u7528\u6587\u6863 <span aria-hidden="true">/</span> ${escapeHtml3(page.group)}</p>
+        <article class="documentation-markdown">${rendered.html}</article>
+        <nav class="documentation-pagination" aria-label="\u76F8\u90BB\u6587\u6863\u9875\u9762">
+          ${previous ? `<a href="${documentationHash(previous.slug)}" data-documentation-page="${escapeHtml3(previous.slug)}"><small>\u4E0A\u4E00\u9875</small><strong>\u2190 ${escapeHtml3(previous.title)}</strong></a>` : "<span></span>"}
+          ${next ? `<a href="${documentationHash(next.slug)}" data-documentation-page="${escapeHtml3(next.slug)}"><small>\u4E0B\u4E00\u9875</small><strong>${escapeHtml3(next.title)} \u2192</strong></a>` : ""}
+        </nav>
+      </main>
+      <aside class="documentation-on-page" aria-label="\u5F53\u524D\u9875\u9762\u76EE\u5F55">
+        <strong><span aria-hidden="true">\u2630</span> \u672C\u9875\u5185\u5BB9</strong>
+        ${rendered.headings.length ? rendered.headings.map((heading) => `<a class="is-level-${heading.level}" href="${documentationHash(page.slug, heading.id)}" data-documentation-heading="${escapeHtml3(heading.id)}">${escapeHtml3(heading.text)}</a>`).join("") : "<span>\u672C\u9875\u6682\u65E0\u5C0F\u8282</span>"}
+      </aside>
+    </div>`;
+    this.observeHeadings();
+    requestAnimationFrame(() => {
+      const target = pendingHeading ? this.root.querySelector(`#${CSS.escape(pendingHeading)}`) : this.root.querySelector(".documentation-markdown h1");
+      target?.scrollIntoView({ block: "start" });
+    });
+  }
+  handleClick(event) {
+    const target = event.target;
+    if (target?.closest("[data-documentation-retry]")) {
+      void this.load(true);
+      return;
+    }
+    const pageLink = target?.closest("[data-documentation-page]");
+    if (pageLink?.dataset.documentationPage) {
+      event.preventDefault();
+      this.showPage(pageLink.dataset.documentationPage);
+      return;
+    }
+    const headingLink = target?.closest("[data-documentation-heading]");
+    if (headingLink?.dataset.documentationHeading) {
+      event.preventDefault();
+      const heading = headingLink.dataset.documentationHeading;
+      history.replaceState(null, "", documentationHash(this.activeSlug, heading));
+      this.root.querySelectorAll("[data-documentation-heading]").forEach((link) => {
+        if (link.dataset.documentationHeading === heading) link.setAttribute("aria-current", "location");
+        else link.removeAttribute("aria-current");
+      });
+      this.root.querySelector(`#${CSS.escape(heading)}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }
+  showPage(slug) {
+    if (!this.document?.pages.some((page) => page.slug === slug)) return;
+    this.activeSlug = slug;
+    history.replaceState(null, "", documentationHash(slug));
+    this.renderPage();
+  }
+  syncFromHash() {
+    const requested = hashLocation();
+    if (!requested || !this.document?.pages.some((page) => page.slug === requested.slug)) return;
+    if (requested.slug !== this.activeSlug) {
+      this.activeSlug = requested.slug;
+      this.renderPage(requested.heading);
+      return;
+    }
+    if (requested.heading) {
+      this.root.querySelector(`#${CSS.escape(requested.heading)}`)?.scrollIntoView({ block: "start" });
+    }
+  }
+  observeHeadings() {
+    this.observer?.disconnect();
+    if (!("IntersectionObserver" in window)) return;
+    this.observer = new IntersectionObserver((entries) => {
+      const current = entries.filter((entry) => entry.isIntersecting).sort((left, right) => left.boundingClientRect.top - right.boundingClientRect.top)[0];
+      if (!current) return;
+      const id = current.target.id;
+      this.root.querySelectorAll("[data-documentation-heading]").forEach((link) => {
+        if (link.dataset.documentationHeading === id) link.setAttribute("aria-current", "location");
+        else link.removeAttribute("aria-current");
+      });
+    }, { rootMargin: "-2% 0px -82% 0px", threshold: 0 });
+    this.root.querySelectorAll(".documentation-markdown h2, .documentation-markdown h3").forEach((heading) => this.observer?.observe(heading));
+  }
+};
+function createDocumentationView(root) {
+  return new DocumentationView(root);
+}
+
 // src/editor_models.ts
 var CJOB_TYPES = ["NormalLot", "HighestLot", "HigherLot"];
 var TASK_MODES = ["Smart", "Pipeline", "Sequential", "Concurrent"];
@@ -3112,6 +3400,7 @@ function normalizeRound(raw, roundIndex, fallbackTime, firstTaskId = roundIndex,
 // src/config_editor.ts
 var { VISIT_SHARED_FIELDS: VISIT_SHARED_FIELDS2, selectReferencedRoutes: selectReferencedRoutes2 } = route_editor_logic_exports;
 var visualizationWorkspace = createVisualizationWorkspace();
+var documentationView = createDocumentationView(document.getElementById("documentationRoot"));
 var batchPerformanceAnalyses = /* @__PURE__ */ new Map();
 var batchBottleneckSummaries = /* @__PURE__ */ new Map();
 var batchBottleneckRequests = /* @__PURE__ */ new Map();
@@ -3383,7 +3672,7 @@ function normalizeRounds() {
   })));
   state.times = state.rounds.map((round) => Number(round.currentTime));
 }
-function escapeHtml3(value) {
+function escapeHtml4(value) {
   return String(value ?? "").replace(/[&<>"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[char]);
 }
 function readonlyText(value) {
@@ -3391,7 +3680,7 @@ function readonlyText(value) {
   return typeof value === "string" ? value : JSON.stringify(value);
 }
 function renderReadonlyField(label, value, wide = false) {
-  return `<div class="readonly-field ${wide ? "wide" : ""}"><span>${escapeHtml3(label)}</span><strong>${escapeHtml3(readonlyText(value))}</strong></div>`;
+  return `<div class="readonly-field ${wide ? "wide" : ""}"><span>${escapeHtml4(label)}</span><strong>${escapeHtml4(readonlyText(value))}</strong></div>`;
 }
 function unwrapDevice(raw) {
   let value = raw;
@@ -3647,7 +3936,7 @@ function refreshCompactSelect(select) {
   trigger.disabled = select.disabled;
   trigger.setAttribute("aria-label", `${compactSelectLabel(select)}\uFF1A${selectedOption?.textContent?.trim() || "\u672A\u9009\u62E9"}`);
   trigger.querySelector(".compact-select-value").textContent = selectedOption?.textContent?.trim() || "\u672A\u9009\u62E9";
-  menu.innerHTML = Array.from(select.options).map((option, index) => `<button class="compact-select-option" type="button" role="option" data-option-index="${index}" aria-selected="${option.selected}" ${option.disabled ? "disabled" : ""}>${escapeHtml3(option.textContent?.trim() || "\u672A\u547D\u540D\u9009\u9879")}</button>`).join("");
+  menu.innerHTML = Array.from(select.options).map((option, index) => `<button class="compact-select-option" type="button" role="option" data-option-index="${index}" aria-selected="${option.selected}" ${option.disabled ? "disabled" : ""}>${escapeHtml4(option.textContent?.trim() || "\u672A\u547D\u540D\u9009\u9879")}</button>`).join("");
 }
 function initializeCompactSelects() {
   compactSelectTargets().forEach((select) => {
@@ -3659,7 +3948,7 @@ function initializeCompactSelects() {
     trigger.className = "compact-select-trigger";
     trigger.type = "button";
     trigger.setAttribute("aria-expanded", "false");
-    trigger.innerHTML = `<span class="compact-select-label">${escapeHtml3(compactSelectLabel(select))}</span><span class="compact-select-value"></span><i class="compact-select-chevron" aria-hidden="true"></i>`;
+    trigger.innerHTML = `<span class="compact-select-label">${escapeHtml4(compactSelectLabel(select))}</span><span class="compact-select-value"></span><i class="compact-select-chevron" aria-hidden="true"></i>`;
     menu.className = "compact-select-menu";
     menu.setAttribute("role", "listbox");
     menu.setAttribute("aria-label", compactSelectLabel(select));
@@ -3713,17 +4002,17 @@ function displayDeviceName(name) {
 }
 function renderWorkspaceControls() {
   const deviceSelect = document.getElementById("deviceSelect"), tests = state.workspaceDevice?.tests || [];
-  deviceSelect.innerHTML = state.workspaceDevices.length ? state.workspaceDevices.map((device) => `<option value="${escapeHtml3(device.id)}" ${device.id === state.workspaceDeviceId ? "selected" : ""}>${escapeHtml3(displayDeviceName(device.name))}</option>`).join("") : `<option value="">\u5C1A\u672A\u5BFC\u5165\u8BBE\u5907</option>`;
+  deviceSelect.innerHTML = state.workspaceDevices.length ? state.workspaceDevices.map((device) => `<option value="${escapeHtml4(device.id)}" ${device.id === state.workspaceDeviceId ? "selected" : ""}>${escapeHtml4(displayDeviceName(device.name))}</option>`).join("") : `<option value="">\u5C1A\u672A\u5BFC\u5165\u8BBE\u5907</option>`;
   const natural = (left, right) => left.localeCompare(right, void 0, { numeric: true });
   const groups = [.../* @__PURE__ */ new Set(["", ...state.workspaceDevice?.testGroups || [], ...tests.map((test) => String(test.group || "").trim())])].sort((left, right) => !left - !right || natural(left, right));
   const selectedGroup = groups.includes(state.activeTestGroup) ? state.activeTestGroup : groups[0] || "";
   const groupSelect = document.getElementById("testGroupSelect");
-  groupSelect.innerHTML = groups.length ? groups.map((group) => `<option value="${escapeHtml3(group)}" title="${escapeHtml3(group || "\u672A\u5206\u7EC4")}" ${group === selectedGroup ? "selected" : ""}>${escapeHtml3(group || "\u672A\u5206\u7EC4")}</option>`).join("") : `<option value="">\u672A\u5206\u7EC4</option>`;
+  groupSelect.innerHTML = groups.length ? groups.map((group) => `<option value="${escapeHtml4(group)}" title="${escapeHtml4(group || "\u672A\u5206\u7EC4")}" ${group === selectedGroup ? "selected" : ""}>${escapeHtml4(group || "\u672A\u5206\u7EC4")}</option>`).join("") : `<option value="">\u672A\u5206\u7EC4</option>`;
   groupSelect.title = selectedGroup || "\u672A\u5206\u7EC4";
   groupSelect.disabled = !state.workspaceDeviceId;
   const testSelect = document.getElementById("testCaseSelect");
   const visibleTests = tests.filter((test) => String(test.group || "").trim() === selectedGroup).sort((left, right) => natural(left.name, right.name));
-  testSelect.innerHTML = visibleTests.length ? visibleTests.map((test) => `<option value="${escapeHtml3(test.id)}" title="${escapeHtml3(test.name)}" ${test.id === state.testCaseId ? "selected" : ""}>${escapeHtml3(test.name)}</option>`).join("") : `<option value="">\u8BE5\u7EC4\u6682\u65E0\u6D4B\u8BD5</option>`;
+  testSelect.innerHTML = visibleTests.length ? visibleTests.map((test) => `<option value="${escapeHtml4(test.id)}" title="${escapeHtml4(test.name)}" ${test.id === state.testCaseId ? "selected" : ""}>${escapeHtml4(test.name)}</option>`).join("") : `<option value="">\u8BE5\u7EC4\u6682\u65E0\u6D4B\u8BD5</option>`;
   testSelect.title = visibleTests.find((test) => test.id === state.testCaseId)?.name || "\u8BE5\u7EC4\u6682\u65E0\u6D4B\u8BD5";
   testSelect.disabled = !visibleTests.length;
   const hasTest = Boolean(state.testCaseId);
@@ -3754,7 +4043,7 @@ function renderWorkspaceControls() {
     dual: "\u53CC\u8154\u975E\u7EA7\u8054",
     cascade: "\u7EA7\u8054"
   }[detectDeviceTopologyLayout(state.device)];
-  document.getElementById("deviceSummary").innerHTML = state.device ? `<span class="chip good">${escapeHtml3(deviceType)}</span>` : `<span class="chip">\u5C1A\u672A\u9009\u62E9\u8BBE\u5907</span>`;
+  document.getElementById("deviceSummary").innerHTML = state.device ? `<span class="chip good">${escapeHtml4(deviceType)}</span>` : `<span class="chip">\u5C1A\u672A\u9009\u62E9\u8BBE\u5907</span>`;
   compactSelectTargets().forEach(refreshCompactSelect);
 }
 function setWorkspaceStatus(message, kind = "") {
@@ -3868,17 +4157,17 @@ function renderSearchActionChains(chains, decisionIndex, recommendedKey, selecte
     const tags = `${isRecommended ? '<span class="decision-tag is-recommendation">\u63A8\u8350</span>' : ""}${isSelected && !isRecommended ? '<span class="decision-tag is-user-chosen">\u4F60\u7684\u9009\u62E9</span>' : ""}`;
     const description = String(chain?.description || "\u7A33\u5B9A\u52A8\u4F5C\u94FE");
     const steps = Array.isArray(chain?.steps) ? chain.steps : [];
-    return `<li class="decision-candidate search-action-candidate search-action-chain ${isSelected ? "is-selected" : ""} ${interactive ? "is-interactive" : ""}" data-action-key="${escapeHtml3(String(chain?.actionKey || ""))}" ${interactive ? `role="button" tabindex="0" aria-label="\u6267\u884C ${escapeHtml3(description)}"` : ""}>
+    return `<li class="decision-candidate search-action-candidate search-action-chain ${isSelected ? "is-selected" : ""} ${interactive ? "is-interactive" : ""}" data-action-key="${escapeHtml4(String(chain?.actionKey || ""))}" ${interactive ? `role="button" tabindex="0" aria-label="\u6267\u884C ${escapeHtml4(description)}"` : ""}>
           <div class="decision-candidate-rank" aria-label="\u7B2C ${index + 1} \u540D">${index + 1}</div>
           <div class="decision-candidate-main">
-            <div class="decision-candidate-title"><strong title="${escapeHtml3(description)}">${escapeHtml3(description)}</strong>${tags}</div>
+            <div class="decision-candidate-title"><strong title="${escapeHtml4(description)}">${escapeHtml4(description)}</strong>${tags}</div>
             <div class="decision-candidate-detail search-pnq" aria-label="\u641C\u7D22\u8BC4\u4F30\u6307\u6807">
               <span title="\u7B56\u7565\u5148\u9A8C P"><small>P \u5148\u9A8C</small><strong>${formatSearchTelemetryNumber(chain?.prior, 4)}</strong></span>
               <span title="\u8BBF\u95EE\u6B21\u6570 N"><small>N \u8BBF\u95EE</small><strong>${visits}</strong></span>
               <span title="\u5E73\u5747\u4EF7\u503C Q"><small>Q \u4EF7\u503C</small><strong>${formatSearchTelemetryNumber(chain?.value, 4)}</strong></span>
             </div>
             <ol class="search-chain-steps" aria-label="\u52A8\u4F5C\u94FE\u6B65\u9AA4">
-              ${steps.map((step, stepIndex) => `<li><b>${stepIndex + 1}</b><span title="${escapeHtml3(step?.description || "\u52A8\u4F5C")}">${escapeHtml3(step?.description || "\u52A8\u4F5C")}</span><small>${Number(step?.primitiveCount) || 1} \u6B65</small></li>`).join("")}
+              ${steps.map((step, stepIndex) => `<li><b>${stepIndex + 1}</b><span title="${escapeHtml4(step?.description || "\u52A8\u4F5C")}">${escapeHtml4(step?.description || "\u52A8\u4F5C")}</span><small>${Number(step?.primitiveCount) || 1} \u6B65</small></li>`).join("")}
             </ol>
           </div>
           <div class="decision-candidate-preference" aria-label="\u63A8\u8350\u6BD4\u4F8B ${visitPercent.toFixed(0)}%"><small>\u63A8\u8350\u6BD4\u4F8B</small><strong>${visitPercent.toFixed(0)}%</strong></div>
@@ -4086,7 +4375,7 @@ function renderSearchTelemetry(snapshot) {
   const selector = document.getElementById("searchTelemetryDecisionSelect");
   selector.innerHTML = decisions.map((item) => {
     const suffix = item.status === "searching" ? "\u641C\u7D22\u4E2D" : `${Number(item.simulations) || 0} \u6B21`;
-    return `<option value="${escapeHtml3(item.searchId || "")}">#${Number(item.decisionIndex || 0) + 1} \xB7 ${suffix}</option>`;
+    return `<option value="${escapeHtml4(item.searchId || "")}">#${Number(item.decisionIndex || 0) + 1} \xB7 ${suffix}</option>`;
   }).join("");
   selector.value = selectedSearchTelemetryId;
   const selected = decisions.find((item) => item.searchId === selectedSearchTelemetryId) || latestDecision;
@@ -4477,6 +4766,9 @@ function switchTab(name) {
   document.querySelectorAll("[data-tab-view]").forEach((view) => view.classList.toggle("active", view.dataset.tabView === name));
   document.getElementById("scheduleSide").classList.toggle("is-hidden", name !== "schedule");
   document.getElementById("pageLayout").classList.toggle("editor-mode", name !== "schedule");
+  document.getElementById("pageLayout").classList.toggle("documentation-mode", name === "documentation");
+  document.body.classList.toggle("documentation-mode", name === "documentation");
+  if (name === "documentation") void documentationView.load();
   if (name !== "route") closeStepDrawer();
 }
 var THEME_STORAGE_KEY = "realtime-scheduler-theme";
@@ -4578,10 +4870,10 @@ function renderContextCleans(scope, routeIndex, stageIndex = -1) {
     const modules = stringList(clean?.modules);
     const moduleSummary = modules.length ? modules.join(" / ") : "\u672A\u9009\u62E9\u8154\u5BA4";
     return `<div class="context-clean-item">
-      <div><strong>${escapeHtml3(cleanName)}</strong><small>${escapeHtml3(placement.label)} \xB7 ${escapeHtml3(moduleSummary)}</small></div>
+      <div><strong>${escapeHtml4(cleanName)}</strong><small>${escapeHtml4(placement.label)} \xB7 ${escapeHtml4(moduleSummary)}</small></div>
       <div class="context-clean-actions">
-        <button class="btn small" type="button" data-action="edit-context-clean" data-clean-scope="${scope}" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-placement="${placement.key}" data-clean-name="${escapeHtml3(cleanName)}">\u7F16\u8F91</button>
-        <button class="btn danger small" type="button" data-action="remove-context-clean" data-clean-scope="${scope}" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-placement="${placement.key}" data-clean-name="${escapeHtml3(cleanName)}">\u79FB\u9664</button>
+        <button class="btn small" type="button" data-action="edit-context-clean" data-clean-scope="${scope}" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-placement="${placement.key}" data-clean-name="${escapeHtml4(cleanName)}">\u7F16\u8F91</button>
+        <button class="btn danger small" type="button" data-action="remove-context-clean" data-clean-scope="${scope}" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-placement="${placement.key}" data-clean-name="${escapeHtml4(cleanName)}">\u79FB\u9664</button>
       </div>
     </div>`;
   }).join("")}</div>`;
@@ -4593,7 +4885,7 @@ function updateCleanDialogFields() {
   const definition = cleanPlacementDefinitions(context.scope).find((item) => item.key === placement);
   const typeSelect = document.getElementById("cleanType");
   const currentType = typeSelect.value || context.draft.cleanType;
-  typeSelect.innerHTML = CLEAN_TYPE_DEFINITIONS.filter((item) => definition?.types.includes(item.key)).map((item) => `<option value="${item.key}">${escapeHtml3(item.label)}</option>`).join("");
+  typeSelect.innerHTML = CLEAN_TYPE_DEFINITIONS.filter((item) => definition?.types.includes(item.key)).map((item) => `<option value="${item.key}">${escapeHtml4(item.label)}</option>`).join("");
   typeSelect.value = definition?.types.includes(currentType) ? currentType : definition?.types[0] || "";
   const usesMaterialCount = ["dummy", "dummywac"].includes(typeSelect.value);
   document.getElementById("cleanTriggerField").hidden = typeSelect.value !== "wacclean" && !usesMaterialCount;
@@ -4616,16 +4908,16 @@ function openCleanDialog(scope, routeIndex, stageIndex = -1, cleanName = "", pla
   document.getElementById("cleanDialogTitle").textContent = `${cleanName ? "\u7F16\u8F91" : "\u65B0\u589E"} ${scope === "route" ? "Route" : "RouteStep"} Clean`;
   document.getElementById("cleanDialogDescription").textContent = scope === "route" ? "Clean \u53EA\u4F1A\u51FA\u73B0\u5728\u6240\u9009 Route \u8154\u5BA4\u4E2D\u3002" : "Clean \u53EA\u4F1A\u51FA\u73B0\u5728\u5F53\u524D Step \u6240\u9009\u8154\u5BA4\u4E2D\u3002";
   const placementSelect = document.getElementById("cleanPlacement");
-  placementSelect.innerHTML = definitions.map((item) => `<option value="${item.key}">${escapeHtml3(item.label)}</option>`).join("");
+  placementSelect.innerHTML = definitions.map((item) => `<option value="${item.key}">${escapeHtml4(item.label)}</option>`).join("");
   placementSelect.value = selectedPlacement;
-  document.getElementById("cleanType").innerHTML = `<option value="${draft.cleanType}">${escapeHtml3(draft.cleanType)}</option>`;
+  document.getElementById("cleanType").innerHTML = `<option value="${draft.cleanType}">${escapeHtml4(draft.cleanType)}</option>`;
   document.getElementById("cleanRecipeTime").value = String(draft.recipeTime);
   document.getElementById("cleanTriggerCount").value = String(draft.triggerCount);
   document.getElementById("cleanWacRecipeTime").value = String(draft.wacRecipeTime);
   const selectedModules = new Set(stringList(draft.modules));
   const moduleHost = document.getElementById("cleanModuleOptions");
   const modules = cleanContextModules(scope, routeIndex, stageIndex);
-  moduleHost.innerHTML = modules.length ? modules.map((module) => `<label class="clean-module-option"><input type="checkbox" name="cleanModule" value="${escapeHtml3(module)}" ${selectedModules.has(module) ? "checked" : ""}><span>${escapeHtml3(module)}</span></label>`).join("") : `<span class="clean-dialog-empty">\u5F53\u524D\u8303\u56F4\u6CA1\u6709\u53EF\u914D\u7F6E\u7684\u52A0\u5DE5\u8154\u5BA4</span>`;
+  moduleHost.innerHTML = modules.length ? modules.map((module) => `<label class="clean-module-option"><input type="checkbox" name="cleanModule" value="${escapeHtml4(module)}" ${selectedModules.has(module) ? "checked" : ""}><span>${escapeHtml4(module)}</span></label>`).join("") : `<span class="clean-dialog-empty">\u5F53\u524D\u8303\u56F4\u6CA1\u6709\u53EF\u914D\u7F6E\u7684\u52A0\u5DE5\u8154\u5BA4</span>`;
   document.getElementById("cleanDialogError").textContent = "";
   document.getElementById("deleteCleanBindingButton").hidden = !cleanName;
   updateCleanDialogFields();
@@ -4688,8 +4980,8 @@ function stepKind(route, index) {
 }
 function renderCandidatePicker(routeIndex, stageIndex, allowed, candidates) {
   const selected = new Set(candidates);
-  const summary = candidates.length ? candidates.map((name) => `<span class="chip">${escapeHtml3(name)}</span>`).join("") : `<span class="candidate-picker-empty">\u9009\u62E9\u8BBE\u5907</span>`;
-  return `<details class="candidate-picker" onclick="event.stopPropagation()"><summary>${summary}</summary><div class="candidate-picker-menu">${allowed.map((name) => `<label class="candidate-option"><input type="checkbox" data-scope="stage-candidate-toggle" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-candidate="${escapeHtml3(name)}" ${selected.has(name) ? "checked" : ""}><span>${escapeHtml3(name)}</span></label>`).join("")}</div></details>`;
+  const summary = candidates.length ? candidates.map((name) => `<span class="chip">${escapeHtml4(name)}</span>`).join("") : `<span class="candidate-picker-empty">\u9009\u62E9\u8BBE\u5907</span>`;
+  return `<details class="candidate-picker" onclick="event.stopPropagation()"><summary>${summary}</summary><div class="candidate-picker-menu">${allowed.map((name) => `<label class="candidate-option"><input type="checkbox" data-scope="stage-candidate-toggle" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-candidate="${escapeHtml4(name)}" ${selected.has(name) ? "checked" : ""}><span>${escapeHtml4(name)}</span></label>`).join("")}</div></details>`;
 }
 function renderSteps(route, routeIndex) {
   return route.stages.map((stage, stageIndex) => {
@@ -4783,7 +5075,7 @@ function renderRouteDetails(route, index) {
   const bufferModes = ["No Buffer", "\u5F3A\u5236 Buffer Out", "\u5F3A\u5236 Buffer In", "\u975E\u5F3A\u5236 Buffer Out", "\u975E\u5F3A\u5236 Buffer In"];
   const selectedBuffer = Math.max(0, Math.min(4, Math.trunc(Number(route.bufferOption) || 0)));
   return `<div class="route-details"><div class="edit-card-head"><strong>\u8DEF\u5F84\u8BE6\u60C5</strong><div><button class="btn small" data-action="open-context-clean" data-clean-scope="route" data-route-index="${index}">\uFF0B Clean</button> <button class="btn small" data-action="add-stage" data-index="${index}">\uFF0B Step \u7EC4</button> <button class="btn danger small" data-action="remove-route" data-index="${index}">\u5220\u9664</button></div></div>
-    <div class="route-meta"><div class="route-meta-grid"><div class="field"><label>\u8DEF\u5F84\u540D\u79F0\uFF08\u81EA\u52A8\u751F\u6210\uFF09</label><input value="${escapeHtml3(route.name)}" readonly></div><div class="field route-group-field"><label>Group</label><input value="${escapeHtml3(route.group)}" title="${escapeHtml3(route.group)}" readonly></div><div class="field route-buffer-field"><label>BufferOption</label><select data-compact-label="BufferOption" data-scope="route" data-index="${index}" data-key="bufferOption">${bufferModes.map((label, value) => `<option value="${value}" ${value === selectedBuffer ? "selected" : ""}>${value} \xB7 ${escapeHtml3(label)}</option>`).join("")}</select></div></div>
+    <div class="route-meta"><div class="route-meta-grid"><div class="field"><label>\u8DEF\u5F84\u540D\u79F0\uFF08\u81EA\u52A8\u751F\u6210\uFF09</label><input value="${escapeHtml4(route.name)}" readonly></div><div class="field route-group-field"><label>Group</label><input value="${escapeHtml4(route.group)}" title="${escapeHtml4(route.group)}" readonly></div><div class="field route-buffer-field"><label>BufferOption</label><select data-compact-label="BufferOption" data-scope="route" data-index="${index}" data-key="bufferOption">${bufferModes.map((label, value) => `<option value="${value}" ${value === selectedBuffer ? "selected" : ""}>${value} \xB7 ${escapeHtml4(label)}</option>`).join("")}</select></div></div>
     <section class="route-clean-section"><div class="context-clean-head"><div><strong>Route Clean</strong><small>Clean \u4EC5\u4F5C\u7528\u4E8E\u5F39\u7A97\u4E2D\u9009\u62E9\u7684\u8154\u5BA4</small></div><button class="btn small" type="button" data-action="open-context-clean" data-clean-scope="route" data-route-index="${index}">\uFF0B Clean</button></div>${renderContextCleans("route", index)}</section></div>
     <div class="route-table-wrap"><table class="route-table"><thead><tr><th>StepID</th><th>\u7C7B\u578B</th><th>\u53EF\u9009\u8154\u5BA4 / \u673A\u5668\u624B</th><th>PostStepID</th><th>NeedProcess</th><th></th></tr></thead><tbody>${renderSteps(route, index)}</tbody></table></div></div>`;
 }
@@ -4799,10 +5091,10 @@ function renderRoutes() {
   state.routeProcessFilter = selectedProcess?.key || "";
   const selectedStructure = selectedProcess?.structures.find((structure) => structure.key === state.routeParallelFilter) || selectedProcess?.structures[0];
   state.routeParallelFilter = selectedStructure?.key || "";
-  processSelect.innerHTML = processGroups.map((group) => `<option value="${escapeHtml3(group.key)}">${escapeHtml3(group.label)}</option>`).join("");
+  processSelect.innerHTML = processGroups.map((group) => `<option value="${escapeHtml4(group.key)}">${escapeHtml4(group.label)}</option>`).join("");
   processSelect.value = state.routeProcessFilter;
   processSelect.disabled = !processGroups.length;
-  parallelSelect.innerHTML = (selectedProcess?.structures || []).map((structure) => `<option value="${escapeHtml3(structure.key)}">${escapeHtml3(structure.label)}</option>`).join("");
+  parallelSelect.innerHTML = (selectedProcess?.structures || []).map((structure) => `<option value="${escapeHtml4(structure.key)}">${escapeHtml4(structure.label)}</option>`).join("");
   parallelSelect.value = state.routeParallelFilter;
   parallelSelect.disabled = !selectedProcess?.structures.length;
   cleanSelect.value = state.routeCleanFilter;
@@ -4825,7 +5117,7 @@ function renderRoutes() {
     const routeOpen = state.expandedRoutes.has(routeIndex);
     const compactPath = routePickerCompactPath(route);
     return `<article class="route-summary-card"><div class="route-summary-head"><button class="route-summary-toggle" data-action="toggle-route" data-route-index="${routeIndex}" aria-expanded="${routeOpen}">
-      <span class="collapse-arrow ${routeOpen ? "open" : ""}">\u25B6</span><span class="route-summary-content"><span class="route-summary-primary"><span class="route-summary-id">${routePickerShortId(route)}</span><strong title="${escapeHtml3(compactPath)}">${escapeHtml3(compactPath)}</strong>${renderRoutePropertyTags(route)}</span></span></button>
+      <span class="collapse-arrow ${routeOpen ? "open" : ""}">\u25B6</span><span class="route-summary-content"><span class="route-summary-primary"><span class="route-summary-id">${routePickerShortId(route)}</span><strong title="${escapeHtml4(compactPath)}">${escapeHtml4(compactPath)}</strong>${renderRoutePropertyTags(route)}</span></span></button>
       <div class="route-summary-actions"><button class="btn small" data-action="open-context-clean" data-clean-scope="route" data-route-index="${routeIndex}">\uFF0B Clean</button><button class="btn small" data-action="edit-route" data-route-index="${routeIndex}">\u7F16\u8F91</button><button class="btn small" data-action="copy-route" data-route-index="${routeIndex}">\u590D\u5236</button><button class="btn danger small" data-action="remove-route" data-index="${routeIndex}">\u5220\u9664</button></div>
     </div>${routeOpen ? renderRouteDetails(route, routeIndex) : ""}</article>`;
   }).join("");
@@ -4913,13 +5205,13 @@ function renderRoutePropertyTags(route) {
   const cleanLabel = cleanSummary === "\u65E0" ? "\u65E0\u6E05\u6D01" : cleanSummary;
   const hasResidency = routeHasTimeConstraint(route, "residencyConstraint");
   const hasQTime = routeHasTimeConstraint(route, "qTimeLimit");
-  return `<span class="route-property-tags"><span class="route-property-tag buffer-${buffer.tone}" title="Buffer \u4F7F\u7528\u6A21\u5F0F ${buffer.index}\uFF1A${escapeHtml3(buffer.label)}">${escapeHtml3(buffer.label)}</span><span class="route-property-tag clean-${cleanSummary === "\u65E0" ? "none" : "active"}" title="\u6E05\u6D01\uFF1A${escapeHtml3(cleanLabel)}">${escapeHtml3(cleanLabel)}</span><span class="route-property-tag constraint-${hasResidency ? "active" : "none"}" title="\u9A7B\u7559\u65F6\u95F4\u7EA6\u675F\uFF1A${hasResidency ? "\u5DF2\u914D\u7F6E" : "\u672A\u914D\u7F6E"}">\u9A7B\u7559${hasResidency ? "\u7EA6\u675F" : "\u65E0"}</span><span class="route-property-tag qtime-${hasQTime ? "active" : "none"}" title="QTime\uFF1A${hasQTime ? "\u5DF2\u914D\u7F6E" : "\u672A\u914D\u7F6E"}">QTime${hasQTime ? "" : "\u65E0"}</span></span>`;
+  return `<span class="route-property-tags"><span class="route-property-tag buffer-${buffer.tone}" title="Buffer \u4F7F\u7528\u6A21\u5F0F ${buffer.index}\uFF1A${escapeHtml4(buffer.label)}">${escapeHtml4(buffer.label)}</span><span class="route-property-tag clean-${cleanSummary === "\u65E0" ? "none" : "active"}" title="\u6E05\u6D01\uFF1A${escapeHtml4(cleanLabel)}">${escapeHtml4(cleanLabel)}</span><span class="route-property-tag constraint-${hasResidency ? "active" : "none"}" title="\u9A7B\u7559\u65F6\u95F4\u7EA6\u675F\uFF1A${hasResidency ? "\u5DF2\u914D\u7F6E" : "\u672A\u914D\u7F6E"}">\u9A7B\u7559${hasResidency ? "\u7EA6\u675F" : "\u65E0"}</span><span class="route-property-tag qtime-${hasQTime ? "active" : "none"}" title="QTime\uFF1A${hasQTime ? "\u5DF2\u914D\u7F6E" : "\u672A\u914D\u7F6E"}">QTime${hasQTime ? "" : "\u65E0"}</span></span>`;
 }
 function renderPJobRouteCard(route, baseline) {
   const routeIndex = state.routes.indexOf(route), selected = route === baseline;
   const compactPath = routePickerCompactPath(route);
-  return `<button type="button" class="pjob-route-card ${selected ? "selected" : ""}" data-action="select-pjob-route" data-route-index="${routeIndex}" aria-pressed="${selected}" title="${escapeHtml3(compactPath)}">
-    <span class="pjob-route-card-head"><span class="pjob-route-card-id">${routePickerShortId(route)}</span><strong class="pjob-route-card-path">${escapeHtml3(compactPath)}</strong>${renderRoutePropertyTags(route)}${selected ? `<span class="pjob-route-card-current">\u5F53\u524D\u9009\u62E9</span>` : ""}</span>
+  return `<button type="button" class="pjob-route-card ${selected ? "selected" : ""}" data-action="select-pjob-route" data-route-index="${routeIndex}" aria-pressed="${selected}" title="${escapeHtml4(compactPath)}">
+    <span class="pjob-route-card-head"><span class="pjob-route-card-id">${routePickerShortId(route)}</span><strong class="pjob-route-card-path">${escapeHtml4(compactPath)}</strong>${renderRoutePropertyTags(route)}${selected ? `<span class="pjob-route-card-current">\u5F53\u524D\u9009\u62E9</span>` : ""}</span>
   </button>`;
 }
 function renderPJobRouteDialogGroup(groupKey) {
@@ -4952,7 +5244,7 @@ function openPJobRoutePicker(button) {
   };
   document.getElementById("pjobRouteDialogTitle").textContent = `\u9009\u62E9 ${pjob.jobName} \u7684\u8DEF\u5F84`;
   const processSelect = document.getElementById("pjobRouteProcess");
-  processSelect.innerHTML = groups.length ? groups.map((group) => `<option value="${escapeHtml3(group.key)}" ${group.key === selectedKey ? "selected" : ""}>${escapeHtml3(`${group.processLabel} \xB7 ${group.label}`)}</option>`).join("") : `<option value="">\u6682\u65E0\u5DE5\u5E8F</option>`;
+  processSelect.innerHTML = groups.length ? groups.map((group) => `<option value="${escapeHtml4(group.key)}" ${group.key === selectedKey ? "selected" : ""}>${escapeHtml4(`${group.processLabel} \xB7 ${group.label}`)}</option>`).join("") : `<option value="">\u6682\u65E0\u5DE5\u5E8F</option>`;
   document.getElementById("pjobRouteCleanFilter").value = "all";
   document.getElementById("pjobRouteResidencyFilter").value = "all";
   document.getElementById("pjobRouteQTimeFilter").value = "all";
@@ -4990,8 +5282,8 @@ function renderPJobRoutePicker(pjob, roundIndex, cjobIndex, pjobIndex) {
   const common = `data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}"`;
   const summary = routePickerProcessSummary(selectedRoute ? routeProcessProfile(selectedRoute) : selectedGroup);
   return `<div class="pjob-route-picker">
-    <div class="pjob-route-current" title="${escapeHtml3(`${summary.label} \xB7 ${summary.chambers}`)}"><strong>${escapeHtml3(summary.label)}</strong><span>${escapeHtml3(summary.chambers)}</span></div>
-    <button type="button" class="pjob-route-open" data-action="open-pjob-route-picker" data-route-group-key="${escapeHtml3(selectedKey)}" aria-label="\u9009\u62E9\u5177\u4F53\u8DEF\u5F84" aria-haspopup="dialog" aria-controls="pjobRouteDialog" aria-expanded="false" ${common} ${groups.length ? "" : "disabled"}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
+    <div class="pjob-route-current" title="${escapeHtml4(`${summary.label} \xB7 ${summary.chambers}`)}"><strong>${escapeHtml4(summary.label)}</strong><span>${escapeHtml4(summary.chambers)}</span></div>
+    <button type="button" class="pjob-route-open" data-action="open-pjob-route-picker" data-route-group-key="${escapeHtml4(selectedKey)}" aria-label="\u9009\u62E9\u5177\u4F53\u8DEF\u5F84" aria-haspopup="dialog" aria-controls="pjobRouteDialog" aria-expanded="false" ${common} ${groups.length ? "" : "disabled"}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
   </div>`;
 }
 function renderRounds() {
@@ -5006,16 +5298,16 @@ function renderRounds() {
       const pjobRows = cjob.pjobs.map((pjob, pjobIndex) => {
         const pjobFieldPrefix = `${fieldPrefix}-pjob-${pjobIndex}`;
         return `<div class="pjob-row">
-          <div class="pjob-identity"><span>PJob</span><strong>${escapeHtml3(pjob.jobName)}</strong></div>
+          <div class="pjob-identity"><span>PJob</span><strong>${escapeHtml4(pjob.jobName)}</strong></div>
           <label class="pjob-field pjob-material" for="${pjobFieldPrefix}-wafer-count"><span>Material</span><input id="${pjobFieldPrefix}-wafer-count" class="pjob-number" type="number" min="1" max="25" inputmode="numeric" data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="waferCount" value="${Number(pjob.waferCount)}"></label>
           <div class="pjob-field pjob-origin-route"><span>OriginRoute</span>${renderPJobRoutePicker(pjob, roundIndex, cjobIndex, pjobIndex)}</div>
           <label class="pjob-field pjob-priority" for="${pjobFieldPrefix}-priority"><span>Priority</span><input id="${pjobFieldPrefix}-priority" class="pjob-number" type="number" min="1" inputmode="numeric" data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="priority" value="${Number(pjob.priority)}"></label>
-          <button class="btn danger icon pjob-remove" type="button" aria-label="\u5220\u9664 ${escapeHtml3(pjob.jobName)}" title="\u5220\u9664 ${escapeHtml3(pjob.jobName)}" data-action="remove-pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" ${cjob.pjobs.length <= 1 ? "disabled" : ""}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M10 11v6m4-6v6M9 7l1-2h4l1 2M7 7l1 13h8l1-13"/></svg></button>
+          <button class="btn danger icon pjob-remove" type="button" aria-label="\u5220\u9664 ${escapeHtml4(pjob.jobName)}" title="\u5220\u9664 ${escapeHtml4(pjob.jobName)}" data-action="remove-pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" ${cjob.pjobs.length <= 1 ? "disabled" : ""}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M10 11v6m4-6v6M9 7l1-2h4l1 2M7 7l1 13h8l1-13"/></svg></button>
         </div>`;
       }).join("");
       return `<section class="cjob-card">
         <header class="cjob-head">
-          <div class="cjob-title"><strong>CJob ${cjobIndex + 1}</strong><span class="cjob-task-id">TaskID ${escapeHtml3(cjob.taskId)}</span></div>
+          <div class="cjob-title"><strong>CJob ${cjobIndex + 1}</strong><span class="cjob-task-id">TaskID ${escapeHtml4(cjob.taskId)}</span></div>
           <div class="cjob-controls">
             <div class="field cjob-job-type"><label for="${fieldPrefix}-job-type">JobType</label><select id="${fieldPrefix}-job-type" data-scope="cjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-key="jobType">${CJOB_TYPES.map((value) => `<option ${value === cjob.jobType ? "selected" : ""}>${value}</option>`).join("")}</select></div>
             <div class="field cjob-priority ${normalLot ? "" : "disabled-field"}"><label for="${fieldPrefix}-priority">Priority</label><input id="${fieldPrefix}-priority" type="number" min="1" inputmode="numeric" data-scope="cjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-key="priority" value="${Number(cjob.priority)}" ${normalLot ? "" : "disabled"}></div>
@@ -5035,12 +5327,12 @@ function renderRounds() {
 }
 function renderStepNumberField(label, key, value, routeIndex, stageIndex, options = {}) {
   const inputId = `step-${routeIndex}-${stageIndex}-${key}`;
-  const helper = options.helper ? `<small class="field-help">${escapeHtml3(options.helper)}</small>` : "";
+  const helper = options.helper ? `<small class="field-help">${escapeHtml4(options.helper)}</small>` : "";
   const minimum = options.minimum === void 0 ? "" : ` min="${options.minimum}"`;
   return `<div class="step-edit-field">
-    <label for="${inputId}">${escapeHtml3(label)}</label>
+    <label for="${inputId}">${escapeHtml4(label)}</label>
     <div class="step-number-control">
-      <input id="${inputId}" type="number" inputmode="decimal" step="${options.step || "0.1"}"${minimum} data-scope="visit-shared" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-key="${key}" value="${escapeHtml3(value)}">
+      <input id="${inputId}" type="number" inputmode="decimal" step="${options.step || "0.1"}"${minimum} data-scope="visit-shared" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-key="${key}" value="${escapeHtml4(value)}">
       <span aria-hidden="true">s</span>
     </div>
     ${helper}
@@ -5067,7 +5359,7 @@ function renderStepDrawer() {
   const differences = visitDifferenceFields(stage).filter((field) => editableFieldLabels[field]);
   const candidates = [...new Set(stage.visits.map((visit) => visit.stationName).filter(Boolean))];
   const differenceNames = differences.map((field) => editableFieldLabels[field] || field);
-  const warning = differences.length ? `<div class="visit-warning" role="status"><strong>\u5019\u9009\u8154\u5BA4\u7684\u53EF\u7F16\u8F91\u53C2\u6570\u4E0D\u4E00\u81F4</strong><p>\u5DEE\u5F02\u9879\uFF1A${differenceNames.map(escapeHtml3).join("\u3001")}\u3002\u5F53\u524D\u663E\u793A\u9996\u4E2A\u5019\u9009\u7684\u503C\u3002</p><button class="btn small" data-action="sync-stage-visits" data-route-index="${routeIndex}" data-stage-index="${stageIndex}">\u540C\u6B65\u5230\u5168\u90E8\u5019\u9009</button></div>` : "";
+  const warning = differences.length ? `<div class="visit-warning" role="status"><strong>\u5019\u9009\u8154\u5BA4\u7684\u53EF\u7F16\u8F91\u53C2\u6570\u4E0D\u4E00\u81F4</strong><p>\u5DEE\u5F02\u9879\uFF1A${differenceNames.map(escapeHtml4).join("\u3001")}\u3002\u5F53\u524D\u663E\u793A\u9996\u4E2A\u5019\u9009\u7684\u503C\u3002</p><button class="btn small" data-action="sync-stage-visits" data-route-index="${routeIndex}" data-stage-index="${stageIndex}">\u540C\u6B65\u5230\u5168\u90E8\u5019\u9009</button></div>` : "";
   const editor = first ? `<section class="step-editor-card" aria-labelledby="stepEditorHeading">
     <header class="step-editor-head"><div><h3 id="stepEditorHeading">\u53EF\u7F16\u8F91\u53C2\u6570</h3><p>\u4FEE\u6539\u540E\u81EA\u52A8\u540C\u6B65\u5230 ${stage.visits.length} \u4E2A\u5019\u9009\u8154\u5BA4</p></div><span class="editable-badge">3 \u9879</span></header>
     <div class="step-edit-grid">
@@ -5087,7 +5379,7 @@ function renderStepDrawer() {
       ${renderReadonlyField("Move Time Offset", first.moveTimeOffset, true)}
     </div>
   </details>` : `<div class="empty">\u672A\u9009\u62E9\u5019\u9009\u8BBE\u5907\uFF0C\u8BF7\u5148\u5728\u8DEF\u5F84\u5217\u8868\u4E2D\u9009\u62E9\u3002</div>`;
-  const routeName = escapeHtml3(route.name || "\u672A\u547D\u540D\u8DEF\u5F84");
+  const routeName = escapeHtml4(route.name || "\u672A\u547D\u540D\u8DEF\u5F84");
   document.getElementById("drawerBody").innerHTML = `<section class="step-overview-card">
     <div class="step-route-context"><span>\u6240\u5C5E\u8DEF\u5F84</span><strong title="${routeName}">${routeName}</strong></div>
     <dl class="step-meta-list">
@@ -5096,7 +5388,7 @@ function renderStepDrawer() {
       <div><dt>Processing</dt><dd>${stage.needProcess ? "Yes" : "No"}</dd></div>
       <div><dt>Candidates</dt><dd>${stage.visits.length}</dd></div>
     </dl>
-    <div class="step-candidates"><span>\u5019\u9009\u8154\u5BA4</span><div class="candidate-chip-list">${candidates.length ? candidates.map((name) => `<span class="chip">${escapeHtml3(name)}</span>`).join("") : `<span class="candidate-picker-empty">\u672A\u9009\u62E9</span>`}</div></div>
+    <div class="step-candidates"><span>\u5019\u9009\u8154\u5BA4</span><div class="candidate-chip-list">${candidates.length ? candidates.map((name) => `<span class="chip">${escapeHtml4(name)}</span>`).join("") : `<span class="candidate-picker-empty">\u672A\u9009\u62E9</span>`}</div></div>
   </section>${warning}${editor}`;
 }
 function openStepDrawer(routeIndex, stageIndex) {
@@ -5143,28 +5435,28 @@ function renderRobotSlots() {
     ).size;
     const tokens = armGroups.map((group) => group.slotIds.map((slotId) => `
       <span class="robot-slot-token ${selected.includes(slotId) ? "is-active" : ""}">
-        ${escapeHtml3(group.armName)} \xB7 Slot ${slotId}
+        ${escapeHtml4(group.armName)} \xB7 Slot ${slotId}
       </span>
     `).join("")).join("");
     return `
-      <article class="robot-slot-card" data-robot-slot-card="${escapeHtml3(robotName)}">
+      <article class="robot-slot-card" data-robot-slot-card="${escapeHtml4(robotName)}">
         <header class="robot-slot-card-head">
           <div class="robot-slot-card-title">
             <span class="robot-slot-card-icon" aria-hidden="true">
               <svg viewBox="0 0 24 24"><rect x="4" y="7" width="16" height="11" rx="3"/><path d="M12 3v4M8 12h.01M16 12h.01M8 18v3m8-3v3"/></svg>
             </span>
             <div>
-              <h3>${escapeHtml3(robotName)}</h3>
-              <p>${escapeHtml3(robot.Type || "Robot")} \xB7 \u53EF\u8FBE ${accessibleStationCount} \u4E2A\u7AD9\u70B9</p>
+              <h3>${escapeHtml4(robotName)}</h3>
+              <p>${escapeHtml4(robot.Type || "Robot")} \xB7 \u53EF\u8FBE ${accessibleStationCount} \u4E2A\u7AD9\u70B9</p>
             </div>
           </div>
           <span class="robot-slot-mode">${isSaving ? "\u4FDD\u5B58\u4E2D\u2026" : isDualArm ? "\u53CC\u81C2" : "\u5355\u81C2"}</span>
         </header>
-        <div class="robot-slot-visual" aria-label="${escapeHtml3(robotName)} \u53EF\u7528\u69FD\u4F4D">${tokens}</div>
-        <div class="robot-slot-controls" role="group" aria-label="${escapeHtml3(robotName)} \u5DE5\u4F5C\u6A21\u5F0F">
-          <button class="robot-slot-choice" type="button" data-robot-slot-name="${escapeHtml3(robotName)}" data-robot-arm-count="1" aria-pressed="${String(!isDualArm)}" ${isSaving ? "disabled" : ""}>\u5355\u81C2</button>
-          <button class="robot-slot-choice" type="button" data-robot-slot-name="${escapeHtml3(robotName)}" data-robot-arm-count="2" aria-pressed="${String(isDualArm)}" ${!supportsDualArm || isSaving ? "disabled" : ""}>\u53CC\u81C2</button>
-          <button class="robot-slot-choice robot-slot-default" type="button" data-robot-slot-default="${escapeHtml3(robotName)}" ${isDefault || isSaving ? "disabled" : ""}>\u6062\u590D\u9ED8\u8BA4</button>
+        <div class="robot-slot-visual" aria-label="${escapeHtml4(robotName)} \u53EF\u7528\u69FD\u4F4D">${tokens}</div>
+        <div class="robot-slot-controls" role="group" aria-label="${escapeHtml4(robotName)} \u5DE5\u4F5C\u6A21\u5F0F">
+          <button class="robot-slot-choice" type="button" data-robot-slot-name="${escapeHtml4(robotName)}" data-robot-arm-count="1" aria-pressed="${String(!isDualArm)}" ${isSaving ? "disabled" : ""}>\u5355\u81C2</button>
+          <button class="robot-slot-choice" type="button" data-robot-slot-name="${escapeHtml4(robotName)}" data-robot-arm-count="2" aria-pressed="${String(isDualArm)}" ${!supportsDualArm || isSaving ? "disabled" : ""}>\u53CC\u81C2</button>
+          <button class="robot-slot-choice robot-slot-default" type="button" data-robot-slot-default="${escapeHtml4(robotName)}" ${isDefault || isSaving ? "disabled" : ""}>\u6062\u590D\u9ED8\u8BA4</button>
         </div>
         <p class="robot-slot-card-note">${supportsDualArm ? "\u6309\u7269\u7406 Arm \u5207\u6362\uFF1B\u6BCF\u4E2A Arm \u58F0\u660E\u7684\u591A\u4E2A\u69FD\u4F4D\u4F1A\u4E00\u8D77\u4FDD\u7559\u3002" : `\u8BBE\u5907\u6587\u4EF6\u58F0\u660E 1 \u4E2A Arm\u3001${available.length} \u4E2A\u624B\u69FD\u3002`}</p>
       </article>
@@ -5550,9 +5842,9 @@ function renderOtherAlgorithmOptions(algorithms) {
   state.availableAlgorithms = Array.isArray(algorithms) ? algorithms : [];
   const container = document.getElementById("otherAlgorithmOptions");
   container.innerHTML = state.availableAlgorithms.map((algorithm) => `
-    <label class="strategy-card" data-strategy-card="${escapeHtml3(algorithm.strategy)}" ${algorithm.unavailableReason ? `title="${escapeHtml3(algorithm.unavailableReason)}"` : ""}>
-      <input type="radio" name="strategy" value="${escapeHtml3(algorithm.strategy)}" ${algorithm.strategy === state.strategy ? "checked" : ""} ${algorithm.available === false ? "disabled" : ""}>
-      <b>${escapeHtml3(algorithm.name)}</b>
+    <label class="strategy-card" data-strategy-card="${escapeHtml4(algorithm.strategy)}" ${algorithm.unavailableReason ? `title="${escapeHtml4(algorithm.unavailableReason)}"` : ""}>
+      <input type="radio" name="strategy" value="${escapeHtml4(algorithm.strategy)}" ${algorithm.strategy === state.strategy ? "checked" : ""} ${algorithm.available === false ? "disabled" : ""}>
+      <b>${escapeHtml4(algorithm.name)}</b>
     </label>
   `).join("");
   updateStrategyOptionVisibility();
@@ -5569,8 +5861,8 @@ function showAlgorithmDetails(strategy) {
   const metadata = state.algorithmMetadata[strategy] || {};
   const cardName = document.querySelector(`[data-strategy-card="${CSS.escape(strategy)}"] b`)?.textContent;
   document.getElementById("algorithmHoverInfo").innerHTML = `
-    <span class="algorithm-hover-info-name">${escapeHtml3(metadata.name || cardName || strategy)}<small>\u7B97\u6CD5\u7B80\u4ECB</small></span>
-    <span class="algorithm-hover-info-description">${escapeHtml3(metadata.introduction || "\u6682\u65E0\u7B97\u6CD5\u7B80\u4ECB")}</span>
+    <span class="algorithm-hover-info-name">${escapeHtml4(metadata.name || cardName || strategy)}<small>\u7B97\u6CD5\u7B80\u4ECB</small></span>
+    <span class="algorithm-hover-info-description">${escapeHtml4(metadata.introduction || "\u6682\u65E0\u7B97\u6CD5\u7B80\u4ECB")}</span>
   `;
 }
 function displayStrategyName(strategy) {
@@ -6085,23 +6377,23 @@ function renderBatchItems(items) {
     const itemSelectionId = String(item.testId || `index-${index}`);
     const selected = itemSelectionId === state.selectedBatchTestId;
     return `
-      <div class="batch-result ${escapeHtml3(item.status || "queued")}${selected ? " selected" : ""}" data-batch-item-index="${index}">
+      <div class="batch-result ${escapeHtml4(item.status || "queued")}${selected ? " selected" : ""}" data-batch-item-index="${index}">
         <div class="batch-result-head">
-          <button class="batch-result-title" type="button" aria-pressed="${selected}" aria-label="\u67E5\u770B ${escapeHtml3(displayId)} ${escapeHtml3(item.testName || "")} \u7684\u8BE6\u7EC6\u6307\u6807"><strong title="${escapeHtml3(`${item.testId || ""} \xB7 ${item.testName || ""}`)}">${escapeHtml3(item.testName || `\u6D4B\u8BD5 ${index + 1}`)}</strong></button>
+          <button class="batch-result-title" type="button" aria-pressed="${selected}" aria-label="\u67E5\u770B ${escapeHtml4(displayId)} ${escapeHtml4(item.testName || "")} \u7684\u8BE6\u7EC6\u6307\u6807"><strong title="${escapeHtml4(`${item.testId || ""} \xB7 ${item.testName || ""}`)}">${escapeHtml4(item.testName || `\u6D4B\u8BD5 ${index + 1}`)}</strong></button>
           <div class="batch-result-meta">
             <span class="batch-status">${statusLabels[item.status] || "\u7B49\u5F85\u4E2D"}</span>
-            ${item.logUrl ? `<a class="btn" href="${escapeHtml3(item.logUrl)}" download>\u65E5\u5FD7</a>` : `<span class="btn" aria-disabled="true">\u65E5\u5FD7</span>`}
-            ${item.resultUrl ? `<button class="btn primary" type="button" data-workspace-result="${escapeHtml3(item.resultUrl)}" data-workspace-name="${escapeHtml3(item.testName || `\u6D4B\u8BD5 ${index + 1}`)}">\u5DE5\u4F5C\u53F0</button>` : `<span class="btn" aria-disabled="true">\u5DE5\u4F5C\u53F0</span>`}
-            ${item.ganttUrl ? `<a class="btn" href="${escapeHtml3(item.ganttUrl)}" target="_blank">\u7518\u7279\u56FE</a>` : `<span class="btn" aria-disabled="true">\u7518\u7279\u56FE</span>`}
+            ${item.logUrl ? `<a class="btn" href="${escapeHtml4(item.logUrl)}" download>\u65E5\u5FD7</a>` : `<span class="btn" aria-disabled="true">\u65E5\u5FD7</span>`}
+            ${item.resultUrl ? `<button class="btn primary" type="button" data-workspace-result="${escapeHtml4(item.resultUrl)}" data-workspace-name="${escapeHtml4(item.testName || `\u6D4B\u8BD5 ${index + 1}`)}">\u5DE5\u4F5C\u53F0</button>` : `<span class="btn" aria-disabled="true">\u5DE5\u4F5C\u53F0</span>`}
+            ${item.ganttUrl ? `<a class="btn" href="${escapeHtml4(item.ganttUrl)}" target="_blank">\u7518\u7279\u56FE</a>` : `<span class="btn" aria-disabled="true">\u7518\u7279\u56FE</span>`}
           </div>
         </div>
         <div class="batch-result-summary">
           <div class="batch-metric-tags" aria-label="\u4E3B\u8981\u6307\u6807">
             <span class="batch-metric-tag makespan" title="Makespan${baselineReady ? `\uFF1BBaseline ${Number(baseline.makespan).toFixed(2)} s` : ""}">${hasMetrics ? `${Number(item.makespan).toFixed(2)} s` : "\u2014 s"}</span>
-            <span class="batch-metric-tag ${improvement < 0 ? "loss" : "gain"}">${escapeHtml3(improvementText)}</span>
+            <span class="batch-metric-tag ${improvement < 0 ? "loss" : "gain"}">${escapeHtml4(improvementText)}</span>
             <span class="batch-metric-tag cpu">CPU Time ${hasMetrics && Number.isFinite(cpuTime) ? `${cpuTime.toFixed(1)} ms` : "\u2014"}</span>
           </div>
-          ${summaryError ? `<span class="summary-error" title="${escapeHtml3(summaryError)}">${escapeHtml3(summaryError)}</span>` : ""}
+          ${summaryError ? `<span class="summary-error" title="${escapeHtml4(summaryError)}">${escapeHtml4(summaryError)}</span>` : ""}
         </div>
       </div>`;
   }).join("");
@@ -6215,16 +6507,16 @@ function renderParameterComparisonRows(baseline, experiment) {
   ];
   return rows.map(([label, base, candidate, delta, kind]) => {
     const deltaValue = typeof delta === "string" ? { text: delta, kind } : delta;
-    return `<div class="comparison-row"><span>${escapeHtml3(label)}</span><strong>${escapeHtml3(base)}</strong><strong>${escapeHtml3(candidate)}</strong><strong class="comparison-delta ${escapeHtml3(deltaValue.kind)}">${escapeHtml3(deltaValue.text)}</strong></div>`;
+    return `<div class="comparison-row"><span>${escapeHtml4(label)}</span><strong>${escapeHtml4(base)}</strong><strong>${escapeHtml4(candidate)}</strong><strong class="comparison-delta ${escapeHtml4(deltaValue.kind)}">${escapeHtml4(deltaValue.text)}</strong></div>`;
   }).join("");
 }
 function renderParameterComparisonCard(index, baseline, experiment) {
   const makespanDelta = comparisonDelta(baseline.result?.makespan, experiment.result?.makespan, 2, " s");
   const validation = experiment.result?.validation === "passed" ? "\u6821\u9A8C\u901A\u8FC7" : experiment.result?.validation === "skipped" ? "\u6821\u9A8C\u8DF3\u8FC7" : `\u6821\u9A8C ${experiment.result?.validation || "\u672A\u77E5"}`;
   return `<article class="comparison-experiment">
-    <header class="comparison-experiment-head"><div><strong>\u57FA\u51C6 vs \u5BF9\u6BD4 ${index + 1}</strong><span> ${escapeHtml3(displayStrategyName(baseline.plan.strategy))} \u2192 ${escapeHtml3(displayStrategyName(experiment.plan.strategy))}</span></div><div><span class="comparison-delta ${escapeHtml3(makespanDelta.kind)}">Makespan ${escapeHtml3(makespanDelta.text)}</span>${experiment.result?.ganttUrl ? `<a class="btn" href="${escapeHtml3(experiment.result.ganttUrl)}" target="_blank">\u7518\u7279\u56FE</a>` : ""}</div></header>
+    <header class="comparison-experiment-head"><div><strong>\u57FA\u51C6 vs \u5BF9\u6BD4 ${index + 1}</strong><span> ${escapeHtml4(displayStrategyName(baseline.plan.strategy))} \u2192 ${escapeHtml4(displayStrategyName(experiment.plan.strategy))}</span></div><div><span class="comparison-delta ${escapeHtml4(makespanDelta.kind)}">Makespan ${escapeHtml4(makespanDelta.text)}</span>${experiment.result?.ganttUrl ? `<a class="btn" href="${escapeHtml4(experiment.result.ganttUrl)}" target="_blank">\u7518\u7279\u56FE</a>` : ""}</div></header>
     <div class="comparison-table"><div class="comparison-row comparison-row-head"><span>\u6307\u6807</span><strong>\u57FA\u51C6</strong><strong>\u5BF9\u6BD4</strong><strong>\u5DEE\u503C</strong></div>${renderParameterComparisonRows(baseline, experiment)}</div>
-    <small>${escapeHtml3(validation)}</small>
+    <small>${escapeHtml4(validation)}</small>
   </article>`;
 }
 function renderParameterComparison() {
@@ -6246,7 +6538,7 @@ function renderParameterComparisonStrategyFields(strategy, options = {}) {
     "loadlock-macro": [["loadLockMacroSearchSeconds", "\u5B8F\u641C\u7D22\u65F6\u95F4\uFF08\u79D2\uFF09", "number", "0.1"], ["loadLockMacroRollouts", "\u5B8F\u91C7\u6837\u6B21\u6570", "number", "1"]]
   };
   const fields = definitions[strategy] || [];
-  document.getElementById("parameterComparisonStrategyOptions").innerHTML = fields.length ? `<div class="grid">${fields.map(([key, label, type, step]) => `<div class="field span-4"><label>${escapeHtml3(label)}<input data-comparison-option="${escapeHtml3(key)}" type="${type}" min="0" step="${step}" value="${escapeHtml3(String(options[key] ?? 0))}" required></label></div>`).join("")}</div>` : `<div class="hint">\u8BE5\u7B56\u7565\u6CA1\u6709\u989D\u5916\u7684\u7B56\u7565\u4E13\u5C5E\u53C2\u6570\uFF1B\u4E0A\u65B9\u901A\u7528\u7EA6\u675F\u53C2\u6570\u4ECD\u4F1A\u751F\u6548\u3002</div>`;
+  document.getElementById("parameterComparisonStrategyOptions").innerHTML = fields.length ? `<div class="grid">${fields.map(([key, label, type, step]) => `<div class="field span-4"><label>${escapeHtml4(label)}<input data-comparison-option="${escapeHtml4(key)}" type="${type}" min="0" step="${step}" value="${escapeHtml4(String(options[key] ?? 0))}" required></label></div>`).join("")}</div>` : `<div class="hint">\u8BE5\u7B56\u7565\u6CA1\u6709\u989D\u5916\u7684\u7B56\u7565\u4E13\u5C5E\u53C2\u6570\uFF1B\u4E0A\u65B9\u901A\u7528\u7EA6\u675F\u53C2\u6570\u4ECD\u4F1A\u751F\u6548\u3002</div>`;
 }
 function openParameterComparisonDialog() {
   const comparison = state.parameterComparison;
@@ -6254,7 +6546,7 @@ function openParameterComparisonDialog() {
   const baseline = comparison.baseline;
   const strategySelect = document.getElementById("parameterComparisonStrategy");
   const strategies = [...document.querySelectorAll('input[name="strategy"]')].filter((input) => !input.disabled || input.value === baseline.plan.strategy).map((input) => input.value);
-  strategySelect.innerHTML = strategies.map((strategy) => `<option value="${escapeHtml3(strategy)}">${escapeHtml3(displayStrategyName(strategy))}</option>`).join("");
+  strategySelect.innerHTML = strategies.map((strategy) => `<option value="${escapeHtml4(strategy)}">${escapeHtml4(displayStrategyName(strategy))}</option>`).join("");
   strategySelect.value = baseline.plan.strategy;
   document.getElementById("comparisonLoadLockManager").value = baseline.options.loadLockManager || "petri-look";
   document.getElementById("comparisonResidencyGuardSeconds").value = String(Number(baseline.options.residencyGuardSeconds) || 0);

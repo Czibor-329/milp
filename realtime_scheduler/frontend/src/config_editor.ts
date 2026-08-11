@@ -17,6 +17,7 @@ import {
 } from "./api_client";
 import { createVisualizationWorkspace, detectDeviceTopologyLayout } from "./workspace_visualizer";
 import { renderTestGroupAnalysis } from "./group_analysis_view";
+import { createDocumentationView } from "./documentation_view";
 import {
   CJOB_TYPES,
   TASK_MODES,
@@ -33,6 +34,7 @@ import {
 
 const { VISIT_SHARED_FIELDS, selectReferencedRoutes } = RouteEditorLogic;
 const visualizationWorkspace = createVisualizationWorkspace();
+const documentationView = createDocumentationView(document.getElementById("documentationRoot"));
 const batchPerformanceAnalyses = new Map();
 const batchBottleneckSummaries = new Map();
 const batchBottleneckRequests = new Map();
@@ -1491,6 +1493,9 @@ function switchTab(name) {
   document.querySelectorAll("[data-tab-view]").forEach(view => view.classList.toggle("active", view.dataset.tabView === name));
   document.getElementById("scheduleSide").classList.toggle("is-hidden", name !== "schedule");
   document.getElementById("pageLayout").classList.toggle("editor-mode", name !== "schedule");
+  document.getElementById("pageLayout").classList.toggle("documentation-mode", name === "documentation");
+  document.body.classList.toggle("documentation-mode", name === "documentation");
+  if (name === "documentation") void documentationView.load();
   if (name !== "route") closeStepDrawer();
 }
 
