@@ -1203,10 +1203,10 @@
                 <div class="toolbar-group">
                   <label class="field">Time line <input id="probeTimeInput" type="number" step="any" placeholder="Time" disabled></label>
                   <button id="setProbeTimeBtn" type="button" disabled>Locate</button>
+                  <label class="switch" title="Show/hide the draggable time cursor"><input id="showTimelineToggle" type="checkbox" checked disabled> Show timeline</label>
                 </div>
                 <label class="switch"><input id="hideDoorToggle" type="checkbox" disabled> Hide door/pre-trans</label>
                 <label class="switch"><input id="showRemovedMovesToggle" type="checkbox" checked disabled> Show removed moves</label>
-                <label class="switch"><input id="showTimelineToggle" type="checkbox" checked disabled> Show timeline</label>
               </div>
             </div>
             <div class="toolbar-file-btns">
@@ -2305,7 +2305,7 @@
       const labelW = 140;
       const rightPad = 18;
       const topPad = 34;
-      const bottomPad = dataset.view.showTimeline ? 46 : 12;
+      const bottomPad = 46;
       const minPlotW = 680;
       const scrollRect = dom.chartScroll.getBoundingClientRect();
       const totalW = Math.max(minPlotW + labelW + rightPad, Math.floor(scrollRect.width || 900));
@@ -2348,10 +2348,8 @@
       const tickStep = niceTickInterval(span, Math.max(5, Math.floor(plotW / 110)));
       const tickStart = Math.ceil(dataset.view.t0 / tickStep) * tickStep;
       const ticks = [];
-      if (dataset.view.showTimeline) {
-        for (let t = tickStart; t <= dataset.view.t1 + tickStep * 0.5; t += tickStep) {
-          ticks.push(t);
-        }
+      for (let t = tickStart; t <= dataset.view.t1 + tickStep * 0.5; t += tickStep) {
+        ticks.push(t);
       }
 
       const laneLines = lanes.map((lane) => {
@@ -2420,7 +2418,7 @@
         const removed = bar.rec.removedByRecompute ? " removed" : "";
         const text = "";
         const radius = 2;
-        const probeHit = probeInView && bar.start <= probeTime && bar.end >= probeTime;
+        const probeHit = dataset.view.showTimeline && probeInView && bar.start <= probeTime && bar.end >= probeTime;
         const fillOpacity = bar.rec.removedByRecompute ? "0.24" : "1";
         const strokeOpacity = bar.rec.removedByRecompute ? "0.45" : (probeHit ? "0.45" : "0.18");
         const probeClass = probeHit ? " probe-hit" : "";
@@ -2437,7 +2435,7 @@
 
       const handleY = topPad + yTop;
       let probeMarkup = "";
-      if (state.probe.time !== null) {
+      if (dataset.view.showTimeline && state.probe.time !== null) {
         const px = labelW + (state.probe.time - dataset.view.t0) * xScale;
         const pxClamped = Math.max(labelW, Math.min(labelW + plotW, px));
         const visible = px >= labelW && px <= labelW + plotW;
@@ -2473,7 +2471,7 @@
         ${barMarkup}
         ${recomputeLabelMarkup}
         <line x1="${labelW}" y1="${topPad + yTop}" x2="${labelW + plotW}" y2="${topPad + yTop}" stroke="#718198" stroke-width="1.2"/>
-        ${dataset.view.showTimeline ? `<text class="axis-title" x="${labelW + plotW / 2}" y="${totalH - 6}" text-anchor="middle">Time (s)</text>` : ""}
+        <text class="axis-title" x="${labelW + plotW / 2}" y="${totalH - 6}" text-anchor="middle">Time (s)</text>
         ${probeMarkup}
       `;
 
