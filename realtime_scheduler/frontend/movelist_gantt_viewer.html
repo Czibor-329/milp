@@ -1203,6 +1203,7 @@
                   <button id="setProbeTimeBtn" type="button" disabled>Locate</button>
                 </div>
                 <label class="switch"><input id="hideDoorToggle" type="checkbox" disabled> Hide door/pre-trans</label>
+                <label class="switch"><input id="showRemovedMovesToggle" type="checkbox" checked disabled> Show removed moves</label>
               </div>
               <div class="toolbar-row">
                 <div class="move-filters" id="moveFilters"></div>
@@ -1296,6 +1297,7 @@
       probeTimeInput: document.getElementById("probeTimeInput"),
       setProbeTimeBtn: document.getElementById("setProbeTimeBtn"),
       hideDoorToggle: document.getElementById("hideDoorToggle"),
+      showRemovedMovesToggle: document.getElementById("showRemovedMovesToggle"),
       moveFilters: document.getElementById("moveFilters"),
       statsPanel: document.getElementById("statsPanel"),
       chartScroll: document.getElementById("chartScroll"),
@@ -1451,6 +1453,7 @@
         end,
         duration: end - start,
         invalid: rec.ValidationFailed === true,
+        removedByRecompute: rec.RemovedByRecompute === true,
         validationIssues: Array.isArray(rec.ValidationIssues)
           ? rec.ValidationIssues.map(String)
           : []
@@ -1588,12 +1591,14 @@
 
     function buildModel(dataset) {
       const hideDoor = dataset.view.hideDoor;
-      const cacheKey = hideDoor ? "hidden" : "all";
+      const showRemovedMoves = dataset.view.showRemovedMoves;
+      const cacheKey = `${hideDoor ? "hidden" : "all"}-${showRemovedMoves ? "with-removed" : "without-removed"}`;
       if (dataset.models.has(cacheKey)) return dataset.models.get(cacheKey);
 
       // 零时长动作仍然代表真实状态边界和校验对象，必须进入绘制、搜索和详情模型。
       let records = dataset.records.filter((rec) => Number.isFinite(rec.start) && Number.isFinite(rec.end) && rec.end >= rec.start);
       if (hideDoor) records = records.filter((rec) => !isHiddenDoorPreTranRecord(rec.raw));
+      if (!showRemovedMoves) records = records.filter((rec) => !rec.removedByRecompute);
       if (!records.length) {
         const empty = {
           records,
@@ -1678,6 +1683,7 @@
         t0: null,
         t1: null,
         hideDoor: false,
+        showRemovedMoves: true,
         laneFilter: "",
         moveTypes: {},
         selected: null,
@@ -1947,7 +1953,8 @@
         dom.nextSearchBtn,
         dom.probeTimeInput,
         dom.setProbeTimeBtn,
-        dom.hideDoorToggle
+        dom.hideDoorToggle,
+        dom.showRemovedMovesToggle
       ]) {
         el.disabled = !enabled;
       }
@@ -1967,6 +1974,7 @@
       syncSearchControls(dataset);
       dom.probeTimeInput.value = fmt(state.probe.time);
       dom.hideDoorToggle.checked = dataset.view.hideDoor;
+      dom.showRemovedMovesToggle.checked = dataset.view.showRemovedMoves;
       renderMoveFilters(dataset, model);
     }
 
@@ -2450,16 +2458,17 @@
         const selected = dataset.view.selected && dataset.view.selected.rawIndex === bar.rec.rawIndex ? " selected" : "";
         const searchHit = searchHitRawIndexes.has(bar.rec.rawIndex) ? " search-hit" : "";
         const invalid = bar.rec.invalid ? " invalid" : "";
+        const removed = bar.rec.removedByRecompute ? " removed" : "";
         const text = "";
         const radius = 2;
         const probeHit = probeInView && bar.start <= probeTime && bar.end >= probeTime;
-        const fillOpacity = "1";
-        const strokeOpacity = probeHit ? "0.45" : "0.18";
+        const fillOpacity = bar.rec.removedByRecompute ? "0.24" : "1";
+        const strokeOpacity = bar.rec.removedByRecompute ? "0.45" : (probeHit ? "0.45" : "0.18");
         const probeClass = probeHit ? " probe-hit" : "";
         return `
           <g clip-path="url(#${clipId})">
-            <rect class="bar${searchHit}${selected}${probeClass}${invalid}" data-bar-index="${index}" x="${x}" y="${y + 2}" width="${w}" height="${Math.max(1, h - 4)}"
-              rx="${radius}" ry="${radius}" fill="${color}" fill-opacity="${fillOpacity}" stroke="#0f172a" stroke-opacity="${strokeOpacity}"></rect>
+            <rect class="bar${searchHit}${selected}${probeClass}${invalid}${removed}" data-bar-index="${index}" x="${x}" y="${y + 2}" width="${w}" height="${Math.max(1, h - 4)}"
+              rx="${radius}" ry="${radius}" fill="${color}" fill-opacity="${fillOpacity}" stroke="#64748b" stroke-opacity="${strokeOpacity}" ${bar.rec.removedByRecompute ? 'stroke-dasharray="4,2"' : ""}></rect>
             ${bar.rec.invalid && w >= 8
               ? `<text class="bar-invalid-label" x="${x + Math.min(w / 2, 10)}" y="${y + h / 2 + 4}" text-anchor="middle">!</text>`
               : ""}
@@ -2922,8 +2931,12 @@
       const validationAlert = bar.rec.invalid
         ? `<div class="validation-alert"><strong>校验失败</strong><br>${escapeHtml(bar.rec.validationIssues.join("；") || "该 Move 未通过状态校验")}</div>`
         : "";
+      const removedAlert = bar.rec.removedByRecompute
+        ? `<div class="validation-alert"><strong>已由重算移除</strong><br>该 Move 仅用于展示失败前的旧计划，不属于可执行结果。</div>`
+        : "";
       dom.detailBody.innerHTML = `
         ${validationAlert}
+        ${removedAlert}
         <div class="detail-title">
           <span class="swatch" style="background:${escapeHtml(color)}"></span>
           <strong>${escapeHtml(name)}</strong>
@@ -3042,6 +3055,18 @@
       const dataset = activeDataset();
       if (!dataset) return;
       dataset.view.hideDoor = dom.hideDoorToggle.checked;
+      dataset.view.t0 = null;
+      dataset.view.t1 = null;
+      dataset.view.selected = null;
+      dataset.view.searchCursor = -1;
+      clearDetails();
+      syncControls(dataset);
+      renderCurrent();
+    });
+    dom.showRemovedMovesToggle.addEventListener("change", () => {
+      const dataset = activeDataset();
+      if (!dataset) return;
+      dataset.view.showRemovedMoves = dom.showRemovedMovesToggle.checked;
       dataset.view.t0 = null;
       dataset.view.t1 = null;
       dataset.view.selected = null;

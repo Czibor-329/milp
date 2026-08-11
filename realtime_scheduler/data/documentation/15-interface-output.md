@@ -117,6 +117,8 @@ description: 完整列出 Move 基类及子类型、Move 状态、输出对象�
 
 重算必须先回放 Running/Done Move 对 Robot、Station、Slot、门和压力的影响，再应用 `RemoveList`。不能把“出现在 RemoveList”直接理解为资源已经释放。
 
+若某轮重算的算法调用在返回新 `MoveList` 前报错，平台会保存可回放的部分结果。上一轮中列入本轮 `RemoveList` 的 Move 会标记为 `RemovedByRecompute=true`，在甘特图中以浅色虚线展示，并可通过“显示已移除 Move”开关隐藏；其余旧 Move 保持正常显示。该图是失败诊断结果，不代表重算已经成功。
+
 ## IOutputParams 全部字段
 
 | 字段 | 类型 | 子对象/说明 |

@@ -20823,7 +20823,7 @@ async function runPlan() {
       cancelled ? `$ \u6A21\u578B\u6B65\u8FDB\u8FD0\u884C\u5DF2\u53D6\u6D88` : `$ \u8FD0\u884C\u5931\u8D25\uFF1A${error.message || "\u672A\u77E5\u9519\u8BEF"}`,
       ...validationIssues,
       ...baselineError ? [baselineError.trim()] : [],
-      ...ganttReady ? ["  \u5931\u8D25 MoveList \u5DF2\u4FDD\u7559\uFF0C\u53EF\u70B9\u51FB\u201C\u6253\u5F00\u7518\u7279\u56FE\u201D\u67E5\u770B\u7EA2\u8272\u95EE\u9898 Move"] : [],
+      ...ganttReady ? ["  \u5DF2\u4FDD\u7559\u53EF\u56DE\u653E\u7684 MoveList\uFF1B\u88AB RemoveList \u53D6\u6D88\u7684\u52A8\u4F5C\u4F1A\u4EE5\u6D45\u8272\u6807\u8BB0\uFF0C\u53EF\u5728\u7518\u7279\u56FE\u4E2D\u663E\u793A\u6216\u9690\u85CF"] : [],
       ...logReady ? ["  \u590D\u73B0\u65E5\u5FD7\u5DF2\u751F\u6210\uFF0C\u53EF\u70B9\u51FB\u201C\u5BFC\u51FA\u590D\u73B0\u65E5\u5FD7\u201D"] : []
     ].join("\n"), true);
     document.getElementById("metricValidation").textContent = runResult?.metricsAvailable ? runResult.validation === "failed" ? "\u672A\u901A\u8FC7" : validationDisplay(runResult.validation) || "\u5931\u8D25" : "\u5931\u8D25";

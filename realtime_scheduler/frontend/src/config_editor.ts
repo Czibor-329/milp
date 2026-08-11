@@ -3186,7 +3186,7 @@ async function runPlan() {
       cancelled ? `$ 模型步进运行已取消` : `$ 运行失败：${error.message || "未知错误"}`,
       ...validationIssues,
       ...(baselineError ? [baselineError.trim()] : []),
-      ...(ganttReady ? ["  失败 MoveList 已保留，可点击“打开甘特图”查看红色问题 Move"] : []),
+      ...(ganttReady ? ["  已保留可回放的 MoveList；被 RemoveList 取消的动作会以浅色标记，可在甘特图中显示或隐藏"] : []),
       ...(logReady ? ["  复现日志已生成，可点击“导出复现日志”"] : []),
     ].join("\n"), true);
     document.getElementById("metricValidation").textContent = runResult?.metricsAvailable

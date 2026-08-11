@@ -2012,6 +2012,74 @@ def _segment_end(moves: Iterable[Mapping[str, Any]]) -> float:
     return max((float(move.get("EndTime") or 0.0) for move in moves), default=0.0)
 
 
+def _build_recompute_failure_output(
+    runtime: Any,
+    update: Mapping[str, Any],
+    requested_time: float,
+    reason: str,
+    error: Exception,
+) -> Dict[str, Any]:
+    """构造重算调用失败时仍可查看的已保留计划。
+
+    第二轮算法尚未返回新的 MoveList 时，当前代计划仍是上一轮算法的输出。
+    本轮 ``RemoveList`` 已明确取消其中哪些未启动 Move；因此甘特图只能保留
+    不在该列表中的旧 Move，不能把已取消的计划误展示为仍会执行。历史代次
+    Move 必须全部保留；若其 MoveID 恰好与当前代被取消的 Move 复用，它也会
+    被浅色标记，但不会从列表中删除。
+    """
+    removed_move_ids = {
+        int(move_id)
+        for move_id in (update.get("RemoveList") or [])
+        if isinstance(move_id, int) and not isinstance(move_id, bool)
+    }
+    active_move_ids = {
+        int(move["MoveID"])
+        for move in runtime.current_plan
+        if isinstance(move, Mapping)
+        and isinstance(move.get("MoveID"), int)
+        and not isinstance(move.get("MoveID"), bool)
+    }
+    output = runtime.combined_output()
+    preserved_moves: List[Dict[str, Any]] = []
+    for raw_move in output.get("MoveList") or []:
+        if not isinstance(raw_move, Mapping):
+            continue
+        move = deepcopy(dict(raw_move))
+        move_id = move.get("MoveID")
+        if (
+            isinstance(move_id, int)
+            and not isinstance(move_id, bool)
+            and move_id in active_move_ids
+            and move_id in removed_move_ids
+        ):
+            # 取消的旧动作同样是失败现场的一部分。前端将其浅色绘制，
+            # 并允许用户按需隐藏，避免误认为它仍属于可执行计划。
+            move["RemovedByRecompute"] = True
+        preserved_moves.append(move)
+    output["MoveList"] = preserved_moves
+    output["RecomputePoints"] = [
+        *deepcopy(list(output.get("RecomputePoints") or [])),
+        {
+            "Time": float(requested_time),
+            "EffectiveTime": float(requested_time),
+            "ScheduleStartTime": float(requested_time),
+            "RecoveryEndTime": float(requested_time),
+            "Index": len(list(output.get("RecomputePoints") or [])) + 1,
+            "Reason": reason,
+            "Status": "algorithm-error",
+        },
+    ]
+    output["Feedback"] = [
+        *deepcopy(list(output.get("Feedback") or [])),
+        {
+            "Level": "Error",
+            "Type": type(error).__name__,
+            "Message": str(error) or type(error).__name__,
+        },
+    ]
+    return output
+
+
 def _release_finished_load_ports(
     runtime: Any,
     build_state: BuildState,
@@ -2239,7 +2307,26 @@ def _execute_standard_algorithm(
                 requested_time,
             )
             round_started = time.perf_counter()
-            raw_output = run_update(update)
+            try:
+                raw_output = run_update(update)
+            except Exception as error:  # noqa: BLE001
+                cancelled_error_type = globals().get("SearchCancelledError")
+                if cancelled_error_type is not None and isinstance(error, cancelled_error_type):
+                    # 用户主动取消属于预期终止，不得伪装成算法失败快照。
+                    raise
+                failure_output = _build_recompute_failure_output(
+                    runtime,
+                    update,
+                    requested_time,
+                    reason,
+                    error,
+                )
+                reproduction.add("AlgOutput", failure_output, requested_time)
+                raise LoggedPlanError(
+                    f"{reason} 算法执行失败：{str(error) or type(error).__name__}",
+                    reproduction.entries,
+                    failure_output=failure_output,
+                ) from error
             elapsed_ms = (time.perf_counter() - round_started) * 1000.0
             output = _alg_output_info(raw_output)
             _ensure_algorithm_output(output, update)
@@ -2498,6 +2585,10 @@ def execute_plan(raw_plan: Mapping[str, Any]) -> Dict[str, Any]:
     cpu_started = time.thread_time() if hasattr(time, "thread_time") else time.process_time()
     try:
         result = _execute_plan(raw_plan, reproduction)
+    except LoggedPlanError:
+        # 多轮重算的算法调用失败可能已附带按 RemoveList 裁剪的旧计划；
+        # 不能再包装为普通异常，否则 /api/run 将丢失甘特图所需的结果。
+        raise
     except Exception as error:  # noqa: BLE001
         # 用户主动取消属于预期终止而非运行失败，原样向上传播，
         # 由 /api/run 返回 cancelled 标记。

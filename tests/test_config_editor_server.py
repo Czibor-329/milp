@@ -123,6 +123,60 @@ class FrontendTemplateTests(unittest.TestCase):
         self.assertIn("state.options = structuredClone(sessionSchedulingConfiguration.options)", script)
 
 
+class RecomputeFailureOutputTests(unittest.TestCase):
+    """验证重算算法异常时仍可供前端回放的部分结果。"""
+
+    def test_recompute_algorithm_error_keeps_only_moves_not_in_remove_list(self) -> None:
+        """重算调用报错时，诊断甘特图不得继续显示已取消的旧 Move。"""
+        class FakeRuntime:
+            """提供失败快照构造所需的最小运行时计划。"""
+
+            current_plan = [
+                {"MoveID": 11, "StartTime": 0, "EndTime": 5},
+                {"MoveID": 12, "StartTime": 5, "EndTime": 10},
+                {"MoveID": 13, "StartTime": 10, "EndTime": 15},
+            ]
+
+            @staticmethod
+            def combined_output() -> dict:
+                """模拟上一轮已拼接的甘特图数据。"""
+                return {
+                    "MoveList": [
+                        {"MoveID": 9, "StartTime": -5, "EndTime": 0},
+                        *FakeRuntime.current_plan,
+                    ],
+                    "Feedback": [{"Level": "Info", "Message": "首排完成"}],
+                    "RecomputePoints": [],
+                }
+
+        output = config_server._build_recompute_failure_output(
+            FakeRuntime(),
+            {"RemoveList": [12, 13]},
+            5.0,
+            "第 2 轮新增 Job",
+            RuntimeError("第二轮算法异常"),
+        )
+
+        self.assertEqual([9, 11, 12, 13], [move["MoveID"] for move in output["MoveList"]])
+        self.assertFalse(output["MoveList"][1].get("RemovedByRecompute", False))
+        self.assertTrue(output["MoveList"][2]["RemovedByRecompute"])
+        self.assertTrue(output["MoveList"][3]["RemovedByRecompute"])
+        self.assertEqual("algorithm-error", output["RecomputePoints"][-1]["Status"])
+        self.assertEqual("第二轮算法异常", output["Feedback"][-1]["Message"])
+
+    def test_gantt_viewer_marks_and_can_hide_removed_moves(self) -> None:
+        """甘特图应浅色显示重算取消 Move，并提供独立开关。"""
+        viewer = (
+            ROOT / "realtime_scheduler" / "frontend" / "movelist_gantt_viewer.html"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('id="showRemovedMovesToggle"', viewer)
+        self.assertIn("removedByRecompute: rec.RemovedByRecompute === true", viewer)
+        self.assertIn("showRemovedMoves: true", viewer)
+        self.assertIn("!rec.removedByRecompute", viewer)
+        self.assertIn('fillOpacity = bar.rec.removedByRecompute ? "0.24" : "1"', viewer)
+
+
 class ConfigEditorServerTests(unittest.TestCase):
     """验证设备选择、Route 引用和两次重算的统一输出。"""
 
