@@ -604,7 +604,9 @@
     .group-diverging-track i.loss { right: 50%; background: #d65c68; border-radius: 999px 0 0 999px; }
     .group-diverging-track i.tie { left: calc(50% - 2px); width: 4px; background: #65748a; }
     .group-analysis-table-wrap { border: 1px solid #d8e1ed; border-radius: 12px; background: #fff; }
-    .group-analysis-table-wrap summary { padding: 13px 15px; color: #253650; font-size: 12px; font-weight: 850; cursor: pointer; }
+    .group-analysis-table-wrap summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 15px; color: #253650; font-size: 12px; font-weight: 850; cursor: pointer; }
+    .group-analysis-export { flex: 0 0 auto; color: #0b5f4d; border-color: #bcd8cb; background: #ecf8f2; }
+    .group-analysis-export:hover { border-color: #75b79b; background: #e1f4ea; }
     .group-analysis-table-scroll { overflow: auto; border-top: 1px solid #e7edf4; }
     .group-analysis-table { width: 100%; border-collapse: collapse; font-size: 11px; white-space: nowrap; }
     .group-analysis-table th, .group-analysis-table td { padding: 10px 11px; border-bottom: 1px solid #edf1f5; color: #40516b; text-align: right; }

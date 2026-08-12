@@ -29,6 +29,8 @@ from typing import Any, Dict, Iterator, Mapping, Optional, Union
 JsonObject = Dict[str, Any]
 EXTERNAL_ENTRY_RELATIVE_PATH = Path("CT") / "infer" / "scheduler.py"
 PACKAGED_ENTRY_RELATIVE_PATH = Path("infer") / "scheduler.py"
+# 公司端按 ``src.infer.scheduler`` 约定的交付布局（如 HeteroGraph）。
+SRC_ENTRY_RELATIVE_PATH = Path("src") / "infer" / "scheduler.py"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ALGORITHM_ROOT = Path(
     os.environ.get("CT_ALGORITHM_ROOT", str(PROJECT_ROOT / "alg"))
@@ -264,9 +266,9 @@ def register_algorithm(
 def discover_other_algorithms() -> list[JsonObject]:
     """扫描 ``other_alg`` 一级子目录并返回可供前端选择的标准算法。
 
-    每个算法目录必须包含 ``CT/infer/scheduler.py`` 或
-    ``infer/scheduler.py``，目录名同时作为稳定算法 ID；已登记的
-    单文件算法也会一并出现在结果中。
+    每个算法目录必须包含 ``CT/infer/scheduler.py``、``infer/scheduler.py``
+    或 ``src/infer/scheduler.py`` 之一，目录名同时作为稳定算法 ID；已
+    登记的单文件算法也会一并出现在结果中。
 
     每次调用都重新扫描目录和登记清单；新增或删除算法包后刷新前端即可
     看到最新列表。
@@ -287,6 +289,7 @@ def discover_other_algorithms() -> list[JsonObject]:
                     for relative_path in (
                         EXTERNAL_ENTRY_RELATIVE_PATH,
                         PACKAGED_ENTRY_RELATIVE_PATH,
+                        SRC_ENTRY_RELATIVE_PATH,
                     )
                     if (root / relative_path).is_file()
                 ),
@@ -359,6 +362,20 @@ def _unload_previous_algorithm(entry_path: Path) -> None:
             sys.modules.pop(module_name, None)
     for namespace in ("CT", "CT.infer"):
         sys.modules.pop(namespace, None)
+    # ``src`` 布局（``src/infer/scheduler.py``）：算法创建的顶层 ``src``
+    # 包已按文件路径在开头卸载；平台内置 src 包（alg/src）必须保留，
+    # 只需移除加载时追加的算法目录，避免误删平台对 src.parse 等的引用。
+    # 无 __file__ 的算法 namespace 包在这里整包清理，防止残留。
+    if (entry_path / SRC_ENTRY_RELATIVE_PATH).is_file():
+        src_module = sys.modules.get("src")
+        if src_module is not None and getattr(src_module, "__path__", None):
+            algorithm_src_text = str(entry_path / "src")
+            src_path = src_module.__path__  # type: ignore[attr-defined]
+            while algorithm_src_text in src_path:
+                src_path.remove(algorithm_src_text)
+            if getattr(src_module, "__file__", None) is None:
+                for namespace in ("src", "src.infer"):
+                    sys.modules.pop(namespace, None)
     search_roots = (
         [entry_path.parent]
         if entry_path.is_file()
@@ -392,6 +409,23 @@ def _prepare_ct_namespace(root: Path) -> None:
     sys.modules["CT"] = namespace
 
 
+def _prepare_src_namespace(entry_path: Path) -> None:
+    """让公司端 ``src.infer.scheduler`` 布局在平台已加载顶层 ``src`` 包时可解析。
+
+    平台内置算法启动即占用顶层 ``src`` 包名（``alg/src``）。此时把算法目录
+    的 ``src/`` 追加到 ``src.__path__``，``src.infer`` 即可解析到算法自身，
+    同时 ``src.parse`` 等平台模块仍按原路径解析，互不干扰；无平台 ``src``
+    时按常规导入由 importlib 自动创建包，无需额外处理。
+    """
+    src_module = sys.modules.get("src")
+    if src_module is None or not getattr(src_module, "__path__", None):
+        return
+    algorithm_src_text = str(entry_path / "src")
+    src_path = src_module.__path__  # type: ignore[attr-defined]
+    if algorithm_src_text not in src_path:
+        src_path.append(algorithm_src_text)
+
+
 def _load_registered_file_module(file_path: Path) -> ModuleType:
     """加载登记的单文件算法模块（不要求 ``CT`` 包结构）。
 
@@ -414,7 +448,20 @@ def _load_registered_file_module(file_path: Path) -> ModuleType:
         spec.loader.exec_module(module)
     except Exception as error:  # noqa: BLE001
         sys.modules.pop(module_name, None)
-        raise RuntimeError(f"登记算法导入失败：{type(error).__name__}: {error}") from error
+        while parent_text in sys.path:
+            sys.path.remove(parent_text)
+        hint = ""
+        if isinstance(error, ImportError):
+            hint = (
+                "。提示：单文件登记只支持自包含源码；若文件通过相对导入"
+                "（from .xxx import …）依赖包内其他模块（如 function.py），"
+                "请把完整算法目录放到 alg/other_alg/<算法名>/ 下（含 "
+                "infer/scheduler.py 或 src/infer/scheduler.py 入口），"
+                "刷新页面后会自动发现"
+            )
+        raise RuntimeError(
+            f"登记算法导入失败：{type(error).__name__}: {error}{hint}"
+        ) from error
     _ENTRY_MODULE = module
     _ENTRY_ROOT = file_path
     _ENTRY_REVISION = _file_algorithm_revision(file_path)
@@ -446,6 +493,15 @@ def _load_entry_module() -> ModuleType:
         return _load_registered_file_module(entry_path)
     _purge_algorithm_bytecode(entry_path)
 
+    # 入口布局优先级与 discover_other_algorithms 保持一致：
+    # CT/infer/scheduler.py 与 infer/scheduler.py 都通过 CT.infer.scheduler
+    # 导入（后者由 _prepare_ct_namespace 合成 CT 命名空间）；src/infer/
+    # scheduler.py 布局直接按公司端约定的 src.infer.scheduler 导入。
+    use_src_layout = (
+        not (entry_path / EXTERNAL_ENTRY_RELATIVE_PATH).is_file()
+        and not (entry_path / PACKAGED_ENTRY_RELATIVE_PATH).is_file()
+        and (entry_path / SRC_ENTRY_RELATIVE_PATH).is_file()
+    )
     search_roots = [entry_path]
     if (entry_path / "CT").is_dir():
         search_roots.insert(0, entry_path / "CT")
@@ -453,9 +509,14 @@ def _load_entry_module() -> ModuleType:
         search_root_text = str(search_root)
         if search_root_text not in sys.path:
             sys.path.insert(0, search_root_text)
-    _prepare_ct_namespace(entry_path)
+    if use_src_layout:
+        _prepare_src_namespace(entry_path)
+    else:
+        _prepare_ct_namespace(entry_path)
     importlib.invalidate_caches()
-    module = importlib.import_module("CT.infer.scheduler")
+    module = importlib.import_module(
+        "src.infer.scheduler" if use_src_layout else "CT.infer.scheduler"
+    )
     module_path = Path(str(getattr(module, "__file__", ""))).resolve()
     if entry_path not in module_path.parents:
         raise RuntimeError(f"标准算法入口加载路径异常：{module_path}")

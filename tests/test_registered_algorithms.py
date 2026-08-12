@@ -216,19 +216,40 @@ class RegisteredAlgorithmExecutionTests(RegisteredAlgorithmStoreTestCase):
                 algorithm_interface.init({})
         self.assertIn("导入失败", str(caught.exception))
 
+    def test_relative_import_failure_gets_guidance_hint(self) -> None:
+        """入口转发文件（依赖包内模块）登记失败时给出目录式算法提示。"""
+        source = (
+            "from .function import init_framework, update_framework\n"
+            "def init(topo_data_json):\n"
+            "    return init_framework(topo_data_json)\n"
+            "def update(tool_json, algorithm=None):\n"
+            "    return update_framework(tool_json)\n"
+        )
+        item = algorithm_interface.register_algorithm(
+            source.encode("utf-8"), "scheduler.py", "转发入口"
+        )
+        with algorithm_interface.session(item["id"]):
+            with self.assertRaises(RuntimeError) as caught:
+                algorithm_interface.init({})
+        message = str(caught.exception)
+        self.assertIn("导入失败", message)
+        self.assertIn("alg/other_alg", message)
+        self.assertIn("src/infer/scheduler.py", message)
+
     def test_same_directory_dependency_is_unloaded_on_switch(self) -> None:
         """切换登记算法后，上一算法的同目录依赖模块必须从 sys.modules 卸载。"""
+        helper_module_name = "registered_alg_unique_helper_8f3a"
         first_source = (
-            "import helper\n"
+            f"import {helper_module_name}\n"
             "def init(topo_data_json):\n"
             "    return None\n"
             "def update(tool_json, algorithm=None):\n"
-            "    return {'MoveList': [], 'Feedback': [], 'Value': helper.VALUE}\n"
+            f"    return {{'MoveList': [], 'Feedback': [], 'Value': {helper_module_name}.VALUE}}\n"
         )
         first = algorithm_interface.register_algorithm(
             first_source.encode("utf-8"), "first_alg.py", "first"
         )
-        helper_path = Path(first["path"]).parent / "helper.py"
+        helper_path = Path(first["path"]).parent / f"{helper_module_name}.py"
         helper_path.write_text("VALUE = 1\n", encoding="utf-8")
         second = algorithm_interface.register_algorithm(
             "def init(topo_data_json):\n    return None\n"
@@ -242,11 +263,11 @@ class RegisteredAlgorithmExecutionTests(RegisteredAlgorithmStoreTestCase):
             algorithm_interface.init({})
             output = algorithm_interface.update({})
         self.assertEqual(output["Value"], 1)
-        self.assertIn("helper", sys.modules)
+        self.assertIn(helper_module_name, sys.modules)
         with algorithm_interface.session(second["id"]):
             algorithm_interface.init({})
             algorithm_interface.update({})
-        self.assertNotIn("helper", sys.modules)
+        self.assertNotIn(helper_module_name, sys.modules)
 
 
 class RegisteredAlgorithmHttpTests(RegisteredAlgorithmStoreTestCase):

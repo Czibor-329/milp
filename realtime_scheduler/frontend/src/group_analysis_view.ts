@@ -97,6 +97,38 @@ function cpuChart(summary: TestGroupPerformanceSummary): string {
   }).join("") || '<p class="group-analysis-empty">没有 CPU Time 数据。</p>';
 }
 
+function csvEscape(value: string): string {
+  return /[",\r\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+}
+
+/** 将逐测试完整指标表格序列化为 CSV 文本（含中文表头，Excel 可直接打开）。 */
+export function testGroupSummaryCsv(summary: TestGroupPerformanceSummary): string {
+  const headers = [
+    "测试", "Makespan", "Baseline", "改善", "瓶颈", "利用率", "CPU Time",
+    "吞吐", "出站 CV", "加工腔驻留均值", "机器手驻留均值",
+    "系统停留均值", "系统停留 CV", "校验",
+  ];
+  const rows = summary.cases.map((item, index) => [
+    caseLabel(item, index),
+    finiteText(item.makespan, 2, " s"),
+    finiteText(item.baselineMakespan, 2, " s"),
+    item.improvementPercent === null
+      ? "—"
+      : `${item.improvementPercent > 0 ? "+" : ""}${item.improvementPercent.toFixed(2)}%`,
+    `${item.bottleneckResource || "—"}${item.bottleneckCandidateCount > 1 ? ` +${item.bottleneckCandidateCount - 1} 个候选` : ""}`,
+    percentText(item.bottleneckUtilization, true),
+    durationText(item.cpuTimeMs),
+    finiteText(item.throughputPerHour, 1, " 片/h"),
+    finiteText(item.departureIntervalCv, 2),
+    finiteText(item.processChamberDwellMeanSeconds, 2, " s"),
+    finiteText(item.robotWaferDwellMeanSeconds, 2, " s"),
+    finiteText(item.waferSystemResidenceMeanSeconds, 2, " s"),
+    finiteText(item.waferSystemResidenceCv, 2),
+    item.validationPassed ? "通过" : (item.validation || item.status || "—"),
+  ].map(csvEscape));
+  return [headers.map(csvEscape).join(","), ...rows.map(row => row.join(","))].join("\r\n");
+}
+
 function resultTable(summary: TestGroupPerformanceSummary): string {
   return summary.cases.map((item, index) => `
     <tr>
@@ -154,7 +186,7 @@ export function renderTestGroupAnalysis(
       </article>
     </div>
     <details class="group-analysis-table-wrap">
-      <summary>查看逐测试完整指标</summary>
+      <summary><span>查看逐测试完整指标</span><button type="button" class="btn small group-analysis-export" data-group-export-csv>导出 CSV</button></summary>
       <div class="group-analysis-table-scroll">
         <table class="group-analysis-table">
           <thead><tr><th>测试</th><th>Makespan</th><th>Baseline</th><th>改善</th><th>瓶颈</th><th>利用率</th><th>CPU Time</th><th>吞吐</th><th>出站 CV</th><th>加工腔驻留均值</th><th>机器手驻留均值</th><th>系统停留均值</th><th>系统停留 CV</th><th>校验</th></tr></thead>

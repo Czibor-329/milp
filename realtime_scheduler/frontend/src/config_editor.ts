@@ -16,7 +16,7 @@ import {
   requestTestGroupAnalysis,
 } from "./api_client";
 import { createVisualizationWorkspace, detectDeviceTopologyLayout } from "./workspace_visualizer";
-import { renderTestGroupAnalysis } from "./group_analysis_view";
+import { renderTestGroupAnalysis, testGroupSummaryCsv } from "./group_analysis_view";
 import { createDocumentationView } from "./documentation_view";
 import {
   CJOB_TYPES,
@@ -3550,11 +3550,34 @@ async function showTestGroupAnalysis() {
   visualizationWorkspace.showGroupAnalysis(panelMarkup);
   switchTab("workspace");
   const panel = document.getElementById("testGroupAnalysisPanel");
+  bindTestGroupExport(panel, summary, result.group || state.activeTestGroup || "当前测试组");
   panel.scrollIntoView({ behavior: "smooth", block: "start" });
   } finally {
     button.disabled = false;
     button.textContent = originalText;
   }
+}
+
+/** 绑定测试组逐测试指标面板的“导出 CSV”按钮，生成 CSV 并触发浏览器下载。 */
+function bindTestGroupExport(panel, summary, groupName) {
+  const button = panel?.querySelector("[data-group-export-csv]");
+  if (!button) return;
+  button.addEventListener("click", (event) => {
+    // 阻止事件冒泡到 <summary>，避免点击导出时展开/收起表格。
+    event.preventDefault();
+    event.stopPropagation();
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    const safeName = String(groupName || "测试组").replace(/[\\/:*?"<>|]/g, "_");
+    const blob = new Blob([`\uFEFF${testGroupSummaryCsv(summary)}`], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `测试组指标-${safeName}-${stamp}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  });
 }
 
 /** 实时绘制总体进度和每个测试的排队、运行、成功、失败状态。 */

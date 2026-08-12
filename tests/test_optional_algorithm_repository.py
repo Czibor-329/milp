@@ -23,21 +23,44 @@ class OptionalAlgorithmRepositoryTests(unittest.TestCase):
         *,
         packaged_root: Path,
     ) -> subprocess.CompletedProcess[str]:
-        """在新进程中屏蔽本地 alg，并执行一段服务端断言脚本。"""
+        """在新进程中屏蔽本地 alg，并执行一段服务端断言脚本。
+
+        登记数据目录同样被重定向到临时目录，使测试不依赖真实
+        ``data/registered_algorithms.json`` 中已存在的登记条目。
+        """
         environment = os.environ.copy()
         environment["CT_ALGORITHM_ROOT"] = str(
             packaged_root.parent / "missing-private-alg"
         )
         environment["CT_OTHER_ALGORITHM_ROOT"] = str(packaged_root)
-        return subprocess.run(
-            [sys.executable, "-c", textwrap.dedent(script)],
-            cwd=ROOT,
-            env=environment,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
+        # 屏蔽本机代理：测试直连 127.0.0.1，避免 HTTP_PROXY 等环境变量
+        # 把 /api/health 请求转发到代理端口导致 502。
+        environment["NO_PROXY"] = "*"
+        environment["no_proxy"] = "*"
+        with tempfile.TemporaryDirectory() as registry_directory:
+            environment["CT_REGISTERED_ALGORITHMS_DATA_DIR"] = registry_directory
+            isolation = (
+                "import os\n"
+                "from pathlib import Path\n"
+                "import realtime_scheduler.algorithm_interface as _algorithm_interface\n"
+                "_registered_data = Path(os.environ['CT_REGISTERED_ALGORITHMS_DATA_DIR'])\n"
+                "_algorithm_interface.REGISTERED_ALGORITHMS_FILE = (\n"
+                "    _registered_data / 'registered_algorithms.json'\n"
+                ")\n"
+                "_algorithm_interface.REGISTERED_ALGORITHMS_DIR = (\n"
+                "    _registered_data / 'registered_algorithms'\n"
+                ")\n"
+            )
+            completed = subprocess.run(
+                [sys.executable, "-c", isolation + textwrap.dedent(script)],
+                cwd=ROOT,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+        return completed
 
     def test_server_imports_without_any_algorithm(self) -> None:
         """算法目录为空时服务端模块应正常导入，并把内置策略标为不可用。"""
@@ -117,6 +140,213 @@ class OptionalAlgorithmRepositoryTests(unittest.TestCase):
                     output = update({})
                 assert output["MoveList"] == []
                 assert output["Feedback"] == []
+                """,
+                packaged_root=packaged_root,
+            )
+        self.assertEqual(
+            0,
+            completed.returncode,
+            completed.stdout + completed.stderr,
+        )
+
+    def test_discovers_and_runs_src_layout_algorithm(self) -> None:
+        """公司端 ``src/infer/scheduler.py`` 布局可被自动发现并调用。
+
+        入口转发文件按真实算法惯例先尝试绝对导入 ``src.infer.function``，
+        再回退到相对导入 ``.function``；两种写法都必须在平台下可用。
+        """
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            packaged_root = Path(temporary_directory) / "other_alg"
+            algorithm_root = packaged_root / "SrcAlgo"
+            src_infer = algorithm_root / "src" / "infer"
+            src_infer.mkdir(parents=True)
+            (algorithm_root / "src" / "__init__.py").write_text("", encoding="utf-8")
+            (algorithm_root / "src" / "infer" / "__init__.py").write_text(
+                "", encoding="utf-8"
+            )
+            (src_infer / "function.py").write_text(
+                "def init_framework(topo_data):\n    return None\n"
+                "def update_framework(tool_json):\n"
+                "    return '{\"MoveList\": [], \"Feedback\": []}'\n",
+                encoding="utf-8",
+            )
+            (src_infer / "scheduler.py").write_text(
+                "try:\n"
+                "    from src.infer.function import init_framework, update_framework\n"
+                "except ModuleNotFoundError:\n"
+                "    from .function import init_framework, update_framework\n"
+                "def init(topo_data):\n    return init_framework(topo_data)\n"
+                "def update(tool_json):\n    return update_framework(tool_json)\n",
+                encoding="utf-8",
+            )
+            completed = self._run_isolated_server_script(
+                """
+                import sys
+                import realtime_scheduler.server as server
+                from realtime_scheduler.algorithm_interface import (
+                    init,
+                    session,
+                    update,
+                )
+
+                algorithms = server.discover_other_algorithms()
+                assert [item["id"] for item in algorithms] == ["SrcAlgo"]
+                assert algorithms[0]["entry"] == "src/infer/scheduler.py"
+                with session("srcalgo"):
+                    init({})
+                    output = update({})
+                assert output["MoveList"] == []
+                assert output["Feedback"] == []
+                """,
+                packaged_root=packaged_root,
+            )
+        self.assertEqual(
+            0,
+            completed.returncode,
+            completed.stdout + completed.stderr,
+        )
+
+    def test_src_layout_algorithm_coexists_with_platform_src_package(self) -> None:
+        """平台已加载内置 src 包时，src 布局算法仍可加载且互不干扰。
+
+        真实平台启动即 ``from src.parse import …`` 占用顶层 ``src`` 包名
+        （alg/src）；算法目录的 src/ 通过追加 ``src.__path__`` 参与解析，
+        不能替换或删除平台 src 包对象。
+        """
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            packaged_root = Path(temporary_directory) / "other_alg"
+            src_infer = packaged_root / "SrcAlgo" / "src" / "infer"
+            src_infer.mkdir(parents=True)
+            (packaged_root / "SrcAlgo" / "src" / "__init__.py").write_text(
+                "", encoding="utf-8"
+            )
+            (packaged_root / "SrcAlgo" / "src" / "infer" / "__init__.py").write_text(
+                "", encoding="utf-8"
+            )
+            (src_infer / "function.py").write_text(
+                "def init_framework(topo_data):\n    return None\n"
+                "def update_framework(tool_json):\n"
+                "    return '{\"MoveList\": [], \"Feedback\": []}'\n",
+                encoding="utf-8",
+            )
+            (src_infer / "scheduler.py").write_text(
+                "from src.infer.function import init_framework, update_framework\n"
+                "def init(topo_data):\n    return init_framework(topo_data)\n"
+                "def update(tool_json):\n    return update_framework(tool_json)\n",
+                encoding="utf-8",
+            )
+            plain_entry = packaged_root / "Plain" / "infer" / "scheduler.py"
+            plain_entry.parent.mkdir(parents=True)
+            plain_entry.write_text(
+                "def init(payload):\n    return None\n"
+                "def update(payload):\n"
+                "    return '{\"MoveList\": []}'\n",
+                encoding="utf-8",
+            )
+            completed = self._run_isolated_server_script(
+                """
+                import os
+                import sys
+                import tempfile
+                import types
+                from pathlib import Path
+
+                # 模拟平台内置算法：启动即占用顶层 src 包（alg/src）。
+                with tempfile.TemporaryDirectory() as fake_alg_text:
+                    fake_src = Path(fake_alg_text) / "src"
+                    fake_src.mkdir()
+                    (fake_src / "__init__.py").write_text("", encoding="utf-8")
+                    platform_src = types.ModuleType("src")
+                    platform_src.__package__ = "src"
+                    platform_src.__file__ = str(fake_src / "__init__.py")
+                    platform_src.__path__ = [str(fake_src)]
+                    sys.modules["src"] = platform_src
+
+                    from realtime_scheduler.algorithm_interface import (
+                        init,
+                        session,
+                        update,
+                    )
+
+                    with session("srcalgo"):
+                        init({})
+                        output = update({})
+                    assert output["MoveList"] == []
+                    # 平台 src 包对象与原始路径条目必须保留。
+                    assert sys.modules["src"] is platform_src
+                    algorithm_src_text = str(
+                        Path(os.environ["CT_OTHER_ALGORITHM_ROOT"])
+                        / "SrcAlgo" / "src"
+                    )
+                    assert algorithm_src_text in sys.modules["src"].__path__
+                    assert str(fake_src) in sys.modules["src"].__path__
+
+                    # 切换算法后，算法 src 目录条目被移除且平台包不受影响。
+                    with session("plain"):
+                        init({})
+                    assert sys.modules["src"] is platform_src
+                    assert algorithm_src_text not in sys.modules["src"].__path__
+                    assert str(fake_src) in sys.modules["src"].__path__
+                """,
+                packaged_root=packaged_root,
+            )
+        self.assertEqual(
+            0,
+            completed.returncode,
+            completed.stdout + completed.stderr,
+        )
+
+    def test_switching_away_from_src_layout_unloads_src_package(self) -> None:
+        """从 src 布局算法切换到普通布局后，sys.modules 不留 src 残留。"""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            packaged_root = Path(temporary_directory) / "other_alg"
+            src_infer = packaged_root / "SrcAlgo" / "src" / "infer"
+            src_infer.mkdir(parents=True)
+            (packaged_root / "SrcAlgo" / "src" / "__init__.py").write_text(
+                "", encoding="utf-8"
+            )
+            (packaged_root / "SrcAlgo" / "src" / "infer" / "__init__.py").write_text(
+                "", encoding="utf-8"
+            )
+            (src_infer / "function.py").write_text(
+                "def init_framework(topo_data):\n    return None\n"
+                "def update_framework(tool_json):\n"
+                "    return '{\"MoveList\": []}'\n",
+                encoding="utf-8",
+            )
+            (src_infer / "scheduler.py").write_text(
+                "from src.infer.function import init_framework, update_framework\n"
+                "def init(topo_data):\n    return init_framework(topo_data)\n"
+                "def update(tool_json):\n    return update_framework(tool_json)\n",
+                encoding="utf-8",
+            )
+            plain_entry = packaged_root / "Plain" / "infer" / "scheduler.py"
+            plain_entry.parent.mkdir(parents=True)
+            plain_entry.write_text(
+                "def init(payload):\n    return None\n"
+                "def update(payload):\n"
+                "    return '{\"MoveList\": []}'\n",
+                encoding="utf-8",
+            )
+            completed = self._run_isolated_server_script(
+                """
+                import sys
+                from realtime_scheduler.algorithm_interface import (
+                    init,
+                    session,
+                    update,
+                )
+
+                with session("srcalgo"):
+                    init({})
+                    update({})
+                assert "src" in sys.modules and "src.infer" in sys.modules
+                with session("plain"):
+                    init({})
+                    update({})
+                assert "src" not in sys.modules
+                assert "src.infer" not in sys.modules
+                assert "src.infer.scheduler" not in sys.modules
                 """,
                 packaged_root=packaged_root,
             )

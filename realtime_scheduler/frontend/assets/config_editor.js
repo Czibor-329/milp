@@ -2942,6 +2942,44 @@ function cpuChart(summary) {
     </div>`;
   }).join("") || '<p class="group-analysis-empty">\u6CA1\u6709 CPU Time \u6570\u636E\u3002</p>';
 }
+function csvEscape(value) {
+  return /[",\r\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+}
+function testGroupSummaryCsv(summary) {
+  const headers = [
+    "\u6D4B\u8BD5",
+    "Makespan",
+    "Baseline",
+    "\u6539\u5584",
+    "\u74F6\u9888",
+    "\u5229\u7528\u7387",
+    "CPU Time",
+    "\u541E\u5410",
+    "\u51FA\u7AD9 CV",
+    "\u52A0\u5DE5\u8154\u9A7B\u7559\u5747\u503C",
+    "\u673A\u5668\u624B\u9A7B\u7559\u5747\u503C",
+    "\u7CFB\u7EDF\u505C\u7559\u5747\u503C",
+    "\u7CFB\u7EDF\u505C\u7559 CV",
+    "\u6821\u9A8C"
+  ];
+  const rows = summary.cases.map((item, index) => [
+    caseLabel(item, index),
+    finiteText(item.makespan, 2, " s"),
+    finiteText(item.baselineMakespan, 2, " s"),
+    item.improvementPercent === null ? "\u2014" : `${item.improvementPercent > 0 ? "+" : ""}${item.improvementPercent.toFixed(2)}%`,
+    `${item.bottleneckResource || "\u2014"}${item.bottleneckCandidateCount > 1 ? ` +${item.bottleneckCandidateCount - 1} \u4E2A\u5019\u9009` : ""}`,
+    percentText(item.bottleneckUtilization, true),
+    durationText(item.cpuTimeMs),
+    finiteText(item.throughputPerHour, 1, " \u7247/h"),
+    finiteText(item.departureIntervalCv, 2),
+    finiteText(item.processChamberDwellMeanSeconds, 2, " s"),
+    finiteText(item.robotWaferDwellMeanSeconds, 2, " s"),
+    finiteText(item.waferSystemResidenceMeanSeconds, 2, " s"),
+    finiteText(item.waferSystemResidenceCv, 2),
+    item.validationPassed ? "\u901A\u8FC7" : item.validation || item.status || "\u2014"
+  ].map(csvEscape));
+  return [headers.map(csvEscape).join(","), ...rows.map((row) => row.join(","))].join("\r\n");
+}
 function resultTable(summary) {
   return summary.cases.map((item, index) => `
     <tr>
@@ -2994,7 +3032,7 @@ function renderTestGroupAnalysis(summary, groupName) {
       </article>
     </div>
     <details class="group-analysis-table-wrap">
-      <summary>\u67E5\u770B\u9010\u6D4B\u8BD5\u5B8C\u6574\u6307\u6807</summary>
+      <summary><span>\u67E5\u770B\u9010\u6D4B\u8BD5\u5B8C\u6574\u6307\u6807</span><button type="button" class="btn small group-analysis-export" data-group-export-csv>\u5BFC\u51FA CSV</button></summary>
       <div class="group-analysis-table-scroll">
         <table class="group-analysis-table">
           <thead><tr><th>\u6D4B\u8BD5</th><th>Makespan</th><th>Baseline</th><th>\u6539\u5584</th><th>\u74F6\u9888</th><th>\u5229\u7528\u7387</th><th>CPU Time</th><th>\u541E\u5410</th><th>\u51FA\u7AD9 CV</th><th>\u52A0\u5DE5\u8154\u9A7B\u7559\u5747\u503C</th><th>\u673A\u5668\u624B\u9A7B\u7559\u5747\u503C</th><th>\u7CFB\u7EDF\u505C\u7559\u5747\u503C</th><th>\u7CFB\u7EDF\u505C\u7559 CV</th><th>\u6821\u9A8C</th></tr></thead>
@@ -21167,11 +21205,31 @@ async function showTestGroupAnalysis() {
     visualizationWorkspace.showGroupAnalysis(panelMarkup);
     switchTab("workspace");
     const panel = document.getElementById("testGroupAnalysisPanel");
+    bindTestGroupExport(panel, summary, result.group || state.activeTestGroup || "\u5F53\u524D\u6D4B\u8BD5\u7EC4");
     panel.scrollIntoView({ behavior: "smooth", block: "start" });
   } finally {
     button.disabled = false;
     button.textContent = originalText;
   }
+}
+function bindTestGroupExport(panel, summary, groupName) {
+  const button = panel?.querySelector("[data-group-export-csv]");
+  if (!button) return;
+  button.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const stamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    const safeName = String(groupName || "\u6D4B\u8BD5\u7EC4").replace(/[\\/:*?"<>|]/g, "_");
+    const blob = new Blob([`\uFEFF${testGroupSummaryCsv(summary)}`], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `\u6D4B\u8BD5\u7EC4\u6307\u6807-${safeName}-${stamp}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  });
 }
 function showBatchProgress(result) {
   const completed = Number(result.completed || 0), total = Number(result.testCount || result.items?.length || 0);
