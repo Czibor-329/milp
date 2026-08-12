@@ -62,6 +62,7 @@ npm run build
 - `启发式`：使用默认实时排程器。
 - `LoadLock 管理器`：Heuristic 默认共用 Petri-ETA 管理器；上层策略只决定发哪片和工艺顺序，管理器在 Petri 安全候选内按动态完成时刻绑定 LA/LB。
 - `other_alg 标准算法`：自动扫描算法仓库 `alg/other_alg/<算法名>`，通过包内正式 `CT.infer.scheduler.init/update` 入口运行。每次重算前使用算法仓库的状态回放能力生成全量物料、机台、机器人快照以及 `RemoveList`，支持连续多轮重算；结果中的 `updates` 保留每次实际发送的数据。
+- `添加算法`：策略面板上的「＋ 添加算法」按钮用于登记单个 Python 文件（管理员可见）。文件只需在顶层定义 `init` 和 `update` 两个函数，不要求 `CT/infer/scheduler.py` 结构；登记信息与源文件保存在 `data/registered_algorithms.json` 与 `data/registered_algorithms/` 下，重启保留。登记后刷新页面即出现在策略列表，与 `other_alg` 算法共用同一套标准调用。
 - `跳过输出校验`：运行策略面板可勾选“跳过输出校验”，此时不再对 MoveList 做平台侧状态校验（首排与重算均跳过），直接展示算法原始输出，结果校验状态标记为 `skipped`；批量运行同样生效。
 
 本地算法列表不在前端写死，而是由算法仓库根目录的 `algorithms.json` 控制。

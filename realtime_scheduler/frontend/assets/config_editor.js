@@ -20645,6 +20645,34 @@ function validationDisplay(value) {
   if (value === "skipped") return "\u8DF3\u8FC7";
   return value ? String(value) : "";
 }
+async function registerAlgorithmFile(file) {
+  const content = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = String(reader.result || "");
+      const separatorIndex = dataUrl.indexOf(",");
+      resolve(separatorIndex >= 0 ? dataUrl.slice(separatorIndex + 1) : "");
+    };
+    reader.onerror = () => reject(new Error("\u8BFB\u53D6\u7B97\u6CD5\u6587\u4EF6\u5931\u8D25"));
+    reader.readAsDataURL(file);
+  });
+  if (!content) throw new Error("\u8BFB\u53D6\u7B97\u6CD5\u6587\u4EF6\u5931\u8D25");
+  const response = await fetch("/api/algorithms/register", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ filename: file.name, content })
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok || !result?.ok) {
+    throw new Error(result?.error || `\u670D\u52A1\u8FD4\u56DE ${response.status}`);
+  }
+  state.strategy = result.algorithm?.strategy || state.strategy;
+  await checkService();
+  setWorkspaceStatus(
+    `\u5DF2\u767B\u8BB0\u7B97\u6CD5\u201C${result.algorithm?.name || file.name}\u201D\uFF0C\u7B56\u7565 ${state.strategy} \u5DF2\u9009\u4E2D\uFF1B\u5237\u65B0\u9875\u9762\u540E\u4ECD\u4F1A\u4FDD\u7559`,
+    "saved"
+  );
+}
 function renderOtherAlgorithmOptions(algorithms) {
   state.availableAlgorithms = Array.isArray(algorithms) ? algorithms : [];
   const container = document.getElementById("otherAlgorithmOptions");
@@ -21684,6 +21712,15 @@ document.getElementById("deviceFile").addEventListener("change", (event) => load
   writeTerminal(`$ \u8BBE\u5907\u8BFB\u53D6\u5931\u8D25
   ${error.message}`, true);
 }));
+document.getElementById("addAlgorithmButton").addEventListener("click", () => document.getElementById("addAlgorithmFileInput").click());
+document.getElementById("addAlgorithmFileInput").addEventListener("change", (event) => {
+  const input = event.currentTarget;
+  const file = input instanceof HTMLInputElement ? input.files?.[0] : null;
+  if (input instanceof HTMLInputElement) input.value = "";
+  if (!file) return;
+  registerAlgorithmFile(file).catch((error) => writeTerminal(`$ \u6DFB\u52A0\u7B97\u6CD5\u5931\u8D25
+  ${error.message || "\u672A\u77E5\u9519\u8BEF"}`, true));
+});
 document.getElementById("deviceSelect").addEventListener("change", (event) => (async () => {
   if (state.dirty) await saveCurrentTest(true);
   if (state.deviceTimingDirty) await saveDeviceTiming();

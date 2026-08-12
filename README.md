@@ -135,3 +135,26 @@ $env:CT_OTHER_ALGORITHM_ROOT = "D:\path\to\alg\other_alg"
 
 `CT_OTHER_ALGORITHM_ROOT` 只在需要将外部算法存放到非默认位置时设置。
 
+### 通过页面登记单个算法文件
+
+不满足目录包结构、只有单个 Python 文件的外部算法，可以在页面「运行策略」
+面板点击「＋ 添加算法」，选择包含 `init` 和 `update` 两个函数的 `.py` 文件
+即可登记。文件不要求放在 `alg/` 下，也不需要 `CT/infer/scheduler.py`
+结构：
+
+```python
+def init(topo_data_json):
+    ...
+
+def update(tool_json, algorithm=None):
+    ...
+    return output_json
+```
+
+登记会校验文件必须在顶层定义 `init` 和 `update` 两个函数（只做语法与
+函数检查，不执行源码）；通过后源文件复制到 `realtime_scheduler/data/
+registered_algorithms/<算法名>/` 下，登记信息写入 `realtime_scheduler/data/
+registered_algorithms.json`。这两处都在 Git 之外且重启保留，因此登记是
+一次性的——刷新页面后新算法就会出现在策略列表里，之后与 `other_alg`
+目录算法同样通过 `init/update` 标准接口调用。登记操作需要管理员权限。
+

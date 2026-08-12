@@ -16,6 +16,7 @@ realtime_scheduler 目录中。批处理、Baseline 与并发运行状态由 bat
 from __future__ import annotations
 
 import argparse
+import base64
 import getpass
 import hashlib
 from io import BytesIO
@@ -98,6 +99,7 @@ if not BUILTIN_ALGORITHM_AVAILABLE:
 from realtime_scheduler.algorithm_interface import (
     discover_other_algorithms,
     init as algorithm_init,
+    register_algorithm,
     session as algorithm_session,
     update as algorithm_update,
 )
@@ -166,6 +168,8 @@ AUTH_REQUIRED = os.environ.get("CT_REQUIRE_AUTH", "").strip().lower() in {
     "on",
 }
 MAX_REQUEST_BYTES = 12 * 1024 * 1024
+# 登记算法请求以 base64 传输源码，放宽到 32MB（约 24MB 原始文件）。
+MAX_REGISTERED_ALGORITHM_BYTES = 32 * 1024 * 1024
 MAX_CHECKPOINT_BYTES = 512 * 1024 * 1024
 MAX_SAVED_RESULTS = 8
 MAX_SAVED_BATCH_RUNS = 8
@@ -2158,7 +2162,18 @@ def _execute_standard_algorithm(
         strategy = f"other_alg:{algorithm_id}"
         backend = f"other_alg/{algorithm_id}"
         display_name = str(algorithm_id)
-        entry_name = "CT.infer.scheduler.init/update"
+        discovered_entry = next(
+            (
+                item for item in discover_other_algorithms()
+                if str(item.get("id") or "").casefold() == str(algorithm_id).casefold()
+            ),
+            None,
+        )
+        entry_name = (
+            f"{str(discovered_entry.get('entry') or 'scheduler.py')} init/update"
+            if discovered_entry is not None
+            else "CT.infer.scheduler.init/update"
+        )
         session_context = algorithm_session(str(algorithm_id))
         initialize = algorithm_init
         run_update = algorithm_update
@@ -4634,6 +4649,9 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                 HTTPStatus.UNAUTHORIZED,
             )
             return
+        if path == "/api/algorithms/register":
+            self._handle_register_algorithm()
+            return
         if path == "/api/search-control":
             # search-control 可暂停求解或指定实际执行的动作，需要登录保护。
             try:
@@ -5285,6 +5303,47 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
         """删除当前会话令牌并返回成功。"""
         _auth.destroy_session(self._request_token())
         self._send_json({"ok": True})
+
+    def _handle_register_algorithm(self) -> None:
+        """登记管理员上传的包含 ``init/update`` 的单文件外部算法。
+
+        请求体为 JSON：``filename`` 为原始文件名，``content`` 为源码的
+        base64 文本，``name`` 为可选的显示名。登记结果永久保存在本地
+        data 目录，刷新页面后算法卡片即可使用。
+        """
+        if self._require_admin() is None:
+            self._send_json(
+                {"ok": False, "error": "仅管理员可添加算法"},
+                HTTPStatus.FORBIDDEN,
+            )
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            if length <= 0 or length > MAX_REGISTERED_ALGORITHM_BYTES:
+                raise ValueError("请求为空或超过大小限制")
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            if not isinstance(payload, Mapping):
+                raise ValueError("请求体必须是 JSON 对象")
+            filename = str(payload.get("filename") or "").strip()
+            content = base64.b64decode(str(payload.get("content") or ""), validate=True)
+            name = str(payload.get("name") or "").strip() or None
+            algorithm = register_algorithm(content, filename, name)
+            self._send_json({"ok": True, "algorithm": algorithm})
+        except (ValueError, TypeError, UnicodeDecodeError) as error:
+            self._send_json(
+                {"ok": False, "error": str(error)},
+                HTTPStatus.BAD_REQUEST,
+            )
+        except OSError as error:
+            self._send_json(
+                {"ok": False, "error": f"保存算法失败：{error}"},
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+        except Exception as error:  # noqa: BLE001
+            self._send_json(
+                {"ok": False, "error": f"登记算法失败：{error}"},
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
 
     def log_message(self, format_string: str, *args: Any) -> None:
         """保留简洁的本地访问日志。"""
