@@ -21198,6 +21198,13 @@ function showBatchProgress(result) {
     `  \u7B49\u5F85: ${(result.items || []).filter((item) => item.status === "queued").length} \xB7 \u8FD0\u884C\u4E2D: ${(result.items || []).filter((item) => item.status === "running").length} \xB7 \u6210\u529F: ${result.succeeded || 0} \xB7 \u5931\u8D25: ${result.failed || 0} \xB7 \u7EC8\u6B62: ${result.cancelled || 0}`
   ].join("\n"));
 }
+function batchItemErrorText(item) {
+  const baseline = item.baseline || {};
+  if (baseline.status === "failed") return `Baseline \u5931\u8D25\uFF1A${baseline.error || "\u7B49\u5F85\u91CD\u65B0\u8BA1\u7B97"}`;
+  if (item.status === "failed") return `${hasBatchResultMetrics(item) ? "\u6821\u9A8C\u5931\u8D25" : "\u8FD0\u884C\u5931\u8D25"}\uFF1A${item.error || "\u672A\u77E5\u9519\u8BEF"}`;
+  if (baseline.status && baseline.status !== "succeeded" && baseline.status !== "skipped") return `Baseline \u5931\u6548\uFF1A${baseline.error || "\u7B49\u5F85\u91CD\u65B0\u8BA1\u7B97"}`;
+  return "";
+}
 function renderBatchItems(items) {
   const statusLabels = { queued: "\u7B49\u5F85\u4E2D", running: "\u8FD0\u884C\u4E2D", succeeded: "\u6210\u529F", failed: "\u5931\u8D25", cancelled: "\u5DF2\u7EC8\u6B62" };
   document.getElementById("batchResults").innerHTML = items.map((item, index) => {
@@ -21206,8 +21213,9 @@ function renderBatchItems(items) {
     const cpuTime = Number(item.cpuTimeMs);
     const improvement = Number(item.improvementPercent);
     const improvementText = hasMetrics && baselineReady && Number.isFinite(improvement) ? `${improvement >= 0 ? "\u63D0\u5347" : "\u9000\u5316"} ${Math.abs(improvement).toFixed(2)}%` : baseline.status === "skipped" ? "\u5DF2\u8DF3\u8FC7\u57FA\u7EBF" : baseline.status && baseline.status !== "succeeded" ? "\u65E0\u6709\u6548\u57FA\u7EBF" : "\u63D0\u5347 \u2014";
-    const baselineReason = baseline.status === "skipped" ? "" : baseline.status && baseline.status !== "succeeded" ? `Baseline ${baseline.status === "failed" ? "\u5931\u8D25" : "\u5931\u6548"}\uFF1A${baseline.error || "\u7B49\u5F85\u91CD\u65B0\u8BA1\u7B97"}` : "";
-    const summaryError = baseline.status === "failed" ? baselineReason : item.status === "failed" ? `${hasMetrics ? "\u6821\u9A8C\u5931\u8D25" : "\u8FD0\u884C\u5931\u8D25"}\uFF1A${item.error || "\u672A\u77E5\u9519\u8BEF"}` : item.status === "cancelled" ? "\u8C03\u5EA6\u5DF2\u7EC8\u6B62" : baselineReason;
+    const summaryError = batchItemErrorText(item);
+    const failed = Boolean(summaryError);
+    const summaryNote = item.status === "cancelled" ? "\u8C03\u5EA6\u5DF2\u7EC8\u6B62" : failed ? "" : summaryError;
     const displayId = `t${index + 1}`;
     const itemSelectionId = String(item.testId || `index-${index}`);
     const selected = itemSelectionId === state.selectedBatchTestId;
@@ -21220,6 +21228,7 @@ function renderBatchItems(items) {
             ${item.logUrl ? `<a class="btn" href="${escapeHtml4(item.logUrl)}" download>\u65E5\u5FD7</a>` : `<span class="btn" aria-disabled="true">\u65E5\u5FD7</span>`}
             ${item.resultUrl ? `<button class="btn primary" type="button" data-workspace-result="${escapeHtml4(item.resultUrl)}" data-workspace-name="${escapeHtml4(item.testName || `\u6D4B\u8BD5 ${index + 1}`)}">\u5DE5\u4F5C\u53F0</button>` : `<span class="btn" aria-disabled="true">\u5DE5\u4F5C\u53F0</span>`}
             ${item.ganttUrl ? `<a class="btn" href="${escapeHtml4(item.ganttUrl)}" target="_blank">\u7518\u7279\u56FE</a>` : `<span class="btn" aria-disabled="true">\u7518\u7279\u56FE</span>`}
+            ${failed ? `<button class="btn danger" type="button" data-batch-error="${index}" aria-label="\u67E5\u770B ${escapeHtml4(displayId)} \u7684\u62A5\u9519\u4FE1\u606F">\u62A5\u9519</button>` : ""}
           </div>
         </div>
         <div class="batch-result-summary">
@@ -21228,10 +21237,18 @@ function renderBatchItems(items) {
             <span class="batch-metric-tag ${improvement < 0 ? "loss" : "gain"}">${escapeHtml4(improvementText)}</span>
             <span class="batch-metric-tag cpu">CPU Time ${hasMetrics && Number.isFinite(cpuTime) ? `${cpuTime.toFixed(1)} ms` : "\u2014"}</span>
           </div>
-          ${summaryError ? `<span class="summary-error" title="${escapeHtml4(summaryError)}">${escapeHtml4(summaryError)}</span>` : ""}
+          ${summaryNote ? `<span class="summary-error" title="${escapeHtml4(summaryNote)}">${escapeHtml4(summaryNote)}</span>` : ""}
         </div>
       </div>`;
   }).join("");
+}
+function openBatchErrorDialog(index) {
+  const item = state.batchResult?.items?.[index];
+  if (!item) return;
+  const errorText = batchItemErrorText(item) || "\u672A\u77E5\u9519\u8BEF";
+  document.getElementById("batchErrorDialogContext").textContent = `${item.testName || `\u6D4B\u8BD5 ${index + 1}`} \xB7 ${item.status === "failed" ? "\u8FD0\u884C\u5931\u8D25" : "\u57FA\u7EBF\u5F02\u5E38"}`;
+  document.getElementById("batchErrorDialogContent").textContent = errorText;
+  document.getElementById("batchErrorDialog").showModal();
 }
 function batchGanttUrl(items) {
   const params = new URLSearchParams();
@@ -21611,6 +21628,19 @@ async function checkService() {
   }
 }
 document.getElementById("workspaceDialogCancel").addEventListener("click", () => document.getElementById("workspaceDialog").close("cancel"));
+var batchErrorDialog = document.getElementById("batchErrorDialog");
+document.getElementById("batchErrorDialogClose").addEventListener("click", () => batchErrorDialog.close());
+document.getElementById("batchErrorDialogConfirm").addEventListener("click", () => batchErrorDialog.close());
+document.getElementById("batchErrorDialogCopy").addEventListener("click", async () => {
+  const content = document.getElementById("batchErrorDialogContent")?.textContent || "";
+  try {
+    await navigator.clipboard.writeText(content);
+  } catch {
+  }
+});
+batchErrorDialog.addEventListener("click", (event) => {
+  if (event.target === batchErrorDialog) batchErrorDialog.close();
+});
 document.getElementById("cleanDialogCancel").addEventListener("click", () => {
   document.getElementById("cleanDialog").close();
   state.cleanDialogContext = null;
@@ -21929,6 +21959,11 @@ document.addEventListener("click", (event) => {
   if (robotSlotDefault && !robotSlotDefault.disabled) {
     restoreRobotSlotDefault(robotSlotDefault.dataset.robotSlotDefault).catch((error) => writeTerminal(`$ \u673A\u5668\u624B\u9ED8\u8BA4\u914D\u7F6E\u6062\u590D\u5931\u8D25
   ${error.message}`, true));
+    return;
+  }
+  const batchErrorButton = event.target.closest("[data-batch-error]");
+  if (batchErrorButton) {
+    openBatchErrorDialog(Number(batchErrorButton.dataset.batchError));
     return;
   }
   const batchResultCard = event.target.closest("[data-batch-item-index]");

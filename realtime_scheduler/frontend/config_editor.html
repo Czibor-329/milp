@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>调度平台</title>
-  <link rel="stylesheet" href="/assets/katex.min.css?v=1.4.1">
-  <link rel="stylesheet" href="/assets/config_editor.css?v=1.4.1">
+  <link rel="stylesheet" href="/assets/katex.min.css?v=1.4.2">
+  <link rel="stylesheet" href="/assets/config_editor.css?v=1.4.2">
 </head>
 <body>
   <a class="skip-link" href="#mainContent">跳到主要内容</a>
@@ -44,7 +44,7 @@
         </button>
         <span class="sidebar-footer-label">系统状态</span>
         <div class="service-pill" id="serviceState">本地服务</div>
-        <span class="frontend-version">前端 v1.4.1</span>
+        <span class="frontend-version">前端 v1.4.2</span>
         <a class="theme-toggle" id="adminUsersLink" href="/admin_users.html" hidden>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
           <span>用户管理</span>
@@ -639,6 +639,23 @@
     </section>
   </dialog>
 
+  <dialog class="batch-error-dialog" id="batchErrorDialog" aria-labelledby="batchErrorDialogTitle">
+    <section class="batch-error-dialog-body">
+      <header class="batch-error-dialog-head">
+        <div>
+          <h3 id="batchErrorDialogTitle">报错信息</h3>
+          <p id="batchErrorDialogContext"></p>
+        </div>
+        <button class="btn icon" type="button" id="batchErrorDialogClose" aria-label="关闭报错信息">×</button>
+      </header>
+      <pre id="batchErrorDialogContent" tabindex="0"></pre>
+      <div class="dialog-actions">
+        <button class="btn small" type="button" id="batchErrorDialogCopy">复制报错</button>
+        <button class="btn primary small" type="button" id="batchErrorDialogConfirm">关闭</button>
+      </div>
+    </section>
+  </dialog>
+
 
   <div class="drawer-layer" id="drawerLayer">
     <aside class="drawer" id="stepDrawer" aria-label="路径 Step 详细设置">
@@ -647,7 +664,7 @@
     </aside>
   </div>
 
-  <script type="module" src="/assets/config_editor.js?v=1.4.1"></script>
+  <script type="module" src="/assets/config_editor.js?v=1.4.2"></script>
   <script>
     // 管理员才显示“用户管理”入口。
     (function () {

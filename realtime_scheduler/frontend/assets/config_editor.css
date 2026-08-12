@@ -354,6 +354,15 @@
     .bottleneck-analysis-optimal-note { border-color: #b9d6c8 !important; background: #f0faf4 !important; }
     .bottleneck-analysis-optimal-note h4, .bottleneck-analysis-optimal-note strong { color: #176043 !important; }
     .bottleneck-analysis-help-footnote { margin: 0; color: var(--muted); font-size: 11px; }
+    dialog.batch-error-dialog { width: min(720px, calc(100vw - 32px)); max-height: min(680px, calc(100dvh - 32px)); overflow: hidden; background: var(--surface); }
+    .batch-error-dialog-body { display: grid; max-height: min(680px, calc(100dvh - 32px)); grid-template-rows: auto minmax(0, 1fr) auto; }
+    .batch-error-dialog-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; padding: 16px 20px 14px; border-bottom: 1px solid var(--line); background: linear-gradient(90deg, #fdf0f1, #fff); }
+    .batch-error-dialog-head h3 { margin: 0; color: var(--red); font-size: 17px; }
+    .batch-error-dialog-head p { margin: 3px 0 0; color: var(--muted); font-size: 11px; }
+    #batchErrorDialogContent { margin: 0; padding: 16px 20px; overflow: auto; color: #7f1d1d; background: var(--soft); font: 12px/1.6 Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .batch-error-dialog-body > .dialog-actions { flex: 0 0 auto; margin: 0; padding: 12px 20px 16px; border-top: 1px solid var(--line); background: #fff; }
+    body.theme-dark .batch-error-dialog-head, body.theme-dark .batch-error-dialog-body > .dialog-actions { border-color: var(--line); background: var(--surface); }
+    body.theme-dark #batchErrorDialogContent { color: #f0bdc2; background: #17181c; }
     @media (max-width: 700px) {
       .pjob-route-picker { min-width: 340px; }
       .pjob-route-dialog-head { padding: 15px 16px 13px; }

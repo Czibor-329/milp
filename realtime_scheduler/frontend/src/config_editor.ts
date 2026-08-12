@@ -3584,6 +3584,15 @@ function showBatchProgress(result) {
   ].join("\n"));
 }
 
+/** 汇总批量测试卡片的失败报错文本；无失败时返回空字符串。 */
+function batchItemErrorText(item) {
+  const baseline = item.baseline || {};
+  if (baseline.status === "failed") return `Baseline 失败：${baseline.error || "等待重新计算"}`;
+  if (item.status === "failed") return `${hasBatchResultMetrics(item) ? "校验失败" : "运行失败"}：${item.error || "未知错误"}`;
+  if (baseline.status && baseline.status !== "succeeded" && baseline.status !== "skipped") return `Baseline 失效：${baseline.error || "等待重新计算"}`;
+  return "";
+}
+
 function renderBatchItems(items) {
   const statusLabels = { queued: "等待中", running: "运行中", succeeded: "成功", failed: "失败", cancelled: "已终止" };
   document.getElementById("batchResults").innerHTML = items.map((item, index) => {
@@ -3594,12 +3603,9 @@ function renderBatchItems(items) {
     const improvementText = hasMetrics && baselineReady && Number.isFinite(improvement)
       ? `${improvement >= 0 ? "提升" : "退化"} ${Math.abs(improvement).toFixed(2)}%`
       : baseline.status === "skipped" ? "已跳过基线" : baseline.status && baseline.status !== "succeeded" ? "无有效基线" : "提升 —";
-    const baselineReason = baseline.status === "skipped"
-      ? ""
-      : baseline.status && baseline.status !== "succeeded"
-        ? `Baseline ${baseline.status === "failed" ? "失败" : "失效"}：${baseline.error || "等待重新计算"}`
-        : "";
-    const summaryError = baseline.status === "failed" ? baselineReason : item.status === "failed" ? `${hasMetrics ? "校验失败" : "运行失败"}：${item.error || "未知错误"}` : item.status === "cancelled" ? "调度已终止" : baselineReason;
+    const summaryError = batchItemErrorText(item);
+    const failed = Boolean(summaryError);
+    const summaryNote = item.status === "cancelled" ? "调度已终止" : failed ? "" : summaryError;
     const displayId = `t${index + 1}`;
     const itemSelectionId = String(item.testId || `index-${index}`);
     const selected = itemSelectionId === state.selectedBatchTestId;
@@ -3612,6 +3618,7 @@ function renderBatchItems(items) {
             ${item.logUrl ? `<a class="btn" href="${escapeHtml(item.logUrl)}" download>日志</a>` : `<span class="btn" aria-disabled="true">日志</span>`}
             ${item.resultUrl ? `<button class="btn primary" type="button" data-workspace-result="${escapeHtml(item.resultUrl)}" data-workspace-name="${escapeHtml(item.testName || `测试 ${index + 1}`)}">工作台</button>` : `<span class="btn" aria-disabled="true">工作台</span>`}
             ${item.ganttUrl ? `<a class="btn" href="${escapeHtml(item.ganttUrl)}" target="_blank">甘特图</a>` : `<span class="btn" aria-disabled="true">甘特图</span>`}
+            ${failed ? `<button class="btn danger" type="button" data-batch-error="${index}" aria-label="查看 ${escapeHtml(displayId)} 的报错信息">报错</button>` : ""}
           </div>
         </div>
         <div class="batch-result-summary">
@@ -3620,10 +3627,20 @@ function renderBatchItems(items) {
             <span class="batch-metric-tag ${improvement < 0 ? "loss" : "gain"}">${escapeHtml(improvementText)}</span>
             <span class="batch-metric-tag cpu">CPU Time ${hasMetrics && Number.isFinite(cpuTime) ? `${cpuTime.toFixed(1)} ms` : "—"}</span>
           </div>
-          ${summaryError ? `<span class="summary-error" title="${escapeHtml(summaryError)}">${escapeHtml(summaryError)}</span>` : ""}
+          ${summaryNote ? `<span class="summary-error" title="${escapeHtml(summaryNote)}">${escapeHtml(summaryNote)}</span>` : ""}
         </div>
       </div>`;
   }).join("");
+}
+
+/** 打开批量测试报错信息弹窗，展示完整失败原因（不直接铺在卡片上）。 */
+function openBatchErrorDialog(index) {
+  const item = state.batchResult?.items?.[index];
+  if (!item) return;
+  const errorText = batchItemErrorText(item) || "未知错误";
+  document.getElementById("batchErrorDialogContext").textContent = `${item.testName || `测试 ${index + 1}`} · ${item.status === "failed" ? "运行失败" : "基线异常"}`;
+  document.getElementById("batchErrorDialogContent").textContent = errorText;
+  (document.getElementById("batchErrorDialog") as HTMLDialogElement).showModal();
 }
 
 /** 生成一个甘特图页面 URL，其中每个成功测试作为独立标签页一次加载。 */
@@ -4030,6 +4047,14 @@ async function checkService() {
 }
 
 document.getElementById("workspaceDialogCancel").addEventListener("click", () => document.getElementById("workspaceDialog").close("cancel"));
+const batchErrorDialog = document.getElementById("batchErrorDialog") as HTMLDialogElement;
+document.getElementById("batchErrorDialogClose").addEventListener("click", () => batchErrorDialog.close());
+document.getElementById("batchErrorDialogConfirm").addEventListener("click", () => batchErrorDialog.close());
+document.getElementById("batchErrorDialogCopy").addEventListener("click", async () => {
+  const content = document.getElementById("batchErrorDialogContent")?.textContent || "";
+  try { await navigator.clipboard.writeText(content); } catch { /* 剪贴板不可用时静默忽略 */ }
+});
+batchErrorDialog.addEventListener("click", event => { if (event.target === batchErrorDialog) batchErrorDialog.close(); });
 document.getElementById("cleanDialogCancel").addEventListener("click", () => {
   document.getElementById("cleanDialog").close();
   state.cleanDialogContext = null;
@@ -4293,6 +4318,11 @@ document.addEventListener("click", event => {
   if (robotSlotDefault && !robotSlotDefault.disabled) {
     restoreRobotSlotDefault(robotSlotDefault.dataset.robotSlotDefault)
       .catch(error => writeTerminal(`$ 机器手默认配置恢复失败\n  ${error.message}`, true));
+    return;
+  }
+  const batchErrorButton = event.target.closest("[data-batch-error]");
+  if (batchErrorButton) {
+    openBatchErrorDialog(Number(batchErrorButton.dataset.batchError));
     return;
   }
   const batchResultCard = event.target.closest("[data-batch-item-index]");
