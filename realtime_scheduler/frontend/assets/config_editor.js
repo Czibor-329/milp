@@ -21187,7 +21187,7 @@ async function showTestGroupAnalysis() {
     }));
     const summary = await requestTestGroupAnalysis(result.items.map((item, index) => ({
       id: String(item.testId || `index-${index}`),
-      name: `t${index + 1}`,
+      name: item.testName || `t${index + 1}`,
       status: String(item.status || "unknown"),
       validation: String(item.validation || "unknown"),
       metricsAvailable: hasBatchResultMetrics(item),
