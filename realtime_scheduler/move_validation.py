@@ -828,9 +828,55 @@ def _robot_alignment_issue(
     return None
 
 
-def _pretrans_source_issue(robot: RobotState, move: Mapping[str, Any], source: str) -> Optional[str]:
-    """校验转位起点：槽位级模式要求 source 在手槽候选站集合内，否则退回站级。"""
+def _parallel_arrays_alignment_issue(move: Mapping[str, Any], fields: Sequence[str]) -> Optional[str]:
+    """校验一组并行数组的非空长度一致（空字段忽略），对齐 MOVE.ARRAY_ALIGNMENT。"""
+    lengths = {field: len(_values(move, field)) for field in fields}
+    nonzero = {length for length in lengths.values() if length > 0}
+    if len(nonzero) > 1:
+        detail = ",".join(f"{field}={lengths[field]}" for field in fields)
+        return _issue(move, ValidationErrorCode.PARALLEL_ARRAY_INVALID, f"Move 对应数组长度不一致: {detail}")
+    return None
+
+
+def _pretrans_source_issue(robot: RobotState, move: Mapping[str, Any]) -> Optional[str]:
+    """校验转位起点：槽位级模式按涉及手槽是否跨站分两种语义比对。
+
+    真空手双槽臂在孪生站组（LALB）下，本次转位涉及的不同手槽会指向不同站
+    （槽1→LA、槽2→LB）：此时 SrcStationList 必须按槽与该手槽精确指向一致，对齐
+    MoveStateSim 的 RequirePreTransSource 逐槽检查。其余情况（大气手整臂单站、
+    单槽转位）退回候选站集合检查；未配置槽位级拓扑时退回站级 position。
+    """
+    sources = [str(value) for value in _values(move, "SrcStationList") if value]
+    robot_slots = _integer_values(move, "RobotSlotList")
     if robot.slot_map:
+        involved_stations = {
+            robot.slot_targets[slot][0]
+            for slot in robot_slots
+            if slot in robot.slot_targets and robot.slot_targets[slot] and robot.slot_targets[slot][0]
+        }
+        if len(involved_stations) >= 2:
+            n = max(len(sources), max(1, len(robot_slots)))
+            for index in range(n):
+                source = sources[index] if index < len(sources) else (sources[0] if len(sources) == 1 else "")
+                slot = robot_slots[index] if index < len(robot_slots) else (robot_slots[0] if len(robot_slots) == 1 else None)
+                if not source or slot is None:
+                    continue
+                target = robot.slot_targets.get(slot)
+                if target is not None and target[0]:
+                    if source != target[0]:
+                        return _issue(
+                            move,
+                            ValidationErrorCode.PRETRANS_STATE_INVALID,
+                            f"{robot.name}#{slot} 无法从 {source} 转位（当前指向 {target[0]}）",
+                        )
+                elif source not in _robot_target_stations(robot):
+                    return _issue(
+                        move,
+                        ValidationErrorCode.PRETRANS_STATE_INVALID,
+                        f"{robot.name} 无法从 {source} 转位（当前手槽指向站：{sorted(_robot_target_stations(robot))}）",
+                    )
+            return None
+        source = sources[0] if sources else ""
         if source and source not in _robot_target_stations(robot):
             return _issue(
                 move,
@@ -838,6 +884,7 @@ def _pretrans_source_issue(robot: RobotState, move: Mapping[str, Any], source: s
                 f"{robot.name} 无法从 {source} 转位（当前手槽指向站：{sorted(_robot_target_stations(robot))}）",
             )
         return None
+    source = sources[0] if sources else ""
     if robot.position is not None and source and robot.position != source:
         return _issue(move, ValidationErrorCode.PRETRANS_STATE_INVALID, f"{robot.name} 当前指向 {robot.position}，不是 {source}")
     return None
@@ -1073,16 +1120,16 @@ def _start_pretrans(state: MachineState, move: Mapping[str, Any], end_time: floa
     robot = _robot(state, move)
     if isinstance(robot, str):
         return robot
-    source = _first_text(move, "SrcStationList")
+    sources = [str(value) for value in _values(move, "SrcStationList") if value]
     destination = _first_text(move, "DestStationList")
     if not destination:
         return _issue(move, ValidationErrorCode.PRETRANS_STATE_INVALID, "转位缺少 DestStationList")
     if not _available(robot.busy_until, _start_time(move)):
         return _issue(move, ValidationErrorCode.ROBOT_BUSY, f"{robot.name} 正在执行其他动作")
-    source_error = _pretrans_source_issue(robot, move, source)
+    source_error = _pretrans_source_issue(robot, move)
     if source_error:
         return source_error
-    for station_name in (source, destination):
+    for station_name in (*sources, destination):
         if station_name and robot.scope and station_name not in robot.scope:
             return _issue(move, ValidationErrorCode.ROBOT_UNREACHABLE, f"{robot.name} 无法访问 {station_name}")
     robot_slots = _integer_values(move, "RobotSlotList")
@@ -1162,6 +1209,9 @@ def _pretrans_is_linked_empty_pick(
 
 def _start_prepare(state: MachineState, move: Mapping[str, Any], end_time: float, all_moves: Sequence[Mapping[str, Any]], scheduled: List[_ScheduledCompletion]) -> Optional[str]:
     """校验开门动作及 LoadLock 当前压力态。"""
+    alignment = _parallel_arrays_alignment_issue(move, ("MatIDList", "StepIDList", "SlotList"))
+    if alignment:
+        return alignment
     station_name = _station_name(move)
     station = state.stations.get(station_name)
     if station is None:
@@ -1192,6 +1242,9 @@ def _start_prepare(state: MachineState, move: Mapping[str, Any], end_time: float
 
 def _start_complete(state: MachineState, move: Mapping[str, Any], end_time: float, _all_moves: Sequence[Mapping[str, Any]], scheduled: List[_ScheduledCompletion]) -> Optional[str]:
     """校验关门动作并登记关门完成状态。"""
+    alignment = _parallel_arrays_alignment_issue(move, ("MatIDList", "StepIDList", "SlotList"))
+    if alignment:
+        return alignment
     station_name = _station_name(move)
     station = state.stations.get(station_name)
     if station is None:
