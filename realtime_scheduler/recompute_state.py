@@ -88,6 +88,7 @@ def add_new_materials_to_machine_state(
                 str(raw_material.get("PJobName") or ""),
                 raw_material.get("StepID"),
             ),
+            material_process_count=slot.material_process_count,
         )
         known_material_ids.add(material_id)
 
@@ -226,7 +227,6 @@ def apply_machine_state_to_update(
             station_state.environment_busy_until,
         )
         slot_times = station.setdefault("TimeToAvailableOfSlot", {})
-        material_count = 0
         for slot_id, slot_state in station_state.slots.items():
             slot_times[str(slot_id)] = _remaining_seconds(
                 max(shared_ready_at, slot_state.busy_until),
@@ -235,7 +235,6 @@ def apply_machine_state_to_update(
             material = slot_state.material
             if material is None:
                 continue
-            material_count += 1
             raw_material = materials.get(material.material_id)
             if raw_material is None:
                 raise ValueError(
@@ -248,8 +247,12 @@ def apply_machine_state_to_update(
             if material.pjob_name:
                 raw_material["PJobName"] = material.pjob_name
             located_material_ids.add(material.material_id)
+        # 企业接口中的 MaterialCount 是逐槽累计加工次数，不是站内当前物料数。
         if "MaterialCount" in station:
-            station["MaterialCount"] = material_count
+            station["MaterialCount"] = {
+                str(slot_id): slot_state.material_process_count
+                for slot_id, slot_state in sorted(station_state.slots.items())
+            }
         if isinstance(station_state, LoadLockState):
             station["LastItem"] = _configured_loadlock_last_item(
                 station,

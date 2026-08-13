@@ -9,7 +9,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from realtime_scheduler.move_validation import ATMOSPHERE, MachineState, VACUUM
+from realtime_scheduler.move_validation import (
+    ATMOSPHERE,
+    MachineState,
+    MoveStateReplay,
+    SlotPhase,
+    VACUUM,
+)
 from realtime_scheduler.recompute_state import apply_machine_state_to_update
 
 
@@ -81,6 +87,69 @@ def test_loadlock_snapshot_preserves_legacy_atr_vtr_names() -> None:
     apply_machine_state_to_update(update, state, 10.0)
 
     assert update["Stations"]["LA"]["LastItem"] == "VTR"
+
+
+def test_station_material_count_remains_slot_mapping_in_snapshot() -> None:
+    """重算快照不得把 Cooler 的逐槽加工次数退化成站内物料总数。"""
+    update = {
+        "CurrentTime": 0.0,
+        "Materials": [],
+        "Robots": {},
+        "Stations": {
+            "Cooler": {
+                "Type": "Cooler",
+                "Capacity": 2,
+                "Slots": [1, 2],
+                "MaterialCount": {"1": 3, "2": 5},
+            },
+        },
+    }
+    state = MachineState.from_sources(None, update)
+
+    apply_machine_state_to_update(update, state, 70.0)
+
+    assert update["Stations"]["Cooler"]["MaterialCount"] == {"1": 3, "2": 5}
+
+
+def test_completed_process_increments_station_slot_material_count() -> None:
+    """带片 ProcessMove 完成后应只累计实际加工槽位的 MaterialCount。"""
+    update = {
+        "CurrentTime": 0.0,
+        "Materials": [{
+            "ID": 101,
+            "PJobName": "P1",
+            "StepID": 1,
+            "CurrentModuleName": "Cooler",
+            "SlotID": 1,
+        }],
+        "Robots": {},
+        "Stations": {
+            "Cooler": {
+                "Type": "Cooler",
+                "Capacity": 2,
+                "Slots": [1, 2],
+                "MaterialCount": {"1": 3, "2": 5},
+            },
+        },
+    }
+    state = MachineState.from_sources(None, update)
+    state.stations["Cooler"].slots[1].phase = SlotPhase.UNPROCESSED
+    move = {
+        "MoveID": 1,
+        "MoveType": 9,
+        "StartTime": 10.0,
+        "EndTime": 30.0,
+        "ModuleName": "Cooler",
+        "MatIDList": [101],
+        "SlotList": [1],
+    }
+    replay = MoveStateReplay(None, [move], state)
+    replay.update_move_state({"MoveID": 1, "MoveState": MoveStateReplay.RUNNING})
+    replay.update_move_state({"MoveID": 1, "MoveState": MoveStateReplay.DONE})
+
+    apply_machine_state_to_update(update, replay.state, 30.0)
+
+    assert update["Stations"]["Cooler"]["MaterialCount"] == {"1": 4, "2": 5}
 
 
 def test_server_does_not_implement_machine_state_snapshot_replay() -> None:

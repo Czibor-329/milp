@@ -108,12 +108,13 @@ class MaterialState:
 
 @dataclass
 class SlotState:
-    """记录一个物理槽位的物料与占用窗口。"""
+    """记录一个物理槽位的物料、占用窗口及累计加工次数。"""
 
     phase: SlotPhase = SlotPhase.EMPTY
     material: Optional[MaterialState] = None
     busy_until: float = 0.0
     busy_action: str = ""
+    material_process_count: int = 0
 
 
 @dataclass
@@ -214,7 +215,12 @@ class MachineState:
         for name, config in station_configs.items():
             task_station = task_stations.get(name)
             station_type = str(config.get("Type") or getattr(task_station, "type", ""))
-            slots = {slot_id: SlotState() for slot_id in _station_slot_ids(config, task_station)}
+            slots = {
+                slot_id: SlotState(
+                    material_process_count=_station_slot_material_count(config, slot_id),
+                )
+                for slot_id in _station_slot_ids(config, task_station)
+            }
             if station_type.lower() == LOAD_LOCK_TYPE:
                 aliases = _environment_aliases(config)
                 aliases.update({
@@ -268,7 +274,11 @@ class MachineState:
                         f"初始物料在 {station_name}#{slot_id} 发生冲突",
                     )
                 )
-            station.slots[slot_id] = SlotState(SlotPhase.COMPLETED, material)
+            station.slots[slot_id] = SlotState(
+                SlotPhase.COMPLETED,
+                material,
+                material_process_count=station.slots[slot_id].material_process_count,
+            )
         return state
 
     def ensure_station(self, name: str, slot_id: int) -> StationState:
@@ -1311,6 +1321,8 @@ def _start_process(state: MachineState, move: Mapping[str, Any], end_time: float
         """同时完成本动作引用的全部槽位。"""
         for slot, material, _ in targets:
             _set_slot(slot, SlotPhase.CLEANED if material is None else SlotPhase.COMPLETED, material)
+            if material is not None:
+                slot.material_process_count += 1
 
     _schedule(scheduled, move, end_time, complete)
     return None
@@ -1655,6 +1667,18 @@ def _station_slot_ids(config: Mapping[str, Any], task_station: Any) -> Set[int]:
     if capacity is None:
         capacity = _positive_integer(getattr(task_station, "capacity", DEFAULT_SLOT_ID)) or DEFAULT_SLOT_ID
     return set(range(DEFAULT_SLOT_ID, capacity + DEFAULT_SLOT_ID))
+
+
+def _station_slot_material_count(config: Mapping[str, Any], slot_id: int) -> int:
+    """读取 Station.MaterialCount 中指定槽位的累计加工次数。"""
+    raw_counts = config.get("MaterialCount")
+    if not isinstance(raw_counts, Mapping):
+        return 0
+    raw_count = raw_counts.get(slot_id, raw_counts.get(str(slot_id), 0))
+    count = _number(raw_count)
+    if count is None or count < 0:
+        return 0
+    return int(count)
 
 
 def _station_from_task(name: str, task_station: Any) -> StationState:
