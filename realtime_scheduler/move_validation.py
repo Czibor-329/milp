@@ -25,6 +25,7 @@ PREPARE_MOVE = 6
 COMPLETE_MOVE = 7
 PROCESS_MOVE = 9
 PRE_PREPARE_MOVE = 10
+ALIGN_MOVE = 11
 ATMOSPHERE = "ATM"
 VACUUM = "VAC"
 LOAD_LOCK_TYPE = "loadlock"
@@ -947,6 +948,7 @@ def _start_move(
         COMPLETE_MOVE: _start_complete,
         PROCESS_MOVE: _start_process,
         PRE_PREPARE_MOVE: _start_preprepare,
+        ALIGN_MOVE: _start_align,
     }
     handler = handlers.get(move.get("MoveType"))
     if handler is None:
@@ -1323,6 +1325,106 @@ def _start_process(state: MachineState, move: Mapping[str, Any], end_time: float
             _set_slot(slot, SlotPhase.CLEANED if material is None else SlotPhase.COMPLETED, material)
             if material is not None:
                 slot.material_process_count += 1
+
+    _schedule(scheduled, move, end_time, complete)
+    return None
+
+
+def _start_align(state: MachineState, move: Mapping[str, Any], end_time: float, _all_moves: Sequence[Mapping[str, Any]], scheduled: List[_ScheduledCompletion]) -> Optional[str]:
+    """校验合法 AlignMove，并在完成时把待对准物料标记为可取。
+
+    Align 是站点服务动作：物料在动作前后仍位于同一 Route Step，平台只检查
+    站点、槽位、物料和占用窗口，不修改位置或 StepID；对准结束会把 Place
+    产生的 ``UNPROCESSED`` 槽位推进为 ``COMPLETED``，供后续 Pick 校验。
+    """
+    alignment = _parallel_arrays_alignment_issue(
+        move,
+        ("MatIDList", "StepIDList", "SlotList"),
+    )
+    if alignment:
+        return alignment
+    station_name = _station_name(move)
+    station = state.stations.get(station_name)
+    if station is None:
+        return _issue(
+            move,
+            ValidationErrorCode.STATION_UNKNOWN,
+            f"未知站点 {station_name or '<empty>'}",
+        )
+    start_time = _start_time(move)
+    if station.door is not DoorState.CLOSED:
+        return _issue(
+            move,
+            ValidationErrorCode.STATION_DOOR_STATE_INVALID,
+            f"{station.name} 对准时必须关门",
+        )
+    if not _available(station.door_busy_until, start_time) or not _available(
+        station.transfer_busy_until,
+        start_time,
+    ):
+        return _issue(
+            move,
+            ValidationErrorCode.STATION_TRANSFER_BUSY,
+            f"{station.name} 正在执行开关门或取放动作",
+        )
+    if _has_active_process(station, start_time):
+        return _issue(
+            move,
+            ValidationErrorCode.STATION_PROCESS_BUSY,
+            f"{station.name} 正在执行其他站点服务",
+        )
+
+    material_ids = _values(move, "MatIDList")
+    slot_ids = _integer_values(move, "SlotList")
+    if material_ids and not slot_ids:
+        slot_ids = [
+            slot_id
+            for material_id in material_ids
+            for slot_id, slot in station.slots.items()
+            if _material_matches(slot.material, material_id)
+        ]
+    if material_ids and len(slot_ids) != len(material_ids):
+        return _issue(
+            move,
+            ValidationErrorCode.PARALLEL_ARRAY_INVALID,
+            "AlignMove 的 MatIDList 与 SlotList 数量不一致",
+        )
+    if not material_ids and not slot_ids:
+        # 无片对准仍占用整台 Aligner；按全部物理槽位登记服务窗口。
+        slot_ids = sorted(station.slots)
+
+    targets: List[SlotState] = []
+    for index, slot_id in enumerate(slot_ids):
+        slot = station.slots.get(slot_id)
+        if slot is None:
+            return _issue(
+                move,
+                ValidationErrorCode.STATION_SLOT_UNKNOWN,
+                f"{station.name} 不存在槽位 {slot_id}",
+            )
+        if not _available(slot.busy_until, start_time):
+            return _issue(
+                move,
+                ValidationErrorCode.STATION_SLOT_BUSY,
+                f"{station.name}#{slot_id} 正在{slot.busy_action}",
+            )
+        if material_ids and not _material_matches(slot.material, material_ids[index]):
+            return _issue(
+                move,
+                ValidationErrorCode.PROCESS_STATE_INVALID,
+                f"{station.name}#{slot_id} 没有待对准的匹配物料",
+            )
+        targets.append(slot)
+    for slot in targets:
+        _reserve_slot(slot, end_time, "对准")
+
+    def complete() -> None:
+        """结束对准占用并完成待对准物料，但保持物料 Route Step。"""
+        for slot in targets:
+            if slot.material is not None and slot.phase is SlotPhase.UNPROCESSED:
+                _set_slot(slot, SlotPhase.COMPLETED, slot.material)
+            else:
+                slot.busy_action = ""
 
     _schedule(scheduled, move, end_time, complete)
     return None
@@ -2084,7 +2186,7 @@ def _is_doorless(station: StationState) -> bool:
 def _has_active_process(station: StationState, timestamp: float) -> bool:
     """返回站点是否还有未结束的加工或清洁。"""
     return any(
-        slot.busy_action in {"加工", "清洁"} and not _available(slot.busy_until, timestamp)
+        slot.busy_action in {"加工", "清洁", "对准"} and not _available(slot.busy_until, timestamp)
         for slot in station.slots.values()
     )
 
@@ -2142,6 +2244,7 @@ def _issue(
 
 
 __all__ = [
+    "ALIGN_MOVE",
     "ATMOSPHERE",
     "COMPLETE_MOVE",
     "DoorState",

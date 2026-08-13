@@ -885,6 +885,98 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual(3, len(result["updates"]))
         self.assertEqual(2, len(result["output"]["RecomputePoints"]))
 
+    def test_standard_algorithm_recompute_returns_dummy_route_from_previous_output(self) -> None:
+        """平台应在调用下一轮 update 前回填上一轮返回的 DummyReturnInfo。"""
+        plan = {
+            "device": self.device,
+            "strategy": "other_alg:greedy",
+            "roundCount": 2,
+            "recipes": [{"name": "R", "time": 20, "modules": ["PM1"], "weight": {}}],
+            "cleans": [],
+            "routes": [_route("R", "PM1", "R")],
+            "rounds": [
+                {"currentTime": 0, "jobs": [_job("J1", "R", "LP1")]},
+                {"currentTime": 10, "jobs": [_job("J2", "R", "LP2")]},
+            ],
+        }
+        route_recipe = {
+            "Name": "dummy-pm1-route",
+            "RouteSteps": [{
+                "StepID": 4,
+                "Visits": [{"StationName": "PM1"}],
+                "NeedProcess": True,
+            }],
+        }
+        first_output = {
+            "MoveList": [{
+                "MoveID": 1,
+                "MoveType": 9,
+                "StartTime": 100.0,
+                "EndTime": 120.0,
+                "ModuleName": "PM1",
+            }],
+            "Feedback": [],
+            "DummyReturnInfo": {
+                "100000": [{
+                    "TaskID": "1",
+                    "PJobName": "1.C1.P1",
+                    "RouteRecipe": route_recipe,
+                }],
+            },
+        }
+        second_output = {
+            "MoveList": [{
+                "MoveID": 2,
+                "MoveType": 9,
+                "StartTime": 200.0,
+                "EndTime": 220.0,
+                "ModuleName": "PM1",
+            }],
+            "Feedback": [],
+        }
+
+        def add_dummy_to_first_update(update):
+            payload = copy.deepcopy(update)
+            payload["Materials"].append({
+                "ID": 100000,
+                "TaskID": "",
+                "PJobName": "",
+                "Route": {},
+                "CurrentModuleName": "PM1",
+                "SlotID": 1,
+                "StepID": 4,
+                "SrcPortName": "DummyPort",
+                "AccessiblePM": ["PM1"],
+            })
+            return payload
+
+        original_builder = config_server.build_round_update
+        with (
+            patch.object(config_server, "algorithm_session", return_value=nullcontext()),
+            patch.object(config_server, "algorithm_init"),
+            patch.object(config_server, "algorithm_update", side_effect=[first_output, second_output]) as update_entry,
+            patch.object(
+                config_server,
+                "build_round_update",
+                side_effect=lambda *args, **kwargs: (
+                    add_dummy_to_first_update(original_builder(*args, **kwargs))
+                    if float(args[2]) == 0.0
+                    else original_builder(*args, **kwargs)
+                ),
+            ),
+        ):
+            execute_plan(plan)
+
+        second_update = update_entry.call_args_list[1].args[0]
+        dummy = next(
+            material
+            for material in second_update["Materials"]
+            if material["ID"] == 100000
+        )
+        self.assertEqual(route_recipe, dummy["Route"])
+        self.assertEqual("1.C1.P1", dummy["PJobName"])
+        self.assertEqual("1", dummy["TaskID"])
+
     def test_standard_algorithm_recovery_completes_loadlock_environment(self) -> None:
         """标准算法收尾应执行 LoadLock 关门后的带片压力转换。"""
         moves = [

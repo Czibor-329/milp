@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import Any, Dict, Mapping, Optional, Set
+from typing import Any, Dict, List, Mapping, Optional, Set
 
 from realtime_scheduler.move_validation import (
     ATMOSPHERE,
@@ -24,6 +24,90 @@ from realtime_scheduler.plan_builder import FIRST_SLOT_ID
 
 DEFAULT_ATMOSPHERE_LAST_ITEM = "ATR"
 DEFAULT_VACUUM_LAST_ITEM = "VTR"
+
+
+def restore_dummy_routes_from_algorithm_output(
+    update_params: Dict[str, Any],
+    algorithm_output: Mapping[str, Any],
+) -> List[Any]:
+    """把算法返回的 Dummy 路径事务写回下一轮标准 update。
+
+    ``DummyReturnInfo`` 是算法为具体 Dummy MatID 返回的实际路径。平台在多轮
+    调度中必须保存这份返回值，并在下一轮重算前将 ``RouteRecipe``、任务归属
+    回填给对应 Material；否则只回传位置和 StepID 会让算法无法恢复在途路径。
+    已有非空 Route 属于现场权威数据，不在这里覆盖。
+
+    参数:
+        update_params: 即将再次发送给算法的全量标准 update，会被原地更新。
+        algorithm_output: 上一轮算法的标准输出。
+
+    返回:
+        成功恢复路径的 Dummy MatID 列表。
+    """
+    return_info = algorithm_output.get("DummyReturnInfo") or {}
+    if not isinstance(return_info, Mapping):
+        return []
+    materials = update_params.get("Materials") or []
+    if isinstance(materials, Mapping):
+        material_items = materials.values()
+    elif isinstance(materials, list):
+        material_items = materials
+    else:
+        return []
+
+    restored: List[Any] = []
+    for material in material_items:
+        if not isinstance(material, dict) or material.get("ID") is None:
+            continue
+        material_id = material["ID"]
+        raw_entries = return_info.get(str(material_id), return_info.get(material_id))
+        if isinstance(raw_entries, Mapping):
+            raw_entries = [raw_entries]
+        if not isinstance(raw_entries, list):
+            continue
+        route = material.get("Route") or {}
+        if isinstance(route, Mapping) and route.get("RouteSteps"):
+            continue
+        current_module = str(material.get("CurrentModuleName") or "")
+        current_step_id = material.get("StepID")
+        candidates = [
+            entry
+            for entry in raw_entries
+            if isinstance(entry, Mapping)
+            and isinstance(entry.get("RouteRecipe"), Mapping)
+            and entry["RouteRecipe"].get("RouteSteps")
+        ]
+        if not candidates:
+            continue
+
+        def route_score(entry: Mapping[str, Any]) -> int:
+            """优先选择同时匹配现场 StepID 和模块的返回路径。"""
+            score = 0
+            route_steps = entry["RouteRecipe"].get("RouteSteps") or []
+            if isinstance(route_steps, Mapping):
+                route_steps = route_steps.values()
+            for step in route_steps:
+                if not isinstance(step, Mapping):
+                    continue
+                visits = {
+                    str(visit.get("StationName") or "")
+                    for visit in step.get("Visits") or []
+                    if isinstance(visit, Mapping)
+                }
+                if current_module in visits:
+                    score = max(score, 10)
+                    if str(step.get("StepID")) == str(current_step_id):
+                        score = max(score, 100)
+            return score
+
+        selected = max(candidates, key=route_score)
+        material["Route"] = deepcopy(dict(selected["RouteRecipe"]))
+        if not str(material.get("PJobName") or ""):
+            material["PJobName"] = str(selected.get("PJobName") or "")
+        if not str(material.get("TaskID") or ""):
+            material["TaskID"] = str(selected.get("TaskID") or "")
+        restored.append(material_id)
+    return restored
 
 
 def _arm_slot_at_station(robot_state: Any, arm_name: Any) -> Optional[str]:
@@ -119,8 +203,14 @@ def release_reused_source_slots(
 def merge_algorithm_update(
     previous_update: Mapping[str, Any],
     new_round_update: Mapping[str, Any],
+    previous_output: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """把新一轮 Job 追加到上一轮全量 update，形成企业接口当前快照。"""
+    """把新一轮 Job 追加到上一轮全量 update，形成企业接口当前快照。
+
+    ``previous_output`` 存在时同时消费上一轮 ``DummyReturnInfo``。把回填放在
+    全量 update 的统一合并边界，确保内置算法和外部算法的两条重算路径都不会
+    漏掉平台已收到的 Dummy Route。
+    """
     merged = deepcopy(dict(previous_update))
     merged["Scenario"] = new_round_update.get("Scenario", merged.get("Scenario", 0))
     merged["CurrentTime"] = float(new_round_update.get("CurrentTime") or 0.0)
@@ -163,6 +253,8 @@ def merge_algorithm_update(
     merged["Stations"] = deepcopy(dict(new_round_update.get("Stations") or {}))
     merged["MoveStates"] = []
     merged["RemoveList"] = []
+    if previous_output is not None:
+        restore_dummy_routes_from_algorithm_output(merged, previous_output)
     return merged
 
 

@@ -98,7 +98,7 @@ description: 完整列出 Move 基类及子类型、Move 状态、输出对象�
 | `IPrePrepareMove` | `LastState` | `string` | 模块转换前状态。 |
 | `IPrePrepareMove` | `CurState` | `string` | 模块转换后状态。 |
 | `IPrePrepareMove` | `PrePrepareType` | `string` | Pump、Vent、旋转、控温等具体类型。 |
-| `IAlignMove` | - | - | 无新增字段，使用 IMove 公共字段描述校准动作。 |
+| `IAlignMove` | - | - | 无新增字段，使用 IMove 公共字段描述校准动作；动作不推进 Route Step，但完成后 Aligner 中的待对准物料进入可 Pick 状态。 |
 | `IPrepareMove` | `SlotList` | `IList<int>` | Prepare 关联模块 Slots。 |
 | `IPrepareMove` | `RelatedActionType` | `ActionType` | place/doubleplace=0、pick/doublepick=1、swap=2。 |
 | `IPrepareMove` | `RelatedRobotType` | `RobotType` | `1=真空手`、`2=大气手`。 |

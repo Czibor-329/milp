@@ -123,6 +123,101 @@ def test_dual_slot_pick_place_and_full_loadlock_transition_are_physically_valid(
     assert validate_move_list(None, _dual_transfer_moves(), _dual_chamber_update()) == []
 
 
+def test_align_move_completes_placed_material_without_advancing_route_step() -> None:
+    """MoveType=11 应完成待对准状态，同时保持物料位置与 StepID。"""
+    update = {
+        "Stations": {
+            "Aligner": {"Type": "Aligner", "Capacity": 1, "Slots": [1]},
+        },
+        "Robots": {},
+        "Materials": [{
+            "ID": 101,
+            "CurrentModuleName": "Aligner",
+            "SlotID": 1,
+            "StepID": 2,
+        }],
+    }
+    moves = [
+        _move(
+            1,
+            11,
+            5,
+            8,
+            ModuleName="Aligner",
+            MatIDList=[101],
+            StepIDList=[2],
+            SlotList=[1],
+        ),
+    ]
+
+    assert validate_move_list(None, moves, update) == []
+    replay = MoveStateReplay(None, moves, update)
+    replay.state.stations["Aligner"].slots[1].phase = SlotPhase.UNPROCESSED
+    replay.update_move_state({"MoveID": 1, "MoveState": MoveStateReplay.RUNNING})
+    replay.update_move_state({"MoveID": 1, "MoveState": MoveStateReplay.DONE})
+    slot = replay.state.stations["Aligner"].slots[1]
+    material = slot.material
+    assert material is not None
+    assert material.material_id == 101
+    assert material.step_id == 2
+    assert slot.phase is SlotPhase.COMPLETED
+
+
+def test_pick_after_aligner_service_accepts_next_robot_step() -> None:
+    """Aligner 放片、对准、取片链应允许 Pick 输出后继 Robot StepID。"""
+    update = {
+        "Stations": {
+            "LP1": {"Type": "LoadPort", "Capacity": 1, "Slots": [1]},
+            "Aligner": {"Type": "Aligner", "Capacity": 1, "Slots": [1]},
+        },
+        "Robots": {
+            "ATR": {
+                "Type": "ATMRobot",
+                "Capacity": 1,
+                "ArmInfo": {
+                    "ArmA": {
+                        "Name": "ArmA",
+                        "IsEnable": True,
+                        "SlotIDs": [1],
+                        "AccessibleStations": ["LP1", "Aligner"],
+                    },
+                },
+            },
+        },
+        "Materials": [{
+            "ID": 101,
+            "CurrentModuleName": "LP1",
+            "SlotID": 1,
+            "StepID": 0,
+        }],
+    }
+    moves = [
+        _move(1, 6, 0, 1, ModuleName="LP1", MatIDList=[101], StepIDList=[0], SlotList=[1]),
+        _move(
+            2, 0, 1, 2, ModuleName="ATR", MatIDList=[101], StepIDList=[1],
+            SrcStationList=["LP1"], SrcSlotList=[1], RobotSlotList=[1],
+        ),
+        _move(3, 7, 2, 3, ModuleName="LP1", MatIDList=[101], StepIDList=[1], SlotList=[1]),
+        _move(4, 6, 2, 3, ModuleName="Aligner", MatIDList=[101], StepIDList=[1], SlotList=[1]),
+        _move(
+            5, 1, 3, 4, ModuleName="ATR", MatIDList=[101], StepIDList=[2],
+            DestStationList=["Aligner"], DestSlotList=[1], RobotSlotList=[1],
+        ),
+        _move(6, 7, 4, 5, ModuleName="Aligner", MatIDList=[101], StepIDList=[2], SlotList=[1]),
+        _move(
+            7, 11, 5, 6, ModuleName="Aligner", MatIDList=[101],
+            StepIDList=[2], SlotList=[1],
+        ),
+        _move(8, 6, 6, 7, ModuleName="Aligner", MatIDList=[101], StepIDList=[2], SlotList=[1]),
+        _move(
+            9, 0, 7, 8, ModuleName="ATR", MatIDList=[101], StepIDList=[3],
+            SrcStationList=["Aligner"], SrcSlotList=[1], RobotSlotList=[1],
+        ),
+    ]
+
+    assert validate_move_list(None, moves, update) == []
+
+
 def test_validation_error_codes_are_unique_and_non_object_moves_are_coded() -> None:
     """每类输出校验错误都必须有唯一稳定码，非法 Move 元素也不能抛普通异常。"""
     codes = [error_code.value for error_code in ValidationErrorCode]

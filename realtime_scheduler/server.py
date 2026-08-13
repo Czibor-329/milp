@@ -135,6 +135,7 @@ from realtime_scheduler.recompute_state import (
     apply_machine_state_to_update,
     merge_algorithm_update,
     release_reused_source_slots,
+    restore_dummy_routes_from_algorithm_output,
 )
 from realtime_scheduler.move_validation import (
     COMPLETE_MOVE,
@@ -496,6 +497,32 @@ class MoveListValidationError(RuntimeError):
         self.sim_time = float(sim_time)
 
 
+def _compile_external_validation_problem(
+    tool_topology: Mapping[str, Any],
+    update_params: Mapping[str, Any],
+) -> Any:
+    """为外部算法输出构造不重复合成 Dummy 的平台校验 Problem。
+
+    标准外部算法已经消费 ``PreDummyClean`` 并返回具体 Dummy Route。平台这里只
+    需要产品 Route 的时长与驻留约束；在校验副本中清空 ``PrePJob``，可阻止
+    内置编译器再次按跨轮产品作业合成 Dummy PJob，同时不修改真正发送给算法、
+    保存为下一轮基线的标准 update。
+    """
+    validation_update = deepcopy(dict(update_params))
+    routes = validation_update.get("Routes") or {}
+    for process_job in validation_update.get("ProcessJobs") or []:
+        if not isinstance(process_job, dict):
+            continue
+        origin_route = process_job.get("OriginRoute")
+        if isinstance(origin_route, dict):
+            origin_route["PrePJob"] = {}
+            route_name = str(origin_route.get("Name") or "")
+            top_route = routes.get(route_name) if isinstance(routes, dict) else None
+            if isinstance(top_route, dict):
+                top_route["PrePJob"] = {}
+    return compile_problem(tool_topology, validation_update)
+
+
 class StandardAlgorithmRuntime:
     """用本仓库状态机维护标准算法当前计划和跨代执行历史。"""
 
@@ -741,8 +768,15 @@ class StandardAlgorithmRuntime:
         *,
         initial_state: Optional[MachineState] = None,
         committed_moves: Optional[Sequence[Mapping[str, Any]]] = None,
+        compile_for_validation: bool = True,
     ) -> None:
-        """保存已执行历史，以调用方给定的重算快照装载下一代计划。"""
+        """保存已执行历史，以调用方给定的重算快照装载下一代计划。
+
+        外部标准算法已经按完整 update 编译过 Dummy 清洗作业；此时平台再次调用
+        内置 ``compile_problem`` 会把跨轮 ProcessJobs 的 PreDummyClean 重新合成，
+        导致同一个 Dummy MatID 被两份内部 PJob 重复占用。外部算法装载可关闭
+        语义编译，仅用标准 update 和 MoveList 做平台物理校验。
+        """
         next_state = (
             initial_state.clone()
             if initial_state is not None
@@ -750,7 +784,11 @@ class StandardAlgorithmRuntime:
         )
         add_new_materials_to_machine_state(next_state, update_params)
         next_update = deepcopy(dict(update_params))
-        next_problem = compile_problem(self.tool_topo, next_update)
+        next_problem = (
+            compile_problem(self.tool_topo, next_update)
+            if compile_for_validation
+            else _compile_external_validation_problem(self.tool_topo, next_update)
+        )
         next_moves = list(output.get("MoveList") or [])
         validation_issues = (
             []
@@ -1229,9 +1267,13 @@ def _build_algorithm_recompute_update(
     requested_time: float,
     projected_state: MachineState,
     move_states: Sequence[Mapping[str, Any]] = (),
+    previous_output: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """按原始重算时刻生成标准 update，并携带真实 Move 状态通知。"""
-    update = merge_algorithm_update(runtime.current_update, new_round_update)
+    update = merge_algorithm_update(
+        runtime.current_update,
+        new_round_update,
+    )
     apply_machine_state_to_update(update, projected_state, requested_time)
     update["MoveStates"] = [
         deepcopy(dict(notification))
@@ -1244,6 +1286,10 @@ def _build_algorithm_recompute_update(
         and float(move.get("StartTime") or 0.0)
         >= float(requested_time) - TIME_TOLERANCE
     ]
+    if previous_output is not None:
+        # 现场投影会重建 Material 字段；DummyReturnInfo 必须最后回填，避免刚恢复的
+        # Route/PJobName/TaskID 又被状态机中上一份空值覆盖。
+        restore_dummy_routes_from_algorithm_output(update, previous_output)
     return update
 
 
@@ -1253,9 +1299,13 @@ def _build_packaged_algorithm_recompute_update(
     requested_time: float,
     move_states: Sequence[Mapping[str, Any]],
     projected_state: Optional[MachineState] = None,
+    previous_output: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """用平台物理快照为算法包构造下一轮标准 update。"""
-    update = merge_algorithm_update(runtime.current_update, new_round_update)
+    update = merge_algorithm_update(
+        runtime.current_update,
+        new_round_update,
+    )
     apply_machine_state_to_update(
         update,
         projected_state if projected_state is not None else runtime.state,
@@ -1278,6 +1328,10 @@ def _build_packaged_algorithm_recompute_update(
         and float(move.get("StartTime") or 0.0)
         >= float(requested_time) - TIME_TOLERANCE
     ]
+    if previous_output is not None:
+        # 与完整平台运行时保持同一协议边界：只在所有现场字段投影完成后消费
+        # 算法返回的 Dummy 信息，确保发出的 AlgSchedule 保留恢复结果。
+        restore_dummy_routes_from_algorithm_output(update, previous_output)
     return update
 
 
@@ -2309,6 +2363,7 @@ def _execute_standard_algorithm(
                     requested_time,
                     projected_state,
                     protocol_move_states,
+                    output,
                 )
             else:
                 update = _build_packaged_algorithm_recompute_update(
@@ -2317,6 +2372,7 @@ def _execute_standard_algorithm(
                     requested_time,
                     notifications,
                     projected_state=projected_state,
+                    previous_output=output,
                 )
             update_snapshots.append(deepcopy(update))
             reproduction.add(
@@ -2357,6 +2413,7 @@ def _execute_standard_algorithm(
                     reason,
                     initial_state=projected_state,
                     committed_moves=committed_moves,
+                    compile_for_validation=builtin_strategy is not None,
                 )
             else:
                 runtime.replace_plan(

@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 
 from realtime_scheduler.move_validation import (
@@ -16,7 +17,12 @@ from realtime_scheduler.move_validation import (
     SlotPhase,
     VACUUM,
 )
-from realtime_scheduler.recompute_state import apply_machine_state_to_update
+from realtime_scheduler.recompute_state import (
+    apply_machine_state_to_update,
+    merge_algorithm_update,
+    restore_dummy_routes_from_algorithm_output,
+)
+from realtime_scheduler.server import _compile_external_validation_problem
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -150,6 +156,211 @@ def test_completed_process_increments_station_slot_material_count() -> None:
     apply_machine_state_to_update(update, replay.state, 30.0)
 
     assert update["Stations"]["Cooler"]["MaterialCount"] == {"1": 4, "2": 5}
+
+
+def test_dummy_route_returned_by_algorithm_is_sent_back_on_recompute() -> None:
+    """平台应把上一轮 DummyReturnInfo 原样回填到在途 Dummy Material。"""
+    route_recipe = {
+        "Name": "dummy-pm1-route",
+        "RouteSteps": [{
+            "StepID": 4,
+            "Visits": [{"StationName": "PM1"}],
+            "NeedProcess": True,
+        }],
+    }
+    update = {
+        "Materials": [{
+            "ID": 100000,
+            "TaskID": "",
+            "PJobName": "",
+            "Route": {},
+            "CurrentModuleName": "PM1",
+            "StepID": 4,
+            "SrcPortName": "DummyPort",
+            "AccessiblePM": ["PM1"],
+        }],
+    }
+    output = {
+        "DummyReturnInfo": {
+            "100000": [{
+                "TaskID": "1",
+                "PJobName": "1.C1.P1",
+                "RouteRecipe": route_recipe,
+            }],
+        },
+    }
+
+    restored = restore_dummy_routes_from_algorithm_output(update, output)
+
+    assert restored == [100000]
+    assert update["Materials"][0]["Route"] == route_recipe
+    assert update["Materials"][0]["TaskID"] == "1"
+    assert update["Materials"][0]["PJobName"] == "1.C1.P1"
+    assert update["Materials"][0]["CurrentModuleName"] == "PM1"
+    assert update["Materials"][0]["StepID"] == 4
+
+
+def test_merge_algorithm_update_consumes_previous_dummy_return_info() -> None:
+    """统一重算合并边界必须直接消费上一轮算法返回的 Dummy Route。"""
+    route_recipe = {
+        "Name": "dummy-pm1-route",
+        "RouteSteps": [{
+            "StepID": 4,
+            "Visits": [{"StationName": "PM1"}],
+            "NeedProcess": True,
+        }],
+    }
+    previous_update = {
+        "CurrentTime": 0.0,
+        "Materials": [{
+            "ID": 100000,
+            "TaskID": "",
+            "PJobName": "",
+            "Route": {},
+            "CurrentModuleName": "PM1",
+            "SlotID": 1,
+            "StepID": 4,
+            "SrcPortName": "DummyPort",
+            "AccessiblePM": ["PM1"],
+        }],
+        "ProcessJobs": [],
+        "ControlJobs": [],
+        "Routes": {},
+    }
+    new_round_update = {
+        "CurrentTime": 70.0,
+        "Materials": [],
+        "ProcessJobs": [],
+        "ControlJobs": [],
+        "ProcessRecipes": [],
+        "Routes": {},
+        "Robots": {},
+        "Stations": {},
+    }
+    previous_output = {
+        "DummyReturnInfo": {
+            "100000": [{
+                "TaskID": "1",
+                "PJobName": "1.C1.P1",
+                "RouteRecipe": route_recipe,
+            }],
+        },
+    }
+
+    merged = merge_algorithm_update(
+        previous_update,
+        new_round_update,
+        previous_output,
+    )
+
+    material = merged["Materials"][0]
+    assert material["Route"] == route_recipe
+    assert material["PJobName"] == "1.C1.P1"
+    assert material["TaskID"] == "1"
+
+
+def test_idle_dummy_consumes_returned_route_by_material_id() -> None:
+    """算法已按 MatID 返回信息时，即使 Dummy 未出发也必须直接回填。"""
+    update = {
+        "Materials": [{
+            "ID": 100000,
+            "TaskID": "",
+            "PJobName": "",
+            "Route": {},
+            "CurrentModuleName": "DummyPort",
+            "StepID": 0,
+            "SrcPortName": "DummyPort",
+            "AccessiblePM": ["PM1"],
+        }],
+    }
+    output = {
+        "DummyReturnInfo": {
+            "100000": [{
+                "TaskID": "1",
+                "PJobName": "1.C1.P1",
+                "RouteRecipe": {
+                    "Name": "unstarted-route",
+                    "RouteSteps": [{"StepID": 0, "Visits": []}],
+                },
+            }],
+        },
+    }
+
+    restored = restore_dummy_routes_from_algorithm_output(update, output)
+
+    assert restored == [100000]
+    assert update["Materials"][0]["Route"]["Name"] == "unstarted-route"
+    assert update["Materials"][0]["PJobName"] == "1.C1.P1"
+
+
+def test_only_dummy_ids_present_in_return_info_are_restored() -> None:
+    """一组空 Dummy 中只回填算法实际返回的 MatID，其余库存保持为空。"""
+    update = {
+        "Materials": [
+            {
+                "ID": 100000 + index,
+                "TaskID": "",
+                "PJobName": "",
+                "Route": {},
+                "CurrentModuleName": "DummyPort",
+                "StepID": 0,
+                "SrcPortName": "DummyPort",
+            }
+            for index in range(5)
+        ],
+    }
+    returned_route = {
+        "Name": "returned-route",
+        "RouteSteps": [{"StepID": 0, "Visits": [{"StationName": "DummyPort"}]}],
+    }
+    output = {
+        "DummyReturnInfo": {
+            str(material_id): [{
+                "TaskID": "1",
+                "PJobName": "1.C1.P1",
+                "RouteRecipe": returned_route,
+            }]
+            for material_id in (100000, 100001)
+        },
+    }
+
+    restored = restore_dummy_routes_from_algorithm_output(update, output)
+
+    assert restored == [100000, 100001]
+    assert [
+        bool((material.get("Route") or {}).get("RouteSteps"))
+        for material in update["Materials"]
+    ] == [True, True, False, False, False]
+
+
+def test_external_validation_compile_clears_predummy_only_in_copy(monkeypatch) -> None:
+    """外部算法计划的校验副本应禁止二次合成 Dummy，且不能修改真实 update。"""
+    route = {
+        "Name": "product-route",
+        "RouteSteps": [],
+        "PrePJob": {"PM1": [{"CheckConditions": {"Dummy": []}}]},
+    }
+    update = {
+        "Routes": {"product-route": deepcopy(route)},
+        "ProcessJobs": [{"JobName": "1.C1.P1", "OriginRoute": deepcopy(route)}],
+    }
+    captured = {}
+
+    def capture_compile(tool_topology, validation_update):
+        """捕获平台实际交给内置编译器的校验副本。"""
+        captured["tool"] = tool_topology
+        captured["update"] = validation_update
+        return "validation-problem"
+
+    monkeypatch.setattr("realtime_scheduler.server.compile_problem", capture_compile)
+
+    result = _compile_external_validation_problem({"Stations": {}}, update)
+
+    assert result == "validation-problem"
+    assert captured["update"]["ProcessJobs"][0]["OriginRoute"]["PrePJob"] == {}
+    assert captured["update"]["Routes"]["product-route"]["PrePJob"] == {}
+    assert update["ProcessJobs"][0]["OriginRoute"]["PrePJob"]
+    assert update["Routes"]["product-route"]["PrePJob"]
 
 
 def test_server_does_not_implement_machine_state_snapshot_replay() -> None:
