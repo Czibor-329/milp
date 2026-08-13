@@ -18,7 +18,7 @@ from unittest.mock import patch
 import realtime_scheduler.server as config_server
 from realtime_scheduler.algorithm_interface import discover_other_algorithms
 from realtime_scheduler.plan_builder import _runtime_clean
-from src.parse import parse_task
+from src.compiler import compile_problem
 from scripts.config_editor_server import (
     BuildState,
     LoggedPlanError,
@@ -751,7 +751,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         }
         policy = load_e2e_ctq_policy(DEFAULT_MODEL_PATH)
 
-        with patch("infer.function._load_policy", return_value=policy):
+        with patch("src.api._load_policy", return_value=policy):
             result = execute_plan(plan)
 
         trace = result["output"]["DecisionTrace"]
@@ -1411,7 +1411,7 @@ class ConfigEditorServerTests(unittest.TestCase):
             },
         }
         self.assertEqual(expected_template, dummy_materials[0])
-        problem = parse_task(self.device, update)
+        problem = compile_problem(self.device, update)
         dummy_wafers = [
             wafer for wafer in problem.wafers
             if wafer.pjob_name.startswith("dummy_")

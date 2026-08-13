@@ -535,7 +535,7 @@ class ReplayMachine:
 
     def _problem_at(self, cutoff: float):
         """构造 cutoff 所在计划代次的 Problem、初态 update 和代次起点。"""
-        from src.parse import parse_task
+        from src.compiler import compile_problem
 
         available_updates = [
             update
@@ -550,7 +550,7 @@ class ReplayMachine:
             )
             generation_start = float(initial_update.get("CurrentTime") or 0.0)
             return (
-                parse_task(self.plan["device"], initial_update),
+                compile_problem(self.plan["device"], initial_update),
                 deepcopy(initial_update),
                 generation_start,
             )
@@ -575,7 +575,7 @@ class ReplayMachine:
             for field_name in ("Materials", "ProcessJobs", "ControlJobs"):
                 combined[field_name].extend(deepcopy(update.get(field_name) or []))
         combined["CurrentTime"] = 0.0
-        return parse_task(self.plan["device"], combined), combined, 0.0
+        return compile_problem(self.plan["device"], combined), combined, 0.0
 
     def _moves_started_by(
         self,

@@ -51,6 +51,28 @@ def test_load_documentation_accepts_and_orders_markdown_pages(tmp_path) -> None:
     assert "## 启动服务" in loaded["pages"][0]["markdown"]
 
 
+def test_load_documentation_merges_platform_and_algorithm_pages(tmp_path) -> None:
+    """平台本地文档和算法仓库文档应进入同一份有序导航。"""
+    platform_directory = tmp_path / "platform"
+    algorithm_directory = tmp_path / "algorithm"
+    _write_page(platform_directory, order=10)
+    _write_page(
+        algorithm_directory,
+        "20-api.md",
+        slug="algorithm-api",
+        title="算法接口",
+        group="算法接口",
+        order=200,
+    )
+
+    loaded = load_documentation((platform_directory, algorithm_directory))
+
+    assert [page["slug"] for page in loaded["pages"]] == [
+        "quick-start",
+        "algorithm-api",
+    ]
+
+
 def test_load_documentation_reports_missing_directory(tmp_path) -> None:
     """文档未部署时应返回可执行的 Markdown 目录提示。"""
     with pytest.raises(DocumentationError, match="data/documentation"):

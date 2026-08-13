@@ -58,25 +58,25 @@ ALGORITHM_ROOT = Path(
     os.environ.get("CT_ALGORITHM_ROOT", str(ROOT / "alg"))
 ).expanduser().resolve()
 ALGORITHM_REPOSITORY_PRESENT = (
-    (ALGORITHM_ROOT / "infer" / "scheduler.py").is_file()
+    (ALGORITHM_ROOT / "src" / "api.py").is_file()
     and (ALGORITHM_ROOT / "src").is_dir()
 )
 if ALGORITHM_REPOSITORY_PRESENT and str(ALGORITHM_ROOT) not in sys.path:
     # 保留父仓库自身 tests/scripts 等包的解析优先级，算法仓库只提供
-    # 父仓库中不存在的 infer/src 命名空间。
+    # 父仓库中不存在的 src 命名空间。
     sys.path.append(str(ALGORITHM_ROOT))
 
 BUILTIN_ALGORITHM_IMPORT_ERROR = ""
 BUILTIN_ALGORITHM_AVAILABLE = False
 if ALGORITHM_REPOSITORY_PRESENT:
     try:
-        from infer import scheduler as builtin_algorithm_scheduler
-        from infer.function import (
+        from src import api as builtin_algorithm_api
+        from src.api import (
             SUPPORTED_ALGORITHMS as builtin_supported_algorithms,
             get_last_strategy_diagnostics as builtin_strategy_diagnostics,
             session as builtin_algorithm_session,
         )
-        from src.parse import parse_task
+        from src.compiler import compile_problem
         from src.paths import MODELS_DIR
         from src.schedule.realtime import (
             RealtimeRescheduler,
@@ -211,6 +211,7 @@ ADMIN_USERS_PATH = FRONTEND_DIR / "admin_users.html"
 FRONTEND_ASSET_DIR = FRONTEND_DIR / "assets"
 USERS_PATH = DATA_DIR / _auth.USER_FILE_NAME
 DOCUMENTATION_DIR = DATA_DIR / "documentation"
+ALGORITHM_DOCUMENTATION_DIR = ALGORITHM_ROOT / "docs" / "documentation"
 E2E_CTQ_MODEL_PATH = ALGORITHM_ROOT / "results" / "models" / "e2e_ctq_policy.npz"
 DUAL_ACTOR_MODEL_PATH = (
     ALGORITHM_ROOT / "results" / "dual_actor_primitive_v1_candidate.npz"
@@ -326,7 +327,7 @@ def discover_builtin_algorithms() -> List[Dict[str, Any]]:
                 else "本地算法仓库未安装"
             )
         elif not runtime_supported:
-            unavailable_reason = "算法未加入 infer.function.SUPPORTED_ALGORITHMS"
+            unavailable_reason = "算法未加入 src.api.SUPPORTED_ALGORITHMS"
         elif missing_files:
             unavailable_reason = "缺少依赖文件：" + "、".join(missing_files)
         option_groups = row.get("optionGroups") or []
@@ -514,7 +515,7 @@ class StandardAlgorithmRuntime:
         self.tool_topo = deepcopy(dict(tool_topo))
         self.current_update = deepcopy(dict(update_params))
         self.skip_validation = bool(skip_validation)
-        self.problem = parse_task(self.tool_topo, self.current_update)
+        self.problem = compile_problem(self.tool_topo, self.current_update)
         initial_state = MachineState.from_sources(self.problem, self.current_update)
         initial_moves = list(output.get("MoveList") or [])
         validation_issues = (
@@ -749,7 +750,7 @@ class StandardAlgorithmRuntime:
         )
         add_new_materials_to_machine_state(next_state, update_params)
         next_update = deepcopy(dict(update_params))
-        next_problem = parse_task(self.tool_topo, next_update)
+        next_problem = compile_problem(self.tool_topo, next_update)
         next_moves = list(output.get("MoveList") or [])
         validation_issues = (
             []
@@ -2132,20 +2133,20 @@ def _execute_standard_algorithm(
                 f"{detail}；请选择已安装的 other_alg 标准算法"
             )
         strategy = builtin_strategy
-        backend = "infer.scheduler"
+        backend = "src.api"
         display_name = builtin_strategy
-        entry_name = "infer.scheduler.init/update"
+        entry_name = "src.api.init/update"
         session_context = builtin_algorithm_session()
 
         def initialize(payload: Mapping[str, Any]) -> None:
             """通过公开 JSON 入口初始化内置算法。"""
-            builtin_algorithm_scheduler.init(
+            builtin_algorithm_api.init(
                 json.dumps(dict(payload), ensure_ascii=False)
             )
 
         def run_update(payload: Mapping[str, Any]) -> Dict[str, Any]:
             """通过公开 JSON 入口执行内置算法并解析标准输出。"""
-            raw_output = builtin_algorithm_scheduler.update(
+            raw_output = builtin_algorithm_api.update(
                 json.dumps(dict(payload), ensure_ascii=False),
                 builtin_strategy,
             )
@@ -2406,7 +2407,7 @@ def _execute_standard_algorithm(
     search_telemetry: Optional[Dict[str, Any]] = None
     if builtin_strategy == "schedule-alphago":
         search_telemetry = dict(
-            builtin_algorithm_scheduler.get_search_telemetry()
+            builtin_algorithm_api.get_search_telemetry()
         )
         search_telemetry.pop("committedMoves", None)
         combined_output["SearchTelemetry"] = deepcopy(search_telemetry)
@@ -4442,7 +4443,10 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/documentation":
             try:
-                document = load_documentation(DOCUMENTATION_DIR)
+                document = load_documentation((
+                    DOCUMENTATION_DIR,
+                    ALGORITHM_DOCUMENTATION_DIR,
+                ))
             except DocumentationError as error:
                 self._send_json(
                     {"ok": False, "error": str(error)},
@@ -4475,7 +4479,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                 )
                 self._send_json({
                     "ok": True,
-                    "telemetry": builtin_algorithm_scheduler.get_search_telemetry(
+                    "telemetry": builtin_algorithm_api.get_search_telemetry(
                         since_revision
                     ),
                 })
@@ -4660,7 +4664,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                 if not BUILTIN_ALGORITHM_AVAILABLE:
                     raise RuntimeError("本地算法仓库未加载，无法控制搜索")
                 payload = self._read_json_object()
-                result = builtin_algorithm_scheduler.control_search(
+                result = builtin_algorithm_api.control_search(
                     str(payload.get("command") or ""),
                     payload.get("actionKey"),
                 )

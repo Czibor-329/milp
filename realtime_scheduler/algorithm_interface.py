@@ -364,7 +364,7 @@ def _unload_previous_algorithm(entry_path: Path) -> None:
         sys.modules.pop(namespace, None)
     # ``src`` 布局（``src/infer/scheduler.py``）：算法创建的顶层 ``src``
     # 包已按文件路径在开头卸载；平台内置 src 包（alg/src）必须保留，
-    # 只需移除加载时追加的算法目录，避免误删平台对 src.parse 等的引用。
+    # 只需移除加载时追加的算法目录，避免误删平台对 src.compiler 等的引用。
     # 无 __file__ 的算法 namespace 包在这里整包清理，防止残留。
     if (entry_path / SRC_ENTRY_RELATIVE_PATH).is_file():
         src_module = sys.modules.get("src")
@@ -414,7 +414,7 @@ def _prepare_src_namespace(entry_path: Path) -> None:
 
     平台内置算法启动即占用顶层 ``src`` 包名（``alg/src``）。此时把算法目录
     的 ``src/`` 追加到 ``src.__path__``，``src.infer`` 即可解析到算法自身，
-    同时 ``src.parse`` 等平台模块仍按原路径解析，互不干扰；无平台 ``src``
+    同时 ``src.compiler`` 等平台模块仍按原路径解析，互不干扰；无平台 ``src``
     时按常规导入由 importlib 自动创建包，无需额外处理。
     """
     src_module = sys.modules.get("src")

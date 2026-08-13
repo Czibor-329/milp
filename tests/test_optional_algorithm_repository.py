@@ -209,7 +209,7 @@ class OptionalAlgorithmRepositoryTests(unittest.TestCase):
     def test_src_layout_algorithm_coexists_with_platform_src_package(self) -> None:
         """平台已加载内置 src 包时，src 布局算法仍可加载且互不干扰。
 
-        真实平台启动即 ``from src.parse import …`` 占用顶层 ``src`` 包名
+        真实平台启动即 ``from src.compiler import …`` 占用顶层 ``src`` 包名
         （alg/src）；算法目录的 src/ 通过追加 ``src.__path__`` 参与解析，
         不能替换或删除平台 src 包对象。
         """

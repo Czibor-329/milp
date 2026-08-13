@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, Dict
 
@@ -90,18 +91,29 @@ def _load_page(path: Path) -> Dict[str, Any]:
     }
 
 
-def load_documentation(directory: Path) -> Dict[str, Any]:
-    """扫描本地 Markdown 页面目录，校验后按 ``order`` 与文件名排序。"""
-    if not directory.is_dir():
-        raise DocumentationError(
-            "本地文档尚未配置，请在 realtime_scheduler/data/documentation/ "
-            "下提供 Markdown 文件"
-        )
-    paths = sorted(path for path in directory.glob("*.md") if path.is_file())
+def load_documentation(directories: Path | Iterable[Path]) -> Dict[str, Any]:
+    """聚合一个或多个 Markdown 页面目录并返回统一导航数据。
+
+    本地使用手册可以继续放在 ``data/documentation``；算法仓库维护的接口
+    文档从其版本化目录直接读取。不同来源仍共用 slug 唯一性与 order 排序，
+    因而前端无需了解页面来自哪个仓库。
+    """
+    source_directories = (
+        [directories]
+        if isinstance(directories, Path)
+        else [Path(directory) for directory in directories]
+    )
+    paths = sorted(
+        path
+        for directory in source_directories
+        if directory.is_dir()
+        for path in directory.glob("*.md")
+        if path.is_file()
+    )
     if not paths:
         raise DocumentationError(
-            "本地文档尚未配置，请在 realtime_scheduler/data/documentation/ "
-            "下提供至少一个 .md 文件"
+            "文档尚未配置，请在 realtime_scheduler/data/documentation/ 或"
+            "算法仓库 docs/documentation/ 下提供至少一个 .md 文件"
         )
 
     pages = [_load_page(path) for path in paths]

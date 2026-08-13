@@ -5,7 +5,7 @@
 - `server.py`：本地调度服务、工作区接口、分析 API 与静态资源入口，不承载页面分析实现。
 - `backend/analysis.py`：服务端唯一的 MoveList 性能、瓶颈和测试组分析实现。
 - 内置 `heuristic/loadlock-macro/e2e-ctq/dual-actor-e2e`：统一调用独立算法仓库
-  `alg/infer/scheduler.py` 的 `init/update`，`update` 的可选 `algorithm`
+  `alg/src/api.py` 的 `init/update`，`update` 的可选 `algorithm`
   参数决定算法。
 - `batch_service.py`：批量运行、Heuristic Baseline、并发进度与取消状态。
 - `plan_builder.py`：设备归一化、Route/Recipe 和各轮 CJob/PJob 请求建模。
@@ -67,12 +67,12 @@ npm run build
 
 本地算法列表不在前端写死，而是由算法仓库根目录的 `algorithms.json` 控制。
 服务会在每次健康检查时重读清单；配置中的算法还必须存在于
-`infer.function.SUPPORTED_ALGORITHMS`，并满足 `requiredFiles`，才能在页面中启用。
+`src.api.SUPPORTED_ALGORITHMS`，并满足 `requiredFiles`，才能在页面中启用。
 
 内置算法与 `other_alg` 现在共用同一套标准 update 数据流。内置入口示例：
 
 ```python
-from infer.scheduler import init, update
+from src.api import init, update
 
 init(topo_data_json)
 output_json = update(tool_json, algorithm="heuristic")

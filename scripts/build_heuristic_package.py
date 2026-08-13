@@ -23,8 +23,8 @@ RUNTIME_REQUIREMENTS = "numpy==2.5.0\n"
 ARCHIVE_PREFIX = "alg-heuristic"
 ZIP_TIMESTAMP_MINIMUM_YEAR = 1980
 EXCLUDED_RUNTIME_FILES = frozenset({
-    PurePosixPath("src/parse/generator.py"),
-    PurePosixPath("src/parse/macro_rule_scenarios.py"),
+    PurePosixPath("src/task_data/generator.py"),
+    PurePosixPath("src/task_data/macro_rule_scenarios.py"),
     PurePosixPath("src/schedule/strategies/dual_actor_e2e.py"),
     PurePosixPath("src/schedule/strategies/e2e_ctq.py"),
     PurePosixPath("src/schedule/strategies/global_wafer.py"),
@@ -44,8 +44,8 @@ PACKAGE_README = r"""# CT Scheduler Heuristic 部署包
 
 ## 内容
 
-- `infer/`：标准 `init/update` 企业接口。
-- `src/`：Heuristic 所需解析、状态机、时序、校验和实时重算运行时。
+- `src/api.py`：标准 `init/update` 企业接口。
+- `src/`：Heuristic 所需编译器、状态机、时序、校验和实时重算运行时。
 - `requirements.txt`：唯一第三方运行依赖 NumPy。
 - `PACKAGE_INFO.json`：源码提交、构建日期和运行环境信息。
 
@@ -68,8 +68,8 @@ python -m venv .venv
 ```text
 调度平台/
   alg/
-    infer/
     src/
+      api.py
     requirements.txt
 ```
 
@@ -130,8 +130,8 @@ def git_output(source_root: Path, *arguments: str) -> str:
 def validate_source(source_root: Path) -> str:
     """校验算法仓库与标准入口，并返回完整源码提交号。"""
     source_root = source_root.resolve()
-    if not (source_root / "infer" / "scheduler.py").is_file():
-        raise FileNotFoundError(f"缺少标准入口：{source_root / 'infer/scheduler.py'}")
+    if not (source_root / "src" / "api.py").is_file():
+        raise FileNotFoundError(f"缺少标准入口：{source_root / 'src/api.py'}")
     if not (source_root / "src").is_dir():
         raise FileNotFoundError(f"缺少运行时源码目录：{source_root / 'src'}")
     dirty_status = git_output(source_root, "status", "--porcelain")
@@ -144,7 +144,7 @@ def iter_runtime_files(source_root: Path) -> Iterable[Path]:
     """按稳定路径顺序返回精简运行时需要的 Python 源文件。"""
     candidates = [
         path
-        for runtime_directory in (source_root / "infer", source_root / "src")
+        for runtime_directory in (source_root / "src",)
         for path in runtime_directory.rglob("*.py")
         if "__pycache__" not in path.parts
     ]
@@ -166,7 +166,7 @@ def iter_runtime_files(source_root: Path) -> Iterable[Path]:
 
 def restrict_to_heuristic(relative_path: PurePosixPath, content: bytes) -> bytes:
     """收紧包内公共入口，使精简包明确拒绝其他算法名。"""
-    if relative_path == PurePosixPath("infer/function.py"):
+    if relative_path == PurePosixPath("src/api.py"):
         text = content.decode("utf-8")
         pattern = r"SUPPORTED_ALGORITHMS = frozenset\(\{.*?\}\)"
         text, replacement_count = re.subn(
@@ -177,7 +177,7 @@ def restrict_to_heuristic(relative_path: PurePosixPath, content: bytes) -> bytes
             flags=re.DOTALL,
         )
         if replacement_count != 1:
-            raise RuntimeError("无法收紧 infer/function.py 的算法白名单")
+            raise RuntimeError("无法收紧 src/api.py 的算法白名单")
         telemetry_reset_pattern = (
             r"\r?\n        from src\.schedule\.strategies\.schedule_alphago"
             r"\.telemetry import \(\r?\n"
@@ -193,23 +193,6 @@ def restrict_to_heuristic(relative_path: PurePosixPath, content: bytes) -> bytes
         )
         if reset_replacement_count != 1:
             raise RuntimeError("无法移除 heuristic 初始化中的搜索遥测依赖")
-        return text.encode("utf-8")
-    if relative_path == PurePosixPath("infer/scheduler.py"):
-        text = content.decode("utf-8")
-        pattern = r"algorithm: 可选算法名，支持 .*?\n\s+同一次"
-        replacement = (
-            "algorithm: 可选算法名，精简部署包仅支持 ``heuristic``。\n"
-            "            同一次"
-        )
-        text, replacement_count = re.subn(
-            pattern,
-            replacement,
-            text,
-            count=1,
-            flags=re.DOTALL,
-        )
-        if replacement_count != 1:
-            raise RuntimeError("无法更新 infer/scheduler.py 的算法说明")
         return text.encode("utf-8")
     return content
 

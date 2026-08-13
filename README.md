@@ -26,9 +26,8 @@ milp/
 │   │   └── experiments.json
 │   └── exports/                      # 运行结果与复现日志（可随时清理）
 └── alg/                              # 由启发式算法包解压得到
-    ├── infer/
-    │   └── scheduler.py
     ├── src/
+    │   └── api.py
     └── other_alg/
         └── <外部算法名>/
             └── infer/
@@ -106,13 +105,12 @@ python realtime_scheduler\server.py --open
 其中必须提供：
 
 ```text
-<算法名>/infer/scheduler.py				# 必须包含初始化函数init和重算函数update
-src/
+<算法名>/src/api.py				# 内置算法公开 API，包含 init 和 update
 ```
 
 本地算法选择器由 `alg/algorithms.json` 驱动。新增算法时只需在算法仓库中：
 
-1. 实现算法，并把算法 ID 加入 `infer/function.py` 的 `SUPPORTED_ALGORITHMS`；
+1. 实现算法，并把算法 ID 加入 `src/api.py` 的 `SUPPORTED_ALGORITHMS`；
 2. 在 `algorithms.json` 的 `algorithms` 数组增加一项。
 
 前端会从健康检查接口自动生成算法卡片，不需要再修改 HTML 或 TypeScript。

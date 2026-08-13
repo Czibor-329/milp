@@ -26,7 +26,7 @@ class BuildHeuristicPackageTests(TestCase):
             temporary_root = Path(temporary_directory)
             source_root = temporary_root / "source"
             output_directory = temporary_root / "output"
-            (source_root / "infer").mkdir(parents=True)
+            (source_root / "src").mkdir(parents=True)
             heuristic_directory = (
                 source_root / "src" / "schedule" / "strategies" / "heuristic"
             )
@@ -36,24 +36,17 @@ class BuildHeuristicPackageTests(TestCase):
             )
             schedule_alphago_directory.mkdir(parents=True)
 
-            (source_root / "infer" / "function.py").write_text(
+            (source_root / "src" / "api.py").write_text(
                 "SUPPORTED_ALGORITHMS = frozenset({\n"
                 '    "heuristic",\n'
                 '    "schedule-alphago",\n'
                 "})\n\n"
-                "def init_framework():\n"
+                "def init():\n"
                 "    with lock:\n"
                 "        from src.schedule.strategies.schedule_alphago.telemetry import (\n"
                 "            reset_schedule_alphago_telemetry,\n"
                 "        )\n\n"
                 "        reset_schedule_alphago_telemetry()\n",
-                encoding="utf-8",
-            )
-            (source_root / "infer" / "scheduler.py").write_text(
-                '"""入口。\n\n'
-                "algorithm: 可选算法名，支持 ``heuristic``、``schedule-alphago``。\n"
-                "            同一次会话不能切换算法。\n"
-                '"""\n',
                 encoding="utf-8",
             )
             (heuristic_directory / "selector.py").write_text(
@@ -85,7 +78,7 @@ class BuildHeuristicPackageTests(TestCase):
 
             with ZipFile(archive_path) as archive:
                 archive_names = archive.namelist()
-                function_source = archive.read("alg/infer/function.py").decode("utf-8")
+                function_source = archive.read("alg/src/api.py").decode("utf-8")
 
             self.assertFalse(
                 any("schedule_alphago" in name for name in archive_names),
