@@ -106,8 +106,9 @@ class ReplayMachine:
             build_resource_flow_observation,
         )
         from src.schedule.strategies.machine_policy import ReentrantFlowPriority
-        from src.validation import Machine, MoveStateReplay
-        from src.validation.state import MachineState
+        from src.schedule.core.machine import Machine
+        from src.schedule.core.replay import MoveStateReplay
+        from src.schedule.core.state import MachineState
 
         replay_time = max(0.0, float(cutoff))
         problem, initial_update, generation_start = self._problem_at(replay_time)

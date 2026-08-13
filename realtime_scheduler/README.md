@@ -27,7 +27,7 @@
 兼容读取 `alg/other_alg/`。也可用 `CT_OTHER_ALGORITHM_ROOT` 指向任意打包
 算法目录。只有打包算法时，多轮重算由算法包自带的重算桥接器根据
 `MoveStates/RemoveList` 恢复状态；本地完整算法仓库存在时仍使用原有
-`src.validation` 状态机做平台侧校验。
+`src.schedule.core` 状态机做平台侧校验。
 
 完整开发环境启动：
 

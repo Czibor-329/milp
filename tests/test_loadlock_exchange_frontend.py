@@ -15,7 +15,7 @@ from scripts.seed_neural_recompute_workspaces import (
     SINGLE_TWO_JOB_GROUP,
     seed_workspace_matrix,
 )
-from src.validation.move_fields import (
+from src.schedule.core.move_fields import (
     PICK_MOVE,
     PLACE_MOVE,
     PRE_PREPARE_MOVE,

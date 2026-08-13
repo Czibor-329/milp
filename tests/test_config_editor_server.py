@@ -881,7 +881,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual(3, len(third_update["ProcessJobs"]))
         self.assertEqual(3, len(third_update["ControlJobs"]))
         self.assertEqual("ATR", second_update["Stations"]["LA"]["LastItem"])
-        self.assertEqual("src.validation.state.MachineState", result["rounds"][1]["strategyDiagnostics"]["stateSource"])
+        self.assertEqual("realtime_scheduler.move_validation.MachineState", result["rounds"][1]["strategyDiagnostics"]["stateSource"])
         self.assertEqual(3, len(result["updates"]))
         self.assertEqual(2, len(result["output"]["RecomputePoints"]))
 
