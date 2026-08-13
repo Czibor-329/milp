@@ -82,9 +82,11 @@ if ALGORITHM_REPOSITORY_PRESENT:
             RealtimeRescheduler,
             TIME_TOLERANCE,
         )
-        from src.schedule.strategies.schedule_alphago.telemetry import (
-            SearchCancelledError,
-        )
+        SearchCancelledError = None
+        if "schedule-alphago" in builtin_supported_algorithms:
+            from src.schedule.strategies.schedule_alphago.telemetry import (
+                SearchCancelledError,
+            )
     except Exception as error:  # noqa: BLE001
         BUILTIN_ALGORITHM_IMPORT_ERROR = f"{type(error).__name__}: {error}"
     else:

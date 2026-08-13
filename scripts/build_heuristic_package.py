@@ -27,8 +27,13 @@ EXCLUDED_RUNTIME_FILES = frozenset({
     PurePosixPath("src/parse/macro_rule_scenarios.py"),
     PurePosixPath("src/schedule/strategies/dual_actor_e2e.py"),
     PurePosixPath("src/schedule/strategies/e2e_ctq.py"),
+    PurePosixPath("src/schedule/strategies/global_wafer.py"),
     PurePosixPath("src/schedule/strategies/loadlock_macro.py"),
     PurePosixPath("src/schedule/strategies/milp.py"),
+    PurePosixPath("src/schedule/strategies/schedule_alphago_model.py"),
+})
+EXCLUDED_RUNTIME_DIRECTORIES = frozenset({
+    PurePosixPath("src/schedule/strategies/schedule_alphago"),
 })
 
 
@@ -148,7 +153,14 @@ def iter_runtime_files(source_root: Path) -> Iterable[Path]:
         key=lambda item: item.relative_to(source_root).as_posix(),
     ):
         relative_path = PurePosixPath(path.relative_to(source_root).as_posix())
-        if relative_path not in EXCLUDED_RUNTIME_FILES:
+        is_excluded_directory = any(
+            directory == relative_path or directory in relative_path.parents
+            for directory in EXCLUDED_RUNTIME_DIRECTORIES
+        )
+        if (
+            relative_path not in EXCLUDED_RUNTIME_FILES
+            and not is_excluded_directory
+        ):
             yield path
 
 
@@ -166,6 +178,21 @@ def restrict_to_heuristic(relative_path: PurePosixPath, content: bytes) -> bytes
         )
         if replacement_count != 1:
             raise RuntimeError("无法收紧 infer/function.py 的算法白名单")
+        telemetry_reset_pattern = (
+            r"\r?\n        from src\.schedule\.strategies\.schedule_alphago"
+            r"\.telemetry import \(\r?\n"
+            r"            reset_schedule_alphago_telemetry,\r?\n"
+            r"        \)\r?\n\r?\n"
+            r"        reset_schedule_alphago_telemetry\(\)\r?\n"
+        )
+        text, reset_replacement_count = re.subn(
+            telemetry_reset_pattern,
+            "\n",
+            text,
+            count=1,
+        )
+        if reset_replacement_count != 1:
+            raise RuntimeError("无法移除 heuristic 初始化中的搜索遥测依赖")
         return text.encode("utf-8")
     if relative_path == PurePosixPath("infer/scheduler.py"):
         text = content.decode("utf-8")

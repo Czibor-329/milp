@@ -8,7 +8,7 @@
 
 1. 将 `docs\\data.rar` 解压后，替换 `realtime_scheduler\\data\\`
 
-2. `docs\\alg-heuristic.zip` 是启发式算法包。解压后将其中的 `alg` 目录放到仓库根目录
+2. `docs\\alg-heuristic-20260813-7750ba9.zip` 是当前启发式算法包。解压后将其中的 `alg` 目录放到仓库根目录
 
 3. 外部算法统一放在 `alg\\other_alg\\` 中。每个外部算法使用独立子目录，并提供标准入口 `infer\\scheduler.py`。
 
@@ -18,7 +18,7 @@
 milp/
 ├── docs/
 │   ├── data.rar
-│   └── alg-heuristic-20260805-b5fa81c.zip
+│   └── alg-heuristic-20260813-7750ba9.zip
 ├── realtime_scheduler/
 │   ├── data/                         # 由 data.rar 解压得到
 │   │   ├── workspaces/               # 工作区数据（拆分目录，见下）
