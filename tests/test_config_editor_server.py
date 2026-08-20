@@ -182,6 +182,57 @@ class CJobCycleUnitTests(unittest.TestCase):
             config_server._cjob_cycle_completion_time(FakeRuntime(), state),
         )
 
+    def test_cycle_completion_keeps_terminal_materials_across_recompute(self) -> None:
+        """其他 CJob 触发重算后，已回 LP 的晶圆不必再次出现在新 MoveList。"""
+        class FakeRuntime:
+            """模拟一片已回 LP、另一片仍按新计划收尾的跨代状态。"""
+
+            state_time = 20.0
+            current_update = {"Materials": [
+                {
+                    "ID": 21,
+                    "TaskID": "8",
+                    "StepID": 2,
+                    "CurrentModuleName": "LP2",
+                    "Route": {"RouteSteps": [{
+                        "StepID": 2,
+                        "PostStepID": [],
+                        "Visits": [{"StationName": "LP2"}],
+                    }]},
+                },
+                {
+                    "ID": 22,
+                    "TaskID": "8",
+                    "StepID": 1,
+                    "CurrentModuleName": "ATR",
+                    "Route": {"RouteSteps": [
+                        {
+                            "StepID": 1,
+                            "PostStepID": [2],
+                            "Visits": [{"StationName": "ATR"}],
+                        },
+                        {
+                            "StepID": 2,
+                            "PostStepID": [],
+                            "Visits": [{"StationName": "LP2"}],
+                        },
+                    ]},
+                },
+            ]}
+            current_plan = [
+                {"MatIDList": [22], "StartTime": 20.0, "EndTime": 25.0},
+            ]
+
+        state = config_server.CJobCycleRuntime(
+            template={}, load_port="LP2", total_cycles=3, current_cycle=1,
+            current_task_id="8", configured_round=1,
+        )
+
+        self.assertAlmostEqual(
+            25.0 + config_server.TIME_TOLERANCE * config_server.CJOB_CYCLE_EVENT_EPSILON_MULTIPLIER,
+            config_server._cjob_cycle_completion_time(FakeRuntime(), state),
+        )
+
     def test_cycle_count_rejects_fractional_and_out_of_range_values(self) -> None:
         """循环数必须是 1~1000 的整数。"""
         for value in (0, 1001, 1.5):
@@ -1246,6 +1297,59 @@ class ConfigEditorServerTests(unittest.TestCase):
             },
         )
         self.assertTrue(any("清空 LoadPort=LP1" in line for line in result["logs"]))
+
+    def test_parallel_cjob_cycles_replenish_in_completion_order(self) -> None:
+        """双 LP 并发时，另一盒的已完成晶圆不得因跨代 MoveList 缺失而阻断补片。"""
+        plan = {
+            "deviceName": DEVICE_PATH.name,
+            "device": self.recording,
+            "strategy": "heuristic",
+            "roundCount": 1,
+            "options": {},
+            "recipes": [{
+                "name": "R12",
+                "time": 8,
+                "modules": "PM1,PM2",
+                "weight": {},
+            }],
+            "cleans": [],
+            "routes": [_route("Route12", "PM1,PM2", "R12")],
+            "rounds": [{
+                "currentTime": 0,
+                "cjobs": [
+                    {
+                        "taskId": task_id,
+                        "loadPort": load_port,
+                        "cjobCycle": 3,
+                        "jobType": "NormalLot",
+                        "priority": 1,
+                        "taskMode": "Smart",
+                        "pjobs": [{
+                            "jobName": "P1",
+                            "routeRef": "Route12",
+                            "loadPort": load_port,
+                            "waferCount": 2,
+                            "priority": 1,
+                        }],
+                    }
+                    for task_id, load_port in (("1", "LP1"), ("2", "LP2"))
+                ],
+            }],
+        }
+
+        result = execute_plan(plan)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("passed", result["validation"])
+        self.assertEqual(
+            [
+                "CJobCycle 补片（LP1 2/3）",
+                "CJobCycle 补片（LP2 2/3）",
+                "CJobCycle 补片（LP1 3/3）",
+                "CJobCycle 补片（LP2 3/3）",
+            ],
+            [point["Reason"] for point in result["output"]["RecomputePoints"]],
+        )
 
     def test_round_rejects_duplicate_task_ids_and_control_job_load_ports(self) -> None:
         """绕过页面的输入也不能把重复 TaskID 或共用 LoadPort 送入算法。"""

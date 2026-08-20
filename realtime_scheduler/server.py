@@ -2293,23 +2293,67 @@ def _cycle_states_for_round(
     return states
 
 
+def _material_finished_cjob_cycle(
+    material: Mapping[str, Any],
+    load_port: str,
+) -> bool:
+    """判断重算快照中的物料是否已经走到指定 LoadPort 的 Route 终点。"""
+    current_module = str(material.get("CurrentModuleName") or "").strip()
+    if current_module != load_port:
+        return False
+    current_step_id = material.get("StepID")
+    if current_step_id is None:
+        return False
+    route = material.get("Route")
+    route_steps = route.get("RouteSteps") if isinstance(route, Mapping) else []
+    for step in route_steps or []:
+        if (
+            not isinstance(step, Mapping)
+            or step.get("StepID") is None
+            or str(step.get("StepID")) != str(current_step_id)
+        ):
+            continue
+        if step.get("PostStepID"):
+            return False
+        terminal_stations = {
+            str(visit.get("StationName") or "").strip()
+            for visit in (step.get("Visits") or [])
+            if isinstance(visit, Mapping)
+        }
+        return load_port in terminal_stations
+    return False
+
+
 def _cjob_cycle_completion_time(
     runtime: Any,
     cycle_state: CJobCycleRuntime,
 ) -> Optional[float]:
-    """从当前代 MoveList 求出这一盒全部晶圆返回后的最晚时刻。"""
-    material_ids = {
-        material.get("ID", material.get("Name"))
+    """结合重算快照与当前代 MoveList 求出整盒晶圆返回后的最晚时刻。"""
+    materials = [
+        material
         for material in (runtime.current_update.get("Materials") or [])
         if (
             isinstance(material, Mapping)
             and str(material.get("TaskID") or "") == cycle_state.current_task_id
         )
+    ]
+    material_ids = {
+        material.get("ID", material.get("Name")) for material in materials
     }
     material_ids.discard(None)
     if not material_ids:
         return None
+    # 其他 CJob 的完工事件可能已经触发过重算。此时本 CJob 先完成的晶圆仍在
+    # current_update 的终点槽中，但不会再次出现在新一代 MoveList；它们应按
+    # 当前状态时刻计为已完成，只让尚未回片的晶圆决定未来完工边界。
     latest_by_material: Dict[Any, float] = {}
+    for material in materials:
+        material_id = material.get("ID", material.get("Name"))
+        if (
+            material_id is not None
+            and _material_finished_cjob_cycle(material, cycle_state.load_port)
+        ):
+            latest_by_material[material_id] = runtime.state_time
     for move in runtime.current_plan:
         end_time = _finite_number(
             move.get("EndTime"),
