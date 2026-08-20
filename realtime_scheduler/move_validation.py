@@ -913,13 +913,22 @@ def _pretrans_target_group(robot: RobotState, dest_stations: Sequence[str]) -> O
 
 
 def _apply_pretrans_landing(robot: RobotState, move: Mapping[str, Any]) -> None:
-    """转位落地：全手槽候选更新到目标站组，并按声明配对刷新精确指向。"""
+    """转位落地：整条物理 Arm 先切到目标站组，再刷新动作声明的精确指向。
+
+    ``SlotsStationMap`` 描述的是共享 Arm 的站组姿态。即使一条 PreTrans 只列出
+    一个 ``RobotSlot``，Arm 上未参与本次取放的其他手槽也会随 Arm 一起转动；
+    若只刷新声明槽位，后续双片转位会把其余手槽误判为仍指向旧站。
+    """
     if robot.slot_map:
         dest_stations = [str(value) for value in _values(move, "DestStationList")]
         group = _pretrans_target_group(robot, dest_stations)
         if group is not None:
             for slot_id, groups in robot.slot_map.items():
-                robot.slot_options[slot_id] = set(groups.get(group) or ())
+                candidates = set(groups.get(group) or ())
+                if not candidates:
+                    continue
+                robot.slot_options[slot_id] = candidates
+                robot.slot_targets[slot_id] = next(iter(sorted(candidates)))
     robot_slots = _integer_values(move, "RobotSlotList")
     dest_stations = [str(value) for value in _values(move, "DestStationList")]
     dest_slots = _integer_values(move, "DestSlotList")
@@ -927,7 +936,15 @@ def _apply_pretrans_landing(robot: RobotState, move: Mapping[str, Any]) -> None:
         station = dest_stations[index] if index < len(dest_stations) else (dest_stations[0] if dest_stations else None)
         station_slot = dest_slots[index] if index < len(dest_slots) else None
         if station:
-            robot.slot_targets[robot_slot] = (station, station_slot) if station_slot is not None else None
+            if station_slot is not None:
+                robot.slot_targets[robot_slot] = (station, station_slot)
+            else:
+                candidates = sorted(
+                    candidate
+                    for candidate in robot.slot_options.get(robot_slot, ())
+                    if candidate[0] == station
+                )
+                robot.slot_targets[robot_slot] = candidates[0] if candidates else None
     robot.position = _robot_derived_position(robot)
 
 
@@ -1220,7 +1237,7 @@ def _pretrans_is_linked_empty_pick(
 
 
 def _start_prepare(state: MachineState, move: Mapping[str, Any], end_time: float, all_moves: Sequence[Mapping[str, Any]], scheduled: List[_ScheduledCompletion]) -> Optional[str]:
-    """校验开门动作及 LoadLock 当前压力态。"""
+    """校验开门动作及 LoadLock 当前压力态；重复开门按幂等动作处理。"""
     alignment = _parallel_arrays_alignment_issue(move, ("MatIDList", "StepIDList", "SlotList"))
     if alignment:
         return alignment
@@ -1229,8 +1246,6 @@ def _start_prepare(state: MachineState, move: Mapping[str, Any], end_time: float
     if station is None:
         return _issue(move, ValidationErrorCode.STATION_UNKNOWN, f"未知站点 {station_name or '<empty>'}")
     start_time = _start_time(move)
-    if station.door is not DoorState.CLOSED:
-        return _issue(move, ValidationErrorCode.STATION_DOOR_STATE_INVALID, f"{station.name} 当前不是关门状态")
     if not _available(station.door_busy_until, start_time) or not _available(station.transfer_busy_until, start_time):
         return _issue(move, ValidationErrorCode.STATION_TRANSFER_BUSY, f"{station.name} 门机构或取放资源正在忙")
     if not _available(station.environment_busy_until, start_time):
@@ -1253,7 +1268,7 @@ def _start_prepare(state: MachineState, move: Mapping[str, Any], end_time: float
 
 
 def _start_complete(state: MachineState, move: Mapping[str, Any], end_time: float, _all_moves: Sequence[Mapping[str, Any]], scheduled: List[_ScheduledCompletion]) -> Optional[str]:
-    """校验关门动作并登记关门完成状态。"""
+    """校验关门动作并登记完成状态；重复关门按幂等动作处理。"""
     alignment = _parallel_arrays_alignment_issue(move, ("MatIDList", "StepIDList", "SlotList"))
     if alignment:
         return alignment
@@ -1261,8 +1276,6 @@ def _start_complete(state: MachineState, move: Mapping[str, Any], end_time: floa
     station = state.stations.get(station_name)
     if station is None:
         return _issue(move, ValidationErrorCode.STATION_UNKNOWN, f"未知站点 {station_name or '<empty>'}")
-    if not _is_doorless(station) and station.door is not DoorState.OPEN:
-        return _issue(move, ValidationErrorCode.STATION_DOOR_STATE_INVALID, f"{station.name} 当前不是开门状态")
     start_time = _start_time(move)
     if not _available(station.door_busy_until, start_time) or not _available(station.transfer_busy_until, start_time):
         return _issue(move, ValidationErrorCode.STATION_TRANSFER_BUSY, f"{station.name} 门机构或取放资源正在忙")

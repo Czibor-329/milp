@@ -123,6 +123,56 @@ def test_dual_slot_pick_place_and_full_loadlock_transition_are_physically_valid(
     assert validate_move_list(None, _dual_transfer_moves(), _dual_chamber_update()) == []
 
 
+def test_repeated_prepare_and_complete_are_idempotent() -> None:
+    """门已开可再次开门，门已关也可再次关门。"""
+    update = {
+        "Stations": {
+            "PM1": {"Type": "ProcessChamber", "Capacity": 1},
+        },
+        "Robots": {},
+        "Materials": [],
+    }
+    moves = [
+        _move(1, 6, 0, 1, ModuleName="PM1"),
+        _move(2, 6, 1, 2, ModuleName="PM1"),
+        _move(3, 7, 2, 3, ModuleName="PM1"),
+        _move(4, 7, 3, 4, ModuleName="PM1"),
+    ]
+
+    assert validate_move_list(None, moves, update) == []
+
+    replay = MoveStateReplay(None, moves, update)
+    for move in moves:
+        replay.update_move_state(
+            {"MoveID": move["MoveID"], "MoveState": MoveStateReplay.RUNNING},
+            snapshot=False,
+        )
+        replay.update_move_state(
+            {"MoveID": move["MoveID"], "MoveState": MoveStateReplay.DONE},
+            snapshot=False,
+        )
+    assert replay.state.stations["PM1"].door.value == "closed"
+
+
+def test_repeated_door_action_still_rejects_busy_overlap() -> None:
+    """幂等开关门不能绕过门机构的时间互斥。"""
+    update = {
+        "Stations": {
+            "PM1": {"Type": "ProcessChamber", "Capacity": 1},
+        },
+        "Robots": {},
+        "Materials": [],
+    }
+    moves = [
+        _move(1, 6, 0, 2, ModuleName="PM1"),
+        _move(2, 6, 1, 3, ModuleName="PM1"),
+    ]
+
+    issues = validate_move_list(None, moves, update)
+    assert issues
+    assert ValidationErrorCode.STATION_TRANSFER_BUSY.value in issues[0]
+
+
 def test_align_move_completes_placed_material_without_advancing_route_step() -> None:
     """MoveType=11 应完成待对准状态，同时保持物料位置与 StepID。"""
     update = {
@@ -965,6 +1015,77 @@ def test_dual_arm_cross_station_rejects_misaligned_slot() -> None:
     ]
     issues = validate_move_list(None, moves, update)
     assert issues and "无法对准" in issues[0]
+
+
+def test_single_arm_station_change_updates_unlisted_sibling_slot_pointer() -> None:
+    """单条 Arm 转位时未列出的兄弟手槽也必须随整臂切换站组。
+
+    复现双腔循环测试：#2 先到 LA，随后只用 #1 转到 LB；此时整条 ATM Arm
+    已位于 LB，下一条双槽 ``LB -> P1`` 转位不应把 #2 误报为仍指向 LA。
+    """
+    station_groups = {
+        station: {
+            "1": [{"Key": station, "Value": 1}],
+            "2": [{"Key": station, "Value": 1}],
+        }
+        for station in ("P1", "LA", "LB")
+    }
+    update = {
+        "Stations": {
+            "P1": {"Type": "LoadPort", "Capacity": 2},
+            "LA": {"Type": "LoadLock", "Capacity": 1},
+            "LB": {"Type": "LoadLock", "Capacity": 1},
+        },
+        "Robots": {
+            "ATMRobot": {
+                "Type": "ATMRobot",
+                "Capacity": 2,
+                "ArmInfo": {
+                    "ArmA": {
+                        "Name": "ArmA",
+                        "IsEnable": True,
+                        "SlotIDs": [1, 2],
+                        "AccessibleStations": ["P1", "LA", "LB"],
+                        "SlotAtStation": "P1",
+                        "SlotsStationMap": station_groups,
+                    },
+                },
+            },
+        },
+        "Materials": [],
+    }
+    moves = [
+        _move(
+            1, 5, 0, 1, ModuleName="ATMRobot", RobotSlotList=[2],
+            SrcStationList=["P1"], DestStationList=["LA"], DestSlotList=[1],
+        ),
+        _move(
+            2, 5, 1, 2, ModuleName="ATMRobot", RobotSlotList=[1],
+            SrcStationList=["LA"], DestStationList=["LB"], DestSlotList=[1],
+        ),
+        _move(
+            3, 5, 2, 3, ModuleName="ATMRobot", RobotSlotList=[1, 2],
+            SrcStationList=["LB", "LB"], DestStationList=["P1", "P1"],
+            DestSlotList=[2, 1],
+        ),
+    ]
+
+    assert validate_move_list(None, moves, update) == []
+
+    replay = MoveStateReplay(None, moves, update)
+    for move in moves:
+        replay.update_move_state(
+            {"MoveID": move["MoveID"], "MoveState": MoveStateReplay.RUNNING},
+            snapshot=False,
+        )
+        replay.update_move_state(
+            {"MoveID": move["MoveID"], "MoveState": MoveStateReplay.DONE},
+            snapshot=False,
+        )
+    assert replay.state.robots["ATMRobot"].slot_targets == {
+        1: ("P1", 2),
+        2: ("P1", 1),
+    }
 
 
 def _cascade_dbr_update() -> dict:

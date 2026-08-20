@@ -106,6 +106,8 @@ description: 完整列出 Move 基类及子类型、Move 状态、输出对象�
 | `ICompleteMove` | `RelatedRobotType` | `RobotType` | `1=真空手`、`2=大气手`。 |
 | `IPostCompleteMove` | `RelatedRobotType` | `RobotType` | PostComplete 关联 Robot 类型。 |
 
+Prepare 与 Complete 在状态回放中采用幂等语义：门已经开启时可以再次执行 Prepare，门已经关闭时也可以再次执行 Complete。重复动作仍占用其声明的门机构时间，不能与其他开关门或取放动作重叠；LoadLock 开门仍必须满足当前压力侧要求。
+
 ## IMoveStateInfo 重算状态
 
 | 字段 | 类型 | 说明 |
@@ -118,6 +120,8 @@ description: 完整列出 Move 基类及子类型、Move 状态、输出对象�
 重算必须先回放 Running/Done Move 对 Robot、Station、Slot、门和压力的影响，再应用 `RemoveList`。不能把“出现在 RemoveList”直接理解为资源已经释放。
 
 若某轮重算的算法调用在返回新 `MoveList` 前报错，平台会保存可回放的部分结果。上一轮中列入本轮 `RemoveList` 的 Move 会标记为 `RemovedByRecompute=true`，在甘特图中以浅色虚线展示，并可通过“显示已移除 Move”开关隐藏；其余旧 Move 保持正常显示。该图是失败诊断结果，不代表重算已经成功。
+
+若错误发生得更早，例如旧计划状态回放、现场投影或重算 update 构造阶段，平台尚未向算法发送新的 `RemoveList`。此时诊断甘特图保留报错前最后一代完整 MoveList，不会把任何动作标成已取消。
 
 ## IOutputParams 全部字段
 

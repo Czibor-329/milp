@@ -242,6 +242,42 @@ class RecomputeFailureOutputTests(unittest.TestCase):
         self.assertIn("!rec.removedByRecompute", viewer)
         self.assertIn('fillOpacity = bar.rec.removedByRecompute ? "0.24" : "1"', viewer)
 
+    def test_frontend_version_and_cache_keys_are_1_4_7(self) -> None:
+        """前端显示版本、包版本和主资源缓存键必须同步。"""
+        frontend_root = ROOT / "realtime_scheduler" / "frontend"
+        template = (frontend_root / "config_editor.html").read_text(encoding="utf-8")
+        package = json.loads((frontend_root / "package.json").read_text(encoding="utf-8"))
+        package_lock = json.loads((frontend_root / "package-lock.json").read_text(encoding="utf-8"))
+
+        self.assertEqual("1.4.7", package["version"])
+        self.assertEqual("1.4.7", package_lock["version"])
+        self.assertEqual("1.4.7", package_lock["packages"][""]["version"])
+        self.assertIn('class="frontend-version">前端 v1.4.7</span>', template)
+        self.assertIn('/assets/config_editor.css?v=1.4.7', template)
+        self.assertIn('/assets/config_editor.js?v=1.4.7', template)
+
+    def test_recompute_preparation_error_keeps_last_successful_movelist(self) -> None:
+        """算法调用前的旧计划回放异常也应返回上一代诊断甘特图。"""
+        previous_moves = [
+            {"MoveID": 1, "StartTime": 0.0, "EndTime": 5.0},
+            {"MoveID": 2, "StartTime": 5.0, "EndTime": 9.0},
+        ]
+
+        def fail_after_initial_output(_plan, reproduction):
+            """模拟首排已保存、CJobCycle 旧计划回放随后失败。"""
+            reproduction.add("AlgOutput", {"MoveList": previous_moves, "Feedback": []})
+            raise ValueError("旧计划回放失败")
+
+        with patch.object(config_server, "_execute_plan", side_effect=fail_after_initial_output):
+            with self.assertRaises(LoggedPlanError) as context:
+                execute_plan({"rounds": []})
+
+        failure_output = context.exception.failure_output
+        self.assertIsNotNone(failure_output)
+        self.assertEqual([1, 2], [move["MoveID"] for move in failure_output["MoveList"]])
+        self.assertEqual("after-algorithm-output", failure_output["FailureContext"]["Stage"])
+        self.assertEqual("旧计划回放失败", failure_output["Feedback"][-1]["Message"])
+
 
 class ConfigEditorServerTests(unittest.TestCase):
     """验证设备选择、Route 引用和两次重算的统一输出。"""

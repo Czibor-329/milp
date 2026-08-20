@@ -2143,6 +2143,44 @@ def _build_recompute_failure_output(
     return output
 
 
+def _build_prior_plan_failure_output(
+    reproduction_entries: Sequence[Mapping[str, Any]],
+    error: Exception,
+) -> Optional[Dict[str, Any]]:
+    """从复现日志恢复异常发生前最后一份可回放计划。
+
+    CJobCycle 或定时重算可能在旧计划推进、现场投影、update 构造阶段失败，
+    此时还没有进入算法调用，也就没有常规重算失败快照。只要此前已有非空
+    AlgOutput，就将其作为只读诊断甘特图返回；该计划代表报错前最后一代，
+    不把尚未发送的 RemoveList 误标为已经取消。
+    """
+    latest_output: Optional[Mapping[str, Any]] = None
+    for entry in reproduction_entries:
+        if str(entry.get("Describe") or "") != "AlgOutput":
+            continue
+        info = entry.get("Info")
+        if isinstance(info, Mapping) and list(info.get("MoveList") or []):
+            latest_output = info
+    if latest_output is None:
+        return None
+
+    output = deepcopy(dict(latest_output))
+    output["MoveList"] = deepcopy(list(latest_output.get("MoveList") or []))
+    output["Feedback"] = [
+        *deepcopy(list(latest_output.get("Feedback") or [])),
+        {
+            "Level": "Error",
+            "Type": type(error).__name__,
+            "Message": str(error) or type(error).__name__,
+        },
+    ]
+    output["FailureContext"] = {
+        "Stage": "after-algorithm-output",
+        "Message": str(error) or type(error).__name__,
+    }
+    return output
+
+
 def _release_finished_load_ports(
     runtime: Any,
     build_state: BuildState,
@@ -2972,8 +3010,16 @@ def execute_plan(raw_plan: Mapping[str, Any]) -> Dict[str, Any]:
                 failure_output=error.gantt_output,
                 validation_issues=error.validation_issues,
             ) from error
+        prior_plan_output = _build_prior_plan_failure_output(
+            reproduction.entries,
+            error,
+        )
         reproduction.add("AlgOutput", _alg_output_info(feedback=feedback))
-        raise LoggedPlanError(str(error), reproduction.entries) from error
+        raise LoggedPlanError(
+            str(error),
+            reproduction.entries,
+            failure_output=prior_plan_output,
+        ) from error
     cpu_finished = time.thread_time() if hasattr(time, "thread_time") else time.process_time()
     result["cpuTimeMs"] = max(0.0, (cpu_finished - cpu_started) * 1000.0)
     result["reproductionLog"] = deepcopy(reproduction.entries)
