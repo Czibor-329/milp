@@ -176,6 +176,8 @@ MAX_REGISTERED_ALGORITHM_BYTES = 32 * 1024 * 1024
 MAX_CHECKPOINT_BYTES = 512 * 1024 * 1024
 MAX_SAVED_RESULTS = 8
 MAX_SAVED_BATCH_RUNS = 8
+MAX_CJOB_CYCLE = 1000
+CJOB_CYCLE_EVENT_EPSILON_MULTIPLIER = 2.0
 WORKSPACE_STORE_VERSION = 3
 API_SCHEMA_VERSION = "cjob-pjob-v3"
 HEURISTIC_BASELINE_SCHEMA_VERSION = "petri-look-dynamic-v1"
@@ -2154,6 +2156,143 @@ def _release_finished_load_ports(
     return released_ids, empty_ports
 
 
+@dataclass
+class CJobCycleRuntime:
+    """记录一个固定 LoadPort CJob 当前运行到第几盒。"""
+
+    template: Dict[str, Any]
+    load_port: str
+    total_cycles: int
+    current_cycle: int
+    current_task_id: str
+    configured_round: int
+
+
+def _cjob_cycle_count(cjob: Mapping[str, Any]) -> int:
+    """读取并校验 CJob 的总循环数；旧数据默认只运行一盒。"""
+    raw_value = cjob.get(
+        "cjobCycle",
+        cjob.get("CJobCycle", cjob.get("jobCycle", cjob.get("JobCycle", 1))),
+    )
+    if isinstance(raw_value, bool):
+        raise ValueError("CJobCycle 必须是整数")
+    try:
+        numeric = float(raw_value)
+    except (TypeError, ValueError):
+        raise ValueError("CJobCycle 必须是整数") from None
+    if not math.isfinite(numeric):
+        raise ValueError("CJobCycle 必须是有限整数")
+    cycle_count = int(numeric)
+    if abs(numeric - cycle_count) > TIME_TOLERANCE:
+        raise ValueError("CJobCycle 必须是整数")
+    if cycle_count < 1 or cycle_count > MAX_CJOB_CYCLE:
+        raise ValueError(f"CJobCycle 必须为 1~{MAX_CJOB_CYCLE}")
+    return cycle_count
+
+
+def _cjob_load_port_name(cjob: Mapping[str, Any]) -> str:
+    """读取 CJob 固定占用的 LoadPort，并兼容旧版 PJob 字段。"""
+    configured = str(cjob.get("loadPort") or cjob.get("LoadPort") or "").strip()
+    if configured:
+        return configured
+    pjobs = [row for row in (cjob.get("pjobs") or []) if isinstance(row, Mapping)]
+    return str(
+        (pjobs[0].get("loadPort") or pjobs[0].get("LoadPort") or "")
+        if pjobs
+        else ""
+    ).strip()
+
+
+def _cycle_task_id(base_task_id: str, cycle_index: int) -> str:
+    """为补片循环生成稳定且不与普通轮次冲突的 TaskID。"""
+    return base_task_id if cycle_index == 1 else f"{base_task_id}-CYCLE-{cycle_index}"
+
+
+def _cycle_cjob(cjob: Mapping[str, Any], cycle_index: int) -> Dict[str, Any]:
+    """复制一个 CJob 作为指定循环的独立标准 ControlJob。"""
+    cloned = deepcopy(dict(cjob))
+    base_task_id = str(cjob.get("taskId") or cjob.get("TaskID") or "").strip()
+    if not base_task_id:
+        raise ValueError("启用 CJobCycle 的 CJob 必须包含 TaskID")
+    load_port = _cjob_load_port_name(cjob)
+    if not load_port:
+        raise ValueError(f"CJob TaskID={base_task_id} 必须选择 LoadPort")
+    cloned["taskId"] = _cycle_task_id(base_task_id, cycle_index)
+    cloned["loadPort"] = load_port
+    cloned["cjobCycle"] = 1
+    cloned["pjobs"] = [
+        {**deepcopy(dict(pjob)), "loadPort": load_port}
+        for pjob in (cjob.get("pjobs") or [])
+        if isinstance(pjob, Mapping)
+    ]
+    return cloned
+
+
+def _cycle_states_for_round(
+    round_config: Mapping[str, Any],
+    configured_round: int,
+) -> List[CJobCycleRuntime]:
+    """为一轮中需要补片的 CJob 建立运行状态。"""
+    states: List[CJobCycleRuntime] = []
+    for cjob in _round_cjob_rows(round_config):
+        total_cycles = _cjob_cycle_count(cjob)
+        if total_cycles <= 1:
+            continue
+        base_task_id = str(cjob.get("taskId") or cjob.get("TaskID") or "").strip()
+        load_port = _cjob_load_port_name(cjob)
+        if not base_task_id:
+            raise ValueError("启用 CJobCycle 的 CJob 必须包含 TaskID")
+        if not load_port:
+            raise ValueError(f"CJob TaskID={base_task_id} 必须选择 LoadPort")
+        states.append(CJobCycleRuntime(
+            template=deepcopy(cjob),
+            load_port=load_port,
+            total_cycles=total_cycles,
+            current_cycle=1,
+            current_task_id=base_task_id,
+            configured_round=configured_round,
+        ))
+    return states
+
+
+def _cjob_cycle_completion_time(
+    runtime: Any,
+    cycle_state: CJobCycleRuntime,
+) -> Optional[float]:
+    """从当前代 MoveList 求出这一盒全部晶圆返回后的最晚时刻。"""
+    material_ids = {
+        material.get("ID", material.get("Name"))
+        for material in (runtime.current_update.get("Materials") or [])
+        if (
+            isinstance(material, Mapping)
+            and str(material.get("TaskID") or "") == cycle_state.current_task_id
+        )
+    }
+    material_ids.discard(None)
+    if not material_ids:
+        return None
+    latest_by_material: Dict[Any, float] = {}
+    for move in runtime.current_plan:
+        end_time = _finite_number(
+            move.get("EndTime"),
+            _finite_number(move.get("StartTime"), runtime.state_time),
+        )
+        for material_id in _move_material_ids(move):
+            if material_id in material_ids:
+                latest_by_material[material_id] = max(
+                    latest_by_material.get(material_id, runtime.state_time),
+                    end_time,
+                )
+    if material_ids - set(latest_by_material):
+        return None
+    # 普通定时重算会取消恰好在 cutoff 启动的动作；补片事件则必须先消费同刻的
+    # 零时长回片/完成动作。仅跨过状态机容差边界，不引入业务上的装卸时间。
+    return (
+        max(latest_by_material.values())
+        + TIME_TOLERANCE * CJOB_CYCLE_EVENT_EPSILON_MULTIPLIER
+    )
+
+
 def _execute_standard_algorithm(
     plan: Mapping[str, Any],
     first_update: Mapping[str, Any],
@@ -2295,8 +2434,18 @@ def _execute_standard_algorithm(
             f"{elapsed_ms:.1f} ms，{len(output['MoveList'])} Moves"
         )
 
-        for index, round_config in enumerate(rounds[1:], start=2):
-            requested_time = float(times[index - 1])
+        active_cycles = _cycle_states_for_round(rounds[0], 1)
+
+        def execute_recompute_event(
+            round_config: Mapping[str, Any],
+            requested_time: float,
+            reason: str,
+            trigger: str,
+            configured_round: Optional[int] = None,
+            completed_cycles: Sequence[CJobCycleRuntime] = (),
+        ) -> Tuple[set[Any], set[str]]:
+            """执行一次定时或补片重算，并更新当前算法代次。"""
+            nonlocal output
             if uses_full_platform_runtime:
                 notifications: List[Dict[str, Any]] = []
                 advance_to_algorithm_update(
@@ -2310,6 +2459,35 @@ def _execute_standard_algorithm(
                     requested_time,
                 )
             released_ids, empty_ports = _release_finished_load_ports(runtime, build_state)
+            if completed_cycles:
+                # CJobCycle 的触发时刻已经由“该 TaskID 全部物料的最后一个 Move
+                # 结束”推导得到。这里按 TaskID 明确卸载整盒，避免部分算法没有把
+                # 回 LP 动作标成 sink stage 时，通用终点识别无法裁剪旧 CJob。
+                completed_task_ids = {
+                    cycle_state.current_task_id for cycle_state in completed_cycles
+                }
+                cycle_material_ids = {
+                    material.get("ID", material.get("Name"))
+                    for material in (runtime.current_update.get("Materials") or [])
+                    if (
+                        isinstance(material, Mapping)
+                        and str(material.get("TaskID") or "") in completed_task_ids
+                    )
+                }
+                cycle_material_ids.discard(None)
+                released_ids.update(cycle_material_ids)
+                _remove_released_materials_from_update(
+                    runtime.current_update,
+                    cycle_material_ids,
+                )
+                if hasattr(runtime, "problem"):
+                    runtime.problem.wafers = [
+                        wafer for wafer in runtime.problem.wafers
+                        if getattr(wafer, "mat_id", None) not in cycle_material_ids
+                    ]
+                for cycle_state in completed_cycles:
+                    empty_ports.add(cycle_state.load_port)
+                    build_state.next_slot_by_port[cycle_state.load_port] = 0
             projected_state, committed_moves = runtime.project_started_moves(
                 requested_time,
                 released_ids,
@@ -2325,9 +2503,13 @@ def _execute_standard_algorithm(
                     notification,
                     _finite_number(event_time, requested_time),
                 )
-            reason = f"第 {index} 轮新增 Job"
+            recompute_index = len(summaries) + 1
             reproduction.add("RecomputeControl", {
-                "ControlInfo": {"Round": index},
+                "ControlInfo": {
+                    "Round": recompute_index,
+                    "ConfiguredRound": configured_round,
+                    "Trigger": trigger,
+                },
                 "RecomputeInfo": {
                     "CurrentTime": requested_time,
                     "EffectiveTime": requested_time,
@@ -2426,8 +2608,10 @@ def _execute_standard_algorithm(
                 )
             reproduction.add("AlgOutput", output, requested_time)
             summaries.append({
-                "index": index,
+                "index": recompute_index,
                 "kind": "recompute",
+                "trigger": trigger,
+                "configuredRound": configured_round,
                 "requestedTime": requested_time,
                 "effectiveTime": requested_time,
                 "scheduleStartTime": requested_time,
@@ -2450,7 +2634,7 @@ def _execute_standard_algorithm(
                 },
             })
             logs.append(
-                f"[{index}/{round_count}] @{requested_time:.2f}s {display_name} 重算完成："
+                f"[重算 {recompute_index - 1}] @{requested_time:.2f}s {display_name} {reason}："
                 f"{elapsed_ms:.1f} ms，移除 {len(update['RemoveList'])} 个旧 Move"
             )
             if released_ids:
@@ -2458,6 +2642,96 @@ def _execute_standard_algorithm(
                     f"  已卸载 {len(released_ids)} 片成品；"
                     f"清空 LoadPort={','.join(sorted(empty_ports)) or '无'}"
                 )
+            return released_ids, empty_ports
+
+        next_configured_round = 1
+        while True:
+            next_timed_time = (
+                float(times[next_configured_round])
+                if next_configured_round < round_count
+                else math.inf
+            )
+            cycle_times = [
+                (completion_time, cycle_state)
+                for cycle_state in active_cycles
+                if cycle_state.current_cycle < cycle_state.total_cycles
+                for completion_time in [_cjob_cycle_completion_time(runtime, cycle_state)]
+                if completion_time is not None
+            ]
+            next_cycle_time = min(
+                (completion_time for completion_time, _state in cycle_times),
+                default=math.inf,
+            )
+            if math.isinf(next_timed_time) and math.isinf(next_cycle_time):
+                unresolved_cycles = [
+                    state for state in active_cycles
+                    if state.current_cycle < state.total_cycles
+                ]
+                if unresolved_cycles:
+                    unresolved = ", ".join(
+                        f"TaskID={state.current_task_id}@{state.load_port}"
+                        for state in unresolved_cycles
+                    )
+                    raise ValueError(f"无法从当前 MoveList 确定 CJobCycle 完工时刻：{unresolved}")
+                break
+
+            # 暂不定义与定时重算同刻时的合并规则；同刻时先完成补片重算。
+            if next_cycle_time <= next_timed_time + TIME_TOLERANCE:
+                due_states = [
+                    cycle_state
+                    for completion_time, cycle_state in cycle_times
+                    if completion_time <= next_cycle_time + TIME_TOLERANCE
+                ]
+                next_cjobs = [
+                    _cycle_cjob(cycle_state.template, cycle_state.current_cycle + 1)
+                    for cycle_state in due_states
+                ]
+                cycle_labels = ", ".join(
+                    f"{cycle_state.load_port} {cycle_state.current_cycle + 1}/{cycle_state.total_cycles}"
+                    for cycle_state in due_states
+                )
+                _released_ids, empty_ports = execute_recompute_event(
+                    {"currentTime": next_cycle_time, "cjobs": next_cjobs},
+                    next_cycle_time,
+                    f"CJobCycle 补片（{cycle_labels}）",
+                    "cjob-cycle",
+                    completed_cycles=due_states,
+                )
+                missing_ports = {
+                    cycle_state.load_port for cycle_state in due_states
+                    if cycle_state.load_port not in empty_ports
+                }
+                if missing_ports:
+                    raise ValueError(
+                        "CJobCycle 到达补片时刻但 LoadPort 尚未清空："
+                        + ",".join(sorted(missing_ports))
+                    )
+                for cycle_state in due_states:
+                    cycle_state.current_cycle += 1
+                    cycle_state.current_task_id = _cycle_task_id(
+                        str(
+                            cycle_state.template.get("taskId")
+                            or cycle_state.template.get("TaskID")
+                            or ""
+                        ).strip(),
+                        cycle_state.current_cycle,
+                    )
+                continue
+
+            round_config = rounds[next_configured_round]
+            configured_round = next_configured_round + 1
+            requested_time = next_timed_time
+            execute_recompute_event(
+                round_config,
+                requested_time,
+                f"第 {configured_round} 轮新增 Job",
+                "time",
+                configured_round,
+            )
+            active_cycles.extend(
+                _cycle_states_for_round(round_config, configured_round)
+            )
+            next_configured_round += 1
 
     combined_output = runtime.combined_output()
 
@@ -2600,6 +2874,14 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
         raise ValueError("首次排程时间必须为 0")
     if any(right <= left + TIME_TOLERANCE for left, right in zip(times, times[1:])):
         raise ValueError("各轮重算时间必须严格递增")
+    for round_index, round_config in enumerate(rounds, start=1):
+        for cjob in _round_cjob_rows(round_config):
+            cycle_count = _cjob_cycle_count(cjob)
+            if cycle_count > 1 and not _cjob_load_port_name(cjob):
+                task_id = str(cjob.get("taskId") or cjob.get("TaskID") or "?")
+                raise ValueError(
+                    f"第 {round_index} 轮 CJob TaskID={task_id} 启用 CJobCycle 时必须选择 LoadPort"
+                )
 
     options = plan.get("options") if isinstance(plan.get("options"), Mapping) else {}
     default_loadlock_manager_mode = (
@@ -2855,7 +3137,7 @@ def _automatic_workspace_load_port(
 
 
 def _repair_workspace_job_layout(device: Dict[str, Any]) -> bool:
-    """迁移已有测试的唯一 TaskID，并统一每个 CJob 下所有 PJob 的 LoadPort。"""
+    """迁移已有测试的 TaskID、固定 LoadPort 与 CJobCycle。"""
     changed = False
     load_ports = _workspace_load_ports(device)
     for test in device.get("tests") or []:
@@ -2882,14 +3164,16 @@ def _repair_workspace_job_layout(device: Dict[str, Any]) -> bool:
                     fallback_load_port = str(
                         pjobs[0].get("loadPort") or pjobs[0].get("LoadPort") or ""
                     )
-                load_port = _automatic_workspace_load_port(
-                    load_ports,
-                    int(task_id),
+                load_port = (
+                    fallback_load_port
+                    if fallback_load_port in load_ports
+                    else _automatic_workspace_load_port(load_ports, int(task_id))
                 ) or fallback_load_port
                 normalized_fields = {
                     "taskId": task_id,
                     "taskMode": task_mode,
                     "loadPort": load_port,
+                    "cjobCycle": _cjob_cycle_count(cjob),
                     "pJobNameList": [f"P{index}" for index in range(1, len(pjobs) + 1)],
                 }
                 for key, value in normalized_fields.items():
@@ -3856,6 +4140,7 @@ def _normalize_workspace_round(
             f"第 {index} 轮使用 Pipeline/Sequential 时只能配置一个 CJob"
         )
     cjobs: List[Dict[str, Any]] = []
+    assigned_load_ports: set[str] = set()
     for cjob_index, row in enumerate(cjob_rows, start=1):
         task_id = str(first_task_id + cjob_index - 1)
         raw_job_type = row.get("jobType", row.get("JobType", "NormalLot"))
@@ -3872,10 +4157,22 @@ def _normalize_workspace_round(
             or pjob_rows[0].get("LoadPort")
             or ""
         )
-        load_port = _automatic_workspace_load_port(
+        if fallback_load_port and load_ports and fallback_load_port not in load_ports:
+            raise ValueError(
+                f"第 {index} 轮 CJob {cjob_index} 的 LoadPort 不存在："
+                f"{fallback_load_port}"
+            )
+        load_port = fallback_load_port or _automatic_workspace_load_port(
             load_ports,
             first_task_id + cjob_index - 1,
-        ) or fallback_load_port
+        )
+        if load_port in assigned_load_ports:
+            raise ValueError(
+                f"第 {index} 轮多个 CJob 不能同时占用 LoadPort：{load_port}"
+            )
+        if load_port:
+            assigned_load_ports.add(load_port)
+        cjob_cycle = _cjob_cycle_count(row)
         pjobs = [
             _normalize_workspace_pjob(item, pjob_index, task_id, load_port)
             for pjob_index, item in enumerate(pjob_rows, start=1)
@@ -3883,6 +4180,7 @@ def _normalize_workspace_round(
         cjobs.append({
             "taskId": task_id,
             "loadPort": load_port,
+            "cjobCycle": cjob_cycle,
             "jobType": CJOB_TYPE_NAMES[job_type_value],
             "priority": max(1, int(_finite_number(row.get("priority", row.get("Priority")), 1))) if job_type_value == 0 else -1,
             "taskMode": TASK_MODE_NAMES[task_mode_value],

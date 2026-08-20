@@ -85,7 +85,8 @@ export function makeCJob(
   const rows = pjobs.length ? pjobs : [makePJob(1, routeRef, loadPort, 5)];
   return {
     key: "C1", taskId: String(roundIndex), jobType: "NormalLot", priority: 1,
-    taskMode: "Smart", pJobNameList: rows.map((item) => item.jobName), pjobs: rows,
+    taskMode: "Smart", loadPort, cjobCycle: 1,
+    pJobNameList: rows.map((item) => item.jobName), pjobs: rows,
   };
 }
 
@@ -179,8 +180,9 @@ export function normalizeRound(
       || rawPJobs[0]?.loadPort
       || rawPJobs[0]?.LoadPort
       || "";
-    const loadPort = automaticLoadPort(loadPorts, firstTaskId + cjobIndex)
-      || legacyLoadPort;
+    const loadPort = (loadPorts.includes(String(legacyLoadPort)) ? String(legacyLoadPort) : "")
+      || automaticLoadPort(loadPorts, firstTaskId + cjobIndex)
+      || String(legacyLoadPort);
     const pjobs = rawPJobs.map(
       (pjob: EditorRecord, pjobIndex: number) => normalizePJob(
         pjob,
@@ -197,6 +199,12 @@ export function normalizeRound(
       jobType,
       priority: jobType === "NormalLot" ? Math.max(1, Number(cjob.priority) || 1) : -1,
       taskMode,
+      cjobCycle: Math.max(
+        1,
+        Math.min(1000, Math.trunc(Number(
+          cjob.cjobCycle ?? cjob.CJobCycle ?? cjob.jobCycle ?? cjob.JobCycle ?? 1,
+        ) || 1)),
+      ),
       pJobNameList: pjobs.map((pjob: EditorRecord) => pjob.jobName),
       pjobs,
     };

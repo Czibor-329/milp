@@ -282,7 +282,7 @@
     .cjob-title strong { font-size: 13px; line-height: 1.35; }
     .cjob-task-id { color: var(--muted); font-size: 9px; font-weight: 700; line-height: 1.35; }
     .readonly-pill { display: inline-flex; align-items: center; gap: 5px; padding: 4px 8px; border-radius: 7px; color: #475569; background: #eef2f7; font-size: 11px; font-weight: 700; }
-    .cjob-controls { display: grid; min-width: 0; grid-template-columns: minmax(126px, 160px) 80px minmax(120px, 150px); justify-content: end; gap: 8px; }
+    .cjob-controls { display: grid; min-width: 0; grid-template-columns: minmax(118px, 150px) minmax(96px, 120px) 76px minmax(112px, 140px) 82px; justify-content: end; gap: 8px; }
     .cjob-controls .field label { margin-bottom: 3px; font-size: 9px; line-height: 1.2; }
     .cjob-controls input, .cjob-controls select { min-height: 36px; padding: 5px 8px; border-radius: 8px; }
     .cjob-actions { align-self: end; }
@@ -306,7 +306,7 @@
     .pjob-remove { width: 40px; min-width: 40px; min-height: 40px; align-self: end; padding: 0; }
     @container (max-width: 760px) {
       .cjob-head { grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
-      .cjob-controls { grid-row: 2; grid-column: 1 / -1; grid-template-columns: minmax(120px, 1fr) 80px minmax(120px, 1fr); justify-content: stretch; }
+      .cjob-controls { grid-row: 2; grid-column: 1 / -1; grid-template-columns: repeat(3, minmax(110px, 1fr)); justify-content: stretch; }
       .cjob-actions { grid-row: 1; grid-column: 2; }
       .pjob-row { grid-template-columns: 70px 100px 92px minmax(44px, 1fr); grid-template-areas: "identity material priority remove" "route route route route"; }
       .pjob-identity { grid-area: identity; }
@@ -1249,7 +1249,7 @@
     }
     @media (max-width: 820px) {
       .cjob-head { grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
-      .cjob-controls { grid-row: 2; grid-column: 1 / -1; grid-template-columns: minmax(120px, 1fr) 80px minmax(120px, 1fr); justify-content: stretch; }
+      .cjob-controls { grid-row: 2; grid-column: 1 / -1; grid-template-columns: repeat(3, minmax(110px, 1fr)); justify-content: stretch; }
       .cjob-actions { grid-row: 1; grid-column: 2; }
       .pjob-row { grid-template-columns: 70px 100px 92px minmax(44px, 1fr); grid-template-areas: "identity material priority remove" "route route route route"; }
       .pjob-identity { grid-area: identity; }

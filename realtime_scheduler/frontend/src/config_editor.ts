@@ -2466,6 +2466,12 @@ function renderRounds() {
     const cjobs = round.cjobs.map((cjob, cjobIndex) => {
       const normalLot = cjob.jobType === "NormalLot";
       const fieldPrefix = `round-${roundIndex}-cjob-${cjobIndex}`;
+      const occupiedLoadPorts = new Set(
+        round.cjobs
+          .filter((_item, index) => index !== cjobIndex)
+          .map(item => item.loadPort),
+      );
+      const loadPortOptions = state.loadPorts.map(loadPort => `<option value="${escapeHtml(loadPort)}" ${loadPort === cjob.loadPort ? "selected" : ""} ${occupiedLoadPorts.has(loadPort) ? "disabled" : ""}>${escapeHtml(loadPort)}</option>`).join("");
       const pjobRows = cjob.pjobs.map((pjob, pjobIndex) => {
         const pjobFieldPrefix = `${fieldPrefix}-pjob-${pjobIndex}`;
         return `<div class="pjob-row">
@@ -2481,8 +2487,10 @@ function renderRounds() {
           <div class="cjob-title"><strong>CJob ${cjobIndex + 1}</strong><span class="cjob-task-id">TaskID ${escapeHtml(cjob.taskId)}</span></div>
           <div class="cjob-controls">
             <div class="field cjob-job-type"><label for="${fieldPrefix}-job-type">JobType</label><select id="${fieldPrefix}-job-type" data-scope="cjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-key="jobType">${CJOB_TYPES.map(value => `<option ${value === cjob.jobType ? "selected" : ""}>${value}</option>`).join("")}</select></div>
+            <div class="field cjob-load-port"><label for="${fieldPrefix}-load-port">LoadPort</label><select id="${fieldPrefix}-load-port" data-scope="cjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-key="loadPort" aria-label="CJob ${cjobIndex + 1} LoadPort">${loadPortOptions}</select></div>
             <div class="field cjob-priority ${normalLot ? "" : "disabled-field"}"><label for="${fieldPrefix}-priority">Priority</label><input id="${fieldPrefix}-priority" type="number" min="1" inputmode="numeric" data-scope="cjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-key="priority" value="${Number(cjob.priority)}" ${normalLot ? "" : "disabled"}></div>
             <div class="field cjob-task-mode"><label for="${fieldPrefix}-task-mode">TaskMode</label><select id="${fieldPrefix}-task-mode" data-scope="cjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-key="taskMode">${TASK_MODES.map(value => `<option ${value === cjob.taskMode ? "selected" : ""} ${round.cjobs.length > 1 && ["Pipeline", "Sequential"].includes(value) ? "disabled" : ""}>${value}</option>`).join("")}</select></div>
+            <div class="field cjob-cycle"><label for="${fieldPrefix}-cycle">CJobCycle</label><input id="${fieldPrefix}-cycle" type="number" min="1" max="1000" step="1" inputmode="numeric" data-scope="cjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-key="cjobCycle" value="${Number(cjob.cjobCycle)}"></div>
           </div>
           <div class="round-actions cjob-actions"><button class="btn small" type="button" data-action="add-pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>PJob</span></button><button class="btn danger small" type="button" data-action="remove-cjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" ${round.cjobs.length <= 1 ? "disabled" : ""}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M10 11v6m4-6v6M9 7l1-2h4l1 2M7 7l1 13h8l1-13"/></svg><span>删除</span></button></div>
         </header>
@@ -2787,7 +2795,12 @@ function updateStateFromControl(control) {
       control.value = cjob.taskMode;
       return;
     }
+    if (key === "cjobCycle") {
+      value = Math.max(1, Math.min(1000, Math.trunc(Number(value) || 1)));
+      control.value = String(value);
+    }
     cjob[key] = value;
+    if (key === "loadPort") cjob.pjobs.forEach(pjob => { pjob.loadPort = String(value); });
     if (key === "jobType") cjob.priority = value === "NormalLot" ? (cjob.priority > 0 ? cjob.priority : 1) : -1;
     normalizeRounds();
   }
@@ -3978,9 +3991,10 @@ function showResult(result) {
     if (round.kind === "initial") return `  #${round.index} 首次 | ${round.elapsedMs.toFixed(1)} ms`;
     const request = Number(round.requestedTime);
     const recoveryEnd = Number(round.recoveryEndTime ?? round.effectiveTime);
+    const triggerLabel = round.trigger === "cjob-cycle" ? "CJobCycle 补片重算" : "定时重算";
     const timing = Math.abs(recoveryEnd - request) > 1e-6
-      ? `@${request}s 重算 · 固定旧动作收尾至 @${recoveryEnd}s`
-      : `@${request}s 重算`;
+      ? `@${request}s ${triggerLabel} · 固定旧动作收尾至 @${recoveryEnd}s`
+      : `@${request}s ${triggerLabel}`;
     return `  #${round.index} ${timing} | ${round.elapsedMs.toFixed(1)} ms`;
   }), "", ...(result.logs || [])].join("\n"));
   const gantt = document.getElementById("ganttButton"); gantt.href = result.ganttUrl; gantt.removeAttribute("aria-disabled");

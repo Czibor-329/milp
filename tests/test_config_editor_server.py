@@ -39,8 +39,8 @@ from scripts.replay_config_log import load_plan_from_log
 
 ROOT = Path(__file__).resolve().parents[1]
 ALGORITHM_ROOT = ROOT / "alg"
-DEVICE_PATH = ALGORITHM_ROOT / "src" / "input_data" / "s1-1c2p-reschedule.json"
-PSE300_PATH = ALGORITHM_ROOT / "src" / "input_data" / "PSE300.json"
+DEVICE_PATH = ALGORITHM_ROOT / "dataset" / "input_data" / "s1-1c2p-reschedule.json"
+PSE300_PATH = ALGORITHM_ROOT / "dataset" / "input_data" / "PSE300.json"
 EDITOR_PATH = ROOT / "realtime_scheduler" / "frontend" / "config_editor.html"
 EDITOR_STYLE_PATH = ROOT / "realtime_scheduler" / "frontend" / "assets" / "config_editor.css"
 EDITOR_SCRIPT_PATH = ROOT / "realtime_scheduler" / "frontend" / "src" / "config_editor.ts"
@@ -121,6 +121,72 @@ class FrontendTemplateTests(unittest.TestCase):
         self.assertIn("retainSessionSchedulingConfiguration", script)
         self.assertIn("state.strategy = sessionSchedulingConfiguration.strategy", script)
         self.assertIn("state.options = structuredClone(sessionSchedulingConfiguration.options)", script)
+
+    def test_cjob_exposes_fixed_load_port_and_cycle_controls(self) -> None:
+        """CJob 卡片应直接编辑固定 LoadPort 和补片循环数。"""
+        script = EDITOR_SCRIPT_PATH.read_text(encoding="utf-8")
+        style = EDITOR_STYLE_PATH.read_text(encoding="utf-8")
+
+        self.assertIn('data-key="loadPort"', script)
+        self.assertIn('data-key="cjobCycle"', script)
+        self.assertIn('min="1" max="1000" step="1"', script)
+        self.assertIn("occupiedLoadPorts", script)
+        self.assertIn("repeat(3, minmax(110px, 1fr))", style)
+
+
+class CJobCycleUnitTests(unittest.TestCase):
+    """验证不依赖算法执行的 CJobCycle 展开与事件时刻计算。"""
+
+    def test_cycle_clone_keeps_fixed_load_port_and_uses_unique_task_id(self) -> None:
+        """补片实例应固定使用模板 LP，同时获得独立 TaskID。"""
+        template = {
+            "taskId": "7",
+            "loadPort": "LP2",
+            "cjobCycle": 3,
+            "pjobs": [{"jobName": "P1", "loadPort": "LP1", "waferCount": 2}],
+        }
+
+        cloned = config_server._cycle_cjob(template, 2)
+
+        self.assertEqual("7-CYCLE-2", cloned["taskId"])
+        self.assertEqual("LP2", cloned["loadPort"])
+        self.assertEqual("LP2", cloned["pjobs"][0]["loadPort"])
+        self.assertEqual(1, cloned["cjobCycle"])
+        self.assertEqual("LP1", template["pjobs"][0]["loadPort"])
+
+    def test_cycle_completion_uses_latest_move_of_every_material(self) -> None:
+        """只有整盒所有物料的最后动作都完成后才允许补片。"""
+        class FakeRuntime:
+            """提供完工时刻计算所需的当前 update 和 MoveList。"""
+
+            state_time = 0.0
+            current_update = {"Materials": [
+                {"ID": 11, "TaskID": "7"},
+                {"ID": 12, "TaskID": "7"},
+                {"ID": 99, "TaskID": "8"},
+            ]}
+            current_plan = [
+                {"MatIDList": [11], "StartTime": 1.0, "EndTime": 5.0},
+                {"MatIDList": [12], "StartTime": 2.0, "EndTime": 7.0},
+                {"MatIDList": [11], "StartTime": 8.0, "EndTime": 12.5},
+                {"MatIDList": [99], "StartTime": 1.0, "EndTime": 30.0},
+            ]
+
+        state = config_server.CJobCycleRuntime(
+            template={}, load_port="LP2", total_cycles=3, current_cycle=1,
+            current_task_id="7", configured_round=1,
+        )
+
+        self.assertAlmostEqual(
+            12.5 + config_server.TIME_TOLERANCE * config_server.CJOB_CYCLE_EVENT_EPSILON_MULTIPLIER,
+            config_server._cjob_cycle_completion_time(FakeRuntime(), state),
+        )
+
+    def test_cycle_count_rejects_fractional_and_out_of_range_values(self) -> None:
+        """循环数必须是 1~1000 的整数。"""
+        for value in (0, 1001, 1.5):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                config_server._cjob_cycle_count({"cjobCycle": value})
 
 
 class RecomputeFailureOutputTests(unittest.TestCase):
@@ -500,13 +566,13 @@ class ConfigEditorServerTests(unittest.TestCase):
             reloaded["device"]["Stations"][station_name]["Capacity"],
         )
 
-    def test_frontend_limits_buffer_and_hides_automatic_load_port(self) -> None:
-        """页面应限制 BufferOption，但不展示由系统自动分配的 LoadPort。"""
+    def test_frontend_limits_buffer_and_edits_cjob_load_port(self) -> None:
+        """页面应限制 BufferOption，并只在 CJob 层编辑固定 LoadPort。"""
         source = _editor_source()
-        buffer_input = source.split('data-key="bufferOption"', 1)[0].rsplit("<input", 1)[1]
-        self.assertIn('min="0"', buffer_input)
-        self.assertIn('max="4"', buffer_input)
-        self.assertIn('step="1"', buffer_input)
+        buffer_select = source.split('data-key="bufferOption"', 1)[1].split("</select>", 1)[0]
+        self.assertIn('const bufferModes = ["No Buffer",', source)
+        self.assertIn("Math.max(0, Math.min(4", source)
+        self.assertIn('<option value="${value}"', buffer_select)
         clean_placements = source.split("function cleanPlacementDefinitions(scope)", 1)[1]
         clean_placements = clean_placements.split("/** 返回当前 Route", 1)[0]
         self.assertIn('key: "prePJobCleanRefs"', clean_placements)
@@ -515,7 +581,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertNotIn('key: "beforeCleanRefs"', clean_placements)
         self.assertNotIn("postCJobCleanRefs", clean_placements)
         self.assertNotIn("LoadPort（自动）", source)
-        self.assertNotIn("LoadPort ${escapeHtml(cjob.loadPort", source)
+        self.assertIn('data-scope="cjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-key="loadPort"', source)
         self.assertNotIn('data-scope="pjob" data-key="loadPort"', source)
 
     def test_frontend_treats_heater_and_cooler_as_processing_modules(self) -> None:
@@ -1091,6 +1157,59 @@ class ConfigEditorServerTests(unittest.TestCase):
                 {"jobName": "P1", "routeRef": "Route12", "loadPort": "LP1", "waferCount": 5},
                 {"jobName": "P2", "routeRef": "Route12", "loadPort": "LP2", "waferCount": 5},
             ]}]}, 0.0, BuildState())
+
+    def test_cjob_cycle_replenishes_same_load_port_after_completion(self) -> None:
+        """上一盒全部回到固定 LP 后，应清空端口并补入下一循环。"""
+        plan = {
+            "deviceName": DEVICE_PATH.name,
+            "device": self.recording,
+            "strategy": "heuristic",
+            "roundCount": 1,
+            "options": {},
+            "recipes": [{"name": "R12", "time": 8, "modules": "PM1,PM2", "weight": {}}],
+            "cleans": [],
+            "routes": [_route("Route12", "PM1,PM2", "R12")],
+            "rounds": [{
+                "currentTime": 0,
+                "cjobs": [{
+                    "taskId": "1",
+                    "loadPort": "LP1",
+                    "cjobCycle": 3,
+                    "jobType": "NormalLot",
+                    "priority": 1,
+                    "taskMode": "Smart",
+                    "pjobs": [{
+                        "jobName": "P1",
+                        "routeRef": "Route12",
+                        "loadPort": "LP1",
+                        "waferCount": 2,
+                        "priority": 1,
+                    }],
+                }],
+            }],
+        }
+
+        result = execute_plan(plan)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            ["initial", "recompute", "recompute"],
+            [row["kind"] for row in result["rounds"]],
+        )
+        self.assertTrue(all(
+            row["trigger"] == "cjob-cycle" for row in result["rounds"][1:]
+        ))
+        self.assertEqual(2, len(result["output"]["RecomputePoints"]))
+        self.assertIn("CJobCycle 补片", result["output"]["RecomputePoints"][0]["Reason"])
+        self.assertEqual(
+            {"1", "1-CYCLE-2", "1-CYCLE-3"},
+            {
+                str(material["TaskID"])
+                for update in result["updates"]
+                for material in update.get("Materials", [])
+            },
+        )
+        self.assertTrue(any("清空 LoadPort=LP1" in line for line in result["logs"]))
 
     def test_round_rejects_duplicate_task_ids_and_control_job_load_ports(self) -> None:
         """绕过页面的输入也不能把重复 TaskID 或共用 LoadPort 送入算法。"""
@@ -2921,7 +3040,7 @@ class ConfigEditorServerTests(unittest.TestCase):
                             {"routeRef": "Route12", "loadPort": "LP2", "waferCount": 3},
                             {"routeRef": "Route12", "loadPort": "LP3", "waferCount": 1},
                         ]},
-                        {"jobType": "HigherLot", "priority": 8, "taskMode": "Concurrent", "pjobs": [
+                        {"jobType": "HigherLot", "priority": 8, "taskMode": "Concurrent", "cjobCycle": 2, "pjobs": [
                             {"routeRef": "Route12", "loadPort": "LP4", "waferCount": 4},
                         ]},
                     ]},
@@ -2935,9 +3054,10 @@ class ConfigEditorServerTests(unittest.TestCase):
             second = loaded["rounds"][1]
             self.assertEqual(2, len(second["cjobs"]))
             self.assertEqual(["2", "3"], [item["taskId"] for item in second["cjobs"]])
-            self.assertEqual(["LP2", "LP3"], [
+            self.assertEqual(["LP2", "LP4"], [
                 item["loadPort"] for item in second["cjobs"]
             ])
+            self.assertEqual([1, 2], [item["cjobCycle"] for item in second["cjobs"]])
             self.assertTrue(all(
                 pjob["loadPort"] == cjob["loadPort"]
                 for cjob in second["cjobs"]

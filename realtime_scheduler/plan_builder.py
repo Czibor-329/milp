@@ -993,7 +993,17 @@ def build_round_update(
         cjob_priority = max(1, int(_finite_number(cjob.get("priority"), 1))) if job_type == 0 else -1
         runtime_pjob_names: List[str] = []
         cjob_material_count = 0
-        cjob_load_port = ""
+        cjob_load_port = str(
+            cjob.get("loadPort")
+            or cjob.get("LoadPort")
+            or ""
+        ).strip()
+        if cjob_load_port:
+            load_port_definition = (tool_topo.get("Stations") or {}).get(cjob_load_port)
+            if not isinstance(load_port_definition, Mapping):
+                raise ValueError(f"CJob {cjob_index} 的 LoadPort 不存在：{cjob_load_port}")
+            if str(load_port_definition.get("Type") or "").strip().lower() != "loadport":
+                raise ValueError(f"CJob {cjob_index} 选择的站点不是 LoadPort：{cjob_load_port}")
         legacy_name = str(cjob.get("_legacyName") or "").strip()
 
         for pjob_index, pjob in enumerate(pjobs, start=1):
@@ -1010,13 +1020,18 @@ def build_round_update(
             route = built_routes.get(route_name)
             if route is None:
                 raise ValueError(f"PJob {display_name} 引用了不存在的 Route：{route_name}")
-            load_port = str(pjob.get("loadPort") or "").strip()
+            pjob_load_port = str(
+                pjob.get("loadPort")
+                or pjob.get("LoadPort")
+                or ""
+            ).strip()
+            load_port = cjob_load_port or pjob_load_port
             if load_port not in (tool_topo.get("Stations") or {}):
                 raise ValueError(f"PJob {display_name} 的 LoadPort 不存在：{load_port}")
-            if cjob_load_port and load_port != cjob_load_port:
+            if cjob_load_port and pjob_load_port and pjob_load_port != cjob_load_port:
                 raise ValueError(
                     f"ControlJob TaskID={task_id} 的 PJob 必须使用同一个 LoadPort："
-                    f"{cjob_load_port}、{load_port}"
+                    f"{cjob_load_port}、{pjob_load_port}"
                 )
             cjob_load_port = load_port
             wafer_count = int(_finite_number(pjob.get("waferCount"), len(pjob.get("matList") or []) or 1))
