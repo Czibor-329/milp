@@ -318,61 +318,36 @@ class RegisteredAlgorithmHttpTests(RegisteredAlgorithmStoreTestCase):
 
     def test_register_endpoint_persists_and_appears_in_health(self) -> None:
         """HTTP 登记成功后，健康检查的策略列表立即包含新算法。"""
-        with patch.object(config_server, "AUTH_REQUIRED", False):
-            port = self._start_server()
-            payload = self._register_payload("http_alg.py", SAMPLE_SOURCE)
-            payload["name"] = "HTTP Algo"
-            result = self._post_register(port, payload)
-            self.assertTrue(result["ok"])
-            self.assertEqual(result["algorithm"]["id"], "http-algo")
-            self.assertEqual(result["algorithm"]["strategy"], "other_alg:http-algo")
-            health_opener = build_opener(ProxyHandler({}))
-            with health_opener.open(
-                f"http://127.0.0.1:{port}/api/health", timeout=5
-            ) as response:
-                health = json.load(response)
-            strategies = {str(item["strategy"]) for item in health["algorithms"]}
-            self.assertIn("other_alg:http-algo", strategies)
+        port = self._start_server()
+        payload = self._register_payload("http_alg.py", SAMPLE_SOURCE)
+        payload["name"] = "HTTP Algo"
+        result = self._post_register(port, payload)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["algorithm"]["id"], "http-algo")
+        self.assertEqual(result["algorithm"]["strategy"], "other_alg:http-algo")
+        health_opener = build_opener(ProxyHandler({}))
+        with health_opener.open(
+            f"http://127.0.0.1:{port}/api/health", timeout=5
+        ) as response:
+            health = json.load(response)
+        strategies = {str(item["strategy"]) for item in health["algorithms"]}
+        self.assertIn("other_alg:http-algo", strategies)
 
     def test_register_endpoint_rejects_invalid_source(self) -> None:
         """缺少 init/update 的文件经 HTTP 登记时返回 400。"""
-        with patch.object(config_server, "AUTH_REQUIRED", False):
-            port = self._start_server()
-            payload = self._register_payload("bad_alg.py", "def only(x):\n    return x\n")
-            with self.assertRaises(HTTPError) as caught:
-                self._post_register(port, payload)
-            self.assertEqual(caught.exception.code, 400)
+        port = self._start_server()
+        payload = self._register_payload("bad_alg.py", "def only(x):\n    return x\n")
+        with self.assertRaises(HTTPError) as caught:
+            self._post_register(port, payload)
+        self.assertEqual(caught.exception.code, 400)
 
     def test_register_endpoint_rejects_invalid_base64(self) -> None:
         """非法的 base64 内容经 HTTP 登记时返回 400。"""
-        with patch.object(config_server, "AUTH_REQUIRED", False):
-            port = self._start_server()
-            payload = {"filename": "broken_alg.py", "content": "!!!not-base64!!!"}
-            with self.assertRaises(HTTPError) as caught:
-                self._post_register(port, payload)
-            self.assertEqual(caught.exception.code, 400)
-
-    def test_register_endpoint_requires_login(self) -> None:
-        """强制登录且未登录时登记请求返回 401。"""
-        with patch.object(config_server, "AUTH_REQUIRED", True):
-            port = self._start_server()
-            payload = self._register_payload("x.py", SAMPLE_SOURCE)
-            with self.assertRaises(HTTPError) as caught:
-                self._post_register(port, payload)
-            self.assertEqual(caught.exception.code, 401)
-
-    def test_register_endpoint_requires_admin_role(self) -> None:
-        """非管理员调用登记接口时返回 403。"""
-        with patch.object(config_server, "AUTH_REQUIRED", False), patch.object(
-            config_server.ConfigEditorHandler,
-            "_require_admin",
-            return_value=None,
-        ):
-            port = self._start_server()
-            payload = self._register_payload("x.py", SAMPLE_SOURCE)
-            with self.assertRaises(HTTPError) as caught:
-                self._post_register(port, payload)
-            self.assertEqual(caught.exception.code, 403)
+        port = self._start_server()
+        payload = {"filename": "broken_alg.py", "content": "!!!not-base64!!!"}
+        with self.assertRaises(HTTPError) as caught:
+            self._post_register(port, payload)
+        self.assertEqual(caught.exception.code, 400)
 
 
 if __name__ == "__main__":

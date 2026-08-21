@@ -229,7 +229,13 @@ test("合法动作空间面板保持单一候选列表与标准开关视觉契�
   assert.match(css, /\.decision-lens-panel[^\n]*border-radius: 6px[^\n]*box-shadow: none/);
   assert.match(css, /\.decision-auto-pause[^\n]*min-height: 44px/);
   assert.match(css, /\.decision-tag\.is-recommendation/);
-  assert.match(css, /body\.theme-dark \.decision-tag\.is-recommendation/);
+  assert.doesNotMatch(css, /body\.theme-dark/);
+  assert.doesNotMatch(html, /themeToggle|logoutButton|adminUsersLink/);
+  assert.match(source, /SERVICE_HEALTHCHECK_INTERVAL_MILLISECONDS = 3000/);
+  assert.match(source, /SERVICE_HEALTHCHECK_TIMEOUT_MILLISECONDS = 2000/);
+  assert.match(source, /new AbortController\(\)/);
+  assert.match(source, /window\.setInterval\(/);
+  assert.match(source, /visibilitychange/);
   assert.doesNotMatch(css, /\.topology-playback\.is-instant-state-transition/);
   assert.match(source, /visualRecommendationModelControl"\)\.hidden = stepMode/);
   assert.match(source, /visualPauseOnDecisionChangeButton"\)\.hidden = stepMode/);

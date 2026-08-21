@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>调度平台</title>
   <link rel="stylesheet" href="/assets/katex.min.css?v=1.4.4">
-  <link rel="stylesheet" href="/assets/config_editor.css?v=1.4.8">
+  <link rel="stylesheet" href="/assets/config_editor.css?v=1.4.9">
 </head>
 <body>
   <a class="skip-link" href="#mainContent">跳到主要内容</a>
@@ -38,21 +38,9 @@
         </button>
       </nav>
       <div class="sidebar-footer">
-        <button class="theme-toggle" id="themeToggle" type="button" aria-pressed="false">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v2m0 14v2M3 12h2m14 0h2M5.6 5.6 7 7m10 10 1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4"/><circle cx="12" cy="12" r="4"/></svg>
-          <span>夜间模式</span>
-        </button>
         <span class="sidebar-footer-label">系统状态</span>
-        <div class="service-pill" id="serviceState">本地服务</div>
-        <span class="frontend-version">前端 v1.4.8</span>
-        <a class="theme-toggle" id="adminUsersLink" href="/admin_users.html" hidden>
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
-          <span>用户管理</span>
-        </a>
-        <button class="theme-toggle" id="logoutButton" type="button">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg>
-          <span>退出登录</span>
-        </button>
+        <div class="service-pill" id="serviceState" role="status" aria-live="polite">正在连接本地服务</div>
+        <span class="frontend-version">前端 v1.4.9</span>
       </div>
     </aside>
 
@@ -433,7 +421,7 @@
             <div class="strategy-options">
               <div class="other-algorithm-options" id="otherAlgorithmOptions"></div>
               <div class="strategy-toolbar">
-                <button class="btn small" id="addAlgorithmButton" type="button" hidden title="选择包含 init 和 update 两个函数的 Python 文件，登记后永久保留并出现在策略列表">＋ 添加算法</button>
+                <button class="btn small" id="addAlgorithmButton" type="button" title="选择包含 init 和 update 两个函数的 Python 文件，登记后永久保留并出现在策略列表">＋ 添加算法</button>
                 <input id="addAlgorithmFileInput" type="file" accept=".py" hidden>
               </div>
             </div>
@@ -666,46 +654,6 @@
     </aside>
   </dialog>
 
-  <script type="module" src="/assets/config_editor.js?v=1.4.8"></script>
-  <script>
-    // 管理员才显示“用户管理”入口。
-    (function () {
-      var link = document.getElementById("adminUsersLink");
-      if (!link) return;
-      fetch("/api/session", { cache: "no-store" })
-        .then(function (response) { return response.json(); })
-        .then(function (payload) {
-          if (payload.ok && payload.role === "admin") link.hidden = false;
-        })
-        .catch(function () {});
-    })();
-  </script>
-  <script>
-    // 管理员才显示“添加算法”登记按钮。
-    (function () {
-      var button = document.getElementById("addAlgorithmButton");
-      if (!button) return;
-      fetch("/api/session", { cache: "no-store" })
-        .then(function (response) { return response.json(); })
-        .then(function (payload) {
-          if (payload.ok && payload.role === "admin") button.hidden = false;
-        })
-        .catch(function () {});
-    })();
-  </script>
-  <script>
-    // 退出登录：销毁服务端会话后回到登录页。
-    (function () {
-      var logoutButton = document.getElementById("logoutButton");
-      if (!logoutButton) return;
-      logoutButton.addEventListener("click", function () {
-        fetch("/api/logout", { method: "POST", cache: "no-store" })
-          .catch(function () {})
-          .finally(function () {
-            window.location.href = "/login.html";
-          });
-      });
-    })();
-  </script>
+  <script type="module" src="/assets/config_editor.js?v=1.4.9"></script>
 </body>
 </html>
