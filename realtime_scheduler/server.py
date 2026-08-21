@@ -163,6 +163,7 @@ MAX_REGISTERED_ALGORITHM_BYTES = 32 * 1024 * 1024
 MAX_CHECKPOINT_BYTES = 512 * 1024 * 1024
 MAX_SAVED_RESULTS = 8
 MAX_SAVED_BATCH_RUNS = 8
+MAX_SAVED_SINGLE_RUNS = 8
 MAX_CJOB_CYCLE = 1000
 CJOB_CYCLE_EVENT_EPSILON_MULTIPLIER = 2.0
 WORKSPACE_STORE_VERSION = 4
@@ -223,6 +224,10 @@ _WORKSPACE_STORE_LOCK = threading.RLock()
 _BATCH_RUNS: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
 _BATCH_RUNS_LOCK = threading.RLock()
 _BATCH_CANCEL_EVENTS: Dict[str, threading.Event] = {}
+_SINGLE_RUNS: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+_SINGLE_RUNS_LOCK = threading.RLock()
+_SINGLE_RUN_CANCEL_EVENTS: Dict[str, threading.Event] = {}
+_RUN_MONITOR = threading.local()
 
 ALGORITHM_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 FALLBACK_BUILTIN_ALGORITHM_ID = "heuristic"
@@ -482,6 +487,162 @@ class MoveListValidationError(RuntimeError):
         self.validation_issues = [str(issue) for issue in validation_issues]
         self.gantt_output = deepcopy(dict(gantt_output))
         self.sim_time = float(sim_time)
+
+
+class UserRunCancelledError(RuntimeError):
+    """用户通过单测状态接口请求停止当前运行。"""
+
+
+def _single_run_snapshot(run_id: str) -> Optional[Dict[str, Any]]:
+    """返回单测后台状态；运行时长由服务端单调时钟实时计算。"""
+    with _SINGLE_RUNS_LOCK:
+        run = _SINGLE_RUNS.get(run_id)
+        if run is None:
+            return None
+        snapshot = deepcopy(run)
+        started_perf = float(snapshot.pop("_startedPerf", time.perf_counter()))
+        if snapshot.get("status") in {"queued", "running", "cancelling"}:
+            snapshot["elapsedMs"] = max(0.0, (time.perf_counter() - started_perf) * 1000.0)
+        return snapshot
+
+
+def _start_single_run(run_id: str, strategy: str, test_name: str) -> threading.Event:
+    """登记由同步 ``/api/run`` 请求承载、但可独立轮询的单测状态。"""
+    normalized_id = str(run_id or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{8,80}", normalized_id):
+        raise ValueError("clientRunId 格式不正确")
+    cancel_event = threading.Event()
+    now = _workspace_timestamp()
+    initial = {
+        "runId": normalized_id,
+        "ok": True,
+        "status": "running",
+        "strategy": str(strategy or "heuristic"),
+        "testName": str(test_name or "当前测试"),
+        "createdAt": now,
+        "startedAt": now,
+        "elapsedMs": 0.0,
+        "events": [],
+        "_startedPerf": time.perf_counter(),
+    }
+    with _SINGLE_RUNS_LOCK:
+        _SINGLE_RUNS[normalized_id] = initial
+        _SINGLE_RUN_CANCEL_EVENTS[normalized_id] = cancel_event
+        _SINGLE_RUNS.move_to_end(normalized_id)
+        while len(_SINGLE_RUNS) > MAX_SAVED_SINGLE_RUNS:
+            expired_id, _ = _SINGLE_RUNS.popitem(last=False)
+            _SINGLE_RUN_CANCEL_EVENTS.pop(expired_id, None)
+    return cancel_event
+
+
+def _finish_single_run(run_id: str, status: str, error: str = "") -> None:
+    """完成、失败或取消单测，并保留最终耗时与精简事件历史。"""
+    with _SINGLE_RUNS_LOCK:
+        run = _SINGLE_RUNS.get(run_id)
+        if run is None or run.get("status") == "cancelled":
+            return
+        run["status"] = status
+        run["ok"] = status == "completed"
+        run["elapsedMs"] = max(
+            0.0,
+            (time.perf_counter() - float(run.get("_startedPerf", time.perf_counter()))) * 1000.0,
+        )
+        run["finishedAt"] = _workspace_timestamp()
+        if error:
+            run["error"] = str(error)
+
+
+def _cancel_single_run(run_id: str) -> Optional[Dict[str, Any]]:
+    """请求停止单测；算法调用返回后将不再接纳输出或执行后续轮次。"""
+    with _SINGLE_RUNS_LOCK:
+        run = _SINGLE_RUNS.get(run_id)
+        if run is None:
+            return None
+        if run.get("status") in {"completed", "failed", "cancelled"}:
+            return _single_run_snapshot(run_id)
+        cancel_event = _SINGLE_RUN_CANCEL_EVENTS.get(run_id)
+        if cancel_event is not None:
+            cancel_event.set()
+        run["ok"] = False
+        run["status"] = "cancelled"
+        run["elapsedMs"] = max(
+            0.0,
+            (time.perf_counter() - float(run.get("_startedPerf", time.perf_counter()))) * 1000.0,
+        )
+        run["finishedAt"] = _workspace_timestamp()
+        run["error"] = "用户停止测试"
+        for event in run.get("events") or []:
+            if event.get("status") == "running":
+                event["status"] = "cancelled"
+                event["detail"] = "用户停止测试"
+                event["updatedAt"] = run["finishedAt"]
+        return _single_run_snapshot(run_id)
+
+
+@contextmanager
+def _monitor_single_run(run_id: str, strategy: str) -> Iterator[None]:
+    """把当前 HTTP 请求的真实算法阶段关联到可轮询状态。"""
+    previous = getattr(_RUN_MONITOR, "value", None)
+    _RUN_MONITOR.value = {
+        "runId": run_id,
+        "strategy": str(strategy or "heuristic"),
+        "scope": "selected",
+    }
+    try:
+        yield
+    finally:
+        _RUN_MONITOR.value = previous
+
+
+def _set_run_monitor_scope(strategy: str) -> None:
+    """区分可选的 Baseline 调用和用户选择的策略调用。"""
+    monitor = getattr(_RUN_MONITOR, "value", None)
+    if monitor is not None:
+        monitor["scope"] = (
+            "selected"
+            if str(strategy or "heuristic") == monitor.get("strategy")
+            else "baseline"
+        )
+
+
+def _report_run_event(key: str, label: str, status: str, detail: str = "") -> None:
+    """原子更新一个真实 init/update/output/validation 阶段。"""
+    monitor = getattr(_RUN_MONITOR, "value", None)
+    if monitor is None:
+        return
+    run_id = str(monitor.get("runId") or "")
+    scope = str(monitor.get("scope") or "selected")
+    event_key = f"{scope}:{key}"
+    display_label = f"Baseline · {label}" if scope == "baseline" else label
+    with _SINGLE_RUNS_LOCK:
+        run = _SINGLE_RUNS.get(run_id)
+        if run is None or run.get("status") == "cancelled":
+            return
+        events = run.setdefault("events", [])
+        event = next((item for item in events if item.get("key") == event_key), None)
+        values = {
+            "key": event_key,
+            "label": display_label,
+            "status": status,
+            "detail": str(detail or ""),
+            "updatedAt": _workspace_timestamp(),
+        }
+        if event is None:
+            events.append(values)
+        else:
+            event.update(values)
+        if len(events) > 16:
+            del events[:-16]
+
+
+def _raise_if_single_run_cancelled() -> None:
+    """在算法边界检查停止标记，避免接纳迟到输出。"""
+    monitor = getattr(_RUN_MONITOR, "value", None)
+    if monitor is None:
+        return
+    cancel_event = _SINGLE_RUN_CANCEL_EVENTS.get(str(monitor.get("runId") or ""))
+    if cancel_event is not None and cancel_event.is_set():
+        raise UserRunCancelledError("运行已取消")
 
 
 def _compile_external_validation_problem(
@@ -2450,28 +2611,58 @@ def _execute_standard_algorithm(
     ]
     with session_context:
         round_started = time.perf_counter()
-        initialize(plan["device"])
-        raw_output = run_update(prepared_first_update)
+        _raise_if_single_run_cancelled()
+        _report_run_event("init", "init", "running")
+        try:
+            initialize(plan["device"])
+            _raise_if_single_run_cancelled()
+        except Exception as error:
+            _report_run_event("init", "init", "failed", str(error))
+            raise
+        _report_run_event("init", "init", "succeeded")
+        _report_run_event("update-1", "update #1", "running")
+        try:
+            raw_output = run_update(prepared_first_update)
+            _raise_if_single_run_cancelled()
+        except Exception as error:
+            _report_run_event("update-1", "update #1", "failed", str(error))
+            raise
+        _report_run_event("update-1", "update #1", "succeeded")
         elapsed_ms = (time.perf_counter() - round_started) * 1000.0
         output = _alg_output_info(raw_output)
-        _ensure_algorithm_output(output, prepared_first_update)
+        _report_run_event("output-1", "收到 output #1", "succeeded")
+        _report_run_event("validation-1", "校验 output #1", "running")
+        try:
+            _ensure_algorithm_output(output, prepared_first_update)
+        except Exception as error:
+            _report_run_event("validation-1", "校验 output #1", "failed", str(error))
+            raise
         uses_full_platform_runtime = BUILTIN_ALGORITHM_AVAILABLE
         runtime: Any
-        if uses_full_platform_runtime:
-            runtime = StandardAlgorithmRuntime(
-                plan["device"],
-                prepared_first_update,
-                output,
-                skip_validation=skip_validation,
-            )
-            state_source = "realtime_scheduler.move_validation.MachineState"
-        else:
-            runtime = PackagedAlgorithmRuntime(
-                prepared_first_update,
-                output,
-                skip_validation=skip_validation,
-            )
-            state_source = "realtime_scheduler.move_validation.MachineState"
+        try:
+            if uses_full_platform_runtime:
+                runtime = StandardAlgorithmRuntime(
+                    plan["device"],
+                    prepared_first_update,
+                    output,
+                    skip_validation=skip_validation,
+                )
+                state_source = "realtime_scheduler.move_validation.MachineState"
+            else:
+                runtime = PackagedAlgorithmRuntime(
+                    prepared_first_update,
+                    output,
+                    skip_validation=skip_validation,
+                )
+                state_source = "realtime_scheduler.move_validation.MachineState"
+        except Exception as error:
+            _report_run_event("validation-1", "校验 output #1", "failed", str(error))
+            raise
+        _report_run_event(
+            "validation-1",
+            "校验 output #1" if not skip_validation else "跳过校验 output #1",
+            "succeeded" if not skip_validation else "skipped",
+        )
         reproduction.add("AlgOutput", output)
         summaries.append({
             "index": 1,
@@ -2630,11 +2821,28 @@ def _execute_standard_algorithm(
                 requested_time,
             )
             round_started = time.perf_counter()
+            _raise_if_single_run_cancelled()
+            _report_run_event(
+                f"update-{recompute_index}",
+                f"update #{recompute_index}",
+                "running",
+            )
             try:
                 raw_output = run_update(update)
+                _raise_if_single_run_cancelled()
             except Exception as error:  # noqa: BLE001
+                _report_run_event(
+                    f"update-{recompute_index}",
+                    f"update #{recompute_index}",
+                    "failed",
+                    str(error),
+                )
                 cancelled_error_type = globals().get("SearchCancelledError")
-                if cancelled_error_type is not None and isinstance(error, cancelled_error_type):
+                if (
+                    isinstance(error, UserRunCancelledError)
+                    or cancelled_error_type is not None
+                    and isinstance(error, cancelled_error_type)
+                ):
                     # 用户主动取消属于预期终止，不得伪装成算法失败快照。
                     raise
                 failure_output = _build_recompute_failure_output(
@@ -2650,29 +2858,62 @@ def _execute_standard_algorithm(
                     reproduction.entries,
                     failure_output=failure_output,
                 ) from error
+            _report_run_event(
+                f"update-{recompute_index}",
+                f"update #{recompute_index}",
+                "succeeded",
+            )
             elapsed_ms = (time.perf_counter() - round_started) * 1000.0
             output = _alg_output_info(raw_output)
-            _ensure_algorithm_output(output, update)
-            if uses_full_platform_runtime:
-                runtime.replace_plan(
-                    update,
-                    output,
-                    requested_time,
-                    requested_time,
-                    reason,
-                    initial_state=projected_state,
-                    committed_moves=committed_moves,
-                    compile_for_validation=builtin_strategy is not None,
+            _report_run_event(
+                f"output-{recompute_index}",
+                f"收到 output #{recompute_index}",
+                "succeeded",
+            )
+            _report_run_event(
+                f"validation-{recompute_index}",
+                f"校验 output #{recompute_index}",
+                "running",
+            )
+            try:
+                _ensure_algorithm_output(output, update)
+                if uses_full_platform_runtime:
+                    runtime.replace_plan(
+                        update,
+                        output,
+                        requested_time,
+                        requested_time,
+                        reason,
+                        initial_state=projected_state,
+                        committed_moves=committed_moves,
+                        compile_for_validation=builtin_strategy is not None,
+                    )
+                else:
+                    runtime.replace_plan(
+                        update,
+                        output,
+                        requested_time,
+                        reason,
+                        committed_moves,
+                        initial_state=projected_state,
+                    )
+            except Exception as error:
+                _report_run_event(
+                    f"validation-{recompute_index}",
+                    f"校验 output #{recompute_index}",
+                    "failed",
+                    str(error),
                 )
-            else:
-                runtime.replace_plan(
-                    update,
-                    output,
-                    requested_time,
-                    reason,
-                    committed_moves,
-                    initial_state=projected_state,
-                )
+                raise
+            _report_run_event(
+                f"validation-{recompute_index}",
+                (
+                    f"校验 output #{recompute_index}"
+                    if not skip_validation
+                    else f"跳过校验 output #{recompute_index}"
+                ),
+                "succeeded" if not skip_validation else "skipped",
+            )
             reproduction.add("AlgOutput", output, requested_time)
             summaries.append({
                 "index": recompute_index,
@@ -3004,6 +3245,8 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
 
 def execute_plan(raw_plan: Mapping[str, Any]) -> Dict[str, Any]:
     """执行计划；成功和失败都生成可重放的 input_data 格式日志。"""
+    _set_run_monitor_scope(str(raw_plan.get("strategy") or "heuristic"))
+    _raise_if_single_run_cancelled()
     reproduction = ReproductionLog()
     reproduction.add("Input", [deepcopy(dict(raw_plan))])
     cpu_started = time.thread_time() if hasattr(time, "thread_time") else time.process_time()
@@ -3018,7 +3261,8 @@ def execute_plan(raw_plan: Mapping[str, Any]) -> Dict[str, Any]:
         # 由 /api/run 返回 cancelled 标记。
         cancelled_error_type = globals().get("SearchCancelledError")
         if (
-            cancelled_error_type is not None
+            isinstance(error, UserRunCancelledError)
+            or cancelled_error_type is not None
             and isinstance(error, cancelled_error_type)
         ):
             raise
@@ -5213,7 +5457,15 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                     top_level_item_per_line=True,
                 )
             return
-        batch_parts = [part for part in path.split("/") if part]
+        run_parts = [part for part in path.split("/") if part]
+        if len(run_parts) == 3 and run_parts[:2] == ["api", "runs"]:
+            run = _single_run_snapshot(run_parts[2])
+            if run is None:
+                self._send_json({"ok": False, "error": "单测任务不存在或尚未开始"}, HTTPStatus.NOT_FOUND)
+            else:
+                self._send_json(run)
+            return
+        batch_parts = run_parts
         if len(batch_parts) == 4 and batch_parts[:2] == ["api", "run-batches"] and batch_parts[3] == "logs":
             try:
                 content, download_name = build_workspace_batch_log_archive(batch_parts[2])
@@ -5441,6 +5693,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
         payload: Any = None
         replay_plan: Optional[Dict[str, Any]] = None
         baseline_response: Optional[Dict[str, Any]] = None
+        client_run_id = ""
         request_started = time.perf_counter()
         try:
             length = int(self.headers.get("Content-Length") or 0)
@@ -5452,6 +5705,13 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             workspace_device_id = str(payload.get("workspaceDeviceId") or "")
             workspace_test_id = str(payload.get("workspaceTestId") or "")
             strategy = str(payload.get("strategy") or "heuristic")
+            client_run_id = str(payload.get("clientRunId") or "").strip()
+            if client_run_id:
+                _start_single_run(
+                    client_run_id,
+                    strategy,
+                    str(payload.get("testCaseName") or payload.get("deviceName") or "当前测试"),
+                )
             if workspace_device_id and workspace_test_id:
                 device = get_workspace_device(workspace_device_id)
                 test_case = next((
@@ -5466,22 +5726,38 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                     apply_robot_slot_selection(runtime_device, device.get("robotSlots"))
                     selected_plan["device"] = runtime_device
                 replay_plan = deepcopy(selected_plan)
-                result, baseline, run_error = _execute_workspace_test_with_baseline(
-                    device,
-                    test_case,
-                    str(payload.get("strategy") or "heuristic"),
-                    dict(payload.get("options") or {}),
-                    selected_plan=selected_plan,
-                    skip_validation=bool(payload.get("skipValidation")),
-                    skip_baseline=bool(payload.get("skipBaseline")),
-                )
+                if client_run_id:
+                    with _monitor_single_run(client_run_id, strategy):
+                        result, baseline, run_error = _execute_workspace_test_with_baseline(
+                            device,
+                            test_case,
+                            strategy,
+                            dict(payload.get("options") or {}),
+                            selected_plan=selected_plan,
+                            skip_validation=bool(payload.get("skipValidation")),
+                            skip_baseline=bool(payload.get("skipBaseline")),
+                        )
+                else:
+                    result, baseline, run_error = _execute_workspace_test_with_baseline(
+                        device,
+                        test_case,
+                        strategy,
+                        dict(payload.get("options") or {}),
+                        selected_plan=selected_plan,
+                        skip_validation=bool(payload.get("skipValidation")),
+                        skip_baseline=bool(payload.get("skipBaseline")),
+                    )
                 baseline_response = deepcopy(baseline)
                 if run_error is not None or result is None:
                     raise run_error or RuntimeError("运行未返回结果")
                 result.update(_baseline_comparison(result, baseline))
             else:
                 replay_plan = deepcopy(dict(payload))
-                result = execute_plan(payload)
+                if client_run_id:
+                    with _monitor_single_run(client_run_id, strategy):
+                        result = execute_plan(payload)
+                else:
+                    result = execute_plan(payload)
             artifact = deepcopy(dict(result["output"]))
             if replay_plan is not None:
                 artifact["ReplayContext"] = {
@@ -5499,8 +5775,12 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             response["resultId"] = result_id
             response["ganttUrl"] = f"/movelist_gantt_viewer.html?src=/api/results/{result_id}"
             response.update(_log_response_fields(log_id))
+            if client_run_id:
+                _finish_single_run(client_run_id, "completed")
             self._send_json(response)
         except LoggedPlanError as error:
+            if client_run_id:
+                _finish_single_run(client_run_id, "failed", str(error))
             log_id = save_reproduction_log(error.reproduction_log)
             response = {"ok": False, "error": str(error)}
             if baseline_response is not None:
@@ -5531,10 +5811,21 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             }]))
             log_id = save_reproduction_log(reproduction.entries)
             cancelled_error_type = globals().get("SearchCancelledError")
-            if cancelled_error_type is not None and isinstance(error, cancelled_error_type):
+            cancelled = (
+                isinstance(error, UserRunCancelledError)
+                or cancelled_error_type is not None
+                and isinstance(error, cancelled_error_type)
+            )
+            if cancelled:
                 response = {"ok": False, "cancelled": True, "error": "运行已取消"}
             else:
                 response = {"ok": False, "error": str(error) or type(error).__name__}
+            if client_run_id:
+                _finish_single_run(
+                    client_run_id,
+                    "cancelled" if cancelled else "failed",
+                    response["error"],
+                )
             if baseline_response is not None:
                 response["baseline"] = baseline_response
             response.update(_log_response_fields(log_id))
@@ -5608,6 +5899,13 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": False, "error": "批量任务不存在或已过期"}, HTTPStatus.NOT_FOUND)
             else:
                 self._send_json(batch)
+            return
+        if path.startswith("/api/runs/"):
+            run = _cancel_single_run(path.rsplit("/", 1)[-1])
+            if run is None:
+                self._send_json({"ok": False, "error": "单测任务不存在或尚未开始"}, HTTPStatus.NOT_FOUND)
+            else:
+                self._send_json(run)
             return
         parts = [part for part in path.split("/") if part]
         if len(parts) == 4 and parts[:2] == ["api", "workspaces"] and parts[2] == "devices":

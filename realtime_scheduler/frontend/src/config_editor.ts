@@ -124,6 +124,14 @@ let pendingModeSync = "";
 let stepRunActive = false;
 /** 停止请求是否已在途；避免重复发送。 */
 let stepRunCancelling = false;
+/** 普通单测通过 clientRunId 轮询真实 init/update/output 阶段。 */
+let singleRunActive = false;
+let singleRunCancelling = false;
+let activeSingleRunId = "";
+let singleRunAbortController: AbortController | null = null;
+let runStatusStartedAt = 0;
+let runStatusElapsedMs = 0;
+let runStatusTimer = 0;
 let pendingAlphaGoCheckpointFile: File | null = null;
 /**
  * 当前页面会话统一使用的运行配置。
@@ -1216,7 +1224,7 @@ function renderWorkspaceControls() {
   document.getElementById("copyTestButton").disabled = !hasTest;
   document.getElementById("saveTestButton").disabled = !hasTest;
   document.getElementById("deleteTestButton").disabled = tests.length <= 1;
-  const batchDisabled = state.batchRunning || !state.serviceCompatible || !visibleTests.length;
+  const batchDisabled = (state.batchRunning && state.batchCancelRequested) || singleRunActive || !state.serviceCompatible || !visibleTests.length;
   document.getElementById("batchRunButton").disabled = batchDisabled;
   document.getElementById("openParameterComparisonDialogButton").disabled = state.batchRunning || !state.serviceCompatible || !state.parameterComparison?.baseline;
   const emptyHint = document.getElementById("emptyGroupHint");
@@ -3527,12 +3535,141 @@ async function prepareWorkspaceView(result) {
   return visualizationWorkspace.getBottleneckUtilization();
 }
 
+/** 把运行时长压缩为固定宽度的 mm:ss.d，长任务超过一小时仍保持可读。 */
+function formatRunElapsed(milliseconds) {
+  const totalTenths = Math.max(0, Math.floor(Number(milliseconds || 0) / 100));
+  const minutes = Math.floor(totalTenths / 600);
+  const seconds = Math.floor(totalTenths / 10) % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${totalTenths % 10}`;
+}
+
+/** 启动紧凑状态卡计时，不依赖后端轮询频率。 */
+function startRunStatus(title, initialLabel = "正在准备") {
+  const card = document.getElementById("runStatusCard");
+  card.classList.remove("failed", "cancelled");
+  card.classList.add("running");
+  document.getElementById("runStatusTitle").textContent = title;
+  runStatusStartedAt = performance.now();
+  runStatusElapsedMs = 0;
+  renderRunStatusEvents([{ label: initialLabel, status: "running" }]);
+  window.clearInterval(runStatusTimer);
+  runStatusTimer = window.setInterval(() => {
+    runStatusElapsedMs = Math.max(runStatusElapsedMs, performance.now() - runStatusStartedAt);
+    document.getElementById("runStatusElapsed").textContent = formatRunElapsed(runStatusElapsedMs);
+  }, 100);
+}
+
+/** 最多展示最近 6 个真实阶段，避免状态卡挤占策略侧栏。 */
+function renderRunStatusEvents(events) {
+  const root = document.getElementById("runStatusEvents");
+  const visible = Array.isArray(events) ? events.slice(-6) : [];
+  root.replaceChildren(...visible.map(event => {
+    const item = document.createElement("span");
+    item.className = `run-status-event ${String(event.status || "")}`;
+    const suffix = event.status === "succeeded"
+      ? (String(event.label || "").startsWith("收到 ") ? "" : " 成功")
+      : event.status === "failed" ? " 失败"
+      : event.status === "running" ? "…"
+      : event.status === "cancelled" ? " 已停止"
+      : "";
+    item.textContent = `${event.label || "处理中"}${suffix}`;
+    if (event.detail) item.title = String(event.detail);
+    return item;
+  }));
+}
+
+/** 合并服务端状态快照；事件来自实际算法调用边界。 */
+function renderSingleRunStatus(snapshot) {
+  if (!snapshot) return;
+  runStatusElapsedMs = Math.max(runStatusElapsedMs, Number(snapshot.elapsedMs || 0));
+  document.getElementById("runStatusElapsed").textContent = formatRunElapsed(runStatusElapsedMs);
+  const terminal = ["completed", "failed", "cancelled"].includes(snapshot.status);
+  const title = snapshot.status === "completed" ? "当前测试运行完成"
+    : snapshot.status === "failed" ? "当前测试运行失败"
+    : snapshot.status === "cancelled" ? "当前测试已停止"
+    : `正在运行 · ${snapshot.testName || state.testCaseName || "当前测试"}`;
+  document.getElementById("runStatusTitle").textContent = title;
+  renderRunStatusEvents(snapshot.events || []);
+  if (terminal) finishRunStatus(snapshot.status, title);
+}
+
+/** 批测共用同一张小卡，只展示汇总而不复制下面的大结果列表。 */
+function renderBatchRunStatus(result) {
+  if (!result) return;
+  const total = Number(result.testCount || 0);
+  const completed = Number(result.completed || 0);
+  const running = (result.items || []).filter(item => item.status === "running").length;
+  renderRunStatusEvents([
+    { label: `完成 ${completed}/${total}`, status: completed === total && total ? "succeeded" : "running" },
+    { label: `运行中 ${running}`, status: running ? "running" : "skipped" },
+    { label: `成功 ${Number(result.succeeded || 0)}`, status: "succeeded" },
+    ...(Number(result.failed || 0) ? [{ label: `失败 ${Number(result.failed)}`, status: "failed" }] : []),
+  ]);
+  document.getElementById("runStatusTitle").textContent = `批量测试 · ${state.activeTestGroup || "未分组"}`;
+}
+
+/** 停止计时并保留最终状态，方便用户在下一次运行前核对。 */
+function finishRunStatus(status, title) {
+  window.clearInterval(runStatusTimer);
+  runStatusTimer = 0;
+  if (runStatusStartedAt) runStatusElapsedMs = Math.max(runStatusElapsedMs, performance.now() - runStatusStartedAt);
+  document.getElementById("runStatusElapsed").textContent = formatRunElapsed(runStatusElapsedMs);
+  const card = document.getElementById("runStatusCard");
+  card.classList.remove("running", "failed", "cancelled");
+  if (status === "failed") card.classList.add("failed");
+  if (status === "cancelled") card.classList.add("cancelled");
+  if (title) document.getElementById("runStatusTitle").textContent = title;
+}
+
+/** 与同步结果请求并行轮询单测阶段；POST 尚未登记时允许短暂 404。 */
+async function pollSingleRunStatus(runId) {
+  while (singleRunActive && activeSingleRunId === runId) {
+    try {
+      const response = await fetch(`/api/runs/${encodeURIComponent(runId)}`, { cache: "no-store" });
+      if (response.ok) {
+        const snapshot = await response.json();
+        renderSingleRunStatus(snapshot);
+        if (["completed", "failed", "cancelled"].includes(snapshot.status)) return;
+      }
+    } catch { /* 主结果请求负责展示连接错误。 */ }
+    await new Promise(resolve => window.setTimeout(resolve, 180));
+  }
+}
+
+/** 停止普通单测；迟到的算法输出由服务端丢弃。 */
+async function requestSingleRunCancellation() {
+  if (!singleRunActive || singleRunCancelling || !activeSingleRunId) return;
+  singleRunCancelling = true;
+  const button = document.getElementById("runButton");
+  button.disabled = true; button.classList.add("running", "cancel"); button.textContent = "正在停止…";
+  document.getElementById("runStatusTitle").textContent = "正在停止当前测试";
+  try {
+    const response = await fetch(`/api/runs/${encodeURIComponent(activeSingleRunId)}`, { method: "DELETE" });
+    const snapshot = await response.json();
+    if (!response.ok) throw new Error(snapshot.error || `服务返回 ${response.status}`);
+    renderSingleRunStatus(snapshot);
+    if (state.strategy === "schedule-alphago") {
+      try { await requestSearchControl("cancel"); } catch { /* 单测停止状态已经生效。 */ }
+    }
+    singleRunAbortController?.abort();
+  } catch (error) {
+    singleRunCancelling = false;
+    button.disabled = false; button.classList.remove("running"); button.classList.add("cancel"); button.textContent = "■ 停止当前测试";
+    throw error;
+  }
+}
+
 /** 调用本地服务运行排程。 */
 async function runPlan() {
   const button = document.getElementById("runButton");
   const stepRunButton = document.getElementById("stepRunButton");
   const batchButton = document.getElementById("batchRunButton");
   const comparisonButton = document.getElementById("openParameterComparisonDialogButton");
+  if (singleRunActive) {
+    try { await requestSingleRunCancellation(); }
+    catch (error) { writeTerminal(`$ 停止失败：${error.message || "未知错误"}\n  可再次点击“■ 停止当前测试”重试。`, true); }
+    return;
+  }
   let logReady = false, ganttReady = false, runResult = null, bottleneckSummary = null;
   const telemetryEnabled = state.strategy === "schedule-alphago";
   let telemetryStopped = false;
@@ -3546,7 +3683,16 @@ async function runPlan() {
       throw new Error(health.strategyErrors?.[state.strategy] || `${state.strategy} 策略当前不可用`);
     }
     if (state.testCaseId) await saveCurrentTest(true);
-    const payload = buildPayload(); button.disabled = true; batchButton.disabled = true; comparisonButton.disabled = true; button.classList.add("running"); button.textContent = "正在运行策略…";
+    const payload = buildPayload();
+    const runId = (crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`).replace(/[^A-Za-z0-9_-]/g, "");
+    payload.clientRunId = runId;
+    payload.testCaseName = state.testCaseName || "当前测试";
+    singleRunActive = true; singleRunCancelling = false; activeSingleRunId = runId;
+    singleRunAbortController = new AbortController();
+    button.disabled = false; batchButton.disabled = true; comparisonButton.disabled = true;
+    button.classList.remove("running"); button.classList.add("cancel"); button.textContent = "■ 停止当前测试";
+    startRunStatus(`正在运行 · ${payload.testCaseName}`, "提交运行请求");
+    void pollSingleRunStatus(runId);
     if (telemetryEnabled) {
       stepRunActive = true; stepRunCancelling = false;
       stepRunButton.classList.add("cancel"); stepRunButton.disabled = false; stepRunButton.textContent = "■ 停止模型步进";
@@ -3562,7 +3708,12 @@ async function runPlan() {
       startSearchTelemetryPolling();
     }
     writeTerminal(`$ 开始运行 ${state.strategy}\n  总轮数: ${state.roundCount}\n  重算时间: ${state.rounds.map(round => round.currentTime).join(", ")} s`);
-    const response = await fetch("/api/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    const response = await fetch("/api/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: singleRunAbortController.signal,
+    });
     const responseText = await response.text();
     try { runResult = JSON.parse(responseText); }
     catch { throw new Error(responseText.trim().slice(0, 240) || `服务返回 ${response.status}`); }
@@ -3584,8 +3735,9 @@ async function runPlan() {
       throw new Error(runResult.error || `服务返回 ${response.status}`);
     }
     showResult(runResult);
+    finishRunStatus("completed", "当前测试运行完成");
   } catch (error) {
-    const cancelled = runResult?.cancelled === true;
+    const cancelled = singleRunCancelling || runResult?.cancelled === true || error?.name === "AbortError";
     const baselineError = runResult?.baseline?.status === "failed" ? `\n  Baseline 失败：${runResult.baseline.error || "未知原因"}` : "";
     const validationIssues = Array.isArray(runResult?.validationIssues)
       ? runResult.validationIssues.map(issue => `  ${issue}`)
@@ -3606,6 +3758,7 @@ async function runPlan() {
     document.getElementById("metricValidation").textContent = runResult?.metricsAvailable
       ? (runResult.validation === "failed" ? "未通过" : validationDisplay(runResult.validation) || "失败")
       : "失败";
+    finishRunStatus(cancelled ? "cancelled" : "failed", cancelled ? "当前测试已停止" : "当前测试运行失败");
   }
   finally {
     if (telemetryEnabled && !telemetryStopped) {
@@ -3615,7 +3768,8 @@ async function runPlan() {
       stepRunActive = false; stepRunCancelling = false;
       stepRunButton.classList.remove("cancel"); stepRunButton.textContent = "⟳ 运行模型步进";
     }
-    button.disabled = false; button.classList.remove("running"); button.textContent = "▶ 运行当前测试"; renderWorkspaceControls();
+    singleRunActive = false; singleRunCancelling = false; activeSingleRunId = ""; singleRunAbortController = null;
+    button.disabled = false; button.classList.remove("running", "cancel"); button.textContent = "▶ 运行当前测试"; renderWorkspaceControls();
   }
 }
 
@@ -3670,6 +3824,7 @@ async function runCurrentTestGroup() {
     const tests = (state.workspaceDevice?.tests || []).filter(test => String(test.group || "").trim() === state.activeTestGroup);
     if (!tests.length) throw new Error("当前测试组没有可运行测试");
     state.batchRunning = true; state.activeBatchId = ""; state.batchCancelRequested = false; state.batchCancelSent = false; state.batchResult = null; state.selectedBatchTestId = "";
+    startRunStatus(`批量测试 · ${state.activeTestGroup || "未分组"}`, `等待 ${tests.length} 个测试`);
     batchPerformanceAnalyses.clear();
     batchBottleneckSummaries.clear();
     batchBottleneckRequests.clear();
@@ -3690,6 +3845,7 @@ async function runCurrentTestGroup() {
     if (!response.ok || !result.batchId || !Array.isArray(result.items)) throw new Error(result.error || `服务返回 ${response.status}`);
     state.activeBatchId = result.batchId;
     showBatchProgress(result);
+    renderBatchRunStatus(result);
     if (state.batchCancelRequested) await sendBatchCancellation();
     while (!["completed", "failed", "cancelled"].includes(result.status)) {
       await new Promise(resolve => window.setTimeout(resolve, 450));
@@ -3697,17 +3853,21 @@ async function runCurrentTestGroup() {
       result = await statusResponse.json();
       if (!statusResponse.ok) throw new Error(result.error || `服务返回 ${statusResponse.status}`);
       showBatchProgress(result);
+      renderBatchRunStatus(result);
     }
     if (result.status === "cancelled") {
       showBatchProgress(result);
       writeTerminal(`$ 批量调度已终止\n  已停止提交等待中的测试；仍在算法内部执行的任务结果将被忽略。`);
+      finishRunStatus("cancelled", "批量测试已停止");
       return;
     }
     if (result.status === "failed" && !Array.isArray(result.items)) throw new Error(result.error || "批量任务失败");
     showBatchResult(result);
+    finishRunStatus(Number(result.failed || 0) ? "failed" : "completed", Number(result.failed || 0) ? "批量测试完成（有失败）" : "批量测试运行完成");
   } catch (error) {
     writeTerminal(`$ 批量运行失败：${error.message || "未知错误"}`, true);
     document.getElementById("metricValidation").textContent = "失败";
+    finishRunStatus("failed", "批量测试运行失败");
   } finally {
     state.batchRunning = false; state.activeBatchId = ""; state.batchCancelRequested = false; state.batchCancelSent = false;
     button.disabled = !state.serviceCompatible; runButton.disabled = !state.serviceCompatible;
@@ -4423,7 +4583,6 @@ function writeTerminal(message, error = false) {
 async function checkService(options = {}) {
   if (serviceCheckInFlight) return;
   serviceCheckInFlight = true;
-  const pill = document.getElementById("serviceState");
   const runButton = document.getElementById("runButton");
   const batchRunButton = document.getElementById("batchRunButton");
   const comparisonButton = document.getElementById("openParameterComparisonDialogButton");
@@ -4454,18 +4613,14 @@ async function checkService(options = {}) {
     if (options.refreshCatalog !== false || previousConnectionState !== "connected") {
       renderOtherAlgorithmOptions(status.algorithms || status.otherAlgorithms || []);
     }
-    runButton.disabled = !compatible || runButton.classList.contains("running") || state.batchRunning;
-    batchRunButton.disabled = !compatible || state.batchRunning;
+    runButton.disabled = !compatible || singleRunCancelling || state.batchRunning;
+    batchRunButton.disabled = !compatible || singleRunActive || (state.batchRunning && state.batchCancelRequested);
     comparisonButton.disabled = !compatible || state.batchRunning || !state.parameterComparison?.baseline;
     document.getElementById("stepRunButton").disabled = stepRunActive
       ? false
       : !compatible || state.strategy !== "schedule-alphago";
     renderWorkspaceControls();
-    pill.textContent = compatible ? "本地服务已连接" : "服务版本过旧";
-    pill.style.removeProperty("color");
-    pill.style.removeProperty("background");
     if (!compatible) {
-      pill.style.color = "var(--red)"; pill.style.background = "var(--red-soft)";
       if (previousConnectionState !== "incompatible") {
         writeTerminal("$ 本地服务版本过旧\n  请重启: py scripts/config_editor_server.py", true);
       }
@@ -4479,9 +4634,6 @@ async function checkService(options = {}) {
     comparisonButton.disabled = true;
     document.getElementById("stepRunButton").disabled = true;
     renderWorkspaceControls();
-    pill.textContent = "本地服务未连接";
-    pill.style.color = "var(--red)";
-    pill.style.background = "var(--red-soft)";
     if (previousConnectionState !== "disconnected") {
       writeTerminal("$ 无法连接本地服务\n  请运行: py scripts/config_editor_server.py", true);
     }
@@ -4491,7 +4643,7 @@ async function checkService(options = {}) {
   }
 }
 
-/** 持续心跳；标签页恢复可见时立即复查，避免显示过期连接状态。 */
+/** 持续心跳；标签页恢复可见时立即复查服务可用性与运行按钮状态。 */
 function startServiceHealthcheck() {
   window.setInterval(
     () => void checkService({ refreshCatalog: false }),

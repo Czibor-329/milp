@@ -18083,6 +18083,13 @@ var userChosenSearchId = "";
 var pendingModeSync = "";
 var stepRunActive = false;
 var stepRunCancelling = false;
+var singleRunActive = false;
+var singleRunCancelling = false;
+var activeSingleRunId = "";
+var singleRunAbortController = null;
+var runStatusStartedAt = 0;
+var runStatusElapsedMs = 0;
+var runStatusTimer = 0;
 var pendingAlphaGoCheckpointFile = null;
 var sessionSchedulingConfiguration = null;
 function retainSessionSchedulingConfiguration() {
@@ -19007,7 +19014,7 @@ function renderWorkspaceControls() {
   document.getElementById("copyTestButton").disabled = !hasTest;
   document.getElementById("saveTestButton").disabled = !hasTest;
   document.getElementById("deleteTestButton").disabled = tests.length <= 1;
-  const batchDisabled = state.batchRunning || !state.serviceCompatible || !visibleTests.length;
+  const batchDisabled = state.batchRunning && state.batchCancelRequested || singleRunActive || !state.serviceCompatible || !visibleTests.length;
   document.getElementById("batchRunButton").disabled = batchDisabled;
   document.getElementById("openParameterComparisonDialogButton").disabled = state.batchRunning || !state.serviceCompatible || !state.parameterComparison?.baseline;
   const emptyHint = document.getElementById("emptyGroupHint");
@@ -21134,11 +21141,129 @@ async function prepareWorkspaceView(result) {
   }
   return visualizationWorkspace.getBottleneckUtilization();
 }
+function formatRunElapsed(milliseconds) {
+  const totalTenths = Math.max(0, Math.floor(Number(milliseconds || 0) / 100));
+  const minutes = Math.floor(totalTenths / 600);
+  const seconds = Math.floor(totalTenths / 10) % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${totalTenths % 10}`;
+}
+function startRunStatus(title, initialLabel = "\u6B63\u5728\u51C6\u5907") {
+  const card = document.getElementById("runStatusCard");
+  card.classList.remove("failed", "cancelled");
+  card.classList.add("running");
+  document.getElementById("runStatusTitle").textContent = title;
+  runStatusStartedAt = performance.now();
+  runStatusElapsedMs = 0;
+  renderRunStatusEvents([{ label: initialLabel, status: "running" }]);
+  window.clearInterval(runStatusTimer);
+  runStatusTimer = window.setInterval(() => {
+    runStatusElapsedMs = Math.max(runStatusElapsedMs, performance.now() - runStatusStartedAt);
+    document.getElementById("runStatusElapsed").textContent = formatRunElapsed(runStatusElapsedMs);
+  }, 100);
+}
+function renderRunStatusEvents(events) {
+  const root = document.getElementById("runStatusEvents");
+  const visible = Array.isArray(events) ? events.slice(-6) : [];
+  root.replaceChildren(...visible.map((event) => {
+    const item = document.createElement("span");
+    item.className = `run-status-event ${String(event.status || "")}`;
+    const suffix = event.status === "succeeded" ? String(event.label || "").startsWith("\u6536\u5230 ") ? "" : " \u6210\u529F" : event.status === "failed" ? " \u5931\u8D25" : event.status === "running" ? "\u2026" : event.status === "cancelled" ? " \u5DF2\u505C\u6B62" : "";
+    item.textContent = `${event.label || "\u5904\u7406\u4E2D"}${suffix}`;
+    if (event.detail) item.title = String(event.detail);
+    return item;
+  }));
+}
+function renderSingleRunStatus(snapshot) {
+  if (!snapshot) return;
+  runStatusElapsedMs = Math.max(runStatusElapsedMs, Number(snapshot.elapsedMs || 0));
+  document.getElementById("runStatusElapsed").textContent = formatRunElapsed(runStatusElapsedMs);
+  const terminal = ["completed", "failed", "cancelled"].includes(snapshot.status);
+  const title = snapshot.status === "completed" ? "\u5F53\u524D\u6D4B\u8BD5\u8FD0\u884C\u5B8C\u6210" : snapshot.status === "failed" ? "\u5F53\u524D\u6D4B\u8BD5\u8FD0\u884C\u5931\u8D25" : snapshot.status === "cancelled" ? "\u5F53\u524D\u6D4B\u8BD5\u5DF2\u505C\u6B62" : `\u6B63\u5728\u8FD0\u884C \xB7 ${snapshot.testName || state.testCaseName || "\u5F53\u524D\u6D4B\u8BD5"}`;
+  document.getElementById("runStatusTitle").textContent = title;
+  renderRunStatusEvents(snapshot.events || []);
+  if (terminal) finishRunStatus(snapshot.status, title);
+}
+function renderBatchRunStatus(result) {
+  if (!result) return;
+  const total = Number(result.testCount || 0);
+  const completed = Number(result.completed || 0);
+  const running = (result.items || []).filter((item) => item.status === "running").length;
+  renderRunStatusEvents([
+    { label: `\u5B8C\u6210 ${completed}/${total}`, status: completed === total && total ? "succeeded" : "running" },
+    { label: `\u8FD0\u884C\u4E2D ${running}`, status: running ? "running" : "skipped" },
+    { label: `\u6210\u529F ${Number(result.succeeded || 0)}`, status: "succeeded" },
+    ...Number(result.failed || 0) ? [{ label: `\u5931\u8D25 ${Number(result.failed)}`, status: "failed" }] : []
+  ]);
+  document.getElementById("runStatusTitle").textContent = `\u6279\u91CF\u6D4B\u8BD5 \xB7 ${state.activeTestGroup || "\u672A\u5206\u7EC4"}`;
+}
+function finishRunStatus(status, title) {
+  window.clearInterval(runStatusTimer);
+  runStatusTimer = 0;
+  if (runStatusStartedAt) runStatusElapsedMs = Math.max(runStatusElapsedMs, performance.now() - runStatusStartedAt);
+  document.getElementById("runStatusElapsed").textContent = formatRunElapsed(runStatusElapsedMs);
+  const card = document.getElementById("runStatusCard");
+  card.classList.remove("running", "failed", "cancelled");
+  if (status === "failed") card.classList.add("failed");
+  if (status === "cancelled") card.classList.add("cancelled");
+  if (title) document.getElementById("runStatusTitle").textContent = title;
+}
+async function pollSingleRunStatus(runId) {
+  while (singleRunActive && activeSingleRunId === runId) {
+    try {
+      const response = await fetch(`/api/runs/${encodeURIComponent(runId)}`, { cache: "no-store" });
+      if (response.ok) {
+        const snapshot = await response.json();
+        renderSingleRunStatus(snapshot);
+        if (["completed", "failed", "cancelled"].includes(snapshot.status)) return;
+      }
+    } catch {
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 180));
+  }
+}
+async function requestSingleRunCancellation() {
+  if (!singleRunActive || singleRunCancelling || !activeSingleRunId) return;
+  singleRunCancelling = true;
+  const button = document.getElementById("runButton");
+  button.disabled = true;
+  button.classList.add("running", "cancel");
+  button.textContent = "\u6B63\u5728\u505C\u6B62\u2026";
+  document.getElementById("runStatusTitle").textContent = "\u6B63\u5728\u505C\u6B62\u5F53\u524D\u6D4B\u8BD5";
+  try {
+    const response = await fetch(`/api/runs/${encodeURIComponent(activeSingleRunId)}`, { method: "DELETE" });
+    const snapshot = await response.json();
+    if (!response.ok) throw new Error(snapshot.error || `\u670D\u52A1\u8FD4\u56DE ${response.status}`);
+    renderSingleRunStatus(snapshot);
+    if (state.strategy === "schedule-alphago") {
+      try {
+        await requestSearchControl("cancel");
+      } catch {
+      }
+    }
+    singleRunAbortController?.abort();
+  } catch (error) {
+    singleRunCancelling = false;
+    button.disabled = false;
+    button.classList.remove("running");
+    button.classList.add("cancel");
+    button.textContent = "\u25A0 \u505C\u6B62\u5F53\u524D\u6D4B\u8BD5";
+    throw error;
+  }
+}
 async function runPlan() {
   const button = document.getElementById("runButton");
   const stepRunButton = document.getElementById("stepRunButton");
   const batchButton = document.getElementById("batchRunButton");
   const comparisonButton = document.getElementById("openParameterComparisonDialogButton");
+  if (singleRunActive) {
+    try {
+      await requestSingleRunCancellation();
+    } catch (error) {
+      writeTerminal(`$ \u505C\u6B62\u5931\u8D25\uFF1A${error.message || "\u672A\u77E5\u9519\u8BEF"}
+  \u53EF\u518D\u6B21\u70B9\u51FB\u201C\u25A0 \u505C\u6B62\u5F53\u524D\u6D4B\u8BD5\u201D\u91CD\u8BD5\u3002`, true);
+    }
+    return;
+  }
   let logReady = false, ganttReady = false, runResult = null, bottleneckSummary = null;
   const telemetryEnabled = state.strategy === "schedule-alphago";
   let telemetryStopped = false;
@@ -21153,11 +21278,21 @@ async function runPlan() {
     }
     if (state.testCaseId) await saveCurrentTest(true);
     const payload = buildPayload();
-    button.disabled = true;
+    const runId = (crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`).replace(/[^A-Za-z0-9_-]/g, "");
+    payload.clientRunId = runId;
+    payload.testCaseName = state.testCaseName || "\u5F53\u524D\u6D4B\u8BD5";
+    singleRunActive = true;
+    singleRunCancelling = false;
+    activeSingleRunId = runId;
+    singleRunAbortController = new AbortController();
+    button.disabled = false;
     batchButton.disabled = true;
     comparisonButton.disabled = true;
-    button.classList.add("running");
-    button.textContent = "\u6B63\u5728\u8FD0\u884C\u7B56\u7565\u2026";
+    button.classList.remove("running");
+    button.classList.add("cancel");
+    button.textContent = "\u25A0 \u505C\u6B62\u5F53\u524D\u6D4B\u8BD5";
+    startRunStatus(`\u6B63\u5728\u8FD0\u884C \xB7 ${payload.testCaseName}`, "\u63D0\u4EA4\u8FD0\u884C\u8BF7\u6C42");
+    void pollSingleRunStatus(runId);
     if (telemetryEnabled) {
       stepRunActive = true;
       stepRunCancelling = false;
@@ -21178,7 +21313,12 @@ async function runPlan() {
     writeTerminal(`$ \u5F00\u59CB\u8FD0\u884C ${state.strategy}
   \u603B\u8F6E\u6570: ${state.roundCount}
   \u91CD\u7B97\u65F6\u95F4: ${state.rounds.map((round) => round.currentTime).join(", ")} s`);
-    const response = await fetch("/api/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    const response = await fetch("/api/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: singleRunAbortController.signal
+    });
     const responseText = await response.text();
     try {
       runResult = JSON.parse(responseText);
@@ -21205,8 +21345,9 @@ async function runPlan() {
       throw new Error(runResult.error || `\u670D\u52A1\u8FD4\u56DE ${response.status}`);
     }
     showResult(runResult);
+    finishRunStatus("completed", "\u5F53\u524D\u6D4B\u8BD5\u8FD0\u884C\u5B8C\u6210");
   } catch (error) {
-    const cancelled = runResult?.cancelled === true;
+    const cancelled = singleRunCancelling || runResult?.cancelled === true || error?.name === "AbortError";
     const baselineError = runResult?.baseline?.status === "failed" ? `
   Baseline \u5931\u8D25\uFF1A${runResult.baseline.error || "\u672A\u77E5\u539F\u56E0"}` : "";
     const validationIssues = Array.isArray(runResult?.validationIssues) ? runResult.validationIssues.map((issue) => `  ${issue}`) : [];
@@ -21222,6 +21363,7 @@ async function runPlan() {
       ...logReady ? ["  \u590D\u73B0\u65E5\u5FD7\u5DF2\u751F\u6210\uFF0C\u53EF\u70B9\u51FB\u201C\u5BFC\u51FA\u590D\u73B0\u65E5\u5FD7\u201D"] : []
     ].join("\n"), true);
     document.getElementById("metricValidation").textContent = runResult?.metricsAvailable ? runResult.validation === "failed" ? "\u672A\u901A\u8FC7" : validationDisplay(runResult.validation) || "\u5931\u8D25" : "\u5931\u8D25";
+    finishRunStatus(cancelled ? "cancelled" : "failed", cancelled ? "\u5F53\u524D\u6D4B\u8BD5\u5DF2\u505C\u6B62" : "\u5F53\u524D\u6D4B\u8BD5\u8FD0\u884C\u5931\u8D25");
   } finally {
     if (telemetryEnabled && !telemetryStopped) {
       stopSearchTelemetryPolling(runResult?.searchTelemetry || null);
@@ -21232,8 +21374,12 @@ async function runPlan() {
       stepRunButton.classList.remove("cancel");
       stepRunButton.textContent = "\u27F3 \u8FD0\u884C\u6A21\u578B\u6B65\u8FDB";
     }
+    singleRunActive = false;
+    singleRunCancelling = false;
+    activeSingleRunId = "";
+    singleRunAbortController = null;
     button.disabled = false;
-    button.classList.remove("running");
+    button.classList.remove("running", "cancel");
     button.textContent = "\u25B6 \u8FD0\u884C\u5F53\u524D\u6D4B\u8BD5";
     renderWorkspaceControls();
   }
@@ -21297,6 +21443,7 @@ async function runCurrentTestGroup() {
     state.batchCancelSent = false;
     state.batchResult = null;
     state.selectedBatchTestId = "";
+    startRunStatus(`\u6279\u91CF\u6D4B\u8BD5 \xB7 ${state.activeTestGroup || "\u672A\u5206\u7EC4"}`, `\u7B49\u5F85 ${tests.length} \u4E2A\u6D4B\u8BD5`);
     batchPerformanceAnalyses.clear();
     batchBottleneckSummaries.clear();
     batchBottleneckRequests.clear();
@@ -21325,6 +21472,7 @@ async function runCurrentTestGroup() {
     if (!response.ok || !result.batchId || !Array.isArray(result.items)) throw new Error(result.error || `\u670D\u52A1\u8FD4\u56DE ${response.status}`);
     state.activeBatchId = result.batchId;
     showBatchProgress(result);
+    renderBatchRunStatus(result);
     if (state.batchCancelRequested) await sendBatchCancellation();
     while (!["completed", "failed", "cancelled"].includes(result.status)) {
       await new Promise((resolve) => window.setTimeout(resolve, 450));
@@ -21332,18 +21480,22 @@ async function runCurrentTestGroup() {
       result = await statusResponse.json();
       if (!statusResponse.ok) throw new Error(result.error || `\u670D\u52A1\u8FD4\u56DE ${statusResponse.status}`);
       showBatchProgress(result);
+      renderBatchRunStatus(result);
     }
     if (result.status === "cancelled") {
       showBatchProgress(result);
       writeTerminal(`$ \u6279\u91CF\u8C03\u5EA6\u5DF2\u7EC8\u6B62
   \u5DF2\u505C\u6B62\u63D0\u4EA4\u7B49\u5F85\u4E2D\u7684\u6D4B\u8BD5\uFF1B\u4ECD\u5728\u7B97\u6CD5\u5185\u90E8\u6267\u884C\u7684\u4EFB\u52A1\u7ED3\u679C\u5C06\u88AB\u5FFD\u7565\u3002`);
+      finishRunStatus("cancelled", "\u6279\u91CF\u6D4B\u8BD5\u5DF2\u505C\u6B62");
       return;
     }
     if (result.status === "failed" && !Array.isArray(result.items)) throw new Error(result.error || "\u6279\u91CF\u4EFB\u52A1\u5931\u8D25");
     showBatchResult(result);
+    finishRunStatus(Number(result.failed || 0) ? "failed" : "completed", Number(result.failed || 0) ? "\u6279\u91CF\u6D4B\u8BD5\u5B8C\u6210\uFF08\u6709\u5931\u8D25\uFF09" : "\u6279\u91CF\u6D4B\u8BD5\u8FD0\u884C\u5B8C\u6210");
   } catch (error) {
     writeTerminal(`$ \u6279\u91CF\u8FD0\u884C\u5931\u8D25\uFF1A${error.message || "\u672A\u77E5\u9519\u8BEF"}`, true);
     document.getElementById("metricValidation").textContent = "\u5931\u8D25";
+    finishRunStatus("failed", "\u6279\u91CF\u6D4B\u8BD5\u8FD0\u884C\u5931\u8D25");
   } finally {
     state.batchRunning = false;
     state.activeBatchId = "";
@@ -21974,7 +22126,6 @@ function writeTerminal(message, error = false) {
 async function checkService(options = {}) {
   if (serviceCheckInFlight) return;
   serviceCheckInFlight = true;
-  const pill = document.getElementById("serviceState");
   const runButton = document.getElementById("runButton");
   const batchRunButton = document.getElementById("batchRunButton");
   const comparisonButton = document.getElementById("openParameterComparisonDialogButton");
@@ -22005,17 +22156,12 @@ async function checkService(options = {}) {
     if (options.refreshCatalog !== false || previousConnectionState !== "connected") {
       renderOtherAlgorithmOptions(status.algorithms || status.otherAlgorithms || []);
     }
-    runButton.disabled = !compatible || runButton.classList.contains("running") || state.batchRunning;
-    batchRunButton.disabled = !compatible || state.batchRunning;
+    runButton.disabled = !compatible || singleRunCancelling || state.batchRunning;
+    batchRunButton.disabled = !compatible || singleRunActive || state.batchRunning && state.batchCancelRequested;
     comparisonButton.disabled = !compatible || state.batchRunning || !state.parameterComparison?.baseline;
     document.getElementById("stepRunButton").disabled = stepRunActive ? false : !compatible || state.strategy !== "schedule-alphago";
     renderWorkspaceControls();
-    pill.textContent = compatible ? "\u672C\u5730\u670D\u52A1\u5DF2\u8FDE\u63A5" : "\u670D\u52A1\u7248\u672C\u8FC7\u65E7";
-    pill.style.removeProperty("color");
-    pill.style.removeProperty("background");
     if (!compatible) {
-      pill.style.color = "var(--red)";
-      pill.style.background = "var(--red-soft)";
       if (previousConnectionState !== "incompatible") {
         writeTerminal("$ \u672C\u5730\u670D\u52A1\u7248\u672C\u8FC7\u65E7\n  \u8BF7\u91CD\u542F: py scripts/config_editor_server.py", true);
       }
@@ -22028,9 +22174,6 @@ async function checkService(options = {}) {
     comparisonButton.disabled = true;
     document.getElementById("stepRunButton").disabled = true;
     renderWorkspaceControls();
-    pill.textContent = "\u672C\u5730\u670D\u52A1\u672A\u8FDE\u63A5";
-    pill.style.color = "var(--red)";
-    pill.style.background = "var(--red-soft)";
     if (previousConnectionState !== "disconnected") {
       writeTerminal("$ \u65E0\u6CD5\u8FDE\u63A5\u672C\u5730\u670D\u52A1\n  \u8BF7\u8FD0\u884C: py scripts/config_editor_server.py", true);
     }
