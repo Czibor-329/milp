@@ -2,17 +2,14 @@
 
 调度算法位于本仓库根目录的 `alg/`；该目录已被父仓库 Git 忽略。
 
-## 首次部署
+## 快速开始
 
-按以下顺序准备运行所需的数据与算法。
+按以下顺序准备运行所需的数据与算法：
 
-1. 将 `docs\\data.rar` 解压后，替换 `realtime_scheduler\\data\\`
+1. 将 `docs\data.rar` 解压后，替换 `realtime_scheduler\data\`
+2. `docs\alg-heuristic-20260813-7750ba9.zip` 是当前启发式算法包。解压后将其中的 `alg` 目录放到仓库根目录
 
-2. `docs\\alg-heuristic-20260813-7750ba9.zip` 是当前启发式算法包。解压后将其中的 `alg` 目录放到仓库根目录
-
-3. 外部算法统一放在 `alg\\other_alg\\` 中。每个外部算法使用独立子目录，并提供标准入口 `infer\\scheduler.py`。
-
-## 最简文件树
+部署完成后的最简文件树：
 
 ```text
 milp/
@@ -20,50 +17,20 @@ milp/
 │   ├── data.rar
 │   └── alg-heuristic-20260813-7750ba9.zip
 ├── realtime_scheduler/
-│   ├── data/                         # 由 data.rar 解压得到
-│   │   ├── workspaces/               # 工作区数据（拆分目录，见下）
-│   │   ├── devices/                  # 设备拓扑镜像
-│   │   └── experiments.json
+│   ├── data/                         # 由 data.rar 解压得到，各目录含义见「数据说明」
+│   │   ├── workspaces/               # 工作区数据（拆分目录，见「数据说明」）
+│   │   └── devices/                  # 设备拓扑镜像
 │   └── exports/                      # 运行结果与复现日志（可随时清理）
 └── alg/                              # 由启发式算法包解压得到
     ├── src/
     │   └── api.py
-    └── other_alg/
+    └── other_alg/                    # 外部算法（可选，见「外部算法部署」）
         └── <外部算法名>/
             └── infer/
                 └── scheduler.py
 ```
 
-## 工作区数据存储
-
-设备、路线、清洁配方与测试集保存在 `realtime_scheduler/data/workspaces/`，
-按设备拆分目录、按测试集拆分文件，便于单独拷贝分享：
-
-```text
-data/workspaces/
-└── <设备 id>/
-    ├── device.json                 # 设备拓扑 + 共享路线/清洁配方 + 组别
-    └── tests/
-        └── <测试集 id>.json        # 单个测试集
-```
-
-- **分享测试集**：把 `data/workspaces/<设备 id>/tests/<测试集 id>.json`
-  发给同事，放入对方相同设备的 `tests/` 目录，刷新页面即生效（无需重启）。
-- **分享整台设备**（含其全部测试集）：拷贝整个 `<设备 id>/` 目录。
-- **旧版单文件迁移**：首次启动会自动把旧的 `data/workspaces.json` 拆分为
-  上述目录结构，原文件保留为 `data/workspaces.json.legacy.json`，确认无误后
-  可手动删除。
-- 数据目录不在 Git 版本控制中；`data/devices/` 中的设备拓扑是自动生成的镜像。
-
-## 启动
-
-完整开发环境先安装算法依赖，再从算法仓库环境启动服务：
-
-```powershell
-python realtime_scheduler\server.py --open
-```
-
-不带完整算法仓库时，安装主仓库依赖并使用任意兼容 Python 环境启动：
+启动：
 
 ```powershell
 python realtime_scheduler\server.py --open
@@ -71,77 +38,57 @@ python realtime_scheduler\server.py --open
 
 默认地址为 `http://127.0.0.1:8765/config_editor.html`
 
-服务无需登录，打开页面即可使用。默认仅监听 `127.0.0.1`；如需让其他电脑
-访问，请先在反向代理、VPN 或内网穿透层配置访问控制，不要直接把未受保护的
-服务端口暴露到公网。`/api/health` 可用于监控服务状态。
+## 外部算法部署
 
-## 对外部署
-
-把平台部署到一台常开的 Windows 电脑上，并配置开机自启、防火墙或
-cpolar 内网穿透的步骤见
-[`docs/deploy-windows.md`](docs/deploy-windows.md)。
-
-
-
-## 算法部署方式
-
-启发式算法目录固定为：
+外部算法包统一放在 `<本仓库>/alg/other_alg/`，每个算法使用独立子目录。当前支持的两种默认登记格式为：
 
 ```text
-<本仓库>/alg
+<本仓库>/alg/other_alg/<算法名>/src/infer/scheduler.py    # 公司端 src.infer.scheduler 交付布局
+<本仓库>/alg/other_alg/<算法名>/CT/infer/scheduler.py     # 交付目录 CT/infer 布局
 ```
 
-其中必须提供：
-
-```text
-<算法名>/src/api.py				# 内置算法公开 API，包含 init 和 update
-```
-
-本地算法选择器由 `alg/algorithms.json` 驱动。新增算法时只需在算法仓库中：
-
-1. 实现算法，并把算法 ID 加入 `src/api.py` 的 `SUPPORTED_ALGORITHMS`；
-2. 在 `algorithms.json` 的 `algorithms` 数组增加一项。
-
-前端会从健康检查接口自动生成算法卡片，不需要再修改 HTML 或 TypeScript。
-`enabled: false` 可隐藏暂不使用的算法；`requiredFiles` 可声明模型等运行依赖，缺失时
-卡片仍会显示但不可选择；`optionGroups` 当前支持 `loadlock` 和
-`heuristic-objectives` 两个通用参数区。配置由服务实时读取，刷新页面即可生效。
-
-外部算法包放到：
-
-```text
-<本仓库>/alg/other_alg/<算法名>/infer/scheduler.py
-```
-
-算法包保留 `CT/infer/scheduler.py` 结构也可以。若打包算法位于其他目录，
-设置：
+目录名 `<算法名>` 同时作为稳定算法 ID。若打包算法位于其他目录，设置：
 
 ```powershell
 $env:CT_OTHER_ALGORITHM_ROOT = "D:\path\to\alg\other_alg"
 ```
 
-`CT_OTHER_ALGORITHM_ROOT` 只在需要将外部算法存放到非默认位置时设置。
+## 数据说明
 
-### 通过页面登记单个算法文件
+`realtime_scheduler/data/` 由 `docs\data.rar` 解压得到（初始包含
+`workspaces/`、`devices/` 与 `.gitignore`），之后由服务自动维护；整个目录
+不在 Git 版本控制中。目录结构：
 
-不满足目录包结构、只有单个 Python 文件的外部算法，可以在页面「运行策略」
-面板点击「＋ 添加算法」，选择包含 `init` 和 `update` 两个函数的 `.py` 文件
-即可登记。文件不要求放在 `alg/` 下，也不需要 `CT/infer/scheduler.py`
-结构：
-
-```python
-def init(topo_data_json):
-    ...
-
-def update(tool_json, algorithm=None):
-    ...
-    return output_json
+```text
+data/
+├── .gitignore                      # 数据目录整体不进 Git
+├── workspaces/                     # 工作区数据：设备、路线、清洁配方与测试集
+├── devices/                        # 设备拓扑镜像（由 data.rar 提供，服务自动刷新）
+├── checkpoints/                    # 页面上传的模型检查点文件（运行时产生）
+├── documentation/                  # 本地使用手册（Markdown）
+├── registered_algorithms/          # 页面登记的单个算法源文件（运行时产生）
+├── registered_algorithms.json      # 页面登记的算法索引（运行时产生）
+└── *.lock                          # 运行时文件锁
 ```
 
-登记会校验文件必须在顶层定义 `init` 和 `update` 两个函数（只做语法与
-函数检查，不执行源码）；通过后源文件复制到 `realtime_scheduler/data/
-registered_algorithms/<算法名>/` 下，登记信息写入 `realtime_scheduler/data/
-registered_algorithms.json`。这两处都在 Git 之外且重启保留，因此登记是
-一次性的——刷新页面后新算法就会出现在策略列表里，之后与 `other_alg`
-目录算法同样通过 `init/update` 标准接口调用。登记操作需要管理员权限。
-
+- **workspaces/**：设备、路线、清洁配方与测试集，按设备拆分目录、按测试集拆分文件：
+  
+  ```text
+  data/workspaces/
+  └── <设备 id>/
+      ├── device.json                 # 设备拓扑 + 共享路线/清洁配方 + 组别
+      └── tests/
+          └── <测试集 id>.json        # 单个测试集
+  ```
+  
+  - **分享整台设备**（含其全部测试集）：拷贝整个 `<设备 id>/` 目录。
+  
+- **devices/**：按设备 ID 独立保存的设备拓扑镜像，由服务在保存工作区时自动刷新，供外部工具读取，无需手工维护。
+  
+- **checkpoints/**：页面上传的模型检查点文件（仅支持 `.npz/.pt/.pth/.ckpt`）。浏览器不会提供用户选择文件的真实路径，因此服务把文件复制到该目录，并返回算法运行时可读取的绝对路径。
+  
+- **documentation/**：本地使用手册，`*.md` 文件由页面「文档」面板通过`/api/documentation` 加载展示。算法仓库维护的接口文档可放在算法包的`docs/documentation/`，两者共用导航与 slug 唯一性校验。
+  
+- **registered_algorithms/ + registered_algorithms.json**：页面登记的单个算法源文件与登记索引，见「外部算法部署」。
+  
+- **\*.lock**：服务运行时的文件锁（如 `workspaces.lock`），只承载跨进程互斥、不保存业务数据，服务停止后可删除。
