@@ -293,19 +293,19 @@ class RecomputeFailureOutputTests(unittest.TestCase):
         self.assertIn("!rec.removedByRecompute", viewer)
         self.assertIn('fillOpacity = bar.rec.removedByRecompute ? "0.24" : "1"', viewer)
 
-    def test_frontend_version_and_cache_keys_are_1_4_7(self) -> None:
+    def test_frontend_version_and_cache_keys_are_1_4_8(self) -> None:
         """前端显示版本、包版本和主资源缓存键必须同步。"""
         frontend_root = ROOT / "realtime_scheduler" / "frontend"
         template = (frontend_root / "config_editor.html").read_text(encoding="utf-8")
         package = json.loads((frontend_root / "package.json").read_text(encoding="utf-8"))
         package_lock = json.loads((frontend_root / "package-lock.json").read_text(encoding="utf-8"))
 
-        self.assertEqual("1.4.7", package["version"])
-        self.assertEqual("1.4.7", package_lock["version"])
-        self.assertEqual("1.4.7", package_lock["packages"][""]["version"])
-        self.assertIn('class="frontend-version">前端 v1.4.7</span>', template)
-        self.assertIn('/assets/config_editor.css?v=1.4.7', template)
-        self.assertIn('/assets/config_editor.js?v=1.4.7', template)
+        self.assertEqual("1.4.8", package["version"])
+        self.assertEqual("1.4.8", package_lock["version"])
+        self.assertEqual("1.4.8", package_lock["packages"][""]["version"])
+        self.assertIn('class="frontend-version">前端 v1.4.8</span>', template)
+        self.assertIn('/assets/config_editor.css?v=1.4.8', template)
+        self.assertIn('/assets/config_editor.js?v=1.4.8', template)
 
     def test_recompute_preparation_error_keeps_last_successful_movelist(self) -> None:
         """算法调用前的旧计划回放异常也应返回上一代诊断甘特图。"""
@@ -1847,14 +1847,14 @@ class ConfigEditorServerTests(unittest.TestCase):
         """路径按工艺结构折叠，Route 和 Step 都提供 Clean 弹窗入口。"""
         html = _editor_source()
         drawer_editor = html.split("function renderStepDrawer()", 1)[1]
-        drawer_editor = drawer_editor.split("/** 打开指定 Step", 1)[0]
+        drawer_editor = drawer_editor.split("/** 从测试的路径引用面板", 1)[0]
         self.assertIn('data-tab-target="schedule"', html)
         self.assertIn('data-tab-target="route"', html)
         self.assertNotIn('data-tab-target="clean"', html)
         self.assertIn("<span>结果分析</span>", html)
         self.assertIn("<span>路径配置</span>", html)
         self.assertNotIn('data-tab-view="clean"', html)
-        self.assertIn('class="frontend-version">前端 v1.1.0</span>', html)
+        self.assertIn('class="frontend-version">前端 v1.4.8</span>', html)
         self.assertIn('data-option="residencyGuardSeconds"', html)
         self.assertIn('data-option="maximumRobotHoldingSeconds"', html)
         self.assertIn('data-option="maximumSystemResidenceCv"', html)
@@ -1867,7 +1867,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn('id="stepDrawer"', html)
         self.assertIn('class="route-table"', html)
         self.assertIn('data-scope="stage-candidate-toggle"', html)
-        self.assertIn('class="step-overview-card"', html)
+        self.assertNotIn('class="step-overview-card"', html)
         self.assertIn('class="step-edit-grid"', html)
         self.assertIn('class="step-clean-section"', html)
         self.assertIn('class="step-system-details"', html)
@@ -1883,8 +1883,8 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertNotIn('data-key="beforeCleanRefs"', drawer_editor)
         for field in ("Recipe Time", "Process Recipe", "Process Type", "Slot IDs", "Weight", "Move Time Offset"):
             self.assertIn(field, drawer_editor)
-        self.assertIn('if (key === "processTime") stage.visits[0].recipeTime = Number(value);', html)
-        self.assertIn("width: min(760px, 100vw)", html)
+        self.assertIn('if (key === "processTime") stageConfig.recipeTime = Number(value);', html)
+        self.assertIn("width: min(560px, 100vw)", html)
 
     def test_clean_editor_is_embedded_in_route_and_uses_parameter_dialog(self) -> None:
         """独立 Clean 页面应删除，Route/Step 通过弹窗配置参数和适用腔室。"""
@@ -1912,34 +1912,35 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("StepID", html)
         self.assertIn("PostStepID", html)
         self.assertIn("NeedProcess", html)
-        self.assertIn('data-scope="visit-shared"', html)
+        self.assertIn('data-scope="test-step"', html)
+        self.assertNotIn('data-scope="visit-shared"', html)
         self.assertIn('src="/assets/config_editor.js?v=', html)
         self.assertIn('id="routeProcessFilter"', template)
         self.assertIn('id="routeParallelFilter"', template)
-        self.assertIn('id="routeCleanFilter"', template)
-        self.assertIn('id="routeResidencyFilter"', template)
-        self.assertIn('id="routeQTimeFilter"', template)
-        self.assertIn('data-compact-label="Clean"', template)
-        self.assertIn('data-compact-label="驻留时间"', template)
-        self.assertIn('data-compact-label="QTime"', template)
+        self.assertNotIn('id="routeCleanFilter"', template)
+        self.assertNotIn('id="routeResidencyFilter"', template)
+        self.assertNotIn('id="routeQTimeFilter"', template)
         self.assertIn('data-compact-label="工序数"', template)
-        self.assertIn('data-compact-label="并行机器数"', template)
+        self.assertIn('data-compact-label="并行腔室结构"', template)
         self.assertIn('class="route-flat-list"', html)
         self.assertIn("function renderRoutePropertyTags(route)", html)
         self.assertIn("No Buffer", html)
         self.assertIn("buffer-forced", html)
         self.assertIn("buffer-optional", html)
-        self.assertIn('class="field route-group-field"', html)
-        self.assertIn('class="field route-buffer-field"', html)
-        self.assertIn('data-key="bufferOption"', html)
-        self.assertIn('data-compact-label="BufferOption"', html)
+        self.assertNotIn('class="field route-group-field"', html)
+        self.assertNotIn('class="field route-buffer-field"', html)
+        self.assertIn('class="route-update-card"', template)
+        self.assertNotIn("路径模板只配置加工腔室", template)
         self.assertNotIn('class="route-summary-secondary"', html)
-        self.assertIn('data-action="toggle-route"', html)
+        self.assertNotIn('data-action="toggle-route"', html)
+        self.assertIn('data-action="save-route"', html)
+        self.assertIn('data-action="cancel-route-edit"', html)
         self.assertIn('data-action="copy-route"', html)
-        self.assertIn("候选腔室的可编辑参数不一致", html)
-        self.assertIn("sync-stage-visits", html)
+        self.assertNotIn("候选腔室的可编辑参数不一致", html)
+        self.assertNotIn("sync-stage-visits", html)
         self.assertIn("state.stationNames", html)
-        self.assertIn('id="autoExportLog"', html)
+        self.assertNotIn('id="autoExportLog"', html)
+        self.assertNotIn("自动下载日志", template)
         self.assertIn('id="logButton"', html)
         self.assertIn("algorithm-hover-info", html)
         self.assertIn("metadata.introduction", html)
@@ -2245,8 +2246,10 @@ class ConfigEditorServerTests(unittest.TestCase):
             loaded = get_workspace_device(device["id"], store_path)
             self.assertEqual(2, len(loaded["tests"]))
             self.assertEqual([{"name": "RoutePM34"}], loaded["routes"])
-            self.assertEqual([{"name": "CleanA"}], loaded["cleans"])
-            self.assertTrue(all("routes" not in item and "cleans" not in item for item in loaded["tests"]))
+            self.assertEqual([], loaded["cleans"])
+            self.assertTrue(all("routes" not in item for item in loaded["tests"]))
+            self.assertTrue(all(item["cleans"] == [{"name": "CleanA"}] for item in loaded["tests"]))
+            self.assertTrue(all("routeConfigs" in item for item in loaded["tests"]))
             self.assertNotIn("routes", updated_second)
             self.assertEqual(2, updated_second["roundCount"])
             migrated = updated_second["rounds"][1]["cjobs"][0]
@@ -2322,6 +2325,27 @@ class ConfigEditorServerTests(unittest.TestCase):
             delete_workspace_device(device["id"], store_dir)
             self.assertFalse(device_dir.exists())
             self.assertEqual([], list_workspace_devices(store_dir))
+
+    def test_directory_workspace_migration_runs_once_per_store_version(self) -> None:
+        """迁移完成标记存在时后续启动应直接跳过数据更新。"""
+        with tempfile.TemporaryDirectory() as directory:
+            store_dir = Path(directory) / "workspaces"
+            import_workspace_device("device-a.json", self.recording, store_dir)
+            marker = store_dir / config_server.WORKSPACE_STORE_VERSION_FILE
+            self.assertTrue(marker.is_file())
+            self.assertFalse(config_server._workspace_data_update_required(store_dir))
+
+            marker.unlink()
+            self.assertTrue(config_server._workspace_data_update_required(store_dir))
+            with patch.object(
+                config_server,
+                "_migrate_workspace_catalog",
+                wraps=config_server._migrate_workspace_catalog,
+            ) as migrate:
+                self.assertTrue(config_server._prepare_workspace_data(store_dir))
+                self.assertFalse(config_server._prepare_workspace_data(store_dir))
+            self.assertEqual(1, migrate.call_count)
+            self.assertFalse(config_server._workspace_data_update_required(store_dir))
 
     def test_directory_store_migrates_legacy_single_file(self) -> None:
         """旧单文件存储首次以目录模式读取时自动迁移为拆分目录，旧文件保留备份。"""
@@ -3140,7 +3164,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertNotIn("CleanRecipe2", recipe_names)
 
     def test_legacy_test_routes_merge_into_shared_device_library(self) -> None:
-        """Test3 有两条 Route、Test4 仅一条时，迁移后两者应使用设备的两条共享 Route。"""
+        """旧测试内没有拓扑差异的 Route 应在迁移时自动去重。"""
         with tempfile.TemporaryDirectory() as directory:
             store_path = Path(directory) / "workspaces.json"
             legacy = {
@@ -3159,11 +3183,12 @@ class ConfigEditorServerTests(unittest.TestCase):
 
             loaded = get_workspace_device("device-1", store_path)
 
-            self.assertEqual(["R1", "R2"], [route["name"] for route in loaded["routes"]])
+            self.assertEqual(["R1"], [route["name"] for route in loaded["routes"]])
             self.assertEqual(["C1"], [clean["name"] for clean in loaded["cleans"]])
-            self.assertTrue(all("routes" not in test and "cleans" not in test for test in loaded["tests"]))
+            self.assertTrue(all("routes" not in test for test in loaded["tests"]))
+            self.assertTrue(all("routeConfigs" in test and "cleans" in test for test in loaded["tests"]))
             migrated = json.loads(store_path.read_text(encoding="utf-8"))
-            self.assertEqual(3, migrated["version"])
+            self.assertEqual(4, migrated["version"])
 
     def test_nested_rounds_persist_without_reordering(self) -> None:
         """多轮、多 CJob/PJob 保存后重新读取，应保留时间与归属并重算只读字段。"""

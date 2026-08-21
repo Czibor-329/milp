@@ -32,7 +32,7 @@ import {
   stringList,
 } from "./editor_models";
 
-const { VISIT_SHARED_FIELDS, selectReferencedRoutes } = RouteEditorLogic;
+const { VISIT_SHARED_FIELDS, automaticTemplateName, selectReferencedRoutes } = RouteEditorLogic;
 const visualizationWorkspace = createVisualizationWorkspace();
 const documentationView = createDocumentationView(document.getElementById("documentationRoot"));
 const batchPerformanceAnalyses = new Map();
@@ -91,8 +91,10 @@ const state = {
   cleans: [],
   routes: [{ name: "RouteA", group: "RouteA", bufferOption: 0, prePJobCleanRefs: [], postPJobCleanRefs: [], postCJobCleanRefs: [], stages: linkRouteSteps([makeStage("LP1"), makeStage("Robot"), makeStage("PM1,PM2", true, "RouteA_Step2"), makeStage("Robot"), makeStage("LP1")]) }],
   rounds: [makeRound(1, 0, "RouteA", "LP1"), makeRound(2, 70, "RouteA", "LP2")],
+  testRouteConfigs: {}, routeDirty: false, routeGroupingProfiles: new Map(),
+  routeEditingIndex: -1, routeEditSnapshot: null, routeEditGroupingProfile: null, routeEditIsNew: false,
   drawer: null, cleanDialogContext: null, expandedRouteProcessGroups: new Set(), expandedRouteGroups: new Set(), expandedRoutes: new Set(), routeNameChanges: new Map(),
-  routeProcessFilter: "", routeParallelFilter: "", routeCleanFilter: "all", routeResidencyFilter: "all", routeQTimeFilter: "all"
+  routeProcessFilter: "", routeParallelFilter: ""
 };
 let pjobRoutePickerContext = null;
 let searchTelemetryPollToken = 0;
@@ -197,12 +199,12 @@ function automaticCleanName(clean) {
 function renameCleanReferences(oldName, newName) {
   if (!oldName || oldName === newName) return;
   const rename = value => stringList(value).map(name => name === oldName ? newName : name);
-  state.routes.forEach(route => {
-    ROUTE_CLEAN_KEYS.forEach(key => { route[key] = rename(route[key]); });
-    (route.stages || []).forEach(stage => (stage.visits || []).forEach(visit => {
-      visit.beforeCleanRefs = rename(visit.beforeCleanRefs);
-      visit.afterCleanRefs = rename(visit.afterCleanRefs);
-    }));
+  Object.values(state.testRouteConfigs).forEach(config => {
+    ROUTE_CLEAN_KEYS.forEach(key => { config[key] = rename(config[key]); });
+    Object.values(config.stages || {}).forEach(stage => {
+      stage.beforeCleanRefs = rename(stage.beforeCleanRefs);
+      stage.afterCleanRefs = rename(stage.afterCleanRefs);
+    });
   });
 }
 
@@ -267,6 +269,20 @@ function cloneVisitParameters(visit) {
   return RouteEditorLogic.cloneVisitParameters(visit);
 }
 
+/** 判断 Route Step 是否为固定的 Src/Sink；运行时使用 CJob LoadPort 覆盖。 */
+function isFixedRouteStep(route, index) {
+  const stages = route?.stages || [];
+  return index === 0 || index === stages.length - 1;
+}
+
+/** 返回 Step 类型的简短名称；首尾固定模块分别显示为 Src 与 Sink。 */
+function stepKind(route, index) {
+  if (!route?.stages?.length) return "Station";
+  if (index === 0) return "Src";
+  if (index === route.stages.length - 1) return "Sink";
+  return stageUsesRobot(route.stages[index], index) ? "Robot" : "Station";
+}
+
 /** 统一补全 Step 的派生字段，避免 StepID、PostStepID、NeedProcess 被手工改坏。 */
 function normalizeRoute(route, normalizationChanges = null) {
   route.stages = Array.isArray(route.stages) ? route.stages : [];
@@ -310,6 +326,144 @@ function setStageCandidates(routeIndex, stageIndex, names) {
   const route = state.routes[routeIndex], stage = route.stages[stageIndex];
   RouteEditorLogic.replaceCandidates(stage, names, makeVisit, normalizeVisit);
   normalizeRoute(route);
+}
+
+/** 读取一个 Step 的首个候选参数，作为测试侧 Route 配置的默认值。 */
+function stageDefaultConfig(stage) {
+  const first = (stage?.visits || [])[0] ? normalizeVisit(stage.visits[0]) : makeVisit("");
+  return {
+    processTime: Number(first.processTime),
+    recipeTime: Number(first.recipeTime ?? first.processTime),
+    qTimeLimit: Number(first.qTimeLimit),
+    residencyConstraint: Number(first.residencyConstraint),
+    beforeCleanRefs: structuredClone(stringList(first.beforeCleanRefs)),
+    afterCleanRefs: structuredClone(stringList(first.afterCleanRefs)),
+    processRecipe: String(first.processRecipe || ""),
+    processType: String(first.processType || ""),
+    weight: structuredClone(first.weight ?? {}),
+    moveTimeOffset: structuredClone(first.moveTimeOffset ?? {}),
+    slotIds: String(first.slotIds || "1"),
+  };
+}
+
+/** 为一条路径模板生成测试侧默认配置；旧数据中嵌在 Route 上的时间与清洁会迁移到这里。 */
+function defaultRouteConfigForRoute(route) {
+  normalizeRoute(route);
+  return {
+    bufferOption: Math.max(0, Math.min(4, Math.trunc(Number(route.bufferOption) || 0))),
+    prePJobCleanRefs: structuredClone(stringList(route.prePJobCleanRefs)),
+    postPJobCleanRefs: structuredClone(stringList(route.postPJobCleanRefs)),
+    postCJobCleanRefs: structuredClone(stringList(route.postCJobCleanRefs)),
+    stages: Object.fromEntries((route.stages || []).map(stage => [
+      String(stage.stepId),
+      stageDefaultConfig(stage),
+    ])),
+  };
+}
+
+/** 规范化测试侧 Route 配置，确保结构与当前路径模板的 Step 对齐。 */
+function normalizeTestRouteConfigs(raw, routes) {
+  const configs = raw && typeof raw === "object" && !Array.isArray(raw) ? structuredClone(raw) : {};
+  const normalized = {};
+  for (const route of routes || []) {
+    const routeName = String(route.name || "").trim();
+    if (!routeName) continue;
+    const base = configs[routeName] || defaultRouteConfigForRoute(route);
+    const stages = {};
+    (route.stages || []).forEach(stage => {
+      const stepId = String(stage.stepId);
+      const override = base.stages?.[stepId] ? base.stages[stepId] : stageDefaultConfig(stage);
+      stages[stepId] = {
+        ...stageDefaultConfig(stage),
+        ...(override && typeof override === "object" ? override : {}),
+        processTime: Number(override?.processTime ?? stageDefaultConfig(stage).processTime),
+        recipeTime: Number(override?.processTime ?? stageDefaultConfig(stage).recipeTime),
+        qTimeLimit: Number(override?.qTimeLimit ?? stageDefaultConfig(stage).qTimeLimit),
+        residencyConstraint: Number(override?.residencyConstraint ?? stageDefaultConfig(stage).residencyConstraint),
+        beforeCleanRefs: stringList(override?.beforeCleanRefs ?? stageDefaultConfig(stage).beforeCleanRefs),
+        afterCleanRefs: stringList(override?.afterCleanRefs ?? stageDefaultConfig(stage).afterCleanRefs),
+        processRecipe: String(override?.processRecipe ?? stageDefaultConfig(stage).processRecipe),
+        processType: String(override?.processType ?? stageDefaultConfig(stage).processType),
+        weight: structuredClone(override?.weight ?? stageDefaultConfig(stage).weight),
+        moveTimeOffset: structuredClone(override?.moveTimeOffset ?? stageDefaultConfig(stage).moveTimeOffset),
+        slotIds: String(override?.slotIds ?? stageDefaultConfig(stage).slotIds),
+      };
+    });
+    normalized[routeName] = {
+      bufferOption: Math.max(0, Math.min(4, Math.trunc(Number(base.bufferOption) || 0))),
+      prePJobCleanRefs: stringList(base.prePJobCleanRefs),
+      postPJobCleanRefs: stringList(base.postPJobCleanRefs),
+      postCJobCleanRefs: stringList(base.postCJobCleanRefs),
+      stages,
+    };
+  }
+  return normalized;
+}
+
+/** 把测试侧 Route 配置合并到路径模板，生成运行时可提交的 Route。 */
+function runtimeRouteForTemplate(route) {
+  const routeName = String(route?.name || "").trim();
+  const config = state.testRouteConfigs[routeName] || defaultRouteConfigForRoute(route);
+  const merged = structuredClone(route);
+  normalizeRoute(merged);
+  merged.bufferOption = Number(config.bufferOption ?? merged.bufferOption ?? 0);
+  merged.prePJobCleanRefs = stringList(config.prePJobCleanRefs);
+  merged.postPJobCleanRefs = stringList(config.postPJobCleanRefs);
+  merged.postCJobCleanRefs = stringList(config.postCJobCleanRefs);
+  (merged.stages || []).forEach(stage => {
+    const stepId = String(stage.stepId);
+    const override = config.stages?.[stepId];
+    if (!override) return;
+    (stage.visits || []).forEach(visit => {
+      visit.processTime = Number(override.processTime ?? visit.processTime ?? 20);
+      visit.recipeTime = Number(override.recipeTime ?? visit.processTime ?? 20);
+      visit.qTimeLimit = Number(override.qTimeLimit ?? visit.qTimeLimit ?? -1);
+      visit.residencyConstraint = Number(override.residencyConstraint ?? visit.residencyConstraint ?? -1);
+      visit.beforeCleanRefs = stringList(override.beforeCleanRefs ?? visit.beforeCleanRefs);
+      visit.afterCleanRefs = stringList(override.afterCleanRefs ?? visit.afterCleanRefs);
+      visit.processRecipe = String(override.processRecipe ?? visit.processRecipe ?? "");
+      visit.processType = String(override.processType ?? visit.processType ?? "");
+      visit.weight = structuredClone(override.weight ?? visit.weight ?? {});
+      visit.moveTimeOffset = structuredClone(override.moveTimeOffset ?? visit.moveTimeOffset ?? {});
+      visit.slotIds = String(override.slotIds ?? visit.slotIds ?? "1");
+    });
+    normalizeVisit(stage.visits[0]);
+    RouteEditorLogic.synchronizeVisits(stage, normalizeVisit);
+  });
+  return merged;
+}
+
+/** 返回所有路径模板合并测试配置后的运行时 Route 列表。 */
+function runtimeRoutes() {
+  return (state.routes || []).map(route => runtimeRouteForTemplate(route));
+}
+
+/** 将编辑态 Route 收敛为只包含路径拓扑的共享模板。 */
+function routeTemplateForSave(route) {
+  const template = structuredClone(route);
+  normalizeRoute(template);
+  template.bufferOption = 0;
+  ROUTE_CLEAN_KEYS.forEach(key => { template[key] = []; });
+  template.stages = (template.stages || []).map(stage => ({
+    stepId: Number(stage.stepId),
+    postStepIds: structuredClone(stage.postStepIds || []),
+    needProcess: stage.needProcess === true,
+    kind: stage.kind,
+    visits: (stage.visits || []).map(visit => ({ stationName: String(visit.stationName || "") })),
+  }));
+  return template;
+}
+
+/** 记录当前已保存结构对应的分组，编辑草稿在保存前继续停留在原分组。 */
+function captureRouteGroupingProfiles() {
+  state.routeGroupingProfiles = new Map(
+    state.routes.map(route => [route, structuredClone(routeProcessProfile(route))]),
+  );
+}
+
+/** 返回路径当前应使用的分组结构；新增路径没有快照时使用草稿结构。 */
+function routeGroupingProfile(route) {
+  return state.routeGroupingProfiles.get(route) || routeProcessProfile(route);
 }
 
 /** 对所有轮次重新计算派生字段，并同步兼容的 times 数组。 */
@@ -887,7 +1041,8 @@ function makeDefaultTestCase(name = "默认测试集") {
   return {
     name, group: state.activeTestGroup || "", strategy: "heuristic", roundCount: 2, times: [0, 70],
     options: { ...DEFAULT_SCHEDULE_OPTIONS },
-    cleans: state.cleans, routes: state.routes,
+    cleans: [], routes: state.routes.map(routeTemplateForSave),
+    routeConfigs: normalizeTestRouteConfigs({}, state.routes),
     rounds: [
       makeRound(1, 0, routeName, state.loadPorts[0] || ""),
       makeRound(2, 70, routeName, state.loadPorts[1] || state.loadPorts[0] || "")
@@ -987,7 +1142,7 @@ function initializeCompactSelects() {
       }
       closeCompactSelects(select);
       const triggerBounds = trigger.getBoundingClientRect();
-      document.body.append(menu);
+      (select.closest("dialog") || document.body).append(menu);
       menu.hidden = false;
       menu.style.position = "fixed";
       menu.style.top = `${triggerBounds.bottom + 6}px`;
@@ -1091,6 +1246,12 @@ function markTestDirty() {
   if (!state.testCaseId) return;
   state.dirty = true; setWorkspaceStatus(`“${state.testCaseName}”有未保存修改`, "dirty");
   scheduleAutoSave();
+}
+
+/** 标记路径模板有尚未保存的编辑；路径模板只在用户点击保存后写回设备共享库。 */
+function markRoutesDirty() {
+  state.routeDirty = true;
+  setWorkspaceStatus("当前路径模板有未保存修改，请在模板旁点击“保存”", "dirty");
 }
 
 /** 清理上一测试集的运行指标和结果链接，避免把旧结果误认为当前结果。 */
@@ -1582,24 +1743,26 @@ function applyTestCase(testCase) {
   }
   // v2：Route/Clean 来自设备共享库；仅在加载尚未迁移的旧数据时使用测试集副本兜底。
   if (!state.routes.length && Array.isArray(value.routes)) state.routes = value.routes;
-  if (!state.cleans.length && Array.isArray(value.cleans)) state.cleans = value.cleans.map(normalizeClean);
-  const routeNormalizationChanges = { changed: false };
-  state.routes.forEach(route => normalizeRoute(route, routeNormalizationChanges));
+  state.cleans = Array.isArray(value.cleans)
+    ? value.cleans.map(normalizeClean)
+    : (state.workspaceDevice?.cleans || []).map(normalizeClean);
+  state.routes.forEach(route => normalizeRoute(route));
+  captureRouteGroupingProfiles();
   state.expandedRouteProcessGroups.clear(); state.expandedRouteGroups.clear(); state.expandedRoutes.clear();
-  state.routeProcessFilter = ""; state.routeParallelFilter = ""; state.routeCleanFilter = "all"; state.routeResidencyFilter = "all"; state.routeQTimeFilter = "all";
+  state.routeProcessFilter = ""; state.routeParallelFilter = "";
   state.rounds = Array.isArray(value.rounds) ? value.rounds : [];
+  state.testRouteConfigs = normalizeTestRouteConfigs(value.routeConfigs, state.routes);
   while (state.times.length < state.roundCount) state.times.push((Number(state.times.at(-1)) || 0) + 70);
   while (state.rounds.length < state.roundCount) {
     const index = state.rounds.length;
     state.rounds.push(makeRound(index + 1, state.times[index], state.routes[0]?.name || "", state.loadPorts[index] || state.loadPorts[0] || ""));
   }
   state.times.length = state.roundCount; state.rounds.length = state.roundCount; state.times[0] = 0;
-  normalizeRounds(); state.drawer = null;
-  visualizationWorkspace.setAnalysisConfiguration(state.routes, state.rounds);
+  normalizeRounds(); state.drawer = null; state.routeDirty = false; state.routeNameChanges.clear();
+  state.routeEditingIndex = -1; state.routeEditSnapshot = null; state.routeEditGroupingProfile = null; state.routeEditIsNew = false;
+  visualizationWorkspace.setAnalysisConfiguration(runtimeRoutes(), state.rounds);
   visualizationWorkspace.setReplayPlan(buildPayload());
-  const cleanNamesChanged = synchronizeCleanNames();
-  const routeNamesChanged = synchronizeRouteNames();
-  state.dirty = routeNormalizationChanges.changed || cleanNamesChanged || routeNamesChanged;
+  state.dirty = false;
   document.getElementById("roundCount").value = state.roundCount;
   document.querySelectorAll('input[name="strategy"]').forEach(input => { input.checked = input.value === state.strategy; });
   document.querySelectorAll("[data-option]").forEach(input => { input.value = state.options[input.dataset.option] ?? input.value; });
@@ -1607,16 +1770,128 @@ function applyTestCase(testCase) {
   document.getElementById("roundCount").disabled = false;
   if (Object.keys(state.algorithmMetadata).length) showAlgorithmDetails(state.strategy);
   renderAll(); renderWorkspaceControls(); resetRunResult();
-  if (state.dirty) { setWorkspaceStatus("正在保存统一生成的路径与 Clean 名称…", "dirty"); scheduleAutoSave(); }
-  else setWorkspaceStatus(`已载入“${state.testCaseName}”`, "saved");
+  setWorkspaceStatus(`已载入“${state.testCaseName}”`, "saved");
 }
 
-/** 整理保存请求；Route/Clean 随请求提交，但后端会写入设备共享库而非测试集。 */
+/** 整理测试保存请求；路径模板不随测试保存，只在“保存路径”时写回设备共享库。 */
 function currentTestSnapshot(name = state.testCaseName) {
   normalizeRounds();
   synchronizeCleanNames();
+  return structuredClone({
+    name,
+    group: state.testCaseGroup,
+    strategy: state.strategy,
+    roundCount: state.roundCount,
+    times: state.times,
+    options: state.options,
+    cleans: state.cleans.map(runtimeClean),
+    routeConfigs: state.testRouteConfigs,
+    rounds: state.rounds,
+  });
+}
+
+/** 整理路径模板保存请求，并同步自动改名链。 */
+function routeTemplateSnapshot() {
   synchronizeRouteNames();
-  return structuredClone({ name, group: state.testCaseGroup, strategy: state.strategy, roundCount: state.roundCount, times: state.times, options: state.options, cleans: state.cleans.map(runtimeClean), routes: state.routes, routeNameChanges: Object.fromEntries(state.routeNameChanges), rounds: state.rounds });
+  return structuredClone({
+    routes: state.routes.map(routeTemplateForSave),
+    routeNameChanges: Object.fromEntries(state.routeNameChanges),
+  });
+}
+
+/** 保存路径模板到设备共享库；保存成功后按最新结构重新生成路径分组。 */
+async function saveRoutes() {
+  if (!state.workspaceDeviceId) throw new Error("请先选择设备");
+  if (state.batchRunning) throw new Error("批量任务运行中，请等待完成或取消后再保存路径");
+  let result;
+  try {
+    result = await requestJson(`/api/workspaces/${state.workspaceDeviceId}/routes`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(routeTemplateSnapshot()),
+    });
+  } catch (error) {
+    setWorkspaceStatus(`路径保存失败：${error.message}`, "dirty");
+    throw error;
+  }
+  state.workspaceDevice.routes = structuredClone(result.routes || state.routes);
+  if (Array.isArray(result.tests)) state.workspaceDevice.tests = structuredClone(result.tests);
+  state.routes = structuredClone(result.routes || state.routes);
+  state.routes.forEach(route => normalizeRoute(route));
+  state.testRouteConfigs = normalizeTestRouteConfigs(state.testRouteConfigs, state.routes);
+  captureRouteGroupingProfiles();
+  state.routeDirty = false;
+  state.routeEditingIndex = -1;
+  state.routeEditSnapshot = null;
+  state.routeEditGroupingProfile = null;
+  state.routeEditIsNew = false;
+  state.routeNameChanges.clear();
+  renderRoutes();
+  renderWorkspaceControls();
+  setWorkspaceStatus("路径模板已保存，分组已刷新", "saved");
+  return true;
+}
+
+/** 放弃尚未保存的路径模板修改，恢复设备共享库中的最新模板。 */
+function discardRouteChanges() {
+  if (!state.workspaceDevice) return;
+  state.routes = Array.isArray(state.workspaceDevice.routes)
+    ? structuredClone(state.workspaceDevice.routes)
+    : [];
+  state.routes.forEach(route => normalizeRoute(route));
+  state.testRouteConfigs = normalizeTestRouteConfigs(state.testRouteConfigs, state.routes);
+  captureRouteGroupingProfiles();
+  state.routeDirty = false;
+  state.routeEditingIndex = -1;
+  state.routeEditSnapshot = null;
+  state.routeEditGroupingProfile = null;
+  state.routeEditIsNew = false;
+  state.routeNameChanges.clear();
+  state.expandedRouteProcessGroups.clear();
+  state.expandedRouteGroups.clear();
+  state.expandedRoutes.clear();
+  renderRoutes();
+  setWorkspaceStatus("已放弃未保存的路径修改", "saved");
+}
+
+/** 进入单条模板编辑态；分组继续使用保存前快照，直到用户明确保存。 */
+function beginRouteEdit(routeIndex, isNew = false) {
+  if (!state.routes[routeIndex]) return false;
+  if (state.routeEditingIndex >= 0 && state.routeEditingIndex !== routeIndex) {
+    setWorkspaceStatus("请先保存或取消当前正在编辑的路径模板", "dirty");
+    return false;
+  }
+  state.routeEditingIndex = routeIndex;
+  state.routeEditSnapshot = isNew ? null : structuredClone(state.routes[routeIndex]);
+  state.routeEditGroupingProfile = structuredClone(routeGroupingProfile(state.routes[routeIndex]));
+  state.routeEditIsNew = isNew;
+  state.expandedRoutes.add(routeIndex);
+  renderRoutes();
+  return true;
+}
+
+/** 取消单条模板草稿，不影响其他模板。 */
+function cancelRouteEdit() {
+  const routeIndex = state.routeEditingIndex;
+  if (routeIndex < 0) return;
+  if (state.routeEditIsNew) {
+    state.routes.splice(routeIndex, 1);
+  } else if (state.routeEditSnapshot) {
+    const restored = structuredClone(state.routeEditSnapshot);
+    state.routes[routeIndex] = restored;
+    if (state.routeEditGroupingProfile) {
+      state.routeGroupingProfiles.set(restored, structuredClone(state.routeEditGroupingProfile));
+    }
+  }
+  state.routeEditingIndex = -1;
+  state.routeEditSnapshot = null;
+  state.routeEditGroupingProfile = null;
+  state.routeEditIsNew = false;
+  state.routeDirty = false;
+  state.routeNameChanges.clear();
+  state.expandedRoutes.clear();
+  renderRoutes();
+  setWorkspaceStatus("已取消路径模板修改", "saved");
 }
 
 /** 保存当前测试集；运行和切换前可静默调用。 */
@@ -1639,7 +1914,6 @@ async function saveCurrentTest(silent = false) {
   }
   const index = state.workspaceDevice.tests.findIndex(test => test.id === state.testCaseId);
   state.workspaceDevice.tests[index] = result.test; state.testCaseName = result.test.name; state.dirty = false; state.routeNameChanges.clear();
-  state.workspaceDevice.routes = structuredClone(state.routes); state.workspaceDevice.cleans = structuredClone(state.cleans);
   renderWorkspaceControls(); setWorkspaceStatus(`${silent ? "已自动保存" : "已保存"}“${state.testCaseName}”`, "saved");
   return true;
 }
@@ -1904,8 +2178,11 @@ function cleanContextModules(scope, routeIndex, stageIndex = -1) {
 function cleanContextReferences(scope, routeIndex, stageIndex, placement) {
   const route = state.routes[routeIndex];
   if (!route) return [];
-  if (scope === "route") return stringList(route[placement]);
-  return stringList(route.stages[stageIndex]?.visits?.[0]?.[placement]);
+  const config = state.testRouteConfigs[route.name]
+    || (state.testRouteConfigs[route.name] = defaultRouteConfigForRoute(route));
+  if (scope === "route") return stringList(config[placement]);
+  const stepId = String(route.stages[stageIndex]?.stepId);
+  return stringList(config.stages?.[stepId]?.[placement]);
 }
 
 /** 在 Route 或 RouteStep 上添加、删除一个 Clean 引用。 */
@@ -1917,20 +2194,27 @@ function setCleanContextReference(context, placement, cleanName, enabled) {
     if (enabled) names.add(cleanName); else names.delete(cleanName);
     target[placement] = [...names];
   };
-  if (context.scope === "route") update(route);
-  else (route.stages[context.stageIndex]?.visits || []).forEach(update);
+  const config = state.testRouteConfigs[route.name]
+    || (state.testRouteConfigs[route.name] = defaultRouteConfigForRoute(route));
+  if (context.scope === "route") update(config);
+  else {
+    const stepId = String(route.stages[context.stageIndex]?.stepId);
+    const stageConfig = config.stages?.[stepId]
+      || (config.stages[stepId] = stageDefaultConfig(route.stages[context.stageIndex]));
+    update(stageConfig);
+  }
 }
 
 /** 统计 Clean 在全部 Route 和 RouteStep 中的引用次数。 */
 function cleanReferenceCount(cleanName) {
   let count = 0;
-  state.routes.forEach(route => {
-    ROUTE_CLEAN_KEYS.forEach(key => { if (stringList(route[key]).includes(cleanName)) count += 1; });
-    (route.stages || []).forEach(stage => (stage.visits || []).forEach(visit => {
+  Object.values(state.testRouteConfigs).forEach(config => {
+    ROUTE_CLEAN_KEYS.forEach(key => { if (stringList(config[key]).includes(cleanName)) count += 1; });
+    Object.values(config.stages || {}).forEach(stage => {
       for (const key of ["beforeCleanRefs", "afterCleanRefs"]) {
-        if (stringList(visit[key]).includes(cleanName)) count += 1;
+        if (stringList(stage[key]).includes(cleanName)) count += 1;
       }
-    }));
+    });
   });
   return count;
 }
@@ -1993,10 +2277,10 @@ function openCleanDialog(scope, routeIndex, stageIndex = -1, cleanName = "", pla
     originalPlacement: selectedPlacement,
     draft: structuredClone(draft),
   };
-  document.getElementById("cleanDialogTitle").textContent = `${cleanName ? "编辑" : "新增"} ${scope === "route" ? "Route" : "RouteStep"} Clean`;
+  document.getElementById("cleanDialogTitle").textContent = `${cleanName ? "编辑" : "新增"} ${scope === "route" ? "Job" : "RouteStep"} Clean`;
   document.getElementById("cleanDialogDescription").textContent = scope === "route"
-    ? "Clean 只会出现在所选 Route 腔室中。"
-    : "Clean 只会出现在当前 Step 所选腔室中。";
+    ? "Clean 只作用于当前测试的所选路径，不会修改路径模板。"
+    : "Clean 只作用于当前测试的这个 Step，不会修改路径模板。";
   const placementSelect = document.getElementById("cleanPlacement");
   placementSelect.innerHTML = definitions.map(item => `<option value="${item.key}">${escapeHtml(item.label)}</option>`).join("");
   placementSelect.value = selectedPlacement;
@@ -2060,6 +2344,9 @@ function saveCleanDialog() {
   state.cleanDialogContext = null;
   renderRoutes();
   if (state.drawer) renderStepDrawer();
+  if (pjobRoutePickerContext && document.getElementById("pjobRouteDialog").open) {
+    renderPJobRouteDialogGroup(pjobRoutePickerContext.processKey, pjobRoutePickerContext.structureKey);
+  }
 }
 
 /** 从当前上下文移除 Clean；无其他引用时同时清理定义。 */
@@ -2072,11 +2359,12 @@ function removeContextClean(scope, routeIndex, stageIndex, placement, cleanName)
   markTestDirty();
   renderRoutes();
   if (state.drawer) renderStepDrawer();
+  if (pjobRoutePickerContext && document.getElementById("pjobRouteDialog").open) {
+    renderPJobRouteDialogGroup(pjobRoutePickerContext.processKey, pjobRoutePickerContext.structureKey);
+  }
 }
 
 /** 返回 Step 类型的简短名称。 */
-function stepKind(route, index) { return stageUsesRobot(route.stages[index], index) ? "Robot" : "Station"; }
-
 /** 绘制紧凑候选设备选择器，避免原生多选框占用整行高度。 */
 function renderCandidatePicker(routeIndex, stageIndex, allowed, candidates) {
   const selected = new Set(candidates);
@@ -2086,18 +2374,59 @@ function renderCandidatePicker(routeIndex, stageIndex, allowed, candidates) {
   return `<details class="candidate-picker" onclick="event.stopPropagation()"><summary>${summary}</summary><div class="candidate-picker-menu">${allowed.map(name => `<label class="candidate-option"><input type="checkbox" data-scope="stage-candidate-toggle" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-candidate="${escapeHtml(name)}" ${selected.has(name) ? "checked" : ""}><span>${escapeHtml(name)}</span></label>`).join("")}</div></details>`;
 }
 
-/** 绘制 Route Step 列表；列表区域仅允许选择设备候选项。 */
+/** 更新候选选择器的摘要与 Step 状态，但不重绘整个路径列表，保持下拉常驻。 */
+function refreshCandidatePicker(control) {
+  const picker = control.closest(".candidate-picker");
+  const routeIndex = Number(control.dataset.routeIndex);
+  const stageIndex = Number(control.dataset.stageIndex);
+  const route = state.routes[routeIndex];
+  const stage = route?.stages?.[stageIndex];
+  if (!picker || !stage) return;
+  normalizeRoute(route);
+  const candidates = [...new Set((stage.visits || []).map(visit => visit.stationName).filter(Boolean))];
+  const summary = picker.querySelector("summary");
+  if (summary) {
+    summary.innerHTML = candidates.length
+      ? candidates.map(name => `<span class="chip">${escapeHtml(name)}</span>`).join("")
+      : `<span class="candidate-picker-empty">选择设备</span>`;
+  }
+  const row = control.closest("[data-step-card]");
+  if (row) {
+    const type = row.querySelector(".step-type");
+    if (type) {
+      type.className = `step-type ${stage.needProcess ? "process" : ""}`;
+      type.textContent = stepKind(route, stageIndex);
+    }
+    const needProcess = row.querySelectorAll(".route-step-readonly")[1];
+    if (needProcess) needProcess.textContent = stage.needProcess ? "true" : "false";
+  }
+}
+
+/** 绘制只读候选腔室；首尾固定模块与测试侧路径实例都使用该展示。 */
+function renderReadonlyCandidates(stage) {
+  const candidates = [...new Set((stage?.visits || []).map(visit => visit.stationName).filter(Boolean))];
+  return candidates.length
+    ? candidates.map(name => `<span class="chip">${escapeHtml(name)}</span>`).join("")
+    : `<span class="candidate-picker-empty">未选择</span>`;
+}
+
+/** 绘制 Route Step 列表；Src/Sink 固定，其余 Step 允许选择候选设备。 */
 function renderSteps(route, routeIndex) {
   return route.stages.map((stage, stageIndex) => {
     const candidates = [...new Set((stage.visits || []).map(visit => visit.stationName).filter(Boolean))];
     const allowed = stageUsesRobot(stage, stageIndex) ? state.robotNames : state.stationNames;
-    return `<tr data-step-card data-route-index="${routeIndex}" data-stage-index="${stageIndex}">
+    const fixed = isFixedRouteStep(route, stageIndex);
+    const picker = fixed ? `<span class="chip">测试 LoadPort</span>` : renderCandidatePicker(routeIndex, stageIndex, allowed, candidates);
+    const actions = fixed
+      ? `<span class="route-step-readonly">固定模块</span>`
+      : `<div class="route-step-actions"><button class="btn icon small" title="前移" data-action="move-step-up" data-route-index="${routeIndex}" data-stage-index="${stageIndex}">↑</button><button class="btn icon small" title="后移" data-action="move-step-down" data-route-index="${routeIndex}" data-stage-index="${stageIndex}">↓</button><button class="btn danger icon small" title="删除" data-action="remove-stage" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" ${route.stages.length <= 3 ? "disabled" : ""}>×</button></div>`;
+    return `<tr data-route-template-step data-route-index="${routeIndex}" data-stage-index="${stageIndex}">
       <td><span class="step-id-badge">${Number(stage.stepId)}</span></td>
       <td><span class="step-type ${stage.needProcess ? "process" : ""}">${stepKind(route, stageIndex)}</span></td>
-      <td>${renderCandidatePicker(routeIndex, stageIndex, allowed, candidates)}</td>
+      <td>${picker}</td>
       <td class="route-step-readonly"><span class="step-next">${stage.postStepIds?.length ? stage.postStepIds.join(", ") : "结束"}</span></td>
       <td class="route-step-readonly">${stage.needProcess ? "true" : "false"}</td>
-      <td><div class="route-step-actions"><button class="btn icon small" title="前移" data-action="move-step-up" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" ${stageIndex === 0 ? "disabled" : ""}>↑</button><button class="btn icon small" title="后移" data-action="move-step-down" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" ${stageIndex === route.stages.length - 1 ? "disabled" : ""}>↓</button><button class="btn danger icon small" title="删除" data-action="remove-stage" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" ${route.stages.length <= 3 ? "disabled" : ""}>×</button></div></td>
+      <td>${actions}</td>
     </tr>`;
   }).join("");
 }
@@ -2108,16 +2437,12 @@ function routeProcessProfile(route) {
   return RouteEditorLogic.processProfile(route);
 }
 
-/** 按加工路径、驻留约束和 Clean 组合生成 Route 名称；配置不同的 Route 不会重名。 */
+/** 按加工路径拓扑生成模板名称；加工时间、清洁与驻留只在测试中编辑。 */
 function generatedRouteName(route) {
-  return RouteEditorLogic.automaticRouteName(
-    routeProcessProfile(route),
-    RouteEditorLogic.routeCleanSignature(route),
-    RouteEditorLogic.minimumResidencyConstraint(route),
-  );
+  return automaticTemplateName(routeProcessProfile(route));
 }
 
-/** 记录 Route 自动改名链，并同步当前测试中引用该 Route 的 PJob。 */
+/** 记录 Route 自动改名链，并同步当前测试中引用该 Route 的 PJob 与测试侧配置。 */
 function recordRouteRename(oldName, newName) {
   if (!oldName || oldName === newName) return;
   let extended = false;
@@ -2128,6 +2453,10 @@ function recordRouteRename(oldName, newName) {
   state.rounds.forEach(round => round.cjobs.forEach(cjob => cjob.pjobs.forEach(pjob => {
     if (pjob.routeRef === oldName) pjob.routeRef = newName;
   })));
+  if (state.testRouteConfigs[oldName] && !state.testRouteConfigs[newName]) {
+    state.testRouteConfigs[newName] = structuredClone(state.testRouteConfigs[oldName]);
+    delete state.testRouteConfigs[oldName];
+  }
 }
 
 /** 按加工路径和实际候选腔室自动生成唯一 Route 名称。 */
@@ -2147,10 +2476,9 @@ function synchronizeRouteNames() {
 /** 生成“工序数 → 并行机器结构 → 路径”的稳定分组列表；重入路径统一进入独立分组。 */
 function groupedRoutes() {
   const natural = (left, right) => left.localeCompare(right, undefined, { numeric: true });
-  synchronizeRouteNames();
   const processGroups = new Map();
   state.routes.forEach((route, routeIndex) => {
-    const profile = routeProcessProfile(route);
+    const profile = routeGroupingProfile(route);
     const processKey = profile.isReentrant ? profile.key : String(profile.processCount);
     const processGroup = processGroups.get(processKey) || {
       key: processKey,
@@ -2186,24 +2514,17 @@ function groupedRoutes() {
     }));
 }
 
-/** 绘制一条已展开路径的原有编辑能力。 */
+/** 绘制一条已展开路径模板的编辑能力；模板只负责腔室结构。 */
 function renderRouteDetails(route, index) {
-  const bufferModes = ["No Buffer", "强制 Buffer Out", "强制 Buffer In", "非强制 Buffer Out", "非强制 Buffer In"];
-  const selectedBuffer = Math.max(0, Math.min(4, Math.trunc(Number(route.bufferOption) || 0)));
-  return `<div class="route-details"><div class="edit-card-head"><strong>路径详情</strong><div><button class="btn small" data-action="open-context-clean" data-clean-scope="route" data-route-index="${index}">＋ Clean</button> <button class="btn small" data-action="add-stage" data-index="${index}">＋ Step 组</button> <button class="btn danger small" data-action="remove-route" data-index="${index}">删除</button></div></div>
-    <div class="route-meta"><div class="route-meta-grid"><div class="field"><label>路径名称（自动生成）</label><input value="${escapeHtml(route.name)}" readonly></div><div class="field route-group-field"><label>Group</label><input value="${escapeHtml(route.group)}" title="${escapeHtml(route.group)}" readonly></div><div class="field route-buffer-field"><label>BufferOption</label><select data-compact-label="BufferOption" data-scope="route" data-index="${index}" data-key="bufferOption">${bufferModes.map((label, value) => `<option value="${value}" ${value === selectedBuffer ? "selected" : ""}>${value} · ${escapeHtml(label)}</option>`).join("")}</select></div></div>
-    <section class="route-clean-section"><div class="context-clean-head"><div><strong>Route Clean</strong><small>Clean 仅作用于弹窗中选择的腔室</small></div><button class="btn small" type="button" data-action="open-context-clean" data-clean-scope="route" data-route-index="${index}">＋ Clean</button></div>${renderContextCleans("route", index)}</section></div>
+  return `<div class="route-details"><div class="edit-card-head"><strong>腔室路径</strong><div><button class="btn small" data-action="add-stage" data-index="${index}">＋ Step 组</button></div></div>
     <div class="route-table-wrap"><table class="route-table"><thead><tr><th>StepID</th><th>类型</th><th>可选腔室 / 机器手</th><th>PostStepID</th><th>NeedProcess</th><th></th></tr></thead><tbody>${renderSteps(route, index)}</tbody></table></div></div>`;
 }
 
-/** 绘制路径筛选器与当前组合的扁平路径列表。 */
+/** 绘制路径筛选器与当前组合的扁平路径列表；路径页只保留工序数与并行结构两个筛选。 */
 function renderRoutes() {
   const host = document.getElementById("routeList");
   const processSelect = document.getElementById("routeProcessFilter");
   const parallelSelect = document.getElementById("routeParallelFilter");
-  const cleanSelect = document.getElementById("routeCleanFilter");
-  const residencySelect = document.getElementById("routeResidencyFilter");
-  const qTimeSelect = document.getElementById("routeQTimeFilter");
   const processGroups = groupedRoutes();
   const selectedProcess = processGroups.find(group => group.key === state.routeProcessFilter) || processGroups[0];
   state.routeProcessFilter = selectedProcess?.key || "";
@@ -2216,33 +2537,24 @@ function renderRoutes() {
   parallelSelect.innerHTML = (selectedProcess?.structures || []).map(structure => `<option value="${escapeHtml(structure.key)}">${escapeHtml(structure.label)}</option>`).join("");
   parallelSelect.value = state.routeParallelFilter;
   parallelSelect.disabled = !selectedProcess?.structures.length;
-  cleanSelect.value = state.routeCleanFilter;
-  cleanSelect.disabled = !selectedStructure;
-  residencySelect.value = state.routeResidencyFilter;
-  residencySelect.disabled = !selectedStructure;
-  qTimeSelect.value = state.routeQTimeFilter;
-  qTimeSelect.disabled = !selectedStructure;
   initializeCompactSelects();
   refreshCompactSelect(processSelect);
   refreshCompactSelect(parallelSelect);
-  refreshCompactSelect(cleanSelect);
-  refreshCompactSelect(residencySelect);
-  refreshCompactSelect(qTimeSelect);
 
   if (!selectedStructure) {
     host.innerHTML = `<div class="empty">至少创建一条路径，Job 才能引用。</div>`;
     return;
   }
-  const routes = selectedStructure.routes.filter(({ route }) => (
-    (state.routeCleanFilter === "all" || (routePickerCleanSummary(route) !== "无") === (state.routeCleanFilter === "yes"))
-    && (state.routeResidencyFilter === "all" || routeHasTimeConstraint(route, "residencyConstraint") === (state.routeResidencyFilter === "yes"))
-    && (state.routeQTimeFilter === "all" || routeHasTimeConstraint(route, "qTimeLimit") === (state.routeQTimeFilter === "yes"))
-  )).map(({ route, routeIndex }) => {
-    const routeOpen = state.expandedRoutes.has(routeIndex);
-    const compactPath = routePickerCompactPath(route);
-    return `<article class="route-summary-card"><div class="route-summary-head"><button class="route-summary-toggle" data-action="toggle-route" data-route-index="${routeIndex}" aria-expanded="${routeOpen}">
-      <span class="collapse-arrow ${routeOpen ? "open" : ""}">▶</span><span class="route-summary-content"><span class="route-summary-primary"><span class="route-summary-id">${routePickerShortId(route)}</span><strong title="${escapeHtml(compactPath)}">${escapeHtml(compactPath)}</strong>${renderRoutePropertyTags(route)}</span></span></button>
-      <div class="route-summary-actions"><button class="btn small" data-action="open-context-clean" data-clean-scope="route" data-route-index="${routeIndex}">＋ Clean</button><button class="btn small" data-action="edit-route" data-route-index="${routeIndex}">编辑</button><button class="btn small" data-action="copy-route" data-route-index="${routeIndex}">复制</button><button class="btn danger small" data-action="remove-route" data-index="${routeIndex}">删除</button></div>
+  const routes = selectedStructure.routes.map(({ route, routeIndex }) => {
+    const routeOpen = state.routeEditingIndex === routeIndex;
+    const anotherRouteEditing = state.routeEditingIndex >= 0 && !routeOpen;
+    const compactPath = routePickerCompactPath(route, false);
+    const actions = routeOpen
+      ? `<button class="btn small" type="button" disabled>编辑</button><button class="btn primary small" type="button" data-action="save-route" data-route-index="${routeIndex}">保存</button><button class="btn small" type="button" data-action="cancel-route-edit" data-route-index="${routeIndex}">取消</button>`
+      : `<button class="btn small" type="button" data-action="edit-route" data-route-index="${routeIndex}" ${anotherRouteEditing ? "disabled" : ""}>编辑</button><button class="btn small" type="button" data-action="copy-route" data-route-index="${routeIndex}" ${anotherRouteEditing ? "disabled" : ""}>复制</button><button class="btn danger small" type="button" data-action="remove-route" data-index="${routeIndex}" ${anotherRouteEditing ? "disabled" : ""}>删除</button>`;
+    return `<article class="route-summary-card ${routeOpen ? "is-editing" : ""}"><div class="route-summary-head"><div class="route-summary-toggle">
+      <span class="route-summary-content"><span class="route-summary-primary"><span class="route-summary-id">${routePickerShortId(route)}</span><strong title="${escapeHtml(compactPath)}">${escapeHtml(compactPath)}</strong></span></span></div>
+      <div class="route-summary-actions">${actions}</div>
     </div>${routeOpen ? renderRouteDetails(route, routeIndex) : ""}</article>`;
   }).join("");
   host.innerHTML = routes ? `<div class="route-flat-list">${routes}</div>` : `<div class="empty">当前筛选条件下没有匹配的路径。</div>`;
@@ -2276,10 +2588,10 @@ function routePickerStageWacTokens(stage) {
   return names.filter(name => routePickerCleanInfo(name).cleanType === "wacclean").map(routePickerWacToken);
 }
 
-/** 生成 LP1->LA/LB->PM1(10s)[wac 2|10s] 形式的完整路径。 */
-function routePickerCompactPath(route) {
+/** 生成紧凑路径文本；模板视图只显示拓扑，测试视图再显示时间与清洁。 */
+function routePickerCompactPath(route, includeTestParameters = true, sourceModule = "") {
   normalizeRoute(route);
-  return (route.stages || []).map(stage => {
+  return (route.stages || []).map((stage, stageIndex) => {
     const candidates = [...new Set((stage.visits || []).map(visit => String(visit.stationName || "").trim()).filter(Boolean))];
     const transferOnly = stage.kind === "robot" || (candidates.length && candidates.every(name => (
       state.robotNames.includes(name)
@@ -2287,12 +2599,15 @@ function routePickerCompactPath(route) {
       || /^(?:ATR|VTR|DBR|UBR|TM|VTM|EFEM)(?:[_-]?\d+)?$/i.test(name)
     )));
     if (transferOnly) return "";
-    let node = candidates.join("/") || "未选腔室";
-    if (stage.needProcess) {
+    const fixedSource = isFixedRouteStep(route, stageIndex);
+    let node = fixedSource
+      ? (stageIndex === 0 ? "Src" : "Sink")
+      : candidates.join("/") || "未选腔室";
+    if (includeTestParameters && stage.needProcess) {
       const processTime = Number(stage.visits?.[0]?.processTime ?? stage.visits?.[0]?.recipeTime ?? 0);
       node += `(${formatCleanSeconds(processTime)})`;
     }
-    const wacTokens = routePickerStageWacTokens(stage);
+    const wacTokens = includeTestParameters ? routePickerStageWacTokens(stage) : [];
     return `${node}${wacTokens.length ? `[${wacTokens.join("+")}]` : ""}`;
   }).filter(Boolean).join("->") || "未配置路径";
 }
@@ -2352,64 +2667,128 @@ function routeHasTimeConstraint(route, field) {
 function renderRoutePropertyTags(route) {
   const buffer = routeBufferMode(route.bufferOption);
   const cleanSummary = routePickerCleanSummary(route);
-  const cleanLabel = cleanSummary === "无" ? "无清洁" : cleanSummary;
   const hasResidency = routeHasTimeConstraint(route, "residencyConstraint");
   const hasQTime = routeHasTimeConstraint(route, "qTimeLimit");
-  return `<span class="route-property-tags"><span class="route-property-tag buffer-${buffer.tone}" title="Buffer 使用模式 ${buffer.index}：${escapeHtml(buffer.label)}">${escapeHtml(buffer.label)}</span><span class="route-property-tag clean-${cleanSummary === "无" ? "none" : "active"}" title="清洁：${escapeHtml(cleanLabel)}">${escapeHtml(cleanLabel)}</span><span class="route-property-tag constraint-${hasResidency ? "active" : "none"}" title="驻留时间约束：${hasResidency ? "已配置" : "未配置"}">驻留${hasResidency ? "约束" : "无"}</span><span class="route-property-tag qtime-${hasQTime ? "active" : "none"}" title="QTime：${hasQTime ? "已配置" : "未配置"}">QTime${hasQTime ? "" : "无"}</span></span>`;
+  const tags = [];
+  if (cleanSummary !== "无") tags.push(`<span class="route-property-tag clean-active" title="清洁：${escapeHtml(cleanSummary)}">${escapeHtml(cleanSummary)}</span>`);
+  if (hasResidency) tags.push(`<span class="route-property-tag constraint-active" title="驻留时间约束：已配置">驻留约束</span>`);
+  if (buffer.index > 0) tags.push(`<span class="route-property-tag buffer-${buffer.tone}" title="Buffer 使用模式 ${buffer.index}：${escapeHtml(buffer.label)}">${escapeHtml(buffer.label)}</span>`);
+  if (hasQTime) tags.push(`<span class="route-property-tag qtime-active" title="QTime：已配置">QTime</span>`);
+  return tags.length ? `<span class="route-property-tags">${tags.join("")}</span>` : "";
 }
 
 /** 绘制一张紧凑的具体路径选择卡片。 */
 function renderPJobRouteCard(route, baseline) {
   const routeIndex = state.routes.indexOf(route), selected = route === baseline;
-  const compactPath = routePickerCompactPath(route);
+  const compactPath = routePickerCompactPath(route, false);
   return `<button type="button" class="pjob-route-card ${selected ? "selected" : ""}" data-action="select-pjob-route" data-route-index="${routeIndex}" aria-pressed="${selected}" title="${escapeHtml(compactPath)}">
-    <span class="pjob-route-card-head"><span class="pjob-route-card-id">${routePickerShortId(route)}</span><strong class="pjob-route-card-path">${escapeHtml(compactPath)}</strong>${renderRoutePropertyTags(route)}${selected ? `<span class="pjob-route-card-current">当前选择</span>` : ""}</span>
+    <span class="pjob-route-card-head"><span class="pjob-route-card-id">${routePickerShortId(route)}</span><strong class="pjob-route-card-path">${escapeHtml(compactPath)}</strong>${selected ? `<span class="pjob-route-card-current">当前选择</span>` : ""}</span>
   </button>`;
 }
 
-/** 根据弹窗中的“工序”选择刷新具体路径卡片。 */
-function renderPJobRouteDialogGroup(groupKey) {
+/** 在路径引用弹窗内显示已选模板的具体 Step；点击 Step 打开右侧抽屉编辑测试参数。 */
+function renderRouteInstanceSteps(route, loadPort = "") {
+  const routeIndex = state.routes.indexOf(route);
+  const runtimeRoute = runtimeRouteForTemplate(route);
+  if (loadPort && runtimeRoute.stages?.length) {
+    for (const stageIndex of [0, runtimeRoute.stages.length - 1]) {
+      (runtimeRoute.stages[stageIndex]?.visits || []).forEach(visit => {
+        visit.stationName = loadPort;
+      });
+    }
+  }
+  return `<table class="route-table"><thead><tr><th>StepID</th><th>类型</th><th>可选腔室 / 机器手</th><th>PostStepID</th><th>NeedProcess</th></tr></thead><tbody>${(runtimeRoute.stages || []).map((stage, stageIndex) => {
+    const fixed = isFixedRouteStep(runtimeRoute, stageIndex);
+    return `<tr ${fixed ? "" : "data-step-card"} data-route-index="${routeIndex}" data-stage-index="${stageIndex}">
+      <td><span class="step-id-badge">${Number(stage.stepId)}</span></td>
+      <td>${fixed ? `<span class="route-step-source-note">由 CJob LoadPort 决定</span>` : `<span class="step-type ${stage.needProcess ? "process" : ""}">${stepKind(route, stageIndex)}</span>`}</td>
+      <td>${fixed ? `<span class="route-step-readonly">—</span>` : renderReadonlyCandidates(stage)}</td>
+      <td class="route-step-readonly"><span class="step-next">${stage.postStepIds?.length ? stage.postStepIds.join(", ") : "结束"}</span></td>
+      <td class="route-step-readonly">${stage.needProcess ? "true" : "false"}</td>
+    </tr>`;
+  }).join("")}</tbody></table>`;
+}
+
+/** 绘制只属于当前测试的 Buffer Option；路径模板本身始终不携带该参数。 */
+function renderRouteBufferEditor(routeIndex) {
+  const route = state.routes[routeIndex];
+  const current = routeBufferMode(runtimeRouteForTemplate(route).bufferOption).index;
+  const bufferModes = ["No Buffer", "强制 Buffer Out", "强制 Buffer In", "非强制 Buffer Out", "非强制 Buffer In"];
+  return `<section class="route-instance-buffer">
+    <label for="route-${routeIndex}-buffer-option">Buffer Option</label>
+    <select id="route-${routeIndex}-buffer-option" data-compact-label="Buffer Option" data-scope="test-route" data-route-index="${routeIndex}" data-key="bufferOption">${bufferModes.map((label, value) => `<option value="${value}" ${value === current ? "selected" : ""}>${value} · ${escapeHtml(label)}</option>`).join("")}</select>
+  </section>`;
+}
+
+/** 刷新弹窗中的并行结构下拉与路径卡片。 */
+function renderPJobRouteDialogGroup(processKey, structureKey) {
   const context = pjobRoutePickerContext;
   if (!context) return;
-  const selectedGroup = context.groups.find(group => group.key === groupKey) || context.groups[0];
-  const filters = context.filters;
-  const candidates = (selectedGroup?.routes || []).filter(({ route }) => (
-    (filters.clean === "all" || (routePickerCleanSummary(route) !== "无") === (filters.clean === "yes"))
-    && (filters.residency === "all" || routeHasTimeConstraint(route, "residencyConstraint") === (filters.residency === "yes"))
-    && (filters.qtime === "all" || routeHasTimeConstraint(route, "qTimeLimit") === (filters.qtime === "yes"))
-  ));
+  const selectedProcess = context.groups.find(group => group.key === processKey) || context.groups[0];
+  const selectedStructure = (selectedProcess?.structures || []).find(structure => structure.key === structureKey) || selectedProcess?.structures[0];
   const pjob = state.rounds[context.roundIndex]?.cjobs[context.cjobIndex]?.pjobs[context.pjobIndex];
   const selectedRoute = state.routes.find(route => route.name === pjob.routeRef);
-  context.groupKey = selectedGroup?.key || "";
-  document.getElementById("pjobRouteDialogContext").textContent = selectedGroup
-    ? `${selectedGroup.processLabel} · ${selectedGroup.label} · ${candidates.length} 条候选路径`
+  context.processKey = selectedProcess?.key || "";
+  context.structureKey = selectedStructure?.key || "";
+  const filterGrid = document.getElementById("pjobRouteFilterGrid");
+  const cardList = document.getElementById("pjobRouteCardList");
+  const detailHost = document.getElementById("pjobRouteDetail");
+  document.querySelector(".pjob-route-dialog-body")?.classList.toggle("edit-mode", context.mode === "edit" && Boolean(selectedRoute));
+  if (context.mode === "edit" && selectedRoute) {
+    document.getElementById("pjobRouteDialogTitle").textContent = `编辑 ${pjob.jobName} 的路径`;
+    document.getElementById("pjobRouteDialogContext").textContent = "";
+    filterGrid.hidden = true;
+    cardList.hidden = true;
+    detailHost.hidden = false;
+    const routeIndex = state.routes.indexOf(selectedRoute);
+    detailHost.innerHTML = `<article class="pjob-route-edit-card">
+      <header class="pjob-route-edit-head"><button class="btn small" type="button" data-action="back-pjob-route-selection">← 返回选择模板</button><div><strong>${routePickerShortId(selectedRoute)}</strong></div></header>
+      <div class="pjob-route-instance-settings">${renderRouteBufferEditor(routeIndex)}${renderRouteCleanEditor(routeIndex)}</div>
+      <div class="route-table-wrap">${renderRouteInstanceSteps(selectedRoute, pjob?.loadPort)}</div>
+    </article>`;
+    initializeCompactSelects();
+    return;
+  }
+  context.mode = "select";
+  document.getElementById("pjobRouteDialogTitle").textContent = `选择 ${pjob.jobName} 的路径模板`;
+  filterGrid.hidden = false;
+  cardList.hidden = false;
+  detailHost.hidden = true;
+  detailHost.innerHTML = "";
+  const parallelSelect = document.getElementById("pjobRouteParallel");
+  parallelSelect.innerHTML = (selectedProcess?.structures || []).map(structure => (
+    `<option value="${escapeHtml(structure.key)}" ${structure.key === context.structureKey ? "selected" : ""}>${escapeHtml(structure.label)}</option>`
+  )).join("") || `<option value="">暂无结构</option>`;
+  document.getElementById("pjobRouteDialogContext").textContent = selectedStructure
+    ? `${selectedProcess.label} · ${selectedStructure.label} · ${selectedStructure.routes.length} 条候选路径`
     : "当前工序没有可用路径";
-  document.getElementById("pjobRouteCardList").innerHTML = candidates.length
-    ? candidates.map(({ route }) => renderPJobRouteCard(route, selectedRoute)).join("")
+  cardList.innerHTML = (selectedStructure?.routes || []).length
+    ? selectedStructure.routes.map(({ route }) => renderPJobRouteCard(route, selectedRoute)).join("")
     : `<div class="pjob-route-dialog-empty">当前工序没有可选择的路径</div>`;
 }
 
-/** 打开具体路径卡片面板，并把“工序”选择放在面板顶部。 */
+/** 打开具体路径卡片面板，并把“工序数/并行结构”选择放在面板顶部。 */
 function openPJobRoutePicker(button) {
   const roundIndex = Number(button.dataset.roundIndex), cjobIndex = Number(button.dataset.cjobIndex), pjobIndex = Number(button.dataset.pjobIndex);
   const pjob = state.rounds[roundIndex]?.cjobs[cjobIndex]?.pjobs[pjobIndex];
   if (!pjob) return;
-  const groups = groupedRoutes().flatMap(processGroup => processGroup.structures);
+  const groups = groupedRoutes();
   const selectedRoute = state.routes.find(route => route.name === pjob.routeRef);
-  const selectedKey = selectedRoute ? routeProcessProfile(selectedRoute).key : groups[0]?.key || "";
+  const selectedProfile = selectedRoute ? routeProcessProfile(selectedRoute) : null;
+  const selectedProcess = groups.find(group => selectedProfile ? (selectedProfile.isReentrant ? group.key === selectedProfile.key : group.key === String(selectedProfile.processCount)) : false) || groups[0];
+  const selectedStructure = (selectedProcess?.structures || []).find(structure => structure.key === selectedProfile?.key) || selectedProcess?.structures[0];
   pjobRoutePickerContext = {
-    roundIndex, cjobIndex, pjobIndex, trigger: button, groups, groupKey: selectedKey,
-    filters: { clean: "all", residency: "all", qtime: "all" },
+    roundIndex, cjobIndex, pjobIndex, trigger: button, groups,
+    processKey: selectedProcess?.key || "",
+    structureKey: selectedStructure?.key || "",
+    mode: "select",
   };
   document.getElementById("pjobRouteDialogTitle").textContent = `选择 ${pjob.jobName} 的路径`;
   const processSelect = document.getElementById("pjobRouteProcess");
   processSelect.innerHTML = groups.length ? groups.map(group => (
-    `<option value="${escapeHtml(group.key)}" ${group.key === selectedKey ? "selected" : ""}>${escapeHtml(`${group.processLabel} · ${group.label}`)}</option>`
+    `<option value="${escapeHtml(group.key)}" ${group.key === pjobRoutePickerContext.processKey ? "selected" : ""}>${escapeHtml(group.label)}</option>`
   )).join("") : `<option value="">暂无工序</option>`;
-  document.getElementById("pjobRouteCleanFilter").value = "all";
-  document.getElementById("pjobRouteResidencyFilter").value = "all";
-  document.getElementById("pjobRouteQTimeFilter").value = "all";
-  renderPJobRouteDialogGroup(selectedKey);
+  renderPJobRouteDialogGroup(pjobRoutePickerContext.processKey, pjobRoutePickerContext.structureKey);
   button.setAttribute("aria-expanded", "true");
   const dialog = document.getElementById("pjobRouteDialog");
   dialog.showModal();
@@ -2425,34 +2804,32 @@ function closePJobRoutePicker(restoreFocus = true) {
     if (restoreFocus) context.trigger.focus();
   }
   pjobRoutePickerContext = null;
+  renderRounds();
 }
 
-/** 提交卡片选择并刷新 PJob 派生字段。 */
+/** 在弹窗中选择路径模板；测试侧参数保持不变，右侧详情立即切换到新模板。 */
 function selectPJobRoute(routeIndex) {
   const context = pjobRoutePickerContext, route = state.routes[routeIndex];
   if (!context || !route) return;
   const pjob = state.rounds[context.roundIndex]?.cjobs[context.cjobIndex]?.pjobs[context.pjobIndex];
   if (!pjob) return;
   pjob.routeRef = route.name;
+  if (!state.testRouteConfigs[route.name]) state.testRouteConfigs[route.name] = defaultRouteConfigForRoute(route);
   normalizeRounds();
   markTestDirty();
-  closePJobRoutePicker(false);
-  renderAll();
+  context.mode = "edit";
+  renderPJobRouteDialogGroup(context.processKey, context.structureKey);
 }
 
-/** 外部只展示当前工序和加工腔室，具体路径统一在弹窗内选择。 */
+/** 外部展示当前工序和具体路径；具体模板与测试参数统一在弹窗内选择和编辑。 */
 function renderPJobRoutePicker(pjob, roundIndex, cjobIndex, pjobIndex) {
-  const groups = groupedRoutes().flatMap(processGroup => processGroup.structures);
   const selectedRoute = state.routes.find(route => route.name === pjob.routeRef);
-  const selectedKey = selectedRoute
-    ? routeProcessProfile(selectedRoute).key
-    : groups[0]?.key || "";
-  const selectedGroup = groups.find(group => group.key === selectedKey);
+  const runtimeRoute = selectedRoute ? runtimeRouteForTemplate(selectedRoute) : null;
+  const compactPath = runtimeRoute ? routePickerCompactPath(runtimeRoute, true, pjob.loadPort) : "未选择路径";
   const common = `data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}"`;
-  const summary = routePickerProcessSummary(selectedRoute ? routeProcessProfile(selectedRoute) : selectedGroup);
   return `<div class="pjob-route-picker">
-    <div class="pjob-route-current" title="${escapeHtml(`${summary.label} · ${summary.chambers}`)}"><strong>${escapeHtml(summary.label)}</strong><span>${escapeHtml(summary.chambers)}</span></div>
-    <button type="button" class="pjob-route-open" data-action="open-pjob-route-picker" data-route-group-key="${escapeHtml(selectedKey)}" aria-label="选择具体路径" aria-haspopup="dialog" aria-controls="pjobRouteDialog" aria-expanded="false" ${common} ${groups.length ? "" : "disabled"}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
+    <div class="pjob-route-current" title="${escapeHtml(compactPath)}"><span class="pjob-route-current-path">${escapeHtml(compactPath)}</span>${runtimeRoute ? renderRoutePropertyTags(runtimeRoute) : ""}</div>
+    <button type="button" class="pjob-route-open" data-action="open-pjob-route-picker" aria-label="选择具体路径" aria-haspopup="dialog" aria-controls="pjobRouteDialog" aria-expanded="false" ${common}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
   </div>`;
 }
 
@@ -2477,8 +2854,8 @@ function renderRounds() {
         return `<div class="pjob-row">
           <div class="pjob-identity"><span>PJob</span><strong>${escapeHtml(pjob.jobName)}</strong></div>
           <label class="pjob-field pjob-material" for="${pjobFieldPrefix}-wafer-count"><span>Material</span><input id="${pjobFieldPrefix}-wafer-count" class="pjob-number" type="number" min="1" max="25" inputmode="numeric" data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="waferCount" value="${Number(pjob.waferCount)}"></label>
-          <div class="pjob-field pjob-origin-route"><span>OriginRoute</span>${renderPJobRoutePicker(pjob, roundIndex, cjobIndex, pjobIndex)}</div>
           <label class="pjob-field pjob-priority" for="${pjobFieldPrefix}-priority"><span>Priority</span><input id="${pjobFieldPrefix}-priority" class="pjob-number" type="number" min="1" inputmode="numeric" data-scope="pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" data-key="priority" value="${Number(pjob.priority)}"></label>
+          <div class="pjob-field pjob-origin-route"><span>OriginRoute</span>${renderPJobRoutePicker(pjob, roundIndex, cjobIndex, pjobIndex)}</div>
           <button class="btn danger icon pjob-remove" type="button" aria-label="删除 ${escapeHtml(pjob.jobName)}" title="删除 ${escapeHtml(pjob.jobName)}" data-action="remove-pjob" data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}" ${cjob.pjobs.length <= 1 ? "disabled" : ""}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M10 11v6m4-6v6M9 7l1-2h4l1 2M7 7l1 13h8l1-13"/></svg></button>
         </div>`;
       }).join("");
@@ -2515,7 +2892,7 @@ function renderStepNumberField(label, key, value, routeIndex, stageIndex, option
   return `<div class="step-edit-field">
     <label for="${inputId}">${escapeHtml(label)}</label>
     <div class="step-number-control">
-      <input id="${inputId}" type="number" inputmode="decimal" step="${options.step || "0.1"}"${minimum} data-scope="visit-shared" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-key="${key}" value="${escapeHtml(value)}">
+      <input id="${inputId}" type="number" inputmode="decimal" step="${options.step || "0.1"}"${minimum} data-scope="test-step" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-key="${key}" value="${escapeHtml(value)}">
       <span aria-hidden="true">s</span>
     </div>
     ${helper}
@@ -2525,35 +2902,39 @@ function renderStepNumberField(label, key, value, routeIndex, stageIndex, option
 /** 绘制 RouteStep 的 Clean 绑定列表和新增入口。 */
 function renderStepCleanEditor(routeIndex, stageIndex) {
   return `<section class="step-clean-section">
-    <div class="context-clean-head"><div><strong>RouteStep Clean</strong><small>进入或离开腔室时执行</small></div><button class="btn small" type="button" data-action="open-context-clean" data-clean-scope="step" data-route-index="${routeIndex}" data-stage-index="${stageIndex}">＋ Clean</button></div>
+    <div class="context-clean-head"><div><strong>Clean</strong></div><button class="btn small" type="button" data-action="open-context-clean" data-clean-scope="step" data-route-index="${routeIndex}" data-stage-index="${stageIndex}">＋ Clean</button></div>
     ${renderContextCleans("step", routeIndex, stageIndex)}
+  </section>`;
+}
+
+/** 绘制只属于当前测试的路径级 Clean，避免写回共享模板。 */
+function renderRouteCleanEditor(routeIndex) {
+  return `<section class="step-clean-section">
+    <div class="context-clean-head"><div><strong>Job Clean</strong></div><button class="btn small" type="button" data-action="open-context-clean" data-clean-scope="route" data-route-index="${routeIndex}" data-stage-index="-1">＋ Clean</button></div>
+    ${renderContextCleans("route", routeIndex)}
   </section>`;
 }
 
 /** 绘制当前 Step 的配置详情；主区域只暴露业务允许修改的四项参数。 */
 function renderStepDrawer() {
   if (!state.drawer) return;
-  const { routeIndex, stageIndex } = state.drawer, route = state.routes[routeIndex], stage = route?.stages[stageIndex];
-  if (!stage) { closeStepDrawer(); return; }
-  normalizeRoute(route);
+  const { routeIndex, stageIndex } = state.drawer, template = state.routes[routeIndex];
+  if (!template) { closeStepDrawer(); return; }
+  const route = runtimeRouteForTemplate(template), stage = route?.stages[stageIndex];
+  if (!stage || isFixedRouteStep(route, stageIndex)) { closeStepDrawer(); return; }
   document.getElementById("drawerTitle").textContent = `Step ${stage.stepId} 配置`;
-  document.getElementById("drawerSubtitle").textContent = `${stepKind(route, stageIndex)} · ${stage.visits.length} 个候选`;
-  const first = stage.visits[0] ? normalizeVisit(stage.visits[0]) : null;
-  const editableFieldLabels = { processTime: "Process Time", qTimeLimit: "QTime", residencyConstraint: "Residency", beforeCleanRefs: "Clean", afterCleanRefs: "Clean" };
-  const differences = visitDifferenceFields(stage).filter(field => editableFieldLabels[field]);
   const candidates = [...new Set(stage.visits.map(visit => visit.stationName).filter(Boolean))];
-  const differenceNames = differences.map(field => editableFieldLabels[field] || field);
-  const warning = differences.length ? `<div class="visit-warning" role="status"><strong>候选腔室的可编辑参数不一致</strong><p>差异项：${differenceNames.map(escapeHtml).join("、")}。当前显示首个候选的值。</p><button class="btn small" data-action="sync-stage-visits" data-route-index="${routeIndex}" data-stage-index="${stageIndex}">同步到全部候选</button></div>` : "";
-  const editor = first ? `<section class="step-editor-card" aria-labelledby="stepEditorHeading">
-    <header class="step-editor-head"><div><h3 id="stepEditorHeading">可编辑参数</h3><p>修改后自动同步到 ${stage.visits.length} 个候选腔室</p></div><span class="editable-badge">3 项</span></header>
+  document.getElementById("drawerSubtitle").textContent = `腔室：${candidates.join(" / ") || "未选择"}`;
+  const first = stage.visits[0] ? normalizeVisit(stage.visits[0]) : null;
+  const editor = first ? `<section class="step-editor-card" aria-label="Step 时间参数">
     <div class="step-edit-grid">
-      ${renderStepNumberField("Process Time", "processTime", first.processTime, routeIndex, stageIndex, { minimum: 0, helper: "Recipe Time 将自动保持一致" })}
+      ${renderStepNumberField("Process Time", "processTime", first.processTime, routeIndex, stageIndex, { minimum: 0 })}
       ${renderStepNumberField("QTime", "qTimeLimit", first.qTimeLimit, routeIndex, stageIndex)}
       ${renderStepNumberField("Residency", "residencyConstraint", first.residencyConstraint, routeIndex, stageIndex)}
     </div>
   </section>${renderStepCleanEditor(routeIndex, stageIndex)}
   <details class="step-system-details">
-    <summary><span><strong>系统参数</strong><small>由路径或系统维护，仅供查看</small></span><span class="details-chevron" aria-hidden="true">⌄</span></summary>
+    <summary><strong>系统参数</strong><span class="details-chevron" aria-hidden="true">⌄</span></summary>
     <div class="step-system-grid">
       ${renderReadonlyField("Recipe Time", first.processTime)}
       ${renderReadonlyField("Process Recipe", first.processRecipe)}
@@ -2563,33 +2944,27 @@ function renderStepDrawer() {
       ${renderReadonlyField("Move Time Offset", first.moveTimeOffset, true)}
     </div>
   </details>` : `<div class="empty">未选择候选设备，请先在路径列表中选择。</div>`;
-  const routeName = escapeHtml(route.name || "未命名路径");
-  document.getElementById("drawerBody").innerHTML = `<section class="step-overview-card">
-    <div class="step-route-context"><span>所属路径</span><strong title="${routeName}">${routeName}</strong></div>
-    <dl class="step-meta-list">
-      <div><dt>Step</dt><dd>#${stage.stepId}</dd></div>
-      <div><dt>Next</dt><dd>${stage.postStepIds?.length ? stage.postStepIds.map(id => `#${id}`).join(", ") : "End"}</dd></div>
-      <div><dt>Processing</dt><dd>${stage.needProcess ? "Yes" : "No"}</dd></div>
-      <div><dt>Candidates</dt><dd>${stage.visits.length}</dd></div>
-    </dl>
-    <div class="step-candidates"><span>候选腔室</span><div class="candidate-chip-list">${candidates.length ? candidates.map(name => `<span class="chip">${escapeHtml(name)}</span>`).join("") : `<span class="candidate-picker-empty">未选择</span>`}</div></div>
-  </section>${warning}${editor}`;
+  document.getElementById("drawerBody").innerHTML = editor;
 }
 
-/** 打开指定 Step 的右侧抽屉，并展开它所在的全部路径分组。 */
-function openStepDrawer(routeIndex, stageIndex) {
-  const profile = routeProcessProfile(state.routes[routeIndex]);
-  state.drawer = { routeIndex, stageIndex };
-  state.expandedRoutes.add(routeIndex);
-  state.expandedRouteProcessGroups.add(String(profile.processCount));
-  state.expandedRouteGroups.add(profile.key);
-  renderRoutes();
+/** 从测试的路径引用面板打开 Step 抽屉；所有改动写入测试侧 Route 配置。 */
+function openPJobStepDrawer(routeIndex, stageIndex) {
+  const route = state.routes[routeIndex];
+  if (!route || isFixedRouteStep(route, stageIndex)) return;
+  state.drawer = { scope: "test", routeIndex, stageIndex };
   renderStepDrawer();
-  document.getElementById("drawerLayer").classList.add("open");
+  const drawerLayer = document.getElementById("drawerLayer");
+  drawerLayer.classList.add("open");
+  if (!drawerLayer.open) drawerLayer.showModal();
 }
 
-/** 关闭 Step 抽屉。 */
-function closeStepDrawer() { state.drawer = null; document.getElementById("drawerLayer").classList.remove("open"); }
+/** 关闭 Step 抽屉；底层 Route 编辑窗口保持原状态。 */
+function closeStepDrawer() {
+  state.drawer = null;
+  const drawerLayer = document.getElementById("drawerLayer");
+  drawerLayer.classList.remove("open");
+  if (drawerLayer.open) drawerLayer.close();
+}
 
 /** 绘制机器手槽位卡片；臂数与每臂槽位数分别展示。 */
 function renderRobotSlots() {
@@ -2747,7 +3122,9 @@ async function saveScheduleAlphaGoOptions() {
 function updateStateFromControl(control) {
   let value = control.multiple ? Array.from(control.selectedOptions, item => item.value) : control.type === "checkbox" ? control.checked : control.type === "number" ? Number(control.value) : control.value;
   const key = control.dataset.key;
-  markTestDirty();
+  const scope = control.dataset.scope;
+  const routeControl = ["stage-candidates", "stage-candidate-toggle"].includes(scope);
+  if (routeControl) markRoutesDirty(); else markTestDirty();
   if (control.dataset.timeIndex !== undefined) { state.times[Number(control.dataset.timeIndex)] = value; return; }
   if (control.dataset.roundTimeIndex !== undefined) {
     const roundIndex = Number(control.dataset.roundTimeIndex);
@@ -2764,11 +3141,6 @@ function updateStateFromControl(control) {
     retainSessionSchedulingConfiguration();
     return;
   }
-  const scope = control.dataset.scope;
-  if (scope === "route") {
-    if (key === "bufferOption") value = Math.max(0, Math.min(4, Math.trunc(Number(value) || 0)));
-    state.routes[Number(control.dataset.index)][key] = ROUTE_CLEAN_KEYS.includes(key) ? (value ? [value] : []) : value;
-  }
   if (scope === "stage-candidates") setStageCandidates(Number(control.dataset.routeIndex), Number(control.dataset.stageIndex), Array.from(control.selectedOptions, item => item.value));
   if (scope === "stage-candidate-toggle") {
     const routeIndex = Number(control.dataset.routeIndex), stageIndex = Number(control.dataset.stageIndex);
@@ -2776,17 +3148,19 @@ function updateStateFromControl(control) {
     if (control.checked) current.add(control.dataset.candidate); else current.delete(control.dataset.candidate);
     setStageCandidates(routeIndex, stageIndex, [...current]);
   }
-  if (scope === "visit") {
-    const stage = state.routes[Number(control.dataset.routeIndex)].stages[Number(control.dataset.stageIndex)];
-    stage.visits[Number(control.dataset.visitIndex)][key] = value;
-    if (key === "processTime") stage.visits[Number(control.dataset.visitIndex)].recipeTime = value;
+  if (scope === "test-route") {
+    const route = state.routes[Number(control.dataset.routeIndex)];
+    const config = state.testRouteConfigs[route.name] || (state.testRouteConfigs[route.name] = defaultRouteConfigForRoute(route));
+    config[key] = ROUTE_CLEAN_KEYS.includes(key) ? (value ? [value] : []) : value;
   }
-  if (scope === "visit-shared") {
-    const stage = state.routes[Number(control.dataset.routeIndex)].stages[Number(control.dataset.stageIndex)];
-    if (!stage.visits.length) return;
-    stage.visits[0][key] = structuredClone(value);
-    if (key === "processTime") stage.visits[0].recipeTime = Number(value);
-    synchronizeStageVisits(stage);
+  if (scope === "test-step") {
+    const route = state.routes[Number(control.dataset.routeIndex)];
+    const stage = route.stages[Number(control.dataset.stageIndex)];
+    const config = state.testRouteConfigs[route.name] || (state.testRouteConfigs[route.name] = defaultRouteConfigForRoute(route));
+    const stepId = String(stage.stepId);
+    const stageConfig = config.stages[stepId] || (config.stages[stepId] = stageDefaultConfig(stage));
+    stageConfig[key] = structuredClone(value);
+    if (key === "processTime") stageConfig.recipeTime = Number(value);
   }
   if (scope === "cjob") {
     const round = state.rounds[Number(control.dataset.roundIndex)];
@@ -2813,9 +3187,20 @@ function updateStateFromControl(control) {
 
 /** 处理新增、删除和 Step 排序动作。 */
 function handleAction(button) {
-  const action = button.dataset.action, index = Number(button.dataset.index), routeIndex = Number(button.dataset.routeIndex), stageIndex = Number(button.dataset.stageIndex), visitIndex = Number(button.dataset.visitIndex);
+  const action = button.dataset.action, index = Number(button.dataset.index), routeIndex = Number(button.dataset.routeIndex), stageIndex = Number(button.dataset.stageIndex);
+  let routeAction = false;
   if (action === "open-pjob-route-picker") { openPJobRoutePicker(button); return; }
   if (action === "select-pjob-route") { selectPJobRoute(routeIndex); return; }
+  if (action === "back-pjob-route-selection") {
+    if (pjobRoutePickerContext) {
+      pjobRoutePickerContext.mode = "select";
+      renderPJobRouteDialogGroup(pjobRoutePickerContext.processKey, pjobRoutePickerContext.structureKey);
+    }
+    return;
+  }
+  if (action === "save-route") { saveRoutes().catch(error => writeTerminal(`$ 路径保存失败\n  ${error.message}`, true)); return; }
+  if (action === "cancel-route-edit") { cancelRouteEdit(); return; }
+  if (action === "open-pjob-step-drawer") { openPJobStepDrawer(routeIndex, stageIndex); return; }
   if (action === "open-context-clean" || action === "edit-context-clean") {
     openCleanDialog(
       button.dataset.cleanScope,
@@ -2861,45 +3246,55 @@ function handleAction(button) {
     if (state.expandedRouteProcessGroups.has(key)) state.expandedRouteProcessGroups.delete(key); else state.expandedRouteProcessGroups.add(key);
     renderRoutes(); return;
   }
-  if (action === "toggle-route" || action === "edit-route") {
-    if (action === "toggle-route" && state.expandedRoutes.has(routeIndex)) state.expandedRoutes.delete(routeIndex); else state.expandedRoutes.add(routeIndex);
-    const profile = routeProcessProfile(state.routes[routeIndex]);
+  if (action === "edit-route") {
+    const profile = routeGroupingProfile(state.routes[routeIndex]);
     state.routeProcessFilter = profile.isReentrant ? profile.key : String(profile.processCount);
     state.routeParallelFilter = profile.key;
     state.expandedRouteProcessGroups.add(String(profile.processCount));
     state.expandedRouteGroups.add(profile.key);
-    renderRoutes(); return;
-  }
-  if (action === "sync-stage-visits") {
-    synchronizeStageVisits(state.routes[routeIndex].stages[stageIndex]);
-    markTestDirty(); renderStepDrawer(); return;
+    beginRouteEdit(routeIndex); return;
   }
   if (action === "add-route") {
+    if (state.routeEditingIndex >= 0) { setWorkspaceStatus("请先保存或取消当前正在编辑的路径模板", "dirty"); return; }
     const name = `Route${state.routes.length + 1}`, route = { name, group: name, bufferOption: 0, prePJobCleanRefs: [], postPJobCleanRefs: [], postCJobCleanRefs: [], stages: state.device ? defaultRouteStages(name) : linkRouteSteps([makeStage(""), makeStage(""), makeStage("", true, `${name}_Step2`), makeStage(""), makeStage("")]) };
     state.routes.push(route);
+    state.routeGroupingProfiles.set(route, structuredClone(routeProcessProfile(route)));
     const newIndex = state.routes.length - 1, profile = routeProcessProfile(route);
     state.expandedRoutes.add(newIndex);
     state.routeProcessFilter = profile.isReentrant ? profile.key : String(profile.processCount);
     state.routeParallelFilter = profile.key;
     state.expandedRouteProcessGroups.add(String(profile.processCount));
     state.expandedRouteGroups.add(profile.key);
+    beginRouteEdit(newIndex, true);
+    routeAction = true;
   }
   if (action === "copy-route") {
+    if (state.routeEditingIndex >= 0) { setWorkspaceStatus("请先保存或取消当前正在编辑的路径模板", "dirty"); return; }
     const source = state.routes[routeIndex], base = `${source.name || "Route"} 副本`, occupied = new Set(state.routes.map(route => route.name)); let name = base, suffix = 2;
     while (occupied.has(name)) name = `${base} (${suffix++})`;
     const copy = structuredClone(source); copy.name = name; state.routes.push(copy);
+    state.routeGroupingProfiles.set(copy, structuredClone(routeProcessProfile(copy)));
     const newIndex = state.routes.length - 1, profile = routeProcessProfile(copy);
     state.expandedRoutes.add(newIndex);
     state.routeProcessFilter = profile.isReentrant ? profile.key : String(profile.processCount);
     state.routeParallelFilter = profile.key;
     state.expandedRouteProcessGroups.add(String(profile.processCount));
     state.expandedRouteGroups.add(profile.key);
+    beginRouteEdit(newIndex, true);
+    routeAction = true;
   }
-  if (action === "remove-route") { state.routes.splice(index, 1); state.expandedRoutes.clear(); state.expandedRouteProcessGroups.clear(); state.expandedRouteGroups.clear(); if (state.drawer?.routeIndex === index) closeStepDrawer(); }
-  if (action === "add-stage") { state.routes[index].stages.splice(-1, 0, makeStage(""), makeStage("")); linkRouteSteps(state.routes[index].stages); }
-  if (action === "remove-stage") { state.routes[routeIndex].stages.splice(stageIndex, 1); linkRouteSteps(state.routes[routeIndex].stages); closeStepDrawer(); }
-  if (action === "move-step-up" && stageIndex > 0) { [state.routes[routeIndex].stages[stageIndex - 1], state.routes[routeIndex].stages[stageIndex]] = [state.routes[routeIndex].stages[stageIndex], state.routes[routeIndex].stages[stageIndex - 1]]; linkRouteSteps(state.routes[routeIndex].stages); }
-  if (action === "move-step-down" && stageIndex < state.routes[routeIndex].stages.length - 1) { [state.routes[routeIndex].stages[stageIndex + 1], state.routes[routeIndex].stages[stageIndex]] = [state.routes[routeIndex].stages[stageIndex], state.routes[routeIndex].stages[stageIndex + 1]]; linkRouteSteps(state.routes[routeIndex].stages); }
+  if (action === "remove-route") {
+    if (state.routeEditingIndex >= 0) { setWorkspaceStatus("请先保存或取消当前正在编辑的路径模板", "dirty"); return; }
+    state.routes.splice(index, 1); state.expandedRoutes.clear(); state.expandedRouteProcessGroups.clear(); state.expandedRouteGroups.clear();
+    if (state.drawer?.routeIndex === index) closeStepDrawer();
+    markRoutesDirty();
+    saveRoutes().catch(error => writeTerminal(`$ 路径删除失败\n  ${error.message}`, true));
+    return;
+  }
+  if (action === "add-stage") { state.routes[index].stages.splice(-1, 0, makeStage(""), makeStage("")); linkRouteSteps(state.routes[index].stages); routeAction = true; }
+  if (action === "remove-stage" && !isFixedRouteStep(state.routes[routeIndex], stageIndex)) { state.routes[routeIndex].stages.splice(stageIndex, 1); linkRouteSteps(state.routes[routeIndex].stages); closeStepDrawer(); routeAction = true; }
+  if (action === "move-step-up" && stageIndex > 0 && !isFixedRouteStep(state.routes[routeIndex], stageIndex)) { [state.routes[routeIndex].stages[stageIndex - 1], state.routes[routeIndex].stages[stageIndex]] = [state.routes[routeIndex].stages[stageIndex], state.routes[routeIndex].stages[stageIndex - 1]]; linkRouteSteps(state.routes[routeIndex].stages); routeAction = true; }
+  if (action === "move-step-down" && stageIndex < state.routes[routeIndex].stages.length - 1 && !isFixedRouteStep(state.routes[routeIndex], stageIndex)) { [state.routes[routeIndex].stages[stageIndex + 1], state.routes[routeIndex].stages[stageIndex]] = [state.routes[routeIndex].stages[stageIndex], state.routes[routeIndex].stages[stageIndex + 1]]; linkRouteSteps(state.routes[routeIndex].stages); routeAction = true; }
   if (action === "add-cjob") {
     const roundIndex = Number(button.dataset.roundIndex), round = state.rounds[roundIndex];
     if (round.cjobs.some(cjob => ["Pipeline", "Sequential"].includes(cjob.taskMode))) return;
@@ -2914,7 +3309,13 @@ function handleAction(button) {
   }
   if (action === "remove-pjob") state.rounds[Number(button.dataset.roundIndex)].cjobs[Number(button.dataset.cjobIndex)].pjobs.splice(Number(button.dataset.pjobIndex), 1);
   normalizeRounds();
-  markTestDirty(); renderAll();
+  if (routeAction) {
+    markRoutesDirty();
+    renderRoutes();
+    if (state.drawer) renderStepDrawer();
+  } else {
+    markTestDirty(); renderAll();
+  }
 }
 
 /** 收集 Step/Clean 内嵌 Recipe，并合并同名 Recipe 的设备范围。 */
@@ -2991,7 +3392,7 @@ function expandVisitSlotIds(): void {
 function buildPayload() {
   normalizeRounds();
   expandVisitSlotIds();
-  const routes = selectReferencedRoutes(state.routes, state.rounds).map(route => ({ ...normalizeRoute(route), stages: route.stages.map(stage => ({ ...stage, visits: stage.visits.map(visit => structuredClone(visit)) })) }));
+  const routes = selectReferencedRoutes(runtimeRoutes(), state.rounds).map(route => ({ ...normalizeRoute(route), stages: route.stages.map(stage => ({ ...stage, visits: stage.visits.map(visit => structuredClone(visit)) })) }));
   const cleans = state.cleans.map(runtimeClean);
   const options = { ...state.options };
   if (state.strategy === "schedule-alphago") {
@@ -3124,14 +3525,11 @@ function renderAlgorithmMetadata() {
   showAlgorithmDetails(state.strategy);
 }
 
-/** 让本次运行生成的 input_data 日志可下载，并按选项自动导出。 */
+/** 让本次运行生成的 input_data 日志可按需下载。 */
 function prepareLogDownload(result) {
   if (!result?.logUrl) return false;
   const link = document.getElementById("logButton");
   link.href = result.logUrl; link.download = result.logFileName || "ct-input-log.json"; link.removeAttribute("aria-disabled");
-  if (document.getElementById("autoExportLog").checked) {
-    const automatic = document.createElement("a"); automatic.href = link.href; automatic.download = link.download; automatic.hidden = true; document.body.appendChild(automatic); automatic.click(); automatic.remove();
-  }
   return true;
 }
 
@@ -4135,21 +4533,7 @@ document.getElementById("residenceAnalysisHelpDialog").addEventListener("click",
   if (event.target === residenceAnalysisHelpDialog) residenceAnalysisHelpDialog.close();
 });
 document.getElementById("pjobRouteProcess").addEventListener("change", event => renderPJobRouteDialogGroup(event.target.value));
-document.getElementById("pjobRouteCleanFilter").addEventListener("change", event => {
-  if (!pjobRoutePickerContext) return;
-  pjobRoutePickerContext.filters.clean = event.target.value;
-  renderPJobRouteDialogGroup(pjobRoutePickerContext.groupKey);
-});
-document.getElementById("pjobRouteResidencyFilter").addEventListener("change", event => {
-  if (!pjobRoutePickerContext) return;
-  pjobRoutePickerContext.filters.residency = event.target.value;
-  renderPJobRouteDialogGroup(pjobRoutePickerContext.groupKey);
-});
-document.getElementById("pjobRouteQTimeFilter").addEventListener("change", event => {
-  if (!pjobRoutePickerContext) return;
-  pjobRoutePickerContext.filters.qtime = event.target.value;
-  renderPJobRouteDialogGroup(pjobRoutePickerContext.groupKey);
-});
+document.getElementById("pjobRouteParallel").addEventListener("change", event => renderPJobRouteDialogGroup(pjobRoutePickerContext?.processKey, event.target.value));
 document.getElementById("routeProcessFilter").addEventListener("change", event => {
   state.routeProcessFilter = event.target.value;
   state.routeParallelFilter = "";
@@ -4159,20 +4543,8 @@ document.getElementById("routeParallelFilter").addEventListener("change", event 
   state.routeParallelFilter = event.target.value;
   renderRoutes();
 });
-document.getElementById("routeCleanFilter").addEventListener("change", event => {
-  state.routeCleanFilter = event.target.value;
-  renderRoutes();
-});
-document.getElementById("routeResidencyFilter").addEventListener("change", event => {
-  state.routeResidencyFilter = event.target.value;
-  renderRoutes();
-});
-document.getElementById("routeQTimeFilter").addEventListener("change", event => {
-  state.routeQTimeFilter = event.target.value;
-  renderRoutes();
-});
 document.addEventListener("keydown", event => {
-  if (event.key === "Escape" && document.getElementById("pjobRouteDialog").open) {
+  if (event.key === "Escape" && document.getElementById("pjobRouteDialog").open && !document.getElementById("drawerLayer").open) {
     event.preventDefault();
     closePJobRoutePicker();
   }
@@ -4304,7 +4676,7 @@ document.getElementById("visualDecisionLens").addEventListener("keydown", event 
 document.getElementById("closeDrawer").addEventListener("click", closeStepDrawer);
 document.getElementById("drawerLayer").addEventListener("click", event => { if (event.target.id === "drawerLayer") closeStepDrawer(); });
 document.addEventListener("keydown", event => { if (event.key === "Escape") closeStepDrawer(); });
-document.addEventListener("keydown", event => { const card = event.target.closest?.("[data-step-card]"); if (card && event.key === "Enter") openStepDrawer(Number(card.dataset.routeIndex), Number(card.dataset.stageIndex)); });
+document.addEventListener("keydown", event => { const card = event.target.closest?.("[data-step-card]"); if (card && event.key === "Enter") openPJobStepDrawer(Number(card.dataset.routeIndex), Number(card.dataset.stageIndex)); });
 document.addEventListener("input", event => {
   if (event.target.matches("[data-device-timing-target]")) updateDeviceTimingFromControl(event.target);
   if (event.target.matches("[data-scope], [data-option], [data-time-index], [data-round-time-index]")) updateStateFromControl(event.target);
@@ -4318,8 +4690,13 @@ document.addEventListener("change", event => {
   }
   if (event.target.matches("[data-scope], [data-option], [data-time-index], [data-round-time-index]")) {
     updateStateFromControl(event.target);
-    if (["name", "cleanType", "recipeTime", "wacRecipeTime", "jobType", "waferCount", "bufferOption", ...ROUTE_CLEAN_KEYS].includes(event.target.dataset.key) || event.target.dataset.timeIndex !== undefined || event.target.dataset.roundTimeIndex !== undefined || ["stage-candidates", "stage-candidate-toggle", "cjob", "pjob"].includes(event.target.dataset.scope)) renderAll();
+    if (event.target.dataset.scope === "stage-candidate-toggle") {
+      refreshCandidatePicker(event.target);
+      return;
+    }
+    if (["name", "cleanType", "recipeTime", "wacRecipeTime", "jobType", "waferCount", "bufferOption", ...ROUTE_CLEAN_KEYS].includes(event.target.dataset.key) || event.target.dataset.timeIndex !== undefined || event.target.dataset.roundTimeIndex !== undefined || ["stage-candidates", "cjob", "pjob"].includes(event.target.dataset.scope)) renderAll();
     else if (state.drawer) { renderRoutes(); renderStepDrawer(); }
+    else if (["test-step", "test-route"].includes(event.target.dataset.scope)) renderRounds();
   }
   if (event.target.name === "strategy") {
     state.strategy = event.target.value;
@@ -4372,7 +4749,7 @@ document.addEventListener("click", event => {
     return;
   }
   const button = event.target.closest("[data-action]"); if (button && !button.disabled) { handleAction(button); return; }
-  const card = event.target.closest("[data-step-card]"); if (card) openStepDrawer(Number(card.dataset.routeIndex), Number(card.dataset.stageIndex));
+  const card = event.target.closest("[data-step-card]"); if (card) openPJobStepDrawer(Number(card.dataset.routeIndex), Number(card.dataset.stageIndex));
 });
 window.addEventListener("pagehide", () => {
   if (state.deviceTimingDirty && state.workspaceDeviceId && state.deviceTimingDraft) {

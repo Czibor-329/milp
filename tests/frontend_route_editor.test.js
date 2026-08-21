@@ -58,6 +58,12 @@ test("Route 名称由腔室种类和加工时间自动生成且不带工序数�
   assert.equal(logic.automaticRouteName(logic.processProfile(route(["PM1", "PM2"], ["PM3", "PM4"]))), "PM1/PM2(20s) → PM3/PM4(20s)");
 });
 
+test("路径模板名称只包含腔室拓扑，不包含测试时间", () => {
+  const value = route(["PM1", "PM2"], ["PM3"]);
+  value.stages[0].visits[0].processTime = 88;
+  assert.equal(logic.automaticTemplateName(logic.processProfile(value)), "PM1/PM2 → PM3");
+});
+
 test("Route 名称仅追加最小的有效驻留时间", () => {
   const value = route(["PM1", "PM2"], ["PM3"]);
   value.stages[0].visits[0].residencyConstraint = 45;

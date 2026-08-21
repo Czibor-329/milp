@@ -148,7 +148,13 @@ export function minimumResidencyConstraint(route: RouteDefinition): number | nul
   return limits.length ? Math.min(...limits) : null;
 }
 
-/** 根据加工路径、加工时间和 Clean 配置生成稳定、可读的 Route 名称。 */
+/** 根据 Route 工艺结构生成仅描述路径拓扑的模板名称，不含时间、清洁或驻留。 */
+export function automaticTemplateName(profile: RouteProcessProfile): string {
+  if (profile.processCount === 0) return "无加工工序";
+  return profile.candidatePath.join(" → ");
+}
+
+/** 按加工路径、加工时间和 Clean 配置生成稳定、可读的 Route 名称。 */
 export function automaticRouteName(
   profile: RouteProcessProfile,
   cleanSignature = "",

@@ -1,0 +1,268 @@
+"""验证共享路径模板与测试独有工艺参数的迁移和运行时合并。"""
+
+import json
+from pathlib import Path
+
+from realtime_scheduler import batch_service
+from realtime_scheduler import server
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _legacy_route() -> dict:
+    """构造一条带旧版内嵌时间、驻留和 Clean 的 Route。"""
+    return {
+        "name": "R1",
+        "group": "R1",
+        "bufferOption": 2,
+        "prePJobCleanRefs": ["Pre1"],
+        "stages": [
+            {
+                "stepId": 0,
+                "postStepIds": [1],
+                "needProcess": False,
+                "visits": [{"stationName": "LP1"}],
+            },
+            {
+                "stepId": 1,
+                "postStepIds": [2],
+                "needProcess": True,
+                "visits": [{
+                    "stationName": "PM1",
+                    "processTime": 37,
+                    "recipeTime": 37,
+                    "processRecipe": "Recipe1",
+                    "qTimeLimit": 55,
+                    "residencyConstraint": 66,
+                    "afterCleanRefs": ["Wac1"],
+                }],
+            },
+            {
+                "stepId": 2,
+                "postStepIds": [],
+                "needProcess": False,
+                "visits": [{"stationName": "LP1"}],
+            },
+        ],
+    }
+
+
+def test_workspace_migration_copies_parameters_before_stripping_template() -> None:
+    """升级旧仓库时应先复制测试参数，再把共享 Route 收敛为纯拓扑。"""
+    catalog = {
+        "version": 3,
+        "devices": [{
+            "id": "device-1",
+            "device": {"Stations": {}, "Robots": {}},
+            "routes": [_legacy_route()],
+            "cleans": [{"name": "Pre1"}, {"name": "Wac1"}],
+            "tests": [{
+                "id": "test-1",
+                "name": "Test1",
+                "rounds": [{"cjobs": [{"pjobs": [{"routeRef": "R1"}]}]}],
+            }],
+        }],
+    }
+
+    assert server._migrate_workspace_catalog(catalog) is True
+
+    device = catalog["devices"][0]
+    template = device["routes"][0]
+    assert catalog["version"] == 4
+    assert "bufferOption" not in template
+    assert template["stages"][1]["visits"] == [{"stationName": "PM1"}]
+    test_case = device["tests"][0]
+    assert test_case["routeConfigs"]["R1"]["bufferOption"] == 2
+    assert test_case["routeConfigs"]["R1"]["stages"]["1"]["processTime"] == 37
+    assert test_case["routeConfigs"]["R1"]["stages"]["1"]["afterCleanRefs"] == ["Wac1"]
+    assert [clean["name"] for clean in test_case["cleans"]] == ["Pre1", "Wac1"]
+
+
+def test_batch_plan_merges_test_parameters_without_mutating_template() -> None:
+    """批量运行应使用测试参数生成 Route，同时保持设备模板不变。"""
+    template = server._normalized_workspace_routes([_legacy_route()])[0]
+    device = {
+        "name": "Device1",
+        "device": {"Stations": {}, "Robots": {}},
+        "routes": [template],
+        "cleans": [],
+    }
+    config = server._workspace_route_config_map([_legacy_route()])
+    test_case = {
+        "options": {},
+        "routeConfigs": config,
+        "cleans": [],
+        "rounds": [{"currentTime": 0, "cjobs": [{"pjobs": [{"routeRef": "R1"}]}]}],
+    }
+
+    plan = batch_service.build_workspace_batch_plan(device, test_case, "heuristic", {})
+
+    visit = plan["routes"][0]["stages"][1]["visits"][0]
+    assert visit["processTime"] == 37
+    assert visit["qTimeLimit"] == 55
+    assert visit["residencyConstraint"] == 66
+    assert template["stages"][1]["visits"] == [{"stationName": "PM1"}]
+
+
+def test_route_save_endpoint_logic_renames_all_test_references(tmp_path) -> None:
+    """独立保存模板时应同步所有测试的引用和 routeConfigs 键。"""
+    store_path = tmp_path / "workspaces.json"
+    route = server._normalized_workspace_routes([_legacy_route()])[0]
+    catalog = {
+        "version": 4,
+        "devices": [{
+            "id": "device-1",
+            "routes": [route],
+            "cleans": [],
+            "tests": [{
+                "id": "test-1",
+                "routeConfigs": {"R1": server._workspace_route_test_config(_legacy_route())},
+                "rounds": [{"cjobs": [{"pjobs": [{"routeRef": "R1"}]}]}],
+            }],
+        }],
+    }
+    store_path.write_text(json.dumps(catalog, ensure_ascii=False), encoding="utf-8")
+    renamed_route = {**route, "name": "PM1"}
+
+    result = server.update_workspace_routes(
+        "device-1",
+        {"routes": [renamed_route], "routeNameChanges": {"R1": "PM1"}},
+        store_path,
+    )
+
+    test_case = result["tests"][0]
+    assert test_case["rounds"][0]["cjobs"][0]["pjobs"][0]["routeRef"] == "PM1"
+    assert list(test_case["routeConfigs"]) == ["PM1"]
+
+
+def test_workspace_migration_deduplicates_topology_and_preserves_referenced_config() -> None:
+    """同拓扑旧 Route 应收敛为一个模板，各测试仍保留自己原先引用的参数。"""
+    first = _legacy_route()
+    second = json.loads(json.dumps(first))
+    second["name"] = second["group"] = "R2"
+    second["stages"][1]["visits"][0]["processTime"] = 88
+    second["stages"][1]["visits"][0]["recipeTime"] = 88
+    catalog = {
+        "version": 3,
+        "devices": [{
+            "id": "device-1",
+            "device": {"Stations": {}, "Robots": {}},
+            "routes": [first, second],
+            "tests": [
+                {"id": "test-1", "rounds": [{"cjobs": [{"pjobs": [{"routeRef": "R1"}]}]}]},
+                {"id": "test-2", "rounds": [{"cjobs": [{"pjobs": [{"routeRef": "R2"}]}]}]},
+            ],
+        }],
+    }
+
+    assert server._migrate_workspace_catalog(catalog) is True
+
+    device = catalog["devices"][0]
+    assert [route["name"] for route in device["routes"]] == ["R1"]
+    assert device["tests"][0]["rounds"][0]["cjobs"][0]["pjobs"][0]["routeRef"] == "R1"
+    assert device["tests"][1]["rounds"][0]["cjobs"][0]["pjobs"][0]["routeRef"] == "R1"
+    assert device["tests"][0]["routeConfigs"]["R1"]["stages"]["1"]["processTime"] == 37
+    assert device["tests"][1]["routeConfigs"]["R1"]["stages"]["1"]["processTime"] == 88
+
+
+def test_workspace_migration_keeps_duplicate_when_one_test_uses_conflicting_configs() -> None:
+    """单个测试同时依赖两套不同参数时不强制合并，避免升级后改变既有排程。"""
+    first = _legacy_route()
+    second = json.loads(json.dumps(first))
+    second["name"] = second["group"] = "R2"
+    second["stages"][1]["visits"][0]["processTime"] = 88
+    second["stages"][1]["visits"][0]["recipeTime"] = 88
+    catalog = {
+        "version": 3,
+        "devices": [{
+            "id": "device-1",
+            "device": {"Stations": {}, "Robots": {}},
+            "routes": [first, second],
+            "tests": [{
+                "id": "test-1",
+                "rounds": [{"cjobs": [{"pjobs": [{"routeRef": "R1"}, {"routeRef": "R2"}]}]}],
+            }],
+        }],
+    }
+
+    assert server._migrate_workspace_catalog(catalog) is True
+
+    assert [route["name"] for route in catalog["devices"][0]["routes"]] == ["R1", "R2"]
+
+
+def test_route_template_and_test_route_editors_use_separate_ui_states() -> None:
+    """模板局部保存、模板选择和测试参数编辑应是三个清晰且可返回的界面状态。"""
+    frontend = ROOT / "realtime_scheduler" / "frontend"
+    template = (frontend / "config_editor.html").read_text(encoding="utf-8")
+    source = (frontend / "src" / "config_editor.ts").read_text(encoding="utf-8")
+
+    assert 'class="route-update-card"' in template
+    assert 'id="saveRoutesButton"' not in template
+    assert 'id="discardRoutesButton"' not in template
+    assert 'data-action="save-route"' in source
+    assert 'data-action="cancel-route-edit"' in source
+    assert '路径名称（自动生成）' not in source
+    assert 'class="field route-group-field"' not in source
+    assert 'if (index === 0) return "Src";' in source
+    assert 'return "Sink";' in source
+    assert '${escapeHtml(group.label)}</option>' in source
+    assert 'data-action="back-pjob-route-selection"' in source
+    assert '<strong>Job Clean</strong>' in source
+    picker_card = source.split("function renderPJobRouteCard", 1)[1].split(
+        "/** 在路径引用弹窗内", 1,
+    )[0]
+    assert "routePickerCompactPath(route, false)" in picker_card
+    assert '>路径模板</strong>' not in picker_card
+    route_table = source.split("function renderRouteInstanceSteps", 1)[1].split(
+        "/** 刷新弹窗", 1,
+    )[0]
+    assert "<th></th>" not in route_table
+    assert '<th>类型</th>' in route_table
+    assert 'data-action="open-pjob-step-drawer"' not in route_table
+    assert 'route-step-source-note' in route_table
+    assert 'fixed ? `<span class="route-step-source-note">由 CJob LoadPort 决定</span>`' in route_table
+    assert 'fixed ? `<span class="route-step-readonly">—</span>`' in route_table
+    assert 'function renderRouteBufferEditor(routeIndex)' in source
+    assert 'data-scope="test-route"' in source
+    assert 'data-key="bufferOption"' in source
+    pjob_picker = source.split("function renderPJobRoutePicker", 1)[1].split(
+        "/** 绘制重算轮次", 1,
+    )[0]
+    assert "routePickerProcessSummary" not in pjob_picker
+    assert "renderRoutePropertyTags(runtimeRoute)" in pjob_picker
+    property_tags = source.split("function renderRoutePropertyTags", 1)[1].split(
+        "/** 绘制一张紧凑", 1,
+    )[0]
+    assert 'if (cleanSummary !== "无")' in property_tags
+    assert "if (hasResidency)" in property_tags
+    assert "if (buffer.index > 0)" in property_tags
+    assert "if (hasQTime)" in property_tags
+    assert ': ""' in property_tags
+    assert '(select.closest("dialog") || document.body).append(menu)' in source
+    assert "正在保存统一生成的路径与 Clean 名称" not in source
+    pjob_row = source.split('return `<div class="pjob-row">', 1)[1].split(
+        "</div>`;", 1,
+    )[0]
+    assert pjob_row.index("pjob-material") < pjob_row.index("pjob-priority")
+    assert pjob_row.index("pjob-priority") < pjob_row.index("pjob-origin-route")
+    assert "· 参数仅作用于当前测试" not in source
+    assert "点击 Step 编辑加工时间、QTime、驻留与 Clean" not in source
+    assert "在 PJob 前后执行，仅作用于当前测试" not in source
+    drawer = source.split("function renderStepDrawer()", 1)[1].split(
+        "/** 从测试的路径引用面板", 1,
+    )[0]
+    assert "renderStepCleanEditor(routeIndex, stageIndex)" in drawer
+    assert "renderRouteCleanEditor(routeIndex)" not in drawer
+    assert "当前测试参数" not in drawer
+    assert "editable-badge" not in drawer
+    assert "step-overview-card" not in drawer
+    open_drawer = source.split("function openPJobStepDrawer", 1)[1].split(
+        "/** 关闭 Step 抽屉", 1,
+    )[0]
+    assert "drawerLayer.showModal()" in open_drawer
+    assert 'document.getElementById("pjobRouteDialog").close()' not in open_drawer
+    assert "returnFromDrawer" not in source
+    assert 'width: min(560px, 100vw)' in (
+        frontend / "assets" / "config_editor.css"
+    ).read_text(encoding="utf-8")

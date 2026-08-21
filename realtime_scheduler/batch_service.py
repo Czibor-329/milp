@@ -272,6 +272,54 @@ def _batch_test_routes(
     ]
 
 
+def _batch_apply_route_configs(
+    routes: Sequence[Mapping[str, Any]],
+    raw_configs: Any,
+) -> List[Dict[str, Any]]:
+    """把测试独有的时间、清洁和驻留参数合并到共享路径模板副本。"""
+    configs = raw_configs if isinstance(raw_configs, Mapping) else {}
+    merged_routes: List[Dict[str, Any]] = []
+    for raw_route in routes:
+        route = deepcopy(dict(raw_route))
+        route_name = str(route.get("name") or "").strip()
+        config = configs.get(route_name)
+        if not isinstance(config, Mapping):
+            merged_routes.append(route)
+            continue
+        route["bufferOption"] = int(_finite_number(config.get("bufferOption"), 0))
+        for key in ("prePJobCleanRefs", "postPJobCleanRefs", "postCJobCleanRefs"):
+            route[key] = _string_list(config.get(key))
+        stage_configs = config.get("stages") if isinstance(config.get("stages"), Mapping) else {}
+        for stage_index, stage in enumerate(route.get("stages") or []):
+            if not isinstance(stage, dict):
+                continue
+            step_id = str(stage.get("stepId", stage_index))
+            stage_config = stage_configs.get(step_id)
+            if not isinstance(stage_config, Mapping):
+                continue
+            for visit in stage.get("visits") or []:
+                if not isinstance(visit, dict):
+                    continue
+                process_time = _finite_number(stage_config.get("processTime"), 20)
+                visit.update({
+                    "processTime": process_time,
+                    "recipeTime": process_time,
+                    "qTimeLimit": _finite_number(stage_config.get("qTimeLimit"), -1),
+                    "residencyConstraint": _finite_number(
+                        stage_config.get("residencyConstraint"), -1,
+                    ),
+                    "beforeCleanRefs": _string_list(stage_config.get("beforeCleanRefs")),
+                    "afterCleanRefs": _string_list(stage_config.get("afterCleanRefs")),
+                    "processRecipe": str(stage_config.get("processRecipe") or ""),
+                    "processType": str(stage_config.get("processType") or ""),
+                    "weight": deepcopy(stage_config.get("weight") or {}),
+                    "moveTimeOffset": deepcopy(stage_config.get("moveTimeOffset") or {}),
+                    "slotIds": str(stage_config.get("slotIds") or "1"),
+                })
+        merged_routes.append(route)
+    return merged_routes
+
+
 def _batch_test_cleans(
     cleans: Sequence[Mapping[str, Any]],
     routes: Sequence[Mapping[str, Any]],
@@ -382,8 +430,12 @@ def build_workspace_batch_plan(
         for row in (test_case.get("rounds") or [])
         if isinstance(row, Mapping)
     ]
-    routes = _batch_test_routes(
+    configured_routes = _batch_apply_route_configs(
         [row for row in (device.get("routes") or []) if isinstance(row, Mapping)],
+        test_case.get("routeConfigs"),
+    )
+    routes = _batch_test_routes(
+        configured_routes,
         rounds,
     )
     cleans = [
@@ -391,7 +443,11 @@ def build_workspace_batch_plan(
         for clean in _batch_test_cleans(
             [
                 row
-                for row in (device.get("cleans") or [])
+                for row in (
+                    test_case.get("cleans")
+                    if isinstance(test_case.get("cleans"), list)
+                    else device.get("cleans") or []
+                )
                 if isinstance(row, Mapping)
             ],
             routes,

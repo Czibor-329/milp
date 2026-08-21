@@ -14,7 +14,7 @@
 - `frontend/src/workspace_visualizer.ts`：MoveList 回放、腔室门状态与设备工作台；性能指标通过 `/api/analysis/*` 获取。
 - `frontend/assets/`：可由 Python 服务直接托管的构建产物与样式。
 - `frontend/movelist_gantt_viewer.html`：MoveList 甘特图页面。
-- `data/workspaces.json`：设备、设备级共享 Route/Clean、测试集任务。
+- `data/workspaces.json`：设备、设备级共享路径模板，以及测试独有的 Route 参数、Clean 和任务。
 - `data/devices/`：按设备 ID 独立保存的 init 信息。
 - `exports/logs/`：每次运行生成的 input_data 复现日志。
 - `exports/results/`：每次运行生成的统一 MoveList 与重算点。
@@ -87,6 +87,14 @@ output_json = update(tool_json, algorithm="heuristic")
 默认无需额外配置；算法仓库不在 `alg/` 时设置 `CT_ALGORITHM_ROOT`。
 
 测试组别作为设备下的独立数据保存，允许先创建空组，再在当前组内新建或复制测试；旧测试会自动归入“未分组”，无需手工迁移。
+
+路径配置只维护 Step 与候选腔室拓扑。加工时间、QTime、驻留、Buffer 和 Clean
+在“运行计划”中为当前测试选择路径模板后配置；这些参数随测试保存，不会回写共享模板。
+旧工作区首次由新版服务读取时会先把原共享 Route 的参数复制到各测试，再将共享 Route
+收敛为模板，并安全合并拓扑相同的重复模板；同一测试存在冲突参数时会保留原模板，
+避免静默改变已有排程。拆分工作区会保存迁移版本标记；仅在版本变化、旧库待迁移或检测到
+外部更新文件时执行数据整理，后续启动直接跳过。服务完成必要迁移和算法预热后才开始监听
+并打开网页，因此升级不需要手工重建已有测试，也不会让页面读到迁移中的数据。
 
 运行页可选择任意可用策略后点击“批量运行当前组”。服务会在后台并行运行当前测试组中的
 全部测试（最多四项并行），页面实时显示每项的等待、运行、成功或失败状态与总体进度。

@@ -178,7 +178,8 @@ MAX_SAVED_RESULTS = 8
 MAX_SAVED_BATCH_RUNS = 8
 MAX_CJOB_CYCLE = 1000
 CJOB_CYCLE_EVENT_EPSILON_MULTIPLIER = 2.0
-WORKSPACE_STORE_VERSION = 3
+WORKSPACE_STORE_VERSION = 4
+WORKSPACE_STORE_VERSION_FILE = ".workspace-version.json"
 API_SCHEMA_VERSION = "cjob-pjob-v3"
 HEURISTIC_BASELINE_SCHEMA_VERSION = "petri-look-dynamic-v1"
 FIRST_ROBOT_SLOT_ID = 1
@@ -3080,6 +3081,70 @@ def _empty_workspace_catalog() -> Dict[str, Any]:
     return {"version": WORKSPACE_STORE_VERSION, "devices": []}
 
 
+def _workspace_store_version_path(store_dir: Path) -> Path:
+    """返回拆分工作区用于记录已完成迁移版本的标记文件。"""
+    return store_dir / WORKSPACE_STORE_VERSION_FILE
+
+
+def _read_workspace_store_version(store_dir: Path) -> int:
+    """读取拆分工作区已完成的迁移版本；缺失或损坏时按旧版本处理。"""
+    try:
+        payload = json.loads(
+            _workspace_store_version_path(store_dir).read_text(encoding="utf-8")
+        )
+        return int(payload.get("version") or 0) if isinstance(payload, Mapping) else 0
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return 0
+
+
+def _write_workspace_store_version(store_dir: Path) -> None:
+    """在数据文件全部落盘后刷新迁移完成标记。"""
+    _write_json_atomic(
+        _workspace_store_version_path(store_dir),
+        {"version": WORKSPACE_STORE_VERSION},
+    )
+
+
+def _workspace_data_update_required(path: Path = WORKSPACE_STORE_PATH) -> bool:
+    """仅在版本变化、旧库待迁移或外部文件更新后要求启动前整理数据。"""
+    if path.suffix:
+        if not path.is_file():
+            return False
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            return int(payload.get("version") or 0) != WORKSPACE_STORE_VERSION
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return True
+    if path == WORKSPACE_STORE_PATH and (DATA_DIR / "workspaces.json").is_file():
+        return True
+    if not path.is_dir():
+        if path != WORKSPACE_STORE_PATH:
+            return False
+        return any(candidate.is_file() for candidate in (
+            DATA_DIR / "workspaces.json", LEGACY_WORKSPACE_STORE_PATH,
+        ))
+    marker = _workspace_store_version_path(path)
+    if _read_workspace_store_version(path) != WORKSPACE_STORE_VERSION:
+        return True
+    try:
+        marker_mtime = marker.stat().st_mtime_ns
+        data_files = [*path.glob("*/device.json"), *path.glob("*/tests/*.json")]
+        return any(file.stat().st_mtime_ns > marker_mtime for file in data_files)
+    except OSError:
+        return True
+
+
+def _prepare_workspace_data(path: Path = WORKSPACE_STORE_PATH) -> bool:
+    """按需完成一次启动前数据迁移，并持久化完成版本供后续启动跳过。"""
+    if not _workspace_data_update_required(path):
+        return False
+    list_workspace_devices(path)
+    if path.suffix == "" and path.is_dir():
+        with _workspace_catalog_guard(path):
+            _write_workspace_store_version(path)
+    return True
+
+
 def _merge_named_assets(base: Sequence[Any], additions: Sequence[Any]) -> List[Dict[str, Any]]:
     """按名称合并 Route/Clean；同名项由后出现的数据覆盖且保持稳定位置。"""
     merged: List[Dict[str, Any]] = []
@@ -3301,8 +3366,123 @@ def _repair_workspace_route_contracts(routes: Sequence[Any]) -> bool:
     return changed
 
 
+def _workspace_route_test_config(route: Mapping[str, Any]) -> Dict[str, Any]:
+    """从旧版共享 Route 提取时间、清洁和驻留等测试侧参数。"""
+    def string_rows(value: Any) -> List[str]:
+        """把旧版数组或逗号文本收敛为去重名称列表。"""
+        rows = value if isinstance(value, list) else str(value or "").replace("，", ",").split(",")
+        return list(dict.fromkeys(
+            str(item).strip() for item in rows if str(item).strip()
+        ))
+
+    recipe_prefix = str(route.get("group") or route.get("name") or "Route").strip()
+    route_config: Dict[str, Any] = {
+        "bufferOption": max(0, min(4, int(_finite_number(
+            route.get("bufferOption", route.get("BufferOption")), 0,
+        )))),
+        "prePJobCleanRefs": string_rows(route.get("prePJobCleanRefs")),
+        "postPJobCleanRefs": string_rows(route.get("postPJobCleanRefs")),
+        "postCJobCleanRefs": [],
+        "stages": {},
+    }
+    for stage_index, stage in enumerate(route.get("stages") or []):
+        if not isinstance(stage, Mapping):
+            continue
+        step_id = str(int(_finite_number(stage.get("stepId"), stage_index)))
+        visits = [
+            visit for visit in (stage.get("visits") or [])
+            if isinstance(visit, Mapping)
+        ]
+        visit = visits[0] if visits else {}
+        process_time = _finite_number(
+            visit.get("processTime", visit.get("recipeTime")), 20,
+        )
+        route_config["stages"][step_id] = {
+            "processTime": process_time,
+            "recipeTime": process_time,
+            "qTimeLimit": _finite_number(visit.get("qTimeLimit"), -1),
+            "residencyConstraint": _finite_number(
+                visit.get("residencyConstraint"), -1,
+            ),
+            "beforeCleanRefs": string_rows(visit.get("beforeCleanRefs")),
+            "afterCleanRefs": string_rows(visit.get("afterCleanRefs")),
+            "processRecipe": str(
+                visit.get("processRecipe")
+                or (f"{recipe_prefix}_Step{step_id}" if stage.get("needProcess") else "")
+            ),
+            "processType": str(visit.get("processType") or ""),
+            "weight": deepcopy(visit.get("weight") or {}),
+            "moveTimeOffset": deepcopy(visit.get("moveTimeOffset") or {}),
+            "slotIds": str(visit.get("slotIds") or "1"),
+        }
+    return route_config
+
+
+def _workspace_route_config_map(routes: Sequence[Any]) -> Dict[str, Any]:
+    """按 Route 名称生成旧数据到测试侧参数的兼容迁移映射。"""
+    return {
+        str(route.get("name") or "").strip(): _workspace_route_test_config(route)
+        for route in routes
+        if isinstance(route, Mapping) and str(route.get("name") or "").strip()
+    }
+
+
+def _synchronize_workspace_test_route_configs(device: Dict[str, Any]) -> None:
+    """让每个测试配置与最新模板 Step 对齐，并保留仍然有效的既有参数。"""
+    defaults = _workspace_route_config_map(device.get("routes") or [])
+    for test_case in device.get("tests") or []:
+        existing = test_case.get("routeConfigs")
+        existing = existing if isinstance(existing, Mapping) else {}
+        normalized: Dict[str, Any] = {}
+        for route_name, default_config in defaults.items():
+            prior = existing.get(route_name)
+            prior = prior if isinstance(prior, Mapping) else {}
+            merged = deepcopy(default_config)
+            for key in (
+                "bufferOption", "prePJobCleanRefs", "postPJobCleanRefs",
+                "postCJobCleanRefs",
+            ):
+                if key in prior:
+                    merged[key] = deepcopy(prior[key])
+            prior_stages = prior.get("stages")
+            prior_stages = prior_stages if isinstance(prior_stages, Mapping) else {}
+            for step_id, stage_config in merged["stages"].items():
+                if isinstance(prior_stages.get(step_id), Mapping):
+                    stage_config.update(deepcopy(dict(prior_stages[step_id])))
+            normalized[route_name] = merged
+        test_case["routeConfigs"] = normalized
+
+
+def _strip_workspace_route_parameters(route: Dict[str, Any]) -> None:
+    """原地清除共享模板中的测试参数，仅保留 Step 与候选腔室拓扑。"""
+    route.pop("bufferOption", None)
+    route.pop("prePJobCleanRefs", None)
+    route.pop("postPJobCleanRefs", None)
+    route.pop("postCJobCleanRefs", None)
+    if "stages" not in route:
+        return
+    stages = []
+    for stage_index, raw_stage in enumerate(route.get("stages") or []):
+        if not isinstance(raw_stage, Mapping):
+            continue
+        step_id = int(_finite_number(raw_stage.get("stepId"), stage_index))
+        visits = [
+            {"stationName": str(visit.get("stationName") or "")}
+            for visit in (raw_stage.get("visits") or [])
+            if isinstance(visit, Mapping)
+        ]
+        stages.append({
+            "stepId": step_id,
+            "postStepIds": [step_id + 1] if stage_index + 1 < len(route.get("stages") or []) else [],
+            "needProcess": bool(raw_stage.get("needProcess")),
+            "kind": str(raw_stage.get("kind") or ""),
+            "visits": visits,
+        })
+    route["stages"] = stages
+
+
 def _normalized_workspace_routes(raw_routes: Sequence[Any]) -> List[Any]:
-    """校验页面 Route 的 BufferOption，并清除不可编辑的 PostCJob Clean。"""
+    """校验并保存只含 Step 与候选腔室的共享路径模板。"""
     routes = deepcopy(list(raw_routes))
     for route in routes:
         if not isinstance(route, dict):
@@ -3317,14 +3497,102 @@ def _normalized_workspace_routes(raw_routes: Sequence[Any]) -> List[Any]:
             if not math.isfinite(numeric_option) or numeric_option != option or not 0 <= option <= 4:
                 raise ValueError(f"BufferOption 必须是 0~4 的整数：{raw_option}")
             route["bufferOption"] = option
-        if "postCJobCleanRefs" in route:
-            route["postCJobCleanRefs"] = []
+        _strip_workspace_route_parameters(route)
     return routes
+
+
+def _workspace_route_topology_key(route: Mapping[str, Any]) -> str:
+    """返回只描述 Step 与候选模块的稳定键；首尾模块由 CJob 决定，不参与区分。"""
+    raw_stages = [stage for stage in (route.get("stages") or []) if isinstance(stage, Mapping)]
+    stages = []
+    for stage_index, stage in enumerate(raw_stages):
+        fixed_endpoint = stage_index == 0 or stage_index == len(raw_stages) - 1
+        candidates = [] if fixed_endpoint else sorted({
+            str(visit.get("stationName") or "").strip()
+            for visit in (stage.get("visits") or [])
+            if isinstance(visit, Mapping) and str(visit.get("stationName") or "").strip()
+        })
+        stages.append({
+            "kind": "endpoint" if fixed_endpoint else str(stage.get("kind") or ""),
+            "needProcess": False if fixed_endpoint else bool(stage.get("needProcess")),
+            "candidates": candidates,
+        })
+    return json.dumps(stages, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _workspace_test_route_refs(test_case: Mapping[str, Any]) -> set[str]:
+    """收集测试内实际被 PJob 引用的模板名称。"""
+    return {
+        str(pjob.get("routeRef") or "").strip()
+        for round_row in (test_case.get("rounds") or [])
+        if isinstance(round_row, Mapping)
+        for cjob in (round_row.get("cjobs") or [])
+        if isinstance(cjob, Mapping)
+        for pjob in (cjob.get("pjobs") or [])
+        if isinstance(pjob, Mapping) and str(pjob.get("routeRef") or "").strip()
+    }
+
+
+def _deduplicate_workspace_route_templates(device: Dict[str, Any]) -> int:
+    """合并纯拓扑重复模板并迁移测试引用；参数冲突时保留模板以避免数据损失。"""
+    routes = [route for route in (device.get("routes") or []) if isinstance(route, dict)]
+    tests = [test for test in (device.get("tests") or []) if isinstance(test, dict)]
+    canonical_by_key: Dict[str, Dict[str, Any]] = {}
+    kept: List[Dict[str, Any]] = []
+    removed_count = 0
+    for route in routes:
+        route_name = str(route.get("name") or "").strip()
+        topology_key = _workspace_route_topology_key(route)
+        canonical = canonical_by_key.get(topology_key)
+        if canonical is None or not route_name:
+            canonical_by_key[topology_key] = route
+            kept.append(route)
+            continue
+        canonical_name = str(canonical.get("name") or "").strip()
+        conflict = False
+        for test_case in tests:
+            refs = _workspace_test_route_refs(test_case)
+            configs = test_case.get("routeConfigs")
+            configs = configs if isinstance(configs, Mapping) else {}
+            if (
+                route_name in refs and canonical_name in refs
+                and route_name in configs and canonical_name in configs
+                and configs[route_name] != configs[canonical_name]
+            ):
+                conflict = True
+                break
+        if conflict:
+            kept.append(route)
+            continue
+
+        for test_case in tests:
+            refs_before = _workspace_test_route_refs(test_case)
+            for round_row in (test_case.get("rounds") or []):
+                if not isinstance(round_row, Mapping):
+                    continue
+                for cjob in (round_row.get("cjobs") or []):
+                    if not isinstance(cjob, Mapping):
+                        continue
+                    for pjob in (cjob.get("pjobs") or []):
+                        if isinstance(pjob, dict) and str(pjob.get("routeRef") or "") == route_name:
+                            pjob["routeRef"] = canonical_name
+            configs = test_case.get("routeConfigs")
+            if isinstance(configs, dict) and route_name in configs:
+                if canonical_name not in configs or (
+                    route_name in refs_before and canonical_name not in refs_before
+                ):
+                    configs[canonical_name] = configs[route_name]
+                configs.pop(route_name, None)
+        removed_count += 1
+    if removed_count:
+        device["routes"] = kept
+    return removed_count
 
 
 def _migrate_workspace_catalog(catalog: Dict[str, Any]) -> bool:
     """迁移设备工作区结构，并为已有 PSE300 补齐 LC/LD LoadLock。"""
-    changed = int(catalog.get("version") or 0) != WORKSPACE_STORE_VERSION
+    source_version = int(catalog.get("version") or 0)
+    changed = source_version != WORKSPACE_STORE_VERSION
     for raw_device in catalog.get("devices") or []:
         if not isinstance(raw_device, dict):
             continue
@@ -3353,27 +3621,55 @@ def _migrate_workspace_catalog(catalog: Dict[str, Any]) -> bool:
         if isinstance(raw_topology, dict) and expand_pse300_loadlocks(raw_topology):
             raw_device["fingerprint"] = _device_fingerprint(raw_topology)
             changed = True
-        # 旧数据按更新时间从早到晚合并，因此最近编辑的同名定义成为设备共享定义。
+        # 旧数据按更新时间从早到晚合并；同时先把每个测试原有参数提取为独立配置。
         for test in sorted(tests, key=lambda item: str(item.get("updatedAt") or item.get("createdAt") or "")):
             if "routes" in test:
-                routes = _merge_named_assets(routes, test.get("routes") or [])
+                legacy_test_routes = [
+                    route for route in (test.get("routes") or [])
+                    if isinstance(route, Mapping)
+                ]
+                if "routeConfigs" not in test:
+                    test["routeConfigs"] = _workspace_route_config_map(
+                        legacy_test_routes,
+                    )
+                routes = _merge_named_assets(routes, legacy_test_routes)
                 test.pop("routes", None)
                 changed = True
-            if "cleans" in test:
+            if source_version < WORKSPACE_STORE_VERSION and "cleans" in test:
                 cleans = _merge_named_assets(cleans, test.get("cleans") or [])
-                test.pop("cleans", None)
+        legacy_route_configs = _workspace_route_config_map(routes)
+        for test in tests:
+            if not isinstance(test.get("routeConfigs"), Mapping):
+                test["routeConfigs"] = deepcopy(legacy_route_configs)
                 changed = True
-        if _repair_workspace_route_recipes(
-            routes,
-            _workspace_processing_modules(raw_device),
-        ):
-            changed = True
+            if not isinstance(test.get("cleans"), list):
+                test["cleans"] = deepcopy(cleans)
+                changed = True
+        if source_version < WORKSPACE_STORE_VERSION:
+            if _repair_workspace_route_recipes(
+                routes,
+                _workspace_processing_modules(raw_device),
+            ):
+                changed = True
         if _repair_workspace_route_contracts(routes):
+            changed = True
+        normalized_templates = _normalized_workspace_routes(routes)
+        if routes != normalized_templates:
+            routes = normalized_templates
             changed = True
         if _repair_workspace_job_layout(raw_device):
             changed = True
         if raw_device.get("routes") != routes:
             raw_device["routes"] = routes
+            changed = True
+        if _deduplicate_workspace_route_templates(raw_device):
+            routes = list(raw_device.get("routes") or [])
+            changed = True
+        previous_route_configs = [
+            deepcopy(test.get("routeConfigs")) for test in tests
+        ]
+        _synchronize_workspace_test_route_configs(raw_device)
+        if previous_route_configs != [test.get("routeConfigs") for test in tests]:
             changed = True
         if raw_device.get("cleans") != cleans:
             raw_device["cleans"] = cleans
@@ -3428,6 +3724,7 @@ def _read_workspace_catalog_directory(store_dir: Path) -> Dict[str, Any]:
     可直接拷贝分享，放入后下次读取即生效。
     """
     catalog = _empty_workspace_catalog()
+    catalog["version"] = _read_workspace_store_version(store_dir)
     if not store_dir.is_dir():
         return catalog
     for device_dir in sorted(store_dir.iterdir()):
@@ -3647,6 +3944,7 @@ def _write_workspace_catalog_directory(store_dir: Path, catalog: Mapping[str, An
             if not test_id:
                 continue
             _write_json_if_changed(tests_dir / f"{test_id}.json", test)
+    _write_workspace_store_version(store_dir)
 
 
 def _remove_directory_test_file(store_dir: Path, device_id: str, test_id: str) -> None:
@@ -4333,6 +4631,12 @@ def _normalize_test_case(
         "roundCount": round_count,
         "times": times,
         "options": options,
+        "routeConfigs": deepcopy(dict(raw_test.get("routeConfigs") or {})),
+        "cleans": [
+            deepcopy(dict(clean))
+            for clean in (raw_test.get("cleans") or [])
+            if isinstance(clean, Mapping)
+        ],
         "rounds": rounds,
         "createdAt": str(raw_test.get("createdAt") or timestamp),
         "updatedAt": timestamp,
@@ -4343,7 +4647,7 @@ def _normalize_test_case(
 
 
 def _apply_device_library(device: Dict[str, Any], payload: Mapping[str, Any]) -> None:
-    """将前端随保存请求提交的 Route/Clean 写入设备级共享库。"""
+    """兼容写入共享路径模板，并同步 Route 自动改名；Clean 归测试所有。"""
     raw_aliases = payload.get("routeNameChanges")
     aliases = {
         str(old_name): str(new_name)
@@ -4360,14 +4664,44 @@ def _apply_device_library(device: Dict[str, Any], payload: Mapping[str, Any]) ->
                         route_ref = str(pjob.get("routeRef") or "")
                         if route_ref in aliases:
                             pjob["routeRef"] = aliases[route_ref]
+            route_configs = test_case.get("routeConfigs")
+            if isinstance(route_configs, dict):
+                for old_name, new_name in aliases.items():
+                    if old_name in route_configs and new_name not in route_configs:
+                        route_configs[new_name] = route_configs.pop(old_name)
     if isinstance(payload.get("routes"), list):
         device["routes"] = _normalized_workspace_routes(payload["routes"])
     else:
         device.setdefault("routes", [])
-    if isinstance(payload.get("cleans"), list):
-        device["cleans"] = deepcopy(payload["cleans"])
-    else:
-        device.setdefault("cleans", [])
+    device.setdefault("cleans", [])
+
+
+def update_workspace_routes(
+    device_id: str,
+    payload: Mapping[str, Any],
+    path: Path = WORKSPACE_STORE_PATH,
+) -> Dict[str, Any]:
+    """保存设备级路径模板，并把自动改名同步到所有测试引用和配置键。"""
+    with _workspace_catalog_guard(path):
+        catalog = _read_workspace_catalog_unlocked(path)
+        device = next(
+            (item for item in catalog["devices"] if item.get("id") == device_id),
+            None,
+        )
+        if device is None:
+            raise ValueError(f"设备不存在：{device_id}")
+        if not isinstance(payload.get("routes"), list):
+            raise ValueError("routes 必须是数组")
+        _apply_device_library(device, payload)
+        _deduplicate_workspace_route_templates(device)
+        _synchronize_workspace_test_route_configs(device)
+        _invalidate_stale_device_baselines(device)
+        device["updatedAt"] = _workspace_timestamp()
+        _write_workspace_catalog_unlocked(path, catalog)
+        return {
+            "routes": deepcopy(device.get("routes") or []),
+            "tests": deepcopy(device.get("tests") or []),
+        }
 
 
 def create_workspace_test(
@@ -4383,6 +4717,9 @@ def create_workspace_test(
             raise ValueError(f"设备不存在：{device_id}")
         _apply_device_library(device, raw_test)
         normalized_input = dict(raw_test)
+        normalized_input.setdefault(
+            "routeConfigs", _workspace_route_config_map(device.get("routes") or []),
+        )
         normalized_input.pop("baseline", None)
         requested_name = str(raw_test.get("name") or "").strip()
         if not requested_name:
@@ -4438,6 +4775,9 @@ def update_workspace_test(
             raise ValueError(f"测试集名称重复：{requested_name}")
         _apply_device_library(device, raw_test)
         merged = dict(raw_test)
+        merged.setdefault(
+            "routeConfigs", _workspace_route_config_map(device.get("routes") or []),
+        )
         merged.pop("baseline", None)
         merged["createdAt"] = tests[index].get("createdAt")
         if isinstance(tests[index].get("baseline"), Mapping):
@@ -5417,7 +5757,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             self._send_json(response, HTTPStatus.BAD_REQUEST)
 
     def do_PUT(self) -> None:
-        """保存测试集、机器手槽位或重命名设备下的测试组别。"""
+        """保存测试、路径模板、机器手槽位或测试组别。"""
         if self._current_username() is None:
             self._send_json(
                 {"ok": False, "error": "未登录或会话已过期"},
@@ -5503,6 +5843,19 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                     parts[2], payload.get("robotSlots"),
                 )
                 self._send_json({"ok": True, "robotSlots": robot_slots})
+            except Exception as error:  # noqa: BLE001
+                self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
+            return
+        if len(parts) == 4 and parts[:2] == ["api", "workspaces"] and parts[3] == "routes":
+            if self._deny_device(parts[2]):
+                self._send_json(
+                    {"ok": False, "error": "设备不存在"}, HTTPStatus.NOT_FOUND
+                )
+                return
+            try:
+                payload = self._read_json_object()
+                result = update_workspace_routes(parts[2], payload)
+                self._send_json({"ok": True, **result})
             except Exception as error:  # noqa: BLE001
                 self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
             return
@@ -5933,20 +6286,14 @@ def main() -> None:
             f"已创建默认账号 {_auth.DEFAULT_ADMIN_USERNAME}/"
             f"{_auth.DEFAULT_ADMIN_PASSWORD}，上线后请立即修改密码"
         )
-    server = ThreadingHTTPServer((args.host, args.port), ConfigEditorHandler)
     url = f"http://{args.host}:{args.port}/"
-    print(f"CT 调度控制台：{url}")
-    if AUTH_REQUIRED:
-        print("已启用强制登录（CT_REQUIRE_AUTH=1），页面与接口需要登录。")
-    else:
-        print(
-            "当前为免登录模式：打开即用，无需登录；"
-            "对外部署请设置环境变量 CT_REQUIRE_AUTH=1 开启登录保护。"
-        )
-    # 预热工作区：旧版单文件（data/workspaces.json）存在时自动迁移为拆分目录。
+    # 仅在版本变化或检测到外部更新文件时整理工作区；完成标记使后续启动直接跳过。
     legacy_store = DATA_DIR / "workspaces.json"
     legacy_present = legacy_store.is_file()
-    list_workspace_devices()
+    if _workspace_data_update_required():
+        print("正在更新工作区数据…", end="", flush=True)
+        _prepare_workspace_data()
+        print(" 完成")
     if legacy_present:
         print(
             f"已自动迁移旧版工作区数据：{legacy_store.name} → {WORKSPACE_STORE_PATH.name}/ 拆分目录"
@@ -5955,6 +6302,16 @@ def main() -> None:
     print("正在预热算法缓存…", end="", flush=True)
     discover_other_algorithms()
     print(" 完成")
+    # 数据迁移和缓存预热全部完成后才开始监听，避免浏览器读到半迁移状态。
+    server = ThreadingHTTPServer((args.host, args.port), ConfigEditorHandler)
+    print(f"CT 调度控制台：{url}")
+    if AUTH_REQUIRED:
+        print("已启用强制登录（CT_REQUIRE_AUTH=1），页面与接口需要登录。")
+    else:
+        print(
+            "当前为免登录模式：打开即用，无需登录；"
+            "对外部署请设置环境变量 CT_REQUIRE_AUTH=1 开启登录保护。"
+        )
     print("按 Ctrl+C 停止服务")
     if args.open:
         webbrowser.open(url)

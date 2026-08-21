@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>调度平台</title>
   <link rel="stylesheet" href="/assets/katex.min.css?v=1.4.4">
-  <link rel="stylesheet" href="/assets/config_editor.css?v=1.4.7">
+  <link rel="stylesheet" href="/assets/config_editor.css?v=1.4.8">
 </head>
 <body>
   <a class="skip-link" href="#mainContent">跳到主要内容</a>
@@ -44,7 +44,7 @@
         </button>
         <span class="sidebar-footer-label">系统状态</span>
         <div class="service-pill" id="serviceState">本地服务</div>
-        <span class="frontend-version">前端 v1.4.7</span>
+        <span class="frontend-version">前端 v1.4.8</span>
         <a class="theme-toggle" id="adminUsersLink" href="/admin_users.html" hidden>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
           <span>用户管理</span>
@@ -300,6 +300,13 @@
         </div>
 
         <div class="tab-view" data-tab-view="route">
+          <aside class="route-update-card" role="note" aria-label="路径模板更新说明">
+            <div class="route-update-card-icon" aria-hidden="true">i</div>
+            <div>
+              <strong>路径模板与测试参数已分离</strong>
+              <p>这里仅维护路径使用的腔室。加工时间、QTime、驻留时间与 Clean 请在“排程”页选择模板后配置；修改测试参数不会影响模板或其他测试。</p>
+            </div>
+          </aside>
           <article class="panel">
             <div class="panel-head route-panel-head">
               <div><h2>路径配置</h2></div>
@@ -309,11 +316,8 @@
                     <select id="routeProcessFilter" data-compact-label="工序数"></select>
                   </div>
                   <div class="route-filter-field">
-                    <select id="routeParallelFilter" data-compact-label="并行机器数"></select>
+                    <select id="routeParallelFilter" data-compact-label="并行腔室结构"></select>
                   </div>
-                  <div class="route-filter-field route-property-filter"><select id="routeCleanFilter" data-compact-label="Clean" aria-label="Clean"><option value="all">全部清洁状态</option><option value="yes">有 Clean</option><option value="no">无 Clean</option></select></div>
-                  <div class="route-filter-field route-property-filter"><select id="routeResidencyFilter" data-compact-label="驻留时间" aria-label="驻留时间"><option value="all">全部驻留状态</option><option value="yes">有约束</option><option value="no">无约束</option></select></div>
-                  <div class="route-filter-field route-property-filter"><select id="routeQTimeFilter" data-compact-label="QTime" aria-label="QTime"><option value="all">全部 QTime 状态</option><option value="yes">已配置</option><option value="no">未配置</option></select></div>
                 </div>
                 <button class="btn small" data-action="add-route">＋ 路径</button>
               </div>
@@ -453,7 +457,6 @@
           <div class="run-box">
             <h2>开始运行</h2>
             <div class="run-options">
-              <label class="export-option"><input id="autoExportLog" type="checkbox">自动下载日志</label>
               <label class="export-option"><input id="skipValidationInput" type="checkbox" checked>跳过输出校验</label>
               <label class="export-option"><input id="skipBaselineInput" type="checkbox" checked>跳过Baseline</label>
             </div>
@@ -550,13 +553,12 @@
         <div><h3 id="pjobRouteDialogTitle">选择具体路径</h3><p id="pjobRouteDialogContext"></p></div>
         <button class="btn icon" type="button" id="pjobRouteDialogClose" aria-label="关闭路径选择">×</button>
       </header>
-      <div class="pjob-route-filter-grid" aria-label="路径筛选">
-        <label class="pjob-route-process-filter" for="pjobRouteProcess"><span>工序</span><select id="pjobRouteProcess" aria-label="工序"></select></label>
-        <label class="pjob-route-process-filter" for="pjobRouteCleanFilter"><span>Clean</span><select id="pjobRouteCleanFilter" aria-label="Clean"><option value="all">全部</option><option value="yes">有 Clean</option><option value="no">无 Clean</option></select></label>
-        <label class="pjob-route-process-filter" for="pjobRouteResidencyFilter"><span>驻留时间</span><select id="pjobRouteResidencyFilter" aria-label="驻留时间"><option value="all">全部</option><option value="yes">有约束</option><option value="no">无约束</option></select></label>
-        <label class="pjob-route-process-filter" for="pjobRouteQTimeFilter"><span>QTime</span><select id="pjobRouteQTimeFilter" aria-label="QTime"><option value="all">全部</option><option value="yes">已配置</option><option value="no">未配置</option></select></label>
+      <div class="pjob-route-filter-grid" id="pjobRouteFilterGrid" aria-label="路径筛选">
+        <label class="pjob-route-process-filter" for="pjobRouteProcess"><span>工序数</span><select id="pjobRouteProcess" aria-label="工序数"></select></label>
+        <label class="pjob-route-process-filter" for="pjobRouteParallel"><span>并行腔室结构</span><select id="pjobRouteParallel" aria-label="并行腔室结构"></select></label>
       </div>
       <div class="pjob-route-card-list" id="pjobRouteCardList" aria-label="候选路径"></div>
+      <div class="pjob-route-detail" id="pjobRouteDetail" aria-label="已选路径详情"></div>
     </section>
   </dialog>
 
@@ -657,14 +659,14 @@
   </dialog>
 
 
-  <div class="drawer-layer" id="drawerLayer">
+  <dialog class="drawer-layer" id="drawerLayer" aria-label="路径 Step 详细设置">
     <aside class="drawer" id="stepDrawer" aria-label="路径 Step 详细设置">
       <header class="drawer-head"><div><h2 id="drawerTitle">Step 详细设置</h2><p id="drawerSubtitle"></p></div><button class="btn icon" id="closeDrawer" aria-label="关闭">✕</button></header>
       <div class="drawer-body" id="drawerBody"></div>
     </aside>
-  </div>
+  </dialog>
 
-  <script type="module" src="/assets/config_editor.js?v=1.4.7"></script>
+  <script type="module" src="/assets/config_editor.js?v=1.4.8"></script>
   <script>
     // 管理员才显示“用户管理”入口。
     (function () {
