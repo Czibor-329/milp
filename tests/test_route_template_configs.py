@@ -69,7 +69,7 @@ def test_workspace_migration_copies_parameters_before_stripping_template() -> No
 
     device = catalog["devices"][0]
     template = device["routes"][0]
-    assert catalog["version"] == 4
+    assert catalog["version"] == server.WORKSPACE_STORE_VERSION
     assert "bufferOption" not in template
     assert template["stages"][1]["visits"] == [{"stationName": "PM1"}]
     test_case = device["tests"][0]
@@ -134,6 +134,79 @@ def test_route_save_endpoint_logic_renames_all_test_references(tmp_path) -> None
     test_case = result["tests"][0]
     assert test_case["rounds"][0]["cjobs"][0]["pjobs"][0]["routeRef"] == "PM1"
     assert list(test_case["routeConfigs"]) == ["PM1"]
+
+
+def test_device_overview_and_route_save_keep_large_test_payloads_lazy(tmp_path) -> None:
+    """切换设备和保存 Route 不应传输同设备下的其他完整测试集。"""
+    store_path = tmp_path / "workspaces.json"
+    route = server._normalized_workspace_routes([_legacy_route()])[0]
+    first_test = {
+        "id": "test-1", "name": "Test1", "group": "G1",
+        "routeConfigs": {"R1": server._workspace_route_test_config(_legacy_route())},
+        "rounds": [{"cjobs": [{"pjobs": [{"routeRef": "R1"}]}]}],
+    }
+    catalog = {
+        "version": 4,
+        "devices": [{
+            "id": "device-1", "device": {"Stations": {}, "Robots": {}},
+            "routes": [route], "cleans": [], "tests": [first_test],
+        }],
+    }
+    store_path.write_text(json.dumps(catalog, ensure_ascii=False), encoding="utf-8")
+
+    overview = server.get_workspace_device_overview("device-1", store_path)
+    assert overview["tests"] == [{"id": "test-1", "name": "Test1", "group": "G1"}]
+    assert server.get_workspace_test("device-1", "test-1", store_path)["rounds"]
+
+    result = server.update_workspace_routes(
+        "device-1", {"routes": [route]}, store_path, include_tests=False,
+    )
+    assert result["testCount"] == 1
+    assert "tests" not in result
+
+
+def test_directory_route_save_is_lazy_and_auto_migrates_old_store(tmp_path) -> None:
+    """目录存储升级后，模板改名不再重写历史测试，读取和执行时再解析别名。"""
+    store_dir = tmp_path / "workspaces"
+    device_dir = store_dir / "device-1"
+    tests_dir = device_dir / "tests"
+    tests_dir.mkdir(parents=True)
+    route = server._normalized_workspace_routes([_legacy_route()])[0]
+    test_case = {
+        "id": "test-1", "name": "Test1", "group": "",
+        "routeConfigs": {"R1": server._workspace_route_test_config(_legacy_route())},
+        "rounds": [{"cjobs": [{"pjobs": [{"routeRef": "R1"}]}]}],
+    }
+    (device_dir / "device.json").write_text(json.dumps({
+        "id": "device-1", "device": {"Stations": {}, "Robots": {}},
+        "routes": [route], "cleans": [],
+    }, ensure_ascii=False), encoding="utf-8")
+    (tests_dir / "test-1.json").write_text(
+        json.dumps(test_case, ensure_ascii=False), encoding="utf-8",
+    )
+    (tests_dir / server.WORKSPACE_TEST_INDEX_FILE).write_text(json.dumps([
+        {"id": "test-1", "name": "Test1", "group": ""},
+    ], ensure_ascii=False), encoding="utf-8")
+    (store_dir / server.WORKSPACE_STORE_VERSION_FILE).write_text(
+        json.dumps({"version": 4}), encoding="utf-8",
+    )
+
+    assert server._prepare_workspace_data(store_dir) is True
+    assert server._read_workspace_store_version(store_dir) == server.WORKSPACE_STORE_VERSION
+    renamed = {**route, "name": "R2"}
+    result = server.update_workspace_routes(
+        "device-1", {"routes": [renamed], "routeNameChanges": {"R1": "R2"}},
+        store_dir, include_tests=False,
+    )
+    assert result["testCount"] == 1
+    assert "tests" not in result
+    persisted_test = json.loads((tests_dir / "test-1.json").read_text(encoding="utf-8"))
+    assert persisted_test["rounds"][0]["cjobs"][0]["pjobs"][0]["routeRef"] == "R1"
+    assert server.get_workspace_test("device-1", "test-1", store_dir)["rounds"][0]["cjobs"][0]["pjobs"][0]["routeRef"] == "R2"
+    device = server.get_workspace_device("device-1", store_dir)
+    plan = batch_service.build_workspace_batch_plan(device, persisted_test, "heuristic", {})
+    assert plan["rounds"][0]["cjobs"][0]["pjobs"][0]["routeRef"] == "R2"
+    assert plan["routes"][0]["stages"][1]["visits"][0]["processTime"] == 37
 
 
 def test_workspace_migration_deduplicates_topology_and_preserves_referenced_config() -> None:

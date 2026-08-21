@@ -1823,7 +1823,6 @@ async function saveRoutes() {
     throw error;
   }
   state.workspaceDevice.routes = structuredClone(result.routes || state.routes);
-  if (Array.isArray(result.tests)) state.workspaceDevice.tests = structuredClone(result.tests);
   state.routes = structuredClone(result.routes || state.routes);
   state.routes.forEach(route => normalizeRoute(route));
   state.testRouteConfigs = normalizeTestRouteConfigs(state.testRouteConfigs, state.routes);
@@ -2025,8 +2024,11 @@ async function deleteCurrentTest() {
 /** 在当前设备中切换测试集，切换前自动保存当前编辑。 */
 async function selectWorkspaceTest(testId) {
   if (state.dirty) await saveCurrentTest(true);
-  const testCase = state.workspaceDevice?.tests?.find(test => test.id === testId);
-  if (!testCase) throw new Error(`测试集不存在：${testId}`);
+  const index = state.workspaceDevice?.tests?.findIndex(test => test.id === testId) ?? -1;
+  if (index < 0) throw new Error(`测试集不存在：${testId}`);
+  const result = await requestJson(`/api/workspaces/${state.workspaceDeviceId}/tests/${testId}`);
+  const testCase = result.test;
+  state.workspaceDevice.tests[index] = testCase;
   applyTestCase(testCase);
 }
 
@@ -2040,7 +2042,7 @@ async function selectWorkspaceGroup(group) {
     renderWorkspaceControls(); resetRunResult(); setWorkspaceStatus(`测试组别“${group || "未分组"}”暂无测试`, "saved");
     return;
   }
-  applyTestCase(testCase);
+  await selectWorkspaceTest(testCase.id);
 }
 
 /** 读取一个设备及其测试集；首次导入时自动建立默认测试集。 */
@@ -2060,7 +2062,7 @@ async function selectWorkspaceDevice(deviceId, preferredTestId = "") {
   }
   const summary = state.workspaceDevices.find(device => device.id === deviceId); if (summary) summary.testCount = state.workspaceDevice.tests.length;
   const selected = state.workspaceDevice.tests.find(test => test.id === preferredTestId) || state.workspaceDevice.tests[0];
-  applyTestCase(selected);
+  await selectWorkspaceTest(selected.id);
 }
 
 /** 加载设备目录，并选择指定设备或目录中的第一台设备。 */

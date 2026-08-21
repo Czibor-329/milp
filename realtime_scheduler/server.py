@@ -166,8 +166,9 @@ MAX_SAVED_BATCH_RUNS = 8
 MAX_SAVED_SINGLE_RUNS = 8
 MAX_CJOB_CYCLE = 1000
 CJOB_CYCLE_EVENT_EPSILON_MULTIPLIER = 2.0
-WORKSPACE_STORE_VERSION = 4
+WORKSPACE_STORE_VERSION = 5
 WORKSPACE_STORE_VERSION_FILE = ".workspace-version.json"
+WORKSPACE_TEST_INDEX_FILE = ".tests-index.json"
 API_SCHEMA_VERSION = "cjob-pjob-v3"
 HEURISTIC_BASELINE_SCHEMA_VERSION = "petri-look-dynamic-v1"
 FIRST_ROBOT_SLOT_ID = 1
@@ -3314,6 +3315,11 @@ def _workspace_store_version_path(store_dir: Path) -> Path:
     return store_dir / WORKSPACE_STORE_VERSION_FILE
 
 
+def _workspace_test_index_path(tests_dir: Path) -> Path:
+    """返回测试摘要索引路径；索引与完整测试文件分开，避免切换设备时全量读取。"""
+    return tests_dir / WORKSPACE_TEST_INDEX_FILE
+
+
 def _read_workspace_store_version(store_dir: Path) -> int:
     """读取拆分工作区已完成的迁移版本；缺失或损坏时按旧版本处理。"""
     try:
@@ -3938,6 +3944,10 @@ def _read_workspace_catalog_unlocked(path: Path) -> Dict[str, Any]:
         if changed:
             _write_workspace_catalog_unlocked(path, catalog)
         return catalog
+    # 已完成当前版本迁移且目录内容没有外部变更时，避免每次读取都遍历并
+    # 规范化所有测试集。路径模板的快速保存依赖此分支只读取必要文件。
+    if not _workspace_data_update_required(path):
+        return catalog
     changed = _migrate_workspace_catalog(catalog)
     if changed:
         _write_workspace_catalog_unlocked(path, catalog)
@@ -3971,6 +3981,8 @@ def _read_workspace_catalog_directory(store_dir: Path) -> Dict[str, Any]:
         tests_dir = device_dir / "tests"
         if tests_dir.is_dir():
             for test_file in sorted(tests_dir.glob("*.json")):
+                if test_file.name == WORKSPACE_TEST_INDEX_FILE:
+                    continue
                 try:
                     raw_test = json.loads(test_file.read_text(encoding="utf-8"))
                 except (OSError, json.JSONDecodeError) as error:
@@ -4172,6 +4184,14 @@ def _write_workspace_catalog_directory(store_dir: Path, catalog: Mapping[str, An
             if not test_id:
                 continue
             _write_json_if_changed(tests_dir / f"{test_id}.json", test)
+        _write_json_if_changed(
+            _workspace_test_index_path(tests_dir),
+            [
+                _workspace_test_summary(test_case)
+                for test_case in tests or []
+                if isinstance(test_case, Mapping)
+            ],
+        )
     _write_workspace_store_version(store_dir)
 
 
@@ -4210,6 +4230,181 @@ def get_workspace_device(device_id: str, path: Path = WORKSPACE_STORE_PATH) -> D
         if device is None:
             raise ValueError(f"设备不存在：{device_id}")
         return deepcopy(dict(device))
+
+
+def _workspace_test_summary(test_case: Mapping[str, Any]) -> Dict[str, Any]:
+    """返回设备切换所需的测试选择信息，不携带完整排程数据。"""
+    return {
+        "id": str(test_case.get("id") or ""),
+        "name": str(test_case.get("name") or "未命名测试集"),
+        "group": str(test_case.get("group") or ""),
+    }
+
+
+def _normalized_route_aliases(raw_aliases: Any) -> Dict[str, str]:
+    """规范化 Route 自动改名链，丢弃空值与无意义的自映射。"""
+    return {
+        str(old_name): str(new_name)
+        for old_name, new_name in (
+            raw_aliases.items() if isinstance(raw_aliases, Mapping) else []
+        )
+        if str(old_name) and str(new_name) and str(old_name) != str(new_name)
+    }
+
+
+def _resolve_route_alias(route_name: str, aliases: Mapping[str, str]) -> str:
+    """沿自动改名链得到最新模板名；异常循环保持原名以避免破坏历史数据。"""
+    current = route_name
+    visited = {current}
+    while current in aliases:
+        next_name = str(aliases[current] or "")
+        if not next_name or next_name in visited:
+            return route_name
+        visited.add(next_name)
+        current = next_name
+    return current
+
+
+def _apply_route_aliases_to_test(test_case: Dict[str, Any], aliases: Mapping[str, str]) -> None:
+    """在读取时延迟应用模板改名，避免保存时重写每个历史测试文件。"""
+    if not aliases:
+        return
+    for round_row in test_case.get("rounds") or []:
+        if not isinstance(round_row, Mapping):
+            continue
+        for cjob in round_row.get("cjobs") or []:
+            if not isinstance(cjob, Mapping):
+                continue
+            for pjob in cjob.get("pjobs") or []:
+                if not isinstance(pjob, dict):
+                    continue
+                route_ref = str(pjob.get("routeRef") or "")
+                pjob["routeRef"] = _resolve_route_alias(route_ref, aliases)
+    route_configs = test_case.get("routeConfigs")
+    if not isinstance(route_configs, dict):
+        return
+    for old_name in list(route_configs):
+        new_name = _resolve_route_alias(str(old_name), aliases)
+        if new_name == old_name:
+            continue
+        if new_name not in route_configs:
+            route_configs[new_name] = route_configs[old_name]
+        route_configs.pop(old_name, None)
+
+
+def _fast_workspace_device_overview_unlocked(
+    device_id: str,
+    path: Path,
+) -> Optional[Dict[str, Any]]:
+    """从已迁移的目录存储读取设备和测试摘要，不解析所有完整测试文件。"""
+    if (
+        path.suffix
+        or not re.fullmatch(r"[A-Za-z0-9_-]+", device_id)
+        or _workspace_data_update_required(path)
+    ):
+        return None
+    device_file = path / device_id / "device.json"
+    tests_dir = device_file.parent / "tests"
+    try:
+        device = json.loads(device_file.read_text(encoding="utf-8"))
+        summaries = json.loads(
+            _workspace_test_index_path(tests_dir).read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(device, dict) or not isinstance(summaries, list):
+        return None
+    if not all(isinstance(summary, Mapping) for summary in summaries):
+        return None
+    device["tests"] = [
+        _workspace_test_summary(summary) for summary in summaries
+    ]
+    return device
+
+
+def get_workspace_device_overview(
+    device_id: str,
+    path: Path = WORKSPACE_STORE_PATH,
+) -> Dict[str, Any]:
+    """读取设备拓扑、共享模板和测试摘要；完整测试在选中时按需读取。"""
+    with _workspace_catalog_guard(path):
+        overview = _fast_workspace_device_overview_unlocked(device_id, path)
+        if overview is not None:
+            return overview
+        catalog = _read_workspace_catalog_unlocked(path)
+        device = next((
+            item for item in catalog["devices"]
+            if isinstance(item, Mapping) and str(item.get("id")) == device_id
+        ), None)
+        if device is None:
+            raise ValueError(f"设备不存在：{device_id}")
+        summaries = [
+            _workspace_test_summary(test_case)
+            for test_case in device.get("tests") or []
+            if isinstance(test_case, Mapping)
+        ]
+        if path.suffix == "":
+            _write_json_if_changed(
+                _workspace_test_index_path(path / device_id / "tests"), summaries,
+            )
+            _write_workspace_store_version(path)
+        overview = deepcopy(dict(device))
+        overview["tests"] = summaries
+        return overview
+
+
+def get_workspace_test(
+    device_id: str,
+    test_id: str,
+    path: Path = WORKSPACE_STORE_PATH,
+) -> Dict[str, Any]:
+    """读取指定设备中的单个完整测试集，供前端延迟加载。"""
+    with _workspace_catalog_guard(path):
+        if (
+            not path.suffix
+            and re.fullmatch(r"[A-Za-z0-9_-]+", device_id)
+            and not _workspace_data_update_required(path)
+            and re.fullmatch(r"[A-Za-z0-9_-]+", test_id)
+        ):
+            try:
+                test_case = json.loads(
+                    (path / device_id / "tests" / f"{test_id}.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                test_case = None
+            if isinstance(test_case, dict) and str(test_case.get("id") or "") == test_id:
+                try:
+                    device = json.loads(
+                        (path / device_id / "device.json").read_text(encoding="utf-8")
+                    )
+                except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                    device = {}
+                _apply_route_aliases_to_test(
+                    test_case,
+                    _normalized_route_aliases(device.get("routeAliases"))
+                    if isinstance(device, Mapping) else {},
+                )
+                return test_case
+        catalog = _read_workspace_catalog_unlocked(path)
+        device = next((
+            item for item in catalog["devices"]
+            if isinstance(item, Mapping) and str(item.get("id")) == device_id
+        ), None)
+        if device is None:
+            raise ValueError(f"设备不存在：{device_id}")
+        test_case = next((
+            item for item in device.get("tests") or []
+            if isinstance(item, Mapping) and str(item.get("id") or "") == test_id
+        ), None)
+        if test_case is None:
+            raise ValueError(f"测试集不存在：{test_id}")
+        resolved = deepcopy(dict(test_case))
+        _apply_route_aliases_to_test(
+            resolved, _normalized_route_aliases(device.get("routeAliases")),
+        )
+        return resolved
 
 
 def delete_workspace_device(device_id: str, path: Path = WORKSPACE_STORE_PATH) -> Dict[str, Any]:
@@ -4904,13 +5099,81 @@ def _apply_device_library(device: Dict[str, Any], payload: Mapping[str, Any]) ->
     device.setdefault("cleans", [])
 
 
+def _fast_update_directory_workspace_routes_unlocked(
+    device_id: str,
+    payload: Mapping[str, Any],
+    path: Path,
+) -> Optional[Dict[str, Any]]:
+    """快速保存未改名的模板编辑，只触碰设备库文件而不遍历全部测试。"""
+    if (
+        path.suffix
+        or not re.fullmatch(r"[A-Za-z0-9_-]+", device_id)
+        or _workspace_data_update_required(path)
+        or not isinstance(payload.get("routes"), list)
+    ):
+        return None
+    device_file = path / device_id / "device.json"
+    try:
+        device = json.loads(device_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(device, dict):
+        return None
+    routes = _normalized_workspace_routes(payload["routes"])
+    topology_keys = [
+        _workspace_route_topology_key(route)
+        for route in routes
+        if isinstance(route, Mapping)
+    ]
+    if len(topology_keys) != len(set(topology_keys)):
+        # 合并重复模板需要检查每个测试参数是否冲突，保持原有安全逻辑。
+        return None
+    device["routes"] = routes
+    device.setdefault("cleans", [])
+    aliases = _normalized_route_aliases(payload.get("routeNameChanges"))
+    if aliases:
+        route_aliases = _normalized_route_aliases(device.get("routeAliases"))
+        for old_name, new_name in aliases.items():
+            for origin, current in list(route_aliases.items()):
+                if current == old_name:
+                    route_aliases[origin] = new_name
+            route_aliases[old_name] = new_name
+        device["routeAliases"] = route_aliases
+    device["updatedAt"] = _workspace_timestamp()
+    _write_json_atomic(device_file, device)
+    if path == WORKSPACE_STORE_PATH and isinstance(device.get("device"), Mapping):
+        _write_json_atomic(DEVICE_INIT_DIR / f"{device_id}.json", device["device"])
+    try:
+        summaries = json.loads(
+            _workspace_test_index_path(device_file.parent / "tests").read_text(
+                encoding="utf-8"
+            )
+        )
+        test_count = len(summaries) if isinstance(summaries, list) else 0
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        test_count = 0
+    _write_workspace_store_version(path)
+    return {"routes": deepcopy(routes), "testCount": test_count}
+
+
 def update_workspace_routes(
     device_id: str,
     payload: Mapping[str, Any],
     path: Path = WORKSPACE_STORE_PATH,
+    *,
+    include_tests: bool = True,
 ) -> Dict[str, Any]:
-    """保存设备级路径模板，并把自动改名同步到所有测试引用和配置键。"""
+    """保存设备级路径模板，并把自动改名同步到所有测试引用和配置键。
+
+    HTTP 调用不需要回传每个完整测试集；设备测试较多时这会显著拖慢保存。
+    保留 ``include_tests`` 以兼容服务端调用方和已有测试。
+    """
     with _workspace_catalog_guard(path):
+        fast_result = _fast_update_directory_workspace_routes_unlocked(
+            device_id, payload, path,
+        )
+        if fast_result is not None:
+            return fast_result
         catalog = _read_workspace_catalog_unlocked(path)
         device = next(
             (item for item in catalog["devices"] if item.get("id") == device_id),
@@ -4926,10 +5189,13 @@ def update_workspace_routes(
         _invalidate_stale_device_baselines(device)
         device["updatedAt"] = _workspace_timestamp()
         _write_workspace_catalog_unlocked(path, catalog)
-        return {
+        result = {
             "routes": deepcopy(device.get("routes") or []),
-            "tests": deepcopy(device.get("tests") or []),
+            "testCount": len(device.get("tests") or []),
         }
+        if include_tests:
+            result["tests"] = deepcopy(device.get("tests") or [])
+        return result
 
 
 def create_workspace_test(
@@ -5432,9 +5698,15 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             return
         if path.startswith("/api/workspaces/"):
             parts = [part for part in path.split("/") if part]
+            if len(parts) == 5 and parts[:2] == ["api", "workspaces"] and parts[3] == "tests":
+                try:
+                    self._send_json({"ok": True, "test": get_workspace_test(parts[2], parts[4])})
+                except Exception as error:  # noqa: BLE001
+                    self._send_json({"ok": False, "error": str(error)}, HTTPStatus.NOT_FOUND)
+                return
             if len(parts) == 3:
                 try:
-                    self._send_json({"ok": True, "device": get_workspace_device(parts[2])})
+                    self._send_json({"ok": True, "device": get_workspace_device_overview(parts[2])})
                 except Exception as error:  # noqa: BLE001
                     self._send_json({"ok": False, "error": str(error)}, HTTPStatus.NOT_FOUND)
                 return
@@ -5858,7 +6130,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
         if len(parts) == 4 and parts[:2] == ["api", "workspaces"] and parts[3] == "routes":
             try:
                 payload = self._read_json_object()
-                result = update_workspace_routes(parts[2], payload)
+                result = update_workspace_routes(parts[2], payload, include_tests=False)
                 self._send_json({"ok": True, **result})
             except Exception as error:  # noqa: BLE001
                 self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)

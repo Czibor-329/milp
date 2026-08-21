@@ -19533,7 +19533,6 @@ async function saveRoutes() {
     throw error;
   }
   state.workspaceDevice.routes = structuredClone(result.routes || state.routes);
-  if (Array.isArray(result.tests)) state.workspaceDevice.tests = structuredClone(result.tests);
   state.routes = structuredClone(result.routes || state.routes);
   state.routes.forEach((route) => normalizeRoute(route));
   state.testRouteConfigs = normalizeTestRouteConfigs(state.testRouteConfigs, state.routes);
@@ -19734,8 +19733,11 @@ async function deleteCurrentTest() {
 }
 async function selectWorkspaceTest(testId) {
   if (state.dirty) await saveCurrentTest(true);
-  const testCase = state.workspaceDevice?.tests?.find((test) => test.id === testId);
-  if (!testCase) throw new Error(`\u6D4B\u8BD5\u96C6\u4E0D\u5B58\u5728\uFF1A${testId}`);
+  const index = state.workspaceDevice?.tests?.findIndex((test) => test.id === testId) ?? -1;
+  if (index < 0) throw new Error(`\u6D4B\u8BD5\u96C6\u4E0D\u5B58\u5728\uFF1A${testId}`);
+  const result = await requestJson(`/api/workspaces/${state.workspaceDeviceId}/tests/${testId}`);
+  const testCase = result.test;
+  state.workspaceDevice.tests[index] = testCase;
   applyTestCase(testCase);
 }
 async function selectWorkspaceGroup(group) {
@@ -19752,7 +19754,7 @@ async function selectWorkspaceGroup(group) {
     setWorkspaceStatus(`\u6D4B\u8BD5\u7EC4\u522B\u201C${group || "\u672A\u5206\u7EC4"}\u201D\u6682\u65E0\u6D4B\u8BD5`, "saved");
     return;
   }
-  applyTestCase(testCase);
+  await selectWorkspaceTest(testCase.id);
 }
 async function selectWorkspaceDevice(deviceId, preferredTestId = "") {
   const result = await requestJson(`/api/workspaces/${deviceId}`);
@@ -19775,7 +19777,7 @@ async function selectWorkspaceDevice(deviceId, preferredTestId = "") {
   const summary = state.workspaceDevices.find((device) => device.id === deviceId);
   if (summary) summary.testCount = state.workspaceDevice.tests.length;
   const selected = state.workspaceDevice.tests.find((test) => test.id === preferredTestId) || state.workspaceDevice.tests[0];
-  applyTestCase(selected);
+  await selectWorkspaceTest(selected.id);
 }
 async function loadWorkspaceCatalog(preferredDeviceId = "", preferredTestId = "") {
   const result = await requestJson("/api/workspaces");

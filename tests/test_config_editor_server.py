@@ -293,19 +293,19 @@ class RecomputeFailureOutputTests(unittest.TestCase):
         self.assertIn("!rec.removedByRecompute", viewer)
         self.assertIn('fillOpacity = bar.rec.removedByRecompute ? "0.24" : "1"', viewer)
 
-    def test_frontend_version_and_cache_keys_are_1_4_11(self) -> None:
+    def test_frontend_version_and_cache_keys_are_1_4_12(self) -> None:
         """前端显示版本、包版本和主资源缓存键必须同步。"""
         frontend_root = ROOT / "realtime_scheduler" / "frontend"
         template = (frontend_root / "config_editor.html").read_text(encoding="utf-8")
         package = json.loads((frontend_root / "package.json").read_text(encoding="utf-8"))
         package_lock = json.loads((frontend_root / "package-lock.json").read_text(encoding="utf-8"))
 
-        self.assertEqual("1.4.11", package["version"])
-        self.assertEqual("1.4.11", package_lock["version"])
-        self.assertEqual("1.4.11", package_lock["packages"][""]["version"])
-        self.assertIn('class="frontend-version">前端 v1.4.11</span>', template)
-        self.assertIn('/assets/config_editor.css?v=1.4.11', template)
-        self.assertIn('/assets/config_editor.js?v=1.4.11', template)
+        self.assertEqual("1.4.12", package["version"])
+        self.assertEqual("1.4.12", package_lock["version"])
+        self.assertEqual("1.4.12", package_lock["packages"][""]["version"])
+        self.assertIn('class="frontend-version">前端 v1.4.12</span>', template)
+        self.assertIn('/assets/config_editor.css?v=1.4.12', template)
+        self.assertIn('/assets/config_editor.js?v=1.4.12', template)
 
     def test_recompute_preparation_error_keeps_last_successful_movelist(self) -> None:
         """算法调用前的旧计划回放异常也应返回上一代诊断甘特图。"""
@@ -1854,7 +1854,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("<span>结果分析</span>", html)
         self.assertIn("<span>路径配置</span>", html)
         self.assertNotIn('data-tab-view="clean"', html)
-        self.assertIn('class="frontend-version">前端 v1.4.11</span>', html)
+        self.assertIn('class="frontend-version">前端 v1.4.12</span>', html)
         self.assertIn('data-option="residencyGuardSeconds"', html)
         self.assertIn('data-option="maximumRobotHoldingSeconds"', html)
         self.assertIn('data-option="maximumSystemResidenceCv"', html)
@@ -3188,7 +3188,7 @@ class ConfigEditorServerTests(unittest.TestCase):
             self.assertTrue(all("routes" not in test for test in loaded["tests"]))
             self.assertTrue(all("routeConfigs" in test and "cleans" in test for test in loaded["tests"]))
             migrated = json.loads(store_path.read_text(encoding="utf-8"))
-            self.assertEqual(4, migrated["version"])
+            self.assertEqual(config_server.WORKSPACE_STORE_VERSION, migrated["version"])
 
     def test_nested_rounds_persist_without_reordering(self) -> None:
         """多轮、多 CJob/PJob 保存后重新读取，应保留时间与归属并重算只读字段。"""

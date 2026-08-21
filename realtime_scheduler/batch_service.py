@@ -272,6 +272,55 @@ def _batch_test_routes(
     ]
 
 
+def _resolve_route_alias(route_name: str, aliases: Mapping[str, Any]) -> str:
+    """解析设备级模板改名链，保留循环或损坏数据的原始引用。"""
+    current = route_name
+    visited = {current}
+    while current in aliases:
+        next_name = str(aliases[current] or "")
+        if not next_name or next_name in visited:
+            return route_name
+        visited.add(next_name)
+        current = next_name
+    return current
+
+
+def _apply_device_route_aliases(
+    test_case: Mapping[str, Any],
+    raw_aliases: Any,
+) -> Dict[str, Any]:
+    """在执行前补应用模板改名，避免模板保存时全量改写历史测试。"""
+    aliases = {
+        str(old_name): str(new_name)
+        for old_name, new_name in (
+            raw_aliases.items() if isinstance(raw_aliases, Mapping) else []
+        )
+        if str(old_name) and str(new_name) and str(old_name) != str(new_name)
+    }
+    resolved = deepcopy(dict(test_case))
+    if not aliases:
+        return resolved
+    for round_row in resolved.get("rounds") or []:
+        if not isinstance(round_row, Mapping):
+            continue
+        for cjob in round_row.get("cjobs") or []:
+            if not isinstance(cjob, Mapping):
+                continue
+            for pjob in cjob.get("pjobs") or []:
+                if isinstance(pjob, dict):
+                    pjob["routeRef"] = _resolve_route_alias(
+                        str(pjob.get("routeRef") or ""), aliases,
+                    )
+    configs = resolved.get("routeConfigs")
+    if isinstance(configs, dict):
+        for old_name in list(configs):
+            new_name = _resolve_route_alias(str(old_name), aliases)
+            if new_name != old_name:
+                configs.setdefault(new_name, configs[old_name])
+                configs.pop(old_name, None)
+    return resolved
+
+
 def _batch_apply_route_configs(
     routes: Sequence[Mapping[str, Any]],
     raw_configs: Any,
@@ -425,6 +474,9 @@ def build_workspace_batch_plan(
     skip_validation: bool = False,
 ) -> Dict[str, Any]:
     """将持久化测试与设备共享库组合成可直接执行的单次请求。"""
+    test_case = _apply_device_route_aliases(
+        test_case, device.get("routeAliases"),
+    )
     rounds = [
         deepcopy(dict(row))
         for row in (test_case.get("rounds") or [])
