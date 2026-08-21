@@ -70,8 +70,6 @@ const PROCESSING_STATION_TYPES = new Set([
 const FIRST_ROBOT_SLOT_ID = 1;
 const DUAL_ARM_SLOT_COUNT = 2;
 const SEARCH_TELEMETRY_POLL_MILLISECONDS = 75;
-const SERVICE_HEALTHCHECK_INTERVAL_MILLISECONDS = 3000;
-const SERVICE_HEALTHCHECK_TIMEOUT_MILLISECONDS = 2000;
 const STATION_ACTION_TIME_FIELDS = [
   { key: "PickPrepareTime", label: "取片准备" },
   { key: "PickCompleteTime", label: "取片完成" },
@@ -110,8 +108,6 @@ let lastSearchTelemetryMoveCount = 0;
 let continuousDecisionEnabled = false;
 /** 已由持续决策提交的 searchId；防止同一遥测帧被轮询重复提交。 */
 let continuousDecisionSubmittedSearchId = "";
-let serviceCheckInFlight = false;
-let serviceConnectionState = "checking";
 /** 拓扑回放页面的求解模式：回放模式连续求解，步进模式等待用户选择根动作。 */
 let playbackMode = "replay";
 /** 用户最近一次 choose 的根动作键；用于回放历史时高亮实际执行的动作。 */
@@ -4580,27 +4576,16 @@ function writeTerminal(message, error = false) {
 }
 
 /** 检查本地服务以及内置策略模型可用性。 */
-async function checkService(options = {}) {
-  if (serviceCheckInFlight) return;
-  serviceCheckInFlight = true;
+async function checkService() {
+  const pill = document.getElementById("serviceState");
   const runButton = document.getElementById("runButton");
   const batchRunButton = document.getElementById("batchRunButton");
   const comparisonButton = document.getElementById("openParameterComparisonDialogButton");
-  const previousConnectionState = serviceConnectionState;
-  const controller = new AbortController();
-  const timeout = window.setTimeout(
-    () => controller.abort(),
-    SERVICE_HEALTHCHECK_TIMEOUT_MILLISECONDS,
-  );
   try {
-    const response = await fetch("/api/health", {
-      cache: "no-store",
-      signal: controller.signal,
-    });
+    const response = await fetch("/api/health", { cache: "no-store" });
     if (!response.ok) throw new Error();
     const status = await response.json(), compatible = status.schemaVersion === EXPECTED_API_SCHEMA;
     state.serviceCompatible = compatible;
-    serviceConnectionState = compatible ? "connected" : "incompatible";
     const e2eCTQAvailable = status.strategies?.["e2e-ctq"] === true, dualActorE2EAvailable = status.strategies?.["dual-actor-e2e"] === true;
     state.algorithmMetadata = status.algorithmMetadata || {};
     const replayModelSelect = document.getElementById("visualRecommendationModel");
@@ -4610,9 +4595,7 @@ async function checkService(options = {}) {
       replayModelSelect.value = dualActorE2EAvailable ? "dual-actor-e2e" : "e2e-ctq";
       replayModelSelect.dispatchEvent(new Event("change"));
     }
-    if (options.refreshCatalog !== false || previousConnectionState !== "connected") {
-      renderOtherAlgorithmOptions(status.algorithms || status.otherAlgorithms || []);
-    }
+    renderOtherAlgorithmOptions(status.algorithms || status.otherAlgorithms || []);
     runButton.disabled = !compatible || singleRunCancelling || state.batchRunning;
     batchRunButton.disabled = !compatible || singleRunActive || (state.batchRunning && state.batchCancelRequested);
     comparisonButton.disabled = !compatible || state.batchRunning || !state.parameterComparison?.baseline;
@@ -4620,39 +4603,24 @@ async function checkService(options = {}) {
       ? false
       : !compatible || state.strategy !== "schedule-alphago";
     renderWorkspaceControls();
+    pill.textContent = compatible ? "本地服务已连接" : "服务版本过旧";
     if (!compatible) {
-      if (previousConnectionState !== "incompatible") {
-        writeTerminal("$ 本地服务版本过旧\n  请重启: py scripts/config_editor_server.py", true);
-      }
+      pill.style.color = "var(--red)"; pill.style.background = "var(--red-soft)";
+      writeTerminal("$ 本地服务版本过旧\n  请重启: py scripts/config_editor_server.py", true);
     }
   }
   catch {
     state.serviceCompatible = false;
-    serviceConnectionState = "disconnected";
     runButton.disabled = true;
     batchRunButton.disabled = true;
     comparisonButton.disabled = true;
     document.getElementById("stepRunButton").disabled = true;
     renderWorkspaceControls();
-    if (previousConnectionState !== "disconnected") {
-      writeTerminal("$ 无法连接本地服务\n  请运行: py scripts/config_editor_server.py", true);
-    }
-  } finally {
-    window.clearTimeout(timeout);
-    serviceCheckInFlight = false;
+    pill.textContent = "本地服务未连接";
+    pill.style.color = "var(--red)";
+    pill.style.background = "var(--red-soft)";
+    writeTerminal("$ 无法连接本地服务\n  请运行: py scripts/config_editor_server.py", true);
   }
-}
-
-/** 持续心跳；标签页恢复可见时立即复查服务可用性与运行按钮状态。 */
-function startServiceHealthcheck() {
-  window.setInterval(
-    () => void checkService({ refreshCatalog: false }),
-    SERVICE_HEALTHCHECK_INTERVAL_MILLISECONDS,
-  );
-  document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) void checkService({ refreshCatalog: false });
-  });
-  window.addEventListener("focus", () => void checkService({ refreshCatalog: false }));
 }
 
 document.getElementById("workspaceDialogCancel").addEventListener("click", () => document.getElementById("workspaceDialog").close("cancel"));
@@ -4941,4 +4909,4 @@ window.addEventListener("pagehide", () => {
 });
 
 initializeCompactSelects();
-renderAll(); renderWorkspaceControls(); renderDeviceTimingConfiguration(); checkService(); startServiceHealthcheck(); loadWorkspaceCatalog().catch(error => setWorkspaceStatus(`测试集读取失败：${error.message}`, "dirty"));
+renderAll(); renderWorkspaceControls(); renderDeviceTimingConfiguration(); checkService(); loadWorkspaceCatalog().catch(error => setWorkspaceStatus(`测试集读取失败：${error.message}`, "dirty"));

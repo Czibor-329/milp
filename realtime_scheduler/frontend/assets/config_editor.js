@@ -17992,8 +17992,6 @@ var PROCESSING_STATION_TYPES = /* @__PURE__ */ new Set([
 var FIRST_ROBOT_SLOT_ID = 1;
 var DUAL_ARM_SLOT_COUNT = 2;
 var SEARCH_TELEMETRY_POLL_MILLISECONDS = 75;
-var SERVICE_HEALTHCHECK_INTERVAL_MILLISECONDS = 3e3;
-var SERVICE_HEALTHCHECK_TIMEOUT_MILLISECONDS = 2e3;
 var STATION_ACTION_TIME_FIELDS = [
   { key: "PickPrepareTime", label: "\u53D6\u7247\u51C6\u5907" },
   { key: "PickCompleteTime", label: "\u53D6\u7247\u5B8C\u6210" },
@@ -18075,8 +18073,6 @@ var searchTelemetryControlPending = false;
 var lastSearchTelemetryMoveCount = 0;
 var continuousDecisionEnabled = false;
 var continuousDecisionSubmittedSearchId = "";
-var serviceCheckInFlight = false;
-var serviceConnectionState = "checking";
 var playbackMode = "replay";
 var userChosenActionKey = "";
 var userChosenSearchId = "";
@@ -22123,27 +22119,16 @@ function writeTerminal(message, error = false) {
   terminal.textContent = String(message || "\u672A\u77E5\u9519\u8BEF").replace(/^\$\s*/, "");
   panel.hidden = false;
 }
-async function checkService(options = {}) {
-  if (serviceCheckInFlight) return;
-  serviceCheckInFlight = true;
+async function checkService() {
+  const pill = document.getElementById("serviceState");
   const runButton = document.getElementById("runButton");
   const batchRunButton = document.getElementById("batchRunButton");
   const comparisonButton = document.getElementById("openParameterComparisonDialogButton");
-  const previousConnectionState = serviceConnectionState;
-  const controller = new AbortController();
-  const timeout = window.setTimeout(
-    () => controller.abort(),
-    SERVICE_HEALTHCHECK_TIMEOUT_MILLISECONDS
-  );
   try {
-    const response = await fetch("/api/health", {
-      cache: "no-store",
-      signal: controller.signal
-    });
+    const response = await fetch("/api/health", { cache: "no-store" });
     if (!response.ok) throw new Error();
     const status = await response.json(), compatible = status.schemaVersion === EXPECTED_API_SCHEMA;
     state.serviceCompatible = compatible;
-    serviceConnectionState = compatible ? "connected" : "incompatible";
     const e2eCTQAvailable = status.strategies?.["e2e-ctq"] === true, dualActorE2EAvailable = status.strategies?.["dual-actor-e2e"] === true;
     state.algorithmMetadata = status.algorithmMetadata || {};
     const replayModelSelect = document.getElementById("visualRecommendationModel");
@@ -22153,44 +22138,30 @@ async function checkService(options = {}) {
       replayModelSelect.value = dualActorE2EAvailable ? "dual-actor-e2e" : "e2e-ctq";
       replayModelSelect.dispatchEvent(new Event("change"));
     }
-    if (options.refreshCatalog !== false || previousConnectionState !== "connected") {
-      renderOtherAlgorithmOptions(status.algorithms || status.otherAlgorithms || []);
-    }
+    renderOtherAlgorithmOptions(status.algorithms || status.otherAlgorithms || []);
     runButton.disabled = !compatible || singleRunCancelling || state.batchRunning;
     batchRunButton.disabled = !compatible || singleRunActive || state.batchRunning && state.batchCancelRequested;
     comparisonButton.disabled = !compatible || state.batchRunning || !state.parameterComparison?.baseline;
     document.getElementById("stepRunButton").disabled = stepRunActive ? false : !compatible || state.strategy !== "schedule-alphago";
     renderWorkspaceControls();
+    pill.textContent = compatible ? "\u672C\u5730\u670D\u52A1\u5DF2\u8FDE\u63A5" : "\u670D\u52A1\u7248\u672C\u8FC7\u65E7";
     if (!compatible) {
-      if (previousConnectionState !== "incompatible") {
-        writeTerminal("$ \u672C\u5730\u670D\u52A1\u7248\u672C\u8FC7\u65E7\n  \u8BF7\u91CD\u542F: py scripts/config_editor_server.py", true);
-      }
+      pill.style.color = "var(--red)";
+      pill.style.background = "var(--red-soft)";
+      writeTerminal("$ \u672C\u5730\u670D\u52A1\u7248\u672C\u8FC7\u65E7\n  \u8BF7\u91CD\u542F: py scripts/config_editor_server.py", true);
     }
   } catch {
     state.serviceCompatible = false;
-    serviceConnectionState = "disconnected";
     runButton.disabled = true;
     batchRunButton.disabled = true;
     comparisonButton.disabled = true;
     document.getElementById("stepRunButton").disabled = true;
     renderWorkspaceControls();
-    if (previousConnectionState !== "disconnected") {
-      writeTerminal("$ \u65E0\u6CD5\u8FDE\u63A5\u672C\u5730\u670D\u52A1\n  \u8BF7\u8FD0\u884C: py scripts/config_editor_server.py", true);
-    }
-  } finally {
-    window.clearTimeout(timeout);
-    serviceCheckInFlight = false;
+    pill.textContent = "\u672C\u5730\u670D\u52A1\u672A\u8FDE\u63A5";
+    pill.style.color = "var(--red)";
+    pill.style.background = "var(--red-soft)";
+    writeTerminal("$ \u65E0\u6CD5\u8FDE\u63A5\u672C\u5730\u670D\u52A1\n  \u8BF7\u8FD0\u884C: py scripts/config_editor_server.py", true);
   }
-}
-function startServiceHealthcheck() {
-  window.setInterval(
-    () => void checkService({ refreshCatalog: false }),
-    SERVICE_HEALTHCHECK_INTERVAL_MILLISECONDS
-  );
-  document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) void checkService({ refreshCatalog: false });
-  });
-  window.addEventListener("focus", () => void checkService({ refreshCatalog: false }));
 }
 document.getElementById("workspaceDialogCancel").addEventListener("click", () => document.getElementById("workspaceDialog").close("cancel"));
 var batchErrorDialog = document.getElementById("batchErrorDialog");
@@ -22550,5 +22521,4 @@ renderAll();
 renderWorkspaceControls();
 renderDeviceTimingConfiguration();
 checkService();
-startServiceHealthcheck();
 loadWorkspaceCatalog().catch((error) => setWorkspaceStatus(`\u6D4B\u8BD5\u96C6\u8BFB\u53D6\u5931\u8D25\uFF1A${error.message}`, "dirty"));
