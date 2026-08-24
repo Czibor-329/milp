@@ -18,8 +18,7 @@ milp/
 │   └── alg-heuristic-20260813-7750ba9.zip
 ├── realtime_scheduler/
 │   ├── data/                         # 由 data.rar 解压得到，各目录含义见「数据说明」
-│   │   ├── workspaces/               # 工作区数据（拆分目录，见「数据说明」）
-│   │   └── devices/                  # 设备拓扑镜像
+│   │   └── datasets/                 # 设备与测试集的唯一主数据
 │   └── exports/                      # 运行结果与复现日志（可随时清理）
 └── alg/                              # 由启发式算法包解压得到
     ├── src/
@@ -55,36 +54,42 @@ $env:CT_OTHER_ALGORITHM_ROOT = "D:\path\to\alg\other_alg"
 
 ## 数据说明
 
-`realtime_scheduler/data/` 由 `docs\data.rar` 解压得到（初始包含
-`workspaces/`、`devices/` 与 `.gitignore`），之后由服务自动维护；整个目录
-不在 Git 版本控制中。目录结构：
+> [!NOTE]
+>
+> 分享设备/测试不需要查看、复制或修改 `realtime_scheduler/data/`。设备和测试集的交换统一在页面“设备与测试集”卡片中使用“导入 / 导出”：设备导出包含该设备下的全部信息；测试集导出只包含当前测试，导入时必须先选择 init 完全相同的设备。
+>
+
+`realtime_scheduler/data/` 由服务自动维护，整个目录不在 Git 版本控制中。简化结构：
 
 ```text
 data/
 ├── .gitignore                      # 数据目录整体不进 Git
-├── workspaces/                     # 工作区数据：设备、路线、清洁配方与测试集
-├── devices/                        # 设备拓扑镜像（由 data.rar 提供，服务自动刷新）
+├── datasets/                       # 设备与测试集的唯一主数据，格式版本见 manifest.json
 ├── checkpoints/                    # 页面上传的模型检查点文件（运行时产生）
 ├── documentation/                  # 本地使用手册（Markdown）
+├── migration-backups/              # 自动升级前的旧数据备份
 ├── registered_algorithms/          # 页面登记的单个算法源文件（运行时产生）
 ├── registered_algorithms.json      # 页面登记的算法索引（运行时产生）
 └── *.lock                          # 运行时文件锁
 ```
 
-- **workspaces/**：设备、路线、清洁配方与测试集，按设备拆分目录、按测试集拆分文件：
-  
+- **datasets/**：内部使用稳定 UUID 寻址。UUID 和实际文件布局不是用户接口，请勿通过手工复制目录分享数据。
+
   ```text
-  data/workspaces/
+  data/datasets/
+  ├── manifest.json                  # 数据格式及 schemaVersion
   └── <设备 id>/
-      ├── device.json                 # 设备拓扑 + 共享路线/清洁配方 + 组别
+      ├── metadata.json               # 设备名称、ID、时间戳及兼容初始化选项
+      ├── device.json                 # 纯 init，只包含 Stations 和 Robots
+      ├── routes.json                 # 设备路径模板与共享配置
+      ├── groups.json                 # 测试组别与设备级页面配置
       └── tests/
-          └── <测试集 id>.json        # 单个测试集
+          └── <测试集 id>/
+              └── test.json           # 单个测试集
   ```
-  
-  - **分享整台设备**（含其全部测试集）：拷贝整个 `<设备 id>/` 目录。
-  
-- **devices/**：按设备 ID 独立保存的设备拓扑镜像，由服务在保存工作区时自动刷新，供外部工具读取，无需手工维护。
-  
+
+旧版 `workspaces/` 和 `devices/` 会在首次启动时自动迁移到 v6；原目录移入`migration-backups/`，确认新版数据正常后可由维护人员清理。详细格式、交换包和迁移规则见 [`docs/data-format.md`](docs/data-format.md)。
+
 - **checkpoints/**：页面上传的模型检查点文件（仅支持 `.npz/.pt/.pth/.ckpt`）。浏览器不会提供用户选择文件的真实路径，因此服务把文件复制到该目录，并返回算法运行时可读取的绝对路径。
   
 - **documentation/**：本地使用手册，`*.md` 文件由页面「文档」面板通过`/api/documentation` 加载展示。算法仓库维护的接口文档可放在算法包的`docs/documentation/`，两者共用导航与 slug 唯一性校验。

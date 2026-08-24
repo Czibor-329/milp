@@ -27,7 +27,7 @@
 | `realtime_scheduler/algorithm_interface.py` | 发现和调用独立算法包 | 工作区和页面渲染 |
 | `realtime_scheduler/batch_service.py` | 批量运行、Baseline、并发状态 | HTML、浏览器存储 |
 | `realtime_scheduler/server.py` | 组合现有应用服务并暴露 HTTP API | 页面分析逻辑 |
-| `realtime_scheduler/data/` | 设备、共享路径模板、测试独有的 Route 参数/Clean 与任务 | 浏览器缓存 |
+| `realtime_scheduler/data/datasets/` | 设备 init、共享路径模板、测试独有的 Route 参数/Clean 与任务的唯一主数据 | 浏览器缓存、设备镜像 |
 | `realtime_scheduler/exports/` | MoveList 结果和复现日志 | 前端临时状态 |
 
 `realtime_scheduler/analysis/` 中的 TypeScript/JavaScript 只用于旧 Node 回归测试
@@ -79,3 +79,5 @@ HTTP 契约提供给前端。
 6. 服务启动时必须先完成工作区迁移与重复模板清理，再创建 HTTP 监听器；迁移过程
    需要同步全部测试的 `routeRef` 和 `routeConfigs`，有参数冲突时不得强制合并。拆分目录
    必须持久化迁移版本，当前版本且数据文件未更新时不得重复执行启动迁移。
+7. 用户通过前端导入/导出交换设备或测试集；浏览器和用户均不得直接操作
+   `data/datasets/`。测试集导入必须校验目标设备 init 指纹并安全合并引用路径。

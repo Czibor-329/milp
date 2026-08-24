@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>调度平台</title>
   <link rel="stylesheet" href="/assets/katex.min.css?v=1.4.4">
-  <link rel="stylesheet" href="/assets/config_editor.css?v=1.4.13">
+  <link rel="stylesheet" href="/assets/config_editor.css?v=1.4.14">
 </head>
 <body>
   <a class="skip-link" href="#mainContent">跳到主要内容</a>
@@ -40,7 +40,7 @@
       <div class="sidebar-footer">
         <span class="sidebar-footer-label">系统状态</span>
         <div class="service-pill" id="serviceState">本地服务</div>
-        <span class="frontend-version">前端 v1.4.13</span>
+        <span class="frontend-version">前端 v1.4.14</span>
       </div>
     </aside>
 
@@ -54,16 +54,22 @@
               <div class="workspace-head-actions">
                 <div class="workspace-device-controls">
                   <select id="deviceSelect" data-compact-label="设备"><option value="">尚未导入设备</option></select>
-                  <label class="btn workspace-icon-button import-device" title="导入新设备" aria-label="导入新设备">
-                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-                    <input id="deviceFile" type="file" accept=".json,application/json">
-                  </label>
                   <button class="btn workspace-icon-button danger" id="deleteDeviceButton" type="button" title="删除当前设备" aria-label="删除当前设备" disabled>
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6"/></svg>
                   </button>
                   <div class="chips workspace-device-summary" id="deviceSummary"><span class="chip">尚未选择设备</span></div>
                 </div>
-                <div class="workspace-status" id="workspaceStatus" role="status" aria-live="polite">导入或选择一个设备后开始。</div>
+                <div class="workspace-status-cluster">
+                  <div class="workspace-transfer-actions" aria-label="设备与测试集导入导出">
+                    <button class="btn small workspace-transfer-button" id="workspaceImportButton" type="button">
+                      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 19h14"/></svg><span>导入</span>
+                    </button>
+                    <button class="btn small workspace-transfer-button" id="workspaceExportButton" type="button">
+                      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0 4 4m-4-4-4 4M5 20h14"/></svg><span>导出</span>
+                    </button>
+                  </div>
+                  <div class="workspace-status" id="workspaceStatus" role="status" aria-live="polite">导入或选择一个设备后开始。</div>
+                </div>
               </div>
             </div>
             <div class="panel-body workspace-panel-body">
@@ -467,6 +473,33 @@
     </div>
   </main>
 
+  <input id="deviceFile" type="file" accept=".json,.zip,.ctdata,application/json,application/zip" hidden>
+  <input id="testExchangeFile" type="file" accept=".zip,.ctdata,application/zip" hidden>
+
+  <dialog class="data-transfer-dialog" id="dataTransferDialog" aria-labelledby="dataTransferDialogTitle">
+    <section class="data-transfer-dialog-body">
+      <header>
+        <div><h3 id="dataTransferDialogTitle">导入数据</h3><p id="dataTransferDialogDescription">选择要导入的内容类型。</p></div>
+        <button class="btn workspace-icon-button" id="dataTransferDialogClose" type="button" aria-label="关闭导入导出窗口">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+        </button>
+      </header>
+      <div class="data-transfer-options">
+        <button class="data-transfer-option" id="deviceTransferOption" type="button">
+          <span class="data-transfer-option-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M8 9h8M8 13h5"/></svg></span>
+          <span><strong id="deviceTransferOptionTitle">导入设备</strong><small id="deviceTransferOptionDescription">导入设备包，或选择新的 init JSON。</small></span>
+          <span class="data-transfer-option-arrow" aria-hidden="true">→</span>
+        </button>
+        <button class="data-transfer-option" id="testTransferOption" type="button">
+          <span class="data-transfer-option-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 3h7l4 4v14H7zM14 3v5h5M10 13h5M10 17h5"/></svg></span>
+          <span><strong id="testTransferOptionTitle">导入测试集</strong><small id="testTransferOptionDescription">测试集只能导入到相同设备。</small></span>
+          <span class="data-transfer-option-arrow" aria-hidden="true">→</span>
+        </button>
+      </div>
+      <div class="data-transfer-status" id="dataTransferStatus" role="status" aria-live="polite"></div>
+    </section>
+  </dialog>
+
   <dialog id="parameterComparisonDialog" aria-labelledby="parameterComparisonDialogTitle">
     <form class="dialog-body parameter-comparison-dialog-body" id="parameterComparisonForm">
       <h3 id="parameterComparisonDialogTitle">运行对比测试</h3>
@@ -665,6 +698,6 @@
     </aside>
   </dialog>
 
-  <script type="module" src="/assets/config_editor.js?v=1.4.13"></script>
+  <script type="module" src="/assets/config_editor.js?v=1.4.14"></script>
 </body>
 </html>

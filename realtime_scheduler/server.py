@@ -167,9 +167,13 @@ MAX_SAVED_BATCH_RUNS = 8
 MAX_SAVED_SINGLE_RUNS = 8
 MAX_CJOB_CYCLE = 1000
 CJOB_CYCLE_EVENT_EPSILON_MULTIPLIER = 2.0
-WORKSPACE_STORE_VERSION = 5
-WORKSPACE_STORE_VERSION_FILE = ".workspace-version.json"
+WORKSPACE_STORE_VERSION = 6
+WORKSPACE_STORE_VERSION_FILE = "manifest.json"
+LEGACY_WORKSPACE_STORE_VERSION_FILE = ".workspace-version.json"
 WORKSPACE_TEST_INDEX_FILE = ".tests-index.json"
+DATA_EXCHANGE_MAX_BYTES = 64 * 1024 * 1024
+DATA_EXCHANGE_KIND_DEVICE = "ct-device"
+DATA_EXCHANGE_KIND_TEST = "ct-test"
 API_SCHEMA_VERSION = "cjob-pjob-v3"
 HEURISTIC_BASELINE_SCHEMA_VERSION = "petri-look-dynamic-v1"
 FIRST_ROBOT_SLOT_ID = 1
@@ -209,9 +213,8 @@ DUAL_ACTOR_MODEL_PATH = (
 )
 BUILTIN_ALGORITHM_CATALOG_PATH = ALGORITHM_ROOT / "algorithms.json"
 ALGORITHM_CATALOG_SCHEMA_VERSION = 1
-WORKSPACE_STORE_PATH = DATA_DIR / "workspaces"
+WORKSPACE_STORE_PATH = DATA_DIR / "datasets"
 LEGACY_WORKSPACE_STORE_PATH = ALGORITHM_ROOT / "results" / "config_editor_workspaces.json"
-DEVICE_INIT_DIR = DATA_DIR / "devices"
 RESULT_EXPORT_DIR = EXPORT_DIR / "results"
 LOG_EXPORT_DIR = EXPORT_DIR / "logs"
 MODEL_CHECKPOINT_DIR = DATA_DIR / "checkpoints"
@@ -3387,13 +3390,24 @@ def _workspace_timestamp() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
+def _legacy_workspace_directory_path() -> Path:
+    """返回随 DATA_DIR 测试替换而变化的旧版工作区目录。"""
+    return DATA_DIR / "workspaces"
+
+
+def _has_separate_legacy_workspace_directory(path: Path) -> bool:
+    """判断默认数据旁是否仍有一份不同路径的 v5 工作区。"""
+    legacy_path = _legacy_workspace_directory_path()
+    return legacy_path.is_dir() and legacy_path.absolute() != path.absolute()
+
+
 def _empty_workspace_catalog() -> Dict[str, Any]:
     """创建当前版本的空设备工作区目录。"""
     return {"version": WORKSPACE_STORE_VERSION, "devices": []}
 
 
 def _workspace_store_version_path(store_dir: Path) -> Path:
-    """返回拆分工作区用于记录已完成迁移版本的标记文件。"""
+    """返回数据集根目录中面向用户可见的格式清单。"""
     return store_dir / WORKSPACE_STORE_VERSION_FILE
 
 
@@ -3403,22 +3417,87 @@ def _workspace_test_index_path(tests_dir: Path) -> Path:
 
 
 def _read_workspace_store_version(store_dir: Path) -> int:
-    """读取拆分工作区已完成的迁移版本；缺失或损坏时按旧版本处理。"""
-    try:
-        payload = json.loads(
-            _workspace_store_version_path(store_dir).read_text(encoding="utf-8")
-        )
-        return int(payload.get("version") or 0) if isinstance(payload, Mapping) else 0
-    except (OSError, ValueError, TypeError, json.JSONDecodeError):
-        return 0
+    """读取数据格式版本，并兼容旧目录中的隐藏版本标记。"""
+    candidates = (
+        _workspace_store_version_path(store_dir),
+        store_dir / LEGACY_WORKSPACE_STORE_VERSION_FILE,
+    )
+    for candidate in candidates:
+        try:
+            payload = json.loads(candidate.read_text(encoding="utf-8"))
+            if isinstance(payload, Mapping):
+                return int(payload.get("schemaVersion", payload.get("version")) or 0)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            continue
+    return 0
 
 
 def _write_workspace_store_version(store_dir: Path) -> None:
-    """在数据文件全部落盘后刷新迁移完成标记。"""
+    """在数据文件全部落盘后刷新可读的格式清单。"""
+    if not _uses_readable_dataset_layout(store_dir):
+        _write_json_atomic(
+            store_dir / WORKSPACE_STORE_VERSION_FILE,
+            {"version": WORKSPACE_STORE_VERSION},
+        )
+        return
     _write_json_atomic(
         _workspace_store_version_path(store_dir),
-        {"version": WORKSPACE_STORE_VERSION},
+        {
+            "kind": "ct-scheduler-datasets",
+            "schemaVersion": WORKSPACE_STORE_VERSION,
+            "description": "请通过调度平台前端导入或导出设备与测试集。",
+        },
     )
+
+
+def _uuid_storage_segment(stable_id: str) -> str:
+    """返回稳定 UUID 目录名；名称只保存在 JSON 和前端，不参与磁盘寻址。"""
+    normalized_id = re.sub(r"[^A-Za-z0-9_-]", "", stable_id)
+    return normalized_id or uuid.uuid4().hex
+
+
+def _dataset_device_directory(store_dir: Path, device: Mapping[str, Any]) -> Path:
+    """根据设备稳定 ID 返回新版数据集目录。"""
+    return store_dir / _uuid_storage_segment(str(device.get("id") or ""))
+
+
+def _find_dataset_device_directory(store_dir: Path, device_id: str) -> Optional[Path]:
+    """扫描新版设备清单，根据内部 ID 定位 UUID 目录。"""
+    if not store_dir.is_dir():
+        return None
+    for device_dir in store_dir.iterdir():
+        if not device_dir.is_dir():
+            continue
+        try:
+            metadata = json.loads((device_dir / "metadata.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(metadata, Mapping) and str(metadata.get("id") or "") == device_id:
+            return device_dir
+    return None
+
+
+def _dataset_test_directory(tests_dir: Path, test_case: Mapping[str, Any]) -> Path:
+    """返回单个测试集的稳定 UUID 独立目录。"""
+    return tests_dir / _uuid_storage_segment(str(test_case.get("id") or ""))
+
+
+def _find_dataset_test_file(device_dir: Path, test_id: str) -> Optional[Path]:
+    """根据测试内部 ID 定位新版独立测试集文件。"""
+    tests_dir = device_dir / "tests"
+    if not tests_dir.is_dir():
+        return None
+    for test_dir in tests_dir.iterdir():
+        test_file = test_dir / "test.json"
+        if not test_file.is_file():
+            continue
+        try:
+            test_case = json.loads(test_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(test_case, Mapping) and str(test_case.get("id") or "") == test_id:
+            return test_file
+    return None
 
 
 def _workspace_data_update_required(path: Path = WORKSPACE_STORE_PATH) -> bool:
@@ -3431,20 +3510,29 @@ def _workspace_data_update_required(path: Path = WORKSPACE_STORE_PATH) -> bool:
             return int(payload.get("version") or 0) != WORKSPACE_STORE_VERSION
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             return True
-    if path == WORKSPACE_STORE_PATH and (DATA_DIR / "workspaces.json").is_file():
+    if path == WORKSPACE_STORE_PATH and (
+        (DATA_DIR / "workspaces.json").is_file()
+        or _has_separate_legacy_workspace_directory(path)
+    ):
         return True
     if not path.is_dir():
         if path != WORKSPACE_STORE_PATH:
             return False
         return any(candidate.is_file() for candidate in (
             DATA_DIR / "workspaces.json", LEGACY_WORKSPACE_STORE_PATH,
-        ))
+        )) or _has_separate_legacy_workspace_directory(path)
     marker = _workspace_store_version_path(path)
     if _read_workspace_store_version(path) != WORKSPACE_STORE_VERSION:
         return True
     try:
         marker_mtime = marker.stat().st_mtime_ns
-        data_files = [*path.glob("*/device.json"), *path.glob("*/tests/*.json")]
+        data_files = [
+            *path.glob("*/metadata.json"),
+            *path.glob("*/device.json"),
+            *path.glob("*/routes.json"),
+            *path.glob("*/groups.json"),
+            *path.glob("*/tests/*/test.json"),
+        ]
         return any(file.stat().st_mtime_ns > marker_mtime for file in data_files)
     except OSError:
         return True
@@ -3912,6 +4000,12 @@ def _migrate_workspace_catalog(catalog: Dict[str, Any]) -> bool:
     for raw_device in catalog.get("devices") or []:
         if not isinstance(raw_device, dict):
             continue
+        if source_version < 6:
+            original_name = str(raw_device.get("name") or "").strip()
+            normalized_name = Path(original_name).stem if original_name else "未命名设备"
+            if normalized_name != original_name:
+                raw_device["name"] = normalized_name
+                changed = True
         routes = list(raw_device.get("routes") or [])
         cleans = list(raw_device.get("cleans") or [])
         tests = [item for item in (raw_device.get("tests") or []) if isinstance(item, dict)]
@@ -3951,7 +4045,7 @@ def _migrate_workspace_catalog(catalog: Dict[str, Any]) -> bool:
                 routes = _merge_named_assets(routes, legacy_test_routes)
                 test.pop("routes", None)
                 changed = True
-            if source_version < WORKSPACE_STORE_VERSION and "cleans" in test:
+            if source_version < 5 and "cleans" in test:
                 cleans = _merge_named_assets(cleans, test.get("cleans") or [])
         legacy_route_configs = _workspace_route_config_map(routes)
         for test in tests:
@@ -3961,7 +4055,7 @@ def _migrate_workspace_catalog(catalog: Dict[str, Any]) -> bool:
             if not isinstance(test.get("cleans"), list):
                 test["cleans"] = deepcopy(cleans)
                 changed = True
-        if source_version < WORKSPACE_STORE_VERSION:
+        if source_version < 5:
             if _repair_workspace_route_recipes(
                 routes,
                 _workspace_processing_modules(raw_device),
@@ -4004,13 +4098,19 @@ def _read_workspace_catalog_unlocked(path: Path) -> Dict[str, Any]:
     if path.suffix == "":
         # 目录模式；仅默认存储路径缺失或上次迁移未完成（旧单文件仍在）时重新迁移，
         # 其他目录路径缺失视为空。迁移本身幂等，可安全重入以恢复中断现场。
-        if path == WORKSPACE_STORE_PATH and (DATA_DIR / "workspaces.json").is_file():
+        if path == WORKSPACE_STORE_PATH and (
+            (DATA_DIR / "workspaces.json").is_file()
+            or _has_separate_legacy_workspace_directory(path)
+        ):
             _migrate_legacy_workspace_store(path)
         elif not path.is_dir():
             if path != WORKSPACE_STORE_PATH:
                 return _empty_workspace_catalog()
             legacy_candidates = (DATA_DIR / "workspaces.json", LEGACY_WORKSPACE_STORE_PATH)
-            if any(candidate.is_file() for candidate in legacy_candidates):
+            if (
+                any(candidate.is_file() for candidate in legacy_candidates)
+                or _has_separate_legacy_workspace_directory(path)
+            ):
                 _migrate_legacy_workspace_store(path)
             else:
                 return _empty_workspace_catalog()
@@ -4036,13 +4136,29 @@ def _read_workspace_catalog_unlocked(path: Path) -> Dict[str, Any]:
     return catalog
 
 
-def _read_workspace_catalog_directory(store_dir: Path) -> Dict[str, Any]:
-    """在调用方持锁时扫描拆分目录，组装完整设备工作区目录。
+def _uses_readable_dataset_layout(store_dir: Path) -> bool:
+    """判断目录是否使用 v6 可读布局；测试和旧调用仍可读取 v5 目录。"""
+    if store_dir == WORKSPACE_STORE_PATH or store_dir.name.startswith(f".{WORKSPACE_STORE_PATH.name}."):
+        return True
+    try:
+        manifest = json.loads((store_dir / WORKSPACE_STORE_VERSION_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        manifest = {}
+    return (
+        isinstance(manifest, Mapping)
+        and manifest.get("kind") == "ct-scheduler-datasets"
+    ) or any(store_dir.glob("*/metadata.json"))
 
-    目录布局为 ``<store_dir>/<device_id>/device.json`` 与
-    ``<store_dir>/<device_id>/tests/<test_id>.json``；设备目录或测试集文件
-    可直接拷贝分享，放入后下次读取即生效。
-    """
+
+def _read_workspace_catalog_directory(store_dir: Path) -> Dict[str, Any]:
+    """根据目录清单读取 v6 可读布局或兼容的 v5 UUID 布局。"""
+    if not _uses_readable_dataset_layout(store_dir):
+        return _read_legacy_workspace_catalog_directory(store_dir)
+    return _read_readable_workspace_catalog_directory(store_dir)
+
+
+def _read_readable_workspace_catalog_directory(store_dir: Path) -> Dict[str, Any]:
+    """扫描新版分层目录，组装供现有业务逻辑使用的完整设备目录。"""
     catalog = _empty_workspace_catalog()
     catalog["version"] = _read_workspace_store_version(store_dir)
     if not store_dir.is_dir():
@@ -4050,27 +4166,83 @@ def _read_workspace_catalog_directory(store_dir: Path) -> Dict[str, Any]:
     for device_dir in sorted(store_dir.iterdir()):
         if not device_dir.is_dir():
             continue
+        metadata_file = device_dir / "metadata.json"
         device_file = device_dir / "device.json"
-        if not device_file.is_file():
+        if not metadata_file.is_file() or not device_file.is_file():
             continue
         try:
-            raw_device = json.loads(device_file.read_text(encoding="utf-8"))
+            raw_device = json.loads(metadata_file.read_text(encoding="utf-8"))
+            init_data = json.loads(device_file.read_text(encoding="utf-8"))
+            routes_payload = json.loads(
+                (device_dir / "routes.json").read_text(encoding="utf-8")
+            ) if (device_dir / "routes.json").is_file() else {}
+            groups_payload = json.loads(
+                (device_dir / "groups.json").read_text(encoding="utf-8")
+            ) if (device_dir / "groups.json").is_file() else {}
         except (OSError, json.JSONDecodeError) as error:
             raise ValueError(f"设备文件无效：{device_file}") from error
-        if not isinstance(raw_device, dict):
+        if not isinstance(raw_device, dict) or not isinstance(init_data, dict):
             continue
+        init_options = raw_device.pop("initOptions", {})
+        if isinstance(init_options, Mapping):
+            init_data.update(deepcopy(dict(init_options)))
+        raw_device["device"] = init_data
+        raw_device["routes"] = (
+            deepcopy(routes_payload.get("routes") or [])
+            if isinstance(routes_payload, Mapping) else []
+        )
+        raw_device["cleans"] = (
+            deepcopy(routes_payload.get("cleans") or [])
+            if isinstance(routes_payload, Mapping) else []
+        )
+        raw_device["routeAliases"] = (
+            deepcopy(routes_payload.get("routeAliases") or {})
+            if isinstance(routes_payload, Mapping) else {}
+        )
+        raw_device["testGroups"] = (
+            deepcopy(groups_payload.get("testGroups") or [])
+            if isinstance(groups_payload, Mapping) else []
+        )
+        if isinstance(groups_payload, Mapping) and "robotSlots" in groups_payload:
+            raw_device["robotSlots"] = deepcopy(groups_payload["robotSlots"])
         tests = []
         tests_dir = device_dir / "tests"
         if tests_dir.is_dir():
-            for test_file in sorted(tests_dir.glob("*.json")):
-                if test_file.name == WORKSPACE_TEST_INDEX_FILE:
-                    continue
+            for test_file in sorted(tests_dir.glob("*/test.json")):
                 try:
                     raw_test = json.loads(test_file.read_text(encoding="utf-8"))
                 except (OSError, json.JSONDecodeError) as error:
                     raise ValueError(f"测试集文件无效：{test_file}") from error
                 if isinstance(raw_test, dict):
                     tests.append(raw_test)
+        raw_device["tests"] = tests
+        catalog["devices"].append(raw_device)
+    return catalog
+
+
+def _read_legacy_workspace_catalog_directory(store_dir: Path) -> Dict[str, Any]:
+    """只读旧版 UUID 目录，作为 v5 到 v6 的迁移输入。"""
+    catalog = {"version": _read_workspace_store_version(store_dir), "devices": []}
+    for device_dir in sorted(store_dir.iterdir()) if store_dir.is_dir() else []:
+        device_file = device_dir / "device.json"
+        if not device_file.is_file():
+            continue
+        try:
+            raw_device = json.loads(device_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError(f"旧设备文件无效：{device_file}") from error
+        if not isinstance(raw_device, dict) or "device" not in raw_device:
+            continue
+        tests = []
+        for test_file in sorted((device_dir / "tests").glob("*.json")):
+            if test_file.name == WORKSPACE_TEST_INDEX_FILE:
+                continue
+            try:
+                raw_test = json.loads(test_file.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as error:
+                raise ValueError(f"旧测试集文件无效：{test_file}") from error
+            if isinstance(raw_test, dict):
+                tests.append(raw_test)
         raw_device["tests"] = tests
         catalog["devices"].append(raw_device)
     return catalog
@@ -4083,6 +4255,38 @@ def _migrate_legacy_workspace_store(store_dir: Path) -> None:
     目录再重建，因此上次迁移中断后可以安全重入。迁移成功后旧文件改名，
     避免重复迁移；确认数据无误后可手动删除旧文件。
     """
+    legacy_workspace_directory = _legacy_workspace_directory_path()
+    if _has_separate_legacy_workspace_directory(store_dir):
+        if store_dir.is_dir():
+            if (
+                not _uses_readable_dataset_layout(store_dir)
+                or _read_workspace_store_version(store_dir) != WORKSPACE_STORE_VERSION
+            ):
+                raise ValueError(f"目标数据目录已存在且格式不完整，拒绝覆盖：{store_dir}")
+        else:
+            catalog = _read_legacy_workspace_catalog_directory(legacy_workspace_directory)
+            _migrate_workspace_catalog(catalog)
+            temporary_store = store_dir.with_name(f".{store_dir.name}.{uuid.uuid4().hex}.tmp")
+            _write_workspace_catalog_directory(temporary_store, catalog)
+            temporary_store.replace(store_dir)
+        backup_root = DATA_DIR / "migration-backups"
+        backup_root.mkdir(parents=True, exist_ok=True)
+        backup_stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+        backup_name = f"workspaces-v5-{backup_stamp}"
+        shutil.move(str(legacy_workspace_directory), str(backup_root / backup_name))
+        legacy_device_mirrors = DATA_DIR / "devices"
+        if legacy_device_mirrors.is_dir():
+            shutil.move(
+                str(legacy_device_mirrors),
+                str(backup_root / f"device-mirrors-v5-{backup_stamp}"),
+            )
+        legacy_single_backup = DATA_DIR / "workspaces.json.legacy.json"
+        if legacy_single_backup.is_file():
+            shutil.move(
+                str(legacy_single_backup),
+                str(backup_root / f"workspaces-single-file-{backup_stamp}.legacy.json"),
+            )
+        return
     legacy_candidates = (DATA_DIR / "workspaces.json", LEGACY_WORKSPACE_STORE_PATH)
     for legacy_file in legacy_candidates:
         if not legacy_file.is_file():
@@ -4203,26 +4407,12 @@ def _write_workspace_catalog_unlocked(path: Path, catalog: Mapping[str, Any]) ->
 
     目录模式（``path`` 无后缀）把 catalog 拆分写为设备目录与测试集文件，
     便于单个测试集或设备直接拷贝分享；文件模式保留旧单文件格式。两种模式
-    都会在默认存储路径下刷新 ``data/devices/<id>.json`` 设备拓扑镜像。
+    默认存储只维护 ``data/datasets`` 这一份设备事实来源。
     """
     if path.suffix == "":
         _write_workspace_catalog_directory(path, catalog)
-        if path == WORKSPACE_STORE_PATH:
-            _write_device_init_mirrors(catalog)
         return
     _write_json_atomic(path, catalog)
-    if path == WORKSPACE_STORE_PATH:
-        _write_device_init_mirrors(catalog)
-
-
-def _write_device_init_mirrors(catalog: Mapping[str, Any]) -> None:
-    """把每台设备的拓扑镜像写入 data/devices/，供外部工具读取。"""
-    for device in catalog.get("devices") or []:
-        if not isinstance(device, Mapping) or not isinstance(device.get("device"), Mapping):
-            continue
-        device_id = str(device.get("id") or "").strip()
-        if device_id:
-            _write_json_atomic(DEVICE_INIT_DIR / f"{device_id}.json", device["device"])
 
 
 def _write_json_if_changed(path: Path, payload: Any) -> None:
@@ -4236,14 +4426,18 @@ def _write_json_if_changed(path: Path, payload: Any) -> None:
 
 
 def _write_workspace_catalog_directory(store_dir: Path, catalog: Mapping[str, Any]) -> None:
-    """在调用方持锁时把完整目录拆分写为设备目录与测试集文件。
+    """按目录版本选择 v6 可读布局或兼容的 v5 UUID 布局。"""
+    if not _uses_readable_dataset_layout(store_dir):
+        _write_legacy_workspace_catalog_directory(store_dir, catalog)
+        return
+    _write_readable_workspace_catalog_directory(store_dir, catalog)
 
-    每个设备写 ``<store_dir>/<device_id>/device.json``（不含 tests），每个测试集
-    写 ``<store_dir>/<device_id>/tests/<test_id>.json``；内容未变的文件跳过写入，
-    使共享目录下他人刚放入的文件不被覆盖。本函数只负责写入，不删除磁盘上的
-    任何文件——测试集与设备的物理删除由对应的 delete_* 操作显式完成，从而保证
-    通过拷贝分享进来的文件在任意后续写入后仍然保留。
-    """
+
+def _write_legacy_workspace_catalog_directory(
+    store_dir: Path,
+    catalog: Mapping[str, Any],
+) -> None:
+    """为旧测试夹具和显式非默认目录保留 v5 拆分写入能力。"""
     store_dir.mkdir(parents=True, exist_ok=True)
     for raw_device in catalog.get("devices") or []:
         if not isinstance(raw_device, Mapping):
@@ -4263,9 +4457,89 @@ def _write_workspace_catalog_directory(store_dir: Path, catalog: Mapping[str, An
                 continue
             test = dict(raw_test)
             test_id = str(test.get("id") or "").strip()
+            if test_id:
+                _write_json_if_changed(tests_dir / f"{test_id}.json", test)
+        _write_json_if_changed(
+            _workspace_test_index_path(tests_dir),
+            [
+                _workspace_test_summary(test_case)
+                for test_case in tests or []
+                if isinstance(test_case, Mapping)
+            ],
+        )
+    _write_json_atomic(
+        store_dir / WORKSPACE_STORE_VERSION_FILE,
+        {"version": WORKSPACE_STORE_VERSION},
+    )
+
+
+def _write_readable_workspace_catalog_directory(
+    store_dir: Path,
+    catalog: Mapping[str, Any],
+) -> None:
+    """把目录写为“可读设备目录 + 纯 init + 路径 + 独立测试集”结构。"""
+    store_dir.mkdir(parents=True, exist_ok=True)
+    for raw_device in catalog.get("devices") or []:
+        if not isinstance(raw_device, Mapping):
+            continue
+        device = deepcopy(dict(raw_device))
+        device_id = str(device.get("id") or "").strip()
+        if not device_id:
+            continue
+        tests = device.pop("tests", None)
+        existing_dir = _find_dataset_device_directory(store_dir, device_id)
+        desired_dir = _dataset_device_directory(store_dir, device)
+        if existing_dir is not None and existing_dir != desired_dir and not desired_dir.exists():
+            existing_dir.replace(desired_dir)
+        device_dir = desired_dir if desired_dir.exists() or existing_dir is None else existing_dir
+        device_dir.mkdir(parents=True, exist_ok=True)
+        init_data, init_options = _split_device_init_data(device.pop("device", {}))
+        if init_options:
+            device["initOptions"] = init_options
+        else:
+            device.pop("initOptions", None)
+        routes_payload = {
+            "schemaVersion": WORKSPACE_STORE_VERSION,
+            "routes": device.pop("routes", []),
+            "cleans": device.pop("cleans", []),
+            "routeAliases": device.pop("routeAliases", {}),
+        }
+        groups_payload = {
+            "schemaVersion": WORKSPACE_STORE_VERSION,
+            "testGroups": device.pop("testGroups", []),
+        }
+        if "robotSlots" in device:
+            groups_payload["robotSlots"] = device.pop("robotSlots")
+        device["schemaVersion"] = WORKSPACE_STORE_VERSION
+        _write_json_if_changed(device_dir / "metadata.json", device)
+        _write_json_if_changed(device_dir / "device.json", init_data)
+        _write_json_if_changed(device_dir / "routes.json", routes_payload)
+        _write_json_if_changed(device_dir / "groups.json", groups_payload)
+        tests_dir = device_dir / "tests"
+        tests_dir.mkdir(parents=True, exist_ok=True)
+        for raw_test in tests or []:
+            if not isinstance(raw_test, Mapping):
+                continue
+            test = dict(raw_test)
+            test_id = str(test.get("id") or "").strip()
             if not test_id:
                 continue
-            _write_json_if_changed(tests_dir / f"{test_id}.json", test)
+            existing_test_file = _find_dataset_test_file(device_dir, test_id)
+            desired_test_dir = _dataset_test_directory(tests_dir, test)
+            if (
+                existing_test_file is not None
+                and existing_test_file.parent != desired_test_dir
+                and not desired_test_dir.exists()
+            ):
+                existing_test_file.parent.replace(desired_test_dir)
+            test_dir = (
+                desired_test_dir
+                if desired_test_dir.exists() or existing_test_file is None
+                else existing_test_file.parent
+            )
+            test_dir.mkdir(parents=True, exist_ok=True)
+            test["schemaVersion"] = WORKSPACE_STORE_VERSION
+            _write_json_if_changed(test_dir / "test.json", test)
         _write_json_if_changed(
             _workspace_test_index_path(tests_dir),
             [
@@ -4280,13 +4554,24 @@ def _write_workspace_catalog_directory(store_dir: Path, catalog: Mapping[str, An
 def _remove_directory_test_file(store_dir: Path, device_id: str, test_id: str) -> None:
     """目录模式下物理删除单个测试集文件；文件模式为空操作。"""
     if store_dir.suffix == "":
-        (store_dir / device_id / "tests" / f"{test_id}.json").unlink(missing_ok=True)
+        if _uses_readable_dataset_layout(store_dir):
+            device_dir = _find_dataset_device_directory(store_dir, device_id)
+            test_file = _find_dataset_test_file(device_dir, test_id) if device_dir else None
+            if test_file is not None:
+                shutil.rmtree(test_file.parent)
+        else:
+            (store_dir / device_id / "tests" / f"{test_id}.json").unlink(missing_ok=True)
 
 
 def _remove_directory_device_dir(store_dir: Path, device_id: str) -> None:
     """目录模式下物理删除整个设备目录（含全部测试集文件）；文件模式为空操作。"""
     if store_dir.suffix == "":
-        shutil.rmtree(store_dir / device_id, ignore_errors=True)
+        if _uses_readable_dataset_layout(store_dir):
+            device_dir = _find_dataset_device_directory(store_dir, device_id)
+            if device_dir is not None:
+                shutil.rmtree(device_dir)
+        else:
+            shutil.rmtree(store_dir / device_id, ignore_errors=True)
 
 
 def list_workspace_devices(path: Path = WORKSPACE_STORE_PATH) -> List[Dict[str, Any]]:
@@ -4381,6 +4666,7 @@ def _fast_workspace_device_overview_unlocked(
     """从已迁移的目录存储读取设备和测试摘要，不解析所有完整测试文件。"""
     if (
         path.suffix
+        or _uses_readable_dataset_layout(path)
         or not re.fullmatch(r"[A-Za-z0-9_-]+", device_id)
         or _workspace_data_update_required(path)
     ):
@@ -4425,11 +4711,6 @@ def get_workspace_device_overview(
             for test_case in device.get("tests") or []
             if isinstance(test_case, Mapping)
         ]
-        if path.suffix == "":
-            _write_json_if_changed(
-                _workspace_test_index_path(path / device_id / "tests"), summaries,
-            )
-            _write_workspace_store_version(path)
         overview = deepcopy(dict(device))
         overview["tests"] = summaries
         return overview
@@ -4489,12 +4770,351 @@ def get_workspace_test(
         return resolved
 
 
+def _zip_json_bytes(files: Mapping[str, Any]) -> bytes:
+    """把若干 JSON 对象写入内存 ZIP，供设备和测试集交换。"""
+    stream = BytesIO()
+    with ZipFile(stream, "w", ZIP_DEFLATED) as archive:
+        for filename, payload in files.items():
+            archive.writestr(
+                filename,
+                json.dumps(payload, ensure_ascii=False, allow_nan=False, indent=2),
+            )
+    return stream.getvalue()
+
+
+def _read_exchange_archive(content: bytes) -> Dict[str, Any]:
+    """读取受限交换包；拒绝路径穿越、重复文件和超大解压内容。"""
+    try:
+        archive = ZipFile(BytesIO(content), "r")
+    except Exception as error:  # noqa: BLE001
+        raise ValueError("导入文件不是有效的 CT 数据包") from error
+    files: Dict[str, Any] = {}
+    total_size = 0
+    with archive:
+        for info in archive.infolist():
+            normalized = info.filename.replace("\\", "/").strip("/")
+            if (
+                not normalized
+                or normalized in files
+                or normalized.startswith("../")
+                or "/../" in f"/{normalized}/"
+                or info.is_dir()
+            ):
+                raise ValueError("导入包包含无效或重复路径")
+            total_size += info.file_size
+            if total_size > DATA_EXCHANGE_MAX_BYTES:
+                raise ValueError("导入包解压后超过 64 MB 限制")
+            try:
+                payload = json.loads(archive.read(info).decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise ValueError(f"导入包中的 JSON 无效：{normalized}") from error
+            files[normalized] = payload
+    manifest = files.get("manifest.json")
+    if not isinstance(manifest, Mapping):
+        raise ValueError("导入包缺少 manifest.json")
+    version = int(manifest.get("schemaVersion") or 0)
+    if version != WORKSPACE_STORE_VERSION:
+        if version > WORKSPACE_STORE_VERSION:
+            raise ValueError(f"数据包版本 v{version} 高于当前支持的 v{WORKSPACE_STORE_VERSION}")
+        raise ValueError(f"不支持数据包版本 v{version}，请先用对应版本平台升级")
+    files["manifest.json"] = dict(manifest)
+    return files
+
+
+def _exchange_metadata(device: Mapping[str, Any]) -> Dict[str, Any]:
+    """提取设备元数据，排除 init、路径和测试内容。"""
+    excluded = {"device", "routes", "cleans", "routeAliases", "testGroups", "robotSlots", "tests"}
+    metadata = {
+        key: deepcopy(value)
+        for key, value in device.items()
+        if key not in excluded
+    }
+    metadata["schemaVersion"] = WORKSPACE_STORE_VERSION
+    return metadata
+
+
+def _exchange_routes(device: Mapping[str, Any], route_names: Optional[set[str]] = None) -> Dict[str, Any]:
+    """提取设备路径；测试集交换只携带实际引用的路径。"""
+    routes = [
+        deepcopy(route) for route in (device.get("routes") or [])
+        if isinstance(route, Mapping)
+        and (route_names is None or str(route.get("name") or "") in route_names)
+    ]
+    return {
+        "schemaVersion": WORKSPACE_STORE_VERSION,
+        "routes": routes,
+        "cleans": deepcopy(device.get("cleans") or []) if route_names is None else [],
+        "routeAliases": deepcopy(device.get("routeAliases") or {}) if route_names is None else {},
+    }
+
+
+def export_workspace_device(
+    device_id: str,
+    path: Path = WORKSPACE_STORE_PATH,
+) -> Tuple[bytes, str]:
+    """导出设备 init、路径、组别及全部测试集的自包含交换包。"""
+    device = get_workspace_device(device_id, path)
+    init_data, init_options = _split_device_init_data(device.get("device") or {})
+    metadata = _exchange_metadata(device)
+    if init_options:
+        metadata["initOptions"] = init_options
+    files: Dict[str, Any] = {
+        "manifest.json": {
+            "kind": DATA_EXCHANGE_KIND_DEVICE,
+            "schemaVersion": WORKSPACE_STORE_VERSION,
+            "deviceId": device_id,
+            "deviceFingerprint": _device_fingerprint(init_data),
+        },
+        "metadata.json": metadata,
+        "device.json": init_data,
+        "routes.json": _exchange_routes(device),
+        "groups.json": {
+            "schemaVersion": WORKSPACE_STORE_VERSION,
+            "testGroups": deepcopy(device.get("testGroups") or []),
+            "robotSlots": deepcopy(device.get("robotSlots") or {}),
+        },
+    }
+    for test_case in device.get("tests") or []:
+        if not isinstance(test_case, Mapping):
+            continue
+        test_dir = _uuid_storage_segment(str(test_case.get("id") or ""))
+        files[f"tests/{test_dir}/test.json"] = deepcopy(dict(test_case))
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", str(device.get("name") or "device")).strip("-") or "device"
+    return _zip_json_bytes(files), f"ct-device-{safe_name}-v{WORKSPACE_STORE_VERSION}.zip"
+
+
+def export_workspace_test(
+    device_id: str,
+    test_id: str,
+    path: Path = WORKSPACE_STORE_PATH,
+) -> Tuple[bytes, str]:
+    """导出单个测试及其引用路径；导入时必须匹配设备 init 指纹。"""
+    device = get_workspace_device(device_id, path)
+    test_case = next((
+        test for test in device.get("tests") or []
+        if isinstance(test, Mapping) and str(test.get("id") or "") == test_id
+    ), None)
+    if test_case is None:
+        raise ValueError(f"测试集不存在：{test_id}")
+    route_names = _workspace_test_route_refs(test_case)
+    files = {
+        "manifest.json": {
+            "kind": DATA_EXCHANGE_KIND_TEST,
+            "schemaVersion": WORKSPACE_STORE_VERSION,
+            "deviceFingerprint": _device_fingerprint(device.get("device") or {}),
+            "sourceDeviceName": str(device.get("name") or "未命名设备"),
+        },
+        "routes.json": _exchange_routes(device, route_names),
+        "test.json": deepcopy(dict(test_case)),
+    }
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", str(test_case.get("name") or "test")).strip("-") or "test"
+    return _zip_json_bytes(files), f"ct-test-{safe_name}-v{WORKSPACE_STORE_VERSION}.zip"
+
+
+def _merge_exchange_routes(device: Dict[str, Any], imported_routes: Any) -> None:
+    """合并交换包路径；同名不同内容时拒绝，避免测试被静默改义。"""
+    routes = [route for route in (device.get("routes") or []) if isinstance(route, Mapping)]
+    by_name = {str(route.get("name") or ""): route for route in routes}
+    for raw_route in imported_routes or []:
+        if not isinstance(raw_route, Mapping):
+            continue
+        route = deepcopy(dict(raw_route))
+        name = str(route.get("name") or "").strip()
+        if not name:
+            raise ValueError("导入包包含未命名路径")
+        existing = by_name.get(name)
+        if existing is not None and existing != route:
+            raise ValueError(f"路径“{name}”与本地同名路径内容不同，已停止导入")
+        if existing is None:
+            routes.append(route)
+            by_name[name] = route
+    device["routes"] = routes
+
+
+def _merge_exchange_named_assets(
+    device: Dict[str, Any],
+    field_name: str,
+    imported_assets: Any,
+    label: str,
+) -> None:
+    """按名称安全合并设备级资产，同名不同内容时停止导入。"""
+    assets = [asset for asset in (device.get(field_name) or []) if isinstance(asset, Mapping)]
+    by_name = {str(asset.get("name") or ""): asset for asset in assets}
+    for raw_asset in imported_assets or []:
+        if not isinstance(raw_asset, Mapping):
+            continue
+        asset = deepcopy(dict(raw_asset))
+        name = str(asset.get("name") or "").strip()
+        if not name:
+            raise ValueError(f"导入包包含未命名{label}")
+        existing = by_name.get(name)
+        if existing is not None and existing != asset:
+            raise ValueError(f"{label}“{name}”与本地同名内容不同，已停止导入")
+        if existing is None:
+            assets.append(asset)
+            by_name[name] = asset
+    device[field_name] = assets
+
+
+def _append_imported_test(device: Dict[str, Any], raw_test: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
+    """安全加入一个测试；相同内容跳过，ID 冲突时创建可读副本。"""
+    imported = deepcopy(dict(raw_test))
+    imported.pop("schemaVersion", None)
+    tests = [test for test in (device.get("tests") or []) if isinstance(test, dict)]
+    imported_id = str(imported.get("id") or "").strip() or uuid.uuid4().hex
+    existing = next((test for test in tests if str(test.get("id") or "") == imported_id), None)
+    if existing is not None:
+        comparable_existing = deepcopy(existing)
+        comparable_existing.pop("schemaVersion", None)
+        if comparable_existing == imported:
+            return deepcopy(existing), False
+    if existing is not None:
+        imported_id = uuid.uuid4().hex
+        imported["name"] = _unique_workspace_name(
+            str(imported.get("name") or "未命名测试集"),
+            (str(test.get("name") or "") for test in tests),
+        )
+    imported["id"] = imported_id
+    imported["updatedAt"] = _workspace_timestamp()
+    imported.setdefault("createdAt", imported["updatedAt"])
+    tests.append(imported)
+    device["tests"] = tests
+    return deepcopy(imported), True
+
+
+def import_workspace_test_archive(
+    device_id: str,
+    content: bytes,
+    path: Path = WORKSPACE_STORE_PATH,
+) -> Tuple[Dict[str, Any], bool]:
+    """把测试交换包导入指定设备，并严格校验设备拓扑一致。"""
+    files = _read_exchange_archive(content)
+    manifest = files["manifest.json"]
+    if manifest.get("kind") != DATA_EXCHANGE_KIND_TEST:
+        raise ValueError("所选文件不是测试集交换包")
+    test_case = files.get("test.json")
+    routes_payload = files.get("routes.json") or {}
+    if not isinstance(test_case, Mapping) or not isinstance(routes_payload, Mapping):
+        raise ValueError("测试集交换包内容不完整")
+    with _workspace_catalog_guard(path):
+        catalog = _read_workspace_catalog_unlocked(path)
+        device = next((
+            item for item in catalog["devices"]
+            if isinstance(item, dict) and str(item.get("id") or "") == device_id
+        ), None)
+        if device is None:
+            raise ValueError(f"设备不存在：{device_id}")
+        fingerprint = _device_fingerprint(device.get("device") or {})
+        if fingerprint != str(manifest.get("deviceFingerprint") or ""):
+            raise ValueError("测试集所属设备与当前设备不一致，请先切换到相同设备")
+        _merge_exchange_routes(device, routes_payload.get("routes"))
+        imported, created = _append_imported_test(device, test_case)
+        device["updatedAt"] = _workspace_timestamp()
+        _write_workspace_catalog_unlocked(path, catalog)
+        return imported, created
+
+
+def import_workspace_device_archive(
+    content: bytes,
+    path: Path = WORKSPACE_STORE_PATH,
+) -> Tuple[Dict[str, Any], int, int]:
+    """导入完整设备包；相同设备合并路径、组别和测试，不静默覆盖冲突。"""
+    files = _read_exchange_archive(content)
+    manifest = files["manifest.json"]
+    if manifest.get("kind") != DATA_EXCHANGE_KIND_DEVICE:
+        raise ValueError("所选文件不是设备交换包")
+    metadata = files.get("metadata.json")
+    init_data = files.get("device.json")
+    routes_payload = files.get("routes.json") or {}
+    groups_payload = files.get("groups.json") or {}
+    if not all(isinstance(item, Mapping) for item in (metadata, init_data, routes_payload, groups_payload)):
+        raise ValueError("设备交换包内容不完整")
+    pure_init_data, packaged_init_options = _split_device_init_data(init_data)
+    metadata_init_options = metadata.get("initOptions") or {}
+    if not isinstance(metadata_init_options, Mapping):
+        raise ValueError("设备交换包的 initOptions 无效")
+    init_options = {
+        **deepcopy(dict(packaged_init_options)),
+        **deepcopy(dict(metadata_init_options)),
+    }
+    fingerprint = _device_fingerprint(pure_init_data)
+    if fingerprint != str(manifest.get("deviceFingerprint") or ""):
+        raise ValueError("设备交换包的 init 指纹校验失败")
+    imported_tests = [
+        value for name, value in files.items()
+        if name.startswith("tests/") and name.endswith("/test.json") and isinstance(value, Mapping)
+    ]
+    with _workspace_catalog_guard(path):
+        catalog = _read_workspace_catalog_unlocked(path)
+        device = next((
+            item for item in catalog["devices"]
+            if isinstance(item, dict)
+            and _device_fingerprint(item.get("device") or {}) == fingerprint
+        ), None)
+        created_device = 0
+        if device is None:
+            device = deepcopy(dict(metadata))
+            device.pop("schemaVersion", None)
+            device.pop("initOptions", None)
+            occupied_ids = {str(item.get("id") or "") for item in catalog["devices"] if isinstance(item, Mapping)}
+            if not str(device.get("id") or "") or str(device.get("id")) in occupied_ids:
+                device["id"] = uuid.uuid4().hex
+            device["name"] = _unique_workspace_name(
+                str(device.get("name") or "未命名设备"),
+                (str(item.get("name") or "") for item in catalog["devices"] if isinstance(item, Mapping)),
+            )
+            device["device"] = {**deepcopy(pure_init_data), **init_options}
+            device["routes"] = []
+            device["cleans"] = deepcopy(routes_payload.get("cleans") or [])
+            device["routeAliases"] = deepcopy(routes_payload.get("routeAliases") or {})
+            device["testGroups"] = deepcopy(groups_payload.get("testGroups") or [])
+            device["robotSlots"] = deepcopy(groups_payload.get("robotSlots") or {})
+            device["tests"] = []
+            catalog["devices"].append(device)
+            created_device = 1
+        elif init_options:
+            local_init, local_options = _split_device_init_data(device.get("device") or {})
+            for key, value in init_options.items():
+                if key in local_options and local_options[key] != value:
+                    raise ValueError(f"设备初始化选项“{key}”与本地定义不同，已停止导入")
+                local_options[key] = deepcopy(value)
+            device["device"] = {**local_init, **local_options}
+        _merge_exchange_routes(device, routes_payload.get("routes"))
+        _merge_exchange_named_assets(
+            device, "cleans", routes_payload.get("cleans"), "Clean",
+        )
+        local_aliases = _normalized_route_aliases(device.get("routeAliases"))
+        for old_name, new_name in _normalized_route_aliases(
+            routes_payload.get("routeAliases")
+        ).items():
+            if old_name in local_aliases and local_aliases[old_name] != new_name:
+                raise ValueError(f"路径别名“{old_name}”与本地定义不同，已停止导入")
+            local_aliases[old_name] = new_name
+        device["routeAliases"] = local_aliases
+        for group in groups_payload.get("testGroups") or []:
+            group_name = str(group).strip()
+            if group_name and group_name not in device.setdefault("testGroups", []):
+                device["testGroups"].append(group_name)
+        imported_robot_slots = groups_payload.get("robotSlots")
+        if imported_robot_slots:
+            local_robot_slots = device.get("robotSlots")
+            if local_robot_slots and local_robot_slots != imported_robot_slots:
+                raise ValueError("设备包的 Robot 槽位配置与本地不同，已停止导入")
+            device["robotSlots"] = deepcopy(imported_robot_slots)
+        imported_count = 0
+        for test_case in imported_tests:
+            _, created = _append_imported_test(device, test_case)
+            imported_count += int(created)
+        device["updatedAt"] = _workspace_timestamp()
+        _write_workspace_catalog_unlocked(path, catalog)
+        return deepcopy(device), created_device, imported_count
+
+
 def delete_workspace_device(device_id: str, path: Path = WORKSPACE_STORE_PATH) -> Dict[str, Any]:
     """从本地工作区删除一台设备及其全部测试集，并返回被删除设备的摘要。
 
-    设备删除后不可恢复：拆分目录模式会移除 ``<store>/<device_id>/`` 设备目录
-    （含其中全部测试集文件），设备初始文件（``DEVICE_INIT_DIR/<id>.json``）
-    也会一并清理。设备不存在时抛出明确错误；已被历史批量任务引用的设备不会
+    设备删除后不可恢复：目录模式会移除设备 UUID 目录及其中全部测试集。
+    设备不存在时抛出明确错误；已被历史批量任务引用的设备不会
     改写历史记录。
     """
     with _workspace_catalog_guard(path):
@@ -4509,14 +5129,8 @@ def delete_workspace_device(device_id: str, path: Path = WORKSPACE_STORE_PATH) -
             item for item in catalog["devices"]
             if not (isinstance(item, Mapping) and str(item.get("id")) == device_id)
         ]
-        # 先物理删除设备目录与初始文件再写目录：即使中途中断，下次扫描也不会复活该设备。
+        # 先物理删除设备目录再写目录：即使中途中断，下次扫描也不会复活该设备。
         _remove_directory_device_dir(path, device_id)
-        if path == WORKSPACE_STORE_PATH:
-            try:
-                (DEVICE_INIT_DIR / f"{device_id}.json").unlink(missing_ok=True)
-            except OSError:
-                # 设备初始文件只是工作区拓扑的镜像缓存，删除失败不影响工作区移除。
-                pass
         _write_workspace_catalog_unlocked(path, catalog)
         return {
             "id": device_id,
@@ -4894,6 +5508,8 @@ def _unique_workspace_name(name: str, existing_names: Iterable[str]) -> str:
 
 def _device_fingerprint(device_data: Mapping[str, Any]) -> str:
     """计算设备语义指纹，将 JSON 中数值相同的整数和浮点数视为同一拓扑。"""
+    pure_init_data, _ = _split_device_init_data(device_data)
+
     def normalize(value: Any) -> Any:
         """递归规范化 JSON 数值表示，不改变字段、数组顺序或非整数浮点精度。"""
         if isinstance(value, Mapping):
@@ -4905,9 +5521,25 @@ def _device_fingerprint(device_data: Mapping[str, Any]) -> str:
         return value
 
     canonical = json.dumps(
-        normalize(device_data), ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        normalize(pure_init_data), ensure_ascii=False, sort_keys=True, separators=(",", ":"),
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _split_device_init_data(device_data: Any) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """将纯 Stations/Robots init 与兼容性初始化选项分开持久化。"""
+    source = dict(device_data) if isinstance(device_data, Mapping) else {}
+    pure = {
+        key: deepcopy(source[key])
+        for key in ("Stations", "Robots")
+        if key in source
+    }
+    options = {
+        str(key): deepcopy(value)
+        for key, value in source.items()
+        if key not in {"Stations", "Robots"}
+    }
+    return pure, options
 
 
 def import_workspace_device(
@@ -5189,6 +5821,7 @@ def _fast_update_directory_workspace_routes_unlocked(
     """快速保存未改名的模板编辑，只触碰设备库文件而不遍历全部测试。"""
     if (
         path.suffix
+        or _uses_readable_dataset_layout(path)
         or not re.fullmatch(r"[A-Za-z0-9_-]+", device_id)
         or _workspace_data_update_required(path)
         or not isinstance(payload.get("routes"), list)
@@ -5223,8 +5856,6 @@ def _fast_update_directory_workspace_routes_unlocked(
         device["routeAliases"] = route_aliases
     device["updatedAt"] = _workspace_timestamp()
     _write_json_atomic(device_file, device)
-    if path == WORKSPACE_STORE_PATH and isinstance(device.get("device"), Mapping):
-        _write_json_atomic(DEVICE_INIT_DIR / f"{device_id}.json", device["device"])
     try:
         summaries = json.loads(
             _workspace_test_index_path(device_file.parent / "tests").read_text(
@@ -5780,6 +6411,25 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             return
         if path.startswith("/api/workspaces/"):
             parts = [part for part in path.split("/") if part]
+            if len(parts) == 4 and parts[:2] == ["api", "workspaces"] and parts[3] == "export":
+                try:
+                    content, download_name = export_workspace_device(parts[2])
+                    self._send_bytes(content, "application/zip", download_name)
+                except Exception as error:  # noqa: BLE001
+                    self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
+                return
+            if (
+                len(parts) == 6
+                and parts[:2] == ["api", "workspaces"]
+                and parts[3] == "tests"
+                and parts[5] == "export"
+            ):
+                try:
+                    content, download_name = export_workspace_test(parts[2], parts[4])
+                    self._send_bytes(content, "application/zip", download_name)
+                except Exception as error:  # noqa: BLE001
+                    self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
+                return
             if len(parts) == 5 and parts[:2] == ["api", "workspaces"] and parts[3] == "tests":
                 try:
                     self._send_json({"ok": True, "test": get_workspace_test(parts[2], parts[4])})
@@ -5841,6 +6491,39 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         """接收控制台配置并同步运行后端策略。"""
         path = unquote(urlparse(self.path).path)
+        if path == "/api/workspaces/import/device":
+            try:
+                device, created_device, imported_tests = import_workspace_device_archive(
+                    self._read_binary_body(DATA_EXCHANGE_MAX_BYTES),
+                )
+                self._send_json({
+                    "ok": True,
+                    "device": {
+                        "id": device["id"],
+                        "name": device.get("name") or "未命名设备",
+                        "testCount": len(device.get("tests") or []),
+                    },
+                    "createdDevice": bool(created_device),
+                    "importedTests": imported_tests,
+                })
+            except Exception as error:  # noqa: BLE001
+                self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
+            return
+        import_test_parts = [part for part in path.split("/") if part]
+        if (
+            len(import_test_parts) == 4
+            and import_test_parts[:2] == ["api", "workspaces"]
+            and import_test_parts[3] == "import-test"
+        ):
+            try:
+                test_case, created = import_workspace_test_archive(
+                    import_test_parts[2],
+                    self._read_binary_body(DATA_EXCHANGE_MAX_BYTES),
+                )
+                self._send_json({"ok": True, "created": created, "test": test_case})
+            except Exception as error:  # noqa: BLE001
+                self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
+            return
         if path == "/api/model-checkpoints":
             try:
                 filename = unquote(str(self.headers.get("X-Checkpoint-Filename") or ""))
@@ -6420,6 +7103,7 @@ def main() -> None:
     # 仅在版本变化或检测到外部更新文件时整理工作区；完成标记使后续启动直接跳过。
     legacy_store = DATA_DIR / "workspaces.json"
     legacy_present = legacy_store.is_file()
+    legacy_directory_present = _has_separate_legacy_workspace_directory(WORKSPACE_STORE_PATH)
     if _workspace_data_update_required():
         print("正在更新工作区数据…", end="", flush=True)
         _prepare_workspace_data()
@@ -6429,6 +7113,11 @@ def main() -> None:
             f"已自动迁移旧版工作区数据：{legacy_store.name} → {WORKSPACE_STORE_PATH.name}/ 拆分目录"
         )
         print(f"原文件备份为 {legacy_store.name}.legacy.json，确认无误后可删除。")
+    if legacy_directory_present:
+        print(
+            f"已自动迁移旧版目录：workspaces/ + devices/ → {WORKSPACE_STORE_PATH.name}/ v{WORKSPACE_STORE_VERSION}"
+        )
+        print("原目录已移入 data/migration-backups/，确认新版数据正常后可清理。")
     print("正在预热算法缓存…", end="", flush=True)
     discover_other_algorithms()
     print(" 完成")

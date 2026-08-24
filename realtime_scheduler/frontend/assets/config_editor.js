@@ -18087,6 +18087,7 @@ var runStatusStartedAt = 0;
 var runStatusElapsedMs = 0;
 var runStatusTimer = 0;
 var pendingAlphaGoCheckpointFile = null;
+var dataTransferMode = "import";
 var sessionSchedulingConfiguration = null;
 function retainSessionSchedulingConfiguration() {
   sessionSchedulingConfiguration = structuredClone({
@@ -18425,6 +18426,86 @@ async function loadDevice(file) {
   writeTerminal(`$ ${result.created ? "\u5DF2\u5BFC\u5165" : "\u5DF2\u9009\u62E9\u5DF2\u6709"}\u8BBE\u5907 ${result.device.name}
   \u8BE5\u8BBE\u5907\u4E0B\u6709 ${state.workspaceDevice?.tests?.length || 0} \u4E2A\u6D4B\u8BD5\u96C6`);
   document.getElementById("deviceFile").value = "";
+}
+function openDataTransferDialog(mode) {
+  dataTransferMode = mode;
+  const importing = mode === "import";
+  document.getElementById("dataTransferDialogTitle").textContent = importing ? "\u5BFC\u5165\u6570\u636E" : "\u5BFC\u51FA\u6570\u636E";
+  document.getElementById("dataTransferDialogDescription").textContent = importing ? "\u9009\u62E9\u5BFC\u5165\u6574\u53F0\u8BBE\u5907\uFF0C\u6216\u628A\u6D4B\u8BD5\u96C6\u52A0\u5165\u5F53\u524D\u76F8\u540C\u8BBE\u5907\u3002" : "\u8BBE\u5907\u5305\u5305\u542B\u8BBE\u5907\u4E0B\u5168\u90E8\u4FE1\u606F\uFF1B\u6D4B\u8BD5\u96C6\u5305\u53EA\u5305\u542B\u5F53\u524D\u6D4B\u8BD5\u53CA\u6240\u9700\u8DEF\u5F84\u3002";
+  document.getElementById("deviceTransferOptionTitle").textContent = importing ? "\u5BFC\u5165\u8BBE\u5907" : "\u5BFC\u51FA\u5F53\u524D\u8BBE\u5907";
+  document.getElementById("deviceTransferOptionDescription").textContent = importing ? "\u652F\u6301\u540C\u4E8B\u5206\u4EAB\u7684\u8BBE\u5907\u5305\uFF0C\u4E5F\u652F\u6301\u65B0\u7684 init JSON\u3002" : "\u5305\u542B init\u3001\u8DEF\u5F84\u3001\u7EC4\u522B\u548C\u8BE5\u8BBE\u5907\u4E0B\u5168\u90E8\u6D4B\u8BD5\u96C6\u3002";
+  document.getElementById("testTransferOptionTitle").textContent = importing ? "\u5BFC\u5165\u6D4B\u8BD5\u96C6" : "\u5BFC\u51FA\u5F53\u524D\u6D4B\u8BD5\u96C6";
+  document.getElementById("testTransferOptionDescription").textContent = importing ? "\u53EA\u80FD\u5BFC\u5165\u5230 init \u5B8C\u5168\u76F8\u540C\u7684\u5F53\u524D\u8BBE\u5907\u3002" : "\u63A5\u6536\u65B9\u5FC5\u987B\u62E5\u6709 init \u5B8C\u5168\u76F8\u540C\u7684\u8BBE\u5907\u3002";
+  document.getElementById("deviceTransferOption").disabled = !importing && !state.workspaceDeviceId;
+  document.getElementById("testTransferOption").disabled = !state.workspaceDeviceId || !importing && !state.testCaseId;
+  const status = document.getElementById("dataTransferStatus");
+  status.textContent = importing && !state.workspaceDeviceId ? "\u5C1A\u672A\u9009\u62E9\u8BBE\u5907\u65F6\uFF0C\u53EA\u80FD\u5BFC\u5165\u8BBE\u5907\u3002" : "";
+  status.classList.remove("error");
+  document.getElementById("dataTransferDialog").showModal();
+}
+async function downloadWorkspaceArchive(url) {
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) {
+    const result = await response.json().catch(() => ({}));
+    throw new Error(result?.error || `\u670D\u52A1\u8FD4\u56DE ${response.status}`);
+  }
+  const blob = await response.blob();
+  const disposition = response.headers.get("Content-Disposition") || "";
+  const filename = disposition.match(/filename="([^"]+)"/)?.[1] || "ct-data.zip";
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = objectUrl;
+  anchor.download = filename;
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(objectUrl);
+}
+async function exportWorkspaceData(kind) {
+  if (!state.workspaceDeviceId) throw new Error("\u8BF7\u5148\u9009\u62E9\u8BBE\u5907");
+  if (state.dirty) await saveCurrentTest(true);
+  if (state.deviceTimingDirty) await saveDeviceTiming();
+  if (kind === "test" && !state.testCaseId) throw new Error("\u8BF7\u5148\u9009\u62E9\u6D4B\u8BD5\u96C6");
+  const url = kind === "device" ? `/api/workspaces/${encodeURIComponent(state.workspaceDeviceId)}/export` : `/api/workspaces/${encodeURIComponent(state.workspaceDeviceId)}/tests/${encodeURIComponent(state.testCaseId)}/export`;
+  await downloadWorkspaceArchive(url);
+  document.getElementById("dataTransferDialog").close();
+  setWorkspaceStatus(kind === "device" ? "\u5DF2\u5F00\u59CB\u5BFC\u51FA\u5F53\u524D\u8BBE\u5907" : "\u5DF2\u5F00\u59CB\u5BFC\u51FA\u5F53\u524D\u6D4B\u8BD5\u96C6", "saved");
+}
+async function uploadWorkspaceArchive(file, kind) {
+  if (!file) return;
+  if (state.dirty) await saveCurrentTest(true);
+  const url = kind === "device" ? "/api/workspaces/import/device" : `/api/workspaces/${encodeURIComponent(state.workspaceDeviceId)}/import-test`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/zip", "X-Data-Filename": encodeURIComponent(file.name) },
+    body: file
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok || result?.ok === false) throw new Error(result?.error || `\u670D\u52A1\u8FD4\u56DE ${response.status}`);
+  if (kind === "device") {
+    await loadWorkspaceCatalog(result.device.id);
+    setWorkspaceStatus(`\u5DF2\u5BFC\u5165\u8BBE\u5907\u201C${result.device.name}\u201D\u53CA ${result.importedTests} \u4E2A\u6D4B\u8BD5\u96C6`, "saved");
+  } else {
+    await loadWorkspaceCatalog(state.workspaceDeviceId, result.test.id);
+    setWorkspaceStatus(result.created ? `\u5DF2\u5BFC\u5165\u6D4B\u8BD5\u96C6\u201C${result.test.name}\u201D` : `\u6D4B\u8BD5\u96C6\u201C${result.test.name}\u201D\u5DF2\u5B58\u5728`, "saved");
+  }
+  document.getElementById("dataTransferDialog").close();
+}
+async function chooseDataTransfer(kind) {
+  const status = document.getElementById("dataTransferStatus");
+  status.textContent = "";
+  status.classList.remove("error");
+  try {
+    if (dataTransferMode === "export") {
+      await exportWorkspaceData(kind);
+      return;
+    }
+    if (kind === "test" && !state.workspaceDeviceId) throw new Error("\u8BF7\u5148\u9009\u62E9\u6D4B\u8BD5\u96C6\u6240\u5C5E\u7684\u76F8\u540C\u8BBE\u5907");
+    document.getElementById(kind === "device" ? "deviceFile" : "testExchangeFile").click();
+  } catch (error) {
+    status.textContent = error.message || "\u64CD\u4F5C\u5931\u8D25";
+    status.classList.add("error");
+  }
 }
 function robotAvailableSlots(robot) {
   const slots = /* @__PURE__ */ new Set();
@@ -22252,11 +22333,41 @@ document.getElementById("cleanDialogForm").addEventListener("submit", (event) =>
   event.preventDefault();
   saveCleanDialog();
 });
-document.getElementById("deviceFile").addEventListener("change", (event) => loadDevice(event.target.files[0]).catch((error) => {
-  event.target.value = "";
-  writeTerminal(`$ \u8BBE\u5907\u8BFB\u53D6\u5931\u8D25
+document.getElementById("workspaceImportButton").addEventListener("click", () => openDataTransferDialog("import"));
+document.getElementById("workspaceExportButton").addEventListener("click", () => openDataTransferDialog("export"));
+document.getElementById("dataTransferDialogClose").addEventListener("click", () => document.getElementById("dataTransferDialog").close());
+document.getElementById("deviceTransferOption").addEventListener("click", () => chooseDataTransfer("device"));
+document.getElementById("testTransferOption").addEventListener("click", () => chooseDataTransfer("test"));
+document.getElementById("dataTransferDialog").addEventListener("click", (event) => {
+  if (event.target === document.getElementById("dataTransferDialog")) event.target.close();
+});
+document.getElementById("deviceFile").addEventListener("change", (event) => {
+  const input = event.currentTarget;
+  const file = input.files?.[0];
+  input.value = "";
+  if (!file) return;
+  const operation = file.name.toLowerCase().endsWith(".json") ? loadDevice(file) : uploadWorkspaceArchive(file, "device");
+  operation.catch((error) => {
+    const status = document.getElementById("dataTransferStatus");
+    status.textContent = error.message || "\u8BBE\u5907\u5BFC\u5165\u5931\u8D25";
+    status.classList.add("error");
+    writeTerminal(`$ \u8BBE\u5907\u8BFB\u53D6\u5931\u8D25
   ${error.message}`, true);
-}));
+  });
+});
+document.getElementById("testExchangeFile").addEventListener("change", (event) => {
+  const input = event.currentTarget;
+  const file = input.files?.[0];
+  input.value = "";
+  if (!file) return;
+  uploadWorkspaceArchive(file, "test").catch((error) => {
+    const status = document.getElementById("dataTransferStatus");
+    status.textContent = error.message || "\u6D4B\u8BD5\u96C6\u5BFC\u5165\u5931\u8D25";
+    status.classList.add("error");
+    writeTerminal(`$ \u6D4B\u8BD5\u96C6\u5BFC\u5165\u5931\u8D25
+  ${error.message}`, true);
+  });
+});
 document.getElementById("addAlgorithmButton").addEventListener("click", () => document.getElementById("addAlgorithmFileInput").click());
 document.getElementById("addAlgorithmFileInput").addEventListener("change", (event) => {
   const input = event.currentTarget;

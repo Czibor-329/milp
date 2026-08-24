@@ -129,6 +129,7 @@ let runStatusStartedAt = 0;
 let runStatusElapsedMs = 0;
 let runStatusTimer = 0;
 let pendingAlphaGoCheckpointFile: File | null = null;
+let dataTransferMode: "import" | "export" = "import";
 /**
  * 当前页面会话统一使用的运行配置。
  *
@@ -555,6 +556,106 @@ async function loadDevice(file) {
   await loadWorkspaceCatalog(result.device.id);
   writeTerminal(`$ ${result.created ? "已导入" : "已选择已有"}设备 ${result.device.name}\n  该设备下有 ${state.workspaceDevice?.tests?.length || 0} 个测试集`);
   document.getElementById("deviceFile").value = "";
+}
+
+/** 打开统一的设备/测试集导入导出选择窗口。 */
+function openDataTransferDialog(mode: "import" | "export") {
+  dataTransferMode = mode;
+  const importing = mode === "import";
+  document.getElementById("dataTransferDialogTitle").textContent = importing ? "导入数据" : "导出数据";
+  document.getElementById("dataTransferDialogDescription").textContent = importing
+    ? "选择导入整台设备，或把测试集加入当前相同设备。"
+    : "设备包包含设备下全部信息；测试集包只包含当前测试及所需路径。";
+  document.getElementById("deviceTransferOptionTitle").textContent = importing ? "导入设备" : "导出当前设备";
+  document.getElementById("deviceTransferOptionDescription").textContent = importing
+    ? "支持同事分享的设备包，也支持新的 init JSON。"
+    : "包含 init、路径、组别和该设备下全部测试集。";
+  document.getElementById("testTransferOptionTitle").textContent = importing ? "导入测试集" : "导出当前测试集";
+  document.getElementById("testTransferOptionDescription").textContent = importing
+    ? "只能导入到 init 完全相同的当前设备。"
+    : "接收方必须拥有 init 完全相同的设备。";
+  document.getElementById("deviceTransferOption").disabled = !importing && !state.workspaceDeviceId;
+  document.getElementById("testTransferOption").disabled = !state.workspaceDeviceId || (!importing && !state.testCaseId);
+  const status = document.getElementById("dataTransferStatus");
+  status.textContent = importing && !state.workspaceDeviceId ? "尚未选择设备时，只能导入设备。" : "";
+  status.classList.remove("error");
+  (document.getElementById("dataTransferDialog") as HTMLDialogElement).showModal();
+}
+
+/** 下载交换包，并在服务端拒绝时显示真实业务错误。 */
+async function downloadWorkspaceArchive(url: string) {
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) {
+    const result = await response.json().catch(() => ({}));
+    throw new Error(result?.error || `服务返回 ${response.status}`);
+  }
+  const blob = await response.blob();
+  const disposition = response.headers.get("Content-Disposition") || "";
+  const filename = disposition.match(/filename="([^"]+)"/)?.[1] || "ct-data.zip";
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = objectUrl;
+  anchor.download = filename;
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(objectUrl);
+}
+
+/** 在导出前保存当前草稿，确保交换包与页面看到的内容一致。 */
+async function exportWorkspaceData(kind: "device" | "test") {
+  if (!state.workspaceDeviceId) throw new Error("请先选择设备");
+  if (state.dirty) await saveCurrentTest(true);
+  if (state.deviceTimingDirty) await saveDeviceTiming();
+  if (kind === "test" && !state.testCaseId) throw new Error("请先选择测试集");
+  const url = kind === "device"
+    ? `/api/workspaces/${encodeURIComponent(state.workspaceDeviceId)}/export`
+    : `/api/workspaces/${encodeURIComponent(state.workspaceDeviceId)}/tests/${encodeURIComponent(state.testCaseId)}/export`;
+  await downloadWorkspaceArchive(url);
+  (document.getElementById("dataTransferDialog") as HTMLDialogElement).close();
+  setWorkspaceStatus(kind === "device" ? "已开始导出当前设备" : "已开始导出当前测试集", "saved");
+}
+
+/** 上传新版交换包，并把后端错误转换为页面可读消息。 */
+async function uploadWorkspaceArchive(file: File, kind: "device" | "test") {
+  if (!file) return;
+  if (state.dirty) await saveCurrentTest(true);
+  const url = kind === "device"
+    ? "/api/workspaces/import/device"
+    : `/api/workspaces/${encodeURIComponent(state.workspaceDeviceId)}/import-test`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/zip", "X-Data-Filename": encodeURIComponent(file.name) },
+    body: file,
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok || result?.ok === false) throw new Error(result?.error || `服务返回 ${response.status}`);
+  if (kind === "device") {
+    await loadWorkspaceCatalog(result.device.id);
+    setWorkspaceStatus(`已导入设备“${result.device.name}”及 ${result.importedTests} 个测试集`, "saved");
+  } else {
+    await loadWorkspaceCatalog(state.workspaceDeviceId, result.test.id);
+    setWorkspaceStatus(result.created ? `已导入测试集“${result.test.name}”` : `测试集“${result.test.name}”已存在`, "saved");
+  }
+  (document.getElementById("dataTransferDialog") as HTMLDialogElement).close();
+}
+
+/** 根据弹窗模式执行设备或测试集操作。 */
+async function chooseDataTransfer(kind: "device" | "test") {
+  const status = document.getElementById("dataTransferStatus");
+  status.textContent = "";
+  status.classList.remove("error");
+  try {
+    if (dataTransferMode === "export") {
+      await exportWorkspaceData(kind);
+      return;
+    }
+    if (kind === "test" && !state.workspaceDeviceId) throw new Error("请先选择测试集所属的相同设备");
+    document.getElementById(kind === "device" ? "deviceFile" : "testExchangeFile").click();
+  } catch (error) {
+    status.textContent = error.message || "操作失败";
+    status.classList.add("error");
+  }
 }
 
 /** 从 ArmInfo 收集槽位；一个物理 Arm 可以包含多个晶圆手槽。 */
@@ -4704,7 +4805,39 @@ document.getElementById("cleanDialogForm").addEventListener("submit", event => {
   event.preventDefault();
   saveCleanDialog();
 });
-document.getElementById("deviceFile").addEventListener("change", event => loadDevice(event.target.files[0]).catch(error => { event.target.value = ""; writeTerminal(`$ 设备读取失败\n  ${error.message}`, true); }));
+document.getElementById("workspaceImportButton").addEventListener("click", () => openDataTransferDialog("import"));
+document.getElementById("workspaceExportButton").addEventListener("click", () => openDataTransferDialog("export"));
+document.getElementById("dataTransferDialogClose").addEventListener("click", () => (document.getElementById("dataTransferDialog") as HTMLDialogElement).close());
+document.getElementById("deviceTransferOption").addEventListener("click", () => chooseDataTransfer("device"));
+document.getElementById("testTransferOption").addEventListener("click", () => chooseDataTransfer("test"));
+document.getElementById("dataTransferDialog").addEventListener("click", event => {
+  if (event.target === document.getElementById("dataTransferDialog")) (event.target as HTMLDialogElement).close();
+});
+document.getElementById("deviceFile").addEventListener("change", event => {
+  const input = event.currentTarget as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = "";
+  if (!file) return;
+  const operation = file.name.toLowerCase().endsWith(".json") ? loadDevice(file) : uploadWorkspaceArchive(file, "device");
+  operation.catch(error => {
+    const status = document.getElementById("dataTransferStatus");
+    status.textContent = error.message || "设备导入失败";
+    status.classList.add("error");
+    writeTerminal(`$ 设备读取失败\n  ${error.message}`, true);
+  });
+});
+document.getElementById("testExchangeFile").addEventListener("change", event => {
+  const input = event.currentTarget as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = "";
+  if (!file) return;
+  uploadWorkspaceArchive(file, "test").catch(error => {
+    const status = document.getElementById("dataTransferStatus");
+    status.textContent = error.message || "测试集导入失败";
+    status.classList.add("error");
+    writeTerminal(`$ 测试集导入失败\n  ${error.message}`, true);
+  });
+});
 document.getElementById("addAlgorithmButton").addEventListener("click", () => document.getElementById("addAlgorithmFileInput").click());
 document.getElementById("addAlgorithmFileInput").addEventListener("change", event => {
   const input = event.currentTarget;

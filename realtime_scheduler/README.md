@@ -14,8 +14,7 @@
 - `frontend/src/workspace_visualizer.ts`：MoveList 回放、腔室门状态与设备工作台；性能指标通过 `/api/analysis/*` 获取。
 - `frontend/assets/`：可由 Python 服务直接托管的构建产物与样式。
 - `frontend/movelist_gantt_viewer.html`：MoveList 甘特图页面。
-- `data/workspaces.json`：设备、设备级共享路径模板，以及测试独有的 Route 参数、Clean 和任务。
-- `data/devices/`：按设备 ID 独立保存的 init 信息。
+- `data/datasets/`：设备、共享路径模板和测试集的唯一主数据；用户只通过前端导入/导出，不直接操作目录。
 - `exports/logs/`：每次运行生成的 input_data 复现日志。
 - `exports/results/`：每次运行生成的统一 MoveList 与重算点。
 

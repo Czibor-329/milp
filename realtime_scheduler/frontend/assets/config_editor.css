@@ -79,11 +79,11 @@
     .workspace-panel { position: relative; z-index: 2; overflow: visible; container-name: workspace-area; container-type: inline-size; }
     .workspace-panel-head { min-height: 64px; padding-top: 15px; padding-bottom: 15px; }
     .workspace-panel-body { padding: 20px; }
-    .workspace-head-actions { display: flex; min-width: 0; align-items: center; justify-content: flex-end; gap: 16px; }
+    .workspace-head-actions { display: flex; min-width: 0; align-items: center; justify-content: flex-end; gap: 12px; }
     .workspace-inline-grid { display: grid; grid-template-columns: minmax(420px, 515px) max-content; align-items: start; justify-content: start; gap: 20px; }
     .workspace-device-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 7px; }
     .workspace-device-row > label { display: block; color: #1f3656; font-size: 12px; font-weight: 800; }
-    .workspace-device-controls { display: grid; grid-template-columns: minmax(170px, 210px) 36px 36px minmax(96px, auto); align-items: center; gap: 8px; }
+    .workspace-device-controls { display: grid; grid-template-columns: minmax(170px, 210px) 36px minmax(96px, auto); align-items: center; gap: 8px; }
     .compact-select { position: relative; min-width: 0; }
     .compact-select.is-open { z-index: 40; }
     .compact-select > select { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; border: 0; clip: rect(0 0 0 0); white-space: nowrap; }
@@ -115,6 +115,11 @@
     .workspace-icon-button.danger:hover:not(:disabled) { border-color: #e596a0; color: #b91f34; background: var(--red-soft); }
     .workspace-save-button { box-shadow: 0 5px 12px rgba(36,87,214,.20); }
     .workspace-save-button:hover:not(:disabled) { color: #fff; background: var(--brand-dark); box-shadow: 0 7px 16px rgba(36,87,214,.24); }
+    .workspace-transfer-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; }
+    .workspace-status-cluster { display: flex; min-width: 0; align-items: center; justify-content: flex-end; gap: 10px; }
+    .workspace-transfer-button { display: inline-flex; min-height: 34px; align-items: center; gap: 6px; padding-inline: 10px; color: #214671; background: #f8fbff; }
+    .workspace-transfer-button svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+    .workspace-transfer-button:hover { border-color: #87a4d9; color: var(--brand); background: var(--brand-soft); }
     .workspace-test-row { width: max-content; max-width: 100%; }
     .test-picker { display: grid; min-width: 0; flex: 0 0 auto; grid-template-columns: 108px 118px; gap: 7px; }
     .test-picker > .compact-select, .test-picker > input { min-width: 0; min-height: 40px; }
@@ -122,6 +127,23 @@
     .empty-group-hint.visible { display: flex; }
     dialog { width: min(420px, calc(100vw - 32px)); padding: 0; border: 1px solid var(--line); border-radius: 14px; color: var(--ink); box-shadow: 0 20px 60px rgba(15, 23, 42, .22); }
     dialog::backdrop { background: rgba(15, 23, 42, .28); }
+    .data-transfer-dialog { width: min(560px, calc(100vw - 32px)); padding: 0; border: 0; border-radius: 16px; box-shadow: 0 22px 60px rgba(15, 35, 65, .22); }
+    .data-transfer-dialog-body { padding: 22px; }
+    .data-transfer-dialog-body > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+    .data-transfer-dialog-body h3 { margin: 0 0 5px; color: #172b48; font-size: 18px; }
+    .data-transfer-dialog-body header p { margin: 0; color: var(--muted); font-size: 12px; }
+    .data-transfer-options { display: grid; gap: 10px; margin-top: 18px; }
+    .data-transfer-option { display: grid; width: 100%; grid-template-columns: 42px minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 14px; border: 1px solid #d7e1ee; border-radius: 12px; color: #1f3656; background: #fff; text-align: left; cursor: pointer; transition: border-color .18s ease, background .18s ease, transform .18s ease, box-shadow .18s ease; }
+    .data-transfer-option:hover:not(:disabled), .data-transfer-option:focus-visible { border-color: #87a4d9; background: #f6f9ff; box-shadow: 0 7px 18px rgba(36,87,214,.10); transform: translateY(-1px); outline: none; }
+    .data-transfer-option:disabled { color: #8b98aa; background: #f7f9fb; cursor: not-allowed; opacity: .72; }
+    .data-transfer-option-icon { display: grid; width: 42px; height: 42px; place-items: center; border-radius: 10px; color: var(--brand); background: var(--brand-soft); }
+    .data-transfer-option-icon svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+    .data-transfer-option strong, .data-transfer-option small { display: block; }
+    .data-transfer-option strong { margin-bottom: 3px; font-size: 13px; }
+    .data-transfer-option small { color: var(--muted); font-size: 11px; line-height: 1.45; }
+    .data-transfer-option-arrow { color: #7890ae; font-size: 18px; }
+    .data-transfer-status { min-height: 18px; margin-top: 12px; color: var(--muted); font-size: 11px; }
+    .data-transfer-status.error { color: var(--red); }
     .dialog-body { padding: 18px; }
     .dialog-body h3 { margin: 0 0 6px; font-size: 16px; }
     .dialog-body p { margin: 0; color: var(--muted); }
@@ -184,8 +206,9 @@
       .workspace-head-actions { width: 100%; justify-content: space-between; flex-wrap: wrap; }
       .workspace-status { justify-content: flex-start; text-align: left; }
       .workspace-inline-grid { grid-template-columns: 1fr; gap: 16px; }
-      .workspace-device-controls { grid-template-columns: minmax(0, 1fr) 36px 36px; }
+      .workspace-device-controls { grid-template-columns: minmax(0, 1fr) 36px; }
       .workspace-device-summary { grid-column: 1 / -1; }
+      .workspace-status-cluster { width: 100%; justify-content: flex-start; flex-wrap: wrap; }
       .workspace-control-row { align-items: stretch; flex-wrap: wrap; }
       .workspace-control-row > select { flex-basis: calc(100% - 162px); }
       .workspace-test-row .test-picker { flex-basis: 100%; }
