@@ -3378,12 +3378,17 @@ function buildPayload() {
     // 初始执行模式随回放/步进模式走，避免 update 启动时的会话重置覆盖用户选择。
     options.scheduleAlphaGoExecutionMode = playbackMode === "step" ? "stepped" : "continuous";
   }
-  return { schemaVersion: EXPECTED_API_SCHEMA, workspaceDeviceId: state.workspaceDeviceId, workspaceTestId: state.testCaseId, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options, skipValidation: skipValidationEnabled(), skipBaseline: skipBaselineEnabled(), recipes: collectRecipes(routes), cleans, routes, rounds: structuredClone(state.rounds) };
+  return { schemaVersion: EXPECTED_API_SCHEMA, workspaceDeviceId: state.workspaceDeviceId, workspaceTestId: state.testCaseId, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options, skipValidation: skipValidationEnabled(), hongYeCheck: hongYeCheckEnabled(), skipBaseline: skipBaselineEnabled(), recipes: collectRecipes(routes), cleans, routes, rounds: structuredClone(state.rounds) };
 }
 
 /** 返回“跳过输出校验”是否已勾选。 */
 function skipValidationEnabled() {
   return document.getElementById("skipValidationInput")?.checked === true;
+}
+
+/** 返回是否选择 HongYe SchStateLib 输出校验器。 */
+function hongYeCheckEnabled() {
+  return document.getElementById("hongYeCheckInput")?.checked === true;
 }
 
 /** 返回“跳过Baseline”是否已勾选。 */
@@ -3837,7 +3842,7 @@ async function runCurrentTestGroup() {
     const response = await fetch("/api/run-batch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ deviceId: state.workspaceDeviceId, group: state.activeTestGroup, strategy: state.strategy, options: state.options, skipValidation: skipValidationEnabled(), skipBaseline: skipBaselineEnabled() }),
+      body: JSON.stringify({ deviceId: state.workspaceDeviceId, group: state.activeTestGroup, strategy: state.strategy, options: state.options, skipValidation: skipValidationEnabled(), hongYeCheck: hongYeCheckEnabled(), skipBaseline: skipBaselineEnabled() }),
     });
     let result = await response.json();
     if (!response.ok || !result.batchId || !Array.isArray(result.items)) throw new Error(result.error || `服务返回 ${response.status}`);

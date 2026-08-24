@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>调度平台</title>
   <link rel="stylesheet" href="/assets/katex.min.css?v=1.4.4">
-  <link rel="stylesheet" href="/assets/config_editor.css?v=1.4.12">
+  <link rel="stylesheet" href="/assets/config_editor.css?v=1.4.13">
 </head>
 <body>
   <a class="skip-link" href="#mainContent">跳到主要内容</a>
@@ -40,7 +40,7 @@
       <div class="sidebar-footer">
         <span class="sidebar-footer-label">系统状态</span>
         <div class="service-pill" id="serviceState">本地服务</div>
-        <span class="frontend-version">前端 v1.4.12</span>
+        <span class="frontend-version">前端 v1.4.13</span>
       </div>
     </aside>
 
@@ -445,7 +445,8 @@
           <div class="run-box">
             <h2>开始运行</h2>
             <div class="run-options">
-              <label class="export-option"><input id="skipValidationInput" type="checkbox" checked>跳过输出校验</label>
+              <label class="export-option"><input id="skipValidationInput" type="checkbox">跳过输出校验</label>
+              <label class="export-option" title="勾选后使用 HongYe SchStateLib 校验；取消勾选则使用原平台校验"><input id="hongYeCheckInput" type="checkbox" checked>HongYe check</label>
               <label class="export-option"><input id="skipBaselineInput" type="checkbox" checked>跳过Baseline</label>
             </div>
             <div class="run-actions"><button class="btn" id="runButton">▶ 运行当前测试</button><button class="btn" id="stepRunButton" title="以步进模式运行 Schedule-AlphaGo：每次决策完成后从 3 条稳定动作链中选择一条整体提交">⟳ 运行模型步进</button><button class="btn batch" id="batchRunButton">▦ 运行当前测试组</button><button class="btn batch" id="openParameterComparisonDialogButton" title="先运行当前测试，再选择策略和参数创建对比实验" disabled>⇄ 运行对比测试</button></div>
@@ -664,6 +665,6 @@
     </aside>
   </dialog>
 
-  <script type="module" src="/assets/config_editor.js?v=1.4.12"></script>
+  <script type="module" src="/assets/config_editor.js?v=1.4.13"></script>
 </body>
 </html>

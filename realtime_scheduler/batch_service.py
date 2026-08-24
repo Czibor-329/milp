@@ -472,6 +472,7 @@ def build_workspace_batch_plan(
     options: Mapping[str, Any],
     *,
     skip_validation: bool = False,
+    hongye_check: bool = True,
 ) -> Dict[str, Any]:
     """将持久化测试与设备共享库组合成可直接执行的单次请求。"""
     test_case = _apply_device_route_aliases(
@@ -519,6 +520,7 @@ def build_workspace_batch_plan(
         "device": runtime_device,
         "strategy": str(strategy or "heuristic"),
         "roundCount": len(rounds),
+        "hongYeCheck": bool(hongye_check),
         "options": merged_options,
         "recipes": _batch_test_recipes(routes, cleans),
         "cleans": cleans,
@@ -642,6 +644,7 @@ def _execute_workspace_test_with_baseline(
     *,
     selected_plan: Optional[Mapping[str, Any]] = None,
     skip_validation: bool = False,
+    hongye_check: bool = True,
     skip_baseline: bool = False,
 ) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any], Optional[Exception]]:
     """确保 Baseline 有效并执行所选策略；Baseline 失败不复用旧值。
@@ -675,7 +678,9 @@ def _execute_workspace_test_with_baseline(
 
     if strategy == "heuristic":
         plan = dict(selected_plan) if selected_plan is not None else build_workspace_batch_plan(
-            device, test_case, "heuristic", options, skip_validation=skip_validation,
+            device, test_case, "heuristic", options,
+            skip_validation=skip_validation,
+            hongye_check=hongye_check,
         )
         try:
             result = execute_plan(plan)
@@ -689,7 +694,9 @@ def _execute_workspace_test_with_baseline(
     if baseline is None and not skip_baseline:
         try:
             baseline_result = execute_plan(build_workspace_batch_plan(
-                device, test_case, "heuristic", options, skip_validation=skip_validation,
+                device, test_case, "heuristic", options,
+                skip_validation=skip_validation,
+                hongye_check=hongye_check,
             ))
             baseline = record(_successful_baseline(fingerprint, baseline_result))
         except Exception as error:  # noqa: BLE001
@@ -698,7 +705,9 @@ def _execute_workspace_test_with_baseline(
         baseline = _skipped_baseline(fingerprint)
 
     plan = dict(selected_plan) if selected_plan is not None else build_workspace_batch_plan(
-        device, test_case, strategy, options, skip_validation=skip_validation,
+        device, test_case, strategy, options,
+        skip_validation=skip_validation,
+        hongye_check=hongye_check,
     )
     try:
         return execute_plan(plan), baseline, None
@@ -730,6 +739,7 @@ def _execute_workspace_test_batch(
     options: Mapping[str, Any],
     *,
     skip_validation: bool = False,
+    hongye_check: bool = True,
     skip_baseline: bool = False,
     maximum_workers: int = 4,
     progress_callback: Optional[Any] = None,
@@ -757,6 +767,7 @@ def _execute_workspace_test_batch(
             selected_plan = build_workspace_batch_plan(
                 device, test_case, strategy, options,
                 skip_validation=skip_validation,
+                hongye_check=hongye_check,
             )
             result, baseline, run_error = _execute_workspace_test_with_baseline(
                 device,
@@ -765,6 +776,7 @@ def _execute_workspace_test_batch(
                 options,
                 selected_plan=selected_plan,
                 skip_validation=skip_validation,
+                hongye_check=hongye_check,
                 skip_baseline=skip_baseline,
             )
             if run_error is not None or result is None:
@@ -896,6 +908,7 @@ def run_workspace_test_batch(
     options: Mapping[str, Any],
     *,
     skip_validation: bool = False,
+    hongye_check: bool = True,
     skip_baseline: bool = False,
     maximum_workers: int = 4,
 ) -> Dict[str, Any]:
@@ -909,6 +922,7 @@ def run_workspace_test_batch(
         strategy,
         options,
         skip_validation=skip_validation,
+        hongye_check=hongye_check,
         skip_baseline=skip_baseline,
         maximum_workers=maximum_workers,
     )
@@ -961,6 +975,7 @@ def start_workspace_test_batch(
     options: Mapping[str, Any],
     *,
     skip_validation: bool = False,
+    hongye_check: bool = True,
     skip_baseline: bool = False,
     maximum_workers: int = 4,
 ) -> Dict[str, Any]:
@@ -1027,6 +1042,7 @@ def start_workspace_test_batch(
                 strategy,
                 options,
                 skip_validation=skip_validation,
+                hongye_check=hongye_check,
                 skip_baseline=skip_baseline,
                 maximum_workers=worker_count,
                 progress_callback=update_item,

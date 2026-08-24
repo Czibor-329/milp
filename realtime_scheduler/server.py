@@ -153,6 +153,7 @@ from realtime_scheduler.move_validation import (
 )
 from realtime_scheduler.replay_machine import ReplayMachine
 from realtime_scheduler.documentation import DocumentationError, load_documentation
+from realtime_scheduler.validation.hongye import HongYeValidationSession
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -409,18 +410,67 @@ class RecoveryProjection:
 
 @dataclass
 class ReproductionLog:
-    """按 input_data 录制格式收集一次控制台运行的全部事件。"""
+    """收集一次运行的事件，并可同步推送给 HongYe 增量校验会话。"""
 
     entries: List[Dict[str, Any]] = field(default_factory=list)
+    hongye_session: Optional[HongYeValidationSession] = None
+    last_hongye_validation: Optional[Dict[str, Any]] = None
 
-    def add(self, describe: str, info: Any, sim_time: float = 0.0) -> None:
-        """追加带墙钟时间和仿真时间的标准日志项。"""
-        self.entries.append({
+    def add(
+        self,
+        describe: str,
+        info: Any,
+        sim_time: float = 0.0,
+        *,
+        forward_to_validator: bool = True,
+    ) -> None:
+        """追加标准事件；启用 HongYe 时先逐条发送并在 AlgOutput 处校验。"""
+        entry = {
             "Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
             "Describe": describe,
             "SimTime": float(sim_time),
             "Info": deepcopy(info),
-        })
+        }
+        if self.hongye_session is not None and forward_to_validator:
+            validation = self.hongye_session.add_event(entry)
+            if validation is not None:
+                self.last_hongye_validation = deepcopy(validation)
+                if not validation.get("success"):
+                    issues = _hongye_validation_issue_messages(
+                        validation.get("issues") or []
+                    )
+                    output = info if isinstance(info, Mapping) else {}
+                    message = (
+                        "HongYe MoveList 状态校验失败："
+                        + (issues[0] if issues else "存在未分类错误")
+                    )
+                    raise MoveListValidationError(
+                        message,
+                        output,
+                        issues,
+                        _build_validation_gantt_output(output, issues),
+                        float(sim_time),
+                    )
+        self.entries.append(entry)
+
+
+def _hongye_validation_issue_messages(
+    issues: Sequence[Mapping[str, Any]],
+) -> List[str]:
+    """把 HongYe 结构化 issue 转成现有甘特图可定位的稳定文案。"""
+    messages: List[str] = []
+    for issue in issues:
+        if not isinstance(issue, Mapping):
+            messages.append(str(issue))
+            continue
+        move_id = issue.get("move_id")
+        phase = str(issue.get("phase") or "")
+        code = str(issue.get("code") or "HONGYE")
+        detail = str(issue.get("message") or "HongYe 校验失败")
+        messages.append(
+            f"[{code}] MoveID={move_id} {phase}: {detail}".strip()
+        )
+    return messages
 
 
 def _remove_released_materials_from_update(
@@ -1336,7 +1386,9 @@ def _validation_issue_records(
 ) -> List[Dict[str, Any]]:
     """把带稳定错误码的校验文案转换成甘特图可定位记录。"""
     records: List[Dict[str, Any]] = []
-    error_code_pattern = re.compile(r"^\[([A-Z0-9]+(?:-[A-Z0-9]+)+)\]")
+    error_code_pattern = re.compile(
+        r"^\[([A-Z0-9]+(?:(?:-|\.)[A-Z0-9_]+)+)\]"
+    )
     move_id_pattern = re.compile(
         r"(?:\bMoveID\b|\bid\b)\s*[=:]\s*(-?\d+)",
         re.IGNORECASE,
@@ -2542,6 +2594,10 @@ def _execute_standard_algorithm(
     """
     if (algorithm_id is None) == (builtin_strategy is None):
         raise ValueError("标准算法执行必须且只能选择一种算法来源")
+    use_hongye_validation = (
+        not skip_validation and bool(plan.get("hongYeCheck", True))
+    )
+    skip_platform_validation = skip_validation or use_hongye_validation
     round_count = len(rounds)
     if builtin_strategy is not None:
         if not BUILTIN_ALGORITHM_AVAILABLE:
@@ -2646,14 +2702,14 @@ def _execute_standard_algorithm(
                     plan["device"],
                     prepared_first_update,
                     output,
-                    skip_validation=skip_validation,
+                    skip_validation=skip_platform_validation,
                 )
                 state_source = "realtime_scheduler.move_validation.MachineState"
             else:
                 runtime = PackagedAlgorithmRuntime(
                     prepared_first_update,
                     output,
-                    skip_validation=skip_validation,
+                    skip_validation=skip_platform_validation,
                 )
                 state_source = "realtime_scheduler.move_validation.MachineState"
         except Exception as error:
@@ -3103,6 +3159,13 @@ def _execute_standard_algorithm(
         "makespan": makespan,
         "moveCount": len(combined_output["MoveList"]),
         "validation": "skipped" if skip_validation else "passed",
+        "validationEngine": (
+            "skipped"
+            if skip_validation
+            else "hongye"
+            if use_hongye_validation
+            else "platform"
+        ),
         "logs": logs,
         "updates": update_snapshots,
         "output": combined_output,
@@ -3248,7 +3311,14 @@ def execute_plan(raw_plan: Mapping[str, Any]) -> Dict[str, Any]:
     """执行计划；成功和失败都生成可重放的 input_data 格式日志。"""
     _set_run_monitor_scope(str(raw_plan.get("strategy") or "heuristic"))
     _raise_if_single_run_cancelled()
-    reproduction = ReproductionLog()
+    use_hongye_validation = (
+        not bool(raw_plan.get("skipValidation"))
+        and bool(raw_plan.get("hongYeCheck", True))
+    )
+    hongye_session = (
+        HongYeValidationSession() if use_hongye_validation else None
+    )
+    reproduction = ReproductionLog(hongye_session=hongye_session)
     reproduction.add("Input", [deepcopy(dict(raw_plan))])
     cpu_started = time.thread_time() if hasattr(time, "thread_time") else time.process_time()
     try:
@@ -3277,6 +3347,7 @@ def execute_plan(raw_plan: Mapping[str, Any]) -> Dict[str, Any]:
                 "AlgOutput",
                 _alg_output_info(error.algorithm_output, feedback=feedback),
                 error.sim_time,
+                forward_to_validator=False,
             )
             raise LoggedPlanError(
                 str(error),
@@ -3288,14 +3359,25 @@ def execute_plan(raw_plan: Mapping[str, Any]) -> Dict[str, Any]:
             reproduction.entries,
             error,
         )
-        reproduction.add("AlgOutput", _alg_output_info(feedback=feedback))
+        reproduction.add(
+            "AlgOutput",
+            _alg_output_info(feedback=feedback),
+            forward_to_validator=False,
+        )
         raise LoggedPlanError(
             str(error),
             reproduction.entries,
             failure_output=prior_plan_output,
         ) from error
+    finally:
+        if hongye_session is not None:
+            hongye_session.close()
     cpu_finished = time.thread_time() if hasattr(time, "thread_time") else time.process_time()
     result["cpuTimeMs"] = max(0.0, (cpu_finished - cpu_started) * 1000.0)
+    if reproduction.last_hongye_validation is not None:
+        result["validationDetails"] = deepcopy(
+            reproduction.last_hongye_validation
+        )
     result["reproductionLog"] = deepcopy(reproduction.entries)
     return result
 
@@ -5922,6 +6004,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                     strategy,
                     options,
                     skip_validation=bool(payload.get("skipValidation")),
+                    hongye_check=bool(payload.get("hongYeCheck", True)),
                     skip_baseline=bool(payload.get("skipBaseline")),
                 )
                 self._send_json(result, HTTPStatus.ACCEPTED)
@@ -6007,6 +6090,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                             dict(payload.get("options") or {}),
                             selected_plan=selected_plan,
                             skip_validation=bool(payload.get("skipValidation")),
+                            hongye_check=bool(payload.get("hongYeCheck", True)),
                             skip_baseline=bool(payload.get("skipBaseline")),
                         )
                 else:
@@ -6017,6 +6101,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                         dict(payload.get("options") or {}),
                         selected_plan=selected_plan,
                         skip_validation=bool(payload.get("skipValidation")),
+                        hongye_check=bool(payload.get("hongYeCheck", True)),
                         skip_baseline=bool(payload.get("skipBaseline")),
                     )
                 baseline_response = deepcopy(baseline)
