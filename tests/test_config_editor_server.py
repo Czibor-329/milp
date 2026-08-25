@@ -3160,6 +3160,46 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn('setResultMetric("Time", "失败前耗时"', html)
         self.assertIn('setResultMetric("Makespan", "Makespan / Baseline"', html)
 
+    def test_single_failure_result_keeps_machine_replay_context(self) -> None:
+        """单次算法失败的部分 MoveList 应保存计划与 update，供拓扑回放。"""
+        error = LoggedPlanError(
+            "Machine 死锁",
+            [{
+                "Describe": "AlgSchedule",
+                "Info": {"CurrentTime": 0, "Materials": [{"ID": 101}]},
+            }],
+            failure_output={
+                "MoveList": [{"MoveID": 1, "StartTime": 0, "EndTime": 8}],
+            },
+        )
+        replay_plan = {"strategy": "heuristic", "rounds": [{"currentTime": 0}]}
+        saved_artifacts = []
+
+        def fake_save_result(artifact):
+            """捕获单次失败结果文件，避免写入真实导出目录。"""
+            saved_artifacts.append(artifact)
+            return "deadlock-result"
+
+        with patch.object(config_server, "save_result", side_effect=fake_save_result):
+            fields = config_server._logged_failure_result_fields(
+                error,
+                replay_plan=replay_plan,
+            )
+
+        self.assertEqual("/api/results/deadlock-result", fields["resultUrl"])
+        self.assertEqual(1, fields["moveCount"])
+        artifact = saved_artifacts[0]
+        self.assertEqual("heuristic", artifact["ReplayContext"]["plan"]["strategy"])
+        self.assertEqual(101, artifact["ReplayContext"]["updates"][0]["Materials"][0]["ID"])
+        post_source = inspect.getsource(config_server.ConfigEditorHandler.do_POST)
+        self.assertIn("replay_plan=replay_plan", post_source)
+
+        editor_source = _editor_source()
+        self.assertLess(
+            editor_source.index("prepareWorkspaceView(runResult)"),
+            editor_source.index("if (!response.ok || !runResult.ok)"),
+        )
+
     def test_automatic_route_rename_updates_every_test_reference(self) -> None:
         """共享 Route 自动改名后，设备下所有测试的 PJob 引用都应同步迁移。"""
         with tempfile.TemporaryDirectory() as directory:

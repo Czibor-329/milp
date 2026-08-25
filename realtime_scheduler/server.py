@@ -7007,7 +7007,10 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             if baseline_response is not None:
                 response["baseline"] = baseline_response
             response.update(_log_response_fields(log_id))
-            response.update(_logged_failure_result_fields(error))
+            response.update(_logged_failure_result_fields(
+                error,
+                replay_plan=replay_plan,
+            ))
             strategy = str(payload.get("strategy") or "") if isinstance(payload, Mapping) else ""
             if strategy.casefold().startswith("other_alg:"):
                 elapsed_ms = (time.perf_counter() - request_started) * 1000.0

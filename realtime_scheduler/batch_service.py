@@ -233,12 +233,34 @@ def _log_response_fields(log_id: str) -> Dict[str, str]:
     return {"logUrl": f"/api/logs/{log_id}", "logFileName": filename}
 
 
-def _logged_failure_result_fields(error: LoggedPlanError) -> Dict[str, Any]:
-    """为带失败 MoveList 的异常保存诊断甘特图并生成响应字段。"""
+def _failure_replay_updates(error: LoggedPlanError) -> List[Dict[str, Any]]:
+    """从失败运行的复现事件中恢复已经发送给算法的各轮 update。"""
+    return [
+        deepcopy(dict(entry["Info"]))
+        for entry in error.reproduction_log
+        if isinstance(entry, Mapping)
+        and entry.get("Describe") == "AlgSchedule"
+        and isinstance(entry.get("Info"), Mapping)
+    ]
+
+
+def _logged_failure_result_fields(
+    error: LoggedPlanError,
+    *,
+    replay_plan: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """保存失败 MoveList 及回放上下文，并生成稳定的诊断入口字段。"""
     if error.failure_output is None:
         return {}
-    result_id = save_result(error.failure_output)
-    moves = list(error.failure_output.get("MoveList") or [])
+    artifact = deepcopy(dict(error.failure_output))
+    if replay_plan is not None:
+        artifact["ReplayContext"] = {
+            "schema": "machine-replay-context-v1",
+            "plan": deepcopy(dict(replay_plan)),
+            "updates": _failure_replay_updates(error),
+        }
+    result_id = save_result(artifact)
+    moves = list(artifact.get("MoveList") or [])
     return {
         "resultId": result_id,
         "resultUrl": f"/api/results/{result_id}",

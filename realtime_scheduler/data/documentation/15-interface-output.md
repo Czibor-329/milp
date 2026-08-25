@@ -12,6 +12,8 @@ description: 完整列出 Move 基类及子类型、Move 状态、输出对象�
 
 算法通过 `IOutputParams` 输出绝对时间 MoveList 和辅助规划信息。Move 子类型继承 `IMove` 公共字段，再增加各自动作所需的 Station、Slot、Arm、Recipe 或状态字段。
 
+算法因死锁结束时可以返回停止前已生成的部分 `MoveList`。平台会把运行状态保留为失败，同时保存生成该 MoveList 的计划和各轮 update；前端仍允许打开诊断甘特图与拓扑回放。部分 MoveList 只描述失败前缀，不得据此填写完整 `JobList` 或把结果标记为成功。
+
 ## IMove 公共字段
 
 | 字段 | 类型 | 说明及约束 |
