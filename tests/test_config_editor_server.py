@@ -100,6 +100,17 @@ def _job(name: str, route: str, load_port: str) -> dict:
 class FrontendTemplateTests(unittest.TestCase):
     """验证不依赖算法数据夹具的前端模板与样式约束。"""
 
+    def test_single_run_responds_before_preflight_and_reuses_pending_save(self) -> None:
+        """单测点击应立即显示准备状态，且运行前只保存确有修改的测试。"""
+        script = EDITOR_SCRIPT_PATH.read_text(encoding="utf-8")
+
+        preparing = script.index('button.textContent = "正在准备…"')
+        health_check = script.index('fetch("/api/health"', preparing)
+        self.assertLess(preparing, health_check)
+        self.assertIn("if (state.dirty) await saveCurrentTest(true);", script)
+        self.assertIn("if (testSaveInFlight)", script)
+        self.assertIn("revision === testEditRevision", script)
+
     def test_groups_alphago_options_without_external_summary(self) -> None:
         """AlphaGo 参数应在弹窗内分组展示，外层入口不再渲染配置摘要。"""
         template = EDITOR_PATH.read_text(encoding="utf-8")
@@ -293,19 +304,19 @@ class RecomputeFailureOutputTests(unittest.TestCase):
         self.assertIn("!rec.removedByRecompute", viewer)
         self.assertIn('fillOpacity = bar.rec.removedByRecompute ? "0.24" : "1"', viewer)
 
-    def test_frontend_version_and_cache_keys_are_1_4_15(self) -> None:
+    def test_frontend_version_and_cache_keys_are_1_4_16(self) -> None:
         """前端显示版本、包版本和主资源缓存键必须同步。"""
         frontend_root = ROOT / "realtime_scheduler" / "frontend"
         template = (frontend_root / "config_editor.html").read_text(encoding="utf-8")
         package = json.loads((frontend_root / "package.json").read_text(encoding="utf-8"))
         package_lock = json.loads((frontend_root / "package-lock.json").read_text(encoding="utf-8"))
 
-        self.assertEqual("1.4.15", package["version"])
-        self.assertEqual("1.4.15", package_lock["version"])
-        self.assertEqual("1.4.15", package_lock["packages"][""]["version"])
-        self.assertIn('class="frontend-version">前端 v1.4.15</span>', template)
-        self.assertIn('/assets/config_editor.css?v=1.4.15', template)
-        self.assertIn('/assets/config_editor.js?v=1.4.15', template)
+        self.assertEqual("1.4.16", package["version"])
+        self.assertEqual("1.4.16", package_lock["version"])
+        self.assertEqual("1.4.16", package_lock["packages"][""]["version"])
+        self.assertIn('class="frontend-version">前端 v1.4.16</span>', template)
+        self.assertIn('/assets/config_editor.css?v=1.4.16', template)
+        self.assertIn('/assets/config_editor.js?v=1.4.16', template)
 
     def test_recompute_preparation_error_keeps_last_successful_movelist(self) -> None:
         """算法调用前的旧计划回放异常也应返回上一代诊断甘特图。"""
@@ -1854,7 +1865,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("<span>结果分析</span>", html)
         self.assertIn("<span>路径配置</span>", html)
         self.assertNotIn('data-tab-view="clean"', html)
-        self.assertIn('class="frontend-version">前端 v1.4.15</span>', html)
+        self.assertIn('class="frontend-version">前端 v1.4.16</span>', html)
         self.assertIn('data-option="residencyGuardSeconds"', html)
         self.assertIn('data-option="maximumRobotHoldingSeconds"', html)
         self.assertIn('data-option="maximumSystemResidenceCv"', html)
@@ -2434,6 +2445,70 @@ class ConfigEditorServerTests(unittest.TestCase):
             loaded = get_workspace_device(device["id"], store_path)
             self.assertEqual("回归测试", loaded["tests"][0]["group"])
             self.assertEqual(["吞吐对比", "回归测试"], loaded["testGroups"])
+
+    def test_readable_dataset_reads_and_updates_one_test_without_full_catalog_scan(self) -> None:
+        """v6 目录的常用读取与测试保存不能退化为解析、比较全部测试文件。"""
+        with tempfile.TemporaryDirectory() as directory:
+            store_dir = Path(directory) / "datasets"
+            store_dir.mkdir()
+            config_server._write_json_atomic(
+                store_dir / config_server.WORKSPACE_STORE_VERSION_FILE,
+                {
+                    "kind": "ct-scheduler-datasets",
+                    "schemaVersion": config_server.WORKSPACE_STORE_VERSION,
+                },
+            )
+            device_id = "device-fast-path"
+            first = config_server._normalize_test_case({
+                "name": "快速案例", "group": "回归", "roundCount": 1, "rounds": [{}],
+            }, "test-fast-path", ["LP1"])
+            second = config_server._normalize_test_case({
+                "name": "保持不变", "group": "回归", "roundCount": 1, "rounds": [{}],
+            }, "test-untouched", ["LP1"])
+            catalog = {
+                "version": config_server.WORKSPACE_STORE_VERSION,
+                "devices": [{
+                    "id": device_id,
+                    "name": "性能测试设备",
+                    "device": copy.deepcopy(self.device),
+                    "routes": [],
+                    "cleans": [],
+                    "routeAliases": {},
+                    "testGroups": ["回归"],
+                    "tests": [first, second],
+                }],
+            }
+            config_server._write_readable_workspace_catalog_directory(store_dir, catalog)
+            device_dir = config_server._find_dataset_device_directory(store_dir, device_id)
+            untouched_file = config_server._find_dataset_test_file(device_dir, second["id"])
+            untouched_before = untouched_file.read_bytes()
+
+            with patch.object(
+                config_server,
+                "_read_workspace_catalog_unlocked",
+                side_effect=AssertionError("不应读取完整工作区目录"),
+            ):
+                overview = config_server.get_workspace_device_overview(device_id, store_dir)
+                loaded = config_server.get_workspace_test(device_id, first["id"], store_dir)
+                updated = config_server.update_workspace_test(device_id, first["id"], {
+                    **loaded,
+                    "name": "快速案例-已修改",
+                    "group": "即时保存",
+                }, store_dir)
+
+            self.assertEqual(2, len(overview["tests"]))
+            self.assertEqual("快速案例-已修改", updated["name"])
+            self.assertEqual("即时保存", updated["group"])
+            self.assertEqual(untouched_before, untouched_file.read_bytes())
+            summaries = json.loads(
+                config_server._workspace_test_index_path(device_dir / "tests").read_text(
+                    encoding="utf-8",
+                )
+            )
+            self.assertEqual(
+                "快速案例-已修改",
+                next(item for item in summaries if item["id"] == first["id"])["name"],
+            )
 
     def test_workspace_group_can_exist_without_creating_test(self) -> None:
         """点击组别加号只应增加空组，不应隐式增加测试。"""

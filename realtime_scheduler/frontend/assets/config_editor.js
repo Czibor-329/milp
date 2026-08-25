@@ -19259,6 +19259,8 @@ function setWorkspaceStatus(message, kind = "") {
   status.className = `workspace-status ${kind}`.trim();
 }
 var autoSaveTimer = null;
+var testEditRevision = 0;
+var testSaveInFlight = null;
 function scheduleAutoSave() {
   window.clearTimeout(autoSaveTimer);
   autoSaveTimer = window.setTimeout(() => {
@@ -19267,6 +19269,7 @@ function scheduleAutoSave() {
 }
 function markTestDirty() {
   if (!state.testCaseId) return;
+  testEditRevision += 1;
   state.dirty = true;
   setWorkspaceStatus(`\u201C${state.testCaseName}\u201D\u6709\u672A\u4FDD\u5B58\u4FEE\u6539`, "dirty");
   scheduleAutoSave();
@@ -19815,31 +19818,53 @@ function cancelRouteEdit() {
 }
 async function saveCurrentTest(silent = false) {
   if (!state.workspaceDeviceId || !state.testCaseId) return false;
+  if (testSaveInFlight) {
+    await testSaveInFlight;
+    if (!state.dirty) return true;
+  }
   const inputName = document.getElementById("testCaseName").value.trim();
   if (!inputName) {
     setWorkspaceStatus("\u6D4B\u8BD5\u540D\u79F0\u4E0D\u80FD\u4E3A\u7A7A\uFF0C\u8BF7\u8F93\u5165\u540D\u79F0\u540E\u518D\u4FDD\u5B58", "dirty");
     throw new Error("\u6D4B\u8BD5\u540D\u79F0\u4E0D\u80FD\u4E3A\u7A7A");
   }
   state.testCaseName = inputName;
-  let result;
+  const deviceId = state.workspaceDeviceId;
+  const testId = state.testCaseId;
+  const revision = testEditRevision;
+  const snapshot = currentTestSnapshot();
+  const pendingSave = (async () => {
+    let result;
+    try {
+      result = await requestJson(`/api/workspaces/${deviceId}/tests/${testId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(snapshot)
+      });
+    } catch (error) {
+      setWorkspaceStatus(`\u4FDD\u5B58\u5931\u8D25\uFF1A${error.message}`, "dirty");
+      throw error;
+    }
+    if (state.workspaceDeviceId !== deviceId || state.testCaseId !== testId) return true;
+    const index = state.workspaceDevice.tests.findIndex((test) => test.id === testId);
+    if (index >= 0) state.workspaceDevice.tests[index] = result.test;
+    if (revision === testEditRevision) {
+      state.testCaseName = result.test.name;
+      state.dirty = false;
+      state.routeNameChanges.clear();
+      renderWorkspaceControls();
+      setWorkspaceStatus(`${silent ? "\u5DF2\u81EA\u52A8\u4FDD\u5B58" : "\u5DF2\u4FDD\u5B58"}\u201C${state.testCaseName}\u201D`, "saved");
+    } else {
+      state.dirty = true;
+      scheduleAutoSave();
+    }
+    return true;
+  })();
+  testSaveInFlight = pendingSave;
   try {
-    result = await requestJson(`/api/workspaces/${state.workspaceDeviceId}/tests/${state.testCaseId}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(currentTestSnapshot())
-    });
-  } catch (error) {
-    setWorkspaceStatus(`\u4FDD\u5B58\u5931\u8D25\uFF1A${error.message}`, "dirty");
-    throw error;
+    return await pendingSave;
+  } finally {
+    if (testSaveInFlight === pendingSave) testSaveInFlight = null;
   }
-  const index = state.workspaceDevice.tests.findIndex((test) => test.id === state.testCaseId);
-  state.workspaceDevice.tests[index] = result.test;
-  state.testCaseName = result.test.name;
-  state.dirty = false;
-  state.routeNameChanges.clear();
-  renderWorkspaceControls();
-  setWorkspaceStatus(`${silent ? "\u5DF2\u81EA\u52A8\u4FDD\u5B58" : "\u5DF2\u4FDD\u5B58"}\u201C${state.testCaseName}\u201D`, "saved");
-  return true;
 }
 async function createTestCase(copyCurrent = false, targetGroup = state.activeTestGroup) {
   if (!state.workspaceDeviceId) throw new Error("\u8BF7\u5148\u9009\u62E9\u8BBE\u5907");
@@ -21497,6 +21522,13 @@ async function runPlan() {
   let logReady = false, ganttReady = false, runResult = null, bottleneckSummary = null;
   const telemetryEnabled = state.strategy === "schedule-alphago";
   let telemetryStopped = false;
+  button.disabled = true;
+  batchButton.disabled = true;
+  comparisonButton.disabled = true;
+  button.classList.add("running");
+  button.classList.remove("cancel");
+  button.textContent = "\u6B63\u5728\u51C6\u5907\u2026";
+  startRunStatus(`\u51C6\u5907\u8FD0\u884C \xB7 ${state.testCaseName || "\u5F53\u524D\u6D4B\u8BD5"}`, "\u68C0\u67E5\u670D\u52A1\u4E0E\u6D4B\u8BD5\u914D\u7F6E");
   try {
     const healthResponse = await fetch("/api/health", { cache: "no-store" }), health = await healthResponse.json();
     if (!healthResponse.ok || health.schemaVersion !== EXPECTED_API_SCHEMA) throw new Error("\u672C\u5730\u670D\u52A1\u7248\u672C\u8FC7\u65E7\uFF0C\u8BF7\u91CD\u542F scripts/config_editor_server.py");
@@ -21506,7 +21538,7 @@ async function runPlan() {
     } else if (health.strategies?.[state.strategy] === false) {
       throw new Error(health.strategyErrors?.[state.strategy] || `${state.strategy} \u7B56\u7565\u5F53\u524D\u4E0D\u53EF\u7528`);
     }
-    if (state.testCaseId) await saveCurrentTest(true);
+    if (state.dirty) await saveCurrentTest(true);
     const payload = buildPayload();
     const runId = (crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`).replace(/[^A-Za-z0-9_-]/g, "");
     payload.clientRunId = runId;
@@ -21664,7 +21696,7 @@ async function runCurrentTestGroup() {
   }
   try {
     if (!state.workspaceDeviceId) throw new Error("\u8BF7\u5148\u9009\u62E9\u8BBE\u5907\u548C\u6D4B\u8BD5\u7EC4");
-    if (state.testCaseId) await saveCurrentTest(true);
+    if (state.dirty) await saveCurrentTest(true);
     const tests = (state.workspaceDevice?.tests || []).filter((test) => String(test.group || "").trim() === state.activeTestGroup);
     if (!tests.length) throw new Error("\u5F53\u524D\u6D4B\u8BD5\u7EC4\u6CA1\u6709\u53EF\u8FD0\u884C\u6D4B\u8BD5");
     state.batchRunning = true;

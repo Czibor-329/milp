@@ -1343,6 +1343,8 @@ function setWorkspaceStatus(message, kind = "") {
 
 /** 延迟自动保存，确保设备共享 Route/Clean 和测试任务均能恢复。 */
 let autoSaveTimer = null;
+let testEditRevision = 0;
+let testSaveInFlight: Promise<boolean> | null = null;
 function scheduleAutoSave() {
   window.clearTimeout(autoSaveTimer);
   autoSaveTimer = window.setTimeout(() => {
@@ -1353,6 +1355,7 @@ function scheduleAutoSave() {
 /** 标记当前测试集有尚未保存的编辑。 */
 function markTestDirty() {
   if (!state.testCaseId) return;
+  testEditRevision += 1;
   state.dirty = true; setWorkspaceStatus(`“${state.testCaseName}”有未保存修改`, "dirty");
   scheduleAutoSave();
 }
@@ -2005,25 +2008,52 @@ function cancelRouteEdit() {
 /** 保存当前测试集；运行和切换前可静默调用。 */
 async function saveCurrentTest(silent = false) {
   if (!state.workspaceDeviceId || !state.testCaseId) return false;
+  if (testSaveInFlight) {
+    await testSaveInFlight;
+    // 运行按钮与自动保存撞在一起时复用同一个请求；若期间又有编辑，再保存最新版。
+    if (!state.dirty) return true;
+  }
   const inputName = document.getElementById("testCaseName").value.trim();
   if (!inputName) {
     setWorkspaceStatus("测试名称不能为空，请输入名称后再保存", "dirty");
     throw new Error("测试名称不能为空");
   }
   state.testCaseName = inputName;
-  let result;
+  const deviceId = state.workspaceDeviceId;
+  const testId = state.testCaseId;
+  const revision = testEditRevision;
+  const snapshot = currentTestSnapshot();
+  const pendingSave = (async () => {
+    let result;
+    try {
+      result = await requestJson(`/api/workspaces/${deviceId}/tests/${testId}`, {
+        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(snapshot)
+      });
+    } catch (error) {
+      setWorkspaceStatus(`保存失败：${error.message}`, "dirty");
+      throw error;
+    }
+    if (state.workspaceDeviceId !== deviceId || state.testCaseId !== testId) return true;
+    const index = state.workspaceDevice.tests.findIndex(test => test.id === testId);
+    if (index >= 0) state.workspaceDevice.tests[index] = result.test;
+    if (revision === testEditRevision) {
+      state.testCaseName = result.test.name;
+      state.dirty = false;
+      state.routeNameChanges.clear();
+      renderWorkspaceControls();
+      setWorkspaceStatus(`${silent ? "已自动保存" : "已保存"}“${state.testCaseName}”`, "saved");
+    } else {
+      state.dirty = true;
+      scheduleAutoSave();
+    }
+    return true;
+  })();
+  testSaveInFlight = pendingSave;
   try {
-    result = await requestJson(`/api/workspaces/${state.workspaceDeviceId}/tests/${state.testCaseId}`, {
-      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(currentTestSnapshot())
-    });
-  } catch (error) {
-    setWorkspaceStatus(`保存失败：${error.message}`, "dirty");
-    throw error;
+    return await pendingSave;
+  } finally {
+    if (testSaveInFlight === pendingSave) testSaveInFlight = null;
   }
-  const index = state.workspaceDevice.tests.findIndex(test => test.id === state.testCaseId);
-  state.workspaceDevice.tests[index] = result.test; state.testCaseName = result.test.name; state.dirty = false; state.routeNameChanges.clear();
-  renderWorkspaceControls(); setWorkspaceStatus(`${silent ? "已自动保存" : "已保存"}“${state.testCaseName}”`, "saved");
-  return true;
 }
 
 /** 新建空白测试集，或复制当前测试集形成独立副本。 */
@@ -3777,6 +3807,14 @@ async function runPlan() {
   let logReady = false, ganttReady = false, runResult = null, bottleneckSummary = null;
   const telemetryEnabled = state.strategy === "schedule-alphago";
   let telemetryStopped = false;
+  // 健康检查和必要的自动保存也可能涉及磁盘；点击后先立即反馈，避免用户误以为按钮失效。
+  button.disabled = true;
+  batchButton.disabled = true;
+  comparisonButton.disabled = true;
+  button.classList.add("running");
+  button.classList.remove("cancel");
+  button.textContent = "正在准备…";
+  startRunStatus(`准备运行 · ${state.testCaseName || "当前测试"}`, "检查服务与测试配置");
   try {
     const healthResponse = await fetch("/api/health", { cache: "no-store" }), health = await healthResponse.json();
     if (!healthResponse.ok || health.schemaVersion !== EXPECTED_API_SCHEMA) throw new Error("本地服务版本过旧，请重启 scripts/config_editor_server.py");
@@ -3786,7 +3824,7 @@ async function runPlan() {
     } else if (health.strategies?.[state.strategy] === false) {
       throw new Error(health.strategyErrors?.[state.strategy] || `${state.strategy} 策略当前不可用`);
     }
-    if (state.testCaseId) await saveCurrentTest(true);
+    if (state.dirty) await saveCurrentTest(true);
     const payload = buildPayload();
     const runId = (crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`).replace(/[^A-Za-z0-9_-]/g, "");
     payload.clientRunId = runId;
@@ -3924,7 +3962,7 @@ async function runCurrentTestGroup() {
   }
   try {
     if (!state.workspaceDeviceId) throw new Error("请先选择设备和测试组");
-    if (state.testCaseId) await saveCurrentTest(true);
+    if (state.dirty) await saveCurrentTest(true);
     const tests = (state.workspaceDevice?.tests || []).filter(test => String(test.group || "").trim() === state.activeTestGroup);
     if (!tests.length) throw new Error("当前测试组没有可运行测试");
     state.batchRunning = true; state.activeBatchId = ""; state.batchCancelRequested = false; state.batchCancelSent = false; state.batchResult = null; state.selectedBatchTestId = "";
