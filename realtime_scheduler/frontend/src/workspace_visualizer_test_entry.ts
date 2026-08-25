@@ -20,6 +20,7 @@ export {
   normalizeMovePayload,
   primitiveDecisionBoundaryTimes,
   renderEquipmentTopology,
+  renderSchedulePerformance,
   renderWaferResidenceChart,
   snapshotWithFullDeviceModules,
   withWaferResidenceTimes,
@@ -30,7 +31,3 @@ export {
   summarizeBottleneckUtilization,
 } from "../../analysis/movelist_performance";
 export { buildScheduleAnalysisContext } from "../../analysis/schedule_context";
-export {
-  productionMetricsCsv,
-  renderProductionMetrics,
-} from "../../production_metrics/view";

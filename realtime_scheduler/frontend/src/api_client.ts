@@ -34,7 +34,8 @@ export async function requestScheduleAnalysis(input: {
   windowMode: PerformanceWindowMode;
   routes?: Array<Record<string, any>>;
   rounds?: Array<Record<string, any>>;
-  calculationSeconds?: number | null;
+  cpuTimeMs?: number | null;
+  recomputeCount?: number;
 }): Promise<{
   analysis: SchedulePerformance;
   bottleneck: BottleneckUtilizationSummary | null;

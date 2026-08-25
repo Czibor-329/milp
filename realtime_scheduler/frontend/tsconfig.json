@@ -8,5 +8,5 @@
     "noEmit": true,
     "skipLibCheck": true
   },
-  "include": ["src/**/*.ts", "../analysis/**/*.ts", "../production_metrics/**/*.ts"]
+  "include": ["src/**/*.ts", "../analysis/**/*.ts"]
 }

@@ -1770,6 +1770,26 @@ test("性能分析用首片完工到末片投料剔除启动与收尾", () => {
   assert.equal(logic.analyzeSchedulePerformance(performanceMoves, device, "full").completedWaferCount, 4);
 });
 
+test("KPI 总览展示 CPU Time 和平均重算时间且不再渲染独立指标卡片", () => {
+  const performance = {
+    ...logic.analyzeSchedulePerformance(performanceMoves, device, "steady"),
+    throughputPerHour: 67.4,
+    throughputSampleCount: 120,
+    throughputReason: "",
+    cpuTimeMs: 900,
+    recomputeCount: 3,
+    averageRecomputeTimeMs: 300,
+  };
+  const markup = logic.renderSchedulePerformance(performance);
+
+  assert.match(markup, /<span>CPU Time<\/span>/);
+  assert.match(markup, /900\.0 ms/);
+  assert.match(markup, /<span>平均重算时间<\/span>/);
+  assert.match(markup, /CPU Time \/ 3 次重算/);
+  assert.match(markup, /完工片数严格大于 150/);
+  assert.doesNotMatch(markup, /指标导出参数设置|计算时间|单独导出 CSV/);
+});
+
 test("双 Actor 回放在 Pick 结束后的原子决策边界暂停", async () => {
   const originalRequestAnimationFrame = global.requestAnimationFrame;
   const originalCancelAnimationFrame = global.cancelAnimationFrame;

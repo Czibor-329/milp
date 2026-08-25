@@ -12,9 +12,6 @@ import re
 from collections import defaultdict
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-from realtime_scheduler.production_metrics import calculate_production_metrics
-
-
 PERFORMANCE_TIME_TOLERANCE = 1e-6
 MIDDLE_WINDOW_TRIM_RATIO = 0.1
 MINIMUM_STEADY_WAFERS = 4
@@ -30,6 +27,9 @@ CLEAN_MOVE_TYPE = 14
 VACUUM_MOVE_TYPE = 12
 VENT_MOVE_TYPE = 13
 SECONDS_PER_HOUR = 3600.0
+PRODUCTION_MINIMUM_COMPLETED_WAFERS = 150
+PRODUCTION_SAMPLE_SIZE = 120
+PRODUCTION_TRIMMED_HEAD_WAFERS = 15
 COMPARISON_TOLERANCE_PERCENT = 1e-6
 ACTIVITY_CATEGORIES = (
     "process", "clean", "door", "transfer", "environment", "other",
@@ -787,6 +787,81 @@ def _process_job_name(move: Mapping[str, Any]) -> str:
     return str(values[0]) if values else str(value or "")
 
 
+def _production_throughput(
+    moves: Sequence[Mapping[str, Any]],
+    device: Optional[Mapping[str, Any]],
+    context: Optional[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """按固定 120 片样本口径计算产能，且要求完工片数严格大于 150。"""
+    _, completions = _wafer_boundary_times(moves, device)
+    completed = sorted(
+        completions.items(),
+        key=lambda item: (item[1], _natural_key(item[0])),
+    )
+    if len(completed) <= PRODUCTION_MINIMUM_COMPLETED_WAFERS:
+        return {
+            "throughputPerHour": 0.0,
+            "throughputSampleCount": 0,
+            "throughputReason": "完工晶圆必须大于 150 片，才能按固定 120 片样本计算产能。",
+        }
+
+    selected = completed[
+        PRODUCTION_TRIMMED_HEAD_WAFERS:
+        PRODUCTION_TRIMMED_HEAD_WAFERS + PRODUCTION_SAMPLE_SIZE
+    ]
+    selected_ids = {wafer for wafer, _ in selected}
+    route_by_job = {
+        str(row.get("pjobName") or ""): str(row.get("routeRef") or "")
+        for row in _list_value(context.get("pjobRoutes") if isinstance(context, Mapping) else None)
+        if isinstance(row, Mapping) and str(row.get("pjobName") or "")
+    }
+    process_paths: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
+    route_refs: Dict[str, set[str]] = defaultdict(set)
+    for move in moves:
+        if int(move["MoveType"]) != PROCESS_MOVE_TYPE:
+            continue
+        job_name = _process_job_name(move)
+        route_ref = route_by_job.get(job_name, "")
+        process_signature = (
+            _process_step_id(move),
+            str(move.get("ProcessRecipe") or ""),
+        )
+        for wafer in _material_ids(move):
+            if wafer not in selected_ids:
+                continue
+            process_paths[wafer].append(process_signature)
+            if route_ref:
+                route_refs[wafer].add(route_ref)
+
+    signatures = [
+        (tuple(sorted(route_refs[wafer])), tuple(process_paths[wafer]))
+        for wafer, _ in selected
+    ]
+    if not signatures or not all(signature[1] for signature in signatures):
+        return {
+            "throughputPerHour": 0.0,
+            "throughputSampleCount": 0,
+            "throughputReason": "固定样本没有完整工艺记录，无法计算产能。",
+        }
+    if len(set(signatures)) != 1:
+        return {
+            "throughputPerHour": 0.0,
+            "throughputSampleCount": 0,
+            "throughputReason": "固定样本并非相同 Recipe 和路径，无法计算产能。",
+        }
+
+    duration = selected[-1][1] - selected[0][1]
+    return {
+        "throughputPerHour": (
+            SECONDS_PER_HOUR * PRODUCTION_SAMPLE_SIZE / duration
+            if duration > PERFORMANCE_TIME_TOLERANCE
+            else 0.0
+        ),
+        "throughputSampleCount": PRODUCTION_SAMPLE_SIZE,
+        "throughputReason": "",
+    }
+
+
 def _stage_matches_move(stage: Mapping[str, Any], move: Mapping[str, Any]) -> bool:
     """判断配置工序是否对应一个实际 ProcessMove。"""
     configured_step = str(stage.get("stepId") or "")
@@ -987,7 +1062,7 @@ def analyze_schedule_performance(
     device: Optional[Mapping[str, Any]],
     mode: str = "steady",
     context: Optional[Mapping[str, Any]] = None,
-    calculation_seconds: Any = None,
+    run_metrics: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """计算服务端 MoveList 性能、瓶颈候选和驻留时间。
 
@@ -1080,6 +1155,15 @@ def analyze_schedule_performance(
     wafer_system_residence_times = _wafer_system_residence_times(
         records, device,
     )
+    production_throughput = _production_throughput(records, device, context)
+    cpu_time_ms = _finite_or_none(
+        run_metrics.get("cpuTimeMs") if isinstance(run_metrics, Mapping) else None,
+    )
+    if cpu_time_ms is not None:
+        cpu_time_ms = max(cpu_time_ms, 0.0)
+    recompute_count = max(0, int(_finite_number(
+        run_metrics.get("recomputeCount") if isinstance(run_metrics, Mapping) else None,
+    )))
     performance = {
         "window": window,
         "resources": resources,
@@ -1087,10 +1171,13 @@ def analyze_schedule_performance(
         "primaryBottleneck": primary,
         "bottleneck": bottleneck,
         "completedWaferCount": len(completion_times),
-        "throughputPerHour": (
-            SECONDS_PER_HOUR / mean_departure_interval
-            if mean_departure_interval > PERFORMANCE_TIME_TOLERANCE
-            else 0.0
+        **production_throughput,
+        "cpuTimeMs": cpu_time_ms,
+        "recomputeCount": recompute_count,
+        "averageRecomputeTimeMs": (
+            cpu_time_ms / recompute_count
+            if cpu_time_ms is not None and recompute_count > 0
+            else None
         ),
         "meanDepartureInterval": mean_departure_interval,
         "departureIntervalCv": _coefficient_of_variation(departure_intervals),
@@ -1105,13 +1192,6 @@ def analyze_schedule_performance(
         ),
         "waferSystemResidenceTimes": wafer_system_residence_times,
         "loadLockEfficiency": _build_load_lock_efficiency(records, device),
-        # 新口径保留在独立子结构中，避免与既有性能指标混用。
-        "productionMetrics": calculate_production_metrics(
-            records,
-            device,
-            context,
-            calculation_seconds,
-        ),
     }
     return performance
 

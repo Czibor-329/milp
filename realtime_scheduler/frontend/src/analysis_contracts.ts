@@ -4,8 +4,6 @@
  * 本文件只描述前端渲染需要的数据形状，不包含任何指标计算、数据持久化或业务规则。
  */
 
-import type { ProductionMetricsResult } from "../../production_metrics/contracts";
-
 export type UnknownRecord = Record<string, unknown>;
 
 export interface MoveRecord extends UnknownRecord {
@@ -104,6 +102,11 @@ export interface SchedulePerformance {
   bottleneck: ResourcePerformance | null;
   completedWaferCount: number;
   throughputPerHour: number;
+  throughputSampleCount: number;
+  throughputReason: string;
+  cpuTimeMs: number | null;
+  recomputeCount: number;
+  averageRecomputeTimeMs: number | null;
   meanDepartureInterval: number;
   departureIntervalCv: number;
   processChamberDwellTime: DurationMetricSummary;
@@ -119,7 +122,6 @@ export interface SchedulePerformance {
     fullLoadCycleRatio: number;
     emptyLoadCycleRatio: number;
   };
-  productionMetrics: ProductionMetricsResult;
 }
 
 export interface BottleneckUtilizationSummary {

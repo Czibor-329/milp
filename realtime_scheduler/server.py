@@ -6774,17 +6774,25 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                     if saved_result is None:
                         raise ValueError("结果不存在或已过期")
                     moves = normalize_move_payload(saved_result)
-                    production_metadata = saved_result.get("ProductionMetricsMetadata")
-                    calculation_seconds = (
-                        production_metadata.get("calculationSeconds")
-                        if isinstance(production_metadata, Mapping)
-                        else None
-                    )
+                    run_metrics = saved_result.get("RunMetricsMetadata")
+                    if not isinstance(run_metrics, Mapping):
+                        legacy_metadata = saved_result.get("ProductionMetricsMetadata")
+                        run_metrics = {
+                            "cpuTimeMs": (
+                                _finite_number(legacy_metadata.get("calculationSeconds")) * 1000.0
+                                if isinstance(legacy_metadata, Mapping)
+                                else None
+                            ),
+                            "recomputeCount": len(list(saved_result.get("RecomputePoints") or [])),
+                        }
                 else:
                     moves = normalize_move_payload(
                         payload.get("moves", payload.get("result")),
                     )
-                    calculation_seconds = payload.get("calculationSeconds")
+                    run_metrics = {
+                        "cpuTimeMs": payload.get("cpuTimeMs"),
+                        "recomputeCount": payload.get("recomputeCount"),
+                    }
                 device = payload.get("device")
                 if device is not None and not isinstance(device, Mapping):
                     raise ValueError("device 必须是 JSON 对象或 null")
@@ -6805,7 +6813,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                     device,
                     str(payload.get("windowMode") or "steady"),
                     context,
-                    calculation_seconds,
+                    run_metrics,
                 )
                 self._send_json({
                     "ok": True,
@@ -6962,10 +6970,14 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                 else:
                     result = execute_plan(payload)
             artifact = deepcopy(dict(result["output"]))
-            artifact["ProductionMetricsMetadata"] = {
-                "calculationSeconds": max(
+            artifact["RunMetricsMetadata"] = {
+                "cpuTimeMs": max(
                     0.0,
-                    float(result.get("cpuTimeMs", result.get("totalElapsedMs", 0.0))) / 1000.0,
+                    float(result.get("cpuTimeMs", result.get("totalElapsedMs", 0.0))),
+                ),
+                "recomputeCount": sum(
+                    1 for row in (result.get("rounds") or [])
+                    if isinstance(row, Mapping) and row.get("kind") == "recompute"
                 ),
             }
             if replay_plan is not None:

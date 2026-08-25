@@ -72,11 +72,43 @@ class BackendAnalysisTests(unittest.TestCase):
             result["waferSystemResidenceTimes"],
         )
         self.assertNotIn("diagnostics", result)
-        self.assertEqual(
-            "production-metrics-v1",
-            result["productionMetrics"]["schemaVersion"],
+        self.assertEqual(0, result["throughputPerHour"])
+        self.assertEqual(0, result["throughputSampleCount"])
+        self.assertIn("大于 150", result["throughputReason"])
+        self.assertIsNone(result["cpuTimeMs"])
+        self.assertIsNone(result["averageRecomputeTimeMs"])
+
+    def test_production_throughput_requires_more_than_150_completed_wafers(self) -> None:
+        """产能必须超过 150 片才按剔除前 15、固定 120 片的新口径计算。"""
+        def moves_for(count: int) -> list[dict]:
+            rows = []
+            for index in range(count):
+                wafer = f"W{index + 1}"
+                completed_at = float((index + 1) * 10)
+                rows.extend([
+                    {"MoveType": 0, "ModuleName": "ATR", "SrcStationList": ["LP1"], "MatIDList": [wafer], "StartTime": completed_at - 9, "EndTime": completed_at - 8},
+                    {"MoveType": 9, "ModuleName": "PM1", "MatIDList": [wafer], "PJobName": ["1.C1.P1"], "StepID": 1, "ProcessRecipe": "R1", "StartTime": completed_at - 7, "EndTime": completed_at - 2},
+                    {"MoveType": 1, "ModuleName": "ATR", "DestStationList": ["LP1"], "MatIDList": [wafer], "StartTime": completed_at - 1, "EndTime": completed_at},
+                ])
+            return rows
+
+        device = {"Stations": {"LP1": {"Type": "LoadPort"}, "PM1": {"Type": "ProcessModule"}}, "Robots": {"ATR": {}}}
+        context = {"pjobRoutes": [{"pjobName": "1.C1.P1", "routeRef": "RouteA"}]}
+        unavailable = analyze_schedule_performance(moves_for(150), device, "full", context)
+        available = analyze_schedule_performance(
+            moves_for(151),
+            device,
+            "full",
+            context,
+            {"cpuTimeMs": 900.0, "recomputeCount": 3},
         )
-        self.assertFalse(result["productionMetrics"]["sampleWindow"]["available"])
+
+        self.assertEqual(0, unavailable["throughputPerHour"])
+        self.assertAlmostEqual(3600 * 120 / 1190, available["throughputPerHour"])
+        self.assertEqual(120, available["throughputSampleCount"])
+        self.assertEqual(900.0, available["cpuTimeMs"])
+        self.assertEqual(3, available["recomputeCount"])
+        self.assertEqual(300.0, available["averageRecomputeTimeMs"])
 
     def test_context_is_built_on_backend_from_routes_and_rounds(self) -> None:
         """工序容量上下文应由后端从原始 Route/PJob 配置构建。"""

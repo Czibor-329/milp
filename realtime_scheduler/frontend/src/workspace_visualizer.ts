@@ -7,11 +7,6 @@
  */
 
 import { requestReplayDecision, requestScheduleAnalysis } from "./api_client";
-import {
-  downloadProductionMetricsCsv,
-  ensureProductionMetricsStyles,
-  renderProductionMetrics,
-} from "../../production_metrics/view";
 import type {
   ActivityCategory,
   BottleneckUtilizationSummary,
@@ -2891,7 +2886,7 @@ export function renderWaferResidenceChart(performance: SchedulePerformance): str
 }
 
 /** 绘制排程诊断面板 —— 总览、逐片驻留与瓶颈分析。 */
-function renderSchedulePerformance(performance: SchedulePerformance): string {
+export function renderSchedulePerformance(performance: SchedulePerformance): string {
   const window = performance.window;
   // 兼容缓存的旧分析响应：服务端升级前的结果没有这个字段，也应能打开结果页。
   const loadLockEfficiency = performance.loadLockEfficiency ?? {
@@ -2915,7 +2910,9 @@ function renderSchedulePerformance(performance: SchedulePerformance): string {
         <div>
           <span>产能</span>
           <strong>${performance.throughputPerHour > 0 ? `${performance.throughputPerHour.toFixed(1)} 片/h` : "—"}</strong>
-          <small>平均间隔 ${formatSeconds(performance.meanDepartureInterval)} s · 间隔 CV ${performance.departureIntervalCv.toFixed(2)} · ${performance.completedWaferCount} 片样本</small>
+          <small>${performance.throughputSampleCount
+            ? `固定 ${performance.throughputSampleCount} 片样本 · 剔除前 15 片 · 完工片数严格大于 150`
+            : escapeHtml(performance.throughputReason || "样本不足，完工片数必须大于 150")}</small>
         </div>
         <div>
           <span>LoadLock 利用效率</span>
@@ -2923,6 +2920,16 @@ function renderSchedulePerformance(performance: SchedulePerformance): string {
           <small>${loadLockEfficiency.cycleCount
             ? `${loadLockEfficiency.waferCycleCount} 片·周期 / ${loadLockEfficiency.cycleCount} 个完整抽充气周期 · 满载 ${formatPercent(loadLockEfficiency.fullLoadCycleRatio)}（${loadLockEfficiency.fullLoadCycleCount}/${loadLockEfficiency.cycleCount}）· 空载 ${formatPercent(loadLockEfficiency.emptyLoadCycleRatio)}（${loadLockEfficiency.emptyLoadCycleCount}/${loadLockEfficiency.cycleCount}）`
             : "没有完整的抽气—充气周期"}</small>
+        </div>
+        <div>
+          <span>CPU Time</span>
+          <strong>${Number.isFinite(performance.cpuTimeMs) ? `${Number(performance.cpuTimeMs).toFixed(1)} ms` : "—"}</strong>
+          <small>本次运行累计 CPU 时间</small>
+        </div>
+        <div>
+          <span>平均重算时间</span>
+          <strong>${Number.isFinite(performance.averageRecomputeTimeMs) ? `${Number(performance.averageRecomputeTimeMs).toFixed(1)} ms` : "—"}</strong>
+          <small>${performance.recomputeCount ? `CPU Time / ${performance.recomputeCount} 次重算` : "没有重算轮次"}</small>
         </div>
       </div>
     </section>
@@ -2934,8 +2941,6 @@ function renderSchedulePerformance(performance: SchedulePerformance): string {
     <section class="result-card bottleneck-analysis-card">
       ${renderBottleneckAnalysis(performance)}
     </section>
-
-    ${performance.productionMetrics ? renderProductionMetrics(performance.productionMetrics) : ""}
 
     `;
 }
@@ -2966,7 +2971,8 @@ export class VisualizationWorkspace {
   private resultUrl = "";
   private analysisResultId = "";
   private analysis: SchedulePerformance | null = null;
-  private productionCalculationSeconds: number | null = null;
+  private cpuTimeMs: number | null = null;
+  private recomputeCount = 0;
   private bottleneckSummary: BottleneckUtilizationSummary | null = null;
   private analysisRequestVersion = 0;
   private time = 0;
@@ -2986,7 +2992,6 @@ export class VisualizationWorkspace {
   constructor(root: Document) {
     this.root = root;
     this.elements = collectElements(root);
-    ensureProductionMetricsStyles(root);
     this.syncModuleFiltersFromUi();
     this.bindEvents();
     this.updatePlayButton();
@@ -3014,18 +3019,28 @@ export class VisualizationWorkspace {
   async loadFile(file: File): Promise<void> {
     const payload = JSON.parse(await file.text()) as unknown;
     const metadata = payload && typeof payload === "object" && !Array.isArray(payload)
-      ? (payload as UnknownRecord).ProductionMetricsMetadata
+      ? ((payload as UnknownRecord).RunMetricsMetadata ?? (payload as UnknownRecord).ProductionMetricsMetadata)
       : null;
-    const rawCalculationSeconds = metadata && typeof metadata === "object" && !Array.isArray(metadata)
-      ? Number((metadata as UnknownRecord).calculationSeconds)
+    const rawCpuTimeMs = metadata && typeof metadata === "object" && !Array.isArray(metadata)
+      ? Number((metadata as UnknownRecord).cpuTimeMs ?? Number((metadata as UnknownRecord).calculationSeconds) * 1000)
       : Number.NaN;
+    const recomputePoints = payload && typeof payload === "object" && !Array.isArray(payload)
+      ? (payload as UnknownRecord).RecomputePoints
+      : null;
+    const metadataRecomputeCount = metadata && typeof metadata === "object" && !Array.isArray(metadata)
+      ? Number((metadata as UnknownRecord).recomputeCount)
+      : Number.NaN;
+    const rawRecomputeCount = Number.isFinite(metadataRecomputeCount)
+      ? metadataRecomputeCount
+      : Array.isArray(recomputePoints) ? recomputePoints.length : 0;
     await this.loadMoves(
       normalizeMovePayload(payload),
       normalizeDecisionTrace(payload),
       file.name,
       "",
       "",
-      Number.isFinite(rawCalculationSeconds) ? Math.max(rawCalculationSeconds, 0) : null,
+      Number.isFinite(rawCpuTimeMs) ? Math.max(rawCpuTimeMs, 0) : null,
+      Number.isFinite(rawRecomputeCount) ? Math.max(0, Math.trunc(rawRecomputeCount)) : 0,
     );
   }
 
@@ -3063,6 +3078,7 @@ export class VisualizationWorkspace {
         resultUrl,
         resultId,
         null,
+        0,
       );
     } catch (error) {
       this.showError(error instanceof Error ? error.message : String(error));
@@ -3113,7 +3129,8 @@ export class VisualizationWorkspace {
     this.resultUrl = "";
     this.analysisResultId = "";
     this.analysis = null;
-    this.productionCalculationSeconds = null;
+    this.cpuTimeMs = null;
+    this.recomputeCount = 0;
     this.bottleneckSummary = null;
     this.time = 0;
     this.setReplayPlan(plan);
@@ -3229,7 +3246,8 @@ export class VisualizationWorkspace {
     this.resultUrl = "";
     this.analysisResultId = "";
     this.analysis = null;
-    this.productionCalculationSeconds = null;
+    this.cpuTimeMs = null;
+    this.recomputeCount = 0;
     this.bottleneckSummary = null;
     this.analysisRequestVersion += 1;
     this.time = 0;
@@ -3264,7 +3282,8 @@ export class VisualizationWorkspace {
     sourceName: string,
     resultUrl: string,
     analysisResultId: string,
-    calculationSeconds: number | null = null,
+    cpuTimeMs: number | null = null,
+    recomputeCount = 0,
   ): Promise<void> {
     if (!moves.length) throw new Error("MoveList 为空，无法建立可视化回放");
     this.pause();
@@ -3284,7 +3303,8 @@ export class VisualizationWorkspace {
     this.resultUrl = resultUrl;
     this.analysisResultId = analysisResultId;
     this.analysis = null;
-    this.productionCalculationSeconds = calculationSeconds;
+    this.cpuTimeMs = cpuTimeMs;
+    this.recomputeCount = recomputeCount;
     this.bottleneckSummary = null;
     const snapshot = buildWorkspaceSnapshot(this.moves, this.device, 0);
     this.time = 0;
@@ -3355,13 +3375,6 @@ export class VisualizationWorkspace {
     this.elements.performanceWindow.addEventListener("change", () => {
       this.performanceWindowMode = this.elements.performanceWindow.value === "full" ? "full" : "steady";
       void this.renderPerformance();
-    });
-    this.elements.performance.addEventListener("click", event => {
-      const target = event.target instanceof Element
-        ? event.target.closest<HTMLElement>("[data-production-metrics-export]")
-        : null;
-      if (!target || !this.analysis?.productionMetrics) return;
-      downloadProductionMetricsCsv(this.analysis.productionMetrics, this.sourceName);
     });
     this.elements.resultButton.addEventListener("click", () => this.show());
     this.elements.openGantt.addEventListener("click", event => {
@@ -3665,7 +3678,8 @@ export class VisualizationWorkspace {
         windowMode: this.performanceWindowMode,
         routes: this.analysisRoutes,
         rounds: this.analysisRounds,
-        calculationSeconds: this.analysisResultId ? undefined : this.productionCalculationSeconds,
+        cpuTimeMs: this.analysisResultId ? undefined : this.cpuTimeMs,
+        recomputeCount: this.analysisResultId ? undefined : this.recomputeCount,
       });
       if (requestVersion !== this.analysisRequestVersion) return;
       const analysis = withWaferResidenceTimes(result.analysis, this.moves, this.device);

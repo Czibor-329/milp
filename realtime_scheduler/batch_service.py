@@ -818,10 +818,14 @@ def _execute_workspace_test_batch(
                     "error": "用户终止调度",
                 }
             artifact = deepcopy(dict(result["output"]))
-            artifact["ProductionMetricsMetadata"] = {
-                "calculationSeconds": max(
+            artifact["RunMetricsMetadata"] = {
+                "cpuTimeMs": max(
                     0.0,
-                    float(result.get("cpuTimeMs", result.get("totalElapsedMs", 0.0))) / 1000.0,
+                    float(result.get("cpuTimeMs", result.get("totalElapsedMs", 0.0))),
+                ),
+                "recomputeCount": sum(
+                    1 for row in (result.get("rounds") or [])
+                    if isinstance(row, Mapping) and row.get("kind") == "recompute"
                 ),
             }
             artifact["ReplayContext"] = {
