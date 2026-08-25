@@ -12,6 +12,8 @@ import re
 from collections import defaultdict
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from realtime_scheduler.production_metrics import calculate_production_metrics
+
 
 PERFORMANCE_TIME_TOLERANCE = 1e-6
 MIDDLE_WINDOW_TRIM_RATIO = 0.1
@@ -985,6 +987,7 @@ def analyze_schedule_performance(
     device: Optional[Mapping[str, Any]],
     mode: str = "steady",
     context: Optional[Mapping[str, Any]] = None,
+    calculation_seconds: Any = None,
 ) -> Dict[str, Any]:
     """计算服务端 MoveList 性能、瓶颈候选和驻留时间。
 
@@ -1102,6 +1105,13 @@ def analyze_schedule_performance(
         ),
         "waferSystemResidenceTimes": wafer_system_residence_times,
         "loadLockEfficiency": _build_load_lock_efficiency(records, device),
+        # 新口径保留在独立子结构中，避免与既有性能指标混用。
+        "productionMetrics": calculate_production_metrics(
+            records,
+            device,
+            context,
+            calculation_seconds,
+        ),
     }
     return performance
 
@@ -1137,6 +1147,7 @@ def build_schedule_analysis_context(
         if isinstance(route, Mapping)
     }
     process_stages: List[Dict[str, Any]] = []
+    pjob_routes: List[Dict[str, str]] = []
     for round_index, round_row in enumerate(rounds or []):
         for cjob_index, cjob in enumerate(_list_value(round_row.get("cjobs"))):
             if not isinstance(cjob, Mapping):
@@ -1147,6 +1158,14 @@ def build_schedule_analysis_context(
                 route = route_by_name.get(str(pjob.get("routeRef") or ""))
                 if not isinstance(route, Mapping):
                     continue
+                task_id = str(round_index + 1)
+                cjob_key = str(cjob.get("key") or f"C{cjob_index + 1}")
+                job_name = str(pjob.get("jobName") or "P?")
+                pjob_name = f"{task_id}.{cjob_key}.{job_name}"
+                pjob_routes.append({
+                    "pjobName": pjob_name,
+                    "routeRef": str(pjob.get("routeRef") or ""),
+                })
                 process_ordinal = 0
                 for stage in _list_value(route.get("stages")):
                     if not isinstance(stage, Mapping) or not stage.get("needProcess"):
@@ -1160,20 +1179,18 @@ def build_schedule_analysis_context(
                     ))
                     if not resource_names:
                         continue
-                    task_id = str(round_index + 1)
-                    cjob_key = str(cjob.get("key") or f"C{cjob_index + 1}")
-                    job_name = str(pjob.get("jobName") or "P?")
                     process_stages.append({
                         "id": (
                             f"{task_id}.{cjob_key}.{job_name}:"
                             f"step-{stage.get('stepId')}"
                         ),
                         "label": f"{job_name} · 工序 {process_ordinal}",
-                        "pjobName": f"{task_id}.{cjob_key}.{job_name}",
+                        "pjobName": pjob_name,
+                        "routeRef": str(pjob.get("routeRef") or ""),
                         "stepId": stage.get("stepId"),
                         "resourceNames": resource_names,
                     })
-    return {"processStages": process_stages}
+    return {"processStages": process_stages, "pjobRoutes": pjob_routes}
 
 
 def _normalize_group_case(input_case: Mapping[str, Any]) -> Dict[str, Any]:

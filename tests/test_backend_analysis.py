@@ -72,6 +72,11 @@ class BackendAnalysisTests(unittest.TestCase):
             result["waferSystemResidenceTimes"],
         )
         self.assertNotIn("diagnostics", result)
+        self.assertEqual(
+            "production-metrics-v1",
+            result["productionMetrics"]["schemaVersion"],
+        )
+        self.assertFalse(result["productionMetrics"]["sampleWindow"]["available"])
 
     def test_context_is_built_on_backend_from_routes_and_rounds(self) -> None:
         """工序容量上下文应由后端从原始 Route/PJob 配置构建。"""
@@ -103,6 +108,11 @@ class BackendAnalysisTests(unittest.TestCase):
             ],
         )
         self.assertEqual(["PM1", "PM2"], context["processStages"][0]["resourceNames"])
+        self.assertEqual("RouteA", context["processStages"][0]["routeRef"])
+        self.assertEqual(
+            [{"pjobName": "1.C1.P1", "routeRef": "RouteA"}],
+            context["pjobRoutes"],
+        )
 
     def test_load_lock_efficiency_counts_completed_cycles_and_repeated_loads(self) -> None:
         """同一晶圆跨多个抽充气周期时，每个周期都应贡献一次载荷。"""

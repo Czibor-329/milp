@@ -7,6 +7,11 @@
  */
 
 import { requestReplayDecision, requestScheduleAnalysis } from "./api_client";
+import {
+  downloadProductionMetricsCsv,
+  ensureProductionMetricsStyles,
+  renderProductionMetrics,
+} from "../../production_metrics/view";
 import type {
   ActivityCategory,
   BottleneckUtilizationSummary,
@@ -2930,6 +2935,8 @@ function renderSchedulePerformance(performance: SchedulePerformance): string {
       ${renderBottleneckAnalysis(performance)}
     </section>
 
+    ${performance.productionMetrics ? renderProductionMetrics(performance.productionMetrics) : ""}
+
     `;
 }
 
@@ -2959,6 +2966,7 @@ export class VisualizationWorkspace {
   private resultUrl = "";
   private analysisResultId = "";
   private analysis: SchedulePerformance | null = null;
+  private productionCalculationSeconds: number | null = null;
   private bottleneckSummary: BottleneckUtilizationSummary | null = null;
   private analysisRequestVersion = 0;
   private time = 0;
@@ -2978,6 +2986,7 @@ export class VisualizationWorkspace {
   constructor(root: Document) {
     this.root = root;
     this.elements = collectElements(root);
+    ensureProductionMetricsStyles(root);
     this.syncModuleFiltersFromUi();
     this.bindEvents();
     this.updatePlayButton();
@@ -3004,12 +3013,19 @@ export class VisualizationWorkspace {
   /** 加载浏览器中选择的 MoveList 文件。 */
   async loadFile(file: File): Promise<void> {
     const payload = JSON.parse(await file.text()) as unknown;
+    const metadata = payload && typeof payload === "object" && !Array.isArray(payload)
+      ? (payload as UnknownRecord).ProductionMetricsMetadata
+      : null;
+    const rawCalculationSeconds = metadata && typeof metadata === "object" && !Array.isArray(metadata)
+      ? Number((metadata as UnknownRecord).calculationSeconds)
+      : Number.NaN;
     await this.loadMoves(
       normalizeMovePayload(payload),
       normalizeDecisionTrace(payload),
       file.name,
       "",
       "",
+      Number.isFinite(rawCalculationSeconds) ? Math.max(rawCalculationSeconds, 0) : null,
     );
   }
 
@@ -3046,6 +3062,7 @@ export class VisualizationWorkspace {
         sourceName,
         resultUrl,
         resultId,
+        null,
       );
     } catch (error) {
       this.showError(error instanceof Error ? error.message : String(error));
@@ -3096,6 +3113,7 @@ export class VisualizationWorkspace {
     this.resultUrl = "";
     this.analysisResultId = "";
     this.analysis = null;
+    this.productionCalculationSeconds = null;
     this.bottleneckSummary = null;
     this.time = 0;
     this.setReplayPlan(plan);
@@ -3211,6 +3229,7 @@ export class VisualizationWorkspace {
     this.resultUrl = "";
     this.analysisResultId = "";
     this.analysis = null;
+    this.productionCalculationSeconds = null;
     this.bottleneckSummary = null;
     this.analysisRequestVersion += 1;
     this.time = 0;
@@ -3245,6 +3264,7 @@ export class VisualizationWorkspace {
     sourceName: string,
     resultUrl: string,
     analysisResultId: string,
+    calculationSeconds: number | null = null,
   ): Promise<void> {
     if (!moves.length) throw new Error("MoveList 为空，无法建立可视化回放");
     this.pause();
@@ -3264,6 +3284,7 @@ export class VisualizationWorkspace {
     this.resultUrl = resultUrl;
     this.analysisResultId = analysisResultId;
     this.analysis = null;
+    this.productionCalculationSeconds = calculationSeconds;
     this.bottleneckSummary = null;
     const snapshot = buildWorkspaceSnapshot(this.moves, this.device, 0);
     this.time = 0;
@@ -3334,6 +3355,13 @@ export class VisualizationWorkspace {
     this.elements.performanceWindow.addEventListener("change", () => {
       this.performanceWindowMode = this.elements.performanceWindow.value === "full" ? "full" : "steady";
       void this.renderPerformance();
+    });
+    this.elements.performance.addEventListener("click", event => {
+      const target = event.target instanceof Element
+        ? event.target.closest<HTMLElement>("[data-production-metrics-export]")
+        : null;
+      if (!target || !this.analysis?.productionMetrics) return;
+      downloadProductionMetricsCsv(this.analysis.productionMetrics, this.sourceName);
     });
     this.elements.resultButton.addEventListener("click", () => this.show());
     this.elements.openGantt.addEventListener("click", event => {
@@ -3637,6 +3665,7 @@ export class VisualizationWorkspace {
         windowMode: this.performanceWindowMode,
         routes: this.analysisRoutes,
         rounds: this.analysisRounds,
+        calculationSeconds: this.analysisResultId ? undefined : this.productionCalculationSeconds,
       });
       if (requestVersion !== this.analysisRequestVersion) return;
       const analysis = withWaferResidenceTimes(result.analysis, this.moves, this.device);

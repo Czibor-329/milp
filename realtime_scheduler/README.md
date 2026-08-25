@@ -4,6 +4,7 @@
 
 - `server.py`：本地调度服务、工作区接口、分析 API 与静态资源入口，不承载页面分析实现。
 - `backend/analysis.py`：服务端唯一的 MoveList 性能、瓶颈和测试组分析实现。
+- `production_metrics/`：本次新增的独立生产指标模块，包含计算、前端卡片、单独 CSV 导出、类型契约、测试和交付说明，可整目录复制给其他项目。
 - 内置 `heuristic/loadlock-macro/e2e-ctq/dual-actor-e2e`：统一调用独立算法仓库
   `alg/src/api.py` 的 `init/update`，`update` 的可选 `algorithm`
   参数决定算法。

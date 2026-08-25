@@ -818,6 +818,12 @@ def _execute_workspace_test_batch(
                     "error": "用户终止调度",
                 }
             artifact = deepcopy(dict(result["output"]))
+            artifact["ProductionMetricsMetadata"] = {
+                "calculationSeconds": max(
+                    0.0,
+                    float(result.get("cpuTimeMs", result.get("totalElapsedMs", 0.0))) / 1000.0,
+                ),
+            }
             artifact["ReplayContext"] = {
                 "schema": "machine-replay-context-v1",
                 "plan": deepcopy(selected_plan),

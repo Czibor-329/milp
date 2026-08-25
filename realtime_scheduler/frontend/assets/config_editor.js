@@ -221,6 +221,137 @@ async function requestSearchControl(command, actionKey = null) {
   });
 }
 
+// ../production_metrics/view.ts
+var PRODUCTION_METRIC_STYLE_ID = "production-metrics-module-styles";
+function productionEscapeHtml(value) {
+  return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+function productionMetricNumberText(value, digits = 2) {
+  return value === null || value === void 0 || !Number.isFinite(value) ? "\u2014" : value.toFixed(digits);
+}
+function productionMetricPercentText(value) {
+  return value === null || value === void 0 || !Number.isFinite(value) ? "\u2014" : `${(value * 100).toFixed(1)}%`;
+}
+function productionMetricChamberLabel(chamber) {
+  const details = [chamber.stepId ? `\u5DE5\u5E8F ${chamber.stepId}` : "", chamber.recipe].filter(Boolean);
+  return details.length ? `${chamber.chamber} \xB7 ${details.join(" \xB7 ")}` : chamber.chamber;
+}
+function ensureProductionMetricsStyles(root = document) {
+  if (typeof root.createElement !== "function" || !root.head || typeof root.head.append !== "function") return;
+  if (root.getElementById(PRODUCTION_METRIC_STYLE_ID)) return;
+  const style = root.createElement("style");
+  style.id = PRODUCTION_METRIC_STYLE_ID;
+  style.textContent = `
+    .production-metrics-module{display:grid;gap:16px;margin-top:16px;--pm-accent:#0f766e;--pm-ink:#102a2a;--pm-muted:#607272;--pm-line:#d6e4e2;--pm-soft:#f0fdfa}
+    .production-metrics-head{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:18px 20px;border:1px solid var(--pm-line);border-radius:14px;background:linear-gradient(135deg,#f0fdfa 0%,#fff 72%);box-shadow:0 5px 18px rgba(15,118,110,.08)}
+    .production-metrics-title{display:grid;gap:4px}.production-metrics-title strong{color:var(--pm-ink);font-size:16px}.production-metrics-title small{color:var(--pm-muted);line-height:1.5}
+    .production-metrics-actions{display:flex;align-items:center;gap:10px}.production-metrics-badge{display:inline-flex;align-items:center;min-height:28px;padding:0 10px;border:1px solid #99d5cc;border-radius:999px;background:#fff;color:var(--pm-accent);font-size:12px;font-weight:800;white-space:nowrap}
+    .production-metrics-export{min-height:34px;padding:0 14px;border:1px solid var(--pm-accent);border-radius:9px;background:var(--pm-accent);color:#fff;font:inherit;font-size:13px;font-weight:800;cursor:pointer}.production-metrics-export:hover{filter:brightness(.96)}.production-metrics-export:focus-visible{outline:3px solid rgba(20,184,166,.3);outline-offset:2px}
+    .production-metrics-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.production-metric-card{min-width:0;overflow:hidden;border:1px solid var(--pm-line);border-radius:14px;background:#fff;box-shadow:0 5px 18px rgba(15,23,42,.05)}
+    .production-metric-card.wide{grid-column:1/-1}.production-metric-card>header{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;padding:16px 18px;border-bottom:1px solid #e7efee;background:#fbfefd}.production-metric-card>header strong{color:var(--pm-ink);font-size:14px}.production-metric-card>header small{color:var(--pm-muted);line-height:1.45;text-align:right}
+    .production-kpis{display:grid;grid-template-columns:repeat(3,minmax(0,1fr))}.production-kpi{min-width:0;padding:18px;border-left:1px solid #e7efee}.production-kpi:first-child{border-left:0}.production-kpi span,.production-kpi strong,.production-kpi small{display:block}.production-kpi span{color:var(--pm-muted);font-size:12px;font-weight:800}.production-kpi strong{margin-top:6px;color:var(--pm-ink);font-size:23px;line-height:1.25}.production-kpi small{margin-top:6px;color:var(--pm-muted);font-size:12px;line-height:1.5}
+    .production-metric-note{margin:0;padding:18px;color:var(--pm-muted);font-size:13px;line-height:1.65}.production-metric-table-wrap{overflow:auto}.production-metric-table{width:100%;border-collapse:collapse;font-size:12px}.production-metric-table th,.production-metric-table td{padding:12px 14px;border-bottom:1px solid #edf2f1;text-align:right;white-space:nowrap}.production-metric-table th:first-child,.production-metric-table td:first-child{text-align:left}.production-metric-table th{background:#fbfefd;color:var(--pm-muted);font-weight:800}.production-metric-table td{color:var(--pm-ink)}
+    .production-utilization-list{display:grid;gap:12px;margin:0;padding:16px 18px;list-style:none}.production-utilization-row{display:grid;grid-template-columns:minmax(90px,1fr) minmax(120px,3fr) 62px;align-items:center;gap:12px}.production-utilization-row strong{overflow:hidden;color:var(--pm-ink);font-size:12px;text-overflow:ellipsis;white-space:nowrap}.production-utilization-track{height:9px;overflow:hidden;border-radius:999px;background:#e6efed}.production-utilization-track i{display:block;height:100%;border-radius:inherit;background:linear-gradient(90deg,#14b8a6,#0f766e)}.production-utilization-row span{color:var(--pm-muted);font-size:12px;text-align:right}
+    @media(max-width:760px){.production-metrics-head{align-items:stretch;flex-direction:column}.production-metrics-actions{justify-content:space-between}.production-metrics-grid{grid-template-columns:1fr}.production-kpis{grid-template-columns:1fr}.production-kpi{border-top:1px solid #e7efee;border-left:0}.production-kpi:first-child{border-top:0}.production-metric-card>header{flex-direction:column}.production-metric-card>header small{text-align:left}.production-utilization-row{grid-template-columns:minmax(80px,1fr) minmax(100px,2fr) 54px}}
+  `;
+  root.head.append(style);
+}
+function renderProductionMetrics(metrics) {
+  const config = metrics.configuration;
+  const sample = metrics.sampleWindow;
+  const unavailableReason = metrics.overall.reason || metrics.applicability.reason || sample.reason;
+  const chamberRows = metrics.chambers.map((chamber) => `
+    <tr>
+      <td>${productionEscapeHtml(productionMetricChamberLabel(chamber))}</td>
+      <td>${chamber.waferCount}</td>
+      <td>${chamber.k}</td>
+      <td>${productionMetricNumberText(chamber.throughputPerHour, 1)}</td>
+      <td>${productionMetricNumberText(chamber.entryIntervalStdSeconds, 3)}</td>
+      <td>${chamber.surpassWaferCount}</td>
+      <td>${productionMetricPercentText(chamber.surpassRate)}</td>
+    </tr>`).join("");
+  const moduleRows = metrics.modules.slice(0, 12).map((module) => `
+    <li class="production-utilization-row">
+      <strong title="${productionEscapeHtml(module.name)}">${productionEscapeHtml(module.name)}</strong>
+      <span class="production-utilization-track" role="img" aria-label="${productionEscapeHtml(module.name)} \u5229\u7528\u7387 ${productionMetricPercentText(module.utilization)}"><i style="width:${Math.max(0, Math.min(module.utilization, 1)) * 100}%"></i></span>
+      <span>${productionMetricPercentText(module.utilization)}</span>
+    </li>`).join("");
+  const sampleDetail = sample.available ? `\u5B8C\u5DE5 ${sample.totalCompletedWafers} \u7247 \xB7 \u5254\u9664\u524D ${config.trimmedHeadWafers} \u7247\u540E\u56FA\u5B9A\u53D6 ${config.sampleSize} \u7247 \xB7 \u540E\u65B9\u81F3\u5C11\u4FDD\u7559 ${config.trimmedTailWafers} \u7247` : sample.reason;
+  return `
+    <section class="production-metrics-module" aria-labelledby="productionMetricsTitle">
+      <header class="production-metrics-head">
+        <div class="production-metrics-title">
+          <strong id="productionMetricsTitle">\u6307\u6807\u5BFC\u51FA\u53C2\u6570\u8BBE\u7F6E \xB7 \u72EC\u7ACB\u7EDF\u8BA1</strong>
+          <small>${productionEscapeHtml(sampleDetail)}</small>
+        </div>
+        <div class="production-metrics-actions">
+          <span class="production-metrics-badge">${metrics.applicability.sameRecipeAndPath ? "\u540C Recipe / \u8DEF\u5F84" : "\u6307\u6807\u53D7\u9650"}</span>
+          <button class="production-metrics-export" type="button" data-production-metrics-export>\u5355\u72EC\u5BFC\u51FA CSV</button>
+        </div>
+      </header>
+      <div class="production-metrics-grid">
+        <article class="production-metric-card">
+          <header><strong>\u4EA7\u80FD\u4E0E\u8FD0\u884C</strong><small>\u4E0E\u539F\u6709 KPI \u5206\u5F00\u7EDF\u8BA1</small></header>
+          <div class="production-kpis">
+            <div class="production-kpi"><span>\u6574\u4F53\u4EA7\u80FD</span><strong>${productionMetricNumberText(metrics.overall.throughputPerHour, 1)}</strong><small>\u7247 / \u5C0F\u65F6 \xB7 \u56FA\u5B9A N=${config.sampleSize}</small></div>
+            <div class="production-kpi"><span>RPT</span><strong>${productionMetricNumberText(metrics.overall.rptMinutes, 2)}</strong><small>\u5206\u949F / \u7247${metrics.overall.parallelChamberCount ? ` \xB7 ${metrics.overall.parallelChamberCount} \u4E2A\u5E76\u884C\u8154\u5BA4` : ""}</small></div>
+            <div class="production-kpi"><span>\u8BA1\u7B97\u65F6\u95F4</span><strong>${productionMetricNumberText(metrics.calculationSeconds, 3)}</strong><small>\u79D2</small></div>
+          </div>
+          ${unavailableReason ? `<p class="production-metric-note">${productionEscapeHtml(unavailableReason)}</p>` : ""}
+        </article>
+        <article class="production-metric-card">
+          <header><strong>\u6A21\u5757\u5229\u7528\u7387</strong><small>\u91CD\u53E0\u6D3B\u52A8\u53D6\u65F6\u95F4\u5E76\u96C6\uFF0C\u591A\u69FD\u4F4D\u4E0D\u91CD\u590D\u7D2F\u8BA1</small></header>
+          ${moduleRows ? `<ol class="production-utilization-list">${moduleRows}</ol>` : `<p class="production-metric-note">${productionEscapeHtml(sample.reason || "\u6CA1\u6709\u53EF\u7EDF\u8BA1\u7684\u6A21\u5757\u6D3B\u52A8\u3002")}</p>`}
+        </article>
+        <article class="production-metric-card wide">
+          <header><strong>\u8154\u5BA4\u4EA7\u80FD\u4E0E\u8FDB\u8154\u8D28\u91CF</strong><small>\u8D85\u7247\u793A\u4F8B\uFF1A\u671F\u671B 1\u21922\u21923\uFF0C\u5B9E\u9645 1\u21923\u21922\uFF0C\u53EA\u5C06\u6676\u5706 3 \u8BA1\u4E3A 1 \u7247\u8D85\u7247</small></header>
+          ${chamberRows ? `
+            <div class="production-metric-table-wrap"><table class="production-metric-table">
+              <thead><tr><th>\u8154\u5BA4 / \u5DE5\u5E8F / Recipe</th><th>\u6676\u5706\u6570</th><th>k</th><th>\u4EA7\u80FD\uFF08\u7247/h\uFF09</th><th>\u8282\u62CD \u03C3\uFF08s\uFF09</th><th>\u8D85\u7247\u6570</th><th>\u8D85\u7247\u7387</th></tr></thead>
+              <tbody>${chamberRows}</tbody>
+            </table></div>` : `<p class="production-metric-note">${productionEscapeHtml(unavailableReason || "\u6CA1\u6709\u53EF\u7EDF\u8BA1\u7684\u8154\u5BA4\u52A0\u5DE5\u8BB0\u5F55\u3002")}</p>`}
+        </article>
+      </div>
+    </section>`;
+}
+function productionMetricCsvCell(value) {
+  const text2 = String(value ?? "");
+  return /[",\r\n]/.test(text2) ? `"${text2.replace(/"/g, '""')}"` : text2;
+}
+function productionMetricsCsv(metrics) {
+  const rows = [["\u7C7B\u522B", "\u5BF9\u8C61", "\u6307\u6807", "\u6570\u503C", "\u5355\u4F4D", "\u8BF4\u660E"]];
+  const push = (category, target, metric, value, unit, note = "") => {
+    rows.push([category, target, metric, value ?? "", unit, note]);
+  };
+  push("\u7EDF\u8BA1\u53E3\u5F84", "\u6837\u672C", "\u5DF2\u5B8C\u5DE5\u6676\u5706\u6570", metrics.sampleWindow.totalCompletedWafers, "\u7247");
+  push("\u7EDF\u8BA1\u53E3\u5F84", "\u6837\u672C", "\u56FA\u5B9A\u6837\u672C\u6570 N", metrics.configuration.sampleSize, "\u7247", `\u5254\u9664\u524D ${metrics.configuration.trimmedHeadWafers} \u7247\uFF0C\u6837\u672C\u540E\u81F3\u5C11\u4FDD\u7559 ${metrics.configuration.trimmedTailWafers} \u7247`);
+  push("\u9002\u7528\u6027", "Recipe/\u8DEF\u5F84", "\u662F\u5426\u4E00\u81F4", metrics.applicability.sameRecipeAndPath ? "\u662F" : "\u5426", "", metrics.applicability.reason);
+  push("\u4EA7\u80FD\u4E0E\u8FD0\u884C", "\u6574\u4F53", "\u6574\u4F53\u4EA7\u80FD", metrics.overall.throughputPerHour, "\u7247/h", metrics.overall.reason);
+  push("\u4EA7\u80FD\u4E0E\u8FD0\u884C", "\u6574\u4F53", "RPT", metrics.overall.rptMinutes, "min/\u7247", metrics.overall.reason);
+  push("\u4EA7\u80FD\u4E0E\u8FD0\u884C", "\u7B97\u6CD5", "\u8BA1\u7B97\u65F6\u95F4", metrics.calculationSeconds, "s");
+  for (const chamber of metrics.chambers) {
+    const label = productionMetricChamberLabel(chamber);
+    push("\u8154\u5BA4", label, "\u8154\u5BA4\u4EA7\u80FD", chamber.throughputPerHour, "\u7247/h", `k=${chamber.k}`);
+    push("\u8154\u5BA4", label, "\u8FDB\u8154\u8282\u62CD\u6807\u51C6\u5DEE", chamber.entryIntervalStdSeconds, "s", "std(I_pmi)");
+    push("\u8154\u5BA4", label, "\u8D85\u7247\u6570", chamber.surpassWaferCount, "\u7247");
+    push("\u8154\u5BA4", label, "\u8D85\u7247\u7387", chamber.surpassRate === null ? null : chamber.surpassRate * 100, "%");
+  }
+  for (const module of metrics.modules) {
+    push("\u6A21\u5757", module.name, "\u5229\u7528\u7387", module.utilization * 100, "%", `\u65F6\u95F4\u5E76\u96C6 ${module.busyTimeSeconds.toFixed(3)} s`);
+  }
+  return rows.map((row) => row.map(productionMetricCsvCell).join(",")).join("\r\n");
+}
+function downloadProductionMetricsCsv(metrics, sourceName = "\u8C03\u5EA6\u7ED3\u679C") {
+  const link = document.createElement("a");
+  const safeName = sourceName.replace(/[\\/:*?"<>|]+/g, "-").replace(/\.[^.]+$/, "") || "\u8C03\u5EA6\u7ED3\u679C";
+  const stamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[-:]/g, "").slice(0, 15);
+  link.href = `data:text/csv;charset=utf-8,%EF%BB%BF${encodeURIComponent(productionMetricsCsv(metrics))}`;
+  link.download = `\u65B0\u589E\u751F\u4EA7\u6307\u6807-${safeName}-${stamp}.csv`;
+  document.body.append(link);
+  link.click();
+  link.remove();
+}
+
 // src/workspace_visualizer.ts
 var PICK_MOVE_TYPES = /* @__PURE__ */ new Set([0, 2]);
 var PLACE_MOVE_TYPES = /* @__PURE__ */ new Set([1, 3]);
@@ -2219,6 +2350,8 @@ function renderSchedulePerformance(performance2) {
       ${renderBottleneckAnalysis(performance2)}
     </section>
 
+    ${performance2.productionMetrics ? renderProductionMetrics(performance2.productionMetrics) : ""}
+
     `;
 }
 var VisualizationWorkspace = class {
@@ -2246,6 +2379,7 @@ var VisualizationWorkspace = class {
   resultUrl = "";
   analysisResultId = "";
   analysis = null;
+  productionCalculationSeconds = null;
   bottleneckSummary = null;
   analysisRequestVersion = 0;
   time = 0;
@@ -2264,6 +2398,7 @@ var VisualizationWorkspace = class {
   constructor(root) {
     this.root = root;
     this.elements = collectElements(root);
+    ensureProductionMetricsStyles(root);
     this.syncModuleFiltersFromUi();
     this.bindEvents();
     this.updatePlayButton();
@@ -2287,12 +2422,15 @@ var VisualizationWorkspace = class {
   /** 加载浏览器中选择的 MoveList 文件。 */
   async loadFile(file) {
     const payload = JSON.parse(await file.text());
+    const metadata = payload && typeof payload === "object" && !Array.isArray(payload) ? payload.ProductionMetricsMetadata : null;
+    const rawCalculationSeconds = metadata && typeof metadata === "object" && !Array.isArray(metadata) ? Number(metadata.calculationSeconds) : Number.NaN;
     await this.loadMoves(
       normalizeMovePayload(payload),
       normalizeDecisionTrace(payload),
       file.name,
       "",
-      ""
+      "",
+      Number.isFinite(rawCalculationSeconds) ? Math.max(rawCalculationSeconds, 0) : null
     );
   }
   /** 从后端保存的运行结果加载 MoveList。 */
@@ -2321,7 +2459,8 @@ var VisualizationWorkspace = class {
         normalizeDecisionTrace(payload),
         sourceName,
         resultUrl,
-        resultId
+        resultId,
+        null
       );
     } catch (error) {
       this.showError(error instanceof Error ? error.message : String(error));
@@ -2362,6 +2501,7 @@ var VisualizationWorkspace = class {
     this.resultUrl = "";
     this.analysisResultId = "";
     this.analysis = null;
+    this.productionCalculationSeconds = null;
     this.bottleneckSummary = null;
     this.time = 0;
     this.setReplayPlan(plan);
@@ -2459,6 +2599,7 @@ var VisualizationWorkspace = class {
     this.resultUrl = "";
     this.analysisResultId = "";
     this.analysis = null;
+    this.productionCalculationSeconds = null;
     this.bottleneckSummary = null;
     this.analysisRequestVersion += 1;
     this.time = 0;
@@ -2486,7 +2627,7 @@ var VisualizationWorkspace = class {
       <span>\u8FD0\u884C\u4E00\u6B21\u8BA1\u5212\uFF0C\u6216\u5BFC\u5165\u5DF2\u6709\u7684 MoveList JSON \u6587\u4EF6\u540E\u67E5\u770B\u8BBE\u5907\u62D3\u6251\u5E76\u5F00\u59CB\u56DE\u653E\u3002</span>`;
   }
   /** 接收规范化后的 MoveList 并重置时间轴。 */
-  async loadMoves(moves, decisionTrace, sourceName, resultUrl, analysisResultId) {
+  async loadMoves(moves, decisionTrace, sourceName, resultUrl, analysisResultId, calculationSeconds = null) {
     if (!moves.length) throw new Error("MoveList \u4E3A\u7A7A\uFF0C\u65E0\u6CD5\u5EFA\u7ACB\u53EF\u89C6\u5316\u56DE\u653E");
     this.pause();
     this.liveSolving = false;
@@ -2505,6 +2646,7 @@ var VisualizationWorkspace = class {
     this.resultUrl = resultUrl;
     this.analysisResultId = analysisResultId;
     this.analysis = null;
+    this.productionCalculationSeconds = calculationSeconds;
     this.bottleneckSummary = null;
     const snapshot = buildWorkspaceSnapshot(this.moves, this.device, 0);
     this.time = 0;
@@ -2570,6 +2712,11 @@ var VisualizationWorkspace = class {
     this.elements.performanceWindow.addEventListener("change", () => {
       this.performanceWindowMode = this.elements.performanceWindow.value === "full" ? "full" : "steady";
       void this.renderPerformance();
+    });
+    this.elements.performance.addEventListener("click", (event) => {
+      const target = event.target instanceof Element ? event.target.closest("[data-production-metrics-export]") : null;
+      if (!target || !this.analysis?.productionMetrics) return;
+      downloadProductionMetricsCsv(this.analysis.productionMetrics, this.sourceName);
     });
     this.elements.resultButton.addEventListener("click", () => this.show());
     this.elements.openGantt.addEventListener("click", (event) => {
@@ -2804,7 +2951,8 @@ var VisualizationWorkspace = class {
         device: this.device,
         windowMode: this.performanceWindowMode,
         routes: this.analysisRoutes,
-        rounds: this.analysisRounds
+        rounds: this.analysisRounds,
+        calculationSeconds: this.analysisResultId ? void 0 : this.productionCalculationSeconds
       });
       if (requestVersion !== this.analysisRequestVersion) return;
       const analysis = withWaferResidenceTimes(result.analysis, this.moves, this.device);
