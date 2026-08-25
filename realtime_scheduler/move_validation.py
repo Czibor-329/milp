@@ -31,6 +31,10 @@ VACUUM = "VAC"
 LOAD_LOCK_TYPE = "loadlock"
 LOAD_PORT_TYPE = "loadport"
 DOORLESS_STATION_NAMES = frozenset({"Cooler", "Cool"})
+TWIN_LOAD_LOCK_PAIRS = frozenset({
+    frozenset({"LA", "LB"}),
+    frozenset({"LC", "LD"}),
+})
 
 
 class ValidationErrorCode(str, Enum):
@@ -1531,15 +1535,25 @@ def _start_preprepare(state: MachineState, move: Mapping[str, Any], end_time: fl
 
 
 def _start_swap(state: MachineState, move: Mapping[str, Any], end_time: float, _all_moves: Sequence[Mapping[str, Any]], scheduled: List[_ScheduledCompletion]) -> Optional[str]:
-    """校验同站原子 Swap；StationList 可重复声明同一站点（双臂一进一出），单次动作可并行交换多组槽位。"""
+    """校验同站或孪生 LoadLock 原子 Swap，并按站点逐组落地物料。"""
     robot = _robot(state, move)
     if isinstance(robot, str):
         return robot
     stations = [str(value) for value in _values(move, "StationList")]
     if not stations:
         return _issue(move, ValidationErrorCode.SWAP_INPUT_INVALID, "SwapMove 缺少 StationList")
-    if len(set(stations)) != 1:
-        return _issue(move, ValidationErrorCode.SWAP_INPUT_INVALID, "SwapMove 必须引用同一个站点")
+    distinct_station_names = set(stations)
+    is_twin_load_lock_swap = (
+        len(distinct_station_names) == 2
+        and frozenset(name.upper() for name in distinct_station_names)
+        in TWIN_LOAD_LOCK_PAIRS
+    )
+    if len(distinct_station_names) != 1 and not is_twin_load_lock_swap:
+        return _issue(
+            move,
+            ValidationErrorCode.SWAP_INPUT_INVALID,
+            "SwapMove 必须引用同一个站点或一组孪生 LoadLock（LA/LB、LC/LD）",
+        )
     receive_materials = _values(move, "RecvMatList")
     send_materials = _values(move, "SendMatList")
     station_send_slots = _integer_values(move, "StnSendSlotList")
@@ -1558,12 +1572,35 @@ def _start_swap(state: MachineState, move: Mapping[str, Any], end_time: float, _
     if len(robot_receive_slots) != recv_count or len(station_send_slots) != recv_count:
         lengths = (recv_count, len(robot_receive_slots), len(station_send_slots))
         return _issue(move, ValidationErrorCode.SWAP_INPUT_INVALID, f"SwapMove 的 Recv 组数组数量不一致：RecvMatList={lengths[0]} RecvSlotList={lengths[1]} StnSendSlotList={lengths[2]}")
+    if is_twin_load_lock_swap:
+        if any(count and count != len(stations) for count in (send_count, recv_count)):
+            return _issue(
+                move,
+                ValidationErrorCode.SWAP_INPUT_INVALID,
+                "孪生 LoadLock Swap 的每个非空 Send/Recv 组必须与 StationList 逐项对齐",
+            )
+        for field_name, slot_ids in (
+            ("StnRecvSlotList", station_receive_slots),
+            ("StnSendSlotList", station_send_slots),
+        ):
+            if slot_ids and len(set(slot_ids)) != 1:
+                return _issue(
+                    move,
+                    ValidationErrorCode.SWAP_INPUT_INVALID,
+                    f"孪生 LoadLock Swap 的 {field_name} 必须使用同一层槽位",
+                )
     start_time = _start_time(move)
     physical_stations: List[StationState] = []
     for station_name in stations:
         station = state.stations.get(station_name)
         if station is None:
             return _issue(move, ValidationErrorCode.STATION_UNKNOWN, f"未知站点 {station_name}")
+        if is_twin_load_lock_swap and not isinstance(station, LoadLockState):
+            return _issue(
+                move,
+                ValidationErrorCode.SWAP_INPUT_INVALID,
+                f"孪生站点 {station_name} 不是 LoadLock",
+            )
         error = _station_access_error(robot, station, start_time, move)
         if error:
             return error
@@ -1572,17 +1609,26 @@ def _start_swap(state: MachineState, move: Mapping[str, Any], end_time: float, _
         return _issue(move, ValidationErrorCode.ROBOT_BUSY, f"{robot.name} 正在执行其他动作")
     if not robot.can_swap or len(robot.hands) < 2:
         return _issue(move, ValidationErrorCode.ROBOT_SWAP_UNSUPPORTED, f"{robot.name} 不支持双臂换片")
-    station = physical_stations[0]
+    send_stations = (
+        physical_stations
+        if is_twin_load_lock_swap
+        else [physical_stations[0]] * send_count
+    )
+    recv_stations = (
+        physical_stations
+        if is_twin_load_lock_swap
+        else [physical_stations[0]] * recv_count
+    )
     send_rows = [
-        (send_materials[i], robot_send_slots[i], station_receive_slots[i], i)
+        (send_stations[i], send_materials[i], robot_send_slots[i], station_receive_slots[i], i)
         for i in range(send_count)
     ]
     recv_rows = [
-        (receive_materials[j], robot_receive_slots[j], station_send_slots[j], j)
+        (recv_stations[j], receive_materials[j], robot_receive_slots[j], station_send_slots[j], j)
         for j in range(recv_count)
     ]
-    send_robot_slots = {row[1] for row in send_rows}
-    recv_robot_slots = {row[1] for row in recv_rows}
+    send_robot_slots = {row[2] for row in send_rows}
+    recv_robot_slots = {row[2] for row in recv_rows}
     if len(send_robot_slots) != send_count or len(recv_robot_slots) != recv_count:
         return _issue(move, ValidationErrorCode.SWAP_INPUT_INVALID, "SwapMove 的 Send/Recv 手槽不能重复")
     if send_robot_slots & recv_robot_slots:
@@ -1590,12 +1636,12 @@ def _start_swap(state: MachineState, move: Mapping[str, Any], end_time: float, _
     for slot_id in send_robot_slots | recv_robot_slots:
         if slot_id not in robot.hands:
             return _issue(move, ValidationErrorCode.ROBOT_SLOT_DISABLED, f"{robot.name} 未启用手槽 {slot_id}")
-    send_station_slots = {row[2] for row in send_rows}
-    recv_station_slots = {row[2] for row in recv_rows}
+    send_station_slots = {(row[0].name, row[3]) for row in send_rows}
+    recv_station_slots = {(row[0].name, row[3]) for row in recv_rows}
     if len(send_station_slots) != send_count or len(recv_station_slots) != recv_count:
         return _issue(move, ValidationErrorCode.SWAP_INPUT_INVALID, "SwapMove 的站槽位不能重复使用")
     # Recv 组校验：站槽位有匹配的已完成物料、目标手槽为空。
-    for material_id, robot_slot_id, station_slot_id, _ in recv_rows:
+    for station, material_id, robot_slot_id, station_slot_id, _ in recv_rows:
         slot = station.slots.get(station_slot_id)
         if slot is None:
             return _issue(move, ValidationErrorCode.STATION_SLOT_UNKNOWN, f"{station.name} 不存在槽位 {station_slot_id}")
@@ -1606,21 +1652,21 @@ def _start_swap(state: MachineState, move: Mapping[str, Any], end_time: float, _
         if not _available(slot.busy_until, start_time):
             return _issue(move, ValidationErrorCode.STATION_SLOT_BUSY, f"{station.name}#{station_slot_id} 正在{slot.busy_action}")
     # Send 组校验：手上有匹配物料；目标槽位可放（换片槽位由 Recv 组腾空，跳过空槽检查）。
-    for material_id, robot_slot_id, station_slot_id, _ in send_rows:
+    for station, material_id, robot_slot_id, station_slot_id, _ in send_rows:
         slot = station.slots.get(station_slot_id)
         if slot is None:
             return _issue(move, ValidationErrorCode.STATION_SLOT_UNKNOWN, f"{station.name} 不存在槽位 {station_slot_id}")
         material = robot.hands.get(robot_slot_id)
         if material is None or not _material_matches(material, material_id):
             return _issue(move, ValidationErrorCode.SWAP_STATE_INVALID, f"{robot.name}#{robot_slot_id} 没有可换入的物料")
-        if station_slot_id not in recv_station_slots and slot.phase not in {SlotPhase.EMPTY, SlotPhase.CLEANED}:
+        if (station.name, station_slot_id) not in recv_station_slots and slot.phase not in {SlotPhase.EMPTY, SlotPhase.CLEANED}:
             return _issue(move, ValidationErrorCode.SWAP_STATE_INVALID, f"{station.name}#{station_slot_id} 不是可直接放片的空槽")
         if not _available(slot.busy_until, start_time):
             return _issue(move, ValidationErrorCode.STATION_SLOT_BUSY, f"{station.name}#{station_slot_id} 正在{slot.busy_action}")
     station_refs = [
-        (station.name, station_receive_slots[i], robot_send_slots[i]) for i in range(send_count)
+        (row[0].name, row[3], row[2]) for row in send_rows
     ] + [
-        (station.name, station_send_slots[j], robot_receive_slots[j]) for j in range(recv_count)
+        (row[0].name, row[3], row[2]) for row in recv_rows
     ]
     alignment_error = _robot_alignment_issue(robot, move, station_refs)
     if alignment_error:
@@ -1628,9 +1674,9 @@ def _start_swap(state: MachineState, move: Mapping[str, Any], end_time: float, _
     robot.busy_until = end_time
     for station_item in {value.name: value for value in physical_stations}.values():
         station_item.transfer_busy_until = end_time
-    for _, _, station_slot_id, _ in recv_rows:
+    for station, _, _, station_slot_id, _ in recv_rows:
         _reserve_slot(station.slots[station_slot_id], end_time, "换片")
-    for _, _, station_slot_id, _ in send_rows:
+    for station, _, _, station_slot_id, _ in send_rows:
         _reserve_slot(station.slots[station_slot_id], end_time, "换片")
 
     def complete() -> None:
@@ -1639,15 +1685,15 @@ def _start_swap(state: MachineState, move: Mapping[str, Any], end_time: float, _
         Recv 先取出旧物料进手槽，Send 再放入新物料（换片槽位被覆盖），
         未被 Send 覆盖的纯 Recv 槽位最后清空。
         """
-        for _, robot_slot_id, station_slot_id, index in recv_rows:
+        for station, _, robot_slot_id, station_slot_id, index in recv_rows:
             robot.hands[robot_slot_id] = _material_with_metadata(station.slots[station_slot_id].material, move, index, "RecvMatStepIDList")
             robot.slot_targets[robot_slot_id] = (station.name, station_slot_id)
-        for _, robot_slot_id, station_slot_id, index in send_rows:
+        for station, _, robot_slot_id, station_slot_id, index in send_rows:
             _set_slot(station.slots[station_slot_id], SlotPhase.UNPROCESSED, _material_with_metadata(robot.hands[robot_slot_id], move, index, "SendMatStepIDList"))
             robot.hands[robot_slot_id] = None
             robot.slot_targets[robot_slot_id] = (station.name, station_slot_id)
-        for _, _, station_slot_id, _ in recv_rows:
-            if station_slot_id not in send_station_slots:
+        for station, _, _, station_slot_id, _ in recv_rows:
+            if (station.name, station_slot_id) not in send_station_slots:
                 _set_slot(station.slots[station_slot_id], SlotPhase.EMPTY, None)
         robot.position = _robot_derived_position(robot)
 

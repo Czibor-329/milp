@@ -7,9 +7,14 @@ from types import SimpleNamespace
 from realtime_scheduler.move_validation import (
     ATMOSPHERE,
     VACUUM,
+    DoorState,
     LoadLockState,
+    MachineState,
+    MaterialState,
     MoveStateReplay,
+    RobotState,
     SlotPhase,
+    SlotState,
     ValidationErrorCode,
     validate_move_list,
 )
@@ -643,7 +648,7 @@ def test_standard_algorithm_swap_move_with_repeated_station_passes() -> None:
 
 
 def test_swap_move_rejects_distinct_stations() -> None:
-    """原子 Swap 必须作用于同一个站点，跨站组合应报错。"""
+    """普通原子 Swap 不能把无关的 PM 与 LoadLock 合成跨站动作。"""
     moves = [
         _move(1, 6, 0, 1, ModuleName="PM1", RelatedRobotType=1),
         _move(2, 4, 1, 2, ModuleName="VACRobot",
@@ -651,7 +656,78 @@ def test_swap_move_rejects_distinct_stations() -> None:
               RecvSlotList=[1], SendSlotList=[2], RecvMatList=[101], SendMatList=[102]),
     ]
     issues = validate_move_list(None, moves, _dual_chamber_update())
-    assert issues == ["[MVL-SWAP-001] MoveID=2 MoveType=4：SwapMove 必须引用同一个站点"]
+    assert issues == [
+        "[MVL-SWAP-001] MoveID=2 MoveType=4："
+        "SwapMove 必须引用同一个站点或一组孪生 LoadLock（LA/LB、LC/LD）"
+    ]
+
+
+def test_twin_loadlock_swap_maps_each_station_and_same_layer() -> None:
+    """真空四槽手应能在 LA/LB 同层同步换出两片并换入两片。"""
+    state = MachineState(
+        stations={
+            "LA": LoadLockState(
+                "LA",
+                "LoadLock",
+                {1: SlotState(SlotPhase.COMPLETED, MaterialState(7, "P", 3))},
+                door=DoorState.OPEN,
+                environment=VACUUM,
+            ),
+            "LB": LoadLockState(
+                "LB",
+                "LoadLock",
+                {1: SlotState(SlotPhase.COMPLETED, MaterialState(8, "P", 3))},
+                door=DoorState.OPEN,
+                environment=VACUUM,
+            ),
+        },
+        robots={
+            "VACRobot": RobotState(
+                "VACRobot",
+                hands={
+                    1: None,
+                    2: None,
+                    3: MaterialState(5, "P", 5),
+                    4: MaterialState(6, "P", 5),
+                },
+                scope={"LA", "LB"},
+                can_swap=True,
+            ),
+        },
+        robot_aliases={"VACRobot": "VACRobot"},
+    )
+    move = _move(
+        201,
+        4,
+        402.29,
+        419.09,
+        ModuleName="VACRobot",
+        StationList=["LA", "LB"],
+        StnRecvSlotList=[1, 1],
+        StnSendSlotList=[1, 1],
+        RecvSlotList=[1, 2],
+        SendSlotList=[3, 4],
+        RecvMatList=[7, 8],
+        SendMatList=[5, 6],
+        RecvMatStepIDList=[3, 3],
+        SendMatStepIDList=[6, 6],
+    )
+
+    assert validate_move_list(None, [move], state) == []
+    replay = MoveStateReplay(None, [move], state)
+    replay.update_move_state({"MoveID": 201, "MoveState": MoveStateReplay.RUNNING}, snapshot=False)
+    replay.update_move_state({"MoveID": 201, "MoveState": MoveStateReplay.DONE}, snapshot=False)
+
+    assert replay.state.stations["LA"].slots[1].material.material_id == 5
+    assert replay.state.stations["LB"].slots[1].material.material_id == 6
+    assert replay.state.robots["VACRobot"].hands[1].material_id == 7
+    assert replay.state.robots["VACRobot"].hands[2].material_id == 8
+    assert replay.state.robots["VACRobot"].hands[3] is None
+    assert replay.state.robots["VACRobot"].hands[4] is None
+
+    invalid_layer = dict(move, StnRecvSlotList=[1, 2], StnSendSlotList=[1, 2])
+    issues = validate_move_list(None, [invalid_layer], state)
+    assert issues and "必须使用同一层槽位" in issues[0]
 
 
 def _three_slot_robot_update() -> dict:
