@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "maximumDeviceCount": 10,
+  "profiles": {
+    "small": {
+      "deviceCount": 3,
+      "testsPerDevice": 10,
+      "payloadBytesPerTest": 163840,
+      "roundCount": 1,
+      "suite": "pr"
+    },
+    "medium": {
+      "deviceCount": 1,
+      "testsPerDevice": 200,
+      "payloadBytesPerTest": 262144,
+      "roundCount": 2,
+      "suite": "pr"
+    },
+    "deep": {
+      "deviceCount": 1,
+      "testsPerDevice": 1000,
+      "payloadBytesPerTest": 4096,
+      "roundCount": 2,
+      "suite": "nightly"
+    },
+    "wide": {
+      "deviceCount": 10,
+      "testsPerDevice": 20,
+      "payloadBytesPerTest": 4096,
+      "roundCount": 1,
+      "suite": "nightly"
+    },
+    "large-test": {
+      "deviceCount": 1,
+      "testsPerDevice": 4,
+      "payloadBytesPerTest": 262144,
+      "roundCount": 20,
+      "suite": "nightly"
+    },
+    "migration": {
+      "deviceCount": 1,
+      "testsPerDevice": 200,
+      "payloadBytesPerTest": 262144,
+      "roundCount": 2,
+      "suite": "release",
+      "sourceSchemaVersion": 5
+    },
+    "moves": {
+      "deviceCount": 1,
+      "testsPerDevice": 4,
+      "payloadBytesPerTest": 4096,
+      "roundCount": 2,
+      "suite": "nightly",
+      "moveCounts": [10000, 50000, 100000]
+    },
+    "concurrent": {
+      "deviceCount": 4,
+      "testsPerDevice": 50,
+      "payloadBytesPerTest": 16384,
+      "roundCount": 2,
+      "suite": "nightly",
+      "workerCount": 4
+    }
+  }
+}

@@ -166,6 +166,7 @@ MAX_SAVED_RESULTS = 8
 MAX_SAVED_BATCH_RUNS = 8
 MAX_SAVED_SINGLE_RUNS = 8
 MAX_CJOB_CYCLE = 1000
+MAX_WORKSPACE_DEVICE_COUNT = 10
 CJOB_CYCLE_EVENT_EPSILON_MULTIPLIER = 2.0
 WORKSPACE_STORE_VERSION = 6
 WORKSPACE_STORE_VERSION_FILE = "manifest.json"
@@ -199,7 +200,9 @@ CJOB_TYPE_NAMES = {value: name for name, value in CJOB_TYPE_VALUES.items()}
 TASK_MODE_NAMES = {value: name for name, value in TASK_MODE_VALUES.items()}
 REALTIME_APP_DIR = ROOT / "realtime_scheduler"
 FRONTEND_DIR = REALTIME_APP_DIR / "frontend"
-DATA_DIR = REALTIME_APP_DIR / "data"
+DATA_DIR = Path(
+    os.environ.get("CT_DATA_DIR", str(REALTIME_APP_DIR / "data"))
+).expanduser().resolve()
 EXPORT_DIR = REALTIME_APP_DIR / "exports"
 EDITOR_PATH = FRONTEND_DIR / "config_editor.html"
 VIEWER_PATH = FRONTEND_DIR / "movelist_gantt_viewer.html"
@@ -3432,6 +3435,31 @@ def _read_workspace_store_version(store_dir: Path) -> int:
     return 0
 
 
+def _workspace_store_is_current(path: Path = WORKSPACE_STORE_PATH) -> bool:
+    """快速判断目录是否可走按需读取路径，不遍历业务数据文件。
+
+    该判断只验证持久化格式标记和旧库迁移状态，供正常运行期间的高频 API
+    使用。检测人工修改文件时间的完整扫描只保留在服务启动和显式迁移流程，
+    避免每次读取单个测试都对整个数据目录执行 O(N) 的 ``stat``。
+
+    Args:
+        path: 工作区目录或兼容的旧单文件路径。
+
+    Returns:
+        当前格式已经完整落盘且没有待迁移旧库时返回 ``True``。
+    """
+    if path.suffix:
+        return False
+    if not path.is_dir() or _read_workspace_store_version(path) != WORKSPACE_STORE_VERSION:
+        return False
+    if path == WORKSPACE_STORE_PATH and (
+        (DATA_DIR / "workspaces.json").is_file()
+        or _has_separate_legacy_workspace_directory(path)
+    ):
+        return False
+    return True
+
+
 def _write_workspace_store_version(store_dir: Path) -> None:
     """在数据文件全部落盘后刷新可读的格式清单。"""
     if not _uses_readable_dataset_layout(store_dir):
@@ -3488,15 +3516,11 @@ def _find_dataset_test_file(device_dir: Path, test_id: str) -> Optional[Path]:
     if not tests_dir.is_dir():
         return None
     # v6 目录名就是稳定测试 UUID。优先直接命中，避免大型设备每次读取一个测试时
-    # 都解析 tests/ 下的全部 test.json；保留后面的扫描以兼容人工移动过的旧数据。
+    # 都解析 tests/ 下的全部 test.json；调用方读取后仍会校验文件内 ID，保留后面的
+    # 扫描只用于目录名未直接命中的人工移动旧数据。
     direct_file = _dataset_test_directory(tests_dir, {"id": test_id}) / "test.json"
     if direct_file.is_file():
-        try:
-            direct_test = json.loads(direct_file.read_text(encoding="utf-8"))
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
-            direct_test = None
-        if isinstance(direct_test, Mapping) and str(direct_test.get("id") or "") == test_id:
-            return direct_file
+        return direct_file
     for test_dir in tests_dir.iterdir():
         test_file = test_dir / "test.json"
         if not test_file.is_file():
@@ -4587,6 +4611,9 @@ def _remove_directory_device_dir(store_dir: Path, device_id: str) -> None:
 def list_workspace_devices(path: Path = WORKSPACE_STORE_PATH) -> List[Dict[str, Any]]:
     """列出本地保存的设备摘要，不返回体积较大的 init 和测试集内容。"""
     with _workspace_catalog_guard(path):
+        fast_devices = _fast_list_workspace_devices_unlocked(path)
+        if fast_devices is not None:
+            return fast_devices
         catalog = _read_workspace_catalog_unlocked(path)
         return [{
             "id": str(device.get("id") or ""),
@@ -4594,6 +4621,46 @@ def list_workspace_devices(path: Path = WORKSPACE_STORE_PATH) -> List[Dict[str, 
             "testCount": len(device.get("tests") or []),
             "updatedAt": device.get("updatedAt"),
         } for device in catalog["devices"] if isinstance(device, Mapping)]
+
+
+def _fast_list_workspace_devices_unlocked(
+    path: Path,
+) -> Optional[List[Dict[str, Any]]]:
+    """只读取设备元数据与测试摘要索引，生成设备列表。
+
+    Args:
+        path: 已由调用方加锁的工作区目录。
+
+    Returns:
+        当前 v6 目录可按需读取时返回设备摘要；目录不完整时返回 ``None``，
+        由调用方进入兼容的完整读取与修复流程。
+    """
+    if not _workspace_store_is_current(path) or not _uses_readable_dataset_layout(path):
+        return None
+    devices: List[Dict[str, Any]] = []
+    try:
+        for device_dir in sorted(path.iterdir()):
+            if not device_dir.is_dir():
+                continue
+            metadata = json.loads(
+                (device_dir / "metadata.json").read_text(encoding="utf-8")
+            )
+            summaries = json.loads(
+                _workspace_test_index_path(device_dir / "tests").read_text(
+                    encoding="utf-8"
+                )
+            )
+            if not isinstance(metadata, Mapping) or not isinstance(summaries, list):
+                return None
+            devices.append({
+                "id": str(metadata.get("id") or ""),
+                "name": str(metadata.get("name") or "未命名设备"),
+                "testCount": len(summaries),
+                "updatedAt": metadata.get("updatedAt"),
+            })
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+    return devices
 
 
 def get_workspace_device(device_id: str, path: Path = WORKSPACE_STORE_PATH) -> Dict[str, Any]:
@@ -4677,7 +4744,7 @@ def _fast_workspace_device_overview_unlocked(
     if (
         path.suffix
         or not re.fullmatch(r"[A-Za-z0-9_-]+", device_id)
-        or _workspace_data_update_required(path)
+        or not _workspace_store_is_current(path)
     ):
         return None
     readable_layout = _uses_readable_dataset_layout(path)
@@ -4761,7 +4828,7 @@ def get_workspace_test(
         if (
             not path.suffix
             and re.fullmatch(r"[A-Za-z0-9_-]+", device_id)
-            and not _workspace_data_update_required(path)
+            and _workspace_store_is_current(path)
             and re.fullmatch(r"[A-Za-z0-9_-]+", test_id)
         ):
             readable_layout = _uses_readable_dataset_layout(path)
@@ -5099,6 +5166,10 @@ def import_workspace_device_archive(
         ), None)
         created_device = 0
         if device is None:
+            if len(catalog["devices"]) >= MAX_WORKSPACE_DEVICE_COUNT:
+                raise ValueError(
+                    f"设备数量不能超过 {MAX_WORKSPACE_DEVICE_COUNT} 台"
+                )
             device = deepcopy(dict(metadata))
             device.pop("schemaVersion", None)
             device.pop("initOptions", None)
@@ -5624,6 +5695,8 @@ def import_workspace_device(
             existing["updatedAt"] = _workspace_timestamp()
             _write_workspace_catalog_unlocked(path, catalog)
             return deepcopy(dict(existing)), False
+        if len(catalog["devices"]) >= MAX_WORKSPACE_DEVICE_COUNT:
+            raise ValueError(f"设备数量不能超过 {MAX_WORKSPACE_DEVICE_COUNT} 台")
         timestamp = _workspace_timestamp()
         device = {
             "id": uuid.uuid4().hex,
@@ -5864,22 +5937,45 @@ def _fast_update_directory_workspace_routes_unlocked(
     payload: Mapping[str, Any],
     path: Path,
 ) -> Optional[Dict[str, Any]]:
-    """快速保存未改名的模板编辑，只触碰设备库文件而不遍历全部测试。"""
+    """快速保存模板及延迟别名，只触碰设备库文件而不遍历全部测试。"""
     if (
         path.suffix
-        or _uses_readable_dataset_layout(path)
         or not re.fullmatch(r"[A-Za-z0-9_-]+", device_id)
-        or _workspace_data_update_required(path)
+        or not _workspace_store_is_current(path)
         or not isinstance(payload.get("routes"), list)
     ):
         return None
-    device_file = path / device_id / "device.json"
+    readable_layout = _uses_readable_dataset_layout(path)
+    device_dir = (
+        _find_dataset_device_directory(path, device_id)
+        if readable_layout else path / device_id
+    )
+    if device_dir is None:
+        return None
+    device_file = device_dir / ("routes.json" if readable_layout else "device.json")
     try:
         device = json.loads(device_file.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return None
     if not isinstance(device, dict):
         return None
+    metadata: Optional[Dict[str, Any]] = None
+    summaries: Any = None
+    if readable_layout:
+        try:
+            raw_metadata = json.loads(
+                (device_dir / "metadata.json").read_text(encoding="utf-8")
+            )
+            summaries = json.loads(
+                _workspace_test_index_path(device_dir / "tests").read_text(
+                    encoding="utf-8"
+                )
+            )
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return None
+        if not isinstance(raw_metadata, dict) or not isinstance(summaries, list):
+            return None
+        metadata = raw_metadata
     routes = _normalized_workspace_routes(payload["routes"])
     topology_keys = [
         _workspace_route_topology_key(route)
@@ -5900,17 +5996,24 @@ def _fast_update_directory_workspace_routes_unlocked(
                     route_aliases[origin] = new_name
             route_aliases[old_name] = new_name
         device["routeAliases"] = route_aliases
-    device["updatedAt"] = _workspace_timestamp()
+    if readable_layout:
+        device["schemaVersion"] = WORKSPACE_STORE_VERSION
+    else:
+        device["updatedAt"] = _workspace_timestamp()
     _write_json_atomic(device_file, device)
-    try:
-        summaries = json.loads(
-            _workspace_test_index_path(device_file.parent / "tests").read_text(
-                encoding="utf-8"
+    if readable_layout:
+        metadata["updatedAt"] = _workspace_timestamp()
+        _write_json_if_changed(device_dir / "metadata.json", metadata)
+    else:
+        try:
+            summaries = json.loads(
+                _workspace_test_index_path(device_dir / "tests").read_text(
+                    encoding="utf-8"
+                )
             )
-        )
-        test_count = len(summaries) if isinstance(summaries, list) else 0
-    except (OSError, ValueError, TypeError, json.JSONDecodeError):
-        test_count = 0
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            summaries = []
+    test_count = len(summaries) if isinstance(summaries, list) else 0
     _write_workspace_store_version(path)
     return {"routes": deepcopy(routes), "testCount": test_count}
 
@@ -6010,7 +6113,7 @@ def _fast_update_readable_workspace_test_unlocked(
         or not _uses_readable_dataset_layout(path)
         or not re.fullmatch(r"[A-Za-z0-9_-]+", device_id)
         or not re.fullmatch(r"[A-Za-z0-9_-]+", test_id)
-        or _workspace_data_update_required(path)
+        or not _workspace_store_is_current(path)
         # 共享 Route 变更必须继续走全量路径，以同步所有测试引用。
         or isinstance(raw_test.get("routes"), list)
         or bool(_normalized_route_aliases(raw_test.get("routeNameChanges")))
@@ -6464,6 +6567,11 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
     """暴露调度控制台、设备测试集、甘特图和运行 API 的本地 HTTP 处理器。"""
 
     server_version = "CTConfigEditor/1.0"
+
+    def handle_one_request(self) -> None:
+        """记录单次 HTTP 请求起点，供统一响应性能头计算端到端服务耗时。"""
+        self._request_started_performance = time.perf_counter()
+        super().handle_one_request()
 
     def do_GET(self) -> None:
         """处理页面、健康检查和内存结果读取。"""
@@ -7206,6 +7314,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(content)))
         self.send_header("Cache-Control", "no-store")
+        self._send_performance_headers(len(content))
         self.end_headers()
         self.wfile.write(content)
 
@@ -7216,6 +7325,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(content)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Disposition", f'attachment; filename="{download_name}"')
+        self._send_performance_headers(len(content))
         self.end_headers()
         self.wfile.write(content)
 
@@ -7253,6 +7363,13 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             raise ValueError("文件为空或超过大小限制")
         return self.rfile.read(length)
 
+    def _send_performance_headers(self, response_bytes: int) -> None:
+        """附加当前请求的服务耗时和响应体积，便于浏览器与基准工具采集。"""
+        started = getattr(self, "_request_started_performance", time.perf_counter())
+        elapsed_ms = max(0.0, (time.perf_counter() - started) * 1000.0)
+        self.send_header("Server-Timing", f"app;dur={elapsed_ms:.3f}")
+        self.send_header("X-Response-Bytes", str(max(0, int(response_bytes))))
+
     def _send_json(
         self,
         payload: Any,
@@ -7270,6 +7387,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(content)))
         self.send_header("Cache-Control", "no-store")
+        self._send_performance_headers(len(content))
         if download_name:
             self.send_header("Content-Disposition", f'attachment; filename="{download_name}"')
         self.end_headers()

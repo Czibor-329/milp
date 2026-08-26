@@ -37,6 +37,28 @@ python realtime_scheduler\server.py --open
 
 默认地址为 `http://127.0.0.1:8765/config_editor.html`
 
+## 性能回归
+
+平台使用确定性 v6 合成数据验证启动、设备列表、设备概览和单测试读写，正常业务
+规模最多包含 10 台设备。PR 可先执行结构性硬门禁和 `small` HTTP 预算：
+
+```powershell
+python -m pytest tests/performance/test_storage_performance_contracts.py -q
+python scripts/run_performance_suite.py --profile small --enforce
+```
+
+发布前在固定 Windows 机器运行 `medium` 场景，并用上一正式版本的 JSON 报告做
+相对比较；数据格式变化还必须增加 `--migration`：
+
+```powershell
+python scripts/run_performance_suite.py --profile medium --baseline previous.json --enforce
+python scripts/run_performance_suite.py --profile medium --migration --enforce
+```
+
+详细指标、夹具和分层门禁见 [`docs/performance-standards.md`](docs/performance-standards.md)
+与 [`docs/performance-testing.md`](docs/performance-testing.md)。基准脚本会通过
+`CT_DATA_DIR` 启动隔离服务，不会读取或改写生产 `data/datasets/`。
+
 ## 外部算法部署
 
 外部算法包统一放在 `<本仓库>/alg/other_alg/`，每个算法使用独立子目录。当前支持的两种默认登记格式为：
@@ -60,6 +82,9 @@ $env:CT_OTHER_ALGORITHM_ROOT = "D:\path\to\alg\other_alg"
 >
 
 `realtime_scheduler/data/` 由服务自动维护，整个目录不在 Git 版本控制中。简化结构：
+
+一个工作区最多保存 10 台设备；相同 init 指纹的重复导入会复用已有设备，不重复占用
+设备名额。
 
 ```text
 data/

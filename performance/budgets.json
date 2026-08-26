@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "status": "trial",
+  "sampleCount": 30,
+  "warmupCount": 3,
+  "nightlySampleCount": 5,
+  "absoluteMilliseconds": {
+    "startupWithoutMigrationP95": 3000,
+    "migrationV5MediumP95": 20000,
+    "healthWarmP95": 300,
+    "workspaceListP95": 200,
+    "deviceOverviewP95": 300,
+    "singleTestReadP95": 150,
+    "singleTestSaveP95": 300,
+    "routeSaveWithoutRenameP95": 300,
+    "concurrentReadP95": 1000,
+    "moveAnalysis10000P95": 1000,
+    "moveAnalysis50000P95": 5000,
+    "moveAnalysis100000P95": 10000,
+    "testSwitchInteractiveP95": 500,
+    "frontendInteractiveP95": 2000,
+    "frontendLongTaskMaximum": 50,
+    "playbackFrameIntervalP95": 25
+  },
+  "relativeRegression": {
+    "medianPercent": 15,
+    "medianMinimumMilliseconds": 30,
+    "p95Percent": 20,
+    "p95MinimumMilliseconds": 50,
+    "memoryPercent": 10,
+    "responseBytesPercent": 10
+  }
+}
