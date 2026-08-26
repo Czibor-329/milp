@@ -311,12 +311,12 @@ class RecomputeFailureOutputTests(unittest.TestCase):
         package = json.loads((frontend_root / "package.json").read_text(encoding="utf-8"))
         package_lock = json.loads((frontend_root / "package-lock.json").read_text(encoding="utf-8"))
 
-        self.assertEqual("1.5.0", package["version"])
-        self.assertEqual("1.5.0", package_lock["version"])
-        self.assertEqual("1.5.0", package_lock["packages"][""]["version"])
-        self.assertIn('class="frontend-version">前端 v1.5.0</span>', template)
-        self.assertIn('/assets/config_editor.css?v=1.5.0', template)
-        self.assertIn('/assets/config_editor.js?v=1.5.0', template)
+        self.assertEqual("1.5.1", package["version"])
+        self.assertEqual("1.5.1", package_lock["version"])
+        self.assertEqual("1.5.1", package_lock["packages"][""]["version"])
+        self.assertIn('class="frontend-version">前端 v1.5.1</span>', template)
+        self.assertIn('/assets/config_editor.css?v=1.5.1', template)
+        self.assertIn('/assets/config_editor.js?v=1.5.1', template)
 
     def test_recompute_preparation_error_keeps_last_successful_movelist(self) -> None:
         """算法调用前的旧计划回放异常也应返回上一代诊断甘特图。"""
@@ -1785,7 +1785,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertGreater(result["makespan"], 0)
 
     def test_dummy_clean_adds_fixed_material_template_and_per_pm_route_conditions(self) -> None:
-        """Dummy Clean 应固定准备五片库存，并按绑定腔室写入物料权限与 Route 条件。"""
+        """Dummy Clean 应固定准备十五片可复用库存，并写入绑定腔室与 Route 条件。"""
         route = _route("DummyRoute", "PM1,PM2", "Recipe1")
         route["prePJobCleanRefs"] = ["DummyClean"]
         plan = {
@@ -1815,7 +1815,7 @@ class ConfigEditorServerTests(unittest.TestCase):
             for material in update["Materials"]
             if material["CurrentModuleName"] == "DummyPort"
         ]
-        self.assertEqual(5, len(dummy_materials))
+        self.assertEqual(15, len(dummy_materials))
         self.assertTrue(all(
             material["AccessiblePM"] == ["PM1", "PM2"]
             for material in dummy_materials
@@ -1832,7 +1832,7 @@ class ConfigEditorServerTests(unittest.TestCase):
             self.assertEqual("", task["EmptyCleanRecipeAfterMaterial"])
 
     def test_dummy_clean_reuses_high_limit_inventory_between_chambers(self) -> None:
-        """库存 Dummy 晶圆应跨 PM 复用，不能因固定五片少于条件总数而失败。"""
+        """固定十五片库存的 Dummy 晶圆应可跨 PM 复用。"""
         route = _route("DummyReuseRoute", "PM1,PM2,PM3", "Recipe1")
         route["prePJobCleanRefs"] = ["DummyClean"]
         plan = {
@@ -1865,7 +1865,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("<span>结果分析</span>", html)
         self.assertIn("<span>路径配置</span>", html)
         self.assertNotIn('data-tab-view="clean"', html)
-        self.assertIn('class="frontend-version">前端 v1.5.0</span>', html)
+        self.assertIn('class="frontend-version">前端 v1.5.1</span>', html)
         self.assertIn('data-option="residencyGuardSeconds"', html)
         self.assertIn('data-option="maximumRobotHoldingSeconds"', html)
         self.assertIn('data-option="maximumSystemResidenceCv"', html)
@@ -2000,6 +2000,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("function routePickerCleanSummary", html)
         self.assertIn("function routeHasTimeConstraint", html)
         self.assertIn("Dummy 晶圆数（MaterialCount）", html)
+        self.assertIn("Dummy wafer 投入数量不可配置，系统固定投放 15 片。", html)
         self.assertIn("Buffer Option", html)
         self.assertIn('class="pjob-route-card-meta"', html)
         self.assertIn('class="route-summary-primary"', html)

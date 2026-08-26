@@ -16,7 +16,8 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 FIRST_SLOT_ID = 1
 MAX_WAFERS_PER_JOB = 25
 DEFAULT_TRIGGER_UPPER = 9999.0
-DUMMY_MATERIAL_MINIMUM_COUNT = 5
+# DummyPort 的固定库存数量。Dummy wafer 可复用，不根据清洁需求自动增减。
+DUMMY_MATERIAL_MINIMUM_COUNT = 15
 DUMMY_MATERIAL_ID_START = 100000
 DUMMY_MATERIAL_LIMIT_LEVEL = 10000
 DUMMY_MATERIAL_USAGE_MIX = 2
@@ -493,25 +494,6 @@ def _dummy_accessible_pms(route: Mapping[str, Any]) -> List[str]:
         if has_dummy_clean and module_name not in modules:
             modules.append(module_name)
     return modules
-
-
-def _dummy_material_requirement(route: Mapping[str, Any]) -> int:
-    """返回单个产品 Route 同时需要的 Dummy 晶圆数。
-
-    ``MaterialCount`` 是每个 PM 的带片清洁所需数量；同一产品各 PM 的 dummy
-    PJob 会一同建模，因此库存至少要覆盖所有 PM 的条件总和。固定五片只适用于
-    需求不超过五片的旧模板，不能作为上限。
-    """
-    requirement = 0
-    for conditions in (route.get("PrePJob") or {}).values():
-        for condition in conditions or []:
-            if not isinstance(condition, Mapping):
-                continue
-            for tasks in (condition.get("CheckConditions") or {}).values():
-                for task in tasks or []:
-                    if isinstance(task, Mapping):
-                        requirement += max(0, int(_finite_number(task.get("MaterialCount"), 0)))
-    return requirement
 
 
 def _dummy_material(
@@ -1087,10 +1069,8 @@ def build_round_update(
             "TaskMode": task_mode, "PJobNameList": runtime_pjob_names,
             "MaterialCount": cjob_material_count,
         })
-    dummy_material_count = max(
-        DUMMY_MATERIAL_MINIMUM_COUNT,
-        *(_dummy_material_requirement(route) for route in built_routes.values()),
-    )
+    # Dummy wafer 在不同 Clean 与腔室之间复用；库存固定为十五片，不按任务需求扩容。
+    dummy_material_count = DUMMY_MATERIAL_MINIMUM_COUNT
     if round_uses_dummy_material and build_state.dummy_material_count < dummy_material_count:
         dummy_port = next(
             (

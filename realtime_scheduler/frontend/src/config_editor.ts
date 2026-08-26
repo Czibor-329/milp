@@ -2371,6 +2371,9 @@ function updateCleanDialogFields() {
     ? "Dummy 晶圆数（MaterialCount）"
     : "触发次数";
   document.getElementById("cleanWacTimeField").hidden = typeSelect.value !== "dummywac";
+  document.getElementById("cleanPrePJobDummyHint").hidden = !(
+    context.scope === "route" && placement === "prePJobCleanRefs"
+  );
 }
 
 /** 打开 Route 或 RouteStep 的 Clean 参数弹窗。 */

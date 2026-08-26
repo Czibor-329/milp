@@ -20083,6 +20083,7 @@ function updateCleanDialogFields() {
   document.getElementById("cleanTriggerField").hidden = typeSelect.value !== "wacclean" && !usesMaterialCount;
   document.getElementById("cleanTriggerLabel").textContent = usesMaterialCount ? "Dummy \u6676\u5706\u6570\uFF08MaterialCount\uFF09" : "\u89E6\u53D1\u6B21\u6570";
   document.getElementById("cleanWacTimeField").hidden = typeSelect.value !== "dummywac";
+  document.getElementById("cleanPrePJobDummyHint").hidden = !(context.scope === "route" && placement === "prePJobCleanRefs");
 }
 function openCleanDialog(scope, routeIndex, stageIndex = -1, cleanName = "", placement = "") {
   const existing = state.cleans.find((clean) => clean.name === cleanName);

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>调度平台</title>
   <link rel="stylesheet" href="/assets/katex.min.css?v=1.4.4">
-  <link rel="stylesheet" href="/assets/config_editor.css?v=1.5.0">
+  <link rel="stylesheet" href="/assets/config_editor.css?v=1.5.1">
 </head>
 <body>
   <a class="skip-link" href="#mainContent">跳到主要内容</a>
@@ -40,7 +40,7 @@
       <div class="sidebar-footer">
         <span class="sidebar-footer-label">系统状态</span>
         <div class="service-pill" id="serviceState">本地服务</div>
-        <span class="frontend-version">前端 v1.5.0</span>
+        <span class="frontend-version">前端 v1.5.1</span>
       </div>
     </aside>
 
@@ -562,6 +562,7 @@
         <div class="field"><label for="cleanType">清洁类别</label><select id="cleanType"></select></div>
         <div class="field"><label for="cleanRecipeTime">清洁时间（秒）</label><input id="cleanRecipeTime" type="number" min="0" step="0.1" required></div>
         <div class="field" id="cleanTriggerField"><label id="cleanTriggerLabel" for="cleanTriggerCount">触发次数</label><input id="cleanTriggerCount" type="number" min="1" step="1" required></div>
+        <p class="clean-dummy-material-hint" id="cleanPrePJobDummyHint" hidden>Dummy wafer 投入数量不可配置，系统固定投放 15 片。</p>
         <div class="field" id="cleanWacTimeField"><label for="cleanWacRecipeTime">WAC 清洁长度（秒）</label><input id="cleanWacRecipeTime" type="number" min="0" step="0.1" required></div>
         <fieldset class="clean-module-field">
           <legend>适用腔室</legend>
@@ -698,6 +699,6 @@
     </aside>
   </dialog>
 
-  <script type="module" src="/assets/config_editor.js?v=1.5.0"></script>
+  <script type="module" src="/assets/config_editor.js?v=1.5.1"></script>
 </body>
 </html>
