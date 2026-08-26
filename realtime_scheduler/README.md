@@ -89,6 +89,9 @@ output_json = update(tool_json, algorithm="heuristic")
 
 路径配置只维护 Step 与候选腔室拓扑。加工时间、QTime、驻留、Buffer 和 Clean
 在“运行计划”中为当前测试选择路径模板后配置；这些参数随测试保存，不会回写共享模板。
+平台物理状态回放会把 Place 到 PM、Aligner 或 LoadLock 的物料保留为待服务状态；
+Place 回 LoadPort 或 DummyPort 的物料则直接进入可再次 Pick 的完成态，使同一片
+Dummy 能在复合清洁路径中安全返回库存并由后续 PJob 继续复用。
 旧工作区首次由新版服务读取时会先把原共享 Route 的参数复制到各测试，再将共享 Route
 收敛为模板，并安全合并拓扑相同的重复模板；同一测试存在冲突参数时会保留原模板，
 避免静默改变已有排程。拆分工作区会保存迁移版本标记；仅在版本变化、旧库待迁移或检测到

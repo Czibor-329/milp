@@ -159,6 +159,56 @@ def test_repeated_prepare_and_complete_are_idempotent() -> None:
     assert replay.state.stations["PM1"].door.value == "closed"
 
 
+def test_dummy_port_returned_material_can_be_picked_again() -> None:
+    """Dummy 放回库存槽后应直接完成，允许下一次清洁任务复用同一物理片。"""
+    update = {
+        "Stations": {
+            "DummyPort": {"Type": "DummyPort", "Capacity": 1, "Slots": [1]},
+        },
+        "Robots": {
+            "ATR": {
+                "Type": "ATMRobot",
+                "Capacity": 1,
+                "ArmInfo": {
+                    "ArmA": {
+                        "Name": "ArmA",
+                        "IsEnable": True,
+                        "SlotIDs": [1],
+                        "AccessibleStations": ["DummyPort"],
+                    },
+                },
+            },
+        },
+        "Materials": [{
+            "ID": 100002,
+            "CurrentModuleName": "DummyPort",
+            "SlotID": 1,
+            "StepID": 0,
+        }],
+    }
+    moves = [
+        _move(1, 6, 0, 1, ModuleName="DummyPort", MatIDList=[100002], StepIDList=[0], SlotList=[1]),
+        _move(
+            2, 0, 1, 2, ModuleName="ATR", MatIDList=[100002], StepIDList=[1],
+            SrcStationList=["DummyPort"], SrcSlotList=[1], RobotSlotList=[1],
+        ),
+        _move(3, 7, 2, 3, ModuleName="DummyPort", MatIDList=[100002], StepIDList=[1], SlotList=[1]),
+        _move(4, 6, 3, 4, ModuleName="DummyPort", MatIDList=[100002], StepIDList=[7], SlotList=[1]),
+        _move(
+            5, 1, 4, 5, ModuleName="ATR", MatIDList=[100002], StepIDList=[8],
+            DestStationList=["DummyPort"], DestSlotList=[1], RobotSlotList=[1],
+        ),
+        _move(6, 7, 5, 6, ModuleName="DummyPort", MatIDList=[100002], StepIDList=[8], SlotList=[1]),
+        _move(7, 6, 6, 7, ModuleName="DummyPort", MatIDList=[100002], StepIDList=[0], SlotList=[1]),
+        _move(
+            8, 0, 7, 8, ModuleName="ATR", MatIDList=[100002], StepIDList=[1],
+            SrcStationList=["DummyPort"], SrcSlotList=[1], RobotSlotList=[1],
+        ),
+    ]
+
+    assert validate_move_list(None, moves, update) == []
+
+
 def test_repeated_door_action_still_rejects_busy_overlap() -> None:
     """幂等开关门不能绕过门机构的时间互斥。"""
     update = {

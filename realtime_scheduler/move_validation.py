@@ -30,6 +30,11 @@ ATMOSPHERE = "ATM"
 VACUUM = "VAC"
 LOAD_LOCK_TYPE = "loadlock"
 LOAD_PORT_TYPE = "loadport"
+DUMMY_PORT_TYPE = "dummyport"
+COMPLETED_ON_PLACE_STATION_TYPES = frozenset({
+    LOAD_PORT_TYPE,
+    DUMMY_PORT_TYPE,
+})
 DOORLESS_STATION_NAMES = frozenset({"Cooler", "Cool"})
 TWIN_LOAD_LOCK_PAIRS = frozenset({
     frozenset({"LA", "LB"}),
@@ -138,6 +143,11 @@ class StationState:
     def is_load_lock(self) -> bool:
         """返回站点是否为 LoadLock。"""
         return self.station_type.lower() == LOAD_LOCK_TYPE
+
+    @property
+    def completes_material_on_place(self) -> bool:
+        """返回物料放入后无需额外服务即可再次取出的库存站点。"""
+        return self.station_type.lower() in COMPLETED_ON_PLACE_STATION_TYPES
 
 
 @dataclass
@@ -1139,7 +1149,12 @@ def _start_place(state: MachineState, move: Mapping[str, Any], end_time: float, 
     def complete() -> None:
         """在 Place 完成时一次性把全部晶圆放入目标槽位，并落地槽位级指向。"""
         for station, slot, station_slot_id, robot_slot_id, material in transfers:
-            _set_slot(slot, SlotPhase.UNPROCESSED, material)
+            phase = (
+                SlotPhase.COMPLETED
+                if station.completes_material_on_place
+                else SlotPhase.UNPROCESSED
+            )
+            _set_slot(slot, phase, material)
             robot.hands[robot_slot_id] = None
             robot.slot_targets[robot_slot_id] = (station.name, station_slot_id)
         robot.position = _robot_derived_position(robot)
