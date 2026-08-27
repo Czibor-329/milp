@@ -177,6 +177,7 @@ DATA_EXCHANGE_KIND_DEVICE = "ct-device"
 DATA_EXCHANGE_KIND_TEST = "ct-test"
 API_SCHEMA_VERSION = "cjob-pjob-v3"
 HEURISTIC_BASELINE_SCHEMA_VERSION = "petri-look-dynamic-v1"
+ALGORITHM_FAILURE_FEEDBACK_PREFIX = "调度失败:"
 FIRST_ROBOT_SLOT_ID = 1
 DUAL_ARM_SLOT_COUNT = 2
 STATION_TIME_MAPPING_FIELDS = frozenset({
@@ -1433,8 +1434,24 @@ def _alg_output_info(
 def _deadlock_feedback(
     output: Mapping[str, Any],
 ) -> Optional[Dict[str, Any]]:
-    """返回算法声明的结构化死锁 Feedback；普通通知返回 ``None``。"""
+    """把算法失败 Feedback 规范化为平台内部死锁记录。
+
+    内置算法和 MLP 都按公司接口返回 ``调度失败: <原因>`` 字符串。这里仍
+    兼容旧版结构化记录，避免历史结果和已部署外部算法无法回放。
+    """
     for raw_feedback in output.get("Feedback") or []:
+        if isinstance(raw_feedback, str):
+            message = raw_feedback.strip()
+            if not message.startswith(ALGORITHM_FAILURE_FEEDBACK_PREFIX):
+                continue
+            reason = message[len(ALGORITHM_FAILURE_FEEDBACK_PREFIX):].strip()
+            return {
+                "Level": "Error",
+                "Type": "MachineDeadlockError",
+                "Code": "DEADLOCK.NO_EXECUTABLE_ACTION",
+                "Category": "no-executable-action",
+                "Message": reason or "算法规划进入死锁",
+            }
         if not isinstance(raw_feedback, Mapping):
             continue
         code = str(raw_feedback.get("Code") or "").strip().upper()

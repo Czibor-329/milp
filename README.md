@@ -37,6 +37,19 @@ python realtime_scheduler\server.py --open
 
 默认地址为 `http://127.0.0.1:8765/config_editor.html`
 
+## 终端运行测试集
+
+调试算法时可以绕过浏览器，直接运行本地数据目录中的设备测试组。该入口默认使用
+平台内置 MoveList 校验器，不启动 HongYe，并跳过 Baseline：
+
+```powershell
+.\venv\Scripts\python.exe scripts\run_dataset_suite.py --device 12kChamber --group 公司示例集 --strategy heuristic --limit 3
+```
+
+使用 `--list` 逐级查看设备、测试组和测试 ID；使用重复的 `--test` 精确选择案例，
+或用 `--json-output output\dataset-run.json` 保存完整结果。完整参数运行
+`.\venv\Scripts\python.exe scripts\run_dataset_suite.py --help` 查看。
+
 ## 性能回归
 
 平台使用确定性 v7 合成数据验证启动、设备列表、设备概览和单测试读写，正常业务

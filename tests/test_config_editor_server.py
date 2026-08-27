@@ -115,7 +115,7 @@ class FrontendTemplateTests(unittest.TestCase):
         self.assertIn("visualizationWorkspace.getTerminalDeadlock()", script)
 
     def test_deadlock_feedback_keeps_partial_output(self) -> None:
-        """结构化死锁不得进入完整计划校验或退回上一代 MoveList。"""
+        """MLP 格式的失败 Feedback 不得进入完整计划校验或丢失部分计划。"""
         output = {
             "MoveList": [{
                 "MoveID": 7,
@@ -123,13 +123,7 @@ class FrontendTemplateTests(unittest.TestCase):
                 "StartTime": 1.0,
                 "EndTime": 2.0,
             }],
-            "Feedback": [{
-                "Level": "Error",
-                "Type": "MachineDeadlockError",
-                "Code": "DEADLOCK.NO_EXECUTABLE_ACTION",
-                "Category": "no-executable-action",
-                "Message": "Machine 无可执行搬运意图",
-            }],
+            "Feedback": ["调度失败: Machine 无可执行搬运意图"],
         }
         reproduction = config_server.ReproductionLog()
 
@@ -145,6 +139,10 @@ class FrontendTemplateTests(unittest.TestCase):
         self.assertEqual(
             "DEADLOCK.NO_EXECUTABLE_ACTION",
             failure["FailureContext"]["Code"],
+        )
+        self.assertEqual(
+            "Machine 无可执行搬运意图",
+            failure["FailureContext"]["Message"],
         )
         self.assertEqual("AlgOutput", reproduction.entries[-1]["Describe"])
 
@@ -3401,11 +3399,13 @@ class ConfigEditorServerTests(unittest.TestCase):
             }],
             failure_output={
                 "MoveList": [{"MoveID": 1, "StartTime": 0, "EndTime": 8}],
-                "Feedback": [{
-                    "Type": "MachineDeadlockError",
+                "Feedback": ["调度失败: Machine 无可执行搬运意图"],
+                "FailureContext": {
+                    "Stage": "algorithm-deadlock",
                     "Code": "DEADLOCK.NO_EXECUTABLE_ACTION",
+                    "Category": "no-executable-action",
                     "Message": "Machine 无可执行搬运意图",
-                }],
+                },
             },
         )
         replay_plan = {"strategy": "heuristic", "rounds": [{"currentTime": 0}]}

@@ -1,5 +1,21 @@
 # Repository agent instructions
 
+## Terminal dataset debugging
+
+- AI 或开发者需要复现前端测试集时，统一从仓库根目录运行
+  `.\venv\Scripts\python.exe scripts\run_dataset_suite.py`。该入口直接读取
+  `realtime_scheduler/data/datasets/`，默认使用平台内置 MoveList 校验器，
+  不启动 HongYe，并跳过 Baseline 以缩短调试时间。
+- 先用 `--list` 查询稳定入口：
+  `--list` 列设备，`--device 12kChamber --list` 列组，
+  `--device 12kChamber --group 公司示例集 --list` 列测试及 ID。
+- 运行整组：
+  `.\venv\Scripts\python.exe scripts\run_dataset_suite.py --device 12kChamber --group 公司示例集 --strategy heuristic`。
+  快速复现优先加 `--limit 3 --workers 1`；精确复现可重复传入
+  `--test <测试ID或完整名称>`；需要机器可读结果时加 `--json-output <路径>`。
+- 退出码 `0` 表示全部通过，`1` 表示至少一个测试失败，`2` 表示参数或运行环境错误。
+  只有明确需要性能对比时才加 `--with-baseline`。
+
 ## Read documentation before solving problems
 
 1. Before analyzing, troubleshooting, or modifying a problem, read the project documentation directly related to the task.

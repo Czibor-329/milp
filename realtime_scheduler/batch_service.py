@@ -42,6 +42,7 @@ PRE_TRANS_MOVE_TYPE = 5
 TIME_TOLERANCE_SECONDS = 1e-9
 MAXIMUM_BATCH_WORKERS = 4
 PROCESS_ISOLATION_MINIMUM_TESTS = 8
+ALGORITHM_FAILURE_FEEDBACK_PREFIX = "调度失败:"
 
 
 def configure_batch_service(services: ModuleType) -> None:
@@ -282,7 +283,20 @@ def _logged_failure_result_fields(
         "moveCount": len(moves),
         "makespan": _segment_end(moves),
     }
-    deadlock = next(
+    failure_context = artifact.get("FailureContext")
+    deadlock = (
+        {
+            "Level": "Error",
+            "Type": "MachineDeadlockError",
+            "Code": str(failure_context.get("Code") or "DEADLOCK.NO_EXECUTABLE_ACTION"),
+            "Category": str(failure_context.get("Category") or "no-executable-action"),
+            "Message": str(failure_context.get("Message") or "算法规划进入死锁"),
+        }
+        if isinstance(failure_context, Mapping)
+        and failure_context.get("Stage") == "algorithm-deadlock"
+        else None
+    )
+    legacy_deadlock = next(
         (
             deepcopy(dict(feedback))
             for feedback in (artifact.get("Feedback") or [])
@@ -294,6 +308,27 @@ def _logged_failure_result_fields(
         ),
         None,
     )
+    if deadlock is None:
+        deadlock = legacy_deadlock
+    if deadlock is None:
+        message = next(
+            (
+                str(feedback).strip()
+                for feedback in (artifact.get("Feedback") or [])
+                if isinstance(feedback, str)
+                and feedback.strip().startswith(ALGORITHM_FAILURE_FEEDBACK_PREFIX)
+            ),
+            "",
+        )
+        if message:
+            deadlock = {
+                "Level": "Error",
+                "Type": "MachineDeadlockError",
+                "Code": "DEADLOCK.NO_EXECUTABLE_ACTION",
+                "Category": "no-executable-action",
+                "Message": message[len(ALGORITHM_FAILURE_FEEDBACK_PREFIX):].strip()
+                or "算法规划进入死锁",
+            }
     if deadlock is not None:
         result["deadlock"] = deadlock
     return result
@@ -982,7 +1017,12 @@ def _execute_workspace_test_batch(
                 "error": "用户终止调度",
             }
         if progress_callback is not None:
-            progress_callback(index, {"status": "running", "startedAt": _workspace_timestamp()})
+            progress_callback(index, {
+                "status": "running",
+                "startedAt": _workspace_timestamp(),
+                "testId": str(test_case.get("id") or ""),
+                "testName": str(test_case.get("name") or f"测试 {index + 1}"),
+            })
         run_started = time.perf_counter()
         try:
             selected_plan = build_workspace_batch_plan(
@@ -1164,10 +1204,12 @@ def run_workspace_test_batch(
     hongye_check: bool = True,
     skip_baseline: bool = False,
     maximum_workers: int = 4,
+    test_ids: Optional[Sequence[str]] = None,
+    progress_callback: Optional[Any] = None,
 ) -> Dict[str, Any]:
-    """同步运行当前测试组；保留给测试和非 HTTP 调用方。"""
+    """同步运行测试组或其指定子集，供测试、终端脚本和非 HTTP 调用方使用。"""
     device = get_workspace_device(device_id)
-    normalized_group, tests = _workspace_group_tests(device, group)
+    normalized_group, tests = _workspace_group_tests(device, group, test_ids)
     result = _execute_workspace_test_batch(
         device,
         tests,
@@ -1178,6 +1220,7 @@ def run_workspace_test_batch(
         hongye_check=hongye_check,
         skip_baseline=skip_baseline,
         maximum_workers=maximum_workers,
+        progress_callback=progress_callback,
     )
     result.update({
         "deviceId": device_id,
