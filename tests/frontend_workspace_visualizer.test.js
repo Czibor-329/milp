@@ -137,8 +137,6 @@ function fakeWorkspaceDocument() {
     "visualDecisionLens",
     "visualRecommendationModel",
     "visualRecommendationModelHint",
-    "visualFilterAligner",
-    "visualFilterCooler",
     "visualPauseOnDecisionChangeButton",
     "visualActiveMoves",
     "visualSource",
@@ -729,11 +727,12 @@ function positionsFromTopology(topology) {
     const isLoadPort = /class="load-port-assembly\b/.test(match[4]);
     const isBuffer = /class="equipment-utility equipment-buffer\b/.test(match[4]);
     const isCooler = /class="equipment-utility equipment-cooler\b/.test(match[4]);
+    const isAligner = /class="equipment-utility equipment-aligner\b/.test(match[4]);
     positions.push({
       x: Number(match[2]) / 100 * 1000,
       y: Number(match[3]),
-      width: isRobot ? 132 : isLoadLock ? 120 : isLoadPort ? 144 : isBuffer ? 104 : isCooler ? 92 : isProcess ? 112 : 96,
-      height: isRobot ? 132 : isLoadLock ? 72 : isLoadPort ? 104 : isBuffer ? 56 : isCooler ? 54 : isProcess ? 122 : 96,
+      width: isRobot ? 132 : isLoadLock ? 120 : isLoadPort ? 112 : isBuffer ? 104 : isCooler || isAligner ? 76 : isProcess ? 112 : 96,
+      height: isRobot ? 132 : isLoadLock ? 72 : isLoadPort ? 104 : isBuffer || isCooler ? 56 : isAligner ? 54 : isProcess ? 122 : 96,
     });
   }
   return positions;
@@ -756,7 +755,7 @@ function assertTopologyComplete(topology, requiredNames) {
   }
 }
 
-test("单真空机械手拓扑显示使用中的 LP、Dummy Port 与大气侧辅助设备且不重叠", () => {
+test("单真空机械手拓扑固定显示全部 LP、Dummy Port 与大气侧辅助设备且不重叠", () => {
   const fullDevice = {
     Stations: {
       LP1: { Type: "LoadPort" }, LP2: { Type: "LoadPort" },
@@ -774,7 +773,7 @@ test("单真空机械手拓扑显示使用中的 LP、Dummy Port 与大气侧辅
     Robots: { ATR: { Type: "ATMRobot" }, VTR: { Type: "VTMRobot" } },
   };
   const required = [
-    "LP1", "DummyPort", "Buffer1", "Buffer2", "Buffer3", "Buffer4", "Cooler",
+    "LP1", "LP2", "LP3", "LP4", "DummyPort", "Aligner", "Buffer1", "Buffer2", "Buffer3", "Buffer4", "Cooler",
     "LA", "LB", "PM1", "PM2", "PM3", "PM4", "PM5", "PM6",
   ];
   const snapshot = logic.buildWorkspaceSnapshot(moves, fullDevice, 0);
@@ -783,9 +782,11 @@ test("单真空机械手拓扑显示使用中的 LP、Dummy Port 与大气侧辅
     null,
   );
   assertTopologyComplete(topology, required);
-  assert.doesNotMatch(topology, />LP[2-4]</);
+  assert.match(topology, />LP2</);
+  assert.match(topology, />LP3</);
+  assert.match(topology, />LP4</);
   assert.match(topology, /class="load-port-assembly is-dummy-port door-closed"/);
-  assert.match(topology, /class="load-port-kind">DUMMY</);
+  assert.doesNotMatch(topology, /class="load-port-kind"|>DUMMY</);
   assert.match(topology, /class="load-port-shared-base"/);
   assert.match(topology, /class="equipment-utility equipment-buffer/);
   assert.match(topology, /class="equipment-utility equipment-cooler/);
@@ -818,13 +819,21 @@ test("单真空机械手拓扑显示使用中的 LP、Dummy Port 与大气侧辅
   };
   const lp1 = modulePosition("LP1");
   const dummyPort = modulePosition("DummyPort");
+  assert.deepEqual(
+    ["LP1", "LP2", "LP3", "LP4", "DummyPort"].map(name => modulePosition(name).x),
+    [26, 38, 50, 62, 74],
+    "五个 LoadPort 应使用紧凑的居中列阵",
+  );
   assert.equal(dummyPort.y, lp1.y, "Dummy Port 应与普通 LoadPort 共用同一排底座");
-  assert.deepEqual([lp1.x, dummyPort.x], [26, 74], "Dummy Port 应固定在第四列");
+  assert.ok(lp1.x < dummyPort.x, "Dummy Port 应排在普通 LoadPort 之后");
   const atr = robotPosition("ATR");
   assert.equal(lp1.y - atr.y, 140, "LoadPort 整排应在 ATR 下方保留更大的垂直间距");
-  for (const name of ["Buffer1", "Buffer2", "Buffer3", "Buffer4", "Cooler"]) {
+  for (const name of ["Buffer1", "Buffer2", "Buffer3", "Buffer4"]) {
     assert.equal(modulePosition(name).x, 90, `${name} 应位于大气传输区右侧`);
   }
+  assert.equal(modulePosition("Aligner").x, 10, "Aligner 应位于大气传输区左侧");
+  assert.equal(modulePosition("Cooler").x, 10, "Cooler 应位于大气传输区左侧");
+  assert.equal(modulePosition("Cooler").y - modulePosition("Aligner").y, 80, "Cooler 应下移并避开 Aligner 名称");
   const atmosphereZone = /class="topology-zone topology-zone-atmosphere" style="--zone-top:([\d.]+)px;--zone-height:([\d.]+)px"/.exec(topology);
   assert.ok(atmosphereZone, "应找到大气传输区边界");
   const atmosphereTop = Number(atmosphereZone[1]);
@@ -941,38 +950,7 @@ test("画布模块筛选：AL/CL 别名同样被 Aligner/Cooler 筛选隐藏", (
   assert.doesNotMatch(filtered, />CL</, "勾选 Cooler 后隐藏 CL 别名");
 });
 
-test("模块筛选默认勾选 Aligner/Cooler，取消勾选后重新显示", async () => {
-  const root = fakeWorkspaceDocument();
-  root.elements.get("visualFilterAligner").checked = true;
-  root.elements.get("visualFilterCooler").checked = true;
-  const workspace = logic.createVisualizationWorkspace(root);
-  workspace.setDevice({
-    Stations: {
-      LP1: { Type: "LoadPort" },
-      LA: { Type: "LoadLock" },
-      PM1: { Type: "Process" },
-      Aligner: { Type: "Aligner" },
-      Cooler: { Type: "Cooler" },
-    },
-    Robots: { ATR: {} },
-  });
-  await workspace.loadFile({
-    name: "filter-default.json",
-    async text() {
-      return JSON.stringify({ MoveList: moves });
-    },
-  });
-  const stage = root.elements.get("visualDeviceStage");
-  assert.doesNotMatch(stage.innerHTML, />Aligner</, "默认勾选时 Aligner 不在画布显示");
-  assert.doesNotMatch(stage.innerHTML, />Cooler</, "默认勾选时 Cooler 不在画布显示");
-  const alignerCheckbox = root.elements.get("visualFilterAligner");
-  alignerCheckbox.checked = false;
-  alignerCheckbox.listeners.get("change")();
-  assert.match(stage.innerHTML, />Aligner</, "取消勾选 Aligner 后重新显示");
-  assert.doesNotMatch(stage.innerHTML, />Cooler</, "Cooler 仍保持默认隐藏");
-});
-
-test("双真空机械手级联拓扑隐藏未使用 LP，并完整显示腔室且不重叠", () => {
+test("双真空机械手级联拓扑固定显示全部 LP，并完整显示腔室且不重叠", () => {
   const fullDevice = {
     Stations: {
       LP1: { Type: "LoadPort" }, LP2: { Type: "LoadPort" },
@@ -988,14 +966,16 @@ test("双真空机械手级联拓扑隐藏未使用 LP，并完整显示腔室�
     },
     Robots: { ATR: { Type: "ATMRobot" }, VTR_1: { Type: "VTMRobot" }, VTR_2: { Type: "HighVTMRobot" } },
   };
-  const required = ["LP1", "LA", "LB", "UBR", "DBR", "PM1", "PM2", "PM3", "PM4", "PM5", "PM6"];
+  const required = ["LP1", "LP2", "LP3", "LP4", "LA", "LB", "UBR", "DBR", "PM1", "PM2", "PM3", "PM4", "PM5", "PM6"];
   const snapshot = logic.buildWorkspaceSnapshot(moves, fullDevice, 0);
   const topology = logic.renderEquipmentTopology(
     logic.snapshotWithFullDeviceModules(snapshot, fullDevice),
     null,
   );
   assertTopologyComplete(topology, required);
-  assert.doesNotMatch(topology, />LP[2-4]</);
+  assert.match(topology, />LP2</);
+  assert.match(topology, />LP3</);
+  assert.match(topology, />LP4</);
   const yOf = name => {
     const module = new RegExp(
       `class="reference-module-position" style="--module-left:[\\d.]+%;--module-top:(\\d+)px">\\s*<strong class="equipment-external-name[^"]*">${name}</strong>`
@@ -1231,8 +1211,8 @@ test("多个大气机械手在同一排横向分布且不重叠", () => {
     logic.snapshotWithFullDeviceModules(snapshot, multiAtrDevice),
     null,
   );
-  assertTopologyComplete(topology, ["LP1", "LA", "LB", "PM1", "PM2"]);
-  assert.doesNotMatch(topology, />LP2</);
+  assertTopologyComplete(topology, ["LP1", "LP2", "LA", "LB", "PM1", "PM2"]);
+  assert.match(topology, />LP2</);
   const reAtr = /class="reference-robot-position" style="--robot-left:([\d.]+)%;--robot-top:(\d+)px">\s*<article class="robot-hub[^"]*"[^>]*aria-label="(ATR_\d)[^"]*"/g;
   let match;
   const found = new Map();
@@ -1373,8 +1353,57 @@ test("LoadPort 按物理槽位显示未加工、空槽与回片后的已加工�
   );
   assert.match(returnedTopology, /槽位 1，晶圆 W1，已加工/);
   assert.match(returnedTopology, /load-port-slot is-processed/);
+  assert.match(returnedTopology, /--load-port-slot-count:3/);
   assert.match(returnedTopology, /equipment-external-name equipment-external-name-port">LP1</);
   assert.doesNotMatch(returnedTopology, /load-port-slot-summary|>RAW\s|>DONE\s/);
+});
+
+test("CJobCycle 补片开始时替换 LoadPort 旧成品盒", () => {
+  const cycleDevice = {
+    Stations: {
+      LP1: { Type: "LoadPort", Capacity: 10, Slots: Array.from({ length: 10 }, (_, index) => index + 1) },
+    },
+    Robots: { ATR: {} },
+  };
+  const cycleMoves = Array.from({ length: 10 }, (_, index) => {
+    const slot = index + 1;
+    return [
+      { MoveID: slot, MoveType: 0, ModuleName: "ATR", SrcStationList: ["LP1"], SrcSlotList: [slot], MatIDList: [`OLD${slot}`], StartTime: index * 2, EndTime: index * 2 + 1 },
+      { MoveID: 20 + slot, MoveType: 1, ModuleName: "ATR", DestStationList: ["LP1"], DestSlotList: [slot], MatIDList: [`OLD${slot}`], StartTime: 70 + index, EndTime: 71 + index },
+      { MoveID: 40 + slot, MoveType: 0, ModuleName: "ATR", SrcStationList: ["LP1"], SrcSlotList: [slot], MatIDList: [`NEW${slot}`], StartTime: 100 + index * 2, EndTime: 101 + index * 2 },
+    ];
+  }).flat();
+
+  const initial = moduleAt(logic.buildWorkspaceSnapshot(cycleMoves, cycleDevice, 0), "LP1");
+  assert.deepEqual(initial.loadPortSlots.map(slot => slot.wafer), Array.from({ length: 10 }, (_, index) => `OLD${index + 1}`));
+  const beforePatch = moduleAt(logic.buildWorkspaceSnapshot(cycleMoves, cycleDevice, 99.9), "LP1");
+  assert.equal(beforePatch.loadPortSlots.filter(slot => /^OLD/.test(slot.wafer)).length, 10);
+  assert.equal(beforePatch.loadPortSlots.some(slot => /^NEW/.test(slot.wafer)), false, "第二轮晶圆不能提前出现在初始盒中");
+  const atPatch = moduleAt(logic.buildWorkspaceSnapshot(cycleMoves, cycleDevice, 100), "LP1");
+  assert.equal(atPatch.loadPortSlots.some(slot => /^OLD/.test(slot.wafer)), false, "补片边界必须清掉上一盒成品");
+  assert.deepEqual(atPatch.loadPortSlots.map(slot => slot.wafer), Array.from({ length: 10 }, (_, index) => `NEW${index + 1}`));
+});
+
+test("Aligner 使用紧凑叉形，Cooler 使用多槽前视图", () => {
+  const auxiliaryDevice = {
+    Stations: {
+      LP1: { Type: "LoadPort" },
+      Aligner: { Type: "Aligner" },
+      Cooler: { Type: "Cooler", Capacity: 4, Slots: [1, 2, 3, 4] },
+    },
+    Robots: { ATR: {} },
+  };
+  const topology = logic.renderEquipmentTopology(
+    logic.snapshotWithFullDeviceModules(logic.buildWorkspaceSnapshot([], auxiliaryDevice, 0), auxiliaryDevice),
+    null,
+    undefined,
+    auxiliaryDevice,
+  );
+  assert.match(topology, /class="equipment-utility equipment-aligner/);
+  assert.match(topology, /class="aligner-cross is-empty"/);
+  assert.match(topology, /class="equipment-utility equipment-cooler/);
+  assert.equal((topology.match(/class="cooler-slot is-empty"/g) || []).length, 4);
+  assert.doesNotMatch(topology, /cooler-plate/);
 });
 
 test("E2E 决策在机器人尚未执行时驱动单槽机械臂朝向且不再绘制箭头", () => {
@@ -1437,10 +1466,13 @@ test("机械手清除旧坐标偏移，并按 PRE_TRANS 进度连续旋转", () 
   assert.match(css, /\.equipment-process \{[^}]*border-radius:\s*0;\s*clip-path:\s*polygon\(29\.29% 0, 70\.71% 0, 100% 29\.29%, 100% 70\.71%, 70\.71% 100%, 29\.29% 100%, 0 70\.71%, 0 29\.29%\)/);
   assert.match(css, /\.equipment-process \.equipment-process-shell \{[^}]*clip-path:\s*polygon\(29\.29% 0, 70\.71% 0, 100% 29\.29%, 100% 70\.71%, 70\.71% 100%, 29\.29% 100%, 0 70\.71%, 0 29\.29%\)/);
   assert.match(css, /\.load-port-shared-base[^}]*z-index:\s*4;[^}]*height:\s*22px;/);
-  assert.match(css, /\.reference-grid-canvas \.load-port-assembly \.chamber-door-top[^}]*top:\s*12px;/);
+  assert.match(css, /\.reference-grid-canvas \.load-port-assembly \.chamber-door-top[^}]*top:\s*0;/);
+  assert.match(css, /\.load-port-slot-bank[^}]*grid-template-rows:\s*repeat\(var\(--load-port-slot-count\), minmax\(0, 1fr\)\);[^}]*gap:\s*0;/);
+  assert.match(css, /\.load-port-slot\.is-unprocessed::after[^}]*width:\s*30px;[^}]*height:\s*3px;/);
+  assert.doesNotMatch(css, /\.load-port-kind|\.topology-module-filter/);
   assert.match(css, /\.load-port-cassette[^}]*align-self:\s*center;/);
   assert.match(css, /\.equipment-buffer[^}]*width:\s*104px;\s*height:\s*56px;/);
-  assert.match(css, /\.equipment-cooler[^}]*width:\s*92px;\s*height:\s*54px;/);
+  assert.match(css, /\.equipment-cooler[^}]*width:\s*76px;\s*height:\s*56px;/);
   assert.match(css, /\.robot-arm[^}]*width:\s*88px;/);
   assert.match(css, /\.robot-end-effector \{[^}]*width:\s*26px;[^}]*border-radius:\s*50%;/);
   assert.doesNotMatch(css, /\.robot-fork-tine/);

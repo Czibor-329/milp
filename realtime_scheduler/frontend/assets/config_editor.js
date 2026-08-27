@@ -544,6 +544,9 @@ function isBufferModule(name, type = "") {
 function isCoolerModule(name, type = "") {
   return type.trim().toLowerCase() === "cooler" || /^(CL|COOL(?:ER)?)$/i.test(name.trim());
 }
+function isAlignerModule(name, type = "") {
+  return type.trim().toLowerCase() === "aligner" || /^(AL|ALIGNER)$/i.test(name.trim());
+}
 function isTopologyHiddenModule(module) {
   const name = module.name.trim();
   const type = module.type.trim().toLowerCase();
@@ -676,6 +679,17 @@ function loadPortCapacity(device, name, observedMaximum) {
     observedMaximum
   );
 }
+function stationSlotCapacity(device, name, defaultCapacity = 1) {
+  const definition = device?.Stations?.[name] ?? {};
+  const declaredSlots = listValue(definition.Slots).map((value) => finiteNumber(value, 0));
+  return Math.max(
+    1,
+    defaultCapacity,
+    finiteNumber(definition.Capacity, 0),
+    declaredSlots.length,
+    ...declaredSlots
+  );
+}
 function buildLoadPortSlots(records, device, time, initialLocations, processedMaterials) {
   const names = /* @__PURE__ */ new Set();
   for (const [name, definition] of Object.entries(device?.Stations ?? {})) {
@@ -684,7 +698,6 @@ function buildLoadPortSlots(records, device, time, initialLocations, processedMa
   for (const location of initialLocations.values()) {
     if (isLoadPortName(location, String(device?.Stations?.[location]?.Type ?? ""))) names.add(location);
   }
-  const initialByPort = /* @__PURE__ */ new Map();
   const observedMaximum = /* @__PURE__ */ new Map();
   for (const move of records) {
     if (!PICK_MOVE_TYPES.has(move.MoveType)) continue;
@@ -695,30 +708,53 @@ function buildLoadPortSlots(records, device, time, initialLocations, processedMa
       names.add(source);
       const slot = indexedSlot(move, "SrcSlotList", index);
       if (!slot) return;
-      const occupancy = initialByPort.get(source) ?? /* @__PURE__ */ new Map();
-      if (!occupancy.has(slot)) occupancy.set(slot, material);
-      initialByPort.set(source, occupancy);
       observedMaximum.set(source, Math.max(observedMaximum.get(source) ?? 0, slot));
     });
   }
   const result = /* @__PURE__ */ new Map();
   for (const name of names) {
-    const occupancy = new Map(initialByPort.get(name) ?? []);
-    const initialMaterials = [...initialLocations.entries()].filter(([, location]) => location === name).map(([material]) => material).sort(naturalCompare);
-    const assigned = new Set(occupancy.values());
-    let fallbackSlot = 1;
-    for (const material of initialMaterials) {
-      if (assigned.has(material)) continue;
-      while (occupancy.has(fallbackSlot)) fallbackSlot += 1;
-      occupancy.set(fallbackSlot, material);
-      assigned.add(material);
+    const slotMaterialHistory = /* @__PURE__ */ new Map();
+    const generationSlots = /* @__PURE__ */ new Map();
+    const generationStartTimes = /* @__PURE__ */ new Map([[0, 0]]);
+    const materialGenerations = /* @__PURE__ */ new Map();
+    for (const move of records) {
+      if (!PICK_MOVE_TYPES.has(move.MoveType)) continue;
+      materialIds(move).forEach((material, index) => {
+        if (indexedStation(move, "SrcStationList", index) !== name) return;
+        const slot = indexedSlot(move, "SrcSlotList", index);
+        if (!slot) return;
+        const history2 = slotMaterialHistory.get(slot) ?? [];
+        let generation = history2.indexOf(material);
+        if (generation < 0) {
+          generation = history2.length;
+          history2.push(material);
+          slotMaterialHistory.set(slot, history2);
+        }
+        const slots = generationSlots.get(generation) ?? /* @__PURE__ */ new Map();
+        if (!slots.has(slot)) slots.set(slot, material);
+        generationSlots.set(generation, slots);
+        materialGenerations.set(material, generation);
+        if (generation > 0) {
+          generationStartTimes.set(
+            generation,
+            Math.min(generationStartTimes.get(generation) ?? Number.POSITIVE_INFINITY, move.StartTime)
+          );
+        }
+      });
+    }
+    const activeGeneration = [...generationSlots.keys()].filter((generation) => generation === 0 || (generationStartTimes.get(generation) ?? Number.POSITIVE_INFINITY) <= time).reduce((latest, generation) => Math.max(latest, generation), 0);
+    const occupancy = new Map(generationSlots.get(activeGeneration) ?? []);
+    if (!occupancy.size && !generationSlots.size) {
+      const legacyInitialMaterials = [...initialLocations.entries()].filter(([, location]) => location === name).map(([material]) => material).sort(naturalCompare);
+      legacyInitialMaterials.forEach((material, index) => occupancy.set(index + 1, material));
     }
     for (const move of records) {
-      if (move.EndTime > time) continue;
       const materials = materialIds(move);
       if (PICK_MOVE_TYPES.has(move.MoveType)) {
+        if (move.EndTime > time) continue;
         materials.forEach((material, index) => {
           if (indexedStation(move, "SrcStationList", index) !== name) return;
+          if ((materialGenerations.get(material) ?? 0) !== activeGeneration) return;
           const slot = indexedSlot(move, "SrcSlotList", index);
           if (slot) occupancy.delete(slot);
           else {
@@ -726,9 +762,10 @@ function buildLoadPortSlots(records, device, time, initialLocations, processedMa
             if (current) occupancy.delete(current[0]);
           }
         });
-      } else if (PLACE_MOVE_TYPES.has(move.MoveType)) {
+      } else if (PLACE_MOVE_TYPES.has(move.MoveType) && move.EndTime <= time) {
         materials.forEach((material, index) => {
           if (indexedStation(move, "DestStationList", index) !== name) return;
+          if ((materialGenerations.get(material) ?? 0) !== activeGeneration) return;
           let slot = indexedSlot(move, "DestSlotList", index);
           if (!slot) {
             slot = 1;
@@ -743,7 +780,7 @@ function buildLoadPortSlots(records, device, time, initialLocations, processedMa
     const capacity = loadPortCapacity(
       device,
       name,
-      Math.max(observedMaximum.get(name) ?? 0, occupiedMaximum, initialMaterials.length)
+      Math.max(observedMaximum.get(name) ?? 0, occupiedMaximum, occupancy.size)
     );
     result.set(name, Array.from({ length: capacity }, (_, index) => {
       const wafer = occupancy.get(index + 1) ?? "";
@@ -963,6 +1000,7 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
       processedWafers: (wafersByLocation.get(name) ?? []).filter((wafer) => processedMaterials.has(wafer)),
       loadPortSlots: loadPortSlots.get(name) ?? [],
       loadLockSlots: loadLockSlots.get(name) ?? [],
+      slotCapacity: stationSlotCapacity(device, name, isCoolerModule(name, definition.type) ? 3 : 1),
       activeMoveName: primaryMove ? isCleaningMove(primaryMove) ? "\u6E05\u6D01" : MOVE_NAMES[primaryMove.MoveType] ?? `\u52A8\u4F5C ${primaryMove.MoveType}` : "",
       progress: primaryMove ? moveProgress(primaryMove, time) : 0,
       environment: environments2.get(name) ?? "",
@@ -1017,8 +1055,6 @@ function collectElements(root) {
     decisionLens: required("visualDecisionLens"),
     recommendationModel: required("visualRecommendationModel"),
     recommendationModelHint: required("visualRecommendationModelHint"),
-    alignerFilter: required("visualFilterAligner"),
-    coolerFilter: required("visualFilterCooler"),
     pauseOnDecisionChangeButton: required("visualPauseOnDecisionChangeButton"),
     activeMoves: required("visualActiveMoves"),
     source: required("visualSource"),
@@ -1082,6 +1118,7 @@ function snapshotWithCandidateModules(snapshot, decision, device) {
       processedWafers: [],
       loadPortSlots: [],
       loadLockSlots: [],
+      slotCapacity: stationSlotCapacity(device, name, isCoolerModule(name, type) ? 3 : 1),
       activeMoveName: "",
       progress: 0,
       environment: isLoadLockName(name, type) ? initialLoadLockEnvironment(device, name) : "",
@@ -1102,7 +1139,7 @@ function snapshotWithFullDeviceModules(snapshot, device) {
   for (const [name, definition] of Object.entries(device?.Stations ?? {})) {
     if (knownNames.has(name) || isRobotName(name, configuredRobotNames)) continue;
     const type = String(definition?.Type ?? "");
-    if (isLoadPortName(name, type) && !isDummyPortName(name) && type.trim().toLowerCase() !== "dummyport") continue;
+    const slotCapacity = stationSlotCapacity(device, name, isCoolerModule(name, type) ? 3 : 1);
     modules.push({
       name,
       type,
@@ -1110,8 +1147,13 @@ function snapshotWithFullDeviceModules(snapshot, device) {
       door: isDoorlessModule(name, type) ? "doorless" : "closed",
       wafers: [],
       processedWafers: [],
-      loadPortSlots: [],
+      loadPortSlots: isLoadPortName(name, type) ? Array.from({ length: loadPortCapacity(device, name, 0) }, (_, index) => ({
+        slot: index + 1,
+        wafer: "",
+        processed: false
+      })) : [],
       loadLockSlots: [],
+      slotCapacity,
       activeMoveName: "",
       progress: 0,
       environment: isLoadLockName(name, type) ? initialLoadLockEnvironment(device, name) : "",
@@ -1189,7 +1231,7 @@ function renderLoadPortCassette(module) {
   }).join("");
   return `<div class="load-port-cassette" role="group" aria-label="${escapeHtml(`${module.name} \u6B63\u89C6\u6676\u5706\u76D2\uFF0C\u5171 ${slots.length} \u4E2A\u69FD\u4F4D\uFF0C\u672A\u52A0\u5DE5 ${unprocessed}\uFF0C\u5DF2\u52A0\u5DE5 ${processed}`)}">
     <span class="load-port-cassette-handle" aria-hidden="true"></span>
-    <div class="load-port-slot-bank">${slotMarkup}</div>
+    <div class="load-port-slot-bank" style="--load-port-slot-count:${slots.length}">${slotMarkup}</div>
   </div>`;
 }
 function renderModule(module, role, candidate, layout = "single", roleIndex = 0) {
@@ -1202,9 +1244,22 @@ function renderModule(module, role, candidate, layout = "single", roleIndex = 0)
   const doors = moduleDoorSides(module, role, layout, roleIndex).map((side) => `<i class="chamber-door chamber-door-${side}"></i>`).join("");
   const accessibleStatus = `${module.name}\uFF0C${STATUS_LABELS[module.status]}\uFF0C${DOOR_LABELS[module.door]}`;
   const candidateLabel = candidate ? `${candidate.count} \u4E2A\u53EF\u884C\u52A8\u4F5C\uFF0C\u6700\u9AD8\u6A21\u578B\u504F\u597D ${(candidate.preference * 100).toFixed(0)}%` : "";
+  if (role === "auxiliary" && isAlignerModule(module.name, module.type)) {
+    return `<strong class="equipment-external-name equipment-external-name-aligner">${escapeHtml(module.name)}</strong>
+      <article class="equipment-utility equipment-aligner status-${module.status} ${module.isRobotTarget ? "is-target" : ""} ${candidate ? "is-candidate-destination" : ""} ${candidate?.selected ? "is-model-selected" : ""}" aria-label="${escapeHtml(`${accessibleStatus}${candidateLabel ? `\uFF0C${candidateLabel}` : ""}`)}">
+        <div class="aligner-cross ${wafers ? "is-occupied" : "is-empty"}" aria-hidden="true"><i></i><i></i>${wafers}</div>
+      </article>`;
+  }
   if (role === "auxiliary" && (isBufferModule(module.name, module.type) || isCoolerModule(module.name, module.type))) {
     const utilityKind = isBufferModule(module.name, module.type) ? "buffer" : "cooler";
-    const utilityBody = utilityKind === "buffer" ? `<div class="buffer-tray ${wafers ? "is-occupied" : "is-empty"}" aria-hidden="true"><span></span><span></span><span></span>${wafers}</div>` : `<div class="cooler-plate ${wafers ? "is-occupied" : "is-empty"}" aria-hidden="true"><span></span><i></i>${wafers}</div>`;
+    const coolerSlotCount = Math.max(2, Math.min(8, module.slotCapacity || module.wafers.length || 3));
+    const coolerSlots = Array.from({ length: coolerSlotCount }, (_, index) => {
+      const wafer = module.wafers[index] ?? "";
+      const processed = wafer && processedWafers.has(wafer);
+      const label = wafer ? `\u69FD\u4F4D ${index + 1}\uFF0C\u6676\u5706 ${wafer}\uFF0C${processed ? "\u5DF2\u52A0\u5DE5" : "\u672A\u52A0\u5DE5"}` : `\u69FD\u4F4D ${index + 1}\uFF0C\u7A7A`;
+      return `<span class="cooler-slot ${wafer ? `is-occupied wafer-${processed ? "processed" : "unprocessed"}` : "is-empty"}" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}"></span>`;
+    }).join("");
+    const utilityBody = utilityKind === "buffer" ? `<div class="buffer-tray ${wafers ? "is-occupied" : "is-empty"}" aria-hidden="true"><span></span><span></span><span></span>${wafers}</div>` : `<div class="cooler-slot-bank ${wafers ? "is-occupied" : "is-empty"}" role="group" aria-label="${escapeHtml(`${module.name} \u6B63\u89C6\u51B7\u5374\u69FD\uFF0C\u5171 ${coolerSlotCount} \u4E2A\u69FD\u4F4D`)}">${coolerSlots}</div>`;
     return `<strong class="equipment-external-name equipment-external-name-${utilityKind}">${escapeHtml(module.name)}</strong>
       <article class="equipment-utility equipment-${utilityKind} status-${module.status} ${module.isRobotTarget ? "is-target" : ""} ${candidate ? "is-candidate-destination" : ""} ${candidate?.selected ? "is-model-selected" : ""}" aria-label="${escapeHtml(`${accessibleStatus}${candidateLabel ? `\uFF0C${candidateLabel}` : ""}`)}">
         ${utilityBody}
@@ -1231,7 +1286,6 @@ function renderModule(module, role, candidate, layout = "single", roleIndex = 0)
     const isDummy = isDummyPortName(module.name) || module.type.trim().toLowerCase() === "dummyport";
     const portDoors = moduleDoorSides(module, role, layout, roleIndex).map((side) => `<i class="chamber-door chamber-door-${side}"></i>`).join("");
     return `<strong class="equipment-external-name ${isDummy ? "equipment-external-name-dummy" : "equipment-external-name-port"}">${escapeHtml(module.name)}</strong><div class="load-port-assembly ${isDummy ? "is-dummy-port" : "is-load-port"} door-${module.door}" role="group" aria-label="${escapeHtml(`${accessibleStatus}${isDummy ? "\uFF0CDummy Port" : ""}${candidateLabel ? `\uFF0C${candidateLabel}` : ""}`)}">
-      ${isDummy ? '<span class="load-port-kind">DUMMY</span>' : ""}
       <div class="chamber-doors" aria-hidden="true">${portDoors}</div>
       ${renderLoadPortCassette(module)}
     </div>`;
@@ -1270,14 +1324,16 @@ var TOPOLOGY_PROCESS_HEIGHT = 104;
 var TOPOLOGY_ROBOT_SIZE = 132;
 var TOPOLOGY_LOADLOCK_WIDTH = 120;
 var TOPOLOGY_LOADLOCK_HEIGHT = 72;
-var TOPOLOGY_LOADPORT_WIDTH = 144;
+var TOPOLOGY_LOADPORT_WIDTH = 112;
 var TOPOLOGY_LOADPORT_HEIGHT = 104;
 var TOPOLOGY_LOADPORT_BASE_HEIGHT = 22;
 var TOPOLOGY_LOADPORT_BASE_OVERHANG = 16;
 var TOPOLOGY_BUFFER_WIDTH = 104;
 var TOPOLOGY_BUFFER_HEIGHT = 56;
-var TOPOLOGY_COOLER_WIDTH = 92;
-var TOPOLOGY_COOLER_HEIGHT = 54;
+var TOPOLOGY_COOLER_WIDTH = 76;
+var TOPOLOGY_COOLER_HEIGHT = 56;
+var TOPOLOGY_ALIGNER_WIDTH = 76;
+var TOPOLOGY_ALIGNER_HEIGHT = 54;
 var TOPOLOGY_LOADLOCK_ROW_TOP_PIXELS = [664, 740];
 var TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS = 866;
 var TOPOLOGY_LOADPORT_ROW_TOP_PIXELS = 1006;
@@ -1415,7 +1471,7 @@ function moduleTopologyPosition(module, role, index, roleModules, layout, bridge
     });
     const portIndex = Math.max(0, orderedPorts.findIndex((item) => item.name === module.name));
     const currentIsDummy = isDummyPortName(module.name) || module.type.trim().toLowerCase() === "dummyport";
-    const portColumns = roleCount <= column.length ? column : Array.from({ length: roleCount }, (_, current) => 16 + current * 58 / (roleCount - 1));
+    const portColumns = roleCount === 5 ? [26, 38, 50, 62, 74] : roleCount <= column.length ? column : Array.from({ length: roleCount }, (_, current) => 20 + current * 60 / (roleCount - 1));
     const loadPortTop = layout === "cascade" ? TOPOLOGY_CASCADE_LOADPORT_TOP : TOPOLOGY_LOADPORT_ROW_TOP_PIXELS;
     return {
       /* 四列语义固定为 LP1 / LP2 / LP3 / Dummy Port；缺少 LP3 时保留空位。 */
@@ -1425,24 +1481,36 @@ function moduleTopologyPosition(module, role, index, roleModules, layout, bridge
       heightPixels: TOPOLOGY_LOADPORT_HEIGHT
     };
   }
-  if (["AL", "ALIGNER"].includes(name)) {
-    return { leftPercent: column[0], topPixels: layout === "cascade" ? TOPOLOGY_CASCADE_ATM_TOP : TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS };
+  if (isAlignerModule(module.name, module.type)) {
+    return {
+      leftPercent: 10,
+      topPixels: layout === "cascade" ? TOPOLOGY_CASCADE_ATM_TOP : TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS,
+      widthPixels: TOPOLOGY_ALIGNER_WIDTH,
+      heightPixels: TOPOLOGY_ALIGNER_HEIGHT
+    };
   }
-  if (role === "auxiliary" && (isBufferModule(module.name, module.type) || isCoolerModule(module.name, module.type))) {
+  if (role === "auxiliary" && isCoolerModule(module.name, module.type)) {
     const atmosphereTop = layout === "cascade" ? TOPOLOGY_CASCADE_ATM_TOP : TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS;
-    const rightUtilities = roleModules.filter((item) => isBufferModule(item.name, item.type) || isCoolerModule(item.name, item.type)).sort((left, right) => {
-      const leftRank = isCoolerModule(left.name, left.type) ? 0 : 1;
-      const rightRank = isCoolerModule(right.name, right.type) ? 0 : 1;
-      return leftRank - rightRank || naturalCompare(left.name, right.name);
-    });
+    const leftUtilities = roleModules.filter((item) => isCoolerModule(item.name, item.type)).sort((left, right) => naturalCompare(left.name, right.name));
+    const coolerIndex = Math.max(0, leftUtilities.findIndex((item) => item.name === module.name));
+    const hasAligner = roleModules.some((item) => isAlignerModule(item.name, item.type));
+    return {
+      leftPercent: 10,
+      topPixels: atmosphereTop + (hasAligner ? 80 : 0) + coolerIndex * 80,
+      widthPixels: TOPOLOGY_COOLER_WIDTH,
+      heightPixels: TOPOLOGY_COOLER_HEIGHT
+    };
+  }
+  if (role === "auxiliary" && isBufferModule(module.name, module.type)) {
+    const atmosphereTop = layout === "cascade" ? TOPOLOGY_CASCADE_ATM_TOP : TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS;
+    const rightUtilities = roleModules.filter((item) => isBufferModule(item.name, item.type)).sort((left, right) => naturalCompare(left.name, right.name));
     const utilityIndex = Math.max(0, rightUtilities.findIndex((item) => item.name === module.name));
     const utilityTop = atmosphereTop + utilityIndex * 68;
-    const buffer = isBufferModule(module.name, module.type);
     return {
       leftPercent: 90,
       topPixels: utilityTop,
-      widthPixels: buffer ? TOPOLOGY_BUFFER_WIDTH : TOPOLOGY_COOLER_WIDTH,
-      heightPixels: buffer ? TOPOLOGY_BUFFER_HEIGHT : TOPOLOGY_COOLER_HEIGHT
+      widthPixels: TOPOLOGY_BUFFER_WIDTH,
+      heightPixels: TOPOLOGY_BUFFER_HEIGHT
     };
   }
   if (role === "auxiliary") {
@@ -2270,23 +2338,15 @@ var VisualizationWorkspace = class {
   animationFrame = 0;
   previousFrameTime = 0;
   previousRenderTime = 0;
-  /** 画布下方模块筛选：勾选的模块类别（aligner/cooler）不在拓扑中显示。 */
-  hiddenModuleFilters = /* @__PURE__ */ new Set();
   /** 绑定页面事件并初始化空状态。 */
   constructor(root) {
     this.root = root;
     this.elements = collectElements(root);
-    this.syncModuleFiltersFromUi();
     this.bindEvents();
     this.updatePlayButton();
     this.updatePauseOnDecisionChangeButton();
     this.updateRecommendationModelControl();
     this.setTopologyVisible(false);
-  }
-  /** 以画布下方筛选框的勾选状态初始化模块筛选集合。 */
-  syncModuleFiltersFromUi() {
-    if (this.elements.alignerFilter.checked) this.hiddenModuleFilters.add("aligner");
-    if (this.elements.coolerFilter.checked) this.hiddenModuleFilters.add("cooler");
   }
   /** 更新当前设备拓扑；已有 MoveList 会立即按新拓扑重绘。 */
   setDevice(device) {
@@ -2588,12 +2648,6 @@ var VisualizationWorkspace = class {
     this.elements.speed.addEventListener("change", () => {
       this.playbackSpeed = Math.max(0.25, finiteNumber(this.elements.speed.value, DEFAULT_PLAYBACK_SPEED));
     });
-    this.elements.alignerFilter.addEventListener("change", () => {
-      this.setModuleFilter("aligner", this.elements.alignerFilter.checked);
-    });
-    this.elements.coolerFilter.addEventListener("change", () => {
-      this.setModuleFilter("cooler", this.elements.coolerFilter.checked);
-    });
     this.elements.performanceWindow.addEventListener("change", () => {
       this.performanceWindowMode = this.elements.performanceWindow.value === "full" ? "full" : "steady";
       void this.renderPerformance();
@@ -2691,12 +2745,6 @@ var VisualizationWorkspace = class {
     this.elements.topologyPlayback.hidden = !visible;
     this.elements.playbackEmpty.hidden = visible;
   }
-  /** 切换画布模块筛选；有 MoveList 时立即按新筛选重绘拓扑。 */
-  setModuleFilter(key, hidden) {
-    if (hidden) this.hiddenModuleFilters.add(key);
-    else this.hiddenModuleFilters.delete(key);
-    if (this.moves.length) this.render();
-  }
   /** 绘制当前时间对应的设备快照。 */
   render(prebuiltSnapshot) {
     if (!this.moves.length && !this.liveSolving) return;
@@ -2731,7 +2779,7 @@ var VisualizationWorkspace = class {
     this.elements.stage.innerHTML = renderEquipmentTopology(
       topologySnapshot,
       currentDecision,
-      this.hiddenModuleFilters,
+      void 0,
       this.device
     );
     if (!this.externalDecisionLensOwner) {

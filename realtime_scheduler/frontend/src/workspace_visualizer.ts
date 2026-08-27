@@ -37,6 +37,8 @@ export interface ModuleSnapshot {
   processedWafers: string[];
   loadPortSlots: LoadPortSlotSnapshot[];
   loadLockSlots: LoadPortSlotSnapshot[];
+  /** 设备声明的物理槽位容量；辅助设备用它绘制固定前视槽位。 */
+  slotCapacity: number;
   activeMoveName: string;
   progress: number;
   environment: string;
@@ -156,8 +158,6 @@ interface WorkspaceElements {
   decisionLens: HTMLElement;
   recommendationModel: HTMLSelectElement;
   recommendationModelHint: HTMLElement;
-  alignerFilter: HTMLInputElement;
-  coolerFilter: HTMLInputElement;
   pauseOnDecisionChangeButton: HTMLButtonElement;
   activeMoves: HTMLElement;
   source: HTMLElement;
@@ -611,6 +611,11 @@ function isCoolerModule(name: string, type = ""): boolean {
   return type.trim().toLowerCase() === "cooler" || /^(CL|COOL(?:ER)?)$/i.test(name.trim());
 }
 
+/** 判断站点是否是标准晶圆对准器。 */
+function isAlignerModule(name: string, type = ""): boolean {
+  return type.trim().toLowerCase() === "aligner" || /^(AL|ALIGNER)$/i.test(name.trim());
+}
+
 /** 画布隐藏不参与搬运路径、也没有独立拓扑语义的站点。 */
 function isTopologyHiddenModule(module: ModuleSnapshot): boolean {
   const name = module.name.trim();
@@ -799,6 +804,23 @@ function loadPortCapacity(
   );
 }
 
+/** 从设备定义读取站点槽位容量，缺失时使用设备类型对应的可视化缺省值。 */
+function stationSlotCapacity(
+  device: DeviceDefinition | null,
+  name: string,
+  defaultCapacity = 1,
+): number {
+  const definition = device?.Stations?.[name] ?? {};
+  const declaredSlots = listValue(definition.Slots).map(value => finiteNumber(value, 0));
+  return Math.max(
+    1,
+    defaultCapacity,
+    finiteNumber(definition.Capacity, 0),
+    declaredSlots.length,
+    ...declaredSlots,
+  );
+}
+
 /**
  * 从完整 MoveList 重建 LoadPort 的正视槽位占用。
  * 初始晶圆由未来第一次从 LP 取片时的 SrcSlotList 定位，已完成取放动作再逐条更新，
@@ -819,7 +841,6 @@ function buildLoadPortSlots(
     if (isLoadPortName(location, String(device?.Stations?.[location]?.Type ?? ""))) names.add(location);
   }
 
-  const initialByPort = new Map<string, Map<number, string>>();
   const observedMaximum = new Map<string, number>();
   for (const move of records) {
     if (!PICK_MOVE_TYPES.has(move.MoveType)) continue;
@@ -830,35 +851,66 @@ function buildLoadPortSlots(
       names.add(source);
       const slot = indexedSlot(move, "SrcSlotList", index);
       if (!slot) return;
-      const occupancy = initialByPort.get(source) ?? new Map<number, string>();
-      if (!occupancy.has(slot)) occupancy.set(slot, material);
-      initialByPort.set(source, occupancy);
       observedMaximum.set(source, Math.max(observedMaximum.get(source) ?? 0, slot));
     });
   }
 
   const result = new Map<string, LoadPortSlotSnapshot[]>();
   for (const name of names) {
-    const occupancy = new Map(initialByPort.get(name) ?? []);
-    const initialMaterials = [...initialLocations.entries()]
-      .filter(([, location]) => location === name)
-      .map(([material]) => material)
-      .sort(naturalCompare);
-    const assigned = new Set(occupancy.values());
-    let fallbackSlot = 1;
-    for (const material of initialMaterials) {
-      if (assigned.has(material)) continue;
-      while (occupancy.has(fallbackSlot)) fallbackSlot += 1;
-      occupancy.set(fallbackSlot, material);
-      assigned.add(material);
+    /*
+     * 同一槽位依次出现的不同物料代表不同晶圆盒。按“槽位内第几个不同物料”建立
+     * 盒次，可以在时间零点只装入首盒，并在下一盒首个 Pick 开始时一次装入整盒。
+     * 同一片 Dummy 多次回库再取出仍属于同一盒次，不会被误判为补片。
+     */
+    const slotMaterialHistory = new Map<number, string[]>();
+    const generationSlots = new Map<number, Map<number, string>>();
+    const generationStartTimes = new Map<number, number>([[0, 0]]);
+    const materialGenerations = new Map<string, number>();
+    for (const move of records) {
+      if (!PICK_MOVE_TYPES.has(move.MoveType)) continue;
+      materialIds(move).forEach((material, index) => {
+        if (indexedStation(move, "SrcStationList", index) !== name) return;
+        const slot = indexedSlot(move, "SrcSlotList", index);
+        if (!slot) return;
+        const history = slotMaterialHistory.get(slot) ?? [];
+        let generation = history.indexOf(material);
+        if (generation < 0) {
+          generation = history.length;
+          history.push(material);
+          slotMaterialHistory.set(slot, history);
+        }
+        const slots = generationSlots.get(generation) ?? new Map<number, string>();
+        if (!slots.has(slot)) slots.set(slot, material);
+        generationSlots.set(generation, slots);
+        materialGenerations.set(material, generation);
+        if (generation > 0) {
+          generationStartTimes.set(
+            generation,
+            Math.min(generationStartTimes.get(generation) ?? Number.POSITIVE_INFINITY, move.StartTime),
+          );
+        }
+      });
+    }
+    const activeGeneration = [...generationSlots.keys()]
+      .filter(generation => generation === 0 || (generationStartTimes.get(generation) ?? Number.POSITIVE_INFINITY) <= time)
+      .reduce((latest, generation) => Math.max(latest, generation), 0);
+    const occupancy = new Map(generationSlots.get(activeGeneration) ?? []);
+    /* 没有槽位字段的旧 MoveList 仍按初始位置顺序回退，但不与盒次推断混用。 */
+    if (!occupancy.size && !generationSlots.size) {
+      const legacyInitialMaterials = [...initialLocations.entries()]
+        .filter(([, location]) => location === name)
+        .map(([material]) => material)
+        .sort(naturalCompare);
+      legacyInitialMaterials.forEach((material, index) => occupancy.set(index + 1, material));
     }
 
     for (const move of records) {
-      if (move.EndTime > time) continue;
       const materials = materialIds(move);
       if (PICK_MOVE_TYPES.has(move.MoveType)) {
+        if (move.EndTime > time) continue;
         materials.forEach((material, index) => {
           if (indexedStation(move, "SrcStationList", index) !== name) return;
+          if ((materialGenerations.get(material) ?? 0) !== activeGeneration) return;
           const slot = indexedSlot(move, "SrcSlotList", index);
           if (slot) occupancy.delete(slot);
           else {
@@ -866,9 +918,10 @@ function buildLoadPortSlots(
             if (current) occupancy.delete(current[0]);
           }
         });
-      } else if (PLACE_MOVE_TYPES.has(move.MoveType)) {
+      } else if (PLACE_MOVE_TYPES.has(move.MoveType) && move.EndTime <= time) {
         materials.forEach((material, index) => {
           if (indexedStation(move, "DestStationList", index) !== name) return;
+          if ((materialGenerations.get(material) ?? 0) !== activeGeneration) return;
           let slot = indexedSlot(move, "DestSlotList", index);
           if (!slot) {
             slot = 1;
@@ -884,7 +937,7 @@ function buildLoadPortSlots(
     const capacity = loadPortCapacity(
       device,
       name,
-      Math.max(observedMaximum.get(name) ?? 0, occupiedMaximum, initialMaterials.length),
+      Math.max(observedMaximum.get(name) ?? 0, occupiedMaximum, occupancy.size),
     );
     result.set(name, Array.from({ length: capacity }, (_, index) => {
       const wafer = occupancy.get(index + 1) ?? "";
@@ -1170,6 +1223,7 @@ export function buildWorkspaceSnapshot(
       processedWafers: (wafersByLocation.get(name) ?? []).filter(wafer => processedMaterials.has(wafer)),
       loadPortSlots: loadPortSlots.get(name) ?? [],
       loadLockSlots: loadLockSlots.get(name) ?? [],
+      slotCapacity: stationSlotCapacity(device, name, isCoolerModule(name, definition.type) ? 3 : 1),
       activeMoveName: primaryMove ? (isCleaningMove(primaryMove) ? "清洁" : MOVE_NAMES[primaryMove.MoveType] ?? `动作 ${primaryMove.MoveType}`) : "",
       progress: primaryMove ? moveProgress(primaryMove, time) : 0,
       environment: environments.get(name) ?? "",
@@ -1228,8 +1282,6 @@ function collectElements(root: Document): WorkspaceElements {
     decisionLens: required("visualDecisionLens"),
     recommendationModel: required<HTMLSelectElement>("visualRecommendationModel"),
     recommendationModelHint: required("visualRecommendationModelHint"),
-    alignerFilter: required<HTMLInputElement>("visualFilterAligner"),
-    coolerFilter: required<HTMLInputElement>("visualFilterCooler"),
     pauseOnDecisionChangeButton: required<HTMLButtonElement>("visualPauseOnDecisionChangeButton"),
     activeMoves: required("visualActiveMoves"),
     source: required("visualSource"),
@@ -1322,6 +1374,7 @@ function snapshotWithCandidateModules(
       processedWafers: [],
       loadPortSlots: [],
       loadLockSlots: [],
+      slotCapacity: stationSlotCapacity(device, name, isCoolerModule(name, type) ? 3 : 1),
       activeMoveName: "",
       progress: 0,
       environment: isLoadLockName(name, type) ? initialLoadLockEnvironment(device, name) : "",
@@ -1338,8 +1391,8 @@ function snapshotWithCandidateModules(
 
 /**
  * 把设备配置中尚未被 MoveList 引用的腔室并入拓扑快照。
- * 工艺模块、LoadLock 与辅助设备完整保留；未使用的普通 LoadPort 不占画布，
- * Dummy Port 作为设备级耗材端口始终保留。
+ * 工艺模块、LoadLock、所有 LoadPort 与辅助设备完整保留，使拓扑结构不随当前盒
+ * 是否有晶圆而跳动。
  * 已存在模块保留其回放状态；新增模块以空闲、门关闭的初始状态呈现。
  */
 export function snapshotWithFullDeviceModules(
@@ -1352,7 +1405,7 @@ export function snapshotWithFullDeviceModules(
   for (const [name, definition] of Object.entries(device?.Stations ?? {})) {
     if (knownNames.has(name) || isRobotName(name, configuredRobotNames)) continue;
     const type = String(definition?.Type ?? "");
-    if (isLoadPortName(name, type) && !isDummyPortName(name) && type.trim().toLowerCase() !== "dummyport") continue;
+    const slotCapacity = stationSlotCapacity(device, name, isCoolerModule(name, type) ? 3 : 1);
     modules.push({
       name,
       type,
@@ -1360,8 +1413,15 @@ export function snapshotWithFullDeviceModules(
       door: isDoorlessModule(name, type) ? "doorless" : "closed",
       wafers: [],
       processedWafers: [],
-      loadPortSlots: [],
+      loadPortSlots: isLoadPortName(name, type)
+        ? Array.from({ length: loadPortCapacity(device, name, 0) }, (_, index) => ({
+            slot: index + 1,
+            wafer: "",
+            processed: false,
+          }))
+        : [],
       loadLockSlots: [],
+      slotCapacity,
       activeMoveName: "",
       progress: 0,
       environment: isLoadLockName(name, type) ? initialLoadLockEnvironment(device, name) : "",
@@ -1445,7 +1505,7 @@ function renderLoadPortCassette(module: ModuleSnapshot): string {
   }).join("");
   return `<div class="load-port-cassette" role="group" aria-label="${escapeHtml(`${module.name} 正视晶圆盒，共 ${slots.length} 个槽位，未加工 ${unprocessed}，已加工 ${processed}`)}">
     <span class="load-port-cassette-handle" aria-hidden="true"></span>
-    <div class="load-port-slot-bank">${slotMarkup}</div>
+    <div class="load-port-slot-bank" style="--load-port-slot-count:${slots.length}">${slotMarkup}</div>
   </div>`;
 }
 
@@ -1476,11 +1536,26 @@ function renderModule(
   const candidateLabel = candidate
     ? `${candidate.count} 个可行动作，最高模型偏好 ${(candidate.preference * 100).toFixed(0)}%`
     : "";
+  if (role === "auxiliary" && isAlignerModule(module.name, module.type)) {
+    return `<strong class="equipment-external-name equipment-external-name-aligner">${escapeHtml(module.name)}</strong>
+      <article class="equipment-utility equipment-aligner status-${module.status} ${module.isRobotTarget ? "is-target" : ""} ${candidate ? "is-candidate-destination" : ""} ${candidate?.selected ? "is-model-selected" : ""}" aria-label="${escapeHtml(`${accessibleStatus}${candidateLabel ? `，${candidateLabel}` : ""}`)}">
+        <div class="aligner-cross ${wafers ? "is-occupied" : "is-empty"}" aria-hidden="true"><i></i><i></i>${wafers}</div>
+      </article>`;
+  }
   if (role === "auxiliary" && (isBufferModule(module.name, module.type) || isCoolerModule(module.name, module.type))) {
     const utilityKind = isBufferModule(module.name, module.type) ? "buffer" : "cooler";
+    const coolerSlotCount = Math.max(2, Math.min(8, module.slotCapacity || module.wafers.length || 3));
+    const coolerSlots = Array.from({ length: coolerSlotCount }, (_, index) => {
+      const wafer = module.wafers[index] ?? "";
+      const processed = wafer && processedWafers.has(wafer);
+      const label = wafer
+        ? `槽位 ${index + 1}，晶圆 ${wafer}，${processed ? "已加工" : "未加工"}`
+        : `槽位 ${index + 1}，空`;
+      return `<span class="cooler-slot ${wafer ? `is-occupied wafer-${processed ? "processed" : "unprocessed"}` : "is-empty"}" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}"></span>`;
+    }).join("");
     const utilityBody = utilityKind === "buffer"
       ? `<div class="buffer-tray ${wafers ? "is-occupied" : "is-empty"}" aria-hidden="true"><span></span><span></span><span></span>${wafers}</div>`
-      : `<div class="cooler-plate ${wafers ? "is-occupied" : "is-empty"}" aria-hidden="true"><span></span><i></i>${wafers}</div>`;
+      : `<div class="cooler-slot-bank ${wafers ? "is-occupied" : "is-empty"}" role="group" aria-label="${escapeHtml(`${module.name} 正视冷却槽，共 ${coolerSlotCount} 个槽位`)}">${coolerSlots}</div>`;
     return `<strong class="equipment-external-name equipment-external-name-${utilityKind}">${escapeHtml(module.name)}</strong>
       <article class="equipment-utility equipment-${utilityKind} status-${module.status} ${module.isRobotTarget ? "is-target" : ""} ${candidate ? "is-candidate-destination" : ""} ${candidate?.selected ? "is-model-selected" : ""}" aria-label="${escapeHtml(`${accessibleStatus}${candidateLabel ? `，${candidateLabel}` : ""}`)}">
         ${utilityBody}
@@ -1529,7 +1604,6 @@ function renderModule(
       .map(side => `<i class="chamber-door chamber-door-${side}"></i>`)
       .join("");
     return `<strong class="equipment-external-name ${isDummy ? "equipment-external-name-dummy" : "equipment-external-name-port"}">${escapeHtml(module.name)}</strong><div class="load-port-assembly ${isDummy ? "is-dummy-port" : "is-load-port"} door-${module.door}" role="group" aria-label="${escapeHtml(`${accessibleStatus}${isDummy ? "，Dummy Port" : ""}${candidateLabel ? `，${candidateLabel}` : ""}`)}">
-      ${isDummy ? '<span class="load-port-kind">DUMMY</span>' : ""}
       <div class="chamber-doors" aria-hidden="true">${portDoors}</div>
       ${renderLoadPortCassette(module)}
     </div>`;
@@ -1592,15 +1666,17 @@ const TOPOLOGY_PROCESS_HEIGHT = 104;
 const TOPOLOGY_ROBOT_SIZE = 132;
 const TOPOLOGY_LOADLOCK_WIDTH = 120;
 const TOPOLOGY_LOADLOCK_HEIGHT = 72;
-const TOPOLOGY_LOADPORT_WIDTH = 144;
+const TOPOLOGY_LOADPORT_WIDTH = 112;
 const TOPOLOGY_LOADPORT_HEIGHT = 104;
 const TOPOLOGY_LOADPORT_BASE_HEIGHT = 22;
 /* 底座顶沿仅压住晶圆盒底边 2px，使 LoadPort 明确站在下托之上。 */
 const TOPOLOGY_LOADPORT_BASE_OVERHANG = 16;
 const TOPOLOGY_BUFFER_WIDTH = 104;
 const TOPOLOGY_BUFFER_HEIGHT = 56;
-const TOPOLOGY_COOLER_WIDTH = 92;
-const TOPOLOGY_COOLER_HEIGHT = 54;
+const TOPOLOGY_COOLER_WIDTH = 76;
+const TOPOLOGY_COOLER_HEIGHT = 56;
+const TOPOLOGY_ALIGNER_WIDTH = 76;
+const TOPOLOGY_ALIGNER_HEIGHT = 54;
 const TOPOLOGY_LOADLOCK_ROW_TOP_PIXELS = [664, 740] as const;
 const TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS = 866;
 const TOPOLOGY_LOADPORT_ROW_TOP_PIXELS = 1006;
@@ -1785,9 +1861,11 @@ function moduleTopologyPosition(
     });
     const portIndex = Math.max(0, orderedPorts.findIndex(item => item.name === module.name));
     const currentIsDummy = isDummyPortName(module.name) || module.type.trim().toLowerCase() === "dummyport";
-    const portColumns = roleCount <= column.length
-      ? column
-      : Array.from({ length: roleCount }, (_, current) => 16 + current * 58 / (roleCount - 1));
+    const portColumns = roleCount === 5
+      ? [26, 38, 50, 62, 74]
+      : roleCount <= column.length
+        ? column
+        : Array.from({ length: roleCount }, (_, current) => 20 + current * 60 / (roleCount - 1));
     const loadPortTop = layout === "cascade" ? TOPOLOGY_CASCADE_LOADPORT_TOP : TOPOLOGY_LOADPORT_ROW_TOP_PIXELS;
     return {
       /* 四列语义固定为 LP1 / LP2 / LP3 / Dummy Port；缺少 LP3 时保留空位。 */
@@ -1799,27 +1877,41 @@ function moduleTopologyPosition(
       heightPixels: TOPOLOGY_LOADPORT_HEIGHT,
     };
   }
-  if (["AL", "ALIGNER"].includes(name)) {
-    return { leftPercent: column[0], topPixels: layout === "cascade" ? TOPOLOGY_CASCADE_ATM_TOP : TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS };
+  if (isAlignerModule(module.name, module.type)) {
+    return {
+      leftPercent: 10,
+      topPixels: layout === "cascade" ? TOPOLOGY_CASCADE_ATM_TOP : TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS,
+      widthPixels: TOPOLOGY_ALIGNER_WIDTH,
+      heightPixels: TOPOLOGY_ALIGNER_HEIGHT,
+    };
   }
-  if (role === "auxiliary" && (isBufferModule(module.name, module.type) || isCoolerModule(module.name, module.type))) {
+  if (role === "auxiliary" && isCoolerModule(module.name, module.type)) {
+    const atmosphereTop = layout === "cascade" ? TOPOLOGY_CASCADE_ATM_TOP : TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS;
+    const leftUtilities = roleModules
+      .filter(item => isCoolerModule(item.name, item.type))
+      .sort((left, right) => naturalCompare(left.name, right.name));
+    const coolerIndex = Math.max(0, leftUtilities.findIndex(item => item.name === module.name));
+    const hasAligner = roleModules.some(item => isAlignerModule(item.name, item.type));
+    return {
+      leftPercent: 10,
+      topPixels: atmosphereTop + (hasAligner ? 80 : 0) + coolerIndex * 80,
+      widthPixels: TOPOLOGY_COOLER_WIDTH,
+      heightPixels: TOPOLOGY_COOLER_HEIGHT,
+    };
+  }
+  if (role === "auxiliary" && isBufferModule(module.name, module.type)) {
     const atmosphereTop = layout === "cascade" ? TOPOLOGY_CASCADE_ATM_TOP : TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS;
     const rightUtilities = roleModules
-      .filter(item => isBufferModule(item.name, item.type) || isCoolerModule(item.name, item.type))
-      .sort((left, right) => {
-        const leftRank = isCoolerModule(left.name, left.type) ? 0 : 1;
-        const rightRank = isCoolerModule(right.name, right.type) ? 0 : 1;
-        return leftRank - rightRank || naturalCompare(left.name, right.name);
-      });
+      .filter(item => isBufferModule(item.name, item.type))
+      .sort((left, right) => naturalCompare(left.name, right.name));
     const utilityIndex = Math.max(0, rightUtilities.findIndex(item => item.name === module.name));
     /* 从 ATR 所在行开始向下排，避免首个 Buffer/Cooler 越过大气区上边界。 */
     const utilityTop = atmosphereTop + utilityIndex * 68;
-    const buffer = isBufferModule(module.name, module.type);
     return {
       leftPercent: 90,
       topPixels: utilityTop,
-      widthPixels: buffer ? TOPOLOGY_BUFFER_WIDTH : TOPOLOGY_COOLER_WIDTH,
-      heightPixels: buffer ? TOPOLOGY_BUFFER_HEIGHT : TOPOLOGY_COOLER_HEIGHT,
+      widthPixels: TOPOLOGY_BUFFER_WIDTH,
+      heightPixels: TOPOLOGY_BUFFER_HEIGHT,
     };
   }
   if (role === "auxiliary") {
@@ -2985,25 +3077,15 @@ export class VisualizationWorkspace {
   private animationFrame = 0;
   private previousFrameTime = 0;
   private previousRenderTime = 0;
-  /** 画布下方模块筛选：勾选的模块类别（aligner/cooler）不在拓扑中显示。 */
-  private readonly hiddenModuleFilters = new Set<string>();
-
   /** 绑定页面事件并初始化空状态。 */
   constructor(root: Document) {
     this.root = root;
     this.elements = collectElements(root);
-    this.syncModuleFiltersFromUi();
     this.bindEvents();
     this.updatePlayButton();
     this.updatePauseOnDecisionChangeButton();
     this.updateRecommendationModelControl();
     this.setTopologyVisible(false);
-  }
-
-  /** 以画布下方筛选框的勾选状态初始化模块筛选集合。 */
-  private syncModuleFiltersFromUi(): void {
-    if (this.elements.alignerFilter.checked) this.hiddenModuleFilters.add("aligner");
-    if (this.elements.coolerFilter.checked) this.hiddenModuleFilters.add("cooler");
   }
 
   /** 更新当前设备拓扑；已有 MoveList 会立即按新拓扑重绘。 */
@@ -3366,12 +3448,6 @@ export class VisualizationWorkspace {
     this.elements.speed.addEventListener("change", () => {
       this.playbackSpeed = Math.max(0.25, finiteNumber(this.elements.speed.value, DEFAULT_PLAYBACK_SPEED));
     });
-    this.elements.alignerFilter.addEventListener("change", () => {
-      this.setModuleFilter("aligner", this.elements.alignerFilter.checked);
-    });
-    this.elements.coolerFilter.addEventListener("change", () => {
-      this.setModuleFilter("cooler", this.elements.coolerFilter.checked);
-    });
     this.elements.performanceWindow.addEventListener("change", () => {
       this.performanceWindowMode = this.elements.performanceWindow.value === "full" ? "full" : "steady";
       void this.renderPerformance();
@@ -3490,13 +3566,6 @@ export class VisualizationWorkspace {
     this.elements.playbackEmpty.hidden = visible;
   }
 
-  /** 切换画布模块筛选；有 MoveList 时立即按新筛选重绘拓扑。 */
-  private setModuleFilter(key: string, hidden: boolean): void {
-    if (hidden) this.hiddenModuleFilters.add(key);
-    else this.hiddenModuleFilters.delete(key);
-    if (this.moves.length) this.render();
-  }
-
   /** 绘制当前时间对应的设备快照。 */
   private render(prebuiltSnapshot?: WorkspaceSnapshot): void {
     if (!this.moves.length && !this.liveSolving) return;
@@ -3548,7 +3617,7 @@ export class VisualizationWorkspace {
     this.elements.stage.innerHTML = renderEquipmentTopology(
       topologySnapshot,
       currentDecision,
-      this.hiddenModuleFilters,
+      undefined,
       this.device,
     );
     if (!this.externalDecisionLensOwner) {
