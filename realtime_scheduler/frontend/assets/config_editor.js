@@ -22332,7 +22332,7 @@ function renderBatchItems(items) {
           <div class="batch-result-meta">
             <span class="batch-status">${statusLabels[item.status] || "\u7B49\u5F85\u4E2D"}</span>
             ${item.logUrl ? `<a class="btn" href="${escapeHtml4(item.logUrl)}" download>\u65E5\u5FD7</a>` : `<span class="btn" aria-disabled="true">\u65E5\u5FD7</span>`}
-            ${item.resultUrl ? `<button class="btn primary" type="button" data-workspace-result="${escapeHtml4(item.resultUrl)}" data-workspace-name="${escapeHtml4(item.testName || `\u6D4B\u8BD5 ${index + 1}`)}">\u5DE5\u4F5C\u53F0</button>` : `<span class="btn" aria-disabled="true">\u5DE5\u4F5C\u53F0</span>`}
+            ${item.resultUrl ? `<button class="btn primary" type="button" data-playback-result="${escapeHtml4(item.resultUrl)}" data-playback-name="${escapeHtml4(item.testName || `\u6D4B\u8BD5 ${index + 1}`)}">\u56DE\u653E</button>` : `<span class="btn" aria-disabled="true">\u56DE\u653E</span>`}
             ${item.ganttUrl ? `<a class="btn" href="${escapeHtml4(item.ganttUrl)}" target="_blank">\u7518\u7279\u56FE</a>` : `<span class="btn" aria-disabled="true">\u7518\u7279\u56FE</span>`}
             ${failed ? `<button class="btn danger" type="button" data-batch-error="${index}" aria-label="\u67E5\u770B ${escapeHtml4(displayId)} \u7684\u62A5\u9519\u4FE1\u606F">\u62A5\u9519</button>` : ""}
           </div>
@@ -23112,6 +23112,12 @@ document.addEventListener("click", (event) => {
   }
   const batchResultCard = event.target.closest("[data-batch-item-index]");
   if (batchResultCard && !event.target.closest(".batch-result-meta")) selectBatchItem(Number(batchResultCard.dataset.batchItemIndex));
+  const playbackResult = event.target.closest("[data-playback-result]");
+  if (playbackResult) {
+    visualizationWorkspace.loadResult(playbackResult.dataset.playbackResult, playbackResult.dataset.playbackName).then(() => visualizationWorkspace.showPlayback()).catch((error) => writeTerminal(`$ \u62D3\u6251\u56DE\u653E\u52A0\u8F7D\u5931\u8D25
+  ${error.message || "\u672A\u77E5\u9519\u8BEF"}`, true));
+    return;
+  }
   const workspaceResult = event.target.closest("[data-workspace-result]");
   if (workspaceResult) {
     visualizationWorkspace.loadResult(workspaceResult.dataset.workspaceResult, workspaceResult.dataset.workspaceName).then(() => visualizationWorkspace.show()).catch((error) => writeTerminal(`$ \u5DE5\u4F5C\u53F0\u52A0\u8F7D\u5931\u8D25

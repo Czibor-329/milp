@@ -4576,7 +4576,7 @@ function renderBatchItems(items) {
           <div class="batch-result-meta">
             <span class="batch-status">${statusLabels[item.status] || "等待中"}</span>
             ${item.logUrl ? `<a class="btn" href="${escapeHtml(item.logUrl)}" download>日志</a>` : `<span class="btn" aria-disabled="true">日志</span>`}
-            ${item.resultUrl ? `<button class="btn primary" type="button" data-workspace-result="${escapeHtml(item.resultUrl)}" data-workspace-name="${escapeHtml(item.testName || `测试 ${index + 1}`)}">工作台</button>` : `<span class="btn" aria-disabled="true">工作台</span>`}
+            ${item.resultUrl ? `<button class="btn primary" type="button" data-playback-result="${escapeHtml(item.resultUrl)}" data-playback-name="${escapeHtml(item.testName || `测试 ${index + 1}`)}">回放</button>` : `<span class="btn" aria-disabled="true">回放</span>`}
             ${item.ganttUrl ? `<a class="btn" href="${escapeHtml(item.ganttUrl)}" target="_blank">甘特图</a>` : `<span class="btn" aria-disabled="true">甘特图</span>`}
             ${failed ? `<button class="btn danger" type="button" data-batch-error="${index}" aria-label="查看 ${escapeHtml(displayId)} 的报错信息">报错</button>` : ""}
           </div>
@@ -5341,6 +5341,13 @@ document.addEventListener("click", event => {
   }
   const batchResultCard = event.target.closest("[data-batch-item-index]");
   if (batchResultCard && !event.target.closest(".batch-result-meta")) selectBatchItem(Number(batchResultCard.dataset.batchItemIndex));
+  const playbackResult = event.target.closest("[data-playback-result]");
+  if (playbackResult) {
+    visualizationWorkspace.loadResult(playbackResult.dataset.playbackResult, playbackResult.dataset.playbackName)
+      .then(() => visualizationWorkspace.showPlayback())
+      .catch(error => writeTerminal(`$ 拓扑回放加载失败\n  ${error.message || "未知错误"}`, true));
+    return;
+  }
   const workspaceResult = event.target.closest("[data-workspace-result]");
   if (workspaceResult) {
     visualizationWorkspace.loadResult(workspaceResult.dataset.workspaceResult, workspaceResult.dataset.workspaceName)

@@ -352,19 +352,19 @@ class RecomputeFailureOutputTests(unittest.TestCase):
         self.assertIn("!rec.removedByRecompute", viewer)
         self.assertIn('fillOpacity = bar.rec.removedByRecompute ? "0.24" : "1"', viewer)
 
-    def test_frontend_version_and_cache_keys_are_1_5_9(self) -> None:
+    def test_frontend_version_and_cache_keys_are_1_5_10(self) -> None:
         """前端显示版本、包版本和主资源缓存键必须同步。"""
         frontend_root = ROOT / "realtime_scheduler" / "frontend"
         template = (frontend_root / "config_editor.html").read_text(encoding="utf-8")
         package = json.loads((frontend_root / "package.json").read_text(encoding="utf-8"))
         package_lock = json.loads((frontend_root / "package-lock.json").read_text(encoding="utf-8"))
 
-        self.assertEqual("1.5.9", package["version"])
-        self.assertEqual("1.5.9", package_lock["version"])
-        self.assertEqual("1.5.9", package_lock["packages"][""]["version"])
-        self.assertIn('class="frontend-version">前端 v1.5.9</span>', template)
-        self.assertIn('/assets/config_editor.css?v=1.5.9', template)
-        self.assertIn('/assets/config_editor.js?v=1.5.9', template)
+        self.assertEqual("1.5.10", package["version"])
+        self.assertEqual("1.5.10", package_lock["version"])
+        self.assertEqual("1.5.10", package_lock["packages"][""]["version"])
+        self.assertIn('class="frontend-version">前端 v1.5.10</span>', template)
+        self.assertIn('/assets/config_editor.css?v=1.5.10', template)
+        self.assertIn('/assets/config_editor.js?v=1.5.10', template)
 
     def test_batch_status_refresh_obeys_frontend_performance_limit(self) -> None:
         """批量状态最多每秒轮询一次，且明细未变化时不得重建整组 DOM。"""
@@ -394,6 +394,16 @@ class RecomputeFailureOutputTests(unittest.TestCase):
         self.assertIn("function orderedBatchItems(items)", source)
         self.assertIn("result.items = orderedBatchItems", source)
         self.assertRegex(style, r"\.batch-results\s*\{[^}]*max-height:[^}]*overflow-y:\s*auto")
+
+    def test_batch_result_card_opens_topology_playback(self) -> None:
+        """批量结果卡片应提供回放入口，并在载入结果后进入拓扑回放。"""
+        source = EDITOR_SCRIPT_PATH.read_text(encoding="utf-8")
+
+        self.assertIn('data-playback-result="${escapeHtml(item.resultUrl)}"', source)
+        self.assertIn(">回放</button>", source)
+        self.assertNotIn(">工作台</button>", source)
+        self.assertIn('event.target.closest("[data-playback-result]")', source)
+        self.assertIn(".then(() => visualizationWorkspace.showPlayback())", source)
 
     def test_recompute_preparation_error_keeps_last_successful_movelist(self) -> None:
         """算法调用前的旧计划回放异常也应返回上一代诊断甘特图。"""
