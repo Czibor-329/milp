@@ -127,6 +127,7 @@
     .empty-group-hint.visible { display: flex; }
     dialog { width: min(420px, calc(100vw - 32px)); padding: 0; border: 1px solid var(--line); border-radius: 14px; color: var(--ink); box-shadow: 0 20px 60px rgba(15, 23, 42, .22); }
     dialog::backdrop { background: rgba(15, 23, 42, .28); }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
     .data-transfer-dialog { width: min(560px, calc(100vw - 32px)); padding: 0; border: 0; border-radius: 16px; box-shadow: 0 22px 60px rgba(15, 35, 65, .22); }
     .data-transfer-dialog-body { padding: 22px; }
     .data-transfer-dialog-body > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
@@ -546,7 +547,7 @@
     .result-error-panel[hidden] { display: none; }
     .result-error-panel strong { font-size: 13px; }
     .result-error-panel pre { max-height: 220px; margin: 0; overflow: auto; color: #8f1f2d; background: transparent; white-space: pre-wrap; word-break: break-word; font: 12px/1.65 Consolas, monospace; }
-    .batch-results { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
+    .batch-results { display: grid; max-height: min(520px, 58dvh); padding-right: 4px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; grid-template-columns: repeat(4, minmax(0, 1fr)); align-content: start; gap: 10px; margin-top: 12px; }
     .batch-results:empty { display: none; }
     .batch-progress { display: none; align-items: center; gap: 12px; margin-top: 12px; padding: 11px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--soft); }
     .batch-progress.visible { display: flex; }
@@ -567,6 +568,7 @@
     button.batch-result-title { width: 100%; padding: 0; border: 0; color: inherit; background: transparent; text-align: left; cursor: pointer; }
     button.batch-result-title:focus-visible { border-radius: 4px; outline: 3px solid rgba(47, 91, 211, .22); outline-offset: 2px; }
     .batch-result-title strong { display: block; overflow: hidden; font: 700 12px/1.2 Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+    .batch-result-order { margin-right: 6px; color: var(--brand); font-weight: 900; }
     .batch-result-meta .btn { min-height: 25px; padding: 4px 7px; border-radius: 7px; font-size: 9px; }
     .batch-result-meta [aria-disabled="true"] { color: #94a3b8; background: transparent; pointer-events: none; }
     .batch-result-summary { min-width: 0; color: #475569; font-size: 11px; line-height: 1.5; }
@@ -583,6 +585,36 @@
     .batch-result.succeeded .batch-status { color: var(--green) !important; background: #d5f2e5; }
     .batch-result.failed .batch-status { color: var(--red) !important; background: #ffdfe2; }
     .batch-result.cancelled .batch-status { color: #9a5b08 !important; background: #ffedc7; }
+    dialog.batch-selection-dialog { width: min(780px, calc(100vw - 32px)); max-height: min(760px, calc(100dvh - 32px)); overflow: hidden; background: var(--surface); }
+    .batch-selection-dialog-body { display: grid; max-height: min(760px, calc(100dvh - 32px)); min-height: 0; grid-template-rows: auto auto minmax(180px, 1fr) auto; }
+    .batch-selection-dialog-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; padding: 18px 20px 15px; border-bottom: 1px solid var(--line); background: linear-gradient(90deg, #edf3ff, #f8faff); }
+    .batch-selection-dialog-head h3 { margin: 0; color: #172b48; font-size: 17px; }
+    .batch-selection-dialog-head p { margin: 4px 0 0; color: var(--muted); font-size: 11px; }
+    .batch-selection-tools { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 20px; border-bottom: 1px solid var(--line); background: #fff; }
+    .batch-selection-range, .batch-selection-quick-actions { display: flex; align-items: center; gap: 8px; }
+    .batch-selection-range label { display: flex; align-items: center; gap: 5px; color: #475569; font-size: 11px; font-weight: 750; }
+    .batch-selection-range input { width: 64px; min-height: 34px; padding: 5px 7px; border: 1px solid #cdd6e2; border-radius: 8px; color: #1e293b; background: #fff; font-variant-numeric: tabular-nums; }
+    .batch-selection-range input:focus-visible { border-color: var(--brand); outline: 3px solid rgba(47, 91, 211, .16); }
+    .batch-selection-fieldset { min-width: 0; min-height: 0; padding: 0; margin: 0; overflow: hidden; border: 0; }
+    .batch-selection-list { display: grid; max-height: 100%; padding: 10px 20px 14px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; grid-template-columns: repeat(2, minmax(0, 1fr)); align-content: start; gap: 7px; }
+    .batch-selection-item { display: grid; min-width: 0; grid-template-columns: auto 42px minmax(0, 1fr); align-items: center; gap: 8px; padding: 9px 10px; border: 1px solid #dbe3ee; border-radius: 9px; color: #334155; background: #fff; cursor: pointer; }
+    .batch-selection-item:hover { border-color: #afc1e9; background: #f7f9ff; }
+    .batch-selection-item:has(input:checked) { border-color: #a8bdef; background: #edf3ff; }
+    .batch-selection-item:focus-within { outline: 3px solid rgba(47, 91, 211, .16); outline-offset: 1px; }
+    .batch-selection-item input { width: 16px; height: 16px; margin: 0; accent-color: var(--brand); }
+    .batch-selection-index { color: var(--brand); font: 800 11px/1.2 Consolas, monospace; }
+    .batch-selection-name { overflow: hidden; font-size: 12px; font-weight: 750; text-overflow: ellipsis; white-space: nowrap; }
+    .batch-selection-footer { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 20px 16px; border-top: 1px solid var(--line); background: #fff; }
+    .batch-selection-footer > span { color: #475569; font-size: 11px; font-weight: 800; }
+    .batch-selection-footer .dialog-actions { margin: 0; }
+    @media (max-width: 620px) {
+      .batch-selection-tools, .batch-selection-footer { align-items: stretch; flex-direction: column; }
+      .batch-selection-range { align-items: stretch; flex-wrap: wrap; }
+      .batch-selection-range label { flex: 1 1 120px; }
+      .batch-selection-range input { flex: 1 1 auto; }
+      .batch-selection-quick-actions, .batch-selection-footer .dialog-actions { justify-content: flex-end; }
+      .batch-selection-list { grid-template-columns: 1fr; }
+    }
     .result-actions { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
     .btn.analysis { border-color: #bcd8cb; color: #087f5b; background: #ecf8f2; }
     .btn.analysis:hover { border-color: #75b79b; background: #e1f4ea; }

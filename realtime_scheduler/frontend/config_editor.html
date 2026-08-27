@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>调度平台</title>
   <link rel="stylesheet" href="/assets/katex.min.css?v=1.4.4">
-  <link rel="stylesheet" href="/assets/config_editor.css?v=1.5.5">
+  <link rel="stylesheet" href="/assets/config_editor.css?v=1.5.6">
 </head>
 <body>
   <a class="skip-link" href="#mainContent">跳到主要内容</a>
@@ -40,7 +40,7 @@
       <div class="sidebar-footer">
         <span class="sidebar-footer-label">系统状态</span>
         <div class="service-pill" id="serviceState">本地服务</div>
-        <span class="frontend-version">前端 v1.5.5</span>
+        <span class="frontend-version">前端 v1.5.6</span>
       </div>
     </aside>
 
@@ -674,6 +674,41 @@
     </section>
   </dialog>
 
+  <dialog class="batch-selection-dialog" id="batchTestSelectionDialog" aria-labelledby="batchTestSelectionDialogTitle" aria-describedby="batchTestSelectionDialogContext">
+    <form class="batch-selection-dialog-body" id="batchTestSelectionForm" method="dialog">
+      <header class="batch-selection-dialog-head">
+        <div>
+          <h3 id="batchTestSelectionDialogTitle">选择批量测试</h3>
+          <p id="batchTestSelectionDialogContext">按测试组顺序选择本次需要执行的测试。</p>
+        </div>
+        <button class="btn icon" type="button" id="batchTestSelectionDialogClose" aria-label="关闭批量测试选择">×</button>
+      </header>
+      <section class="batch-selection-tools" aria-label="批量选择工具">
+        <div class="batch-selection-range">
+          <label>从第 <input id="batchSelectionRangeStart" type="number" min="1" step="1" inputmode="numeric" aria-label="范围起始序号"> 项</label>
+          <label>到第 <input id="batchSelectionRangeEnd" type="number" min="1" step="1" inputmode="numeric" aria-label="范围结束序号"> 项</label>
+          <button class="btn small" type="button" id="batchSelectionApplyRange">应用范围</button>
+        </div>
+        <div class="batch-selection-quick-actions">
+          <button class="btn small" type="button" id="batchSelectionSelectAll">全选</button>
+          <button class="btn small" type="button" id="batchSelectionClear">清空</button>
+        </div>
+      </section>
+      <fieldset class="batch-selection-fieldset">
+        <legend class="sr-only">选择要运行的测试</legend>
+        <div class="batch-selection-list" id="batchSelectionList"></div>
+      </fieldset>
+      <footer class="batch-selection-footer">
+        <span id="batchSelectionCount" aria-live="polite">已选择 0 项</span>
+        <div class="dialog-actions">
+          <button class="btn" type="button" id="batchTestSelectionDialogCancel">取消</button>
+          <button class="btn" type="button" id="batchSelectionRunAll">全量运行</button>
+          <button class="btn primary" type="submit" id="batchSelectionRunSelected">运行已选</button>
+        </div>
+      </footer>
+    </form>
+  </dialog>
+
   <dialog class="batch-error-dialog" id="batchErrorDialog" aria-labelledby="batchErrorDialogTitle">
     <section class="batch-error-dialog-body">
       <header class="batch-error-dialog-head">
@@ -699,6 +734,6 @@
     </aside>
   </dialog>
 
-  <script type="module" src="/assets/config_editor.js?v=1.5.5"></script>
+  <script type="module" src="/assets/config_editor.js?v=1.5.6"></script>
 </body>
 </html>

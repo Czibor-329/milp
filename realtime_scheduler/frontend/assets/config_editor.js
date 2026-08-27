@@ -18023,6 +18023,8 @@ var PROCESSING_STATION_TYPES = /* @__PURE__ */ new Set([
 var FIRST_ROBOT_SLOT_ID = 1;
 var DUAL_ARM_SLOT_COUNT = 2;
 var SEARCH_TELEMETRY_POLL_MILLISECONDS = 75;
+var BATCH_STATUS_POLL_MILLISECONDS = 1e3;
+var TEST_ORDER_COLLATOR = new Intl.Collator("zh-CN", { numeric: true, sensitivity: "base" });
 var DEFAULT_DUMMY_WAFER_COUNT = 8;
 var STATION_ACTION_TIME_FIELDS = [
   { key: "PickPrepareTime", label: "\u53D6\u7247\u51C6\u5907" },
@@ -18103,6 +18105,7 @@ var followLatestSearchTelemetry = true;
 var searchTelemetryRunActive = false;
 var searchTelemetryControlPending = false;
 var lastSearchTelemetryMoveCount = 0;
+var lastBatchItemsRenderSignature = "";
 var continuousDecisionEnabled = false;
 var continuousDecisionSubmittedSearchId = "";
 var playbackMode = "replay";
@@ -21661,7 +21664,62 @@ async function runModelStepped() {
   renderPlaybackModeSwitch();
   await runPlan();
 }
-async function runCurrentTestGroup() {
+function currentBatchGroupTests() {
+  return (state.workspaceDevice?.tests || []).map((test, workspaceIndex) => ({ test, workspaceIndex })).filter(({ test }) => String(test.group || "").trim() === state.activeTestGroup).sort((left, right) => {
+    const leftLabel = String(left.test.name || left.test.id || "");
+    const rightLabel = String(right.test.name || right.test.id || "");
+    return TEST_ORDER_COLLATOR.compare(leftLabel, rightLabel) || left.workspaceIndex - right.workspaceIndex;
+  }).map(({ test }) => test);
+}
+function updateBatchSelectionCount() {
+  const checkboxes = [...document.querySelectorAll("[data-batch-test-selection]")];
+  const selectedCount = checkboxes.filter((checkbox) => checkbox.checked).length;
+  document.getElementById("batchSelectionCount").textContent = `\u5DF2\u9009\u62E9 ${selectedCount}/${checkboxes.length} \u9879`;
+  document.getElementById("batchSelectionRunSelected").disabled = selectedCount === 0;
+}
+function setBatchTestSelection(predicate) {
+  document.querySelectorAll("[data-batch-test-selection]").forEach((checkbox, index) => {
+    checkbox.checked = Boolean(predicate(index));
+  });
+  updateBatchSelectionCount();
+}
+function openBatchTestSelectionDialog() {
+  if (!state.workspaceDeviceId) {
+    writeTerminal("$ \u8BF7\u5148\u9009\u62E9\u8BBE\u5907\u548C\u6D4B\u8BD5\u7EC4", true);
+    return;
+  }
+  const tests = currentBatchGroupTests();
+  if (!tests.length) {
+    writeTerminal("$ \u5F53\u524D\u6D4B\u8BD5\u7EC4\u6CA1\u6709\u53EF\u8FD0\u884C\u6D4B\u8BD5", true);
+    return;
+  }
+  document.getElementById("batchTestSelectionDialogContext").textContent = `${state.activeTestGroup || "\u672A\u5206\u7EC4"} \xB7 \u5171 ${tests.length} \u9879 \xB7 \u5C06\u6309\u4E0B\u5217\u987A\u5E8F\u6267\u884C\u5E76\u5C55\u793A`;
+  document.getElementById("batchSelectionList").innerHTML = tests.map((test, index) => `
+    <label class="batch-selection-item" title="${escapeHtml4(`${test.id || ""} \xB7 ${test.name || ""}`)}">
+      <input type="checkbox" value="${escapeHtml4(test.id || "")}" data-batch-test-selection checked>
+      <span class="batch-selection-index">t${index + 1}</span>
+      <span class="batch-selection-name">${escapeHtml4(test.name || `\u6D4B\u8BD5 ${index + 1}`)}</span>
+    </label>
+  `).join("");
+  const rangeStart = document.getElementById("batchSelectionRangeStart");
+  const rangeEnd = document.getElementById("batchSelectionRangeEnd");
+  rangeStart.max = String(tests.length);
+  rangeStart.value = "1";
+  rangeEnd.max = String(tests.length);
+  rangeEnd.value = String(tests.length);
+  updateBatchSelectionCount();
+  const dialog = document.getElementById("batchTestSelectionDialog");
+  dialog.showModal();
+  window.requestAnimationFrame(() => rangeStart.focus());
+}
+function runBatchSelection(runAll = false) {
+  const tests = currentBatchGroupTests();
+  const selectedIds = runAll ? tests.map((test) => String(test.id || "")) : [...document.querySelectorAll("[data-batch-test-selection]:checked")].map((checkbox) => String(checkbox.value));
+  if (!selectedIds.length) return;
+  document.getElementById("batchTestSelectionDialog").close();
+  void runCurrentTestGroup(selectedIds);
+}
+async function runCurrentTestGroup(selectedTestIds = null) {
   const button = document.getElementById("batchRunButton");
   const comparisonButton = document.getElementById("openParameterComparisonDialogButton");
   const runButton = document.getElementById("runButton");
@@ -21680,11 +21738,16 @@ async function runCurrentTestGroup() {
     }
     return;
   }
+  if (!Array.isArray(selectedTestIds)) {
+    openBatchTestSelectionDialog();
+    return;
+  }
   try {
     if (!state.workspaceDeviceId) throw new Error("\u8BF7\u5148\u9009\u62E9\u8BBE\u5907\u548C\u6D4B\u8BD5\u7EC4");
     if (state.dirty) await saveCurrentTest(true);
-    const tests = (state.workspaceDevice?.tests || []).filter((test) => String(test.group || "").trim() === state.activeTestGroup);
-    if (!tests.length) throw new Error("\u5F53\u524D\u6D4B\u8BD5\u7EC4\u6CA1\u6709\u53EF\u8FD0\u884C\u6D4B\u8BD5");
+    const selectedIdSet = new Set(selectedTestIds.map(String));
+    const tests = currentBatchGroupTests().filter((test) => selectedIdSet.has(String(test.id || "")));
+    if (!tests.length) throw new Error("\u8BF7\u81F3\u5C11\u9009\u62E9\u4E00\u4E2A\u53EF\u8FD0\u884C\u6D4B\u8BD5");
     state.batchRunning = true;
     state.activeBatchId = "";
     state.batchCancelRequested = false;
@@ -21696,6 +21759,7 @@ async function runCurrentTestGroup() {
     batchBottleneckSummaries.clear();
     batchBottleneckRequests.clear();
     batchBottleneckErrors.clear();
+    lastBatchItemsRenderSignature = "";
     document.getElementById("testGroupAnalysisButton").hidden = true;
     document.getElementById("testGroupAnalysisPanel").hidden = true;
     document.getElementById("testGroupAnalysisPanel").innerHTML = "";
@@ -21714,7 +21778,7 @@ async function runCurrentTestGroup() {
     const response = await fetch("/api/run-batch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ deviceId: state.workspaceDeviceId, group: state.activeTestGroup, strategy: state.strategy, options: state.options, skipValidation: skipValidationEnabled(), hongYeCheck: hongYeCheckEnabled(), skipBaseline: skipBaselineEnabled() })
+      body: JSON.stringify({ deviceId: state.workspaceDeviceId, group: state.activeTestGroup, testIds: tests.map((test) => test.id), strategy: state.strategy, options: state.options, skipValidation: skipValidationEnabled(), hongYeCheck: hongYeCheckEnabled(), skipBaseline: skipBaselineEnabled() })
     });
     let result = await response.json();
     if (!response.ok || !result.batchId || !Array.isArray(result.items)) throw new Error(result.error || `\u670D\u52A1\u8FD4\u56DE ${response.status}`);
@@ -21723,7 +21787,7 @@ async function runCurrentTestGroup() {
     renderBatchRunStatus(result);
     if (state.batchCancelRequested) await sendBatchCancellation();
     while (!["completed", "failed", "cancelled"].includes(result.status)) {
-      await new Promise((resolve) => window.setTimeout(resolve, 450));
+      await new Promise((resolve) => window.setTimeout(resolve, BATCH_STATUS_POLL_MILLISECONDS));
       const statusResponse = await fetch(`/api/run-batches/${encodeURIComponent(result.batchId)}`, { cache: "no-store" });
       result = await statusResponse.json();
       if (!statusResponse.ok) throw new Error(result.error || `\u670D\u52A1\u8FD4\u56DE ${statusResponse.status}`);
@@ -21960,7 +22024,23 @@ function bindTestGroupExport(panel, summary, groupName) {
     URL.revokeObjectURL(url);
   });
 }
+function batchItemsRenderSignature(items) {
+  return JSON.stringify(items.map((item) => [
+    item.status,
+    item.resultUrl,
+    item.logUrl,
+    item.error,
+    item.validation,
+    item.makespan,
+    item.cpuTimeMs,
+    item.baseline?.status
+  ]));
+}
+function orderedBatchItems(items) {
+  return [...items].sort((left, right) => Number(left.index ?? 0) - Number(right.index ?? 0));
+}
 function showBatchProgress(result) {
+  result.items = orderedBatchItems(result.items || []);
   const completed = Number(result.completed || 0), total = Number(result.testCount || result.items?.length || 0);
   const percent = total ? Math.round(completed / total * 100) : 0;
   const progress = document.getElementById("batchProgress");
@@ -21972,7 +22052,12 @@ function showBatchProgress(result) {
   state.batchResult = result;
   updateBatchLogDownload(result);
   if (!state.selectedBatchTestId) showBatchOverviewMetrics(result);
-  renderBatchItems(result.items || []);
+  const items = result.items || [];
+  const renderSignature = batchItemsRenderSignature(items);
+  if (renderSignature !== lastBatchItemsRenderSignature) {
+    renderBatchItems(items);
+    lastBatchItemsRenderSignature = renderSignature;
+  }
   const selectedIndex = (result.items || []).findIndex((item, index) => String(item.testId || `index-${index}`) === state.selectedBatchTestId);
   if (selectedIndex >= 0) {
     showBatchItemOverview(result.items[selectedIndex], selectedIndex);
@@ -21993,6 +22078,7 @@ function batchItemErrorText(item) {
   return "";
 }
 function renderBatchItems(items) {
+  items = orderedBatchItems(items);
   const statusLabels = { queued: "\u7B49\u5F85\u4E2D", running: "\u8FD0\u884C\u4E2D", succeeded: "\u6210\u529F", failed: "\u5931\u8D25", cancelled: "\u5DF2\u7EC8\u6B62" };
   document.getElementById("batchResults").innerHTML = items.map((item, index) => {
     const hasMetrics = hasBatchResultMetrics(item);
@@ -22009,7 +22095,7 @@ function renderBatchItems(items) {
     return `
       <div class="batch-result ${escapeHtml4(item.status || "queued")}${selected ? " selected" : ""}" data-batch-item-index="${index}">
         <div class="batch-result-head">
-          <button class="batch-result-title" type="button" aria-pressed="${selected}" aria-label="\u67E5\u770B ${escapeHtml4(displayId)} ${escapeHtml4(item.testName || "")} \u7684\u8BE6\u7EC6\u6307\u6807"><strong title="${escapeHtml4(`${item.testId || ""} \xB7 ${item.testName || ""}`)}">${escapeHtml4(item.testName || `\u6D4B\u8BD5 ${index + 1}`)}</strong></button>
+          <button class="batch-result-title" type="button" aria-pressed="${selected}" aria-label="\u67E5\u770B ${escapeHtml4(displayId)} ${escapeHtml4(item.testName || "")} \u7684\u8BE6\u7EC6\u6307\u6807"><strong title="${escapeHtml4(`${item.testId || ""} \xB7 ${item.testName || ""}`)}"><span class="batch-result-order">${escapeHtml4(displayId)}</span>${escapeHtml4(item.testName || `\u6D4B\u8BD5 ${index + 1}`)}</strong></button>
           <div class="batch-result-meta">
             <span class="batch-status">${statusLabels[item.status] || "\u7B49\u5F85\u4E2D"}</span>
             ${item.logUrl ? `<a class="btn" href="${escapeHtml4(item.logUrl)}" download>\u65E5\u5FD7</a>` : `<span class="btn" aria-disabled="true">\u65E5\u5FD7</span>`}
@@ -22610,6 +22696,27 @@ document.getElementById("roundCount").addEventListener("input", (event) => {
 document.getElementById("runButton").addEventListener("click", runPlan);
 document.getElementById("stepRunButton").addEventListener("click", runModelStepped);
 document.getElementById("batchRunButton").addEventListener("click", runCurrentTestGroup);
+document.getElementById("batchTestSelectionDialogClose").addEventListener("click", () => document.getElementById("batchTestSelectionDialog").close());
+document.getElementById("batchTestSelectionDialogCancel").addEventListener("click", () => document.getElementById("batchTestSelectionDialog").close());
+document.getElementById("batchSelectionSelectAll").addEventListener("click", () => setBatchTestSelection(() => true));
+document.getElementById("batchSelectionClear").addEventListener("click", () => setBatchTestSelection(() => false));
+document.getElementById("batchSelectionApplyRange").addEventListener("click", () => {
+  const total = currentBatchGroupTests().length;
+  const startInput = document.getElementById("batchSelectionRangeStart");
+  const endInput = document.getElementById("batchSelectionRangeEnd");
+  const rawStart = Math.min(total, Math.max(1, Number.parseInt(startInput.value, 10) || 1));
+  const rawEnd = Math.min(total, Math.max(1, Number.parseInt(endInput.value, 10) || total));
+  const start = Math.min(rawStart, rawEnd), end = Math.max(rawStart, rawEnd);
+  startInput.value = String(start);
+  endInput.value = String(end);
+  setBatchTestSelection((index) => index + 1 >= start && index + 1 <= end);
+});
+document.getElementById("batchSelectionList").addEventListener("change", updateBatchSelectionCount);
+document.getElementById("batchSelectionRunAll").addEventListener("click", () => runBatchSelection(true));
+document.getElementById("batchTestSelectionForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  runBatchSelection(false);
+});
 document.getElementById("openParameterComparisonDialogButton").addEventListener("click", openParameterComparisonDialog);
 document.getElementById("parameterComparisonDialogCancel").addEventListener("click", () => document.getElementById("parameterComparisonDialog").close());
 document.getElementById("openScheduleAlphaGoOptionsDialogButton").addEventListener("click", openScheduleAlphaGoOptionsDialog);

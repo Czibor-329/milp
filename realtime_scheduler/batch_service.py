@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import multiprocessing
+import re
 import threading
 import time
 import uuid
@@ -873,17 +874,47 @@ def _restore_batch_process_error(payload: Optional[Mapping[str, Any]]) -> Option
 def _workspace_group_tests(
     device: Mapping[str, Any],
     group: str,
+    test_ids: Optional[Sequence[str]] = None,
 ) -> Tuple[str, List[Mapping[str, Any]]]:
-    """返回规范化组名及该组按工作区顺序排列的测试。"""
+    """返回规范化组名及按名称自然顺序筛选后的测试。
+
+    ``test_ids`` 为 ``None`` 时运行整组；传入时只选择指定测试，但不采用调用方
+    的 ID 顺序。测试名称按数字片段自然排序，使 ``test2`` 排在 ``test10`` 前面。
+    """
     normalized_group = str(group or "").strip()
-    tests = [
+    group_tests = [
         row for row in (device.get("tests") or [])
         if isinstance(row, Mapping)
         and str(row.get("group") or "").strip() == normalized_group
     ]
+    group_tests.sort(key=_natural_test_order_key)
+    if test_ids is None:
+        tests = group_tests
+    else:
+        normalized_ids = [str(test_id or "").strip() for test_id in test_ids]
+        if not normalized_ids or any(not test_id for test_id in normalized_ids):
+            raise ValueError("请至少选择一个可运行测试")
+        if len(set(normalized_ids)) != len(normalized_ids):
+            raise ValueError("批量测试选择中包含重复测试")
+        available_ids = {str(row.get("id") or "") for row in group_tests}
+        missing_ids = [test_id for test_id in normalized_ids if test_id not in available_ids]
+        if missing_ids:
+            raise ValueError(f"所选测试不属于当前测试组：{', '.join(missing_ids[:3])}")
+        selected_ids = set(normalized_ids)
+        tests = [row for row in group_tests if str(row.get("id") or "") in selected_ids]
     if not tests:
         raise ValueError(f"当前测试组“{normalized_group or '未分组'}”没有可运行测试")
     return normalized_group, tests
+
+
+def _natural_test_order_key(test_case: Mapping[str, Any]) -> Tuple[Any, ...]:
+    """把测试名称拆成文本和数字片段，生成稳定的自然排序键。"""
+    label = str(test_case.get("name") or test_case.get("id") or "").strip()
+    return tuple(
+        (0, int(part)) if part.isdigit() else (1, part.casefold())
+        for part in re.split(r"(\d+)", label)
+        if part
+    )
 
 
 def _execute_workspace_test_batch(
@@ -1186,10 +1217,11 @@ def start_workspace_test_batch(
     skip_baseline: bool = False,
     maximum_workers: int = 4,
     use_process_isolation: bool = False,
+    test_ids: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
-    """创建后台批量任务并立即返回可轮询的初始状态。"""
+    """创建后台批量任务；可按 ID 选择子集，结果仍按名称自然顺序排列。"""
     device = get_workspace_device(device_id)
-    normalized_group, tests = _workspace_group_tests(device, group)
+    normalized_group, tests = _workspace_group_tests(device, group, test_ids)
     batch_id = uuid.uuid4().hex
     worker_count = max(1, min(int(maximum_workers), MAXIMUM_BATCH_WORKERS, len(tests)))
     initial = {

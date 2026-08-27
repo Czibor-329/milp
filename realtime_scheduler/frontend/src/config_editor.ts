@@ -71,6 +71,7 @@ const FIRST_ROBOT_SLOT_ID = 1;
 const DUAL_ARM_SLOT_COUNT = 2;
 const SEARCH_TELEMETRY_POLL_MILLISECONDS = 75;
 const BATCH_STATUS_POLL_MILLISECONDS = 1000;
+const TEST_ORDER_COLLATOR = new Intl.Collator("zh-CN", { numeric: true, sensitivity: "base" });
 const DEFAULT_DUMMY_WAFER_COUNT = 8;
 const STATION_ACTION_TIME_FIELDS = [
   { key: "PickPrepareTime", label: "取片准备" },
@@ -4062,8 +4063,78 @@ async function runModelStepped() {
   await runPlan();
 }
 
-/** 使用当前所选策略并行运行当前测试组中的全部测试。 */
-async function runCurrentTestGroup() {
+/** 返回当前测试组按名称数字自然顺序排列的测试。 */
+function currentBatchGroupTests() {
+  return (state.workspaceDevice?.tests || [])
+    .map((test, workspaceIndex) => ({ test, workspaceIndex }))
+    .filter(({ test }) => String(test.group || "").trim() === state.activeTestGroup)
+    .sort((left, right) => {
+      const leftLabel = String(left.test.name || left.test.id || "");
+      const rightLabel = String(right.test.name || right.test.id || "");
+      return TEST_ORDER_COLLATOR.compare(leftLabel, rightLabel) || left.workspaceIndex - right.workspaceIndex;
+    })
+    .map(({ test }) => test);
+}
+
+/** 更新选择计数和“运行已选”按钮状态。 */
+function updateBatchSelectionCount() {
+  const checkboxes = [...document.querySelectorAll("[data-batch-test-selection]")];
+  const selectedCount = checkboxes.filter(checkbox => checkbox.checked).length;
+  document.getElementById("batchSelectionCount").textContent = `已选择 ${selectedCount}/${checkboxes.length} 项`;
+  document.getElementById("batchSelectionRunSelected").disabled = selectedCount === 0;
+}
+
+/** 按断言批量设置选择框，并同步无障碍计数。 */
+function setBatchTestSelection(predicate) {
+  document.querySelectorAll("[data-batch-test-selection]").forEach((checkbox, index) => {
+    checkbox.checked = Boolean(predicate(index));
+  });
+  updateBatchSelectionCount();
+}
+
+/** 打开批量测试选择弹窗，默认全选并保持名称自然顺序。 */
+function openBatchTestSelectionDialog() {
+  if (!state.workspaceDeviceId) {
+    writeTerminal("$ 请先选择设备和测试组", true);
+    return;
+  }
+  const tests = currentBatchGroupTests();
+  if (!tests.length) {
+    writeTerminal("$ 当前测试组没有可运行测试", true);
+    return;
+  }
+  document.getElementById("batchTestSelectionDialogContext").textContent =
+    `${state.activeTestGroup || "未分组"} · 共 ${tests.length} 项 · 将按下列顺序执行并展示`;
+  document.getElementById("batchSelectionList").innerHTML = tests.map((test, index) => `
+    <label class="batch-selection-item" title="${escapeHtml(`${test.id || ""} · ${test.name || ""}`)}">
+      <input type="checkbox" value="${escapeHtml(test.id || "")}" data-batch-test-selection checked>
+      <span class="batch-selection-index">t${index + 1}</span>
+      <span class="batch-selection-name">${escapeHtml(test.name || `测试 ${index + 1}`)}</span>
+    </label>
+  `).join("");
+  const rangeStart = document.getElementById("batchSelectionRangeStart");
+  const rangeEnd = document.getElementById("batchSelectionRangeEnd");
+  rangeStart.max = String(tests.length); rangeStart.value = "1";
+  rangeEnd.max = String(tests.length); rangeEnd.value = String(tests.length);
+  updateBatchSelectionCount();
+  const dialog = document.getElementById("batchTestSelectionDialog") as HTMLDialogElement;
+  dialog.showModal();
+  window.requestAnimationFrame(() => rangeStart.focus());
+}
+
+/** 读取当前选择，关闭弹窗后按名称自然顺序启动批量任务。 */
+function runBatchSelection(runAll = false) {
+  const tests = currentBatchGroupTests();
+  const selectedIds = runAll
+    ? tests.map(test => String(test.id || ""))
+    : [...document.querySelectorAll("[data-batch-test-selection]:checked")].map(checkbox => String(checkbox.value));
+  if (!selectedIds.length) return;
+  (document.getElementById("batchTestSelectionDialog") as HTMLDialogElement).close();
+  void runCurrentTestGroup(selectedIds);
+}
+
+/** 使用当前所选策略并行运行用户选中的测试；未传选择时先打开选择弹窗。 */
+async function runCurrentTestGroup(selectedTestIds = null) {
   const button = document.getElementById("batchRunButton");
   const comparisonButton = document.getElementById("openParameterComparisonDialogButton");
   const runButton = document.getElementById("runButton");
@@ -4077,11 +4148,16 @@ async function runCurrentTestGroup() {
     }
     return;
   }
+  if (!Array.isArray(selectedTestIds)) {
+    openBatchTestSelectionDialog();
+    return;
+  }
   try {
     if (!state.workspaceDeviceId) throw new Error("请先选择设备和测试组");
     if (state.dirty) await saveCurrentTest(true);
-    const tests = (state.workspaceDevice?.tests || []).filter(test => String(test.group || "").trim() === state.activeTestGroup);
-    if (!tests.length) throw new Error("当前测试组没有可运行测试");
+    const selectedIdSet = new Set(selectedTestIds.map(String));
+    const tests = currentBatchGroupTests().filter(test => selectedIdSet.has(String(test.id || "")));
+    if (!tests.length) throw new Error("请至少选择一个可运行测试");
     state.batchRunning = true; state.activeBatchId = ""; state.batchCancelRequested = false; state.batchCancelSent = false; state.batchResult = null; state.selectedBatchTestId = "";
     startRunStatus(`批量测试 · ${state.activeTestGroup || "未分组"}`, `等待 ${tests.length} 个测试`);
     batchPerformanceAnalyses.clear();
@@ -4099,7 +4175,7 @@ async function runCurrentTestGroup() {
     const response = await fetch("/api/run-batch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ deviceId: state.workspaceDeviceId, group: state.activeTestGroup, strategy: state.strategy, options: state.options, skipValidation: skipValidationEnabled(), hongYeCheck: hongYeCheckEnabled(), skipBaseline: skipBaselineEnabled() }),
+      body: JSON.stringify({ deviceId: state.workspaceDeviceId, group: state.activeTestGroup, testIds: tests.map(test => test.id), strategy: state.strategy, options: state.options, skipValidation: skipValidationEnabled(), hongYeCheck: hongYeCheckEnabled(), skipBaseline: skipBaselineEnabled() }),
     });
     let result = await response.json();
     if (!response.ok || !result.batchId || !Array.isArray(result.items)) throw new Error(result.error || `服务返回 ${response.status}`);
@@ -4398,8 +4474,14 @@ function batchItemsRenderSignature(items) {
   ]));
 }
 
+/** 按服务端分配的测试序号稳定排序，完成先后不会改变卡片位置。 */
+function orderedBatchItems(items) {
+  return [...items].sort((left, right) => Number(left.index ?? 0) - Number(right.index ?? 0));
+}
+
 /** 实时绘制总体进度；仅在测试状态变化时重绘逐项卡片。 */
 function showBatchProgress(result) {
+  result.items = orderedBatchItems(result.items || []);
   const completed = Number(result.completed || 0), total = Number(result.testCount || result.items?.length || 0);
   const percent = total ? Math.round(completed / total * 100) : 0;
   const progress = document.getElementById("batchProgress");
@@ -4440,6 +4522,7 @@ function batchItemErrorText(item) {
 }
 
 function renderBatchItems(items) {
+  items = orderedBatchItems(items);
   const statusLabels = { queued: "等待中", running: "运行中", succeeded: "成功", failed: "失败", cancelled: "已终止" };
   document.getElementById("batchResults").innerHTML = items.map((item, index) => {
     const hasMetrics = hasBatchResultMetrics(item);
@@ -4458,7 +4541,7 @@ function renderBatchItems(items) {
     return `
       <div class="batch-result ${escapeHtml(item.status || "queued")}${selected ? " selected" : ""}" data-batch-item-index="${index}">
         <div class="batch-result-head">
-          <button class="batch-result-title" type="button" aria-pressed="${selected}" aria-label="查看 ${escapeHtml(displayId)} ${escapeHtml(item.testName || "")} 的详细指标"><strong title="${escapeHtml(`${item.testId || ""} · ${item.testName || ""}`)}">${escapeHtml(item.testName || `测试 ${index + 1}`)}</strong></button>
+          <button class="batch-result-title" type="button" aria-pressed="${selected}" aria-label="查看 ${escapeHtml(displayId)} ${escapeHtml(item.testName || "")} 的详细指标"><strong title="${escapeHtml(`${item.testId || ""} · ${item.testName || ""}`)}"><span class="batch-result-order">${escapeHtml(displayId)}</span>${escapeHtml(item.testName || `测试 ${index + 1}`)}</strong></button>
           <div class="batch-result-meta">
             <span class="batch-status">${statusLabels[item.status] || "等待中"}</span>
             ${item.logUrl ? `<a class="btn" href="${escapeHtml(item.logUrl)}" download>日志</a>` : `<span class="btn" aria-disabled="true">日志</span>`}
@@ -5061,6 +5144,26 @@ document.getElementById("roundCount").addEventListener("input", event => { resiz
 document.getElementById("runButton").addEventListener("click", runPlan);
 document.getElementById("stepRunButton").addEventListener("click", runModelStepped);
 document.getElementById("batchRunButton").addEventListener("click", runCurrentTestGroup);
+document.getElementById("batchTestSelectionDialogClose").addEventListener("click", () => (document.getElementById("batchTestSelectionDialog") as HTMLDialogElement).close());
+document.getElementById("batchTestSelectionDialogCancel").addEventListener("click", () => (document.getElementById("batchTestSelectionDialog") as HTMLDialogElement).close());
+document.getElementById("batchSelectionSelectAll").addEventListener("click", () => setBatchTestSelection(() => true));
+document.getElementById("batchSelectionClear").addEventListener("click", () => setBatchTestSelection(() => false));
+document.getElementById("batchSelectionApplyRange").addEventListener("click", () => {
+  const total = currentBatchGroupTests().length;
+  const startInput = document.getElementById("batchSelectionRangeStart");
+  const endInput = document.getElementById("batchSelectionRangeEnd");
+  const rawStart = Math.min(total, Math.max(1, Number.parseInt(startInput.value, 10) || 1));
+  const rawEnd = Math.min(total, Math.max(1, Number.parseInt(endInput.value, 10) || total));
+  const start = Math.min(rawStart, rawEnd), end = Math.max(rawStart, rawEnd);
+  startInput.value = String(start); endInput.value = String(end);
+  setBatchTestSelection(index => index + 1 >= start && index + 1 <= end);
+});
+document.getElementById("batchSelectionList").addEventListener("change", updateBatchSelectionCount);
+document.getElementById("batchSelectionRunAll").addEventListener("click", () => runBatchSelection(true));
+document.getElementById("batchTestSelectionForm").addEventListener("submit", event => {
+  event.preventDefault();
+  runBatchSelection(false);
+});
 document.getElementById("openParameterComparisonDialogButton").addEventListener("click", openParameterComparisonDialog);
 document.getElementById("parameterComparisonDialogCancel").addEventListener("click", () => document.getElementById("parameterComparisonDialog").close());
 document.getElementById("openScheduleAlphaGoOptionsDialogButton").addEventListener("click", openScheduleAlphaGoOptionsDialog);

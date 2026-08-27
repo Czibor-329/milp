@@ -121,6 +121,8 @@ Prepare 与 Complete 在状态回放中采用幂等语义：门已经开启时�
 
 重算必须先回放 Running/Done Move 对 Robot、Station、Slot、门和压力的影响，再应用 `RemoveList`。不能把“出现在 RemoveList”直接理解为资源已经释放。
 
+重算后的 `MoveList` 是增量输出：新 MoveID 从 `InitialMoveID + 1` 起编号，其 `PreMoveID` 可以引用上一代已提交或正在执行的 MoveID（含 Running Move）作为已完成前驱。平台校验把这些跨代引用视为合法，只要求被引用 Move 的 `EndTime` 不晚于本动作的 `StartTime`；`PreMoveID` 不得引用既不在本代、也不在上一代已提交历史中的 MoveID。
+
 若某轮重算的算法调用在返回新 `MoveList` 前报错，平台会保存可回放的部分结果。上一轮中列入本轮 `RemoveList` 的 Move 会标记为 `RemovedByRecompute=true`，在甘特图中以浅色虚线展示，并可通过“显示已移除 Move”开关隐藏；其余旧 Move 保持正常显示。该图是失败诊断结果，不代表重算已经成功。
 
 若错误发生得更早，例如旧计划状态回放、现场投影或重算 update 构造阶段，平台尚未向算法发送新的 `RemoveList`。此时诊断甘特图保留报错前最后一代完整 MoveList，不会把任何动作标成已取消。

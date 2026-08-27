@@ -305,19 +305,19 @@ class RecomputeFailureOutputTests(unittest.TestCase):
         self.assertIn("!rec.removedByRecompute", viewer)
         self.assertIn('fillOpacity = bar.rec.removedByRecompute ? "0.24" : "1"', viewer)
 
-    def test_frontend_version_and_cache_keys_are_1_5_5(self) -> None:
+    def test_frontend_version_and_cache_keys_are_1_5_6(self) -> None:
         """前端显示版本、包版本和主资源缓存键必须同步。"""
         frontend_root = ROOT / "realtime_scheduler" / "frontend"
         template = (frontend_root / "config_editor.html").read_text(encoding="utf-8")
         package = json.loads((frontend_root / "package.json").read_text(encoding="utf-8"))
         package_lock = json.loads((frontend_root / "package-lock.json").read_text(encoding="utf-8"))
 
-        self.assertEqual("1.5.5", package["version"])
-        self.assertEqual("1.5.5", package_lock["version"])
-        self.assertEqual("1.5.5", package_lock["packages"][""]["version"])
-        self.assertIn('class="frontend-version">前端 v1.5.5</span>', template)
-        self.assertIn('/assets/config_editor.css?v=1.5.5', template)
-        self.assertIn('/assets/config_editor.js?v=1.5.5', template)
+        self.assertEqual("1.5.6", package["version"])
+        self.assertEqual("1.5.6", package_lock["version"])
+        self.assertEqual("1.5.6", package_lock["packages"][""]["version"])
+        self.assertIn('class="frontend-version">前端 v1.5.6</span>', template)
+        self.assertIn('/assets/config_editor.css?v=1.5.6', template)
+        self.assertIn('/assets/config_editor.js?v=1.5.6', template)
 
     def test_batch_status_refresh_obeys_frontend_performance_limit(self) -> None:
         """批量状态最多每秒轮询一次，且明细未变化时不得重建整组 DOM。"""
@@ -327,6 +327,26 @@ class RecomputeFailureOutputTests(unittest.TestCase):
         self.assertIn("window.setTimeout(resolve, BATCH_STATUS_POLL_MILLISECONDS)", source)
         self.assertIn("renderSignature !== lastBatchItemsRenderSignature", source)
         self.assertNotIn("window.setTimeout(resolve, 450)", source)
+
+    def test_batch_selection_dialog_and_scrollable_ordered_cards_exist(self) -> None:
+        """批量入口应支持范围、勾选和全量运行，结果卡片保持顺序并限制高度。"""
+        template = EDITOR_PATH.read_text(encoding="utf-8")
+        source = EDITOR_SCRIPT_PATH.read_text(encoding="utf-8")
+        style = EDITOR_STYLE_PATH.read_text(encoding="utf-8")
+
+        for element_id in (
+            "batchTestSelectionDialog",
+            "batchSelectionRangeStart",
+            "batchSelectionRangeEnd",
+            "batchSelectionList",
+            "batchSelectionRunSelected",
+            "batchSelectionRunAll",
+        ):
+            self.assertIn(f'id="{element_id}"', template)
+        self.assertIn("testIds: tests.map(test => test.id)", source)
+        self.assertIn("function orderedBatchItems(items)", source)
+        self.assertIn("result.items = orderedBatchItems", source)
+        self.assertRegex(style, r"\.batch-results\s*\{[^}]*max-height:[^}]*overflow-y:\s*auto")
 
     def test_recompute_preparation_error_keeps_last_successful_movelist(self) -> None:
         """算法调用前的旧计划回放异常也应返回上一代诊断甘特图。"""
@@ -1885,7 +1905,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("<span>结果分析</span>", html)
         self.assertIn("<span>路径配置</span>", html)
         self.assertNotIn('data-tab-view="clean"', html)
-        self.assertIn('class="frontend-version">前端 v1.5.5</span>', html)
+        self.assertIn('class="frontend-version">前端 v1.5.6</span>', html)
         self.assertIn('data-option="residencyGuardSeconds"', html)
         self.assertIn('data-option="maximumRobotHoldingSeconds"', html)
         self.assertIn('data-option="maximumSystemResidenceCv"', html)
@@ -2638,6 +2658,38 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertTrue(all([route["name"] for route in plan["routes"]] == ["BatchRoute"] for plan in submitted))
         self.assertTrue(all(item["baseline"]["status"] == "succeeded" for item in result["items"]))
         self.assertTrue(all(item["improvementPercent"] == 0 for item in result["items"]))
+
+    def test_batch_test_selection_filters_but_preserves_workspace_order(self) -> None:
+        """调用方即使倒序提交测试 ID，执行队列也必须保持名称自然顺序。"""
+        tests = [
+            {"id": "test-a", "name": "案例 A", "group": "回归"},
+            {"id": "test-b", "name": "案例 B", "group": "回归"},
+            {"id": "test-c", "name": "案例 C", "group": "回归"},
+            {"id": "test-x", "name": "其他组", "group": "性能"},
+        ]
+        group, selected = config_server._workspace_group_tests(
+            {"tests": tests},
+            "回归",
+            ["test-c", "test-a"],
+        )
+
+        self.assertEqual("回归", group)
+        self.assertEqual(["test-a", "test-c"], [test["id"] for test in selected])
+        _, naturally_ordered = config_server._workspace_group_tests(
+            {"tests": [
+                {"id": "id-10", "name": "test10", "group": "回归"},
+                {"id": "id-2", "name": "test2", "group": "回归"},
+                {"id": "id-1", "name": "test1", "group": "回归"},
+            ]},
+            "回归",
+        )
+        self.assertEqual(["test1", "test2", "test10"], [test["name"] for test in naturally_ordered])
+        with self.assertRaisesRegex(ValueError, "不属于当前测试组"):
+            config_server._workspace_group_tests(
+                {"tests": tests},
+                "回归",
+                ["test-x"],
+            )
 
     def test_background_batch_exposes_queued_running_and_completed_item_status(self) -> None:
         """后台批量任务应在运行期间暴露逐项状态，并在结束后返回全部结果 URL。"""
