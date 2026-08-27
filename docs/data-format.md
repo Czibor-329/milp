@@ -58,6 +58,10 @@ datasets/
 顶层 `routeConfigs` 是 v6 兼容字段：迁移时按 `routeRef` 深拷贝到每个 PJob，之后只
 作为新 PJob 的默认配置来源，不再作为多个 PJob 的共同编辑状态。
 
+测试内的 Dummy / Dummy WAC Clean 可保存可选字段 `dummyWaferCount`，表示
+DummyPort 的库存投放数量；该字段与标准 Clean 条件的 `MaterialCount` 独立。
+缺少该字段的旧测试按 8 片读取，因此无需改写即可继续运行。
+
 ## 版本和迁移
 
 当前格式为 `schemaVersion: 7`。服务开始监听前完成迁移，页面不会读取迁移到一半的数据。

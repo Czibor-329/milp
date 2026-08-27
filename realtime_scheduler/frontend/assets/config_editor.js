@@ -18023,6 +18023,7 @@ var PROCESSING_STATION_TYPES = /* @__PURE__ */ new Set([
 var FIRST_ROBOT_SLOT_ID = 1;
 var DUAL_ARM_SLOT_COUNT = 2;
 var SEARCH_TELEMETRY_POLL_MILLISECONDS = 75;
+var DEFAULT_DUMMY_WAFER_COUNT = 8;
 var STATION_ACTION_TIME_FIELDS = [
   { key: "PickPrepareTime", label: "\u53D6\u7247\u51C6\u5907" },
   { key: "PickCompleteTime", label: "\u53D6\u7247\u5B8C\u6210" },
@@ -18152,6 +18153,8 @@ function normalizeClean(clean) {
     isDummy ? value.materialCount ?? value.triggerCount : value.triggerCount ?? value.lower
   ) || defaultTriggerCount));
   if (isDummy) value.materialCount = value.triggerCount;
+  const dummyWaferCount = Number(value.dummyWaferCount);
+  value.dummyWaferCount = isDummy ? Math.max(1, Math.floor(Number.isFinite(dummyWaferCount) ? dummyWaferCount : DEFAULT_DUMMY_WAFER_COUNT)) : 0;
   const wacRecipeTime = Number(value.wacRecipeTime ?? value.emptyRecipeTime);
   value.wacRecipeTime = Math.max(0, Number.isFinite(wacRecipeTime) ? wacRecipeTime : 20);
   value.modules = [...new Set(stringList(value.modules))];
@@ -18168,9 +18171,9 @@ function automaticCleanName(clean) {
   const labels = Object.fromEntries(CLEAN_TYPE_DEFINITIONS.map((item) => [item.key, item.label]));
   const mainDuration = formatCleanSeconds(value.recipeTime);
   if (value.cleanType === "dummywac") {
-    return `${labels[value.cleanType]} \xB7 ${value.triggerCount}\u7247 \xB7 \u4E3B\u6E05\u6D01 ${mainDuration} \xB7 WAC ${formatCleanSeconds(value.wacRecipeTime)}`;
+    return `${labels[value.cleanType]} \xB7 \u5355\u6B21 ${value.triggerCount}\u7247 \xB7 \u5E93\u5B58 ${value.dummyWaferCount}\u7247 \xB7 \u4E3B\u6E05\u6D01 ${mainDuration} \xB7 WAC ${formatCleanSeconds(value.wacRecipeTime)}`;
   }
-  if (value.cleanType === "dummy") return `${labels[value.cleanType]} \xB7 ${value.triggerCount}\u7247 \xB7 ${mainDuration}`;
+  if (value.cleanType === "dummy") return `${labels[value.cleanType]} \xB7 \u5355\u6B21 ${value.triggerCount}\u7247 \xB7 \u5E93\u5B58 ${value.dummyWaferCount}\u7247 \xB7 ${mainDuration}`;
   return `${labels[value.cleanType]} \xB7 ${mainDuration}`;
 }
 function renameCleanReferences(oldName, newName) {
@@ -18228,7 +18231,16 @@ function runtimeClean(clean) {
   };
 }
 function makeClean(cleanType = "preclean") {
-  return normalizeClean({ name: "", cleanType, recipeTime: 20, triggerCount: 5, wacRecipeTime: 20, modules: [] });
+  const triggerCount = ["dummy", "dummywac"].includes(cleanType) ? 2 : 5;
+  return normalizeClean({
+    name: "",
+    cleanType,
+    recipeTime: 20,
+    triggerCount,
+    dummyWaferCount: DEFAULT_DUMMY_WAFER_COUNT,
+    wacRecipeTime: 20,
+    modules: []
+  });
 }
 function stageUsesRobot(stage, index) {
   const names = (stage.visits || []).map((visit) => visit.stationName).filter(Boolean);
@@ -20120,11 +20132,12 @@ function updateCleanDialogFields() {
   const currentType = typeSelect.value || context.draft.cleanType;
   typeSelect.innerHTML = CLEAN_TYPE_DEFINITIONS.filter((item) => definition?.types.includes(item.key)).map((item) => `<option value="${item.key}">${escapeHtml4(item.label)}</option>`).join("");
   typeSelect.value = definition?.types.includes(currentType) ? currentType : definition?.types[0] || "";
-  const usesMaterialCount = ["dummy", "dummywac"].includes(typeSelect.value);
-  document.getElementById("cleanTriggerField").hidden = typeSelect.value !== "wacclean" && !usesMaterialCount;
-  document.getElementById("cleanTriggerLabel").textContent = usesMaterialCount ? "Dummy \u6676\u5706\u6570\uFF08MaterialCount\uFF09" : "\u89E6\u53D1\u6B21\u6570";
+  const isDummyClean = ["dummy", "dummywac"].includes(typeSelect.value);
+  document.getElementById("cleanTriggerField").hidden = typeSelect.value !== "wacclean" && !isDummyClean;
+  document.getElementById("cleanTriggerLabel").textContent = isDummyClean ? "\u5355\u6B21\u6E05\u6D01\u5E26\u7247\u6570\uFF08MaterialCount\uFF09" : "\u89E6\u53D1\u6B21\u6570";
+  document.getElementById("cleanDummyWaferCountField").hidden = !isDummyClean;
+  document.getElementById("cleanDummyWaferCount").disabled = !isDummyClean;
   document.getElementById("cleanWacTimeField").hidden = typeSelect.value !== "dummywac";
-  document.getElementById("cleanPrePJobDummyHint").hidden = !(context.scope === "route" && placement === "prePJobCleanRefs");
 }
 function openCleanDialog(scope, routeIndex, stageIndex = -1, cleanName = "", placement = "") {
   const existing = state.cleans.find((clean) => clean.name === cleanName);
@@ -20148,6 +20161,7 @@ function openCleanDialog(scope, routeIndex, stageIndex = -1, cleanName = "", pla
   document.getElementById("cleanType").innerHTML = `<option value="${draft.cleanType}">${escapeHtml4(draft.cleanType)}</option>`;
   document.getElementById("cleanRecipeTime").value = String(draft.recipeTime);
   document.getElementById("cleanTriggerCount").value = String(draft.triggerCount);
+  document.getElementById("cleanDummyWaferCount").value = String(draft.dummyWaferCount || DEFAULT_DUMMY_WAFER_COUNT);
   document.getElementById("cleanWacRecipeTime").value = String(draft.wacRecipeTime);
   const selectedModules = new Set(stringList(draft.modules));
   const moduleHost = document.getElementById("cleanModuleOptions");
@@ -20176,6 +20190,7 @@ function saveCleanDialog() {
     recipeTime: Number(document.getElementById("cleanRecipeTime").value),
     triggerCount: Number(document.getElementById("cleanTriggerCount").value),
     materialCount: ["dummy", "dummywac"].includes(cleanType) ? Number(document.getElementById("cleanTriggerCount").value) : context.draft.materialCount,
+    dummyWaferCount: ["dummy", "dummywac"].includes(cleanType) ? Number(document.getElementById("cleanDummyWaferCount").value) : 0,
     wacRecipeTime: Number(document.getElementById("cleanWacRecipeTime").value),
     modules
   });
@@ -22479,7 +22494,15 @@ document.addEventListener("keydown", (event) => {
   }
 });
 document.getElementById("cleanPlacement").addEventListener("change", updateCleanDialogFields);
-document.getElementById("cleanType").addEventListener("change", updateCleanDialogFields);
+document.getElementById("cleanType").addEventListener("change", (event) => {
+  const previousType = state.cleanDialogContext?.draft?.cleanType;
+  const nextType = event.target.value;
+  if (!["dummy", "dummywac"].includes(previousType) && ["dummy", "dummywac"].includes(nextType)) {
+    document.getElementById("cleanDummyWaferCount").value = String(DEFAULT_DUMMY_WAFER_COUNT);
+  }
+  if (state.cleanDialogContext) state.cleanDialogContext.draft.cleanType = nextType;
+  updateCleanDialogFields();
+});
 document.getElementById("cleanDialogForm").addEventListener("submit", (event) => {
   event.preventDefault();
   saveCleanDialog();

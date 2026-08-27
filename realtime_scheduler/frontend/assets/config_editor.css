@@ -255,7 +255,6 @@
     .clean-dialog-body > p { margin-bottom: 16px; }
     .clean-dialog-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
     .clean-dialog-grid .field input, .clean-dialog-grid .field select { margin-top: 0; }
-    .clean-dummy-material-hint { grid-column: 1 / -1; margin: -4px 0 0; padding: 9px 11px; border: 1px solid #c8d8ef; border-radius: 8px; color: #34527f; background: #f2f7ff; font-size: 11px; line-height: 1.45; }
     .clean-module-field { grid-column: 1 / -1; margin: 0; padding: 12px; border: 1px solid #dbe3ee; border-radius: 10px; }
     .clean-module-field legend { padding: 0 5px; color: #42526b; font-size: 12px; font-weight: 700; }
     .clean-module-field > small { display: block; margin-top: 9px; color: var(--muted); font-size: 9px; }
@@ -270,7 +269,6 @@
     .clean-dialog-actions { display: grid; grid-template-columns: auto 1fr auto auto; }
     @media (max-width: 700px) {
       .clean-dialog-grid { grid-template-columns: 1fr; }
-      .clean-dummy-material-hint { grid-column: auto; }
       .clean-module-field { grid-column: auto; }
       .context-clean-item { align-items: flex-start; flex-direction: column; }
     }

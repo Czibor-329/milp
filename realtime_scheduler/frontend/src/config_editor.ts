@@ -70,6 +70,7 @@ const PROCESSING_STATION_TYPES = new Set([
 const FIRST_ROBOT_SLOT_ID = 1;
 const DUAL_ARM_SLOT_COUNT = 2;
 const SEARCH_TELEMETRY_POLL_MILLISECONDS = 75;
+const DEFAULT_DUMMY_WAFER_COUNT = 8;
 const STATION_ACTION_TIME_FIELDS = [
   { key: "PickPrepareTime", label: "取片准备" },
   { key: "PickCompleteTime", label: "取片完成" },
@@ -178,6 +179,10 @@ function normalizeClean(clean) {
     isDummy ? (value.materialCount ?? value.triggerCount) : (value.triggerCount ?? value.lower),
   ) || defaultTriggerCount));
   if (isDummy) value.materialCount = value.triggerCount;
+  const dummyWaferCount = Number(value.dummyWaferCount);
+  value.dummyWaferCount = isDummy
+    ? Math.max(1, Math.floor(Number.isFinite(dummyWaferCount) ? dummyWaferCount : DEFAULT_DUMMY_WAFER_COUNT))
+    : 0;
   const wacRecipeTime = Number(value.wacRecipeTime ?? value.emptyRecipeTime);
   value.wacRecipeTime = Math.max(0, Number.isFinite(wacRecipeTime) ? wacRecipeTime : 20);
   value.modules = [...new Set(stringList(value.modules))];
@@ -198,9 +203,9 @@ function automaticCleanName(clean) {
   const labels = Object.fromEntries(CLEAN_TYPE_DEFINITIONS.map(item => [item.key, item.label]));
   const mainDuration = formatCleanSeconds(value.recipeTime);
   if (value.cleanType === "dummywac") {
-    return `${labels[value.cleanType]} · ${value.triggerCount}片 · 主清洁 ${mainDuration} · WAC ${formatCleanSeconds(value.wacRecipeTime)}`;
+    return `${labels[value.cleanType]} · 单次 ${value.triggerCount}片 · 库存 ${value.dummyWaferCount}片 · 主清洁 ${mainDuration} · WAC ${formatCleanSeconds(value.wacRecipeTime)}`;
   }
-  if (value.cleanType === "dummy") return `${labels[value.cleanType]} · ${value.triggerCount}片 · ${mainDuration}`;
+  if (value.cleanType === "dummy") return `${labels[value.cleanType]} · 单次 ${value.triggerCount}片 · 库存 ${value.dummyWaferCount}片 · ${mainDuration}`;
   return `${labels[value.cleanType]} · ${mainDuration}`;
 }
 
@@ -264,7 +269,12 @@ function runtimeClean(clean) {
 
 /** 创建一个使用默认时长且尚未选择腔室的 Clean。 */
 function makeClean(cleanType = "preclean") {
-  return normalizeClean({ name: "", cleanType, recipeTime: 20, triggerCount: 5, wacRecipeTime: 20, modules: [] });
+  const triggerCount = ["dummy", "dummywac"].includes(cleanType) ? 2 : 5;
+  return normalizeClean({
+    name: "", cleanType, recipeTime: 20, triggerCount,
+    dummyWaferCount: DEFAULT_DUMMY_WAFER_COUNT,
+    wacRecipeTime: 20, modules: [],
+  });
 }
 
 /** 判断 Step 是否使用 Robot；旧数据没有类型时按已有候选项和原有交替规则兼容。 */
@@ -2416,15 +2426,14 @@ function updateCleanDialogFields() {
     .map(item => `<option value="${item.key}">${escapeHtml(item.label)}</option>`)
     .join("");
   typeSelect.value = definition?.types.includes(currentType) ? currentType : definition?.types[0] || "";
-  const usesMaterialCount = ["dummy", "dummywac"].includes(typeSelect.value);
-  document.getElementById("cleanTriggerField").hidden = typeSelect.value !== "wacclean" && !usesMaterialCount;
-  document.getElementById("cleanTriggerLabel").textContent = usesMaterialCount
-    ? "Dummy 晶圆数（MaterialCount）"
+  const isDummyClean = ["dummy", "dummywac"].includes(typeSelect.value);
+  document.getElementById("cleanTriggerField").hidden = typeSelect.value !== "wacclean" && !isDummyClean;
+  document.getElementById("cleanTriggerLabel").textContent = isDummyClean
+    ? "单次清洁带片数（MaterialCount）"
     : "触发次数";
+  document.getElementById("cleanDummyWaferCountField").hidden = !isDummyClean;
+  document.getElementById("cleanDummyWaferCount").disabled = !isDummyClean;
   document.getElementById("cleanWacTimeField").hidden = typeSelect.value !== "dummywac";
-  document.getElementById("cleanPrePJobDummyHint").hidden = !(
-    context.scope === "route" && placement === "prePJobCleanRefs"
-  );
 }
 
 /** 打开 Route 或 RouteStep 的 Clean 参数弹窗。 */
@@ -2452,6 +2461,7 @@ function openCleanDialog(scope, routeIndex, stageIndex = -1, cleanName = "", pla
   document.getElementById("cleanType").innerHTML = `<option value="${draft.cleanType}">${escapeHtml(draft.cleanType)}</option>`;
   document.getElementById("cleanRecipeTime").value = String(draft.recipeTime);
   document.getElementById("cleanTriggerCount").value = String(draft.triggerCount);
+  document.getElementById("cleanDummyWaferCount").value = String(draft.dummyWaferCount || DEFAULT_DUMMY_WAFER_COUNT);
   document.getElementById("cleanWacRecipeTime").value = String(draft.wacRecipeTime);
   const selectedModules = new Set(stringList(draft.modules));
   const moduleHost = document.getElementById("cleanModuleOptions");
@@ -2486,6 +2496,9 @@ function saveCleanDialog() {
     materialCount: ["dummy", "dummywac"].includes(cleanType)
       ? Number(document.getElementById("cleanTriggerCount").value)
       : context.draft.materialCount,
+    dummyWaferCount: ["dummy", "dummywac"].includes(cleanType)
+      ? Number(document.getElementById("cleanDummyWaferCount").value)
+      : 0,
     wacRecipeTime: Number(document.getElementById("cleanWacRecipeTime").value),
     modules,
   });
@@ -4940,7 +4953,16 @@ document.addEventListener("keydown", event => {
   }
 });
 document.getElementById("cleanPlacement").addEventListener("change", updateCleanDialogFields);
-document.getElementById("cleanType").addEventListener("change", updateCleanDialogFields);
+document.getElementById("cleanType").addEventListener("change", event => {
+  const previousType = state.cleanDialogContext?.draft?.cleanType;
+  const nextType = event.target.value;
+  if (!["dummy", "dummywac"].includes(previousType)
+      && ["dummy", "dummywac"].includes(nextType)) {
+    document.getElementById("cleanDummyWaferCount").value = String(DEFAULT_DUMMY_WAFER_COUNT);
+  }
+  if (state.cleanDialogContext) state.cleanDialogContext.draft.cleanType = nextType;
+  updateCleanDialogFields();
+});
 document.getElementById("cleanDialogForm").addEventListener("submit", event => {
   event.preventDefault();
   saveCleanDialog();

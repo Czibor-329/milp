@@ -16,8 +16,8 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 FIRST_SLOT_ID = 1
 MAX_WAFERS_PER_JOB = 25
 DEFAULT_TRIGGER_UPPER = 9999.0
-# DummyPort 的固定库存数量。Dummy wafer 可复用，不根据清洁需求自动增减。
-DUMMY_MATERIAL_MINIMUM_COUNT = 15
+# 旧 Clean 未提供库存配置时使用的 DummyPort wafer 数量。
+DEFAULT_DUMMY_WAFER_COUNT = 8
 DUMMY_MATERIAL_ID_START = 100000
 DUMMY_MATERIAL_LIMIT_LEVEL = 10000
 DUMMY_MATERIAL_USAGE_MIX = 2
@@ -368,6 +368,14 @@ def _runtime_clean(clean: Mapping[str, Any]) -> Dict[str, Any]:
             else []
         ),
         "materialCount": material_count,
+        "dummyWaferCount": (
+            max(1, int(_finite_number(
+                value.get("dummyWaferCount"),
+                DEFAULT_DUMMY_WAFER_COUNT,
+            )))
+            if is_dummy
+            else 0
+        ),
         "preJudge": False,
         "emptyRecipeRef": (
             str(value.get("emptyRecipeRef") or f"{recipe_name}-WAC").strip()
@@ -494,6 +502,23 @@ def _dummy_accessible_pms(route: Mapping[str, Any]) -> List[str]:
         if has_dummy_clean and module_name not in modules:
             modules.append(module_name)
     return modules
+
+
+def _dummy_wafer_count(
+    route: Mapping[str, Any],
+    clean_by_name: Mapping[str, Mapping[str, Any]],
+) -> int:
+    """返回 Route 引用的 Dummy Clean 所配置的最大 DummyPort 库存数。"""
+    counts = [
+        max(1, int(_finite_number(
+            clean_by_name[name].get("dummyWaferCount"),
+            DEFAULT_DUMMY_WAFER_COUNT,
+        )))
+        for name in _string_list(route.get("prePJobCleanRefs"))
+        if name in clean_by_name
+        and _clean_type(clean_by_name[name]) in {"dummy", "dummywac"}
+    ]
+    return max(counts, default=0)
 
 
 def _dummy_material(
@@ -937,6 +962,10 @@ def build_round_update(
         name: build_route(route, recipe_by_name, clean_by_name, robot_names, station_slots_map)
         for name, route in route_by_name.items()
     }
+    dummy_wafer_count_by_route = {
+        name: _dummy_wafer_count(route, clean_by_name)
+        for name, route in route_by_name.items()
+    }
     dummy_accessible_pms: List[str] = []
     for route in built_routes.values():
         for module in _dummy_accessible_pms(route):
@@ -961,6 +990,7 @@ def build_round_update(
     control_jobs: List[Dict[str, Any]] = []
     referenced_routes: Dict[str, Dict[str, Any]] = {}
     round_uses_dummy_material = False
+    round_dummy_wafer_count = 0
     used_control_load_ports: Dict[str, str] = {}
     for cjob_index, cjob in enumerate(cjobs, start=1):
         task_id = str(cjob.get("taskId") or cjob.get("TaskID") or cjob_index).strip()
@@ -1026,6 +1056,10 @@ def build_round_update(
                 round_uses_dummy_material
                 or bool(_dummy_accessible_pms(runtime_route))
             )
+            round_dummy_wafer_count = max(
+                round_dummy_wafer_count,
+                dummy_wafer_count_by_route.get(route_name, 0),
+            )
             runtime_route["Name"] = runtime_route_name
             route_steps = runtime_route.get("RouteSteps") or []
             for step_index in (0, len(route_steps) - 1):
@@ -1069,8 +1103,8 @@ def build_round_update(
             "TaskMode": task_mode, "PJobNameList": runtime_pjob_names,
             "MaterialCount": cjob_material_count,
         })
-    # Dummy wafer 在不同 Clean 与腔室之间复用；库存固定为十五片，不按任务需求扩容。
-    dummy_material_count = DUMMY_MATERIAL_MINIMUM_COUNT
+    # DummyPort 库存与 Clean 的 MaterialCount 独立，采用当前轮所引用的页面配置。
+    dummy_material_count = round_dummy_wafer_count
     if round_uses_dummy_material and build_state.dummy_material_count < dummy_material_count:
         dummy_port = next(
             (

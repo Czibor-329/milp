@@ -304,19 +304,19 @@ class RecomputeFailureOutputTests(unittest.TestCase):
         self.assertIn("!rec.removedByRecompute", viewer)
         self.assertIn('fillOpacity = bar.rec.removedByRecompute ? "0.24" : "1"', viewer)
 
-    def test_frontend_version_and_cache_keys_are_1_5_2(self) -> None:
+    def test_frontend_version_and_cache_keys_are_1_5_3(self) -> None:
         """前端显示版本、包版本和主资源缓存键必须同步。"""
         frontend_root = ROOT / "realtime_scheduler" / "frontend"
         template = (frontend_root / "config_editor.html").read_text(encoding="utf-8")
         package = json.loads((frontend_root / "package.json").read_text(encoding="utf-8"))
         package_lock = json.loads((frontend_root / "package-lock.json").read_text(encoding="utf-8"))
 
-        self.assertEqual("1.5.2", package["version"])
-        self.assertEqual("1.5.2", package_lock["version"])
-        self.assertEqual("1.5.2", package_lock["packages"][""]["version"])
-        self.assertIn('class="frontend-version">前端 v1.5.2</span>', template)
-        self.assertIn('/assets/config_editor.css?v=1.5.2', template)
-        self.assertIn('/assets/config_editor.js?v=1.5.2', template)
+        self.assertEqual("1.5.3", package["version"])
+        self.assertEqual("1.5.3", package_lock["version"])
+        self.assertEqual("1.5.3", package_lock["packages"][""]["version"])
+        self.assertIn('class="frontend-version">前端 v1.5.3</span>', template)
+        self.assertIn('/assets/config_editor.css?v=1.5.3', template)
+        self.assertIn('/assets/config_editor.js?v=1.5.3', template)
 
     def test_recompute_preparation_error_keeps_last_successful_movelist(self) -> None:
         """算法调用前的旧计划回放异常也应返回上一代诊断甘特图。"""
@@ -1550,6 +1550,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual(("WacClean", ["ProcessCount"]), (wac["taskName"], wac["updateStateVariables"]))
         self.assertEqual(("PreDummyClean", 4), (dummy["taskName"], dummy["materialCount"]))
         self.assertEqual(("PreWacClean", 2), (dummy_wac["taskName"], dummy_wac["materialCount"]))
+        self.assertEqual(8, dummy_wac["dummyWaferCount"])
         self.assertEqual("DummyWac-Recipe-WAC", dummy_wac["emptyRecipeRef"])
         self.assertEqual(6, dummy_wac["wacRecipeTime"])
         self.assertEqual(["PM1"], dummy_wac["modules"])
@@ -1784,8 +1785,8 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertGreater(result["makespan"], 0)
 
-    def test_dummy_clean_adds_fixed_material_template_and_per_pm_route_conditions(self) -> None:
-        """Dummy Clean 应固定准备十五片可复用库存，并写入绑定腔室与 Route 条件。"""
+    def test_dummy_clean_uses_configured_dummy_port_inventory(self) -> None:
+        """DummyPort 库存应采用独立配置，不与 Clean MaterialCount 混用。"""
         route = _route("DummyRoute", "PM1,PM2", "Recipe1")
         route["prePJobCleanRefs"] = ["DummyClean"]
         plan = {
@@ -1798,6 +1799,8 @@ class ConfigEditorServerTests(unittest.TestCase):
                 "name": "DummyClean",
                 "cleanType": "dummy",
                 "recipeTime": 6,
+                "materialCount": 2,
+                "dummyWaferCount": 6,
                 "modules": ["PM1", "PM2"],
             }],
             "routes": [route],
@@ -1815,7 +1818,7 @@ class ConfigEditorServerTests(unittest.TestCase):
             for material in update["Materials"]
             if material["CurrentModuleName"] == "DummyPort"
         ]
-        self.assertEqual(15, len(dummy_materials))
+        self.assertEqual(6, len(dummy_materials))
         self.assertTrue(all(
             material["AccessiblePM"] == ["PM1", "PM2"]
             for material in dummy_materials
@@ -1831,8 +1834,8 @@ class ConfigEditorServerTests(unittest.TestCase):
             self.assertEqual(2, task["MaterialCount"])
             self.assertEqual("", task["EmptyCleanRecipeAfterMaterial"])
 
-    def test_dummy_clean_reuses_high_limit_inventory_between_chambers(self) -> None:
-        """固定十五片库存的 Dummy 晶圆应可跨 PM 复用。"""
+    def test_dummy_clean_defaults_dummy_port_inventory_to_eight(self) -> None:
+        """旧 Clean 未配置 DummyPort 库存时应默认准备八片。"""
         route = _route("DummyReuseRoute", "PM1,PM2,PM3", "Recipe1")
         route["prePJobCleanRefs"] = ["DummyClean"]
         plan = {
@@ -1849,10 +1852,17 @@ class ConfigEditorServerTests(unittest.TestCase):
             "rounds": [{"currentTime": 0, "jobs": [_job("J1", "DummyReuseRoute", "LP1")]}],
         }
 
-        result = execute_plan(plan)
-
-        self.assertTrue(result["ok"])
-        self.assertGreater(result["makespan"], 0)
+        update = build_round_update(
+            plan,
+            plan["rounds"][0],
+            0.0,
+            BuildState(),
+        )
+        dummy_materials = [
+            material for material in update["Materials"]
+            if material["CurrentModuleName"] == "DummyPort"
+        ]
+        self.assertEqual(8, len(dummy_materials))
 
     def test_editor_uses_persistent_route_table_and_step_drawer(self) -> None:
         """路径按工艺结构折叠，Route 和 Step 都提供 Clean 弹窗入口。"""
@@ -1865,7 +1875,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("<span>结果分析</span>", html)
         self.assertIn("<span>路径配置</span>", html)
         self.assertNotIn('data-tab-view="clean"', html)
-        self.assertIn('class="frontend-version">前端 v1.5.2</span>', html)
+        self.assertIn('class="frontend-version">前端 v1.5.3</span>', html)
         self.assertIn('data-option="residencyGuardSeconds"', html)
         self.assertIn('data-option="maximumRobotHoldingSeconds"', html)
         self.assertIn('data-option="maximumSystemResidenceCv"', html)
@@ -1999,8 +2009,13 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("function routePickerSpecialCleanSummary", html)
         self.assertIn("function routePickerCleanSummary", html)
         self.assertIn("function routeHasTimeConstraint", html)
-        self.assertIn("Dummy 晶圆数（MaterialCount）", html)
-        self.assertIn("Dummy wafer 投入数量不可配置，系统固定投放 15 片。", html)
+        self.assertIn("单次清洁带片数（MaterialCount）", html)
+        self.assertIn("DEFAULT_DUMMY_WAFER_COUNT = 8", html)
+        self.assertIn('id="cleanDummyWaferCountField" hidden', page_template)
+        self.assertIn('id="cleanDummyWaferCount" type="number" min="1" step="1" value="8"', page_template)
+        self.assertIn('cleanDummyWaferCountField").hidden = !isDummyClean', html)
+        self.assertIn('cleanDummyWaferCount").disabled = !isDummyClean', html)
+        self.assertNotIn("Dummy wafer 投入数量不可配置", page_template)
         self.assertIn("Buffer Option", html)
         self.assertIn('class="pjob-route-card-meta"', html)
         self.assertIn('class="route-summary-primary"', html)
