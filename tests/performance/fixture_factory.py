@@ -1,7 +1,7 @@
-"""生成 v6 性能测试数据目录。
+"""生成 v7 性能测试数据目录。
 
 本模块只为测试和基准运行创建确定性数据，不参与生产数据读写。生成结果遵循
-``data/datasets`` 的 v6 布局，并用固定名称和内容保证相同配置产生相同哈希。
+``data/datasets`` 的 v7 布局，并用固定名称和内容保证相同配置产生相同哈希。
 设备数量受平台性能标准约束，任何夹具都不得超过十台设备。
 """
 
@@ -14,7 +14,7 @@ from typing import Any, Mapping
 
 
 PERFORMANCE_PROFILE_SCHEMA_VERSION = 1
-DATASET_SCHEMA_VERSION = 6
+DATASET_SCHEMA_VERSION = 7
 MAXIMUM_DEVICE_COUNT = 10
 
 
@@ -52,7 +52,7 @@ def load_performance_profiles(path: Path) -> Mapping[str, Any]:
     return payload
 
 
-def generate_v6_dataset(
+def generate_v7_dataset(
     destination: Path,
     *,
     device_count: int,
@@ -60,7 +60,7 @@ def generate_v6_dataset(
     payload_bytes_per_test: int,
     round_count: int,
 ) -> dict[str, Any]:
-    """生成一份确定性的 v6 数据集并返回规模摘要。
+    """生成一份确定性的 v7 数据集并返回规模摘要。
 
     Args:
         destination: 新数据集根目录，调用前应为空或不存在。

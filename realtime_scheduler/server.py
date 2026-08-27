@@ -3325,7 +3325,13 @@ def execute_plan(raw_plan: Mapping[str, Any]) -> Dict[str, Any]:
         HongYeValidationSession() if use_hongye_validation else None
     )
     reproduction = ReproductionLog(hongye_session=hongye_session)
-    reproduction.add("Input", [deepcopy(dict(raw_plan))])
+    # Input 是前端复现上下文，不属于 HongYe 的增量校验协议。把整份页面计划
+    # 发送给校验子进程只会产生一次无效的 JSON 序列化和跨进程复制。
+    reproduction.add(
+        "Input",
+        [deepcopy(dict(raw_plan))],
+        forward_to_validator=False,
+    )
     cpu_started = time.thread_time() if hasattr(time, "thread_time") else time.process_time()
     try:
         result = _execute_plan(raw_plan, reproduction)
@@ -4933,6 +4939,22 @@ def get_workspace_test(
             resolved, _normalized_route_aliases(device.get("routeAliases")),
         )
         return resolved
+
+
+def get_workspace_run_context(
+    device_id: str,
+    test_id: str,
+    path: Path = WORKSPACE_STORE_PATH,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """按需读取单测运行所需的设备概览和目标测试。
+
+    参数 ``device_id`` 和 ``test_id`` 分别标识设备与测试；返回不含其他完整
+    测试的设备上下文及目标测试。该边界供单测运行接口使用，避免点击运行时退回
+    到读取整台设备全部 ``test.json`` 的旧目录路径。
+    """
+    device = get_workspace_device_overview(device_id, path)
+    test_case = get_workspace_test(device_id, test_id, path)
+    return device, test_case
 
 
 def _zip_json_bytes(files: Mapping[str, Any]) -> bytes:
@@ -7085,13 +7107,10 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                     str(payload.get("testCaseName") or payload.get("deviceName") or "当前测试"),
                 )
             if workspace_device_id and workspace_test_id:
-                device = get_workspace_device(workspace_device_id)
-                test_case = next((
-                    item for item in (device.get("tests") or [])
-                    if str(item.get("id") or "") == workspace_test_id
-                ), None)
-                if test_case is None:
-                    raise ValueError(f"测试集不存在：{workspace_test_id}")
+                device, test_case = get_workspace_run_context(
+                    workspace_device_id,
+                    workspace_test_id,
+                )
                 selected_plan = deepcopy(dict(payload))
                 runtime_device = deepcopy(device.get("device"))
                 if isinstance(runtime_device, dict):

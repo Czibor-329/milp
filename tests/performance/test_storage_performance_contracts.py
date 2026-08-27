@@ -8,20 +8,23 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from realtime_scheduler import server
 from tests.performance.fixture_factory import (
-    generate_v6_dataset,
+    generate_v7_dataset,
     load_performance_profiles,
 )
 
 
 ROOT = Path(__file__).resolve().parents[2]
 PROFILE_PATH = ROOT / "performance" / "profiles.json"
+BUDGET_PATH = ROOT / "performance" / "budgets.json"
 
 
 def _test_file_hashes(store_dir: Path) -> dict[Path, str]:
@@ -55,8 +58,8 @@ class PerformanceFixtureTests(unittest.TestCase):
                 "payload_bytes_per_test": 128,
                 "round_count": 2,
             }
-            first = generate_v6_dataset(root / "first", **arguments)
-            second = generate_v6_dataset(root / "second", **arguments)
+            first = generate_v7_dataset(root / "first", **arguments)
+            second = generate_v7_dataset(root / "second", **arguments)
 
         self.assertEqual(first, second)
         self.assertEqual(2, first["deviceCount"])
@@ -66,7 +69,7 @@ class PerformanceFixtureTests(unittest.TestCase):
         """生成器必须拒绝超出产品上限的规模定义。"""
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(ValueError, "1~10"):
-                generate_v6_dataset(
+                generate_v7_dataset(
                     Path(directory) / "datasets",
                     device_count=11,
                     tests_per_device=1,
@@ -82,7 +85,7 @@ class WorkspaceStorageComplexityTests(unittest.TestCase):
         """为每项测试创建包含多设备、多测试的可读数据目录。"""
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.store_dir = Path(self.temporary_directory.name) / "datasets"
-        generate_v6_dataset(
+        generate_v7_dataset(
             self.store_dir,
             device_count=3,
             tests_per_device=12,
@@ -156,6 +159,55 @@ class WorkspaceStorageComplexityTests(unittest.TestCase):
         self.assertEqual(self.test_id, test_case["id"])
         self.assertEqual(1, len(read_test_files))
         self.assertEqual(self.test_id, read_test_files[0].parent.name)
+
+    def test_single_run_context_opens_only_target_test(self) -> None:
+        """前端点击运行时只能读取目标测试，不能加载同设备的全部测试。"""
+        context, reads = self._record_json_reads()
+        with context, patch.object(
+            server,
+            "_read_workspace_catalog_unlocked",
+            side_effect=AssertionError("单测运行不得读取完整工作区目录"),
+        ), patch.object(
+            server,
+            "_workspace_data_update_required",
+            side_effect=AssertionError("单测运行不得扫描数据文件时间戳"),
+        ):
+            device, test_case = server.get_workspace_run_context(
+                self.device_id,
+                self.test_id,
+                self.store_dir,
+            )
+
+        read_test_files = [path for path in reads if path.name == "test.json"]
+        self.assertEqual(self.device_id, device["id"])
+        self.assertEqual(self.test_id, test_case["id"])
+        self.assertEqual(1, len(read_test_files))
+        self.assertEqual(self.test_id, read_test_files[0].parent.name)
+
+    def test_single_run_preparation_p95_stays_within_frontend_budget(self) -> None:
+        """运行准备 P95 必须满足前端点击到算法启动前的附加耗时预算。"""
+        budget = json.loads(BUDGET_PATH.read_text(encoding="utf-8"))[
+            "absoluteMilliseconds"
+        ]["singleRunPreparationP95"]
+        durations: list[float] = []
+        for _ in range(20):
+            started = time.perf_counter()
+            device, test_case = server.get_workspace_run_context(
+                self.device_id,
+                self.test_id,
+                self.store_dir,
+            )
+            durations.append((time.perf_counter() - started) * 1000.0)
+            self.assertEqual(self.device_id, device["id"])
+            self.assertEqual(self.test_id, test_case["id"])
+
+        ordered = sorted(durations)
+        p95 = ordered[int((len(ordered) - 1) * 0.95)]
+        self.assertLessEqual(
+            p95,
+            budget,
+            f"单测运行准备 P95={p95:.1f} ms，超过预算 {budget} ms",
+        )
 
     def test_single_test_save_keeps_other_test_hashes(self) -> None:
         """保存目标测试不得改写或规范化其他测试文件。"""

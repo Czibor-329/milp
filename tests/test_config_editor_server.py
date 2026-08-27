@@ -304,19 +304,19 @@ class RecomputeFailureOutputTests(unittest.TestCase):
         self.assertIn("!rec.removedByRecompute", viewer)
         self.assertIn('fillOpacity = bar.rec.removedByRecompute ? "0.24" : "1"', viewer)
 
-    def test_frontend_version_and_cache_keys_are_1_5_3(self) -> None:
+    def test_frontend_version_and_cache_keys_are_1_5_4(self) -> None:
         """前端显示版本、包版本和主资源缓存键必须同步。"""
         frontend_root = ROOT / "realtime_scheduler" / "frontend"
         template = (frontend_root / "config_editor.html").read_text(encoding="utf-8")
         package = json.loads((frontend_root / "package.json").read_text(encoding="utf-8"))
         package_lock = json.loads((frontend_root / "package-lock.json").read_text(encoding="utf-8"))
 
-        self.assertEqual("1.5.3", package["version"])
-        self.assertEqual("1.5.3", package_lock["version"])
-        self.assertEqual("1.5.3", package_lock["packages"][""]["version"])
-        self.assertIn('class="frontend-version">前端 v1.5.3</span>', template)
-        self.assertIn('/assets/config_editor.css?v=1.5.3', template)
-        self.assertIn('/assets/config_editor.js?v=1.5.3', template)
+        self.assertEqual("1.5.4", package["version"])
+        self.assertEqual("1.5.4", package_lock["version"])
+        self.assertEqual("1.5.4", package_lock["packages"][""]["version"])
+        self.assertIn('class="frontend-version">前端 v1.5.4</span>', template)
+        self.assertIn('/assets/config_editor.css?v=1.5.4', template)
+        self.assertIn('/assets/config_editor.js?v=1.5.4', template)
 
     def test_recompute_preparation_error_keeps_last_successful_movelist(self) -> None:
         """算法调用前的旧计划回放异常也应返回上一代诊断甘特图。"""
@@ -1875,7 +1875,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("<span>结果分析</span>", html)
         self.assertIn("<span>路径配置</span>", html)
         self.assertNotIn('data-tab-view="clean"', html)
-        self.assertIn('class="frontend-version">前端 v1.5.3</span>', html)
+        self.assertIn('class="frontend-version">前端 v1.5.4</span>', html)
         self.assertIn('data-option="residencyGuardSeconds"', html)
         self.assertIn('data-option="maximumRobotHoldingSeconds"', html)
         self.assertIn('data-option="maximumSystemResidenceCv"', html)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import unittest
+from unittest.mock import Mock
 
 from realtime_scheduler.batch_service import build_workspace_batch_plan
 from realtime_scheduler.server import MoveListValidationError, ReproductionLog
@@ -99,6 +100,20 @@ class HongYeValidationSessionTests(unittest.TestCase):
             raised.exception.gantt_output["Validation"]["Issues"][0]["Code"],
             "MOVE.TYPE",
         )
+
+    def test_reproduction_input_is_not_forwarded_to_hongye(self) -> None:
+        """前端完整计划只进入复现日志，不得增加校验进程的启动前传输耗时。"""
+        validator = Mock()
+        reproduction = ReproductionLog(hongye_session=validator)
+
+        reproduction.add(
+            "Input",
+            [{"options": {"largeFrontendPayload": "x" * 10_000}}],
+            forward_to_validator=False,
+        )
+
+        validator.add_event.assert_not_called()
+        self.assertEqual("Input", reproduction.entries[0]["Describe"])
 
 
 class HongYeSelectionDefaultsTests(unittest.TestCase):
