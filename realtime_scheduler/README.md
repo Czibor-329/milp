@@ -88,7 +88,8 @@ output_json = update(tool_json, algorithm="heuristic")
 测试组别作为设备下的独立数据保存，允许先创建空组，再在当前组内新建或复制测试；旧测试会自动归入“未分组”，无需手工迁移。
 
 路径配置只维护 Step 与候选腔室拓扑。加工时间、QTime、驻留、Buffer 和 Clean
-在“运行计划”中为当前测试选择路径模板后配置；这些参数随测试保存，不会回写共享模板。
+在“运行计划”中为具体 PJob 选择路径模板后配置；这些参数随 PJob 路径实例保存，
+同一测试内引用相同模板的多个 CJob/PJob 也互不影响，并且不会回写共享模板。
 平台物理状态回放会把 Place 到 PM、Aligner 或 LoadLock 的物料保留为待服务状态；
 Place 回 LoadPort 或 DummyPort 的物料则直接进入可再次 Pick 的完成态，使同一片
 Dummy 能在复合清洁路径中安全返回库存并由后续 PJob 继续复用。

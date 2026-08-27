@@ -168,7 +168,7 @@ MAX_SAVED_SINGLE_RUNS = 8
 MAX_CJOB_CYCLE = 1000
 MAX_WORKSPACE_DEVICE_COUNT = 10
 CJOB_CYCLE_EVENT_EPSILON_MULTIPLIER = 2.0
-WORKSPACE_STORE_VERSION = 6
+WORKSPACE_STORE_VERSION = 7
 WORKSPACE_STORE_VERSION_FILE = "manifest.json"
 LEGACY_WORKSPACE_STORE_VERSION_FILE = ".workspace-version.json"
 WORKSPACE_TEST_INDEX_FILE = ".tests-index.json"
@@ -3573,7 +3573,7 @@ def _workspace_data_update_required(path: Path = WORKSPACE_STORE_PATH) -> bool:
 
 
 def _prepare_workspace_data(path: Path = WORKSPACE_STORE_PATH) -> bool:
-    """按需完成一次启动前数据迁移，并持久化完成版本供后续启动跳过。"""
+    """按需完成一次启动前数据迁移，并为目录格式升级保留可恢复备份。"""
     if not _workspace_data_update_required(path):
         return False
     list_workspace_devices(path)
@@ -3581,6 +3581,29 @@ def _prepare_workspace_data(path: Path = WORKSPACE_STORE_PATH) -> bool:
         with _workspace_catalog_guard(path):
             _write_workspace_store_version(path)
     return True
+
+
+def _backup_workspace_directory_before_upgrade(path: Path) -> Optional[Path]:
+    """在首次改写旧目录前创建一次完整备份；同一版本升级重复调用保持幂等。"""
+    if path.suffix or not path.is_dir():
+        return None
+    source_version = _read_workspace_store_version(path)
+    if source_version <= 0 or source_version >= WORKSPACE_STORE_VERSION:
+        return None
+    backup_root = (
+        DATA_DIR / "migration-backups"
+        if path == WORKSPACE_STORE_PATH
+        else path.parent / "migration-backups"
+    )
+    backup_root.mkdir(parents=True, exist_ok=True)
+    prefix = f"datasets-v{source_version}-to-v{WORKSPACE_STORE_VERSION}-"
+    existing = next(backup_root.glob(f"{prefix}*"), None)
+    if existing is not None:
+        return existing
+    backup_stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup_path = backup_root / f"{prefix}{backup_stamp}-{uuid.uuid4().hex[:8]}"
+    shutil.copytree(path, backup_path)
+    return backup_path
 
 
 def _merge_named_assets(base: Sequence[Any], additions: Sequence[Any]) -> List[Dict[str, Any]]:
@@ -3891,6 +3914,29 @@ def _synchronize_workspace_test_route_configs(device: Dict[str, Any]) -> None:
         test_case["routeConfigs"] = normalized
 
 
+def _migrate_workspace_pjob_route_configs(
+    test_case: Dict[str, Any],
+    route_configs: Mapping[str, Any],
+) -> bool:
+    """把旧版按模板共享的参数复制到每个 PJob，确保路径实例互不影响。"""
+    changed = False
+    for round_row in test_case.get("rounds") or []:
+        if not isinstance(round_row, Mapping):
+            continue
+        for cjob in round_row.get("cjobs") or []:
+            if not isinstance(cjob, Mapping):
+                continue
+            for pjob in cjob.get("pjobs") or []:
+                if not isinstance(pjob, dict) or isinstance(pjob.get("routeConfig"), Mapping):
+                    continue
+                route_name = str(pjob.get("routeRef") or "").strip()
+                config = route_configs.get(route_name)
+                if isinstance(config, Mapping):
+                    pjob["routeConfig"] = deepcopy(dict(config))
+                    changed = True
+    return changed
+
+
 def _strip_workspace_route_parameters(route: Dict[str, Any]) -> None:
     """原地清除共享模板中的测试参数，仅保留 Step 与候选腔室拓扑。"""
     route.pop("bufferOption", None)
@@ -4115,6 +4161,11 @@ def _migrate_workspace_catalog(catalog: Dict[str, Any]) -> bool:
         _synchronize_workspace_test_route_configs(raw_device)
         if previous_route_configs != [test.get("routeConfigs") for test in tests]:
             changed = True
+        if source_version < 7:
+            for test in tests:
+                configs = test.get("routeConfigs")
+                if isinstance(configs, Mapping) and _migrate_workspace_pjob_route_configs(test, configs):
+                    changed = True
         if raw_device.get("cleans") != cleans:
             raw_device["cleans"] = cleans
             changed = True
@@ -4164,6 +4215,7 @@ def _read_workspace_catalog_unlocked(path: Path) -> Dict[str, Any]:
     # 规范化所有测试集。路径模板的快速保存依赖此分支只读取必要文件。
     if not _workspace_data_update_required(path):
         return catalog
+    _backup_workspace_directory_before_upgrade(path)
     changed = _migrate_workspace_catalog(catalog)
     if changed:
         _write_workspace_catalog_unlocked(path, catalog)
@@ -5732,7 +5784,7 @@ def _normalize_workspace_pjob(
     origin_route = raw.get("originRoute", raw.get("OriginRoute"))
     if isinstance(origin_route, Mapping):
         origin_route = origin_route.get("name") or origin_route.get("Name")
-    return {
+    normalized = {
         "jobName": job_name,
         "taskId": task_id,
         "waferCount": wafer_count,
@@ -5743,6 +5795,9 @@ def _normalize_workspace_pjob(
         ),
         "priority": max(1, int(_finite_number(raw.get("priority", raw.get("Priority")), 1))),
     }
+    if isinstance(raw.get("routeConfig"), Mapping):
+        normalized["routeConfig"] = deepcopy(dict(raw["routeConfig"]))
+    return normalized
 
 
 def _normalize_workspace_round(

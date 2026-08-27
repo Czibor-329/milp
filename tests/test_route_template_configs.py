@@ -105,6 +105,78 @@ def test_batch_plan_merges_test_parameters_without_mutating_template() -> None:
     assert template["stages"][1]["visits"] == [{"stationName": "PM1"}]
 
 
+def test_same_template_uses_independent_pjob_route_configs() -> None:
+    """两个 CJob 引用同一模板时，应生成互不覆盖的 Route 与 Recipe 实例。"""
+    template = server._normalized_workspace_routes([_legacy_route()])[0]
+    first_config = server._workspace_route_test_config(_legacy_route())
+    second_config = json.loads(json.dumps(first_config))
+    second_config["stages"]["1"]["processTime"] = 88
+    device = {
+        "name": "Device1",
+        "device": {
+            "Stations": {
+                "LP1": {"Type": "LoadPort", "Capacity": 25},
+                "LP2": {"Type": "LoadPort", "Capacity": 25},
+                "PM1": {"Type": "ProcessChamber", "Capacity": 1},
+            },
+            "Robots": {},
+        },
+        "routes": [template],
+        "cleans": [],
+    }
+    test_case = {
+        "options": {},
+        "routeConfigs": {"R1": first_config},
+        "cleans": [],
+        "rounds": [{"currentTime": 0, "cjobs": [
+            {"taskId": "1", "loadPort": "LP1", "pjobs": [{
+                "routeRef": "R1", "routeConfig": first_config,
+            }]},
+            {"taskId": "2", "loadPort": "LP2", "pjobs": [{
+                "routeRef": "R1", "routeConfig": second_config,
+            }]},
+        ]}],
+    }
+
+    plan = batch_service.build_workspace_batch_plan(device, test_case, "heuristic", {})
+
+    route_refs = [cjob["pjobs"][0]["routeRef"] for cjob in plan["rounds"][0]["cjobs"]]
+    assert route_refs[0] != route_refs[1]
+    route_times = {
+        route["name"]: route["stages"][1]["visits"][0]["processTime"]
+        for route in plan["routes"]
+    }
+    assert [route_times[name] for name in route_refs] == [37, 88]
+    assert len({recipe["name"] for recipe in plan["recipes"]}) == 2
+
+
+def test_v6_migration_copies_route_config_to_each_pjob() -> None:
+    """v6 的模板级参数应幂等复制到每个 PJob，保留原有运行语义。"""
+    config = server._workspace_route_test_config(_legacy_route())
+    catalog = {
+        "version": 6,
+        "devices": [{
+            "id": "device-1",
+            "device": {"Stations": {}, "Robots": {}},
+            "routes": [server._normalized_workspace_routes([_legacy_route()])[0]],
+            "tests": [{
+                "routeConfigs": {"R1": config},
+                "rounds": [{"cjobs": [
+                    {"pjobs": [{"routeRef": "R1"}]},
+                    {"pjobs": [{"routeRef": "R1"}]},
+                ]}],
+            }],
+        }],
+    }
+
+    assert server._migrate_workspace_catalog(catalog) is True
+    pjobs = catalog["devices"][0]["tests"][0]["rounds"][0]["cjobs"]
+    assert pjobs[0]["pjobs"][0]["routeConfig"] == config
+    assert pjobs[1]["pjobs"][0]["routeConfig"] == config
+    assert pjobs[0]["pjobs"][0]["routeConfig"] is not pjobs[1]["pjobs"][0]["routeConfig"]
+    assert server._migrate_workspace_catalog(catalog) is False
+
+
 def test_route_save_endpoint_logic_renames_all_test_references(tmp_path) -> None:
     """独立保存模板时应同步所有测试的引用和 routeConfigs 键。"""
     store_path = tmp_path / "workspaces.json"
@@ -193,6 +265,13 @@ def test_directory_route_save_is_lazy_and_auto_migrates_old_store(tmp_path) -> N
 
     assert server._prepare_workspace_data(store_dir) is True
     assert server._read_workspace_store_version(store_dir) == server.WORKSPACE_STORE_VERSION
+    backups = list((tmp_path / "migration-backups").glob(
+        f"datasets-v4-to-v{server.WORKSPACE_STORE_VERSION}-*"
+    ))
+    assert len(backups) == 1
+    assert json.loads((backups[0] / server.WORKSPACE_STORE_VERSION_FILE).read_text(
+        encoding="utf-8",
+    ))["version"] == 4
     renamed = {**route, "name": "R2"}
     result = server.update_workspace_routes(
         "device-1", {"routes": [renamed], "routeNameChanges": {"R1": "R2"}},
@@ -205,7 +284,9 @@ def test_directory_route_save_is_lazy_and_auto_migrates_old_store(tmp_path) -> N
     assert server.get_workspace_test("device-1", "test-1", store_dir)["rounds"][0]["cjobs"][0]["pjobs"][0]["routeRef"] == "R2"
     device = server.get_workspace_device("device-1", store_dir)
     plan = batch_service.build_workspace_batch_plan(device, persisted_test, "heuristic", {})
-    assert plan["rounds"][0]["cjobs"][0]["pjobs"][0]["routeRef"] == "R2"
+    runtime_route_ref = plan["rounds"][0]["cjobs"][0]["pjobs"][0]["routeRef"]
+    assert runtime_route_ref.startswith("R2__")
+    assert runtime_route_ref in {route["name"] for route in plan["routes"]}
     assert plan["routes"][0]["stages"][1]["visits"][0]["processTime"] == 37
 
 
@@ -296,9 +377,11 @@ def test_route_template_and_test_route_editors_use_separate_ui_states() -> None:
     assert 'route-step-source-note' in route_table
     assert 'fixed ? `<span class="route-step-source-note">由 CJob LoadPort 决定</span>`' in route_table
     assert 'fixed ? `<span class="route-step-readonly">—</span>`' in route_table
-    assert 'function renderRouteBufferEditor(routeIndex)' in source
+    assert 'function renderRouteBufferEditor(routeIndex, context)' in source
     assert 'data-scope="test-route"' in source
     assert 'data-key="bufferOption"' in source
+    assert 'pjob.routeConfig = normalized;' in source
+    assert 'runtimePJobRouteInstances()' in source
     pjob_picker = source.split("function renderPJobRoutePicker", 1)[1].split(
         "/** 绘制重算轮次", 1,
     )[0]

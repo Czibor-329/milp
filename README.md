@@ -39,7 +39,7 @@ python realtime_scheduler\server.py --open
 
 ## 性能回归
 
-平台使用确定性 v6 合成数据验证启动、设备列表、设备概览和单测试读写，正常业务
+平台使用确定性 v7 合成数据验证启动、设备列表、设备概览和单测试读写，正常业务
 规模最多包含 10 台设备。PR 可先执行结构性硬门禁和 `small` HTTP 预算：
 
 ```powershell
@@ -113,7 +113,7 @@ data/
               └── test.json           # 单个测试集
   ```
 
-旧版 `workspaces/` 和 `devices/` 会在首次启动时自动迁移到 v6；原目录移入`migration-backups/`，确认新版数据正常后可由维护人员清理。详细格式、交换包和迁移规则见 [`docs/data-format.md`](docs/data-format.md)。
+旧版 `workspaces/` 和 `devices/` 会在首次启动时自动迁移；v7 将路径参数保存到具体 PJob，使用同一模板的多个 CJob/PJob 仍可配置不同的加工时间、QTime、驻留、Buffer 和 Clean。格式升级前的数据会保留在 `migration-backups/`，确认新版数据正常后可由维护人员清理。详细格式、交换包和迁移规则见 [`docs/data-format.md`](docs/data-format.md)。
 
 - **checkpoints/**：页面上传的模型检查点文件（仅支持 `.npz/.pt/.pth/.ckpt`）。浏览器不会提供用户选择文件的真实路径，因此服务把文件复制到该目录，并返回算法运行时可读取的绝对路径。
   

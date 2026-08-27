@@ -391,6 +391,53 @@ def _batch_apply_route_configs(
     return merged_routes
 
 
+def _batch_pjob_route_instances(
+    routes: Sequence[Mapping[str, Any]],
+    rounds: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """为带独立参数的 PJob 生成唯一 Route/Recipe 实例并同步运行时引用。"""
+    route_by_name = {
+        str(route.get("name") or "").strip(): route
+        for route in routes
+        if str(route.get("name") or "").strip()
+    }
+    instances: List[Dict[str, Any]] = []
+    for round_index, round_row in enumerate(rounds, start=1):
+        raw_cjobs = round_row.get("cjobs")
+        if isinstance(raw_cjobs, list):
+            cjobs = [cjob for cjob in raw_cjobs if isinstance(cjob, dict)]
+        else:
+            cjobs = _round_cjob_rows(round_row)
+            round_row["cjobs"] = cjobs
+            round_row.pop("jobs", None)
+        for cjob_index, cjob in enumerate(cjobs, start=1):
+            task_id = str(cjob.get("taskId") or cjob_index)
+            for pjob_index, pjob in enumerate(cjob.get("pjobs") or [], start=1):
+                if not isinstance(pjob, dict):
+                    continue
+                route_name = str(pjob.get("routeRef") or "").strip()
+                template = route_by_name.get(route_name)
+                config = pjob.get("routeConfig")
+                if template is None or not isinstance(config, Mapping):
+                    continue
+                instance = _batch_apply_route_configs([template], {route_name: config})[0]
+                instance_suffix = f"r{round_index}-t{task_id}-c{cjob_index}-p{pjob_index}"
+                instance_name = f"{route_name}__{instance_suffix}"
+                instance["name"] = instance_name
+                for stage in instance.get("stages") or []:
+                    if not isinstance(stage, Mapping):
+                        continue
+                    for visit in stage.get("visits") or []:
+                        if not isinstance(visit, dict):
+                            continue
+                        recipe_name = str(visit.get("processRecipe") or "").strip()
+                        if recipe_name:
+                            visit["processRecipe"] = f"{recipe_name}__{instance_suffix}"
+                pjob["routeRef"] = instance_name
+                instances.append(instance)
+    return [*routes, *instances]
+
+
 def _batch_test_cleans(
     cleans: Sequence[Mapping[str, Any]],
     routes: Sequence[Mapping[str, Any]],
@@ -509,6 +556,7 @@ def build_workspace_batch_plan(
         [row for row in (device.get("routes") or []) if isinstance(row, Mapping)],
         test_case.get("routeConfigs"),
     )
+    configured_routes = _batch_pjob_route_instances(configured_routes, rounds)
     routes = _batch_test_routes(
         configured_routes,
         rounds,

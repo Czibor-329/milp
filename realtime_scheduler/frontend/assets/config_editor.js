@@ -17878,6 +17878,7 @@ function makePJob(index = 1, routeRef = "", loadPort = "", waferCount = 5) {
     waferCount,
     matList: Array.from({ length: waferCount }, (_, item) => item + 1),
     routeRef,
+    routeConfig: null,
     loadPort,
     priority: 1
   };
@@ -17928,6 +17929,7 @@ function normalizePJob(raw, index, taskId, assignedLoadPort = "") {
     waferCount,
     matList: Array.from({ length: waferCount }, (_, item) => item + 1),
     routeRef: source.routeRef || routeRef || "",
+    routeConfig: source.routeConfig && typeof source.routeConfig === "object" ? structuredClone(source.routeConfig) : null,
     loadPort: assignedLoadPort || source.loadPort || source.LoadPort || "",
     priority: Math.max(1, Number(source.priority ?? source.Priority) || 1)
   };
@@ -17985,7 +17987,7 @@ function normalizeRound(raw, roundIndex, fallbackTime, firstTaskId = roundIndex,
 }
 
 // src/config_editor.ts
-var { VISIT_SHARED_FIELDS: VISIT_SHARED_FIELDS2, automaticTemplateName: automaticTemplateName2, selectReferencedRoutes: selectReferencedRoutes2 } = route_editor_logic_exports;
+var { VISIT_SHARED_FIELDS: VISIT_SHARED_FIELDS2, automaticTemplateName: automaticTemplateName2 } = route_editor_logic_exports;
 var visualizationWorkspace = createVisualizationWorkspace();
 var documentationView = createDocumentationView(document.getElementById("documentationRoot"));
 var batchPerformanceAnalyses = /* @__PURE__ */ new Map();
@@ -18174,7 +18176,7 @@ function automaticCleanName(clean) {
 function renameCleanReferences(oldName, newName) {
   if (!oldName || oldName === newName) return;
   const rename = (value) => stringList(value).map((name) => name === oldName ? newName : name);
-  Object.values(state.testRouteConfigs).forEach((config) => {
+  allTestRouteConfigs().forEach((config) => {
     ROUTE_CLEAN_KEYS.forEach((key) => {
       config[key] = rename(config[key]);
     });
@@ -18331,9 +18333,33 @@ function normalizeTestRouteConfigs(raw, routes) {
   }
   return normalized;
 }
-function runtimeRouteForTemplate(route) {
+function pjobRouteConfig(pjob, route = null) {
+  const template = route || state.routes.find((item) => item.name === pjob?.routeRef);
+  if (!pjob || !template) return null;
+  const fallback = state.testRouteConfigs[template.name] || defaultRouteConfigForRoute(template);
+  const normalized = normalizeTestRouteConfigs(
+    { [template.name]: pjob.routeConfig || fallback },
+    [template]
+  )[template.name];
+  pjob.routeConfig = normalized;
+  return normalized;
+}
+function allTestRouteConfigs() {
+  const configs = [];
+  state.rounds.forEach((round) => round.cjobs.forEach((cjob) => cjob.pjobs.forEach((pjob) => {
+    const config = pjobRouteConfig(pjob);
+    if (config) configs.push(config);
+  })));
+  return configs.length ? configs : Object.values(state.testRouteConfigs);
+}
+function normalizePJobRouteConfigs() {
+  state.rounds.forEach((round) => round.cjobs.forEach((cjob) => cjob.pjobs.forEach((pjob) => {
+    pjobRouteConfig(pjob);
+  })));
+}
+function runtimeRouteForTemplate(route, routeConfig = null) {
   const routeName = String(route?.name || "").trim();
-  const config = state.testRouteConfigs[routeName] || defaultRouteConfigForRoute(route);
+  const config = routeConfig || state.testRouteConfigs[routeName] || defaultRouteConfigForRoute(route);
   const merged = structuredClone(route);
   normalizeRoute(merged);
   merged.bufferOption = Number(config.bufferOption ?? merged.bufferOption ?? 0);
@@ -18361,9 +18387,6 @@ function runtimeRouteForTemplate(route) {
     synchronizeVisits(stage, normalizeVisit);
   });
   return merged;
-}
-function runtimeRoutes() {
-  return (state.routes || []).map((route) => runtimeRouteForTemplate(route));
 }
 function routeTemplateForSave(route) {
   const template = structuredClone(route);
@@ -19584,6 +19607,7 @@ function applyTestCase(testCase) {
   state.rounds.length = state.roundCount;
   state.times[0] = 0;
   normalizeRounds();
+  normalizePJobRouteConfigs();
   state.drawer = null;
   state.routeDirty = false;
   state.routeNameChanges.clear();
@@ -19591,7 +19615,8 @@ function applyTestCase(testCase) {
   state.routeEditSnapshot = null;
   state.routeEditGroupingProfile = null;
   state.routeEditIsNew = false;
-  visualizationWorkspace.setAnalysisConfiguration(runtimeRoutes(), state.rounds);
+  const visualizationPlan = runtimePJobRouteInstances();
+  visualizationWorkspace.setAnalysisConfiguration(visualizationPlan.routes, visualizationPlan.rounds);
   visualizationWorkspace.setReplayPlan(buildPayload());
   state.dirty = false;
   document.getElementById("roundCount").value = state.roundCount;
@@ -20010,10 +20035,25 @@ function cleanContextModules(scope, routeIndex, stageIndex = -1) {
   const stages = scope === "step" ? [route.stages[stageIndex]] : route.stages;
   return [...new Set((stages || []).flatMap((stage) => (stage?.visits || []).map((visit) => visit.stationName).filter((module) => state.processModules.includes(module))))];
 }
+function activePJobRouteContext() {
+  const source = state.drawer || pjobRoutePickerContext;
+  if (!source) return null;
+  return {
+    roundIndex: Number(source.roundIndex),
+    cjobIndex: Number(source.cjobIndex),
+    pjobIndex: Number(source.pjobIndex)
+  };
+}
+function routeConfigForContext(route, context = null) {
+  const target = context || activePJobRouteContext();
+  const pjob = target ? state.rounds[target.roundIndex]?.cjobs[target.cjobIndex]?.pjobs[target.pjobIndex] : null;
+  return pjobRouteConfig(pjob, route);
+}
 function cleanContextReferences(scope, routeIndex, stageIndex, placement) {
   const route = state.routes[routeIndex];
   if (!route) return [];
-  const config = state.testRouteConfigs[route.name] || (state.testRouteConfigs[route.name] = defaultRouteConfigForRoute(route));
+  const config = routeConfigForContext(route);
+  if (!config) return [];
   if (scope === "route") return stringList(config[placement]);
   const stepId = String(route.stages[stageIndex]?.stepId);
   return stringList(config.stages?.[stepId]?.[placement]);
@@ -20027,7 +20067,8 @@ function setCleanContextReference(context, placement, cleanName, enabled) {
     else names.delete(cleanName);
     target[placement] = [...names];
   };
-  const config = state.testRouteConfigs[route.name] || (state.testRouteConfigs[route.name] = defaultRouteConfigForRoute(route));
+  const config = routeConfigForContext(route, context);
+  if (!config) return;
   if (context.scope === "route") update(config);
   else {
     const stepId = String(route.stages[context.stageIndex]?.stepId);
@@ -20094,12 +20135,13 @@ function openCleanDialog(scope, routeIndex, stageIndex = -1, cleanName = "", pla
     scope,
     routeIndex,
     stageIndex,
+    ...activePJobRouteContext(),
     cleanName,
     originalPlacement: selectedPlacement,
     draft: structuredClone(draft)
   };
   document.getElementById("cleanDialogTitle").textContent = `${cleanName ? "\u7F16\u8F91" : "\u65B0\u589E"} ${scope === "route" ? "Job" : "RouteStep"} Clean`;
-  document.getElementById("cleanDialogDescription").textContent = scope === "route" ? "Clean \u53EA\u4F5C\u7528\u4E8E\u5F53\u524D\u6D4B\u8BD5\u7684\u6240\u9009\u8DEF\u5F84\uFF0C\u4E0D\u4F1A\u4FEE\u6539\u8DEF\u5F84\u6A21\u677F\u3002" : "Clean \u53EA\u4F5C\u7528\u4E8E\u5F53\u524D\u6D4B\u8BD5\u7684\u8FD9\u4E2A Step\uFF0C\u4E0D\u4F1A\u4FEE\u6539\u8DEF\u5F84\u6A21\u677F\u3002";
+  document.getElementById("cleanDialogDescription").textContent = scope === "route" ? "Clean \u53EA\u4F5C\u7528\u4E8E\u5F53\u524D PJob \u7684\u6240\u9009\u8DEF\u5F84\uFF0C\u4E0D\u4F1A\u4FEE\u6539\u8DEF\u5F84\u6A21\u677F\u6216\u5176\u4ED6 PJob\u3002" : "Clean \u53EA\u4F5C\u7528\u4E8E\u5F53\u524D PJob \u7684\u8FD9\u4E2A Step\uFF0C\u4E0D\u4F1A\u4FEE\u6539\u8DEF\u5F84\u6A21\u677F\u6216\u5176\u4ED6 PJob\u3002";
   const placementSelect = document.getElementById("cleanPlacement");
   placementSelect.innerHTML = definitions.map((item) => `<option value="${item.key}">${escapeHtml4(item.label)}</option>`).join("");
   placementSelect.value = selectedPlacement;
@@ -20140,8 +20182,17 @@ function saveCleanDialog() {
   if (context.cleanName) {
     const cleanIndex = state.cleans.findIndex((item) => item.name === context.cleanName);
     if (cleanIndex < 0) return;
-    state.cleans[cleanIndex] = clean;
-    if (context.originalPlacement !== placement) {
+    const sharedClean = cleanReferenceCount(context.cleanName) > 1;
+    if (sharedClean) {
+      setCleanContextReference(context, context.originalPlacement, context.cleanName, false);
+      clean.name = `__pjob_clean_${Date.now()}_${state.cleans.length}`;
+      state.cleans.push(clean);
+      synchronizeCleanNames();
+      setCleanContextReference(context, placement, state.cleans.at(-1).name, true);
+    } else {
+      state.cleans[cleanIndex] = clean;
+    }
+    if (!sharedClean && context.originalPlacement !== placement) {
       setCleanContextReference(context, context.originalPlacement, context.cleanName, false);
       setCleanContextReference(context, placement, context.cleanName, true);
     }
@@ -20162,7 +20213,7 @@ function saveCleanDialog() {
   }
 }
 function removeContextClean(scope, routeIndex, stageIndex, placement, cleanName) {
-  const context = { scope, routeIndex, stageIndex };
+  const context = { scope, routeIndex, stageIndex, ...activePJobRouteContext() };
   setCleanContextReference(context, placement, cleanName, false);
   if (cleanReferenceCount(cleanName) === 0) {
     state.cleans = state.cleans.filter((clean) => clean.name !== cleanName);
@@ -20427,9 +20478,9 @@ function renderPJobRouteCard(route, baseline) {
     <span class="pjob-route-card-head"><span class="pjob-route-card-id">${routePickerShortId(route)}</span><strong class="pjob-route-card-path">${escapeHtml4(compactPath)}</strong>${selected ? `<span class="pjob-route-card-current">\u5F53\u524D\u9009\u62E9</span>` : ""}</span>
   </button>`;
 }
-function renderRouteInstanceSteps(route, loadPort = "") {
+function renderRouteInstanceSteps(route, pjob, loadPort = "") {
   const routeIndex = state.routes.indexOf(route);
-  const runtimeRoute = runtimeRouteForTemplate(route);
+  const runtimeRoute = runtimeRouteForTemplate(route, pjobRouteConfig(pjob, route));
   if (loadPort && runtimeRoute.stages?.length) {
     for (const stageIndex of [0, runtimeRoute.stages.length - 1]) {
       (runtimeRoute.stages[stageIndex]?.visits || []).forEach((visit) => {
@@ -20448,13 +20499,14 @@ function renderRouteInstanceSteps(route, loadPort = "") {
     </tr>`;
   }).join("")}</tbody></table>`;
 }
-function renderRouteBufferEditor(routeIndex) {
+function renderRouteBufferEditor(routeIndex, context) {
   const route = state.routes[routeIndex];
-  const current = routeBufferMode(runtimeRouteForTemplate(route).bufferOption).index;
+  const pjob = state.rounds[context.roundIndex]?.cjobs[context.cjobIndex]?.pjobs[context.pjobIndex];
+  const current = routeBufferMode(runtimeRouteForTemplate(route, pjobRouteConfig(pjob, route)).bufferOption).index;
   const bufferModes = ["No Buffer", "\u5F3A\u5236 Buffer Out", "\u5F3A\u5236 Buffer In", "\u975E\u5F3A\u5236 Buffer Out", "\u975E\u5F3A\u5236 Buffer In"];
   return `<section class="route-instance-buffer">
     <label for="route-${routeIndex}-buffer-option">Buffer Option</label>
-    <select id="route-${routeIndex}-buffer-option" data-compact-label="Buffer Option" data-scope="test-route" data-route-index="${routeIndex}" data-key="bufferOption">${bufferModes.map((label, value) => `<option value="${value}" ${value === current ? "selected" : ""}>${value} \xB7 ${escapeHtml4(label)}</option>`).join("")}</select>
+    <select id="route-${routeIndex}-buffer-option" data-compact-label="Buffer Option" data-scope="test-route" data-route-index="${routeIndex}" data-round-index="${context.roundIndex}" data-cjob-index="${context.cjobIndex}" data-pjob-index="${context.pjobIndex}" data-key="bufferOption">${bufferModes.map((label, value) => `<option value="${value}" ${value === current ? "selected" : ""}>${value} \xB7 ${escapeHtml4(label)}</option>`).join("")}</select>
   </section>`;
 }
 function renderPJobRouteDialogGroup(processKey, structureKey) {
@@ -20479,8 +20531,8 @@ function renderPJobRouteDialogGroup(processKey, structureKey) {
     const routeIndex = state.routes.indexOf(selectedRoute);
     detailHost.innerHTML = `<article class="pjob-route-edit-card">
       <header class="pjob-route-edit-head"><button class="btn small" type="button" data-action="back-pjob-route-selection">\u2190 \u8FD4\u56DE\u9009\u62E9\u6A21\u677F</button><div><strong>${routePickerShortId(selectedRoute)}</strong></div></header>
-      <div class="pjob-route-instance-settings">${renderRouteBufferEditor(routeIndex)}${renderRouteCleanEditor(routeIndex)}</div>
-      <div class="route-table-wrap">${renderRouteInstanceSteps(selectedRoute, pjob?.loadPort)}</div>
+      <div class="pjob-route-instance-settings">${renderRouteBufferEditor(routeIndex, context)}${renderRouteCleanEditor(routeIndex)}</div>
+      <div class="route-table-wrap">${renderRouteInstanceSteps(selectedRoute, pjob, pjob?.loadPort)}</div>
     </article>`;
     initializeCompactSelects();
     return;
@@ -20540,7 +20592,9 @@ function selectPJobRoute(routeIndex) {
   const pjob = state.rounds[context.roundIndex]?.cjobs[context.cjobIndex]?.pjobs[context.pjobIndex];
   if (!pjob) return;
   pjob.routeRef = route.name;
-  if (!state.testRouteConfigs[route.name]) state.testRouteConfigs[route.name] = defaultRouteConfigForRoute(route);
+  pjob.routeConfig = structuredClone(
+    state.testRouteConfigs[route.name] || defaultRouteConfigForRoute(route)
+  );
   normalizeRounds();
   markTestDirty();
   context.mode = "edit";
@@ -20548,7 +20602,7 @@ function selectPJobRoute(routeIndex) {
 }
 function renderPJobRoutePicker(pjob, roundIndex, cjobIndex, pjobIndex) {
   const selectedRoute = state.routes.find((route) => route.name === pjob.routeRef);
-  const runtimeRoute = selectedRoute ? runtimeRouteForTemplate(selectedRoute) : null;
+  const runtimeRoute = selectedRoute ? runtimeRouteForTemplate(selectedRoute, pjobRouteConfig(pjob, selectedRoute)) : null;
   const compactPath = runtimeRoute ? routePickerCompactPath(runtimeRoute, true, pjob.loadPort) : "\u672A\u9009\u62E9\u8DEF\u5F84";
   const common = `data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}"`;
   return `<div class="pjob-route-picker">
@@ -20608,7 +20662,7 @@ function renderStepNumberField(label, key, value, routeIndex, stageIndex, option
   return `<div class="step-edit-field">
     <label for="${inputId}">${escapeHtml4(label)}</label>
     <div class="step-number-control">
-      <input id="${inputId}" type="number" inputmode="decimal" step="${options.step || "0.1"}"${minimum} data-scope="test-step" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-key="${key}" value="${escapeHtml4(value)}">
+      <input id="${inputId}" type="number" inputmode="decimal" step="${options.step || "0.1"}"${minimum} data-scope="test-step" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-round-index="${state.drawer?.roundIndex}" data-cjob-index="${state.drawer?.cjobIndex}" data-pjob-index="${state.drawer?.pjobIndex}" data-key="${key}" value="${escapeHtml4(value)}">
       <span aria-hidden="true">s</span>
     </div>
     ${helper}
@@ -20628,12 +20682,13 @@ function renderRouteCleanEditor(routeIndex) {
 }
 function renderStepDrawer() {
   if (!state.drawer) return;
-  const { routeIndex, stageIndex } = state.drawer, template = state.routes[routeIndex];
+  const { routeIndex, stageIndex, roundIndex, cjobIndex, pjobIndex } = state.drawer, template = state.routes[routeIndex];
   if (!template) {
     closeStepDrawer();
     return;
   }
-  const route = runtimeRouteForTemplate(template), stage = route?.stages[stageIndex];
+  const pjob = state.rounds[roundIndex]?.cjobs[cjobIndex]?.pjobs[pjobIndex];
+  const route = runtimeRouteForTemplate(template, pjobRouteConfig(pjob, template)), stage = route?.stages[stageIndex];
   if (!stage || isFixedRouteStep(route, stageIndex)) {
     closeStepDrawer();
     return;
@@ -20665,7 +20720,16 @@ function renderStepDrawer() {
 function openPJobStepDrawer(routeIndex, stageIndex) {
   const route = state.routes[routeIndex];
   if (!route || isFixedRouteStep(route, stageIndex)) return;
-  state.drawer = { scope: "test", routeIndex, stageIndex };
+  const context = pjobRoutePickerContext;
+  if (!context) return;
+  state.drawer = {
+    scope: "test",
+    routeIndex,
+    stageIndex,
+    roundIndex: context.roundIndex,
+    cjobIndex: context.cjobIndex,
+    pjobIndex: context.pjobIndex
+  };
   renderStepDrawer();
   const drawerLayer = document.getElementById("drawerLayer");
   drawerLayer.classList.add("open");
@@ -20853,13 +20917,15 @@ function updateStateFromControl(control) {
   }
   if (scope === "test-route") {
     const route = state.routes[Number(control.dataset.routeIndex)];
-    const config = state.testRouteConfigs[route.name] || (state.testRouteConfigs[route.name] = defaultRouteConfigForRoute(route));
+    const pjob = state.rounds[Number(control.dataset.roundIndex)]?.cjobs[Number(control.dataset.cjobIndex)]?.pjobs[Number(control.dataset.pjobIndex)];
+    const config = pjobRouteConfig(pjob, route);
     config[key] = ROUTE_CLEAN_KEYS.includes(key) ? value ? [value] : [] : value;
   }
   if (scope === "test-step") {
     const route = state.routes[Number(control.dataset.routeIndex)];
     const stage = route.stages[Number(control.dataset.stageIndex)];
-    const config = state.testRouteConfigs[route.name] || (state.testRouteConfigs[route.name] = defaultRouteConfigForRoute(route));
+    const pjob = state.rounds[Number(control.dataset.roundIndex)]?.cjobs[Number(control.dataset.cjobIndex)]?.pjobs[Number(control.dataset.pjobIndex)];
+    const config = pjobRouteConfig(pjob, route);
     const stepId = String(stage.stepId);
     const stageConfig = config.stages[stepId] || (config.stages[stepId] = stageDefaultConfig(stage));
     stageConfig[key] = structuredClone(value);
@@ -21140,16 +21206,39 @@ function expandVisitSlotIds() {
     }
   }
 }
+function runtimePJobRouteInstances() {
+  const rounds = structuredClone(state.rounds);
+  const routes = [];
+  rounds.forEach((round, roundIndex) => round.cjobs.forEach((cjob, cjobIndex) => {
+    cjob.pjobs.forEach((pjob, pjobIndex) => {
+      const sourcePJob = state.rounds[roundIndex].cjobs[cjobIndex].pjobs[pjobIndex];
+      const template = state.routes.find((route2) => route2.name === sourcePJob.routeRef);
+      if (!template) return;
+      const route = runtimeRouteForTemplate(template, pjobRouteConfig(sourcePJob, template));
+      const suffix = `r${roundIndex + 1}-t${cjob.taskId}-c${cjobIndex + 1}-p${pjobIndex + 1}`;
+      route.name = `${template.name}__${suffix}`;
+      route.stages.forEach((stage) => stage.visits.forEach((visit) => {
+        if (visit.processRecipe) visit.processRecipe = `${visit.processRecipe}__${suffix}`;
+      }));
+      pjob.routeRef = route.name;
+      delete pjob.routeConfig;
+      routes.push(route);
+    });
+  }));
+  return { routes, rounds };
+}
 function buildPayload() {
   normalizeRounds();
   expandVisitSlotIds();
-  const routes = selectReferencedRoutes2(runtimeRoutes(), state.rounds).map((route) => ({ ...normalizeRoute(route), stages: route.stages.map((stage) => ({ ...stage, visits: stage.visits.map((visit) => structuredClone(visit)) })) }));
+  normalizePJobRouteConfigs();
+  const instances = runtimePJobRouteInstances();
+  const routes = instances.routes.map((route) => ({ ...normalizeRoute(route), stages: route.stages.map((stage) => ({ ...stage, visits: stage.visits.map((visit) => structuredClone(visit)) })) }));
   const cleans = state.cleans.map(runtimeClean);
   const options = { ...state.options };
   if (state.strategy === "schedule-alphago") {
     options.scheduleAlphaGoExecutionMode = playbackMode === "step" ? "stepped" : "continuous";
   }
-  return { schemaVersion: EXPECTED_API_SCHEMA, workspaceDeviceId: state.workspaceDeviceId, workspaceTestId: state.testCaseId, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options, skipValidation: skipValidationEnabled(), hongYeCheck: hongYeCheckEnabled(), skipBaseline: skipBaselineEnabled(), recipes: collectRecipes(routes), cleans, routes, rounds: structuredClone(state.rounds) };
+  return { schemaVersion: EXPECTED_API_SCHEMA, workspaceDeviceId: state.workspaceDeviceId, workspaceTestId: state.testCaseId, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options, skipValidation: skipValidationEnabled(), hongYeCheck: hongYeCheckEnabled(), skipBaseline: skipBaselineEnabled(), recipes: collectRecipes(routes), cleans, routes, rounds: instances.rounds };
 }
 function skipValidationEnabled() {
   return document.getElementById("skipValidationInput")?.checked === true;

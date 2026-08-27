@@ -14,7 +14,7 @@
 一个工作区最多保存 10 台设备；达到上限后仍可导入与现有 init 指纹相同的设备包以
 合并测试，但新增不同设备会被拒绝。
 
-## v6 主数据结构
+## v7 主数据结构
 
 `data/datasets/` 是设备与测试集唯一事实来源，不再生成 `data/devices/` 拓扑镜像。
 
@@ -48,14 +48,28 @@ datasets/
 支持的交换方式，也不会保证立即被页面发现；外部数据必须通过导入接口进入，维护人员
 确需处理内部文件时应先停止服务并在完成后重新启动。
 
+### PJob 路径实例参数
+
+`test.json` 中每个 `rounds[].cjobs[].pjobs[]` 使用 `routeRef` 引用共享模板，并以
+`routeConfig` 保存该 PJob 独有的加工时间、QTime、驻留、Buffer 和 Clean 引用。
+即使两个 CJob 选择相同的 `routeRef`，编辑或运行时也不会共享可变参数。运行请求会
+为每个 PJob 生成唯一的 Route 与 ProcessRecipe 名称，避免标准接口中的名称索引碰撞。
+
+顶层 `routeConfigs` 是 v6 兼容字段：迁移时按 `routeRef` 深拷贝到每个 PJob，之后只
+作为新 PJob 的默认配置来源，不再作为多个 PJob 的共同编辑状态。
+
 ## 版本和迁移
 
-当前格式为 `schemaVersion: 6`。服务开始监听前完成迁移，页面不会读取迁移到一半的数据。
+当前格式为 `schemaVersion: 7`。服务开始监听前完成迁移，页面不会读取迁移到一半的数据。
+
+v6 升级到 v7 时，服务会把测试顶层 `routeConfigs[routeRef]` 深拷贝到每一个 PJob 的
+`routeConfig`。迁移幂等执行，且升级前会把完整 `datasets/` 复制到
+`data/migration-backups/`，因此可恢复原始数据。
 
 v5 的 `workspaces/` 与 `devices/` 首次升级时执行以下过程：
 
 1. 读取并规范化旧工作区。
-2. 在临时目录完整写入 v6 数据。
+2. 在临时目录完整写入当前版本数据。
 3. 校验写入成功后原子启用 `datasets/`。
 4. 将旧 `workspaces/` 和 `devices/` 移入 `data/migration-backups/`。
 

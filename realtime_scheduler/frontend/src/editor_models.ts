@@ -70,6 +70,7 @@ export function makePJob(index = 1, routeRef = "", loadPort = "", waferCount = 5
     waferCount,
     matList: Array.from({ length: waferCount }, (_, item) => item + 1),
     routeRef,
+    routeConfig: null,
     loadPort,
     priority: 1,
   };
@@ -146,6 +147,9 @@ export function normalizePJob(
     waferCount,
     matList: Array.from({ length: waferCount }, (_, item) => item + 1),
     routeRef: source.routeRef || routeRef || "",
+    routeConfig: source.routeConfig && typeof source.routeConfig === "object"
+      ? structuredClone(source.routeConfig)
+      : null,
     loadPort: assignedLoadPort || source.loadPort || source.LoadPort || "",
     priority: Math.max(1, Number(source.priority ?? source.Priority) || 1),
   };

@@ -32,7 +32,7 @@ import {
   stringList,
 } from "./editor_models";
 
-const { VISIT_SHARED_FIELDS, automaticTemplateName, selectReferencedRoutes } = RouteEditorLogic;
+const { VISIT_SHARED_FIELDS, automaticTemplateName } = RouteEditorLogic;
 const visualizationWorkspace = createVisualizationWorkspace();
 const documentationView = createDocumentationView(document.getElementById("documentationRoot"));
 const batchPerformanceAnalyses = new Map();
@@ -208,7 +208,7 @@ function automaticCleanName(clean) {
 function renameCleanReferences(oldName, newName) {
   if (!oldName || oldName === newName) return;
   const rename = value => stringList(value).map(name => name === oldName ? newName : name);
-  Object.values(state.testRouteConfigs).forEach(config => {
+  allTestRouteConfigs().forEach(config => {
     ROUTE_CLEAN_KEYS.forEach(key => { config[key] = rename(config[key]); });
     Object.values(config.stages || {}).forEach(stage => {
       stage.beforeCleanRefs = rename(stage.beforeCleanRefs);
@@ -409,10 +409,40 @@ function normalizeTestRouteConfigs(raw, routes) {
   return normalized;
 }
 
-/** 把测试侧 Route 配置合并到路径模板，生成运行时可提交的 Route。 */
-function runtimeRouteForTemplate(route) {
+/** 返回一个 PJob 对应的模板，并把旧版测试级参数复制为该实例的独立配置。 */
+function pjobRouteConfig(pjob, route = null) {
+  const template = route || state.routes.find(item => item.name === pjob?.routeRef);
+  if (!pjob || !template) return null;
+  const fallback = state.testRouteConfigs[template.name] || defaultRouteConfigForRoute(template);
+  const normalized = normalizeTestRouteConfigs(
+    { [template.name]: pjob.routeConfig || fallback },
+    [template],
+  )[template.name];
+  pjob.routeConfig = normalized;
+  return normalized;
+}
+
+/** 枚举测试内全部路径实例配置；旧版模板配置只作为未迁移数据的兜底。 */
+function allTestRouteConfigs() {
+  const configs = [];
+  state.rounds.forEach(round => round.cjobs.forEach(cjob => cjob.pjobs.forEach(pjob => {
+    const config = pjobRouteConfig(pjob);
+    if (config) configs.push(config);
+  })));
+  return configs.length ? configs : Object.values(state.testRouteConfigs);
+}
+
+/** 载入旧测试时为每个 PJob 建立独立配置，后续编辑不再按模板名共享引用。 */
+function normalizePJobRouteConfigs() {
+  state.rounds.forEach(round => round.cjobs.forEach(cjob => cjob.pjobs.forEach(pjob => {
+    pjobRouteConfig(pjob);
+  })));
+}
+
+/** 把 PJob 路径实例配置合并到模板，生成运行时可提交的 Route。 */
+function runtimeRouteForTemplate(route, routeConfig = null) {
   const routeName = String(route?.name || "").trim();
-  const config = state.testRouteConfigs[routeName] || defaultRouteConfigForRoute(route);
+  const config = routeConfig || state.testRouteConfigs[routeName] || defaultRouteConfigForRoute(route);
   const merged = structuredClone(route);
   normalizeRoute(merged);
   merged.bufferOption = Number(config.bufferOption ?? merged.bufferOption ?? 0);
@@ -1870,9 +1900,10 @@ function applyTestCase(testCase) {
     state.rounds.push(makeRound(index + 1, state.times[index], state.routes[0]?.name || "", state.loadPorts[index] || state.loadPorts[0] || ""));
   }
   state.times.length = state.roundCount; state.rounds.length = state.roundCount; state.times[0] = 0;
-  normalizeRounds(); state.drawer = null; state.routeDirty = false; state.routeNameChanges.clear();
+  normalizeRounds(); normalizePJobRouteConfigs(); state.drawer = null; state.routeDirty = false; state.routeNameChanges.clear();
   state.routeEditingIndex = -1; state.routeEditSnapshot = null; state.routeEditGroupingProfile = null; state.routeEditIsNew = false;
-  visualizationWorkspace.setAnalysisConfiguration(runtimeRoutes(), state.rounds);
+  const visualizationPlan = runtimePJobRouteInstances();
+  visualizationWorkspace.setAnalysisConfiguration(visualizationPlan.routes, visualizationPlan.rounds);
   visualizationWorkspace.setReplayPlan(buildPayload());
   state.dirty = false;
   document.getElementById("roundCount").value = state.roundCount;
@@ -2284,12 +2315,32 @@ function cleanContextModules(scope, routeIndex, stageIndex = -1) {
     .filter(module => state.processModules.includes(module))))];
 }
 
+/** 返回当前路径弹窗或 Step 抽屉所编辑的 PJob 坐标。 */
+function activePJobRouteContext() {
+  const source = state.drawer || pjobRoutePickerContext;
+  if (!source) return null;
+  return {
+    roundIndex: Number(source.roundIndex),
+    cjobIndex: Number(source.cjobIndex),
+    pjobIndex: Number(source.pjobIndex),
+  };
+}
+
+/** 根据编辑上下文取得当前 PJob 的独立路径配置。 */
+function routeConfigForContext(route, context = null) {
+  const target = context || activePJobRouteContext();
+  const pjob = target
+    ? state.rounds[target.roundIndex]?.cjobs[target.cjobIndex]?.pjobs[target.pjobIndex]
+    : null;
+  return pjobRouteConfig(pjob, route);
+}
+
 /** 读取某一挂载位置的 Clean 引用。 */
 function cleanContextReferences(scope, routeIndex, stageIndex, placement) {
   const route = state.routes[routeIndex];
   if (!route) return [];
-  const config = state.testRouteConfigs[route.name]
-    || (state.testRouteConfigs[route.name] = defaultRouteConfigForRoute(route));
+  const config = routeConfigForContext(route);
+  if (!config) return [];
   if (scope === "route") return stringList(config[placement]);
   const stepId = String(route.stages[stageIndex]?.stepId);
   return stringList(config.stages?.[stepId]?.[placement]);
@@ -2304,8 +2355,8 @@ function setCleanContextReference(context, placement, cleanName, enabled) {
     if (enabled) names.add(cleanName); else names.delete(cleanName);
     target[placement] = [...names];
   };
-  const config = state.testRouteConfigs[route.name]
-    || (state.testRouteConfigs[route.name] = defaultRouteConfigForRoute(route));
+  const config = routeConfigForContext(route, context);
+  if (!config) return;
   if (context.scope === "route") update(config);
   else {
     const stepId = String(route.stages[context.stageIndex]?.stepId);
@@ -2386,14 +2437,15 @@ function openCleanDialog(scope, routeIndex, stageIndex = -1, cleanName = "", pla
     scope,
     routeIndex,
     stageIndex,
+    ...activePJobRouteContext(),
     cleanName,
     originalPlacement: selectedPlacement,
     draft: structuredClone(draft),
   };
   document.getElementById("cleanDialogTitle").textContent = `${cleanName ? "编辑" : "新增"} ${scope === "route" ? "Job" : "RouteStep"} Clean`;
   document.getElementById("cleanDialogDescription").textContent = scope === "route"
-    ? "Clean 只作用于当前测试的所选路径，不会修改路径模板。"
-    : "Clean 只作用于当前测试的这个 Step，不会修改路径模板。";
+    ? "Clean 只作用于当前 PJob 的所选路径，不会修改路径模板或其他 PJob。"
+    : "Clean 只作用于当前 PJob 的这个 Step，不会修改路径模板或其他 PJob。";
   const placementSelect = document.getElementById("cleanPlacement");
   placementSelect.innerHTML = definitions.map(item => `<option value="${item.key}">${escapeHtml(item.label)}</option>`).join("");
   placementSelect.value = selectedPlacement;
@@ -2440,8 +2492,17 @@ function saveCleanDialog() {
   if (context.cleanName) {
     const cleanIndex = state.cleans.findIndex(item => item.name === context.cleanName);
     if (cleanIndex < 0) return;
-    state.cleans[cleanIndex] = clean;
-    if (context.originalPlacement !== placement) {
+    const sharedClean = cleanReferenceCount(context.cleanName) > 1;
+    if (sharedClean) {
+      setCleanContextReference(context, context.originalPlacement, context.cleanName, false);
+      clean.name = `__pjob_clean_${Date.now()}_${state.cleans.length}`;
+      state.cleans.push(clean);
+      synchronizeCleanNames();
+      setCleanContextReference(context, placement, state.cleans.at(-1).name, true);
+    } else {
+      state.cleans[cleanIndex] = clean;
+    }
+    if (!sharedClean && context.originalPlacement !== placement) {
       setCleanContextReference(context, context.originalPlacement, context.cleanName, false);
       setCleanContextReference(context, placement, context.cleanName, true);
     }
@@ -2464,7 +2525,7 @@ function saveCleanDialog() {
 
 /** 从当前上下文移除 Clean；无其他引用时同时清理定义。 */
 function removeContextClean(scope, routeIndex, stageIndex, placement, cleanName) {
-  const context = { scope, routeIndex, stageIndex };
+  const context = { scope, routeIndex, stageIndex, ...activePJobRouteContext() };
   setCleanContextReference(context, placement, cleanName, false);
   if (cleanReferenceCount(cleanName) === 0) {
     state.cleans = state.cleans.filter(clean => clean.name !== cleanName);
@@ -2800,9 +2861,9 @@ function renderPJobRouteCard(route, baseline) {
 }
 
 /** 在路径引用弹窗内显示已选模板的具体 Step；点击 Step 打开右侧抽屉编辑测试参数。 */
-function renderRouteInstanceSteps(route, loadPort = "") {
+function renderRouteInstanceSteps(route, pjob, loadPort = "") {
   const routeIndex = state.routes.indexOf(route);
-  const runtimeRoute = runtimeRouteForTemplate(route);
+  const runtimeRoute = runtimeRouteForTemplate(route, pjobRouteConfig(pjob, route));
   if (loadPort && runtimeRoute.stages?.length) {
     for (const stageIndex of [0, runtimeRoute.stages.length - 1]) {
       (runtimeRoute.stages[stageIndex]?.visits || []).forEach(visit => {
@@ -2822,14 +2883,15 @@ function renderRouteInstanceSteps(route, loadPort = "") {
   }).join("")}</tbody></table>`;
 }
 
-/** 绘制只属于当前测试的 Buffer Option；路径模板本身始终不携带该参数。 */
-function renderRouteBufferEditor(routeIndex) {
+/** 绘制只属于当前 PJob 路径实例的 Buffer Option。 */
+function renderRouteBufferEditor(routeIndex, context) {
   const route = state.routes[routeIndex];
-  const current = routeBufferMode(runtimeRouteForTemplate(route).bufferOption).index;
+  const pjob = state.rounds[context.roundIndex]?.cjobs[context.cjobIndex]?.pjobs[context.pjobIndex];
+  const current = routeBufferMode(runtimeRouteForTemplate(route, pjobRouteConfig(pjob, route)).bufferOption).index;
   const bufferModes = ["No Buffer", "强制 Buffer Out", "强制 Buffer In", "非强制 Buffer Out", "非强制 Buffer In"];
   return `<section class="route-instance-buffer">
     <label for="route-${routeIndex}-buffer-option">Buffer Option</label>
-    <select id="route-${routeIndex}-buffer-option" data-compact-label="Buffer Option" data-scope="test-route" data-route-index="${routeIndex}" data-key="bufferOption">${bufferModes.map((label, value) => `<option value="${value}" ${value === current ? "selected" : ""}>${value} · ${escapeHtml(label)}</option>`).join("")}</select>
+    <select id="route-${routeIndex}-buffer-option" data-compact-label="Buffer Option" data-scope="test-route" data-route-index="${routeIndex}" data-round-index="${context.roundIndex}" data-cjob-index="${context.cjobIndex}" data-pjob-index="${context.pjobIndex}" data-key="bufferOption">${bufferModes.map((label, value) => `<option value="${value}" ${value === current ? "selected" : ""}>${value} · ${escapeHtml(label)}</option>`).join("")}</select>
   </section>`;
 }
 
@@ -2856,8 +2918,8 @@ function renderPJobRouteDialogGroup(processKey, structureKey) {
     const routeIndex = state.routes.indexOf(selectedRoute);
     detailHost.innerHTML = `<article class="pjob-route-edit-card">
       <header class="pjob-route-edit-head"><button class="btn small" type="button" data-action="back-pjob-route-selection">← 返回选择模板</button><div><strong>${routePickerShortId(selectedRoute)}</strong></div></header>
-      <div class="pjob-route-instance-settings">${renderRouteBufferEditor(routeIndex)}${renderRouteCleanEditor(routeIndex)}</div>
-      <div class="route-table-wrap">${renderRouteInstanceSteps(selectedRoute, pjob?.loadPort)}</div>
+      <div class="pjob-route-instance-settings">${renderRouteBufferEditor(routeIndex, context)}${renderRouteCleanEditor(routeIndex)}</div>
+      <div class="route-table-wrap">${renderRouteInstanceSteps(selectedRoute, pjob, pjob?.loadPort)}</div>
     </article>`;
     initializeCompactSelects();
     return;
@@ -2927,7 +2989,9 @@ function selectPJobRoute(routeIndex) {
   const pjob = state.rounds[context.roundIndex]?.cjobs[context.cjobIndex]?.pjobs[context.pjobIndex];
   if (!pjob) return;
   pjob.routeRef = route.name;
-  if (!state.testRouteConfigs[route.name]) state.testRouteConfigs[route.name] = defaultRouteConfigForRoute(route);
+  pjob.routeConfig = structuredClone(
+    state.testRouteConfigs[route.name] || defaultRouteConfigForRoute(route),
+  );
   normalizeRounds();
   markTestDirty();
   context.mode = "edit";
@@ -2937,7 +3001,7 @@ function selectPJobRoute(routeIndex) {
 /** 外部展示当前工序和具体路径；具体模板与测试参数统一在弹窗内选择和编辑。 */
 function renderPJobRoutePicker(pjob, roundIndex, cjobIndex, pjobIndex) {
   const selectedRoute = state.routes.find(route => route.name === pjob.routeRef);
-  const runtimeRoute = selectedRoute ? runtimeRouteForTemplate(selectedRoute) : null;
+  const runtimeRoute = selectedRoute ? runtimeRouteForTemplate(selectedRoute, pjobRouteConfig(pjob, selectedRoute)) : null;
   const compactPath = runtimeRoute ? routePickerCompactPath(runtimeRoute, true, pjob.loadPort) : "未选择路径";
   const common = `data-round-index="${roundIndex}" data-cjob-index="${cjobIndex}" data-pjob-index="${pjobIndex}"`;
   return `<div class="pjob-route-picker">
@@ -3005,7 +3069,7 @@ function renderStepNumberField(label, key, value, routeIndex, stageIndex, option
   return `<div class="step-edit-field">
     <label for="${inputId}">${escapeHtml(label)}</label>
     <div class="step-number-control">
-      <input id="${inputId}" type="number" inputmode="decimal" step="${options.step || "0.1"}"${minimum} data-scope="test-step" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-key="${key}" value="${escapeHtml(value)}">
+      <input id="${inputId}" type="number" inputmode="decimal" step="${options.step || "0.1"}"${minimum} data-scope="test-step" data-route-index="${routeIndex}" data-stage-index="${stageIndex}" data-round-index="${state.drawer?.roundIndex}" data-cjob-index="${state.drawer?.cjobIndex}" data-pjob-index="${state.drawer?.pjobIndex}" data-key="${key}" value="${escapeHtml(value)}">
       <span aria-hidden="true">s</span>
     </div>
     ${helper}
@@ -3020,7 +3084,7 @@ function renderStepCleanEditor(routeIndex, stageIndex) {
   </section>`;
 }
 
-/** 绘制只属于当前测试的路径级 Clean，避免写回共享模板。 */
+/** 绘制只属于当前 PJob 路径实例的 Clean，避免写回共享模板。 */
 function renderRouteCleanEditor(routeIndex) {
   return `<section class="step-clean-section">
     <div class="context-clean-head"><div><strong>Job Clean</strong></div><button class="btn small" type="button" data-action="open-context-clean" data-clean-scope="route" data-route-index="${routeIndex}" data-stage-index="-1">＋ Clean</button></div>
@@ -3031,9 +3095,10 @@ function renderRouteCleanEditor(routeIndex) {
 /** 绘制当前 Step 的配置详情；主区域只暴露业务允许修改的四项参数。 */
 function renderStepDrawer() {
   if (!state.drawer) return;
-  const { routeIndex, stageIndex } = state.drawer, template = state.routes[routeIndex];
+  const { routeIndex, stageIndex, roundIndex, cjobIndex, pjobIndex } = state.drawer, template = state.routes[routeIndex];
   if (!template) { closeStepDrawer(); return; }
-  const route = runtimeRouteForTemplate(template), stage = route?.stages[stageIndex];
+  const pjob = state.rounds[roundIndex]?.cjobs[cjobIndex]?.pjobs[pjobIndex];
+  const route = runtimeRouteForTemplate(template, pjobRouteConfig(pjob, template)), stage = route?.stages[stageIndex];
   if (!stage || isFixedRouteStep(route, stageIndex)) { closeStepDrawer(); return; }
   document.getElementById("drawerTitle").textContent = `Step ${stage.stepId} 配置`;
   const candidates = [...new Set(stage.visits.map(visit => visit.stationName).filter(Boolean))];
@@ -3060,11 +3125,18 @@ function renderStepDrawer() {
   document.getElementById("drawerBody").innerHTML = editor;
 }
 
-/** 从测试的路径引用面板打开 Step 抽屉；所有改动写入测试侧 Route 配置。 */
+/** 从路径引用面板打开 Step 抽屉；所有改动写入当前 PJob 的独立 Route 配置。 */
 function openPJobStepDrawer(routeIndex, stageIndex) {
   const route = state.routes[routeIndex];
   if (!route || isFixedRouteStep(route, stageIndex)) return;
-  state.drawer = { scope: "test", routeIndex, stageIndex };
+  const context = pjobRoutePickerContext;
+  if (!context) return;
+  state.drawer = {
+    scope: "test", routeIndex, stageIndex,
+    roundIndex: context.roundIndex,
+    cjobIndex: context.cjobIndex,
+    pjobIndex: context.pjobIndex,
+  };
   renderStepDrawer();
   const drawerLayer = document.getElementById("drawerLayer");
   drawerLayer.classList.add("open");
@@ -3263,13 +3335,15 @@ function updateStateFromControl(control) {
   }
   if (scope === "test-route") {
     const route = state.routes[Number(control.dataset.routeIndex)];
-    const config = state.testRouteConfigs[route.name] || (state.testRouteConfigs[route.name] = defaultRouteConfigForRoute(route));
+    const pjob = state.rounds[Number(control.dataset.roundIndex)]?.cjobs[Number(control.dataset.cjobIndex)]?.pjobs[Number(control.dataset.pjobIndex)];
+    const config = pjobRouteConfig(pjob, route);
     config[key] = ROUTE_CLEAN_KEYS.includes(key) ? (value ? [value] : []) : value;
   }
   if (scope === "test-step") {
     const route = state.routes[Number(control.dataset.routeIndex)];
     const stage = route.stages[Number(control.dataset.stageIndex)];
-    const config = state.testRouteConfigs[route.name] || (state.testRouteConfigs[route.name] = defaultRouteConfigForRoute(route));
+    const pjob = state.rounds[Number(control.dataset.roundIndex)]?.cjobs[Number(control.dataset.cjobIndex)]?.pjobs[Number(control.dataset.pjobIndex)];
+    const config = pjobRouteConfig(pjob, route);
     const stepId = String(stage.stepId);
     const stageConfig = config.stages[stepId] || (config.stages[stepId] = stageDefaultConfig(stage));
     stageConfig[key] = structuredClone(value);
@@ -3501,18 +3575,43 @@ function expandVisitSlotIds(): void {
   }
 }
 
+/** 为每个 PJob 生成独立 Route/Recipe 名称，避免同模板的不同参数在运行请求中碰撞。 */
+function runtimePJobRouteInstances() {
+  const rounds = structuredClone(state.rounds);
+  const routes = [];
+  rounds.forEach((round, roundIndex) => round.cjobs.forEach((cjob, cjobIndex) => {
+    cjob.pjobs.forEach((pjob, pjobIndex) => {
+      const sourcePJob = state.rounds[roundIndex].cjobs[cjobIndex].pjobs[pjobIndex];
+      const template = state.routes.find(route => route.name === sourcePJob.routeRef);
+      if (!template) return;
+      const route = runtimeRouteForTemplate(template, pjobRouteConfig(sourcePJob, template));
+      const suffix = `r${roundIndex + 1}-t${cjob.taskId}-c${cjobIndex + 1}-p${pjobIndex + 1}`;
+      route.name = `${template.name}__${suffix}`;
+      route.stages.forEach(stage => stage.visits.forEach(visit => {
+        if (visit.processRecipe) visit.processRecipe = `${visit.processRecipe}__${suffix}`;
+      }));
+      pjob.routeRef = route.name;
+      delete pjob.routeConfig;
+      routes.push(route);
+    });
+  }));
+  return { routes, rounds };
+}
+
 /** 构造后端请求，Recipe 由 Route Step 和 Clean 自动生成。 */
 function buildPayload() {
   normalizeRounds();
   expandVisitSlotIds();
-  const routes = selectReferencedRoutes(runtimeRoutes(), state.rounds).map(route => ({ ...normalizeRoute(route), stages: route.stages.map(stage => ({ ...stage, visits: stage.visits.map(visit => structuredClone(visit)) })) }));
+  normalizePJobRouteConfigs();
+  const instances = runtimePJobRouteInstances();
+  const routes = instances.routes.map(route => ({ ...normalizeRoute(route), stages: route.stages.map(stage => ({ ...stage, visits: stage.visits.map(visit => structuredClone(visit)) })) }));
   const cleans = state.cleans.map(runtimeClean);
   const options = { ...state.options };
   if (state.strategy === "schedule-alphago") {
     // 初始执行模式随回放/步进模式走，避免 update 启动时的会话重置覆盖用户选择。
     options.scheduleAlphaGoExecutionMode = playbackMode === "step" ? "stepped" : "continuous";
   }
-  return { schemaVersion: EXPECTED_API_SCHEMA, workspaceDeviceId: state.workspaceDeviceId, workspaceTestId: state.testCaseId, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options, skipValidation: skipValidationEnabled(), hongYeCheck: hongYeCheckEnabled(), skipBaseline: skipBaselineEnabled(), recipes: collectRecipes(routes), cleans, routes, rounds: structuredClone(state.rounds) };
+  return { schemaVersion: EXPECTED_API_SCHEMA, workspaceDeviceId: state.workspaceDeviceId, workspaceTestId: state.testCaseId, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options, skipValidation: skipValidationEnabled(), hongYeCheck: hongYeCheckEnabled(), skipBaseline: skipBaselineEnabled(), recipes: collectRecipes(routes), cleans, routes, rounds: instances.rounds };
 }
 
 /** 返回“跳过输出校验”是否已勾选。 */
