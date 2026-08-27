@@ -9,10 +9,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import multiprocessing
 import threading
 import time
 import uuid
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import (
+    FIRST_COMPLETED,
+    ProcessPoolExecutor,
+    ThreadPoolExecutor,
+    wait,
+)
 from copy import deepcopy
 from pathlib import Path
 from types import ModuleType
@@ -33,6 +39,8 @@ PLACE_MOVE_TYPES = frozenset({1, 3})
 SWAP_MOVE_TYPE = 4
 PRE_TRANS_MOVE_TYPE = 5
 TIME_TOLERANCE_SECONDS = 1e-9
+MAXIMUM_BATCH_WORKERS = 4
+PROCESS_ISOLATION_MINIMUM_TESTS = 8
 
 
 def configure_batch_service(services: ModuleType) -> None:
@@ -755,7 +763,12 @@ def _execute_workspace_test_with_baseline(
         try:
             result = execute_plan(plan)
         except Exception as error:  # noqa: BLE001
-            return None, record(_failed_baseline(fingerprint, error)), error
+            baseline = (
+                _skipped_baseline(fingerprint)
+                if skip_baseline
+                else record(_failed_baseline(fingerprint, error))
+            )
+            return None, baseline, error
         if skip_baseline:
             return result, _skipped_baseline(fingerprint), None
         baseline = record(_successful_baseline(fingerprint, result))
@@ -785,6 +798,78 @@ def _execute_workspace_test_with_baseline(
         return None, baseline, error
 
 
+def _execute_workspace_test_in_process(
+    device: Mapping[str, Any],
+    test_case: Mapping[str, Any],
+    strategy: str,
+    options: Mapping[str, Any],
+    selected_plan: Mapping[str, Any],
+    skip_validation: bool,
+    hongye_check: bool,
+    skip_baseline: bool,
+) -> Dict[str, Any]:
+    """在独立进程中执行一个批量测试并返回可序列化结果。
+
+    内置算法和标准外部算法都以模块级全局对象保存当前 ``init/update`` 会话，
+    因此线程 worker 会被同一把会话锁串行化。独立进程为每个并行槽提供隔离的
+    算法状态；参数和返回值均为普通映射，避免把锁或模块对象跨进程传递。
+    """
+    from realtime_scheduler import server as server_services
+
+    configure_batch_service(server_services)
+    result, baseline, error = _execute_workspace_test_with_baseline(
+        device,
+        test_case,
+        strategy,
+        options,
+        selected_plan=selected_plan,
+        skip_validation=skip_validation,
+        hongye_check=hongye_check,
+        skip_baseline=skip_baseline,
+    )
+    if error is None:
+        return {
+            "result": result,
+            "baseline": baseline,
+            "error": None,
+        }
+    if isinstance(error, LoggedPlanError):
+        return {
+            "result": None,
+            "baseline": baseline,
+            "error": {
+                "kind": "logged",
+                "message": str(error),
+                "reproductionLog": deepcopy(error.reproduction_log),
+                "failureOutput": deepcopy(error.failure_output),
+                "validationIssues": deepcopy(error.validation_issues),
+            },
+        }
+    return {
+        "result": None,
+        "baseline": baseline,
+        "error": {
+            "kind": "plain",
+            "message": str(error) or type(error).__name__,
+        },
+    }
+
+
+def _restore_batch_process_error(payload: Optional[Mapping[str, Any]]) -> Optional[Exception]:
+    """把子进程的普通错误映射恢复为现有批量结果处理所需的异常。"""
+    if not isinstance(payload, Mapping):
+        return None
+    message = str(payload.get("message") or "批量测试子进程执行失败")
+    if payload.get("kind") == "logged":
+        return LoggedPlanError(
+            message,
+            payload.get("reproductionLog") or [],
+            failure_output=payload.get("failureOutput"),
+            validation_issues=payload.get("validationIssues") or [],
+        )
+    return RuntimeError(message)
+
+
 def _workspace_group_tests(
     device: Mapping[str, Any],
     group: str,
@@ -812,12 +897,32 @@ def _execute_workspace_test_batch(
     hongye_check: bool = True,
     skip_baseline: bool = False,
     maximum_workers: int = 4,
+    use_process_isolation: bool = False,
     progress_callback: Optional[Any] = None,
     cancel_event: Optional[threading.Event] = None,
 ) -> Dict[str, Any]:
     """执行已解析的批量测试，并通过回调报告每项状态变化。"""
-    worker_count = max(1, min(int(maximum_workers), 4, len(tests)))
+    worker_count = max(1, min(int(maximum_workers), MAXIMUM_BATCH_WORKERS, len(tests)))
     started = time.perf_counter()
+    process_device = {
+        key: value
+        for key, value in device.items()
+        if key != "tests"
+    }
+    process_isolation_enabled = (
+        use_process_isolation
+        and worker_count > 1
+        and len(tests) >= PROCESS_ISOLATION_MINIMUM_TESTS
+    )
+
+    process_executor = (
+        ProcessPoolExecutor(
+            max_workers=worker_count,
+            mp_context=multiprocessing.get_context("spawn"),
+        )
+        if process_isolation_enabled
+        else None
+    )
 
     def run_one(index: int, test_case: Mapping[str, Any]) -> Dict[str, Any]:
         """执行单个测试并生成统一的批处理结果项。"""
@@ -839,16 +944,32 @@ def _execute_workspace_test_batch(
                 skip_validation=skip_validation,
                 hongye_check=hongye_check,
             )
-            result, baseline, run_error = _execute_workspace_test_with_baseline(
-                device,
-                test_case,
-                strategy,
-                options,
-                selected_plan=selected_plan,
-                skip_validation=skip_validation,
-                hongye_check=hongye_check,
-                skip_baseline=skip_baseline,
-            )
+            if process_executor is None:
+                result, baseline, run_error = _execute_workspace_test_with_baseline(
+                    process_device,
+                    test_case,
+                    strategy,
+                    options,
+                    selected_plan=selected_plan,
+                    skip_validation=skip_validation,
+                    hongye_check=hongye_check,
+                    skip_baseline=skip_baseline,
+                )
+            else:
+                process_result = process_executor.submit(
+                    _execute_workspace_test_in_process,
+                    process_device,
+                    test_case,
+                    strategy,
+                    options,
+                    selected_plan,
+                    skip_validation,
+                    hongye_check,
+                    skip_baseline,
+                ).result()
+                result = process_result.get("result")
+                baseline = process_result.get("baseline") or {}
+                run_error = _restore_batch_process_error(process_result.get("error"))
             if run_error is not None or result is None:
                 error = run_error or RuntimeError("运行未返回结果")
                 failure = {
@@ -962,6 +1083,11 @@ def _execute_workspace_test_batch(
             executor.shutdown(wait=False, cancel_futures=True)
         else:
             executor.shutdown(wait=True)
+        if process_executor is not None:
+            process_executor.shutdown(
+                wait=not cancelled,
+                cancel_futures=cancelled,
+            )
     items.sort(key=lambda item: int(item["index"]))
     succeeded = sum(bool(item["ok"]) for item in items)
     batch_result = {
@@ -975,6 +1101,7 @@ def _execute_workspace_test_batch(
         "failed": len(items) - succeeded,
         "cancelled": len(tests) - len(items) if cancelled else 0,
         "workerCount": worker_count,
+        "processIsolation": process_isolation_enabled,
         "totalElapsedMs": (time.perf_counter() - started) * 1000.0,
         "items": items,
     }
@@ -1058,12 +1185,13 @@ def start_workspace_test_batch(
     hongye_check: bool = True,
     skip_baseline: bool = False,
     maximum_workers: int = 4,
+    use_process_isolation: bool = False,
 ) -> Dict[str, Any]:
     """创建后台批量任务并立即返回可轮询的初始状态。"""
     device = get_workspace_device(device_id)
     normalized_group, tests = _workspace_group_tests(device, group)
     batch_id = uuid.uuid4().hex
-    worker_count = max(1, min(int(maximum_workers), 4, len(tests)))
+    worker_count = max(1, min(int(maximum_workers), MAXIMUM_BATCH_WORKERS, len(tests)))
     initial = {
         "batchId": batch_id,
         "ok": True,
@@ -1125,6 +1253,7 @@ def start_workspace_test_batch(
                 hongye_check=hongye_check,
                 skip_baseline=skip_baseline,
                 maximum_workers=worker_count,
+                use_process_isolation=use_process_isolation,
                 progress_callback=update_item,
                 cancel_event=cancel_event,
             )

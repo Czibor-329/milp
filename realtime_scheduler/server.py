@@ -7045,6 +7045,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                     skip_validation=bool(payload.get("skipValidation")),
                     hongye_check=bool(payload.get("hongYeCheck", True)),
                     skip_baseline=bool(payload.get("skipBaseline")),
+                    use_process_isolation=True,
                 )
                 self._send_json(result, HTTPStatus.ACCEPTED)
             except Exception as error:  # noqa: BLE001

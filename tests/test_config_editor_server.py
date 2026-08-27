@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from concurrent.futures import Future
 import inspect
 import json
 import tempfile
@@ -304,19 +305,28 @@ class RecomputeFailureOutputTests(unittest.TestCase):
         self.assertIn("!rec.removedByRecompute", viewer)
         self.assertIn('fillOpacity = bar.rec.removedByRecompute ? "0.24" : "1"', viewer)
 
-    def test_frontend_version_and_cache_keys_are_1_5_4(self) -> None:
+    def test_frontend_version_and_cache_keys_are_1_5_5(self) -> None:
         """前端显示版本、包版本和主资源缓存键必须同步。"""
         frontend_root = ROOT / "realtime_scheduler" / "frontend"
         template = (frontend_root / "config_editor.html").read_text(encoding="utf-8")
         package = json.loads((frontend_root / "package.json").read_text(encoding="utf-8"))
         package_lock = json.loads((frontend_root / "package-lock.json").read_text(encoding="utf-8"))
 
-        self.assertEqual("1.5.4", package["version"])
-        self.assertEqual("1.5.4", package_lock["version"])
-        self.assertEqual("1.5.4", package_lock["packages"][""]["version"])
-        self.assertIn('class="frontend-version">前端 v1.5.4</span>', template)
-        self.assertIn('/assets/config_editor.css?v=1.5.4', template)
-        self.assertIn('/assets/config_editor.js?v=1.5.4', template)
+        self.assertEqual("1.5.5", package["version"])
+        self.assertEqual("1.5.5", package_lock["version"])
+        self.assertEqual("1.5.5", package_lock["packages"][""]["version"])
+        self.assertIn('class="frontend-version">前端 v1.5.5</span>', template)
+        self.assertIn('/assets/config_editor.css?v=1.5.5', template)
+        self.assertIn('/assets/config_editor.js?v=1.5.5', template)
+
+    def test_batch_status_refresh_obeys_frontend_performance_limit(self) -> None:
+        """批量状态最多每秒轮询一次，且明细未变化时不得重建整组 DOM。"""
+        source = EDITOR_SCRIPT_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("const BATCH_STATUS_POLL_MILLISECONDS = 1000;", source)
+        self.assertIn("window.setTimeout(resolve, BATCH_STATUS_POLL_MILLISECONDS)", source)
+        self.assertIn("renderSignature !== lastBatchItemsRenderSignature", source)
+        self.assertNotIn("window.setTimeout(resolve, 450)", source)
 
     def test_recompute_preparation_error_keeps_last_successful_movelist(self) -> None:
         """算法调用前的旧计划回放异常也应返回上一代诊断甘特图。"""
@@ -1875,7 +1885,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("<span>结果分析</span>", html)
         self.assertIn("<span>路径配置</span>", html)
         self.assertNotIn('data-tab-view="clean"', html)
-        self.assertIn('class="frontend-version">前端 v1.5.4</span>', html)
+        self.assertIn('class="frontend-version">前端 v1.5.5</span>', html)
         self.assertIn('data-option="residencyGuardSeconds"', html)
         self.assertIn('data-option="maximumRobotHoldingSeconds"', html)
         self.assertIn('data-option="maximumSystemResidenceCv"', html)
@@ -2683,6 +2693,102 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual(2, completed["completed"])
         self.assertEqual(["succeeded", "succeeded"], [item["status"] for item in completed["items"]])
         self.assertTrue(all(item["resultUrl"] == "/api/results/result-id" for item in completed["items"]))
+
+    def test_large_batch_uses_four_isolated_algorithm_processes(self) -> None:
+        """8 项及以上批量任务必须启用四个隔离进程，不能被算法会话锁串行化。"""
+        device = {
+            "id": "device-process-batch", "name": "fixture.json", "device": self.device,
+            "routes": [_route("BatchRoute", "PM1,PM2", "BatchRecipe")],
+            "cleans": [],
+            "tests": [
+                {
+                    "id": f"test-{index}", "name": f"案例 {index}", "group": "回归",
+                    "roundCount": 1, "options": {},
+                    "rounds": [{"currentTime": 0, "jobs": [_job(f"J{index}", "BatchRoute", "LP1")]}],
+                }
+                for index in range(8)
+            ],
+        }
+        executor_options = []
+        submitted_process_devices = []
+
+        class ImmediateProcessExecutor:
+            """在当前进程执行任务，以确定性验证生产并发路由。"""
+
+            def __init__(self, **options):
+                executor_options.append(options)
+
+            def submit(self, function, *args):
+                submitted_process_devices.append(args[0])
+                future = Future()
+                try:
+                    future.set_result(function(*args))
+                except Exception as error:  # noqa: BLE001
+                    future.set_exception(error)
+                return future
+
+            def shutdown(self, **_options):
+                return None
+
+        def fake_execute(_plan):
+            return {
+                "ok": True, "totalElapsedMs": 10.0, "cpuTimeMs": 8.0,
+                "makespan": 20.0, "moveCount": 3, "validation": "passed",
+                "output": {"MoveList": []}, "reproductionLog": [],
+            }
+
+        with (
+            patch.object(config_server._batch_service, "ProcessPoolExecutor", ImmediateProcessExecutor),
+            patch.object(config_server, "execute_plan", side_effect=fake_execute),
+            patch.object(config_server, "save_result", return_value="result-id"),
+            patch.object(config_server, "save_reproduction_log", return_value="log-id"),
+        ):
+            result = config_server._execute_workspace_test_batch(
+                device,
+                device["tests"],
+                "回归",
+                "heuristic",
+                {},
+                hongye_check=False,
+                skip_baseline=True,
+                use_process_isolation=True,
+            )
+
+        self.assertTrue(result["processIsolation"])
+        self.assertEqual(4, result["workerCount"])
+        self.assertEqual(8, result["succeeded"])
+        self.assertEqual(4, executor_options[0]["max_workers"])
+        self.assertTrue(all("tests" not in device for device in submitted_process_devices))
+
+    def test_skip_baseline_failure_does_not_persist_from_parallel_worker(self) -> None:
+        """跳过 Baseline 后算法失败也不得抢占工作区写锁保存失败基线。"""
+        test_case = {
+            "id": "test-failed-skip", "name": "跳过失败基线", "group": "回归",
+            "roundCount": 1, "options": {},
+            "rounds": [{"currentTime": 0, "jobs": [_job("A", "BatchRoute", "LP1")]}],
+        }
+        device = {
+            "id": "device-failed-skip", "name": "fixture.json", "device": self.device,
+            "routes": [_route("BatchRoute", "PM1,PM2", "BatchRecipe")],
+            "cleans": [], "tests": [test_case],
+        }
+        with (
+            patch.object(config_server, "execute_plan", side_effect=RuntimeError("算法失败")),
+            patch.object(config_server, "_persist_workspace_baseline") as persist,
+        ):
+            result, baseline, error = config_server._execute_workspace_test_with_baseline(
+                device,
+                test_case,
+                "heuristic",
+                {},
+                skip_baseline=True,
+                hongye_check=False,
+            )
+
+        self.assertIsNone(result)
+        self.assertIsInstance(error, RuntimeError)
+        self.assertEqual("skipped", baseline["status"])
+        persist.assert_not_called()
 
     def test_batch_log_archive_contains_each_available_test_log_and_manifest(self) -> None:
         """批量日志下载应将各测试日志及其测试集映射一次性打包。"""

@@ -70,6 +70,7 @@ const PROCESSING_STATION_TYPES = new Set([
 const FIRST_ROBOT_SLOT_ID = 1;
 const DUAL_ARM_SLOT_COUNT = 2;
 const SEARCH_TELEMETRY_POLL_MILLISECONDS = 75;
+const BATCH_STATUS_POLL_MILLISECONDS = 1000;
 const DEFAULT_DUMMY_WAFER_COUNT = 8;
 const STATION_ACTION_TIME_FIELDS = [
   { key: "PickPrepareTime", label: "取片准备" },
@@ -105,6 +106,7 @@ let followLatestSearchTelemetry = true;
 let searchTelemetryRunActive = false;
 let searchTelemetryControlPending = false;
 let lastSearchTelemetryMoveCount = 0;
+let lastBatchItemsRenderSignature = "";
 /** 是否在步进模式下持续提交每一轮搜索的模型推荐动作。 */
 let continuousDecisionEnabled = false;
 /** 已由持续决策提交的 searchId；防止同一遥测帧被轮询重复提交。 */
@@ -4086,6 +4088,7 @@ async function runCurrentTestGroup() {
     batchBottleneckSummaries.clear();
     batchBottleneckRequests.clear();
     batchBottleneckErrors.clear();
+    lastBatchItemsRenderSignature = "";
     document.getElementById("testGroupAnalysisButton").hidden = true;
     document.getElementById("testGroupAnalysisPanel").hidden = true;
     document.getElementById("testGroupAnalysisPanel").innerHTML = "";
@@ -4105,7 +4108,7 @@ async function runCurrentTestGroup() {
     renderBatchRunStatus(result);
     if (state.batchCancelRequested) await sendBatchCancellation();
     while (!["completed", "failed", "cancelled"].includes(result.status)) {
-      await new Promise(resolve => window.setTimeout(resolve, 450));
+      await new Promise(resolve => window.setTimeout(resolve, BATCH_STATUS_POLL_MILLISECONDS));
       const statusResponse = await fetch(`/api/run-batches/${encodeURIComponent(result.batchId)}`, { cache: "no-store" });
       result = await statusResponse.json();
       if (!statusResponse.ok) throw new Error(result.error || `服务返回 ${statusResponse.status}`);
@@ -4381,7 +4384,21 @@ function bindTestGroupExport(panel, summary, groupName) {
   });
 }
 
-/** 实时绘制总体进度和每个测试的排队、运行、成功、失败状态。 */
+/** 返回影响测试卡片显示的轻量签名，避免轮询时重建整组 DOM。 */
+function batchItemsRenderSignature(items) {
+  return JSON.stringify(items.map(item => [
+    item.status,
+    item.resultUrl,
+    item.logUrl,
+    item.error,
+    item.validation,
+    item.makespan,
+    item.cpuTimeMs,
+    item.baseline?.status,
+  ]));
+}
+
+/** 实时绘制总体进度；仅在测试状态变化时重绘逐项卡片。 */
 function showBatchProgress(result) {
   const completed = Number(result.completed || 0), total = Number(result.testCount || result.items?.length || 0);
   const percent = total ? Math.round(completed / total * 100) : 0;
@@ -4394,7 +4411,12 @@ function showBatchProgress(result) {
   state.batchResult = result;
   updateBatchLogDownload(result);
   if (!state.selectedBatchTestId) showBatchOverviewMetrics(result);
-  renderBatchItems(result.items || []);
+  const items = result.items || [];
+  const renderSignature = batchItemsRenderSignature(items);
+  if (renderSignature !== lastBatchItemsRenderSignature) {
+    renderBatchItems(items);
+    lastBatchItemsRenderSignature = renderSignature;
+  }
   const selectedIndex = (result.items || []).findIndex((item, index) => String(item.testId || `index-${index}`) === state.selectedBatchTestId);
   if (selectedIndex >= 0) {
     showBatchItemOverview(result.items[selectedIndex], selectedIndex);

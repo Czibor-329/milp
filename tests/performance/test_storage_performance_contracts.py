@@ -16,6 +16,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from realtime_scheduler import server
+from realtime_scheduler import batch_service
 from tests.performance.fixture_factory import (
     generate_v7_dataset,
     load_performance_profiles,
@@ -47,6 +48,17 @@ class PerformanceFixtureTests(unittest.TestCase):
             1 <= int(profile["deviceCount"]) <= 10
             for profile in profiles["profiles"].values()
         ))
+
+    def test_batch_runtime_limits_match_performance_budget(self) -> None:
+        """130 项批量门禁必须绑定四进程并行与 260 秒产品预算。"""
+        budget = json.loads(BUDGET_PATH.read_text(encoding="utf-8"))[
+            "absoluteMilliseconds"
+        ]
+
+        self.assertEqual(260_000, budget["batch130Maximum"])
+        self.assertEqual(1_000, budget["batchStatusPollIntervalMinimum"])
+        self.assertEqual(4, batch_service.MAXIMUM_BATCH_WORKERS)
+        self.assertLessEqual(batch_service.PROCESS_ISOLATION_MINIMUM_TESTS, 130)
 
     def test_fixture_generation_is_deterministic(self) -> None:
         """相同参数生成的数据规模和内容哈希必须完全相同。"""
