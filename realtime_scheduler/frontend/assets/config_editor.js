@@ -904,7 +904,8 @@ function activeTarget(move) {
 function buildWorkspaceSnapshot(moves, device, requestedTime) {
   const records = normalizeMoves(moves);
   const endTime = records.reduce((maximum, move) => Math.max(maximum, move.EndTime), 0);
-  const time = Math.max(0, Math.min(finiteNumber(requestedTime), endTime));
+  const normalizedRequestedTime = requestedTime === Number.POSITIVE_INFINITY ? endTime : finiteNumber(requestedTime);
+  const time = Math.max(0, Math.min(normalizedRequestedTime, endTime));
   const robotNames = collectRobotNames(records, device);
   const robotNameSet = new Set(robotNames);
   const definitions = collectModuleDefinitions(records, device, robotNameSet);
@@ -1037,6 +1038,159 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
     robots,
     waferCount: new Set(records.flatMap((move) => materialIds(move))).size
   };
+}
+function stationCapacity(device, name) {
+  const definition = device?.Stations?.[name] ?? {};
+  const slots = listValue(definition.Slots).map((value) => finiteNumber(value, 0)).filter((value) => Number.isInteger(value) && value > 0);
+  return Math.max(1, finiteNumber(definition.Capacity, 0), slots.length);
+}
+function routeByPJobName(plan, pjobName) {
+  const routes = Array.isArray(plan?.routes) ? plan.routes : [];
+  const routeByName = new Map(routes.filter((route) => route && typeof route === "object" && !Array.isArray(route)).map((route) => [String(route.name ?? ""), route]));
+  const aliases = /* @__PURE__ */ new Map();
+  const rounds = Array.isArray(plan?.rounds) ? plan.rounds : [];
+  rounds.forEach((round, roundIndex) => {
+    const cjobs = Array.isArray(round?.cjobs) ? round.cjobs : [];
+    cjobs.forEach((cjob, cjobIndex) => {
+      const row = cjob;
+      const cjobName = String(row.key ?? `C${cjobIndex + 1}`);
+      const pjobs = Array.isArray(row.pjobs) ? row.pjobs : [];
+      pjobs.forEach((pjob, pjobIndex) => {
+        const job = pjob;
+        const shortName = String(job.jobName ?? `P${pjobIndex + 1}`);
+        const route = routeByName.get(String(job.routeRef ?? ""));
+        if (!route) return;
+        aliases.set(`${roundIndex + 1}.${cjobName}.${shortName}`, route);
+        if (!aliases.has(shortName)) aliases.set(shortName, route);
+      });
+    });
+  });
+  return aliases.get(pjobName) ?? aliases.get(pjobName.split(".").at(-1) ?? "") ?? null;
+}
+function replayMaterialProgress(records) {
+  const progress = /* @__PURE__ */ new Map();
+  const update = (move, materials, stepField, pjobOffset = 0) => {
+    const stepIds = listValue(move[stepField]);
+    const pjobs = listValue(move.PJobName);
+    materials.forEach((material, index) => {
+      const previous = progress.get(material) ?? { pjobName: "", stepId: "", explicitTargets: [] };
+      const explicitTarget = indexedStation(move, "DestStationList", index);
+      progress.set(material, {
+        pjobName: String(pjobs[pjobOffset + index] ?? pjobs[index] ?? previous.pjobName),
+        stepId: String(stepIds[index] ?? previous.stepId),
+        explicitTargets: explicitTarget ? [explicitTarget] : []
+      });
+    });
+  };
+  for (const move of [...records].sort((left, right) => left.EndTime - right.EndTime || left.MoveID - right.MoveID)) {
+    if (move.MoveType === SWAP_MOVE) {
+      const received = materialIds(move, "RecvMatList");
+      update(move, received, "RecvMatStepIDList");
+      update(move, materialIds(move, "SendMatList"), "SendMatStepIDList", received.length);
+    } else {
+      update(move, materialIds(move), "StepIDList");
+    }
+  }
+  return progress;
+}
+function nextRouteResources(plan, progress) {
+  if (!progress) return [];
+  if (progress.explicitTargets.length) return progress.explicitTargets;
+  const route = routeByPJobName(plan, progress.pjobName);
+  const stages = Array.isArray(route?.stages) ? route.stages : [];
+  const currentIndex = stages.findIndex((stage) => String(stage.stepId ?? "") === progress.stepId);
+  if (currentIndex < 0) return [];
+  const postStepIds = listValue(stages[currentIndex].postStepIds).map(String);
+  const nextStages = postStepIds.length ? stages.filter((stage) => postStepIds.includes(String(stage.stepId ?? ""))) : stages.slice(currentIndex + 1, currentIndex + 2);
+  return [...new Set(nextStages.flatMap((stage) => Array.isArray(stage.visits) ? stage.visits.map((visit) => String(visit.stationName ?? "")) : []).filter(Boolean))];
+}
+function hasConsistentTransferReplay(records, device) {
+  const locations = initialMaterialLocations(records);
+  const robotNames = new Set(Object.keys(device.Robots ?? {}));
+  const locationCount = (location) => [...locations.values()].filter((current) => current === location).length;
+  const orderedTransfers = records.filter((move) => PICK_MOVE_TYPES.has(move.MoveType) || PLACE_MOVE_TYPES.has(move.MoveType) || move.MoveType === SWAP_MOVE).sort((left, right) => left.EndTime - right.EndTime || left.MoveID - right.MoveID);
+  for (const move of orderedTransfers) {
+    if (PICK_MOVE_TYPES.has(move.MoveType)) {
+      const materials = materialIds(move);
+      for (let index = 0; index < materials.length; index += 1) {
+        const material = materials[index];
+        const source = indexedStation(move, "SrcStationList", index);
+        if (!source || locations.get(material) !== source) return false;
+        const robotDefinition = device.Robots?.[move.ModuleName] ?? {};
+        if (!robotNames.has(move.ModuleName) || locationCount(move.ModuleName) >= robotCapacity(robotDefinition)) return false;
+        locations.set(material, move.ModuleName);
+      }
+      continue;
+    }
+    if (PLACE_MOVE_TYPES.has(move.MoveType)) {
+      const materials = materialIds(move);
+      for (let index = 0; index < materials.length; index += 1) {
+        const material = materials[index];
+        const destination = indexedStation(move, "DestStationList", index);
+        if (!destination || locations.get(material) !== move.ModuleName) return false;
+        if (locationCount(destination) >= stationCapacity(device, destination)) return false;
+        locations.set(material, destination);
+      }
+      continue;
+    }
+    const received = materialIds(move, "RecvMatList");
+    const sent = materialIds(move, "SendMatList");
+    for (let index = 0; index < received.length; index += 1) {
+      const station = indexedStation(move, "StationList", index);
+      if (!station || locations.get(received[index]) !== station) return false;
+      locations.set(received[index], move.ModuleName);
+    }
+    for (let index = 0; index < sent.length; index += 1) {
+      const station = indexedStation(move, "StationList", index);
+      if (!station || locations.get(sent[index]) !== move.ModuleName) return false;
+      if (locationCount(station) >= stationCapacity(device, station)) return false;
+      locations.set(sent[index], station);
+    }
+  }
+  return true;
+}
+function detectTerminalPlaybackDeadlock(moves, device, plan) {
+  if (!moves.length || !device || !plan) return null;
+  const records = normalizeMoves(moves);
+  if (!hasConsistentTransferReplay(records, device)) return null;
+  const snapshot = buildWorkspaceSnapshot(records, device, Number.POSITIVE_INFINITY);
+  const progress = replayMaterialProgress(records);
+  const modules = new Map(snapshot.modules.map((module) => [module.name, module]));
+  const robotNames = new Set(snapshot.robots.map((robot) => robot.name));
+  const blockingTargets = (robot, wafer) => {
+    const targets = nextRouteResources(plan, progress.get(wafer)).filter((target) => !robotNames.has(target));
+    if (!targets.length) return [];
+    const blocked = targets.filter((target) => {
+      const chamber = modules.get(target);
+      if (!chamber || chamber.wafers.length < stationCapacity(device, target)) return false;
+      return chamber.wafers.some((occupant) => nextRouteResources(plan, progress.get(occupant)).includes(robot.name));
+    });
+    return blocked.length === targets.length ? blocked : [];
+  };
+  for (const robot of snapshot.robots) {
+    const held = [...robot.wafers].sort(naturalCompare);
+    if (robot.capacity === 1 && held.length === 1) {
+      const targets = blockingTargets(robot, held[0]);
+      if (!targets.length) continue;
+      const occupants = [...new Set(targets.flatMap((target) => modules.get(target)?.wafers ?? []))].sort(naturalCompare);
+      return {
+        Code: "DEADLOCK.SINGLE_ARM_TARGET_FULL",
+        Category: "single-arm-target-full",
+        Message: `\u5355\u81C2\u673A\u5668\u624B ${robot.name} \u624B\u4E0A\u62FF\u7740\u6676\u5706 ${held[0]}\uFF0C\u76EE\u6807\u8154\u5BA4 ${targets.join("\u3001")} \u5DF2\u6EE1\uFF1B\u8154\u5BA4\u5185\u7684\u6676\u5706 ${occupants.join("\u3001")} \u4E5F\u9700\u8981\u7531 ${robot.name} \u53D6\u51FA\uFF0C\u56E0\u6B64\u673A\u5668\u624B\u65E0\u6CD5\u817E\u51FA\u624B\u81C2\u7EE7\u7EED\u642C\u8FD0\u3002`
+      };
+    }
+    if (robot.capacity === 2 && held.length === 2) {
+      const targetsByWafer = held.map((wafer) => blockingTargets(robot, wafer));
+      if (targetsByWafer.some((targets2) => !targets2.length)) continue;
+      const targets = [...new Set(targetsByWafer.flat())].sort(naturalCompare);
+      return {
+        Code: "DEADLOCK.DUAL_ARM_TARGETS_FULL",
+        Category: "dual-arm-targets-full",
+        Message: `\u53CC\u81C2\u673A\u5668\u624B ${robot.name} \u7684\u4E24\u53EA\u624B\u5206\u522B\u62FF\u7740\u6676\u5706 ${held.join("\u3001")}\uFF0C\u5B83\u4EEC\u7684\u76EE\u6807\u8154\u5BA4 ${targets.join("\u3001")} \u5747\u5DF2\u6EE1\uFF1B\u8154\u5BA4\u5185\u6676\u5706\u4ECD\u9700\u7531 ${robot.name} \u53D6\u51FA\uFF0C\u4F46\u673A\u5668\u624B\u5DF2\u7ECF\u6CA1\u6709\u7A7A\u95F2\u624B\u81C2\uFF0C\u65E0\u6CD5\u7EE7\u7EED\u642C\u8FD0\u3002`
+      };
+    }
+  }
+  return null;
 }
 function collectElements(root) {
   const required = (id) => {
@@ -2503,6 +2657,10 @@ var VisualizationWorkspace = class {
   /** 返回与诊断面板一致的稳态瓶颈候选利用率，供运行结果摘要复用。 */
   getBottleneckUtilization() {
     return this.bottleneckSummary ? structuredClone(this.bottleneckSummary) : null;
+  }
+  /** 返回当前 MoveList 在前端回放终点识别出的持片满腔死锁。 */
+  getTerminalDeadlock() {
+    return detectTerminalPlaybackDeadlock(this.moves, this.device, this.replayPlan);
   }
   /** 切换到工作台标签。 */
   show() {
@@ -18054,6 +18212,25 @@ var DEFAULT_SCHEDULE_OPTIONS = Object.freeze({
   seed: 0
 });
 var SCHEDULE_OPTION_KEYS = new Set(Object.keys(DEFAULT_SCHEDULE_OPTIONS));
+var DEADLOCK_TYPE_CATALOG = Object.freeze({
+  "DEADLOCK.SINGLE_ARM_TARGET_FULL": {
+    title: "\u5355\u81C2\u673A\u5668\u624B\u6301\u7247\uFF0C\u76EE\u6807\u8154\u5BA4\u5DF2\u6EE1"
+  },
+  "DEADLOCK.DUAL_ARM_TARGETS_FULL": {
+    title: "\u53CC\u81C2\u673A\u5668\u624B\u6301\u6709\u4E24\u7247\uFF0C\u76EE\u6807\u8154\u5BA4\u5747\u5DF2\u6EE1"
+  }
+});
+function deadlockDisplay(deadlock) {
+  if (!deadlock || typeof deadlock !== "object") return null;
+  const code = String(deadlock.Code || "DEADLOCK.UNCLASSIFIED").toUpperCase();
+  const registered = DEADLOCK_TYPE_CATALOG[code];
+  if (registered) return { code, ...registered, message: String(deadlock.Message || "") };
+  return {
+    code: "DEADLOCK.UNCLASSIFIED",
+    title: "\u524D\u7AEF\u56DE\u653E\u672A\u8BC6\u522B\u51FA\u6301\u7247\u6EE1\u8154\u6B7B\u9501",
+    message: "MoveList \u5DF2\u56DE\u653E\u5230\u7EC8\u70B9\uFF0C\u4F46\u73B0\u573A\u4E0D\u7B26\u5408\u5DF2\u767B\u8BB0\u7684\u5355\u81C2\u6216\u53CC\u81C2\u6301\u7247\u6EE1\u8154\u6761\u4EF6\u3002"
+  };
+}
 var CLEAN_TYPE_DEFINITIONS = [
   { key: "preclean", label: "PreClean" },
   { key: "postclean", label: "PostClean" },
@@ -21428,6 +21605,8 @@ async function prepareWorkspaceView(result) {
   visualizationWorkspace.setAnalysisConfiguration(state.routes, state.rounds);
   visualizationWorkspace.setReplayPlan(buildPayload());
   await visualizationWorkspace.loadResult(result.resultId, state.testCaseName || "\u5F53\u524D\u8FD0\u884C\u7ED3\u679C");
+  const replayDeadlock = visualizationWorkspace.getTerminalDeadlock();
+  if (result.deadlock) result.deadlock = replayDeadlock || { Code: "DEADLOCK.UNCLASSIFIED" };
   if (latestSearchTelemetry?.algorithm === "schedule-alphago") {
     renderSearchTelemetry(latestSearchTelemetry);
   }
@@ -21650,12 +21829,14 @@ async function runPlan() {
     const baselineError = runResult?.baseline?.status === "failed" ? `
   Baseline \u5931\u8D25\uFF1A${runResult.baseline.error || "\u672A\u77E5\u539F\u56E0"}` : "";
     const validationIssues = Array.isArray(runResult?.validationIssues) ? runResult.validationIssues.map((issue) => `  ${issue}`) : [];
+    const deadlock = deadlockDisplay(runResult?.deadlock);
     if (!runResult?.metricsAvailable && ganttReady) {
       setBottleneckMetric(bottleneckSummary, "\u6CA1\u6709\u8DB3\u591F\u7684\u8D44\u6E90\u6D3B\u52A8");
       document.getElementById("metricMakespan").textContent = Number.isFinite(Number(runResult.makespan)) ? `${Number(runResult.makespan).toFixed(2)} s` : "\u2014";
     }
     writeTerminal([
       cancelled ? `$ \u6A21\u578B\u6B65\u8FDB\u8FD0\u884C\u5DF2\u53D6\u6D88` : `$ \u8FD0\u884C\u5931\u8D25\uFF1A${error.message || "\u672A\u77E5\u9519\u8BEF"}`,
+      ...deadlock ? [`  \u6B7B\u9501\u7C7B\u578B\uFF1A${deadlock.title}\uFF08${deadlock.code}\uFF09`, `  ${deadlock.message}`] : [],
       ...validationIssues,
       ...baselineError ? [baselineError.trim()] : [],
       ...ganttReady ? ["  \u5DF2\u4FDD\u7559\u53EF\u56DE\u653E\u7684 MoveList\uFF1B\u88AB RemoveList \u53D6\u6D88\u7684\u52A8\u4F5C\u4F1A\u4EE5\u6D45\u8272\u6807\u8BB0\uFF0C\u53EF\u5728\u7518\u7279\u56FE\u4E2D\u663E\u793A\u6216\u9690\u85CF"] : [],
@@ -22121,7 +22302,11 @@ function showBatchProgress(result) {
 function batchItemErrorText(item) {
   const baseline = item.baseline || {};
   if (baseline.status === "failed") return `Baseline \u5931\u8D25\uFF1A${baseline.error || "\u7B49\u5F85\u91CD\u65B0\u8BA1\u7B97"}`;
-  if (item.status === "failed") return `${hasBatchResultMetrics(item) ? "\u6821\u9A8C\u5931\u8D25" : "\u8FD0\u884C\u5931\u8D25"}\uFF1A${item.error || "\u672A\u77E5\u9519\u8BEF"}`;
+  if (item.status === "failed") {
+    const deadlock = deadlockDisplay(item.deadlock);
+    if (deadlock) return `${deadlock.title}\uFF08${deadlock.code}\uFF09\uFF1A${deadlock.message || item.error || "\u7B97\u6CD5\u89C4\u5212\u8FDB\u5165\u6B7B\u9501"}`;
+    return `${hasBatchResultMetrics(item) ? "\u6821\u9A8C\u5931\u8D25" : "\u8FD0\u884C\u5931\u8D25"}\uFF1A${item.error || "\u672A\u77E5\u9519\u8BEF"}`;
+  }
   if (baseline.status && baseline.status !== "succeeded" && baseline.status !== "skipped") return `Baseline \u5931\u6548\uFF1A${baseline.error || "\u7B49\u5F85\u91CD\u65B0\u8BA1\u7B97"}`;
   return "";
 }

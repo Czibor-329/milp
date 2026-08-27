@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from realtime_scheduler.documentation import DocumentationError, load_documentation
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _write_page(
@@ -98,3 +103,27 @@ def test_load_documentation_requires_matching_h1(tmp_path) -> None:
 
     with pytest.raises(DocumentationError, match="一级标题"):
         load_documentation(directory)
+
+
+def test_deadlock_catalog_page_is_visible_before_standard_api() -> None:
+    """死锁类型页应进入前端导航，正文和右侧目录所需标题必须完整。"""
+    loaded = load_documentation((
+        ROOT / "realtime_scheduler" / "data" / "documentation",
+        ROOT / "alg" / "docs" / "documentation",
+    ))
+    pages = loaded["pages"]
+    slugs = [page["slug"] for page in pages]
+    page = next(page for page in pages if page["slug"] == "deadlock-types")
+
+    assert slugs.index("analysis-diagnostics") < slugs.index("deadlock-types")
+    assert slugs.index("deadlock-types") < slugs.index("interface-overview")
+    assert page["group"] == "结果分析"
+    for code in (
+        "DEADLOCK.SINGLE_ARM_TARGET_FULL",
+        "DEADLOCK.DUAL_ARM_TARGETS_FULL",
+        "DEADLOCK.NO_EXECUTABLE_ACTION",
+        "DEADLOCK.UNCLASSIFIED",
+    ):
+        assert f"## {code}" in page["markdown"]
+    assert "## 前端回放判定字段" in page["markdown"]
+    assert "## 回放与校验边界" in page["markdown"]

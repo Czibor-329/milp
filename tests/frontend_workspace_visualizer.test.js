@@ -56,6 +56,111 @@ const moves = [
   },
 ];
 
+const deadlockStage = (stepId, stationName, postStepIds = []) => ({
+  stepId,
+  postStepIds,
+  visits: [{ stationName }],
+});
+
+test("前端回放识别单臂持片且目标满腔依赖同一机器手排空", () => {
+  const replayMoves = [
+    {
+      MoveID: 1, MoveType: 9, ModuleName: "PM1", MatIDList: ["W_OLD"],
+      StepIDList: [0], PJobName: ["1.C1.P2"], StartTime: 0, EndTime: 1,
+    },
+    {
+      MoveID: 2, MoveType: 0, ModuleName: "R", SrcStationList: ["LP1"],
+      MatIDList: ["W_NEW"], StepIDList: [1], PJobName: ["1.C1.P1"],
+      StartTime: 1, EndTime: 2,
+    },
+  ];
+  const replayDevice = {
+    Stations: { LP1: { Type: "LoadPort" }, PM1: { Type: "ProcessChamber", Capacity: 1 } },
+    Robots: { R: { Capacity: 1, Slot: [1] } },
+  };
+  const replayPlan = {
+    routes: [
+      { name: "Incoming", stages: [deadlockStage(0, "LP1", [1]), deadlockStage(1, "R", [2]), deadlockStage(2, "PM1")] },
+      { name: "Outgoing", stages: [deadlockStage(0, "PM1", [1]), deadlockStage(1, "R", [2]), deadlockStage(2, "LP1")] },
+    ],
+    rounds: [{ cjobs: [{ key: "C1", pjobs: [
+      { jobName: "P1", routeRef: "Incoming" },
+      { jobName: "P2", routeRef: "Outgoing" },
+    ] }] }],
+  };
+
+  const deadlock = logic.detectTerminalPlaybackDeadlock(replayMoves, replayDevice, replayPlan);
+
+  assert.equal(deadlock.Code, "DEADLOCK.SINGLE_ARM_TARGET_FULL");
+  assert.match(deadlock.Message, /R.*W_NEW.*PM1.*已满.*W_OLD.*R.*无法腾出手臂/);
+});
+
+test("前端回放识别双臂同时持有两片且目标腔室均已满", () => {
+  const replayMoves = [
+    ...[1, 2].map((number) => ({
+      MoveID: number, MoveType: 9, ModuleName: `PM${number}`, MatIDList: [`W_OLD_${number}`],
+      StepIDList: [0], PJobName: [`1.C1.P${number + 2}`], StartTime: 0, EndTime: 1,
+    })),
+    {
+      MoveID: 3, MoveType: 2, ModuleName: "R", SrcStationList: ["LP1", "LP1"],
+      MatIDList: ["W_NEW_1", "W_NEW_2"], StepIDList: [1, 1],
+      PJobName: ["1.C1.P1", "1.C1.P2"], StartTime: 1, EndTime: 2,
+    },
+  ];
+  const replayDevice = {
+    Stations: {
+      LP1: { Type: "LoadPort" },
+      PM1: { Type: "ProcessChamber", Capacity: 1 },
+      PM2: { Type: "ProcessChamber", Capacity: 1 },
+    },
+    Robots: { R: { Capacity: 2, Slot: [1, 2] } },
+  };
+  const route = (name, source, target) => ({
+    name,
+    stages: [deadlockStage(0, source, [1]), deadlockStage(1, "R", [2]), deadlockStage(2, target)],
+  });
+  const replayPlan = {
+    routes: [
+      route("Incoming1", "LP1", "PM1"), route("Incoming2", "LP1", "PM2"),
+      route("Outgoing1", "PM1", "LP1"), route("Outgoing2", "PM2", "LP1"),
+    ],
+    rounds: [{ cjobs: [{ key: "C1", pjobs: [
+      { jobName: "P1", routeRef: "Incoming1" }, { jobName: "P2", routeRef: "Incoming2" },
+      { jobName: "P3", routeRef: "Outgoing1" }, { jobName: "P4", routeRef: "Outgoing2" },
+    ] }] }],
+  };
+
+  const deadlock = logic.detectTerminalPlaybackDeadlock(replayMoves, replayDevice, replayPlan);
+
+  assert.equal(deadlock.Code, "DEADLOCK.DUAL_ARM_TARGETS_FULL");
+  assert.match(deadlock.Message, /R.*W_NEW_1、W_NEW_2.*PM1、PM2.*均已满.*没有空闲手臂/);
+});
+
+test("Move 位置回放不自洽时不继续猜测死锁类型", () => {
+  const invalidMoves = [
+    {
+      MoveID: 1, MoveType: 0, ModuleName: "R", SrcStationList: ["LP1"],
+      MatIDList: ["W1"], StepIDList: [1], PJobName: ["1.C1.P1"], StartTime: 0, EndTime: 1,
+    },
+    {
+      MoveID: 2, MoveType: 0, ModuleName: "R", SrcStationList: ["PM1"],
+      MatIDList: ["W1"], StepIDList: [1], PJobName: ["1.C1.P1"], StartTime: 1, EndTime: 2,
+    },
+  ];
+  const replayDevice = {
+    Stations: { LP1: { Type: "LoadPort" }, PM1: { Type: "ProcessChamber", Capacity: 1 } },
+    Robots: { R: { Capacity: 1 } },
+  };
+  const replayPlan = {
+    routes: [{ name: "Route", stages: [
+      deadlockStage(0, "LP1", [1]), deadlockStage(1, "R", [2]), deadlockStage(2, "PM1"),
+    ] }],
+    rounds: [{ cjobs: [{ key: "C1", pjobs: [{ jobName: "P1", routeRef: "Route" }] }] }],
+  };
+
+  assert.equal(logic.detectTerminalPlaybackDeadlock(invalidMoves, replayDevice, replayPlan), null);
+});
+
 function moduleAt(snapshot, name) {
   return snapshot.modules.find(module => module.name === name);
 }

@@ -270,7 +270,7 @@ def _logged_failure_result_fields(
         }
     result_id = save_result(artifact)
     moves = list(artifact.get("MoveList") or [])
-    return {
+    result = {
         "resultId": result_id,
         "resultUrl": f"/api/results/{result_id}",
         "ganttUrl": (
@@ -282,6 +282,21 @@ def _logged_failure_result_fields(
         "moveCount": len(moves),
         "makespan": _segment_end(moves),
     }
+    deadlock = next(
+        (
+            deepcopy(dict(feedback))
+            for feedback in (artifact.get("Feedback") or [])
+            if isinstance(feedback, Mapping)
+            and (
+                str(feedback.get("Code") or "").upper().startswith("DEADLOCK.")
+                or "deadlock" in str(feedback.get("Type") or "").casefold()
+            )
+        ),
+        None,
+    )
+    if deadlock is not None:
+        result["deadlock"] = deadlock
+    return result
 
 
 def _batch_test_routes(

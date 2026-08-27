@@ -5,6 +5,11 @@
 `AlgInit`、`AlgSchedule`、`AlgUpdateMove` 和 `AlgOutput`。收到 `AlgOutput` 时，
 校验器按 `module-parallel` 推进并立即返回错误、警告和计划时长差异。
 
+每个 `AlgSchedule` 都是该代的完整现场快照。首排之后收到新的 `AlgSchedule` 时，
+Python 会先发送 `reset`，再补发 `AlgInit` 和当前 `AlgSchedule`；因此 HongYe 独立
+校验每一代 `AlgOutput`，不会用新一代 Material 状态回头重放旧计划。平台侧复现日志
+仍保留全部 `AlgUpdateMove` 和各代输入输出。
+
 `runtime/` 是最小运行目录，只包含：
 
 - `HongYeValidator.exe` 与 .NET Framework 配置；

@@ -13,6 +13,7 @@ export {
   decisionAtTime,
   decisionBoundaryTimes,
   decisionSpaceSignature,
+  detectTerminalPlaybackDeadlock,
   detectDeviceTopologyLayout,
   detectTopologyLayout,
   groupedBottleneckResources,

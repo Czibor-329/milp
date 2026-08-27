@@ -53,6 +53,29 @@ const DEFAULT_SCHEDULE_OPTIONS = Object.freeze({
 });
 const SCHEDULE_OPTION_KEYS = new Set(Object.keys(DEFAULT_SCHEDULE_OPTIONS));
 
+/** 前端在 MoveList 回放终点能够确认的两种死锁。 */
+const DEADLOCK_TYPE_CATALOG = Object.freeze({
+  "DEADLOCK.SINGLE_ARM_TARGET_FULL": {
+    title: "单臂机器手持片，目标腔室已满",
+  },
+  "DEADLOCK.DUAL_ARM_TARGETS_FULL": {
+    title: "双臂机器手持有两片，目标腔室均已满",
+  },
+});
+
+/** 展示前端回放结论；算法只负责声明规划无法继续，不参与死锁分类。 */
+function deadlockDisplay(deadlock) {
+  if (!deadlock || typeof deadlock !== "object") return null;
+  const code = String(deadlock.Code || "DEADLOCK.UNCLASSIFIED").toUpperCase();
+  const registered = DEADLOCK_TYPE_CATALOG[code];
+  if (registered) return { code, ...registered, message: String(deadlock.Message || "") };
+  return {
+    code: "DEADLOCK.UNCLASSIFIED",
+    title: "前端回放未识别出持片满腔死锁",
+    message: "MoveList 已回放到终点，但现场不符合已登记的单臂或双臂持片满腔条件。",
+  };
+}
+
 const CLEAN_TYPE_DEFINITIONS = [
   { key: "preclean", label: "PreClean" },
   { key: "postclean", label: "PostClean" },
@@ -3781,6 +3804,8 @@ async function prepareWorkspaceView(result) {
   visualizationWorkspace.setAnalysisConfiguration(state.routes, state.rounds);
   visualizationWorkspace.setReplayPlan(buildPayload());
   await visualizationWorkspace.loadResult(result.resultId, state.testCaseName || "当前运行结果");
+  const replayDeadlock = visualizationWorkspace.getTerminalDeadlock();
+  if (result.deadlock) result.deadlock = replayDeadlock || { Code: "DEADLOCK.UNCLASSIFIED" };
   if (latestSearchTelemetry?.algorithm === "schedule-alphago") {
     renderSearchTelemetry(latestSearchTelemetry);
   }
@@ -4002,6 +4027,7 @@ async function runPlan() {
     const validationIssues = Array.isArray(runResult?.validationIssues)
       ? runResult.validationIssues.map(issue => `  ${issue}`)
       : [];
+    const deadlock = deadlockDisplay(runResult?.deadlock);
     if (!runResult?.metricsAvailable && ganttReady) {
       setBottleneckMetric(bottleneckSummary, "没有足够的资源活动");
       document.getElementById("metricMakespan").textContent = Number.isFinite(Number(runResult.makespan))
@@ -4010,6 +4036,7 @@ async function runPlan() {
     }
     writeTerminal([
       cancelled ? `$ 模型步进运行已取消` : `$ 运行失败：${error.message || "未知错误"}`,
+      ...(deadlock ? [`  死锁类型：${deadlock.title}（${deadlock.code}）`, `  ${deadlock.message}`] : []),
       ...validationIssues,
       ...(baselineError ? [baselineError.trim()] : []),
       ...(ganttReady ? ["  已保留可回放的 MoveList；被 RemoveList 取消的动作会以浅色标记，可在甘特图中显示或隐藏"] : []),
@@ -4516,7 +4543,11 @@ function showBatchProgress(result) {
 function batchItemErrorText(item) {
   const baseline = item.baseline || {};
   if (baseline.status === "failed") return `Baseline 失败：${baseline.error || "等待重新计算"}`;
-  if (item.status === "failed") return `${hasBatchResultMetrics(item) ? "校验失败" : "运行失败"}：${item.error || "未知错误"}`;
+  if (item.status === "failed") {
+    const deadlock = deadlockDisplay(item.deadlock);
+    if (deadlock) return `${deadlock.title}（${deadlock.code}）：${deadlock.message || item.error || "算法规划进入死锁"}`;
+    return `${hasBatchResultMetrics(item) ? "校验失败" : "运行失败"}：${item.error || "未知错误"}`;
+  }
   if (baseline.status && baseline.status !== "succeeded" && baseline.status !== "skipped") return `Baseline 失效：${baseline.error || "等待重新计算"}`;
   return "";
 }

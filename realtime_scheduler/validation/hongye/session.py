@@ -47,11 +47,20 @@ class HongYeValidationSession:
 
     def add_event(self, event: Mapping[str, Any]) -> Optional[dict[str, Any]]:
         """发送一条标准日志事件；AlgOutput 返回校验摘要，其余事件返回 ``None``。"""
+        response = self._send_request({"command": "event", "event": dict(event)})
+        validation = response.get("validation")
+        return dict(validation) if isinstance(validation, dict) else None
+
+    def reset(self) -> None:
+        """清空已累积事件，使下一代重算从完整现场快照独立校验。"""
+        self._send_request({"command": "reset"})
+
+    def _send_request(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        """发送一条协议请求并校验 HongYe 进程的统一响应。"""
         if self._closed or self._process.poll() is not None:
             raise HongYeValidatorError(self._process_failure_message())
         if self._process.stdin is None or self._process.stdout is None:
             raise HongYeValidatorError("HongYe 校验器管道未建立")
-        request = {"command": "event", "event": dict(event)}
         try:
             self._process.stdin.write(
                 json.dumps(request, ensure_ascii=False, separators=(",", ":")) + "\n"
@@ -75,8 +84,7 @@ class HongYeValidationSession:
                 else "HongYe 校验器返回格式错误"
             )
             raise HongYeValidatorError(message)
-        validation = response.get("validation")
-        return dict(validation) if isinstance(validation, dict) else None
+        return dict(response)
 
     def close(self) -> None:
         """正常结束子进程；异常退出时确保不会遗留校验进程。"""

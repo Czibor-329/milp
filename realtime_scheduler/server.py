@@ -438,6 +438,28 @@ class ReproductionLog:
             "Info": deepcopy(info),
         }
         if self.hongye_session is not None and forward_to_validator:
+            # AlgSchedule 是一代完整现场快照。HongYe 若跨代累积事件，会拿新一代
+            # Material 状态回头重放旧 AlgOutput，制造历史占用和 Route 冲突。
+            # 平台复现日志仍完整保留；校验器只在新代开始时重置并补发 AlgInit。
+            starts_new_generation = (
+                describe.casefold() == "algschedule"
+                and any(
+                    str(previous.get("Describe") or "").casefold() == "algoutput"
+                    for previous in self.entries
+                )
+            )
+            if starts_new_generation:
+                self.hongye_session.reset()
+                latest_init = next(
+                    (
+                        previous
+                        for previous in reversed(self.entries)
+                        if str(previous.get("Describe") or "").casefold() == "alginit"
+                    ),
+                    None,
+                )
+                if latest_init is not None:
+                    self.hongye_session.add_event(latest_init)
             validation = self.hongye_session.add_event(entry)
             if validation is not None:
                 self.last_hongye_validation = deepcopy(validation)
@@ -1406,6 +1428,57 @@ def _alg_output_info(
         "DummyReturnInfo": deepcopy(dict(source.get("DummyReturnInfo") or {})),
         "MatIntoPM": deepcopy(dict(source.get("MatIntoPM") or {})),
     }
+
+
+def _deadlock_feedback(
+    output: Mapping[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """返回算法声明的结构化死锁 Feedback；普通通知返回 ``None``。"""
+    for raw_feedback in output.get("Feedback") or []:
+        if not isinstance(raw_feedback, Mapping):
+            continue
+        code = str(raw_feedback.get("Code") or "").strip().upper()
+        category = str(raw_feedback.get("Category") or "").strip().casefold()
+        feedback_type = str(raw_feedback.get("Type") or "").strip().casefold()
+        if (
+            code.startswith("DEADLOCK.")
+            or category.startswith("deadlock")
+            or "deadlock" in feedback_type
+        ):
+            return deepcopy(dict(raw_feedback))
+    return None
+
+
+def _raise_deadlock_feedback(
+    output: Mapping[str, Any],
+    reproduction: ReproductionLog,
+    *,
+    sim_time: float = 0.0,
+    context: str,
+) -> None:
+    """将算法死锁输出登记为可回放失败，而不是继续做完整计划校验。"""
+    feedback = _deadlock_feedback(output)
+    if feedback is None:
+        return
+    failure_output = _alg_output_info(output)
+    failure_output["FailureContext"] = {
+        "Stage": "algorithm-deadlock",
+        "Context": context,
+        "Code": str(feedback.get("Code") or "DEADLOCK.NO_EXECUTABLE_ACTION"),
+        "Category": str(feedback.get("Category") or "unknown"),
+        "Message": str(feedback.get("Message") or "算法规划进入死锁"),
+    }
+    reproduction.add(
+        "AlgOutput",
+        failure_output,
+        sim_time,
+        forward_to_validator=False,
+    )
+    raise LoggedPlanError(
+        str(feedback.get("Message") or "算法规划进入死锁"),
+        reproduction.entries,
+        failure_output=failure_output,
+    )
 
 
 def _validation_issue_records(
@@ -2715,6 +2788,11 @@ def _execute_standard_algorithm(
         elapsed_ms = (time.perf_counter() - round_started) * 1000.0
         output = _alg_output_info(raw_output)
         _report_run_event("output-1", "收到 output #1", "succeeded")
+        _raise_deadlock_feedback(
+            output,
+            reproduction,
+            context="initial",
+        )
         _report_run_event("validation-1", "校验 output #1", "running")
         try:
             _ensure_algorithm_output(output, prepared_first_update)
@@ -2953,6 +3031,12 @@ def _execute_standard_algorithm(
                 f"output-{recompute_index}",
                 f"收到 output #{recompute_index}",
                 "succeeded",
+            )
+            _raise_deadlock_feedback(
+                output,
+                reproduction,
+                sim_time=requested_time,
+                context=reason,
             )
             _report_run_event(
                 f"validation-{recompute_index}",

@@ -72,6 +72,12 @@ export interface WorkspaceSnapshot {
   waferCount: number;
 }
 
+export interface PlaybackDeadlock {
+  Code: "DEADLOCK.SINGLE_ARM_TARGET_FULL" | "DEADLOCK.DUAL_ARM_TARGETS_FULL";
+  Category: "single-arm-target-full" | "dual-arm-targets-full";
+  Message: string;
+}
+
 export interface LoadPortSlotSnapshot {
   slot: number;
   wafer: string;
@@ -1100,7 +1106,10 @@ export function buildWorkspaceSnapshot(
 ): WorkspaceSnapshot {
   const records = normalizeMoves(moves);
   const endTime = records.reduce((maximum, move) => Math.max(maximum, move.EndTime), 0);
-  const time = Math.max(0, Math.min(finiteNumber(requestedTime), endTime));
+  const normalizedRequestedTime = requestedTime === Number.POSITIVE_INFINITY
+    ? endTime
+    : finiteNumber(requestedTime);
+  const time = Math.max(0, Math.min(normalizedRequestedTime, endTime));
   const robotNames = collectRobotNames(records, device);
   const robotNameSet = new Set(robotNames);
   const definitions = collectModuleDefinitions(records, device, robotNameSet);
@@ -1262,6 +1271,215 @@ export function buildWorkspaceSnapshot(
     robots,
     waferCount: new Set(records.flatMap(move => materialIds(move))).size,
   };
+}
+
+/** 从设备声明读取普通腔室容量；未声明容量的腔室按单槽处理。 */
+function stationCapacity(device: DeviceDefinition | null, name: string): number {
+  const definition = device?.Stations?.[name] ?? {};
+  const slots = listValue(definition.Slots)
+    .map(value => finiteNumber(value, 0))
+    .filter(value => Number.isInteger(value) && value > 0);
+  return Math.max(1, finiteNumber(definition.Capacity, 0), slots.length);
+}
+
+/** 找到计划中 PJob 使用的 Route，兼容页面短名称和运行时完整 PJobName。 */
+function routeByPJobName(plan: UnknownRecord | null, pjobName: string): UnknownRecord | null {
+  const routes = Array.isArray(plan?.routes) ? plan.routes : [];
+  const routeByName = new Map(routes
+    .filter(route => route && typeof route === "object" && !Array.isArray(route))
+    .map(route => [String((route as UnknownRecord).name ?? ""), route as UnknownRecord]));
+  const aliases = new Map<string, UnknownRecord>();
+  const rounds = Array.isArray(plan?.rounds) ? plan.rounds : [];
+  rounds.forEach((round, roundIndex) => {
+    const cjobs = Array.isArray((round as UnknownRecord)?.cjobs) ? (round as UnknownRecord).cjobs as unknown[] : [];
+    cjobs.forEach((cjob, cjobIndex) => {
+      const row = cjob as UnknownRecord;
+      const cjobName = String(row.key ?? `C${cjobIndex + 1}`);
+      const pjobs = Array.isArray(row.pjobs) ? row.pjobs : [];
+      pjobs.forEach((pjob, pjobIndex) => {
+        const job = pjob as UnknownRecord;
+        const shortName = String(job.jobName ?? `P${pjobIndex + 1}`);
+        const route = routeByName.get(String(job.routeRef ?? ""));
+        if (!route) return;
+        aliases.set(`${roundIndex + 1}.${cjobName}.${shortName}`, route);
+        if (!aliases.has(shortName)) aliases.set(shortName, route);
+      });
+    });
+  });
+  return aliases.get(pjobName) ?? aliases.get(pjobName.split(".").at(-1) ?? "") ?? null;
+}
+
+interface PlaybackMaterialProgress {
+  pjobName: string;
+  stepId: string;
+  explicitTargets: string[];
+}
+
+/** 按 Move 完成顺序提取每片晶圆最后可确认的 Route 位置和显式搬运目标。 */
+function replayMaterialProgress(records: NormalizedMove[]): Map<string, PlaybackMaterialProgress> {
+  const progress = new Map<string, PlaybackMaterialProgress>();
+  const update = (move: NormalizedMove, materials: string[], stepField: string, pjobOffset = 0): void => {
+    const stepIds = listValue(move[stepField]);
+    const pjobs = listValue(move.PJobName);
+    materials.forEach((material, index) => {
+      const previous = progress.get(material) ?? { pjobName: "", stepId: "", explicitTargets: [] };
+      const explicitTarget = indexedStation(move, "DestStationList", index);
+      progress.set(material, {
+        pjobName: String(pjobs[pjobOffset + index] ?? pjobs[index] ?? previous.pjobName),
+        stepId: String(stepIds[index] ?? previous.stepId),
+        explicitTargets: explicitTarget ? [explicitTarget] : [],
+      });
+    });
+  };
+  for (const move of [...records].sort((left, right) => left.EndTime - right.EndTime || left.MoveID - right.MoveID)) {
+    if (move.MoveType === SWAP_MOVE) {
+      const received = materialIds(move, "RecvMatList");
+      update(move, received, "RecvMatStepIDList");
+      update(move, materialIds(move, "SendMatList"), "SendMatStepIDList", received.length);
+    } else {
+      update(move, materialIds(move), "StepIDList");
+    }
+  }
+  return progress;
+}
+
+/** 根据最后 Step 的 PostStepID 返回下一步可用模块。 */
+function nextRouteResources(
+  plan: UnknownRecord | null,
+  progress: PlaybackMaterialProgress | undefined,
+): string[] {
+  if (!progress) return [];
+  if (progress.explicitTargets.length) return progress.explicitTargets;
+  const route = routeByPJobName(plan, progress.pjobName);
+  const stages = Array.isArray(route?.stages) ? route.stages as UnknownRecord[] : [];
+  const currentIndex = stages.findIndex(stage => String(stage.stepId ?? "") === progress.stepId);
+  if (currentIndex < 0) return [];
+  const postStepIds = listValue(stages[currentIndex].postStepIds).map(String);
+  const nextStages = postStepIds.length
+    ? stages.filter(stage => postStepIds.includes(String(stage.stepId ?? "")))
+    : stages.slice(currentIndex + 1, currentIndex + 2);
+  return [...new Set(nextStages.flatMap(stage => (
+    Array.isArray(stage.visits)
+      ? stage.visits.map(visit => String((visit as UnknownRecord).stationName ?? ""))
+      : []
+  )).filter(Boolean))];
+}
+
+/**
+ * 校验死锁识别依赖的 Pick/Place/Swap 位置演进。
+ *
+ * 这里只验证前端回放状态能否自洽，不复制服务端的门、压力、时长和工艺校验规则。
+ */
+function hasConsistentTransferReplay(
+  records: NormalizedMove[],
+  device: DeviceDefinition,
+): boolean {
+  const locations = initialMaterialLocations(records);
+  const robotNames = new Set(Object.keys(device.Robots ?? {}));
+  const locationCount = (location: string): number => [...locations.values()]
+    .filter(current => current === location).length;
+  const orderedTransfers = records
+    .filter(move => PICK_MOVE_TYPES.has(move.MoveType) || PLACE_MOVE_TYPES.has(move.MoveType) || move.MoveType === SWAP_MOVE)
+    .sort((left, right) => left.EndTime - right.EndTime || left.MoveID - right.MoveID);
+
+  for (const move of orderedTransfers) {
+    if (PICK_MOVE_TYPES.has(move.MoveType)) {
+      const materials = materialIds(move);
+      for (let index = 0; index < materials.length; index += 1) {
+        const material = materials[index];
+        const source = indexedStation(move, "SrcStationList", index);
+        if (!source || locations.get(material) !== source) return false;
+        const robotDefinition = device.Robots?.[move.ModuleName] ?? {};
+        if (!robotNames.has(move.ModuleName) || locationCount(move.ModuleName) >= robotCapacity(robotDefinition)) return false;
+        locations.set(material, move.ModuleName);
+      }
+      continue;
+    }
+    if (PLACE_MOVE_TYPES.has(move.MoveType)) {
+      const materials = materialIds(move);
+      for (let index = 0; index < materials.length; index += 1) {
+        const material = materials[index];
+        const destination = indexedStation(move, "DestStationList", index);
+        if (!destination || locations.get(material) !== move.ModuleName) return false;
+        if (locationCount(destination) >= stationCapacity(device, destination)) return false;
+        locations.set(material, destination);
+      }
+      continue;
+    }
+    const received = materialIds(move, "RecvMatList");
+    const sent = materialIds(move, "SendMatList");
+    for (let index = 0; index < received.length; index += 1) {
+      const station = indexedStation(move, "StationList", index);
+      if (!station || locations.get(received[index]) !== station) return false;
+      locations.set(received[index], move.ModuleName);
+    }
+    for (let index = 0; index < sent.length; index += 1) {
+      const station = indexedStation(move, "StationList", index);
+      if (!station || locations.get(sent[index]) !== move.ModuleName) return false;
+      if (locationCount(station) >= stationCapacity(device, station)) return false;
+      locations.set(sent[index], station);
+    }
+  }
+  return true;
+}
+
+/**
+ * 在 MoveList 回放终点识别两种明确的持片满腔死锁。
+ *
+ * 判定只读取前端回放出的最终位置、Route 下一步和设备容量，不信任算法提供的
+ * DEADLOCK 分类。目标腔内晶圆的下一步也必须由同一机器手搬出，才算形成依赖。
+ */
+export function detectTerminalPlaybackDeadlock(
+  moves: MoveRecord[],
+  device: DeviceDefinition | null,
+  plan: UnknownRecord | null,
+): PlaybackDeadlock | null {
+  if (!moves.length || !device || !plan) return null;
+  const records = normalizeMoves(moves);
+  if (!hasConsistentTransferReplay(records, device)) return null;
+  const snapshot = buildWorkspaceSnapshot(records, device, Number.POSITIVE_INFINITY);
+  const progress = replayMaterialProgress(records);
+  const modules = new Map(snapshot.modules.map(module => [module.name, module]));
+  const robotNames = new Set(snapshot.robots.map(robot => robot.name));
+
+  const blockingTargets = (robot: RobotSnapshot, wafer: string): string[] => {
+    const targets = nextRouteResources(plan, progress.get(wafer))
+      .filter(target => !robotNames.has(target));
+    if (!targets.length) return [];
+    const blocked = targets.filter(target => {
+      const chamber = modules.get(target);
+      if (!chamber || chamber.wafers.length < stationCapacity(device, target)) return false;
+      return chamber.wafers.some(occupant => (
+        nextRouteResources(plan, progress.get(occupant)).includes(robot.name)
+      ));
+    });
+    return blocked.length === targets.length ? blocked : [];
+  };
+
+  for (const robot of snapshot.robots) {
+    const held = [...robot.wafers].sort(naturalCompare);
+    if (robot.capacity === 1 && held.length === 1) {
+      const targets = blockingTargets(robot, held[0]);
+      if (!targets.length) continue;
+      const occupants = [...new Set(targets.flatMap(target => modules.get(target)?.wafers ?? []))].sort(naturalCompare);
+      return {
+        Code: "DEADLOCK.SINGLE_ARM_TARGET_FULL",
+        Category: "single-arm-target-full",
+        Message: `单臂机器手 ${robot.name} 手上拿着晶圆 ${held[0]}，目标腔室 ${targets.join("、")} 已满；腔室内的晶圆 ${occupants.join("、")} 也需要由 ${robot.name} 取出，因此机器手无法腾出手臂继续搬运。`,
+      };
+    }
+    if (robot.capacity === 2 && held.length === 2) {
+      const targetsByWafer = held.map(wafer => blockingTargets(robot, wafer));
+      if (targetsByWafer.some(targets => !targets.length)) continue;
+      const targets = [...new Set(targetsByWafer.flat())].sort(naturalCompare);
+      return {
+        Code: "DEADLOCK.DUAL_ARM_TARGETS_FULL",
+        Category: "dual-arm-targets-full",
+        Message: `双臂机器手 ${robot.name} 的两只手分别拿着晶圆 ${held.join("、")}，它们的目标腔室 ${targets.join("、")} 均已满；腔室内晶圆仍需由 ${robot.name} 取出，但机器手已经没有空闲手臂，无法继续搬运。`,
+      };
+    }
+  }
+  return null;
 }
 
 /** 返回与当前页面结构绑定的工作台 DOM 节点。 */
@@ -3285,6 +3503,11 @@ export class VisualizationWorkspace {
   /** 返回与诊断面板一致的稳态瓶颈候选利用率，供运行结果摘要复用。 */
   getBottleneckUtilization(): BottleneckUtilizationSummary | null {
     return this.bottleneckSummary ? structuredClone(this.bottleneckSummary) : null;
+  }
+
+  /** 返回当前 MoveList 在前端回放终点识别出的持片满腔死锁。 */
+  getTerminalDeadlock(): PlaybackDeadlock | null {
+    return detectTerminalPlaybackDeadlock(this.moves, this.device, this.replayPlan);
   }
 
   /** 切换到工作台标签。 */

@@ -75,6 +75,54 @@ class HongYeValidationSessionTests(unittest.TestCase):
         self.assertTrue(results[2]["success"])
         self.assertEqual(results[2]["errors"], 0)
 
+    def test_session_can_reset_between_recompute_generations(self) -> None:
+        """重算代次之间应能清空旧事件，再独立校验完整现场快照。"""
+        with HongYeValidationSession() as session:
+            for event in _minimal_events([]):
+                first = session.add_event(event)
+            session.reset()
+            for event in _minimal_events([]):
+                second = session.add_event(event)
+        self.assertTrue(first["success"])
+        self.assertTrue(second["success"])
+
+    def test_reproduction_log_resets_validator_before_next_schedule(self) -> None:
+        """平台保留完整日志，但第二代 AlgSchedule 应重启 HongYe 校验上下文。"""
+        class RecordingSession:
+            """记录 ReproductionLog 发给校验器的事件与 reset 次数。"""
+
+            def __init__(self) -> None:
+                self.events: list[dict] = []
+                self.reset_count = 0
+
+            def add_event(self, event: dict) -> None:
+                """记录一条事件；本测试不返回校验错误。"""
+                self.events.append(event)
+                return None
+
+            def reset(self) -> None:
+                """模拟清空校验器事件。"""
+                self.reset_count += 1
+                self.events.clear()
+
+        session = RecordingSession()
+        reproduction = ReproductionLog(hongye_session=session)
+        reproduction.add("AlgInit", {"Stations": {}, "Robots": {}})
+        reproduction.add("AlgSchedule", {"CurrentTime": 0})
+        reproduction.add("AlgOutput", {"MoveList": []})
+        reproduction.add("AlgUpdateMove", {"MoveID": 1, "MoveState": 1})
+        reproduction.add("AlgSchedule", {"CurrentTime": 10}, 10)
+
+        self.assertEqual(1, session.reset_count)
+        self.assertEqual(
+            ["AlgInit", "AlgSchedule"],
+            [event["Describe"] for event in session.events],
+        )
+        self.assertEqual(
+            ["AlgInit", "AlgSchedule", "AlgOutput", "AlgUpdateMove", "AlgSchedule"],
+            [event["Describe"] for event in reproduction.entries],
+        )
+
     def test_reproduction_log_converts_hongye_issue_for_gantt(self) -> None:
         """HongYe 错误应保留 MoveID，并沿用现有失败甘特图通道。"""
         invalid_move = {

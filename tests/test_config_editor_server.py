@@ -101,6 +101,53 @@ def _job(name: str, route: str, load_port: str) -> dict:
 class FrontendTemplateTests(unittest.TestCase):
     """验证不依赖算法数据夹具的前端模板与样式约束。"""
 
+    def test_frontend_registers_stable_deadlock_catalog(self) -> None:
+        """前端回放只登记两种持片满腔死锁，未知现场保留兜底。"""
+        script = EDITOR_SCRIPT_PATH.read_text(encoding="utf-8")
+
+        for code in (
+            "DEADLOCK.SINGLE_ARM_TARGET_FULL",
+            "DEADLOCK.DUAL_ARM_TARGETS_FULL",
+            "DEADLOCK.UNCLASSIFIED",
+        ):
+            self.assertIn(code, script)
+        self.assertIn("function deadlockDisplay", script)
+        self.assertIn("visualizationWorkspace.getTerminalDeadlock()", script)
+
+    def test_deadlock_feedback_keeps_partial_output(self) -> None:
+        """结构化死锁不得进入完整计划校验或退回上一代 MoveList。"""
+        output = {
+            "MoveList": [{
+                "MoveID": 7,
+                "MoveType": 9,
+                "StartTime": 1.0,
+                "EndTime": 2.0,
+            }],
+            "Feedback": [{
+                "Level": "Error",
+                "Type": "MachineDeadlockError",
+                "Code": "DEADLOCK.NO_EXECUTABLE_ACTION",
+                "Category": "no-executable-action",
+                "Message": "Machine 无可执行搬运意图",
+            }],
+        }
+        reproduction = config_server.ReproductionLog()
+
+        with self.assertRaises(LoggedPlanError) as context:
+            config_server._raise_deadlock_feedback(
+                output,
+                reproduction,
+                context="initial",
+            )
+
+        failure = context.exception.failure_output
+        self.assertEqual([7], [move["MoveID"] for move in failure["MoveList"]])
+        self.assertEqual(
+            "DEADLOCK.NO_EXECUTABLE_ACTION",
+            failure["FailureContext"]["Code"],
+        )
+        self.assertEqual("AlgOutput", reproduction.entries[-1]["Describe"])
+
     def test_single_run_responds_before_preflight_and_reuses_pending_save(self) -> None:
         """单测点击应立即显示准备状态，且运行前只保存确有修改的测试。"""
         script = EDITOR_SCRIPT_PATH.read_text(encoding="utf-8")
@@ -305,19 +352,19 @@ class RecomputeFailureOutputTests(unittest.TestCase):
         self.assertIn("!rec.removedByRecompute", viewer)
         self.assertIn('fillOpacity = bar.rec.removedByRecompute ? "0.24" : "1"', viewer)
 
-    def test_frontend_version_and_cache_keys_are_1_5_7(self) -> None:
+    def test_frontend_version_and_cache_keys_are_1_5_9(self) -> None:
         """前端显示版本、包版本和主资源缓存键必须同步。"""
         frontend_root = ROOT / "realtime_scheduler" / "frontend"
         template = (frontend_root / "config_editor.html").read_text(encoding="utf-8")
         package = json.loads((frontend_root / "package.json").read_text(encoding="utf-8"))
         package_lock = json.loads((frontend_root / "package-lock.json").read_text(encoding="utf-8"))
 
-        self.assertEqual("1.5.7", package["version"])
-        self.assertEqual("1.5.7", package_lock["version"])
-        self.assertEqual("1.5.7", package_lock["packages"][""]["version"])
-        self.assertIn('class="frontend-version">前端 v1.5.7</span>', template)
-        self.assertIn('/assets/config_editor.css?v=1.5.7', template)
-        self.assertIn('/assets/config_editor.js?v=1.5.7', template)
+        self.assertEqual("1.5.9", package["version"])
+        self.assertEqual("1.5.9", package_lock["version"])
+        self.assertEqual("1.5.9", package_lock["packages"][""]["version"])
+        self.assertIn('class="frontend-version">前端 v1.5.9</span>', template)
+        self.assertIn('/assets/config_editor.css?v=1.5.9', template)
+        self.assertIn('/assets/config_editor.js?v=1.5.9', template)
 
     def test_batch_status_refresh_obeys_frontend_performance_limit(self) -> None:
         """批量状态最多每秒轮询一次，且明细未变化时不得重建整组 DOM。"""
@@ -1905,7 +1952,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("<span>结果分析</span>", html)
         self.assertIn("<span>路径配置</span>", html)
         self.assertNotIn('data-tab-view="clean"', html)
-        self.assertIn('class="frontend-version">前端 v1.5.7</span>', html)
+        self.assertIn('class="frontend-version">前端 v1.5.9</span>', html)
         self.assertIn('data-option="residencyGuardSeconds"', html)
         self.assertIn('data-option="maximumRobotHoldingSeconds"', html)
         self.assertIn('data-option="maximumSystemResidenceCv"', html)
@@ -3344,6 +3391,11 @@ class ConfigEditorServerTests(unittest.TestCase):
             }],
             failure_output={
                 "MoveList": [{"MoveID": 1, "StartTime": 0, "EndTime": 8}],
+                "Feedback": [{
+                    "Type": "MachineDeadlockError",
+                    "Code": "DEADLOCK.NO_EXECUTABLE_ACTION",
+                    "Message": "Machine 无可执行搬运意图",
+                }],
             },
         )
         replay_plan = {"strategy": "heuristic", "rounds": [{"currentTime": 0}]}
@@ -3362,6 +3414,10 @@ class ConfigEditorServerTests(unittest.TestCase):
 
         self.assertEqual("/api/results/deadlock-result", fields["resultUrl"])
         self.assertEqual(1, fields["moveCount"])
+        self.assertEqual(
+            "DEADLOCK.NO_EXECUTABLE_ACTION",
+            fields["deadlock"]["Code"],
+        )
         artifact = saved_artifacts[0]
         self.assertEqual("heuristic", artifact["ReplayContext"]["plan"]["strategy"])
         self.assertEqual(101, artifact["ReplayContext"]["updates"][0]["Materials"][0]["ID"])

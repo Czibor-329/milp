@@ -28,6 +28,7 @@ __export(workspace_visualizer_test_entry_exports, {
   decisionBoundaryTimes: () => decisionBoundaryTimes,
   decisionSpaceSignature: () => decisionSpaceSignature,
   detectDeviceTopologyLayout: () => detectDeviceTopologyLayout,
+  detectTerminalPlaybackDeadlock: () => detectTerminalPlaybackDeadlock,
   detectTopologyLayout: () => detectTopologyLayout,
   displayedPerformanceResources: () => displayedPerformanceResources,
   groupedBottleneckResources: () => groupedBottleneckResources,
@@ -755,7 +756,8 @@ function activeTarget(move) {
 function buildWorkspaceSnapshot(moves, device, requestedTime) {
   const records = normalizeMoves(moves);
   const endTime = records.reduce((maximum, move) => Math.max(maximum, move.EndTime), 0);
-  const time = Math.max(0, Math.min(finiteNumber(requestedTime), endTime));
+  const normalizedRequestedTime = requestedTime === Number.POSITIVE_INFINITY ? endTime : finiteNumber(requestedTime);
+  const time = Math.max(0, Math.min(normalizedRequestedTime, endTime));
   const robotNames = collectRobotNames(records, device);
   const robotNameSet = new Set(robotNames);
   const definitions = collectModuleDefinitions(records, device, robotNameSet);
@@ -888,6 +890,159 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
     robots,
     waferCount: new Set(records.flatMap((move) => materialIds(move))).size
   };
+}
+function stationCapacity(device, name) {
+  const definition = device?.Stations?.[name] ?? {};
+  const slots = listValue(definition.Slots).map((value) => finiteNumber(value, 0)).filter((value) => Number.isInteger(value) && value > 0);
+  return Math.max(1, finiteNumber(definition.Capacity, 0), slots.length);
+}
+function routeByPJobName(plan, pjobName) {
+  const routes = Array.isArray(plan?.routes) ? plan.routes : [];
+  const routeByName = new Map(routes.filter((route) => route && typeof route === "object" && !Array.isArray(route)).map((route) => [String(route.name ?? ""), route]));
+  const aliases = /* @__PURE__ */ new Map();
+  const rounds = Array.isArray(plan?.rounds) ? plan.rounds : [];
+  rounds.forEach((round, roundIndex) => {
+    const cjobs = Array.isArray(round?.cjobs) ? round.cjobs : [];
+    cjobs.forEach((cjob, cjobIndex) => {
+      const row = cjob;
+      const cjobName = String(row.key ?? `C${cjobIndex + 1}`);
+      const pjobs = Array.isArray(row.pjobs) ? row.pjobs : [];
+      pjobs.forEach((pjob, pjobIndex) => {
+        const job = pjob;
+        const shortName = String(job.jobName ?? `P${pjobIndex + 1}`);
+        const route = routeByName.get(String(job.routeRef ?? ""));
+        if (!route) return;
+        aliases.set(`${roundIndex + 1}.${cjobName}.${shortName}`, route);
+        if (!aliases.has(shortName)) aliases.set(shortName, route);
+      });
+    });
+  });
+  return aliases.get(pjobName) ?? aliases.get(pjobName.split(".").at(-1) ?? "") ?? null;
+}
+function replayMaterialProgress(records) {
+  const progress = /* @__PURE__ */ new Map();
+  const update = (move, materials, stepField, pjobOffset = 0) => {
+    const stepIds = listValue(move[stepField]);
+    const pjobs = listValue(move.PJobName);
+    materials.forEach((material, index) => {
+      const previous = progress.get(material) ?? { pjobName: "", stepId: "", explicitTargets: [] };
+      const explicitTarget = indexedStation(move, "DestStationList", index);
+      progress.set(material, {
+        pjobName: String(pjobs[pjobOffset + index] ?? pjobs[index] ?? previous.pjobName),
+        stepId: String(stepIds[index] ?? previous.stepId),
+        explicitTargets: explicitTarget ? [explicitTarget] : []
+      });
+    });
+  };
+  for (const move of [...records].sort((left, right) => left.EndTime - right.EndTime || left.MoveID - right.MoveID)) {
+    if (move.MoveType === SWAP_MOVE) {
+      const received = materialIds(move, "RecvMatList");
+      update(move, received, "RecvMatStepIDList");
+      update(move, materialIds(move, "SendMatList"), "SendMatStepIDList", received.length);
+    } else {
+      update(move, materialIds(move), "StepIDList");
+    }
+  }
+  return progress;
+}
+function nextRouteResources(plan, progress) {
+  if (!progress) return [];
+  if (progress.explicitTargets.length) return progress.explicitTargets;
+  const route = routeByPJobName(plan, progress.pjobName);
+  const stages = Array.isArray(route?.stages) ? route.stages : [];
+  const currentIndex = stages.findIndex((stage) => String(stage.stepId ?? "") === progress.stepId);
+  if (currentIndex < 0) return [];
+  const postStepIds = listValue(stages[currentIndex].postStepIds).map(String);
+  const nextStages = postStepIds.length ? stages.filter((stage) => postStepIds.includes(String(stage.stepId ?? ""))) : stages.slice(currentIndex + 1, currentIndex + 2);
+  return [...new Set(nextStages.flatMap((stage) => Array.isArray(stage.visits) ? stage.visits.map((visit) => String(visit.stationName ?? "")) : []).filter(Boolean))];
+}
+function hasConsistentTransferReplay(records, device) {
+  const locations = initialMaterialLocations(records);
+  const robotNames = new Set(Object.keys(device.Robots ?? {}));
+  const locationCount = (location) => [...locations.values()].filter((current) => current === location).length;
+  const orderedTransfers = records.filter((move) => PICK_MOVE_TYPES.has(move.MoveType) || PLACE_MOVE_TYPES.has(move.MoveType) || move.MoveType === SWAP_MOVE).sort((left, right) => left.EndTime - right.EndTime || left.MoveID - right.MoveID);
+  for (const move of orderedTransfers) {
+    if (PICK_MOVE_TYPES.has(move.MoveType)) {
+      const materials = materialIds(move);
+      for (let index = 0; index < materials.length; index += 1) {
+        const material = materials[index];
+        const source = indexedStation(move, "SrcStationList", index);
+        if (!source || locations.get(material) !== source) return false;
+        const robotDefinition = device.Robots?.[move.ModuleName] ?? {};
+        if (!robotNames.has(move.ModuleName) || locationCount(move.ModuleName) >= robotCapacity(robotDefinition)) return false;
+        locations.set(material, move.ModuleName);
+      }
+      continue;
+    }
+    if (PLACE_MOVE_TYPES.has(move.MoveType)) {
+      const materials = materialIds(move);
+      for (let index = 0; index < materials.length; index += 1) {
+        const material = materials[index];
+        const destination = indexedStation(move, "DestStationList", index);
+        if (!destination || locations.get(material) !== move.ModuleName) return false;
+        if (locationCount(destination) >= stationCapacity(device, destination)) return false;
+        locations.set(material, destination);
+      }
+      continue;
+    }
+    const received = materialIds(move, "RecvMatList");
+    const sent = materialIds(move, "SendMatList");
+    for (let index = 0; index < received.length; index += 1) {
+      const station = indexedStation(move, "StationList", index);
+      if (!station || locations.get(received[index]) !== station) return false;
+      locations.set(received[index], move.ModuleName);
+    }
+    for (let index = 0; index < sent.length; index += 1) {
+      const station = indexedStation(move, "StationList", index);
+      if (!station || locations.get(sent[index]) !== move.ModuleName) return false;
+      if (locationCount(station) >= stationCapacity(device, station)) return false;
+      locations.set(sent[index], station);
+    }
+  }
+  return true;
+}
+function detectTerminalPlaybackDeadlock(moves, device, plan) {
+  if (!moves.length || !device || !plan) return null;
+  const records = normalizeMoves(moves);
+  if (!hasConsistentTransferReplay(records, device)) return null;
+  const snapshot = buildWorkspaceSnapshot(records, device, Number.POSITIVE_INFINITY);
+  const progress = replayMaterialProgress(records);
+  const modules = new Map(snapshot.modules.map((module2) => [module2.name, module2]));
+  const robotNames = new Set(snapshot.robots.map((robot) => robot.name));
+  const blockingTargets = (robot, wafer) => {
+    const targets = nextRouteResources(plan, progress.get(wafer)).filter((target) => !robotNames.has(target));
+    if (!targets.length) return [];
+    const blocked = targets.filter((target) => {
+      const chamber = modules.get(target);
+      if (!chamber || chamber.wafers.length < stationCapacity(device, target)) return false;
+      return chamber.wafers.some((occupant) => nextRouteResources(plan, progress.get(occupant)).includes(robot.name));
+    });
+    return blocked.length === targets.length ? blocked : [];
+  };
+  for (const robot of snapshot.robots) {
+    const held = [...robot.wafers].sort(naturalCompare);
+    if (robot.capacity === 1 && held.length === 1) {
+      const targets = blockingTargets(robot, held[0]);
+      if (!targets.length) continue;
+      const occupants = [...new Set(targets.flatMap((target) => modules.get(target)?.wafers ?? []))].sort(naturalCompare);
+      return {
+        Code: "DEADLOCK.SINGLE_ARM_TARGET_FULL",
+        Category: "single-arm-target-full",
+        Message: `\u5355\u81C2\u673A\u5668\u624B ${robot.name} \u624B\u4E0A\u62FF\u7740\u6676\u5706 ${held[0]}\uFF0C\u76EE\u6807\u8154\u5BA4 ${targets.join("\u3001")} \u5DF2\u6EE1\uFF1B\u8154\u5BA4\u5185\u7684\u6676\u5706 ${occupants.join("\u3001")} \u4E5F\u9700\u8981\u7531 ${robot.name} \u53D6\u51FA\uFF0C\u56E0\u6B64\u673A\u5668\u624B\u65E0\u6CD5\u817E\u51FA\u624B\u81C2\u7EE7\u7EED\u642C\u8FD0\u3002`
+      };
+    }
+    if (robot.capacity === 2 && held.length === 2) {
+      const targetsByWafer = held.map((wafer) => blockingTargets(robot, wafer));
+      if (targetsByWafer.some((targets2) => !targets2.length)) continue;
+      const targets = [...new Set(targetsByWafer.flat())].sort(naturalCompare);
+      return {
+        Code: "DEADLOCK.DUAL_ARM_TARGETS_FULL",
+        Category: "dual-arm-targets-full",
+        Message: `\u53CC\u81C2\u673A\u5668\u624B ${robot.name} \u7684\u4E24\u53EA\u624B\u5206\u522B\u62FF\u7740\u6676\u5706 ${held.join("\u3001")}\uFF0C\u5B83\u4EEC\u7684\u76EE\u6807\u8154\u5BA4 ${targets.join("\u3001")} \u5747\u5DF2\u6EE1\uFF1B\u8154\u5BA4\u5185\u6676\u5706\u4ECD\u9700\u7531 ${robot.name} \u53D6\u51FA\uFF0C\u4F46\u673A\u5668\u624B\u5DF2\u7ECF\u6CA1\u6709\u7A7A\u95F2\u624B\u81C2\uFF0C\u65E0\u6CD5\u7EE7\u7EED\u642C\u8FD0\u3002`
+      };
+    }
+  }
+  return null;
 }
 function collectElements(root) {
   const required = (id) => {
@@ -2359,6 +2514,10 @@ var VisualizationWorkspace = class {
   getBottleneckUtilization() {
     return this.bottleneckSummary ? structuredClone(this.bottleneckSummary) : null;
   }
+  /** 返回当前 MoveList 在前端回放终点识别出的持片满腔死锁。 */
+  getTerminalDeadlock() {
+    return detectTerminalPlaybackDeadlock(this.moves, this.device, this.replayPlan);
+  }
   /** 切换到工作台标签。 */
   show() {
     if (this.moves.length) this.showSingleResult();
@@ -3578,6 +3737,7 @@ function buildScheduleAnalysisContext(routes, rounds) {
   decisionBoundaryTimes,
   decisionSpaceSignature,
   detectDeviceTopologyLayout,
+  detectTerminalPlaybackDeadlock,
   detectTopologyLayout,
   displayedPerformanceResources,
   groupedBottleneckResources,
