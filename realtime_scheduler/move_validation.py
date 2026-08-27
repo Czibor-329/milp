@@ -428,8 +428,14 @@ def validate_move_list(
     init_data: "Optional[Mapping[str, Any] | MachineState]" = None,
     *,
     check_residency: bool = True,
+    external_predecessors: "Optional[Mapping[int, Mapping[str, Any]]]" = None,
 ) -> List[str]:
-    """按时间线校验 MoveList；覆盖依赖 DAG、Route 时限与物理状态。"""
+    """按时间线校验 MoveList；覆盖依赖 DAG、Route 时限与物理状态。
+
+    ``external_predecessors`` 提供上一代已提交或正在执行的 Move（按 MoveID
+    索引），供重算增量输出引用：其 MoveID 不属于本代 ``moves``，但可被本代
+    ``PreMoveID`` 合法引用为已完成的前驱；首排校验不传该参数。
+    """
     for index, move in enumerate(moves):
         if not isinstance(move, Mapping):
             return [
@@ -438,7 +444,7 @@ def validate_move_list(
                     f"MoveList[{index}] 必须是 JSON 对象",
                 )
             ]
-    dependency_error = _validate_move_dependencies(moves)
+    dependency_error = _validate_move_dependencies(moves, external_predecessors)
     if dependency_error:
         return [dependency_error]
     duration_error = _validate_configured_durations(task, moves, init_data)
@@ -470,8 +476,16 @@ def validate_move_list(
     return []
 
 
-def _validate_move_dependencies(moves: Sequence[Mapping[str, Any]]) -> Optional[str]:
-    """校验 MoveID 唯一性、PreMoveID 引用、拓扑无环和时间先后。"""
+def _validate_move_dependencies(
+    moves: Sequence[Mapping[str, Any]],
+    external_predecessors: "Optional[Mapping[int, Mapping[str, Any]]]" = None,
+) -> Optional[str]:
+    """校验 MoveID 唯一性、PreMoveID 引用、拓扑无环和时间先后。
+
+    ``external_predecessors`` 提供上一代已提交或正在执行的 Move 索引（按
+    MoveID）。重算增量输出的 ``PreMoveID`` 可引用这些旧代 MoveID 作为已完成
+    前驱：仍要求其 EndTime 不晚于本动作 StartTime，但不参与本代拓扑环检测。
+    """
     by_id: Dict[int, Mapping[str, Any]] = {}
     for move in moves:
         raw_move_id = move.get("MoveID")
@@ -496,9 +510,14 @@ def _validate_move_dependencies(moves: Sequence[Mapping[str, Any]]) -> Optional[
             if predecessor_id == move_id:
                 return _issue(move, ValidationErrorCode.PREDECESSOR_SELF_REFERENCE, "PreMoveID 不能引用自身")
             predecessor = by_id.get(predecessor_id)
-            if predecessor is None:
+            external = (
+                external_predecessors.get(predecessor_id)
+                if predecessor is None and external_predecessors is not None
+                else None
+            )
+            if predecessor is None and external is None:
                 return _issue(move, ValidationErrorCode.PREDECESSOR_MISSING, f"PreMoveID 引用了不存在的 MoveID={predecessor_id}")
-            predecessor_end = _number(predecessor.get("EndTime"))
+            predecessor_end = _number((predecessor or external).get("EndTime"))
             current_start = _number(move.get("StartTime"))
             if (
                 predecessor_end is not None
@@ -510,8 +529,9 @@ def _validate_move_dependencies(moves: Sequence[Mapping[str, Any]]) -> Optional[
                     ValidationErrorCode.PREDECESSOR_TIME_CONFLICT,
                     f"前驱 MoveID={predecessor_id} 尚未结束（EndTime={predecessor_end}）",
                 )
-            parsed.add(predecessor_id)
-            successors[predecessor_id].add(move_id)
+            if predecessor is not None:
+                parsed.add(predecessor_id)
+                successors[predecessor_id].add(move_id)
         predecessors[move_id] = parsed
 
     ready = [move_id for move_id, values in predecessors.items() if not values]

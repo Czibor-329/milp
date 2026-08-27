@@ -995,6 +995,11 @@ class StandardAlgorithmRuntime:
             else _compile_external_validation_problem(self.tool_topo, next_update)
         )
         next_moves = list(output.get("MoveList") or [])
+        committed = (
+            deepcopy(list(committed_moves))
+            if committed_moves is not None
+            else self._tracker.executed_moves
+        )
         validation_issues = (
             []
             if self.skip_validation
@@ -1002,15 +1007,14 @@ class StandardAlgorithmRuntime:
                 next_problem,
                 next_moves,
                 next_state,
+                # 重算增量输出可引用旧代已提交/正在执行的 Move 作为前驱。
+                external_predecessors=_committed_move_index(
+                    [*self._history, *committed]
+                ),
             )
         )
         if validation_issues:
             message = f"{reason} MoveList 状态校验失败：{validation_issues[0]}"
-            committed = (
-                deepcopy(list(committed_moves))
-                if committed_moves is not None
-                else self._tracker.executed_moves
-            )
             recompute_point = {
                 "Time": float(requested_time),
                 "EffectiveTime": float(effective_time),
@@ -1040,11 +1044,7 @@ class StandardAlgorithmRuntime:
             next_moves,
             next_state,
         )
-        self._history.extend(
-            deepcopy(list(committed_moves))
-            if committed_moves is not None
-            else self._tracker.executed_moves
-        )
+        self._history.extend(committed)
         self.current_update = next_update
         self.problem = next_problem
         self._tracker = next_tracker
@@ -1294,10 +1294,19 @@ class PackagedAlgorithmRuntime:
         )
         add_new_materials_to_machine_state(next_state, update_params)
         next_moves = deepcopy(list(output.get("MoveList") or []))
+        committed = deepcopy(list(committed_moves))
         validation_issues = (
             []
             if self.skip_validation
-            else validate_move_list(None, next_moves, next_state)
+            else validate_move_list(
+                None,
+                next_moves,
+                next_state,
+                # 重算增量输出可引用旧代已提交/正在执行的 Move 作为前驱。
+                external_predecessors=_committed_move_index(
+                    [*self._history, *committed]
+                ),
+            )
         )
         if validation_issues:
             message = f"{reason} MoveList 状态校验失败：{validation_issues[0]}"
@@ -1317,12 +1326,12 @@ class PackagedAlgorithmRuntime:
                 _build_validation_gantt_output(
                     output,
                     validation_issues,
-                    prefix_moves=[*self._history, *deepcopy(list(committed_moves))],
+                    prefix_moves=[*self._history, *committed],
                     recompute_points=[*self._recompute_points, recompute_point],
                 ),
                 float(requested_time),
             )
-        self._history.extend(deepcopy(list(committed_moves)))
+        self._history.extend(committed)
         self.current_update = deepcopy(dict(update_params))
         self._tracker = MoveStateReplay(None, next_moves, next_state)
         self._generation_initial_state = next_state.clone()
@@ -1370,6 +1379,18 @@ class LoggedPlanError(RuntimeError):
             else None
         )
         self.validation_issues = list(validation_issues or ())
+
+
+def _committed_move_index(
+    moves: Sequence[Mapping[str, Any]],
+) -> Dict[int, Mapping[str, Any]]:
+    """按 MoveID 建立已提交 Move 索引，供重算增量校验引用为合法前驱。"""
+    indexed: Dict[int, Mapping[str, Any]] = {}
+    for move in moves:
+        raw_move_id = move.get("MoveID")
+        if isinstance(raw_move_id, int) and not isinstance(raw_move_id, bool):
+            indexed[int(raw_move_id)] = move
+    return indexed
 
 
 def _alg_output_info(
@@ -7037,6 +7058,9 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                 options = payload.get("options")
                 if not isinstance(options, Mapping):
                     options = {}
+                test_ids = payload.get("testIds")
+                if test_ids is not None and not isinstance(test_ids, list):
+                    raise ValueError("testIds 必须是测试 ID 数组")
                 result = start_workspace_test_batch(
                     device_id,
                     str(payload.get("group") or ""),
@@ -7046,6 +7070,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                     hongye_check=bool(payload.get("hongYeCheck", True)),
                     skip_baseline=bool(payload.get("skipBaseline")),
                     use_process_isolation=True,
+                    test_ids=test_ids,
                 )
                 self._send_json(result, HTTPStatus.ACCEPTED)
             except Exception as error:  # noqa: BLE001
