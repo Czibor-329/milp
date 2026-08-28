@@ -31,9 +31,11 @@ VACUUM = "VAC"
 LOAD_LOCK_TYPE = "loadlock"
 LOAD_PORT_TYPE = "loadport"
 DUMMY_PORT_TYPE = "dummyport"
+BUFFER_TYPE = "buffer"
 COMPLETED_ON_PLACE_STATION_TYPES = frozenset({
     LOAD_PORT_TYPE,
     DUMMY_PORT_TYPE,
+    BUFFER_TYPE,
 })
 DOORLESS_STATION_NAMES = frozenset({"Cooler", "Cool"})
 TWIN_LOAD_LOCK_PAIRS = frozenset({
@@ -146,7 +148,7 @@ class StationState:
 
     @property
     def completes_material_on_place(self) -> bool:
-        """返回物料放入后无需额外服务即可再次取出的库存站点。"""
+        """返回物料放入后无需额外服务即可再次取出的库存或 Buffer 站点。"""
         return self.station_type.lower() in COMPLETED_ON_PLACE_STATION_TYPES
 
 
