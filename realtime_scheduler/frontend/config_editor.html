@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>调度平台</title>
   <link rel="stylesheet" href="/assets/katex.min.css?v=1.4.4">
-  <link rel="stylesheet" href="/assets/config_editor.css?v=1.5.10">
+  <link rel="stylesheet" href="/assets/config_editor.css?v=1.5.11">
 </head>
 <body>
   <a class="skip-link" href="#mainContent">跳到主要内容</a>
@@ -40,7 +40,7 @@
       <div class="sidebar-footer">
         <span class="sidebar-footer-label">系统状态</span>
         <div class="service-pill" id="serviceState">本地服务</div>
-        <span class="frontend-version">前端 v1.5.10</span>
+        <span class="frontend-version">前端 v1.5.11</span>
       </div>
     </aside>
 
@@ -145,7 +145,15 @@
                 <div class="parameter-comparison-base" id="parameterComparisonBase"></div>
                 <div id="parameterComparisonResults"></div>
               </section>
-              <div class="result-error-panel" id="resultErrorPanel" role="alert" hidden><strong>运行错误</strong><pre id="terminal"></pre></div>
+              <div class="result-error-panel" id="resultErrorPanel" role="alert" hidden>
+                <header class="result-error-header">
+                  <span class="result-error-icon" aria-hidden="true">!</span>
+                  <div><small>RUN DIAGNOSTIC</small><strong>运行错误</strong></div>
+                  <span class="result-error-status">需要处理</span>
+                </header>
+                <div id="resultErrorDetails" class="result-error-details" hidden></div>
+                <pre id="terminal"></pre>
+              </div>
               <div class="result-actions"><a class="btn" id="logButton" href="#" download aria-disabled="true">导出复现日志</a><button class="btn primary" id="workspaceResultButton" type="button" disabled>在结果分析中查看</button><a class="btn" id="ganttButton" href="#" target="_blank" aria-disabled="true">打开甘特图</a><button class="btn danger" id="clearExportsButton" type="button">清理导出数据</button></div>
             </div>
           </article>
@@ -728,6 +736,6 @@
     </aside>
   </dialog>
 
-  <script type="module" src="/assets/config_editor.js?v=1.5.10"></script>
+  <script type="module" src="/assets/config_editor.js?v=1.5.11"></script>
 </body>
 </html>

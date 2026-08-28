@@ -92,7 +92,52 @@ test("前端回放识别单臂持片且目标满腔依赖同一机器手排空",
   const deadlock = logic.detectTerminalPlaybackDeadlock(replayMoves, replayDevice, replayPlan);
 
   assert.equal(deadlock.Code, "DEADLOCK.SINGLE_ARM_TARGET_FULL");
-  assert.match(deadlock.Message, /R.*W_NEW.*PM1.*已满.*W_OLD.*R.*无法腾出手臂/);
+  assert.match(deadlock.Message, /R.*唯一手臂.*W_NEW.*PM1.*W_OLD.*没有空手接走腔内晶圆.*相互等待/);
+});
+
+test("前端回放识别双臂单片持有且目标满腔无交换出口", () => {
+  const replayMoves = [
+    {
+      MoveID: 1, MoveType: 5, ModuleName: "R", SrcStationList: ["PM2"],
+      DestStationList: ["LL1"], MatIDList: ["W_HELD"], StepIDList: [0],
+      StartTime: 0, EndTime: 0.5,
+    },
+    {
+      MoveID: 2, MoveType: 9, ModuleName: "PM1", MatIDList: ["W_BLOCKING"],
+      StepIDList: [0], PJobName: ["1.C1.P2"], StartTime: 0, EndTime: 1,
+      CleanTaskName: "PreDummyClean", ProcessRecipe: "DummyCleanRecipe",
+      IsLastCleanTaskMove: false,
+    },
+    {
+      MoveID: 3, MoveType: 0, ModuleName: "R", SrcStationList: ["LL1"],
+      MatIDList: ["W_HELD"], StepIDList: [1], PJobName: ["1.C1.P1"],
+      StartTime: 1, EndTime: 2,
+    },
+  ];
+  const replayDevice = {
+    Stations: {
+      LL1: { Type: "LoadLock", Capacity: 1 },
+      PM1: { Type: "ProcessChamber", Capacity: 1 },
+      PM2: { Type: "ProcessChamber", Capacity: 1 },
+    },
+    Robots: { R: { Capacity: 2, Slot: [1, 2] } },
+  };
+  const replayPlan = {
+    routes: [
+      { name: "Incoming", stages: [deadlockStage(0, "LL1", [1]), deadlockStage(1, "R", [2]), deadlockStage(2, "PM1")] },
+      { name: "Outgoing", stages: [deadlockStage(0, "PM1", [1]), deadlockStage(1, "R", [2]), deadlockStage(2, "LL1")] },
+    ],
+    rounds: [{ cjobs: [{ key: "C1", pjobs: [
+      { jobName: "P1", routeRef: "Incoming" },
+      { jobName: "P2", routeRef: "Outgoing" },
+    ] }] }],
+  };
+
+  const deadlock = logic.detectTerminalPlaybackDeadlock(replayMoves, replayDevice, replayPlan);
+
+  assert.equal(deadlock.Code, "DEADLOCK.DUAL_ARM_SINGLE_HELD_TARGET_FULL");
+  assert.match(deadlock.Message, /R.*W_HELD.*PM1.*尚未完成整组 PreDummyClean.*W_BLOCKING/);
+  assert.match(deadlock.Message, /W_HELD.*清洗完成前禁止进入.*不能直接换片.*只能由 R 取出/);
 });
 
 test("前端回放识别双臂同时持有两片且目标腔室均已满", () => {
@@ -133,7 +178,7 @@ test("前端回放识别双臂同时持有两片且目标腔室均已满", () =>
   const deadlock = logic.detectTerminalPlaybackDeadlock(replayMoves, replayDevice, replayPlan);
 
   assert.equal(deadlock.Code, "DEADLOCK.DUAL_ARM_TARGETS_FULL");
-  assert.match(deadlock.Message, /R.*W_NEW_1、W_NEW_2.*PM1、PM2.*均已满.*没有空闲手臂/);
+  assert.match(deadlock.Message, /R.*两只手臂.*W_NEW_1、W_NEW_2.*PM1、PM2.*没有空手接走.*W_OLD_1、W_OLD_2.*相互等待/);
 });
 
 test("Move 位置回放不自洽时不继续猜测死锁类型", () => {

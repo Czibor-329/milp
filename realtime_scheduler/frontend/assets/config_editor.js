@@ -629,9 +629,7 @@ function initialMaterialLocations(moves) {
       }
       continue;
     }
-    const source = firstStation(move, "SrcStationList");
-    const destination = firstStation(move, "DestStationList");
-    const fallback = source || (PICK_MOVE_TYPES.has(move.MoveType) ? move.ModuleName : "") || (PLACE_MOVE_TYPES.has(move.MoveType) ? move.ModuleName : "") || destination || move.ModuleName;
+    const fallback = PICK_MOVE_TYPES.has(move.MoveType) ? firstStation(move, "SrcStationList") : PLACE_MOVE_TYPES.has(move.MoveType) ? move.ModuleName : move.MoveType === PROCESS_MOVE ? move.ModuleName : "";
     for (const material of materialIds(move)) {
       if (!locations.has(material) && fallback) locations.set(material, fallback);
     }
@@ -1167,6 +1165,18 @@ function detectTerminalPlaybackDeadlock(moves, device, plan) {
     });
     return blocked.length === targets.length ? blocked : [];
   };
+  const unfinishedCleaningBlockers = (targets) => targets.flatMap((target) => {
+    const occupants = modules.get(target)?.wafers ?? [];
+    return occupants.flatMap((wafer) => {
+      const latestCleaningMove = [...records].filter((move) => move.MoveType === PROCESS_MOVE && move.ModuleName === target && materialIds(move).includes(wafer) && isCleaningMove(move)).sort((left, right) => right.EndTime - left.EndTime || right.MoveID - left.MoveID)[0];
+      if (!latestCleaningMove || latestCleaningMove.IsLastCleanTaskMove !== false) return [];
+      return [{
+        target,
+        wafer,
+        taskName: String(latestCleaningMove.CleanTaskName || latestCleaningMove.ProcessRecipe || "\u6E05\u6D17\u4EFB\u52A1")
+      }];
+    });
+  });
   for (const robot of snapshot.robots) {
     const held = [...robot.wafers].sort(naturalCompare);
     if (robot.capacity === 1 && held.length === 1) {
@@ -1176,7 +1186,19 @@ function detectTerminalPlaybackDeadlock(moves, device, plan) {
       return {
         Code: "DEADLOCK.SINGLE_ARM_TARGET_FULL",
         Category: "single-arm-target-full",
-        Message: `\u5355\u81C2\u673A\u5668\u624B ${robot.name} \u624B\u4E0A\u62FF\u7740\u6676\u5706 ${held[0]}\uFF0C\u76EE\u6807\u8154\u5BA4 ${targets.join("\u3001")} \u5DF2\u6EE1\uFF1B\u8154\u5BA4\u5185\u7684\u6676\u5706 ${occupants.join("\u3001")} \u4E5F\u9700\u8981\u7531 ${robot.name} \u53D6\u51FA\uFF0C\u56E0\u6B64\u673A\u5668\u624B\u65E0\u6CD5\u817E\u51FA\u624B\u81C2\u7EE7\u7EED\u642C\u8FD0\u3002`
+        Message: `${robot.name} \u7684\u552F\u4E00\u624B\u81C2\u6301\u6709\u6676\u5706 ${held[0]}\uFF0C\u76EE\u6807 ${targets.join("\u3001")} \u88AB\u6676\u5706 ${occupants.join("\u3001")} \u5360\u7528\uFF1B\u5B83\u6CA1\u6709\u7A7A\u624B\u63A5\u8D70\u8154\u5185\u6676\u5706\uFF0C\u6301\u7247\u53C8\u5FC5\u987B\u7B49\u76EE\u6807\u817E\u7A7A\u624D\u80FD\u653E\u4E0B\uFF0C\u5F62\u6210\u76F8\u4E92\u7B49\u5F85\u3002`
+      };
+    }
+    if (robot.capacity === 2 && held.length === 1) {
+      const targets = blockingTargets(robot, held[0]);
+      if (!targets.length) continue;
+      const occupants = [...new Set(targets.flatMap((target) => modules.get(target)?.wafers ?? []))].sort(naturalCompare);
+      const cleaningBlockers = unfinishedCleaningBlockers(targets);
+      const reason = cleaningBlockers.length ? cleaningBlockers.map((blocker) => `${blocker.target} \u88AB\u5C1A\u672A\u5B8C\u6210\u6574\u7EC4 ${blocker.taskName} \u7684\u6E05\u6D17\u7247 ${blocker.wafer} \u5360\u7528\uFF1B\u6676\u5706 ${held[0]} \u5728\u6E05\u6D17\u5B8C\u6210\u524D\u7981\u6B62\u8FDB\u5165\uFF0C\u4E0D\u80FD\u76F4\u63A5\u6362\u7247\u3002`).join("") : `\u76F4\u63A5\u6362\u7247\u4F1A\u8BA9\u8154\u5185\u6676\u5706 ${occupants.join("\u3001")} \u8F6C\u5230 ${robot.name} \u7684\u7B2C\u4E8C\u53EA\u624B\u81C2\uFF0C\u4F46\u56DE\u653E\u7EC8\u70B9\u6CA1\u6709\u80FD\u5C06\u8FD9\u4E9B\u6676\u5706\u7EE7\u7EED\u653E\u4E0B\u7684\u5408\u6CD5\u540E\u7EE7\u51FA\u53E3\uFF0C\u6362\u7247\u94FE\u65E0\u6CD5\u95ED\u5408\u3002`;
+      return {
+        Code: "DEADLOCK.DUAL_ARM_SINGLE_HELD_TARGET_FULL",
+        Category: "dual-arm-single-held-target-full",
+        Message: `${robot.name} \u5DF2\u6301\u6709\u6676\u5706 ${held[0]}\u3002${reason}\u8154\u5185\u7247\u53C8\u53EA\u80FD\u7531 ${robot.name} \u53D6\u51FA\uFF0C\u5F62\u6210\u6301\u7247\u7B49\u5F85\u95ED\u73AF\u3002`
       };
     }
     if (robot.capacity === 2 && held.length === 2) {
@@ -1186,7 +1208,7 @@ function detectTerminalPlaybackDeadlock(moves, device, plan) {
       return {
         Code: "DEADLOCK.DUAL_ARM_TARGETS_FULL",
         Category: "dual-arm-targets-full",
-        Message: `\u53CC\u81C2\u673A\u5668\u624B ${robot.name} \u7684\u4E24\u53EA\u624B\u5206\u522B\u62FF\u7740\u6676\u5706 ${held.join("\u3001")}\uFF0C\u5B83\u4EEC\u7684\u76EE\u6807\u8154\u5BA4 ${targets.join("\u3001")} \u5747\u5DF2\u6EE1\uFF1B\u8154\u5BA4\u5185\u6676\u5706\u4ECD\u9700\u7531 ${robot.name} \u53D6\u51FA\uFF0C\u4F46\u673A\u5668\u624B\u5DF2\u7ECF\u6CA1\u6709\u7A7A\u95F2\u624B\u81C2\uFF0C\u65E0\u6CD5\u7EE7\u7EED\u642C\u8FD0\u3002`
+        Message: `${robot.name} \u4E24\u53EA\u624B\u81C2\u6301\u6709\u6676\u5706 ${held.join("\u3001")}\uFF0C\u76EE\u6807 ${targets.join("\u3001")} \u5747\u5DF2\u6EE1\uFF1B\u6CA1\u6709\u7A7A\u624B\u63A5\u8D70\u8154\u5185\u6676\u5706 ${[...new Set(targets.flatMap((target) => modules.get(target)?.wafers ?? []))].sort(naturalCompare).join("\u3001")}\uFF0C\u6301\u7247\u53C8\u5FC5\u987B\u7B49\u76EE\u6807\u817E\u7A7A\u624D\u80FD\u653E\u4E0B\uFF0C\u5F62\u6210\u76F8\u4E92\u7B49\u5F85\u3002`
       };
     }
   }
@@ -18214,21 +18236,28 @@ var DEFAULT_SCHEDULE_OPTIONS = Object.freeze({
 var SCHEDULE_OPTION_KEYS = new Set(Object.keys(DEFAULT_SCHEDULE_OPTIONS));
 var DEADLOCK_TYPE_CATALOG = Object.freeze({
   "DEADLOCK.SINGLE_ARM_TARGET_FULL": {
+    deadlockCode: "DLK-ROB-001",
     title: "\u5355\u81C2\u673A\u5668\u624B\u6301\u7247\uFF0C\u76EE\u6807\u8154\u5BA4\u5DF2\u6EE1"
   },
   "DEADLOCK.DUAL_ARM_TARGETS_FULL": {
+    deadlockCode: "DLK-ROB-002",
     title: "\u53CC\u81C2\u673A\u5668\u624B\u6301\u6709\u4E24\u7247\uFF0C\u76EE\u6807\u8154\u5BA4\u5747\u5DF2\u6EE1"
+  },
+  "DEADLOCK.DUAL_ARM_SINGLE_HELD_TARGET_FULL": {
+    deadlockCode: "DLK-ROB-003",
+    title: "\u53CC\u81C2\u673A\u5668\u624B\u6301\u6709\u4E00\u7247\uFF0C\u76EE\u6807\u8154\u5BA4\u5DF2\u6EE1\u4E14\u65E0\u4EA4\u6362\u51FA\u53E3"
   }
 });
 function deadlockDisplay(deadlock) {
   if (!deadlock || typeof deadlock !== "object") return null;
   const code = String(deadlock.Code || "DEADLOCK.UNCLASSIFIED").toUpperCase();
   const registered = DEADLOCK_TYPE_CATALOG[code];
-  if (registered) return { code, ...registered, message: String(deadlock.Message || "") };
+  if (registered) return { internalCode: code, ...registered, message: String(deadlock.Message || "") };
   return {
-    code: "DEADLOCK.UNCLASSIFIED",
-    title: "\u524D\u7AEF\u56DE\u653E\u672A\u8BC6\u522B\u51FA\u6301\u7247\u6EE1\u8154\u6B7B\u9501",
-    message: "MoveList \u5DF2\u56DE\u653E\u5230\u7EC8\u70B9\uFF0C\u4F46\u73B0\u573A\u4E0D\u7B26\u5408\u5DF2\u767B\u8BB0\u7684\u5355\u81C2\u6216\u53CC\u81C2\u6301\u7247\u6EE1\u8154\u6761\u4EF6\u3002"
+    internalCode: "DEADLOCK.UNCLASSIFIED",
+    deadlockCode: "DLK-UNK-001",
+    title: "\u524D\u7AEF\u56DE\u653E\u672A\u8BC6\u522B\u51FA\u5DF2\u767B\u8BB0\u6B7B\u9501",
+    message: "MoveList \u5DF2\u56DE\u653E\u5230\u7EC8\u70B9\uFF0C\u4F46\u73B0\u573A\u4E0D\u7B26\u5408\u5DF2\u767B\u8BB0\u7684\u6301\u7247\u6EE1\u8154\u6761\u4EF6\u3002"
   };
 }
 var CLEAN_TYPE_DEFINITIONS = [
@@ -21834,14 +21863,13 @@ async function runPlan() {
       setBottleneckMetric(bottleneckSummary, "\u6CA1\u6709\u8DB3\u591F\u7684\u8D44\u6E90\u6D3B\u52A8");
       document.getElementById("metricMakespan").textContent = Number.isFinite(Number(runResult.makespan)) ? `${Number(runResult.makespan).toFixed(2)} s` : "\u2014";
     }
-    writeTerminal([
-      cancelled ? `$ \u6A21\u578B\u6B65\u8FDB\u8FD0\u884C\u5DF2\u53D6\u6D88` : `$ \u8FD0\u884C\u5931\u8D25\uFF1A${error.message || "\u672A\u77E5\u9519\u8BEF"}`,
-      ...deadlock ? [`  \u6B7B\u9501\u7C7B\u578B\uFF1A${deadlock.title}\uFF08${deadlock.code}\uFF09`, `  ${deadlock.message}`] : [],
-      ...validationIssues,
-      ...baselineError ? [baselineError.trim()] : [],
-      ...ganttReady ? ["  \u5DF2\u4FDD\u7559\u53EF\u56DE\u653E\u7684 MoveList\uFF1B\u88AB RemoveList \u53D6\u6D88\u7684\u52A8\u4F5C\u4F1A\u4EE5\u6D45\u8272\u6807\u8BB0\uFF0C\u53EF\u5728\u7518\u7279\u56FE\u4E2D\u663E\u793A\u6216\u9690\u85CF"] : [],
-      ...logReady ? ["  \u590D\u73B0\u65E5\u5FD7\u5DF2\u751F\u6210\uFF0C\u53EF\u70B9\u51FB\u201C\u5BFC\u51FA\u590D\u73B0\u65E5\u5FD7\u201D"] : []
-    ].join("\n"), true);
+    renderRunFailureCard({
+      cancelled,
+      errorMessage: error.message || "\u672A\u77E5\u9519\u8BEF",
+      deadlock,
+      validationIssues,
+      baselineError: baselineError.trim()
+    });
     document.getElementById("metricValidation").textContent = runResult?.metricsAvailable ? runResult.validation === "failed" ? "\u672A\u901A\u8FC7" : validationDisplay(runResult.validation) || "\u5931\u8D25" : "\u5931\u8D25";
     finishRunStatus(cancelled ? "cancelled" : "failed", cancelled ? "\u5F53\u524D\u6D4B\u8BD5\u5DF2\u505C\u6B62" : "\u5F53\u524D\u6D4B\u8BD5\u8FD0\u884C\u5931\u8D25");
   } finally {
@@ -22304,7 +22332,7 @@ function batchItemErrorText(item) {
   if (baseline.status === "failed") return `Baseline \u5931\u8D25\uFF1A${baseline.error || "\u7B49\u5F85\u91CD\u65B0\u8BA1\u7B97"}`;
   if (item.status === "failed") {
     const deadlock = deadlockDisplay(item.deadlock);
-    if (deadlock) return `${deadlock.title}\uFF08${deadlock.code}\uFF09\uFF1A${deadlock.message || item.error || "\u7B97\u6CD5\u89C4\u5212\u8FDB\u5165\u6B7B\u9501"}`;
+    if (deadlock) return `[${deadlock.deadlockCode}] ${deadlock.title}\uFF1A${deadlock.message || item.error || "\u7B97\u6CD5\u89C4\u5212\u8FDB\u5165\u6B7B\u9501"}`;
     return `${hasBatchResultMetrics(item) ? "\u6821\u9A8C\u5931\u8D25" : "\u8FD0\u884C\u5931\u8D25"}\uFF1A${item.error || "\u672A\u77E5\u9519\u8BEF"}`;
   }
   if (baseline.status && baseline.status !== "succeeded" && baseline.status !== "skipped") return `Baseline \u5931\u6548\uFF1A${baseline.error || "\u7B49\u5F85\u91CD\u65B0\u8BA1\u7B97"}`;
@@ -22681,13 +22709,63 @@ function showFailedResultMetrics(result) {
 }
 function writeTerminal(message, error = false) {
   const panel = document.getElementById("resultErrorPanel");
+  const details = document.getElementById("resultErrorDetails");
   const terminal = document.getElementById("terminal");
   if (!error) {
+    details.innerHTML = "";
+    details.hidden = true;
     terminal.textContent = "";
+    terminal.hidden = false;
     panel.hidden = true;
     return;
   }
+  details.innerHTML = "";
+  details.hidden = true;
+  terminal.hidden = false;
   terminal.textContent = String(message || "\u672A\u77E5\u9519\u8BEF").replace(/^\$\s*/, "");
+  panel.hidden = false;
+}
+function renderRunFailureCard({
+  cancelled,
+  errorMessage,
+  deadlock,
+  validationIssues,
+  baselineError
+}) {
+  const panel = document.getElementById("resultErrorPanel");
+  const details = document.getElementById("resultErrorDetails");
+  const terminal = document.getElementById("terminal");
+  const issueRows = validationIssues.map((rawIssue) => {
+    const issue = String(rawIssue || "").trim();
+    const matched = issue.match(/^\[([A-Z0-9-]+)\]\s*/);
+    const code = matched?.[1] || "MVL-UNKNOWN";
+    const message = matched ? issue.slice(matched[0].length) : issue;
+    return `<li><code>${escapeHtml4(code)}</code><span>${escapeHtml4(message || issue)}</span></li>`;
+  }).join("");
+  const informationType = cancelled ? "\u8FD0\u884C\u5DF2\u7EC8\u6B62" : deadlock ? "\u7B97\u6CD5\u6B7B\u9501" : validationIssues.length ? "MoveList \u6821\u9A8C\u5931\u8D25" : baselineError ? "Baseline \u5931\u8D25" : "\u8FD0\u884C\u5F02\u5E38";
+  const primaryCode = deadlock?.deadlockCode || (validationIssues[0]?.match(/^\s*\[([A-Z0-9-]+)\]/)?.[1] ?? "RUN-ERR-001");
+  const validationSection = issueRows ? `
+    <section class="error-detail-section" aria-labelledby="errorValidationTitle">
+      <div class="error-detail-heading"><span id="errorValidationTitle">MoveList \u6821\u9A8C\u95EE\u9898</span><b>${validationIssues.length} \u9879</b></div>
+      <ul class="error-issue-list">${issueRows}</ul>
+    </section>` : "";
+  const baselineSection = baselineError ? `
+    <section class="error-detail-section">
+      <div class="error-detail-heading"><span>Baseline</span><b>\u5931\u8D25</b></div>
+      <p>${escapeHtml4(baselineError.replace(/^Baseline\s*失败：?\s*/, ""))}</p>
+    </section>` : "";
+  const summaryText = deadlock?.message || (cancelled ? "\u7528\u6237\u7EC8\u6B62\u4E86\u672C\u6B21\u8FD0\u884C" : errorMessage);
+  details.innerHTML = `
+    <div class="error-summary-line">
+      <span class="error-summary-meta">[${escapeHtml4(informationType)} <i aria-hidden="true">|</i> <code>${escapeHtml4(primaryCode)}</code>]</span>
+      <strong>${escapeHtml4(summaryText || "\u672A\u63D0\u4F9B\u9519\u8BEF\u8BF4\u660E")}</strong>
+    </div>
+    ${validationSection}
+    ${baselineSection}
+  `;
+  terminal.textContent = "";
+  terminal.hidden = true;
+  details.hidden = false;
   panel.hidden = false;
 }
 async function checkService() {

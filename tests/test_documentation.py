@@ -120,6 +120,7 @@ def test_deadlock_catalog_page_is_visible_before_standard_api() -> None:
     assert page["group"] == "结果分析"
     for code in (
         "DEADLOCK.SINGLE_ARM_TARGET_FULL",
+        "DEADLOCK.DUAL_ARM_SINGLE_HELD_TARGET_FULL",
         "DEADLOCK.DUAL_ARM_TARGETS_FULL",
         "DEADLOCK.NO_EXECUTABLE_ACTION",
         "DEADLOCK.UNCLASSIFIED",

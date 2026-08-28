@@ -102,13 +102,18 @@ class FrontendTemplateTests(unittest.TestCase):
     """验证不依赖算法数据夹具的前端模板与样式约束。"""
 
     def test_frontend_registers_stable_deadlock_catalog(self) -> None:
-        """前端回放只登记两种持片满腔死锁，未知现场保留兜底。"""
+        """前端回放登记三种持片满腔死锁，未知现场保留兜底。"""
         script = EDITOR_SCRIPT_PATH.read_text(encoding="utf-8")
 
         for code in (
             "DEADLOCK.SINGLE_ARM_TARGET_FULL",
+            "DEADLOCK.DUAL_ARM_SINGLE_HELD_TARGET_FULL",
             "DEADLOCK.DUAL_ARM_TARGETS_FULL",
             "DEADLOCK.UNCLASSIFIED",
+            "DLK-ROB-001",
+            "DLK-ROB-002",
+            "DLK-ROB-003",
+            "DLK-UNK-001",
         ):
             self.assertIn(code, script)
         self.assertIn("function deadlockDisplay", script)
@@ -350,19 +355,19 @@ class RecomputeFailureOutputTests(unittest.TestCase):
         self.assertIn("!rec.removedByRecompute", viewer)
         self.assertIn('fillOpacity = bar.rec.removedByRecompute ? "0.24" : "1"', viewer)
 
-    def test_frontend_version_and_cache_keys_are_1_5_10(self) -> None:
+    def test_frontend_version_and_cache_keys_are_1_5_11(self) -> None:
         """前端显示版本、包版本和主资源缓存键必须同步。"""
         frontend_root = ROOT / "realtime_scheduler" / "frontend"
         template = (frontend_root / "config_editor.html").read_text(encoding="utf-8")
         package = json.loads((frontend_root / "package.json").read_text(encoding="utf-8"))
         package_lock = json.loads((frontend_root / "package-lock.json").read_text(encoding="utf-8"))
 
-        self.assertEqual("1.5.10", package["version"])
-        self.assertEqual("1.5.10", package_lock["version"])
-        self.assertEqual("1.5.10", package_lock["packages"][""]["version"])
-        self.assertIn('class="frontend-version">前端 v1.5.10</span>', template)
-        self.assertIn('/assets/config_editor.css?v=1.5.10', template)
-        self.assertIn('/assets/config_editor.js?v=1.5.10', template)
+        self.assertEqual("1.5.11", package["version"])
+        self.assertEqual("1.5.11", package_lock["version"])
+        self.assertEqual("1.5.11", package_lock["packages"][""]["version"])
+        self.assertIn('class="frontend-version">前端 v1.5.11</span>', template)
+        self.assertIn('/assets/config_editor.css?v=1.5.11', template)
+        self.assertIn('/assets/config_editor.js?v=1.5.11', template)
 
     def test_batch_status_refresh_obeys_frontend_performance_limit(self) -> None:
         """批量状态最多每秒轮询一次，且明细未变化时不得重建整组 DOM。"""
@@ -1960,7 +1965,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("<span>结果分析</span>", html)
         self.assertIn("<span>路径配置</span>", html)
         self.assertNotIn('data-tab-view="clean"', html)
-        self.assertIn('class="frontend-version">前端 v1.5.9</span>', html)
+        self.assertIn('class="frontend-version">前端 v1.5.11</span>', html)
         self.assertIn('data-option="residencyGuardSeconds"', html)
         self.assertIn('data-option="maximumRobotHoldingSeconds"', html)
         self.assertIn('data-option="maximumSystemResidenceCv"', html)
@@ -2114,7 +2119,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertNotIn("<th>TaskID</th>", html)
         self.assertNotIn("<th>FoupID</th>", html)
         self.assertNotIn("<th>Weight</th>", html)
-        self.assertIn("$ 运行失败：${error.message", html)
+        self.assertIn("renderRunFailureCard({", html)
         self.assertIn("EXPECTED_API_SCHEMA", html)
         self.assertIn("失败也会生成", html)
         self.assertIn('id="testGroupSelect"', html)
@@ -2185,25 +2190,32 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("运行策略", sidebar)
         self.assertNotIn("结果预览", sidebar)
         self.assertIn("container-name: result-area", html)
-        self.assertIn(".batch-results { display: grid; grid-template-columns: repeat(4", html)
+        self.assertIn(".batch-results { display: grid;", html)
+        self.assertIn("grid-template-columns: repeat(4, minmax(0, 1fr))", html)
         self.assertIn("@container result-area (max-width: 1100px)", html)
         self.assertIn("@container result-area (max-width: 720px)", html)
         self.assertIn("@container result-area (max-width: 520px)", html)
         self.assertNotIn('class="terminal-section"', html)
         self.assertNotIn('id="clearButton"', html)
         self.assertIn('id="resultErrorPanel" role="alert" hidden', html)
+        self.assertIn('id="resultErrorDetails" class="result-error-details" hidden', html)
+        self.assertIn(".error-summary-line", html)
+        self.assertIn("error-summary-meta", html)
+        self.assertIn("[${escapeHtml(informationType)}", html)
+        self.assertIn("deadlock?.message", html)
+        self.assertNotIn("error-artifact-strip", html)
         self.assertIn("只有错误才显示", html)
         self.assertIn('class="batch-result-summary"', html)
         self.assertIn('class="batch-metric-tags"', html)
         self.assertIn("batch-metric-tag cpu", html)
         self.assertNotIn('class="batch-result-metrics"', html)
         self.assertIn('const displayId = `t${index + 1}`', html)
-        self.assertIn("CPU Time ${finished", html)
+        self.assertIn("CPU Time ${hasMetrics && Number.isFinite(cpuTime)", html)
         self.assertIn('id="batchOverviewButton"', html)
         self.assertIn('id="testGroupAnalysisButton"', html)
         self.assertIn('id="testGroupAnalysisPanel"', html)
         self.assertIn("renderTestGroupAnalysis", html)
-        self.assertIn("analyzeTestGroupPerformance", html)
+        self.assertIn("testGroupSummaryCsv", html)
         self.assertIn('data-batch-item-index="${index}"', html)
         self.assertIn("loadBatchItemBottleneck", html)
         self.assertIn("正在计算稳态瓶颈", html)

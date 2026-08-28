@@ -543,10 +543,30 @@
     .metric small:empty { display: none; }
     .metric.is-success strong { color: var(--green); }
     .metric.is-error strong { color: var(--red); }
-    .result-error-panel { display: grid; gap: 7px; margin-top: 12px; padding: 13px 14px; border: 1px solid #efb6bd; border-radius: 10px; color: #8f1f2d; background: #fff2f3; }
+    .result-error-panel { display: grid; gap: 8px; margin-top: 12px; padding: 12px 14px; border: 1px solid #edb2ba; border-radius: 12px; color: #7f1d2d; background: linear-gradient(145deg, #fff7f7, #fff1f2); box-shadow: 0 8px 24px rgba(127,29,45,.06); }
     .result-error-panel[hidden] { display: none; }
-    .result-error-panel strong { font-size: 13px; }
+    .result-error-header { display: flex; align-items: center; gap: 10px; }
+    .result-error-icon { display: grid; flex: 0 0 28px; width: 28px; height: 28px; border-radius: 8px; color: #fff; background: #b42335; font: 900 16px/1 system-ui, sans-serif; place-items: center; }
+    .result-error-header div { display: grid; min-width: 0; gap: 1px; }
+    .result-error-header small { color: #a64a57; font-size: 8px; font-weight: 900; letter-spacing: .14em; }
+    .result-error-header strong { color: #7f1224; font-size: 14px; }
+    .result-error-status { margin-left: auto; padding: 4px 8px; border: 1px solid #efb6bd; border-radius: 999px; color: #9f2436; background: #fff; font-size: 10px; font-weight: 850; }
+    .result-error-details { display: grid; gap: 7px; }
+    .result-error-details[hidden] { display: none; }
+    .error-summary-line { display: flex; align-items: baseline; flex-wrap: wrap; gap: 5px 8px; color: #68202c; }
+    .error-summary-line strong { font-size: 12px; line-height: 1.4; }
+    .error-summary-meta { display: inline-flex; align-items: center; gap: 4px; color: #9f2436; font-size: 10px; font-weight: 850; white-space: nowrap; }
+    .error-summary-meta i { color: #d38c96; font-style: normal; }
+    .error-summary-meta code, .error-detail-heading code, .error-technical-code code, .error-issue-list code { display: inline-flex; width: fit-content; padding: 2px 5px; border: 1px solid #e8bcc3; border-radius: 5px; color: #991b2e; background: #fff; font: 800 9px/1.3 Consolas, monospace; }
+    .error-detail-section { display: grid; gap: 4px; padding: 8px 10px; border-left: 3px solid #dc8793; border-radius: 0 8px 8px 0; background: rgba(255,255,255,.58); }
+    .error-detail-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #98515c; font-size: 10px; font-weight: 850; }
+    .error-detail-heading b { color: #8e3341; font-size: 10px; }
+    .error-detail-section h4 { margin: 0; color: #711827; font-size: 12px; line-height: 1.45; }
+    .error-detail-section p { margin: 0; color: #782b37; font-size: 11px; line-height: 1.5; }
+    .error-issue-list { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+    .error-issue-list li { display: grid; grid-template-columns: max-content minmax(0, 1fr); align-items: start; gap: 8px; color: #782b37; font-size: 11px; line-height: 1.55; }
     .result-error-panel pre { max-height: 220px; margin: 0; overflow: auto; color: #8f1f2d; background: transparent; white-space: pre-wrap; word-break: break-word; font: 12px/1.65 Consolas, monospace; }
+    .result-error-panel pre[hidden] { display: none; }
     .batch-results { display: grid; max-height: min(520px, 58dvh); padding-right: 4px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; grid-template-columns: repeat(4, minmax(0, 1fr)); align-content: start; gap: 10px; margin-top: 12px; }
     .batch-results:empty { display: none; }
     .batch-progress { display: none; align-items: center; gap: 12px; margin-top: 12px; padding: 11px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--soft); }

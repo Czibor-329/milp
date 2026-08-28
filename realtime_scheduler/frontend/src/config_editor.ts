@@ -53,13 +53,19 @@ const DEFAULT_SCHEDULE_OPTIONS = Object.freeze({
 });
 const SCHEDULE_OPTION_KEYS = new Set(Object.keys(DEFAULT_SCHEDULE_OPTIONS));
 
-/** 前端在 MoveList 回放终点能够确认的两种死锁。 */
+/** 前端在 MoveList 回放终点能够确认的三种死锁。 */
 const DEADLOCK_TYPE_CATALOG = Object.freeze({
   "DEADLOCK.SINGLE_ARM_TARGET_FULL": {
+    deadlockCode: "DLK-ROB-001",
     title: "单臂机器手持片，目标腔室已满",
   },
   "DEADLOCK.DUAL_ARM_TARGETS_FULL": {
+    deadlockCode: "DLK-ROB-002",
     title: "双臂机器手持有两片，目标腔室均已满",
+  },
+  "DEADLOCK.DUAL_ARM_SINGLE_HELD_TARGET_FULL": {
+    deadlockCode: "DLK-ROB-003",
+    title: "双臂机器手持有一片，目标腔室已满且无交换出口",
   },
 });
 
@@ -68,11 +74,12 @@ function deadlockDisplay(deadlock) {
   if (!deadlock || typeof deadlock !== "object") return null;
   const code = String(deadlock.Code || "DEADLOCK.UNCLASSIFIED").toUpperCase();
   const registered = DEADLOCK_TYPE_CATALOG[code];
-  if (registered) return { code, ...registered, message: String(deadlock.Message || "") };
+  if (registered) return { internalCode: code, ...registered, message: String(deadlock.Message || "") };
   return {
-    code: "DEADLOCK.UNCLASSIFIED",
-    title: "前端回放未识别出持片满腔死锁",
-    message: "MoveList 已回放到终点，但现场不符合已登记的单臂或双臂持片满腔条件。",
+    internalCode: "DEADLOCK.UNCLASSIFIED",
+    deadlockCode: "DLK-UNK-001",
+    title: "前端回放未识别出已登记死锁",
+    message: "MoveList 已回放到终点，但现场不符合已登记的持片满腔条件。",
   };
 }
 
@@ -4034,14 +4041,13 @@ async function runPlan() {
         ? `${Number(runResult.makespan).toFixed(2)} s`
         : "—";
     }
-    writeTerminal([
-      cancelled ? `$ 模型步进运行已取消` : `$ 运行失败：${error.message || "未知错误"}`,
-      ...(deadlock ? [`  死锁类型：${deadlock.title}（${deadlock.code}）`, `  ${deadlock.message}`] : []),
-      ...validationIssues,
-      ...(baselineError ? [baselineError.trim()] : []),
-      ...(ganttReady ? ["  已保留可回放的 MoveList；被 RemoveList 取消的动作会以浅色标记，可在甘特图中显示或隐藏"] : []),
-      ...(logReady ? ["  复现日志已生成，可点击“导出复现日志”"] : []),
-    ].join("\n"), true);
+    renderRunFailureCard({
+      cancelled,
+      errorMessage: error.message || "未知错误",
+      deadlock,
+      validationIssues,
+      baselineError: baselineError.trim(),
+    });
     document.getElementById("metricValidation").textContent = runResult?.metricsAvailable
       ? (runResult.validation === "failed" ? "未通过" : validationDisplay(runResult.validation) || "失败")
       : "失败";
@@ -4545,7 +4551,7 @@ function batchItemErrorText(item) {
   if (baseline.status === "failed") return `Baseline 失败：${baseline.error || "等待重新计算"}`;
   if (item.status === "failed") {
     const deadlock = deadlockDisplay(item.deadlock);
-    if (deadlock) return `${deadlock.title}（${deadlock.code}）：${deadlock.message || item.error || "算法规划进入死锁"}`;
+    if (deadlock) return `[${deadlock.deadlockCode}] ${deadlock.title}：${deadlock.message || item.error || "算法规划进入死锁"}`;
     return `${hasBatchResultMetrics(item) ? "校验失败" : "运行失败"}：${item.error || "未知错误"}`;
   }
   if (baseline.status && baseline.status !== "succeeded" && baseline.status !== "skipped") return `Baseline 失效：${baseline.error || "等待重新计算"}`;
@@ -4962,13 +4968,74 @@ function showFailedResultMetrics(result) {
 /** 正常过程保持界面安静；只有错误才显示可复制的详细信息。 */
 function writeTerminal(message, error = false) {
   const panel = document.getElementById("resultErrorPanel");
+  const details = document.getElementById("resultErrorDetails");
   const terminal = document.getElementById("terminal");
   if (!error) {
+    details.innerHTML = "";
+    details.hidden = true;
     terminal.textContent = "";
+    terminal.hidden = false;
     panel.hidden = true;
     return;
   }
+  details.innerHTML = "";
+  details.hidden = true;
+  terminal.hidden = false;
   terminal.textContent = String(message || "未知错误").replace(/^\$\s*/, "");
+  panel.hidden = false;
+}
+
+/** 把单测失败压缩为“类型和编码 + 直接错误信息”，避免重复分区。 */
+function renderRunFailureCard({
+  cancelled,
+  errorMessage,
+  deadlock,
+  validationIssues,
+  baselineError,
+}) {
+  const panel = document.getElementById("resultErrorPanel");
+  const details = document.getElementById("resultErrorDetails");
+  const terminal = document.getElementById("terminal");
+  const issueRows = validationIssues.map(rawIssue => {
+    const issue = String(rawIssue || "").trim();
+    const matched = issue.match(/^\[([A-Z0-9-]+)\]\s*/);
+    const code = matched?.[1] || "MVL-UNKNOWN";
+    const message = matched ? issue.slice(matched[0].length) : issue;
+    return `<li><code>${escapeHtml(code)}</code><span>${escapeHtml(message || issue)}</span></li>`;
+  }).join("");
+  const informationType = cancelled
+    ? "运行已终止"
+    : deadlock
+      ? "算法死锁"
+      : validationIssues.length
+        ? "MoveList 校验失败"
+        : baselineError
+          ? "Baseline 失败"
+          : "运行异常";
+  const primaryCode = deadlock?.deadlockCode || (validationIssues[0]?.match(/^\s*\[([A-Z0-9-]+)\]/)?.[1] ?? "RUN-ERR-001");
+  const validationSection = issueRows ? `
+    <section class="error-detail-section" aria-labelledby="errorValidationTitle">
+      <div class="error-detail-heading"><span id="errorValidationTitle">MoveList 校验问题</span><b>${validationIssues.length} 项</b></div>
+      <ul class="error-issue-list">${issueRows}</ul>
+    </section>` : "";
+  const baselineSection = baselineError ? `
+    <section class="error-detail-section">
+      <div class="error-detail-heading"><span>Baseline</span><b>失败</b></div>
+      <p>${escapeHtml(baselineError.replace(/^Baseline\s*失败：?\s*/, ""))}</p>
+    </section>` : "";
+  const summaryText = deadlock?.message || (cancelled ? "用户终止了本次运行" : errorMessage);
+
+  details.innerHTML = `
+    <div class="error-summary-line">
+      <span class="error-summary-meta">[${escapeHtml(informationType)} <i aria-hidden="true">|</i> <code>${escapeHtml(primaryCode)}</code>]</span>
+      <strong>${escapeHtml(summaryText || "未提供错误说明")}</strong>
+    </div>
+    ${validationSection}
+    ${baselineSection}
+  `;
+  terminal.textContent = "";
+  terminal.hidden = true;
+  details.hidden = false;
   panel.hidden = false;
 }
 
