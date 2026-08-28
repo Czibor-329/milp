@@ -1208,13 +1208,16 @@ class PackagedAlgorithmRuntime:
         """根据当前代次的最终动作释放已完成物料及其 LoadPort。
 
         轻量模式不解释设备状态，只在某片物料的本代最后动作已经结束时认定
-        该片完成。只有同一 LoadPort 的历史物料全部完成后才允许槽位复用。
+        该片完成。释放范围必须同时受调用方给出的 LoadPort 和物理快照约束；
+        返回 DummyPort 的清洁片虽然本代动作已经结束，仍是可复用库存，不能
+        作为产品成品从下一轮 Materials 中移除。只有同一 LoadPort 的历史物料
+        全部完成后才允许槽位复用。
         """
         material_moves: Dict[Any, List[Mapping[str, Any]]] = {}
         for move in self.current_plan:
             for material_id in _move_material_ids(move):
                 material_moves.setdefault(material_id, []).append(move)
-        released_ids = {
+        completed_material_ids = {
             material_id
             for material_id, moves in material_moves.items()
             if moves and max(
@@ -1222,19 +1225,35 @@ class PackagedAlgorithmRuntime:
                 for move in moves
             ) <= self.state_time + TIME_TOLERANCE
         }
+        requested_load_ports = {
+            str(load_port_name)
+            for load_port_name in load_port_names
+            if str(load_port_name)
+        }
+        released_ids: set[Any] = set()
+        for load_port_name in requested_load_ports:
+            station = self._tracker.state.stations.get(load_port_name)
+            if station is None:
+                continue
+            for slot in station.slots.values():
+                material = slot.material
+                if (
+                    material is not None
+                    and material.material_id in completed_material_ids
+                ):
+                    released_ids.add(material.material_id)
         if released_ids:
             _remove_released_materials_from_update(self.current_update, released_ids)
 
-        remaining_ports = {
-            str(material.get("CurrentModuleName") or "")
-            for material in (self.current_update.get("Materials") or [])
-            if isinstance(material, Mapping)
-        }
-        empty_ports = {
-            str(load_port_name)
-            for load_port_name in load_port_names
-            if str(load_port_name) not in remaining_ports
-        }
+        empty_ports: set[str] = set()
+        for load_port_name in requested_load_ports:
+            station = self._tracker.state.stations.get(load_port_name)
+            if station is None or all(
+                slot.material is None
+                or slot.material.material_id in released_ids
+                for slot in station.slots.values()
+            ):
+                empty_ports.add(load_port_name)
         return released_ids, empty_ports
 
     def committed_moves(self, cutoff: float) -> List[dict]:
@@ -2729,6 +2748,37 @@ class CJobCycleRuntime:
     configured_round: int
 
 
+def _completed_cycle_material_ids(
+    update_params: Mapping[str, Any],
+    completed_cycles: Sequence[CJobCycleRuntime],
+) -> set[Any]:
+    """返回已完成循环中应从真实 LoadPort 卸载的产品物料编号。
+
+    DummyReturnInfo 会把清洁片临时绑定到产品 TaskID，但其物理来源仍是
+    DummyPort。CJobCycle 完成只能卸载对应 TaskID 且 SrcPortName 与该循环
+    LoadPort 一致的产品片，不能按 TaskID 连带删除可复用 Dummy 库存。
+    """
+    load_port_by_task_id = {
+        str(cycle_state.current_task_id): str(cycle_state.load_port)
+        for cycle_state in completed_cycles
+    }
+    material_ids: set[Any] = set()
+    for material in update_params.get("Materials") or []:
+        if not isinstance(material, Mapping):
+            continue
+        task_id = str(material.get("TaskID") or "")
+        expected_load_port = load_port_by_task_id.get(task_id)
+        if (
+            expected_load_port is None
+            or str(material.get("SrcPortName") or "") != expected_load_port
+        ):
+            continue
+        material_id = material.get("ID", material.get("Name"))
+        if material_id is not None:
+            material_ids.add(material_id)
+    return material_ids
+
+
 def _cjob_cycle_count(cjob: Mapping[str, Any]) -> int:
     """读取并校验 CJob 的总循环数；旧数据默认只运行一盒。"""
     raw_value = cjob.get(
@@ -3105,20 +3155,13 @@ def _execute_standard_algorithm(
             released_ids, empty_ports = _release_finished_load_ports(runtime, build_state)
             if completed_cycles:
                 # CJobCycle 的触发时刻已经由“该 TaskID 全部物料的最后一个 Move
-                # 结束”推导得到。这里按 TaskID 明确卸载整盒，避免部分算法没有把
-                # 回 LP 动作标成 sink stage 时，通用终点识别无法裁剪旧 CJob。
-                completed_task_ids = {
-                    cycle_state.current_task_id for cycle_state in completed_cycles
-                }
-                cycle_material_ids = {
-                    material.get("ID", material.get("Name"))
-                    for material in (runtime.current_update.get("Materials") or [])
-                    if (
-                        isinstance(material, Mapping)
-                        and str(material.get("TaskID") or "") in completed_task_ids
-                    )
-                }
-                cycle_material_ids.discard(None)
+                # 结束”推导得到。这里按 TaskID + 固定 LoadPort 明确卸载整盒，
+                # 避免部分算法没有把回 LP 动作标成 sink stage 时，通用终点识别
+                # 无法裁剪旧 CJob；同 TaskID 的 DummyPort 清洁库存必须保留。
+                cycle_material_ids = _completed_cycle_material_ids(
+                    runtime.current_update,
+                    completed_cycles,
+                )
                 released_ids.update(cycle_material_ids)
                 _remove_released_materials_from_update(
                     runtime.current_update,

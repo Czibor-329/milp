@@ -532,6 +532,95 @@ class OptionalAlgorithmRepositoryTests(unittest.TestCase):
             completed.stdout + completed.stderr,
         )
 
+    def test_packaged_runtime_keeps_completed_dummy_port_inventory(self) -> None:
+        """轻量运行时只能卸载真实 LoadPort 成品，不能删除已回港 Dummy。"""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            packaged_root = Path(temporary_directory) / "other_alg"
+            packaged_root.mkdir()
+            completed = self._run_isolated_server_script(
+                """
+                import realtime_scheduler.server as server
+
+                first_update = {
+                    "CurrentTime": 0,
+                    "Materials": [
+                        {
+                            "ID": 1,
+                            "CurrentModuleName": "LP1",
+                            "SlotID": 1,
+                            "PJobName": "P1",
+                            "SrcPortName": "LP1",
+                        },
+                        {
+                            "ID": 100000,
+                            "CurrentModuleName": "DummyPort",
+                            "SlotID": 1,
+                            "PJobName": "P1",
+                            "SrcPortName": "DummyPort",
+                            "AccessiblePM": ["PM1"],
+                        },
+                    ],
+                    "ProcessJobs": [{"JobName": "P1", "MatList": [1]}],
+                    "ControlJobs": [{
+                        "TaskID": "C1",
+                        "PJobNameList": ["P1"],
+                        "MaterialCount": 1,
+                    }],
+                    "Routes": {},
+                    "Robots": {},
+                    "Stations": {
+                        "LP1": {"Slots": [1]},
+                        "DummyPort": {"Slots": [1]},
+                    },
+                }
+                first_output = {
+                    "MoveList": [
+                        {
+                            "MoveID": 1,
+                            "MoveType": 9,
+                            "MatIDList": [1],
+                            "StartTime": 1,
+                            "EndTime": 10,
+                        },
+                        {
+                            "MoveID": 2,
+                            "MoveType": 9,
+                            "MatIDList": [100000],
+                            "StartTime": 2,
+                            "EndTime": 9,
+                        },
+                    ],
+                    "Feedback": [],
+                }
+                runtime = server.PackagedAlgorithmRuntime(
+                    first_update,
+                    first_output,
+                    skip_validation=True,
+                )
+                runtime.advance_to(20)
+
+                released_ids, empty_ports = runtime.release_completed_load_ports(
+                    ["LP1"]
+                )
+
+                assert released_ids == {1}
+                assert empty_ports == {"LP1"}
+                assert [
+                    material["ID"] for material in runtime.current_update["Materials"]
+                ] == [100000]
+                assert (
+                    runtime.state.stations["DummyPort"].slots[1].material.material_id
+                    == 100000
+                )
+                """,
+                packaged_root=packaged_root,
+            )
+        self.assertEqual(
+            0,
+            completed.returncode,
+            completed.stdout + completed.stderr,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

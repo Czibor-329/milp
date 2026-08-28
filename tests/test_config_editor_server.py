@@ -368,6 +368,36 @@ class CJobCycleUnitTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 config_server._cjob_cycle_count({"cjobCycle": value})
 
+    def test_cycle_completion_does_not_unload_dummy_with_same_task_id(self) -> None:
+        """CJobCycle 卸载产品时必须保留临时绑定同一 TaskID 的 Dummy。"""
+        completed_cycle = config_server.CJobCycleRuntime(
+            template={},
+            load_port="LP1",
+            total_cycles=3,
+            current_cycle=1,
+            current_task_id="7",
+            configured_round=1,
+        )
+        update = {
+            "Materials": [
+                {"ID": 1, "TaskID": "7", "SrcPortName": "LP1"},
+                {
+                    "ID": 100000,
+                    "TaskID": "7",
+                    "SrcPortName": "DummyPort",
+                    "AccessiblePM": ["PM1"],
+                },
+                {"ID": 2, "TaskID": "8", "SrcPortName": "LP2"},
+            ]
+        }
+
+        material_ids = config_server._completed_cycle_material_ids(
+            update,
+            [completed_cycle],
+        )
+
+        self.assertEqual({1}, material_ids)
+
 
 class RecomputeFailureOutputTests(unittest.TestCase):
     """验证重算算法异常时仍可供前端回放的部分结果。"""
@@ -422,19 +452,19 @@ class RecomputeFailureOutputTests(unittest.TestCase):
         self.assertIn("!rec.removedByRecompute", viewer)
         self.assertIn('fillOpacity = bar.rec.removedByRecompute ? "0.24" : "1"', viewer)
 
-    def test_frontend_version_and_cache_keys_are_1_5_12(self) -> None:
+    def test_frontend_version_and_cache_keys_are_1_5_13(self) -> None:
         """前端显示版本、包版本和主资源缓存键必须同步。"""
         frontend_root = ROOT / "realtime_scheduler" / "frontend"
         template = (frontend_root / "config_editor.html").read_text(encoding="utf-8")
         package = json.loads((frontend_root / "package.json").read_text(encoding="utf-8"))
         package_lock = json.loads((frontend_root / "package-lock.json").read_text(encoding="utf-8"))
 
-        self.assertEqual("1.5.12", package["version"])
-        self.assertEqual("1.5.12", package_lock["version"])
-        self.assertEqual("1.5.12", package_lock["packages"][""]["version"])
-        self.assertIn('class="frontend-version">前端 v1.5.12</span>', template)
-        self.assertIn('/assets/config_editor.css?v=1.5.12', template)
-        self.assertIn('/assets/config_editor.js?v=1.5.12', template)
+        self.assertEqual("1.5.13", package["version"])
+        self.assertEqual("1.5.13", package_lock["version"])
+        self.assertEqual("1.5.13", package_lock["packages"][""]["version"])
+        self.assertIn('class="frontend-version">前端 v1.5.13</span>', template)
+        self.assertIn('/assets/config_editor.css?v=1.5.13', template)
+        self.assertIn('/assets/config_editor.js?v=1.5.13', template)
 
     def test_batch_status_refresh_obeys_frontend_performance_limit(self) -> None:
         """批量状态最多每秒轮询一次，且明细未变化时不得重建整组 DOM。"""
@@ -2032,7 +2062,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("<span>结果分析</span>", html)
         self.assertIn("<span>路径配置</span>", html)
         self.assertNotIn('data-tab-view="clean"', html)
-        self.assertIn('class="frontend-version">前端 v1.5.12</span>', html)
+        self.assertIn('class="frontend-version">前端 v1.5.13</span>', html)
         self.assertIn('data-option="residencyGuardSeconds"', html)
         self.assertIn('data-option="maximumRobotHoldingSeconds"', html)
         self.assertIn('data-option="maximumSystemResidenceCv"', html)
