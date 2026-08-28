@@ -760,17 +760,12 @@ def _compile_external_validation_problem(
     保存为下一轮基线的标准 update。
     """
     validation_update = deepcopy(dict(update_params))
-    routes = validation_update.get("Routes") or {}
     for process_job in validation_update.get("ProcessJobs") or []:
         if not isinstance(process_job, dict):
             continue
         origin_route = process_job.get("OriginRoute")
         if isinstance(origin_route, dict):
             origin_route["PrePJob"] = {}
-            route_name = str(origin_route.get("Name") or "")
-            top_route = routes.get(route_name) if isinstance(routes, dict) else None
-            if isinstance(top_route, dict):
-                top_route["PrePJob"] = {}
     return compile_problem(tool_topology, validation_update)
 
 

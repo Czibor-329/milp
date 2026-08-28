@@ -43,7 +43,11 @@ class BuildState:
 
 
 def extract_init_data(raw: Any) -> Dict[str, Any]:
-    """兼容原始 init_data、AlgInit 录制数组和一层 Info 包装。"""
+    """兼容原始 init_data、AlgInit 录制数组和一层 Info 包装。
+
+    标准 ``IToolTopo`` 不包含顶层 Route；旧录制或导入文件即使携带
+    ``Route/Routes`` 兼容字段，也不能继续透传给算法 ``init``。
+    """
     value = raw
     if isinstance(value, list):
         entry = next(
@@ -64,7 +68,11 @@ def extract_init_data(raw: Any) -> Dict[str, Any]:
         raise ValueError("设备文件不是有效 JSON 对象")
     if not isinstance(value.get("Stations"), Mapping) or not isinstance(value.get("Robots"), Mapping):
         raise ValueError("设备文件必须包含 Stations 和 Robots")
-    return deepcopy(dict(value))
+    return {
+        str(key): deepcopy(item)
+        for key, item in value.items()
+        if str(key).casefold() not in {"route", "routes"}
+    }
 
 
 def _clone_station_references(value: Any, source: str, target: str) -> Any:
@@ -988,7 +996,6 @@ def build_round_update(
     materials: List[Dict[str, Any]] = []
     process_jobs: List[Dict[str, Any]] = []
     control_jobs: List[Dict[str, Any]] = []
-    referenced_routes: Dict[str, Dict[str, Any]] = {}
     round_uses_dummy_material = False
     round_dummy_wafer_count = 0
     used_control_load_ports: Dict[str, str] = {}
@@ -1085,7 +1092,6 @@ def build_round_update(
                     "SrcPortName": load_port, "Route": deepcopy(runtime_route),
                 })
             build_state.next_slot_by_port[load_port] = next_slot
-            referenced_routes[runtime_route_name] = deepcopy(runtime_route)
             process_jobs.append({
                 "JobName": pjob_name, "TaskID": task_id, "Priority": priority,
                 "State": 0, "OriginRoute": deepcopy(runtime_route), "MatList": material_ids,
@@ -1128,7 +1134,7 @@ def build_round_update(
             materials.append(_dummy_material(slot_id, dummy_port, dummy_accessible_pms))
         build_state.dummy_material_count = dummy_material_count
     return {
-        "Scenario": 0, "Routes": referenced_routes,
+        "Scenario": 0,
         "ProcessRecipes": build_process_recipes(recipes, routes, cleans),
         "Materials": materials, "ProcessJobs": process_jobs, "ControlJobs": control_jobs,
         "RemoveList": [], "MoveStates": [], "CurrentTime": float(current_time),

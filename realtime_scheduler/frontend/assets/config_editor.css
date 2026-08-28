@@ -993,7 +993,7 @@
     .legend-dot.is-transition { background: #d28a13; }
     .legend-door { width: 7px; height: 11px; border: 1px solid #64748b; border-radius: 1px; background: #64748b; }
     .legend-door.is-open { border-color: var(--green); background: transparent; }
-    .device-config-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; margin-bottom: 18px; }
+    .device-config-heading { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-bottom: 14px; padding: 16px 18px; border: 1px solid var(--line); border-radius: 15px; background: var(--surface); box-shadow: var(--shadow); }
     .device-config-heading h1 { margin: 0; color: var(--ink); font-size: 24px; letter-spacing: -.02em; }
     .device-config-heading p { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
     .device-config-heading-actions { display: flex; min-width: 0; align-items: center; justify-content: flex-end; gap: 8px; }
@@ -1004,11 +1004,10 @@
     .device-config-save-state > strong { margin-top: 3px; color: var(--muted); font-size: 10px; font-weight: 700; }
     .device-config-save-state > strong.is-dirty { color: #9a5b05; }
     .device-config-save-state > strong.is-saving { color: var(--brand); }
-    .device-config-layout { display: grid; grid-template-columns: 214px minmax(0, 1fr); align-items: start; gap: 18px; }
+    .device-config-layout { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: 12px; }
     .device-config-layout > * { min-width: 0; }
-    .device-config-nav { position: sticky; top: 18px; display: grid; gap: 7px; padding: 12px; border: 1px solid var(--line); border-radius: 15px; background: var(--surface); box-shadow: var(--shadow); }
-    .device-config-nav-title { padding: 4px 8px 10px; color: var(--muted); font-size: 10px; font-weight: 850; letter-spacing: .08em; }
-    .device-config-nav-item { display: flex; width: 100%; min-height: 56px; align-items: center; gap: 10px; padding: 10px 11px; border: 1px solid transparent; border-radius: 11px; color: #53647a; background: transparent; font: inherit; text-align: left; cursor: pointer; transition: border-color .18s ease, color .18s ease, background .18s ease; }
+    .device-config-nav { position: sticky; z-index: 4; top: 10px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; padding: 7px; border: 1px solid var(--line); border-radius: 13px; background: rgba(255,255,255,.94); box-shadow: 0 6px 20px rgba(32,47,81,.07); backdrop-filter: blur(10px); }
+    .device-config-nav-item { display: flex; width: 100%; min-height: 58px; align-items: center; justify-content: center; gap: 10px; padding: 9px 12px; border: 1px solid transparent; border-radius: 9px; color: #53647a; background: transparent; font: inherit; text-align: left; cursor: pointer; transition: border-color .18s ease, color .18s ease, background .18s ease; }
     .device-config-nav-item:hover { color: var(--ink); background: var(--soft); }
     .device-config-nav-item.active { border-color: #c8d6f3; color: #214fb8; background: var(--brand-soft); }
     .device-config-nav-item svg { width: 22px; height: 22px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
@@ -1021,6 +1020,10 @@
     .device-timing-panel-head { align-items: flex-start; }
     .device-config-picker { display: grid; min-width: 210px; gap: 5px; color: var(--muted); font-size: 9px; font-weight: 850; letter-spacing: .04em; text-transform: uppercase; }
     .device-config-picker select { min-height: 42px; color: var(--ink); font-size: 12px; font-weight: 750; text-transform: none; }
+    .device-config-entity-picker { display: grid; grid-template-columns: 42px minmax(190px, 240px) 42px; align-items: end; gap: 6px; }
+    .device-config-step-button { display: grid; width: 42px; height: 42px; place-items: center; border: 1px solid #cdd7e5; border-radius: 9px; color: #3e526e; background: #fff; font: 500 25px/1 Arial, sans-serif; cursor: pointer; }
+    .device-config-step-button:hover:not(:disabled) { border-color: #9fb4dc; color: var(--brand); background: var(--brand-soft); }
+    .device-config-step-button:disabled { color: #b5bfcc; background: #f5f7fa; cursor: not-allowed; }
     .device-timing-body { display: grid; gap: 14px; }
     #deviceStationTimingEditor, #deviceRobotTimingEditor { display: grid; width: 100%; min-width: 0; gap: 14px; overflow: hidden; }
     .device-config-notice { display: flex; align-items: flex-start; gap: 10px; padding: 11px 13px; border: 1px solid #d7e2f6; border-radius: 12px; color: #49617f; background: #f6f9ff; font-size: 11px; line-height: 1.55; }
@@ -1246,14 +1249,12 @@
       .documentation-spinner { animation-duration: .01ms; animation-iteration-count: 1; }
     }
     @media (max-width: 1180px) { .visual-overview { grid-template-columns: repeat(3, minmax(0, 1fr)); } .visual-source { grid-column: span 3; } .visual-stat:nth-child(5) { border-left: 0; } .visual-workspace-layout { grid-template-columns: 1fr; } .playback-inspector { position: static; grid-template-columns: minmax(0, 1.25fr) minmax(280px, .75fr); } .performance-grid { grid-template-columns: 1fr; } .group-chart-grid { grid-template-columns: 1fr; } }
-    @media (max-width: 1040px) { .layout { grid-template-columns: 1fr; } .side { position: static; grid-row: 1; } .batch-results { grid-template-columns: repeat(2, minmax(0, 1fr)); } .device-config-layout { grid-template-columns: 1fr; } .device-config-nav { padding: 8px; } .device-config-nav-title { display: none; } .device-config-nav-item { max-width: 260px; } .robot-slot-grid { grid-template-columns: 1fr; } }
+    @media (max-width: 1040px) { .layout { grid-template-columns: 1fr; } .side { position: static; grid-row: 1; } .batch-results { grid-template-columns: repeat(2, minmax(0, 1fr)); } .robot-slot-grid { grid-template-columns: 1fr; } }
     @media (max-width: 900px) { .cjob-controls { grid-template-columns: 1fr 1fr; } .bottleneck-candidate-list li { grid-template-columns: 30px minmax(0, 1fr) 90px; } .candidate-score { display: none; } }
     @media (max-width: 700px) { .shell { padding: 12px 14px 48px; } .topbar { overflow-x: auto; } .tabs { flex: 0 0 auto; } .tab { min-width: 88px; } .grid > * { grid-column: span 12 !important; } .route-panel-head { position: static; align-items: stretch; flex-direction: column; } .route-panel-actions, .route-filter-bar { align-items: stretch; flex-wrap: wrap; } .route-filter-field { flex: 1 1 145px; } .route-filter-field .compact-select, .route-filter-field:last-child .compact-select { width: 100%; } .route-panel-actions > .btn { align-self: flex-end; } .route-meta-grid, .cjob-controls, .clean-fields { grid-template-columns: 1fr; } .route-process-head, .route-type-head { align-items: flex-start; flex-wrap: wrap; } .route-count { width: 100%; margin-left: 30px; } .route-summary-head { grid-template-columns: 1fr; padding: 8px 10px; } .route-summary-toggle { grid-template-columns: auto minmax(0, 1fr); } .route-summary-primary { flex-wrap: wrap; } .route-summary-primary strong { flex-basis: calc(100% - 72px); } .route-property-tags { margin-left: 39px; } .route-summary-actions { justify-content: flex-start; flex-wrap: wrap; padding-left: 13px; } .round-head, .robot-slot-panel-head { align-items: flex-start; flex-direction: column; } .candidate-picker-menu { grid-template-columns: 1fr; } .drawer { width: 100vw; max-width: 100vw; } .drawer-head, .drawer-body { padding-right: 16px; padding-left: 16px; } .step-meta-list { grid-template-columns: 1fr 1fr; row-gap: 12px; } .step-meta-list > div:nth-child(3) { padding-left: 0; border-left: 0; } .step-edit-grid, .step-system-grid, .batch-results { grid-template-columns: 1fr; } .readonly-field.wide { grid-column: auto; } .clean-choice { flex: 1 1 calc(50% - 8px); justify-content: flex-start; } .result-actions { grid-template-columns: 1fr; } .visual-toolbar { align-items: stretch; flex-direction: column; padding: 18px; } .visual-toolbar-actions { justify-content: flex-start; } .visual-overview { grid-template-columns: 1fr 1fr; } .visual-source { grid-column: span 2; } .visual-stat { border-top: 1px solid var(--line); } .visual-stat:nth-child(even) { border-left: 0; } .timeline-console { grid-template-columns: 1fr; } .timeline-play { width: 100%; } .timeline-speed { justify-content: space-between; } .performance-head { align-items: stretch; flex-direction: column; padding: 20px; } .performance-head label { min-width: 0; } .performance-summary { grid-template-columns: 1fr; } .performance-summary > div { padding: 18px 20px; border-top: 1px solid #e7edf4; border-left: 0; } .performance-summary > div:first-child { border-top: 0; } .bottleneck-candidates { padding: 18px 20px; } .bottleneck-candidate-head { align-items: flex-start; flex-direction: column; gap: 4px; } .bottleneck-candidate-list li { grid-template-columns: 28px minmax(0, 1fr); } .candidate-metrics { display: none; } .candidate-main > div { align-items: flex-start; flex-direction: column; gap: 4px; } .candidate-main small { white-space: normal; } .performance-window-note { padding-right: 20px; padding-left: 20px; } .performance-legend { padding-right: 20px; padding-left: 20px; } .equipment-grid, .lock-zone .equipment-grid, .robot-grid { grid-template-columns: 1fr; } .group-analysis-head { flex-direction: column; } .group-kpi-grid { grid-template-columns: 1fr; } .group-frequency-card { grid-template-columns: 1fr; } .test-group-analysis { padding: 16px; } .robot-slot-visual { flex-wrap: wrap; } }
     @media (max-width: 700px) { .pjob-route-card-head > .route-property-tags { margin-left: 0; } }
     @media (max-width: 1040px) {
-      .device-config-layout { grid-template-columns: 1fr; }
-      .device-config-nav { position: static; grid-template-columns: repeat(3, minmax(0, 1fr)); }
-      .device-config-nav-item { max-width: none; }
+      .device-config-nav { position: static; }
     }
     @media (max-width: 760px) {
       .device-config-heading { align-items: stretch; flex-direction: column; }
@@ -1262,6 +1263,7 @@
       .device-config-save-state > span { max-width: 100%; }
       .device-timing-panel-head { align-items: stretch; flex-direction: column; }
       .device-config-picker { min-width: 0; }
+      .device-config-entity-picker { grid-template-columns: 42px minmax(0, 1fr) 42px; }
       .device-timing-overview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .device-timing-overview > div:nth-child(odd) { border-left: 0; }
       .device-timing-overview > div:nth-child(n+3) { border-top: 1px solid var(--line); }

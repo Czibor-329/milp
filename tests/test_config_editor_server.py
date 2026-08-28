@@ -517,19 +517,19 @@ class RecomputeFailureOutputTests(unittest.TestCase):
         self.assertIn("!rec.removedByRecompute", viewer)
         self.assertIn('fillOpacity = bar.rec.removedByRecompute ? "0.24" : "1"', viewer)
 
-    def test_frontend_version_and_cache_keys_are_1_5_13(self) -> None:
+    def test_frontend_version_and_cache_keys_are_1_5_14(self) -> None:
         """前端显示版本、包版本和主资源缓存键必须同步。"""
         frontend_root = ROOT / "realtime_scheduler" / "frontend"
         template = (frontend_root / "config_editor.html").read_text(encoding="utf-8")
         package = json.loads((frontend_root / "package.json").read_text(encoding="utf-8"))
         package_lock = json.loads((frontend_root / "package-lock.json").read_text(encoding="utf-8"))
 
-        self.assertEqual("1.5.13", package["version"])
-        self.assertEqual("1.5.13", package_lock["version"])
-        self.assertEqual("1.5.13", package_lock["packages"][""]["version"])
-        self.assertIn('class="frontend-version">前端 v1.5.13</span>', template)
-        self.assertIn('/assets/config_editor.css?v=1.5.13', template)
-        self.assertIn('/assets/config_editor.js?v=1.5.13', template)
+        self.assertEqual("1.5.14", package["version"])
+        self.assertEqual("1.5.14", package_lock["version"])
+        self.assertEqual("1.5.14", package_lock["packages"][""]["version"])
+        self.assertIn('class="frontend-version">前端 v1.5.14</span>', template)
+        self.assertIn('/assets/config_editor.css?v=1.5.14', template)
+        self.assertIn('/assets/config_editor.js?v=1.5.14', template)
 
     def test_batch_status_refresh_obeys_frontend_performance_limit(self) -> None:
         """批量状态最多每秒轮询一次，且明细未变化时不得重建整组 DOM。"""
@@ -616,8 +616,11 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual([("start", 59), ("finish", 59), ("start", 60)], events)
 
     def test_extract_init_data_from_recording(self) -> None:
-        """input_data 录制数组应只提取 AlgInit 的设备字段。"""
+        """input_data 录制数组应提取设备字段并丢弃非标准顶层 Route。"""
         self.assertIn("Stations", self.device)
+        recording = _device_recording()
+        recording[0]["Info"]["Routes"] = {"Legacy": {}}
+        self.assertNotIn("Routes", extract_init_data(recording))
 
     def test_discovers_standard_algorithms_below_other_alg(self) -> None:
         """后端应把 other_alg 下具有 infer/scheduler.py 的目录暴露给前端。"""
@@ -699,6 +702,10 @@ class ConfigEditorServerTests(unittest.TestCase):
             "机器手槽位",
             'id="deviceStationTimingEditor"',
             'id="deviceRobotTimingEditor"',
+            'id="previousDeviceStationButton"',
+            'id="nextDeviceStationButton"',
+            'id="previousDeviceRobotButton"',
+            'id="nextDeviceRobotButton"',
             'id="saveDeviceTimingButton"',
             '"device-timing-target":',
             "/device-timing",
@@ -1436,7 +1443,8 @@ class ConfigEditorServerTests(unittest.TestCase):
             10.0,
             BuildState(),
         )
-        runtime_route = update["Routes"]["Route12__Incoming"]
+        self.assertNotIn("Routes", update)
+        runtime_route = update["ProcessJobs"][0]["OriginRoute"]
         self.assertEqual("LP3", runtime_route["RouteSteps"][0]["Visits"][0]["StationName"])
         self.assertEqual("LP3", runtime_route["RouteSteps"][-1]["Visits"][0]["StationName"])
         self.assertEqual("Route12__Incoming", update["ProcessJobs"][0]["OriginRoute"]["Name"])
@@ -2127,7 +2135,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("<span>结果分析</span>", html)
         self.assertIn("<span>路径配置</span>", html)
         self.assertNotIn('data-tab-view="clean"', html)
-        self.assertIn('class="frontend-version">前端 v1.5.13</span>', html)
+        self.assertIn('class="frontend-version">前端 v1.5.14</span>', html)
         self.assertIn('data-option="residencyGuardSeconds"', html)
         self.assertIn('data-option="maximumRobotHoldingSeconds"', html)
         self.assertIn('data-option="maximumSystemResidenceCv"', html)

@@ -326,9 +326,11 @@ def merge_algorithm_update(
     merged["ProcessRecipes"] = deepcopy(
         list(new_round_update.get("ProcessRecipes") or [])
     )
-    merged_routes = deepcopy(dict(merged.get("Routes") or {}))
-    merged_routes.update(deepcopy(dict(new_round_update.get("Routes") or {})))
-    merged["Routes"] = merged_routes
+    # 企业 IUpdateParams 没有顶层 Routes；路径由 Material.Route 与
+    # ProcessJob.OriginRoute 随各自业务对象传递。
+    for field_name in list(merged):
+        if str(field_name).casefold() in {"route", "routes"}:
+            merged.pop(field_name, None)
 
     material_by_id: Dict[Any, Dict[str, Any]] = {}
     for raw_material in [
