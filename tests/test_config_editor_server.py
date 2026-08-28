@@ -362,6 +362,71 @@ class CJobCycleUnitTests(unittest.TestCase):
             config_server._cjob_cycle_completion_time(FakeRuntime(), state),
         )
 
+    def test_cycle_completion_uses_process_job_products_not_dummy_task_id(self) -> None:
+        """同 TaskID 的历史 Dummy 不得阻断 CJob 产品晶圆完工判定。"""
+        class FakeRuntime:
+            """模拟两片产品有完整计划、历史 Dummy 已回 DummyPort 的现场。"""
+
+            state_time = 10.0
+            current_update = {
+                "Materials": [
+                    {"ID": 1, "TaskID": "2", "SrcPortName": "LP2"},
+                    {"ID": 2, "TaskID": "2", "SrcPortName": "LP2"},
+                    {
+                        "ID": 100001,
+                        "TaskID": "2",
+                        "SrcPortName": "DummyPort",
+                        "CurrentModuleName": "DummyPort",
+                    },
+                ],
+                "ProcessJobs": [{
+                    "JobName": "2.C2.P1",
+                    "TaskID": "2",
+                    "MatList": [1, 2],
+                }],
+            }
+            current_plan = [
+                {"MatIDList": [1], "StartTime": 11.0, "EndTime": 20.0},
+                {"MatIDList": [2], "StartTime": 12.0, "EndTime": 25.0},
+            ]
+
+        state = config_server.CJobCycleRuntime(
+            template={}, load_port="LP2", total_cycles=4, current_cycle=1,
+            current_task_id="2", configured_round=1,
+        )
+
+        self.assertAlmostEqual(
+            25.0 + config_server.TIME_TOLERANCE * config_server.CJOB_CYCLE_EVENT_EPSILON_MULTIPLIER,
+            config_server._cjob_cycle_completion_time(FakeRuntime(), state),
+        )
+
+    def test_cycle_event_only_checks_its_completed_load_port(self) -> None:
+        """一个循环事件不得顺带清空其他尚未推进循环状态的 LoadPort。"""
+        class FakeRuntime:
+            """记录平台要求卸载的 LoadPort 范围。"""
+
+            requested_load_ports = ()
+
+            def release_completed_load_ports(self, load_port_names):
+                """保存调用范围并模拟 LP1 已清空。"""
+                self.requested_load_ports = tuple(load_port_names)
+                return {1}, {"LP1"}
+
+        runtime = FakeRuntime()
+        build_state = BuildState(next_slot_by_port={"LP1": 25, "LP2": 25})
+
+        released_ids, empty_ports = config_server._release_finished_load_ports(
+            runtime,
+            build_state,
+            ["LP1"],
+        )
+
+        self.assertEqual(("LP1",), runtime.requested_load_ports)
+        self.assertEqual({1}, released_ids)
+        self.assertEqual({"LP1"}, empty_ports)
+        self.assertEqual(0, build_state.next_slot_by_port["LP1"])
+        self.assertEqual(25, build_state.next_slot_by_port["LP2"])
+
     def test_cycle_count_rejects_fractional_and_out_of_range_values(self) -> None:
         """循环数必须是 1~1000 的整数。"""
         for value in (0, 1001, 1.5):

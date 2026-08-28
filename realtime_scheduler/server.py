@@ -2726,10 +2726,20 @@ def _build_prior_plan_failure_output(
 def _release_finished_load_ports(
     runtime: Any,
     build_state: BuildState,
+    load_port_names: Optional[Sequence[str]] = None,
 ) -> Tuple[set[Any], set[str]]:
-    """在新一轮装片前卸载成品，并重置已经清空的 LoadPort 槽位计数。"""
+    """在新一轮装片前卸载指定范围的成品并重置已清空槽位计数。
+
+    ``load_port_names`` 为空时检查当前计划使用的全部 LoadPort；CJobCycle
+    事件应显式传入本次已经整盒完工的端口，避免一次重算提前清空其他循环。
+    """
+    requested_load_ports = tuple(
+        load_port_names
+        if load_port_names is not None
+        else build_state.next_slot_by_port
+    )
     released_ids, empty_ports = runtime.release_completed_load_ports(
-        tuple(build_state.next_slot_by_port),
+        requested_load_ports,
     )
     for load_port_name in empty_ports:
         build_state.next_slot_by_port[load_port_name] = 0
@@ -2748,6 +2758,44 @@ class CJobCycleRuntime:
     configured_round: int
 
 
+def _cjob_cycle_product_material_ids(
+    update_params: Mapping[str, Any],
+    task_id: str,
+    load_port: str,
+) -> set[Any]:
+    """返回一个 CJobCycle 当前盒的产品晶圆编号。
+
+    ProcessJob.MatList 是 CJob 产品成员的权威集合，DummyReturnInfo 临时写入
+    Dummy 的 TaskID 不会改变该集合。兼容缺少 ProcessJobs 的旧测试或外部快照
+    时，才按 TaskID 与 SrcPortName 的组合从 Materials 回退识别。
+    """
+    matching_process_jobs = [
+        process_job
+        for process_job in update_params.get("ProcessJobs") or []
+        if (
+            isinstance(process_job, Mapping)
+            and str(process_job.get("TaskID") or "") == str(task_id)
+        )
+    ]
+    if matching_process_jobs:
+        return {
+            material_id
+            for process_job in matching_process_jobs
+            for material_id in (process_job.get("MatList") or [])
+            if material_id is not None
+        }
+    return {
+        material.get("ID", material.get("Name"))
+        for material in update_params.get("Materials") or []
+        if (
+            isinstance(material, Mapping)
+            and str(material.get("TaskID") or "") == str(task_id)
+            and str(material.get("SrcPortName") or "") in {"", str(load_port)}
+            and material.get("ID", material.get("Name")) is not None
+        )
+    }
+
+
 def _completed_cycle_material_ids(
     update_params: Mapping[str, Any],
     completed_cycles: Sequence[CJobCycleRuntime],
@@ -2758,24 +2806,13 @@ def _completed_cycle_material_ids(
     DummyPort。CJobCycle 完成只能卸载对应 TaskID 且 SrcPortName 与该循环
     LoadPort 一致的产品片，不能按 TaskID 连带删除可复用 Dummy 库存。
     """
-    load_port_by_task_id = {
-        str(cycle_state.current_task_id): str(cycle_state.load_port)
-        for cycle_state in completed_cycles
-    }
     material_ids: set[Any] = set()
-    for material in update_params.get("Materials") or []:
-        if not isinstance(material, Mapping):
-            continue
-        task_id = str(material.get("TaskID") or "")
-        expected_load_port = load_port_by_task_id.get(task_id)
-        if (
-            expected_load_port is None
-            or str(material.get("SrcPortName") or "") != expected_load_port
-        ):
-            continue
-        material_id = material.get("ID", material.get("Name"))
-        if material_id is not None:
-            material_ids.add(material_id)
+    for cycle_state in completed_cycles:
+        material_ids.update(_cjob_cycle_product_material_ids(
+            update_params,
+            cycle_state.current_task_id,
+            cycle_state.load_port,
+        ))
     return material_ids
 
 
@@ -2902,20 +2939,21 @@ def _cjob_cycle_completion_time(
     cycle_state: CJobCycleRuntime,
 ) -> Optional[float]:
     """结合重算快照与当前代 MoveList 求出整盒晶圆返回后的最晚时刻。"""
+    material_ids = _cjob_cycle_product_material_ids(
+        runtime.current_update,
+        cycle_state.current_task_id,
+        cycle_state.load_port,
+    )
+    if not material_ids:
+        return None
     materials = [
         material
         for material in (runtime.current_update.get("Materials") or [])
         if (
             isinstance(material, Mapping)
-            and str(material.get("TaskID") or "") == cycle_state.current_task_id
+            and material.get("ID", material.get("Name")) in material_ids
         )
     ]
-    material_ids = {
-        material.get("ID", material.get("Name")) for material in materials
-    }
-    material_ids.discard(None)
-    if not material_ids:
-        return None
     # 其他 CJob 的完工事件可能已经触发过重算。此时本 CJob 先完成的晶圆仍在
     # current_update 的终点槽中，但不会再次出现在新一代 MoveList；它们应按
     # 当前状态时刻计为已完成，只让尚未回片的晶圆决定未来完工边界。
@@ -3152,16 +3190,29 @@ def _execute_standard_algorithm(
                     runtime,
                     requested_time,
                 )
-            released_ids, empty_ports = _release_finished_load_ports(runtime, build_state)
+            cycle_material_ids = (
+                _completed_cycle_material_ids(
+                    runtime.current_update,
+                    completed_cycles,
+                )
+                if completed_cycles
+                else set()
+            )
+            cycle_load_ports = (
+                tuple(cycle_state.load_port for cycle_state in completed_cycles)
+                if completed_cycles
+                else None
+            )
+            released_ids, empty_ports = _release_finished_load_ports(
+                runtime,
+                build_state,
+                cycle_load_ports,
+            )
             if completed_cycles:
                 # CJobCycle 的触发时刻已经由“该 TaskID 全部物料的最后一个 Move
                 # 结束”推导得到。这里按 TaskID + 固定 LoadPort 明确卸载整盒，
                 # 避免部分算法没有把回 LP 动作标成 sink stage 时，通用终点识别
                 # 无法裁剪旧 CJob；同 TaskID 的 DummyPort 清洁库存必须保留。
-                cycle_material_ids = _completed_cycle_material_ids(
-                    runtime.current_update,
-                    completed_cycles,
-                )
                 released_ids.update(cycle_material_ids)
                 _remove_released_materials_from_update(
                     runtime.current_update,

@@ -259,8 +259,8 @@ def test_merge_algorithm_update_consumes_previous_dummy_return_info() -> None:
     assert material["TaskID"] == "1"
 
 
-def test_idle_dummy_consumes_returned_route_by_material_id() -> None:
-    """算法已按 MatID 返回信息时，即使 Dummy 未出发也必须直接回填。"""
+def test_idle_dummy_at_source_port_returns_to_default_state() -> None:
+    """Dummy 位于来源端口且没有 Running Move 时应恢复库存默认状态。"""
     update = {
         "Materials": [{
             "ID": 100000,
@@ -271,6 +271,7 @@ def test_idle_dummy_consumes_returned_route_by_material_id() -> None:
             "StepID": 0,
             "SrcPortName": "DummyPort",
             "AccessiblePM": ["PM1"],
+            "Count": 7,
         }],
     }
     output = {
@@ -289,12 +290,17 @@ def test_idle_dummy_consumes_returned_route_by_material_id() -> None:
     restored = restore_dummy_routes_from_algorithm_output(update, output)
 
     assert restored == [100000]
-    assert update["Materials"][0]["Route"]["Name"] == "unstarted-route"
-    assert update["Materials"][0]["PJobName"] == "1.C1.P1"
+    material = update["Materials"][0]
+    assert material["Route"]["RouteSteps"] == []
+    assert material["TaskID"] == ""
+    assert material["PJobName"] == ""
+    assert material["StepID"] == 0
+    assert material["CurrentModuleName"] == "DummyPort"
+    assert material["Count"] == 7
 
 
-def test_only_dummy_ids_present_in_return_info_are_restored() -> None:
-    """一组空 Dummy 中只回填算法实际返回的 MatID，其余库存保持为空。"""
+def test_only_dummy_ids_present_in_return_info_are_normalized() -> None:
+    """只处理算法返回过的 Dummy MatID，其余库存保持原样。"""
     update = {
         "Materials": [
             {
@@ -330,7 +336,126 @@ def test_only_dummy_ids_present_in_return_info_are_restored() -> None:
     assert [
         bool((material.get("Route") or {}).get("RouteSteps"))
         for material in update["Materials"]
-    ] == [True, True, False, False, False]
+    ] == [False, False, False, False, False]
+
+
+def test_inflight_dummy_uses_running_move_task_assignment() -> None:
+    """共享中间工步不能覆盖 Running Move 已确定的 Dummy 任务归属。"""
+    task1_route = {
+        "Name": "task-1-route",
+        "RouteSteps": [{
+            "StepID": 2,
+            "Visits": [{"StationName": "LA"}],
+            "PostStepID": [3],
+        }],
+    }
+    task2_route = {
+        "Name": "task-2-route",
+        "RouteSteps": [{
+            "StepID": 2,
+            "Visits": [{"StationName": "LA"}],
+            "PostStepID": [3],
+        }],
+    }
+    update = {
+        "CurrentTime": 100.0,
+        "MoveStates": [{"MoveID": 20, "MoveState": 0}],
+        "Materials": [{
+            "ID": 100001,
+            "TaskID": "1",
+            "PJobName": "1.C1.P1",
+            "Route": task1_route,
+            "CurrentModuleName": "LA",
+            "StepID": 2,
+            "SrcPortName": "DummyPort",
+            "AccessiblePM": ["PM1"],
+            "Count": 9,
+        }],
+    }
+    output = {
+        "MoveList": [{
+            "MoveID": 20,
+            "StartTime": 99.0,
+            "MatIDList": [100001],
+            "TaskID": ["2"],
+            "PJobName": ["2.C2.P1"],
+        }],
+        "DummyReturnInfo": {
+            "100001": [
+                {
+                    "TaskID": "1",
+                    "PJobName": "1.C1.P1",
+                    "RouteRecipe": task1_route,
+                },
+                {
+                    "TaskID": "2",
+                    "PJobName": "2.C2.P1",
+                    "RouteRecipe": task2_route,
+                },
+            ],
+        },
+    }
+
+    restored = restore_dummy_routes_from_algorithm_output(update, output)
+
+    assert restored == [100001]
+    material = update["Materials"][0]
+    assert material["TaskID"] == "2"
+    assert material["PJobName"] == "2.C2.P1"
+    assert material["Route"]["Name"] == "task-2-route"
+    assert material["CurrentModuleName"] == "LA"
+    assert material["StepID"] == 2
+    assert material["Count"] == 9
+
+
+def test_dummy_projected_to_source_with_running_move_is_still_inflight() -> None:
+    """回片 Move 尚在 Running 时，即使投影到 DummyPort 也不得提前清空归属。"""
+    route = {
+        "Name": "returning-route",
+        "RouteSteps": [{
+            "StepID": 8,
+            "Visits": [{"StationName": "DummyPort"}],
+            "PostStepID": [],
+        }],
+    }
+    update = {
+        "CurrentTime": 50.0,
+        "MoveStates": [{"MoveID": 8, "MoveState": "Running"}],
+        "Materials": [{
+            "ID": 100002,
+            "TaskID": "2",
+            "PJobName": "2.C2.P1",
+            "Route": {},
+            "CurrentModuleName": "DummyPort",
+            "StepID": 8,
+            "SrcPortName": "DummyPort",
+            "Count": 4,
+        }],
+    }
+    output = {
+        "MoveList": [{
+            "MoveID": 8,
+            "StartTime": 49.0,
+            "MatIDList": [100002],
+            "TaskID": ["2"],
+            "PJobName": ["2.C2.P1"],
+        }],
+        "DummyReturnInfo": {
+            "100002": [{
+                "TaskID": "2",
+                "PJobName": "2.C2.P1",
+                "RouteRecipe": route,
+            }],
+        },
+    }
+
+    restore_dummy_routes_from_algorithm_output(update, output)
+
+    material = update["Materials"][0]
+    assert material["TaskID"] == "2"
+    assert material["Route"]["Name"] == "returning-route"
+    assert material["StepID"] == 8
+    assert material["Count"] == 4
 
 
 def test_external_validation_compile_clears_predummy_only_in_copy(monkeypatch) -> None:

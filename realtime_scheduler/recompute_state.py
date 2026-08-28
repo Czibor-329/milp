@@ -26,16 +26,82 @@ DEFAULT_ATMOSPHERE_LAST_ITEM = "ATR"
 DEFAULT_VACUUM_LAST_ITEM = "VTR"
 
 
+def _empty_dummy_route() -> Dict[str, Any]:
+    """返回 Dummy 库存片回港后的标准空 Route。"""
+    return {
+        "Name": "",
+        "RouteSteps": [],
+        "BufferOption": -1,
+        "BoundedStepIDs": [],
+        "Group": "",
+        "PrePJob": {},
+        "PostPJob": {},
+        "PostCJob": {},
+    }
+
+
+def _dummy_assignment_hints(
+    update_params: Mapping[str, Any],
+    algorithm_output: Mapping[str, Any],
+) -> tuple[Dict[str, tuple[str, str]], Set[str]]:
+    """从当前运行 Move 和已启动历史中推导在途 Dummy 的任务归属。
+
+    返回值第一项按 MatID 保存 ``(TaskID, PJobName)``；第二项是当前仍有
+    Running Move 的 MatID。Running Move 优先于同一片更早的历史动作。
+    """
+    running_move_ids = {
+        int(state["MoveID"])
+        for state in update_params.get("MoveStates") or []
+        if (
+            isinstance(state, Mapping)
+            and state.get("MoveID") is not None
+            and str(state.get("MoveState", "")).strip().casefold()
+            in {"0", "running"}
+        )
+    }
+    current_time = float(update_params.get("CurrentTime") or 0.0)
+    candidates: List[tuple[int, float, int, Mapping[str, Any]]] = []
+    for order, move in enumerate(algorithm_output.get("MoveList") or []):
+        if not isinstance(move, Mapping) or move.get("MoveID") is None:
+            continue
+        try:
+            move_id = int(move["MoveID"])
+            start_time = float(move.get("StartTime") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if move_id not in running_move_ids and start_time > current_time:
+            continue
+        candidates.append((move_id in running_move_ids, start_time, order, move))
+
+    hints: Dict[str, tuple[str, str]] = {}
+    running_material_ids: Set[str] = set()
+    for is_running, _start_time, _order, move in sorted(candidates):
+        material_ids = list(move.get("MatIDList") or [])
+        task_ids = list(move.get("TaskID") or [])
+        pjob_names = list(move.get("PJobName") or [])
+        for index, material_id in enumerate(material_ids):
+            material_key = str(material_id)
+            task_id = str(task_ids[index] if index < len(task_ids) else "")
+            pjob_name = str(
+                pjob_names[index] if index < len(pjob_names) else ""
+            )
+            if task_id or pjob_name:
+                hints[material_key] = (task_id, pjob_name)
+            if is_running:
+                running_material_ids.add(material_key)
+    return hints, running_material_ids
+
+
 def restore_dummy_routes_from_algorithm_output(
     update_params: Dict[str, Any],
     algorithm_output: Mapping[str, Any],
 ) -> List[Any]:
     """把算法返回的 Dummy 路径事务写回下一轮标准 update。
 
-    ``DummyReturnInfo`` 是算法为具体 Dummy MatID 返回的实际路径。平台在多轮
-    调度中必须保存这份返回值，并在下一轮重算前将 ``RouteRecipe``、任务归属
-    回填给对应 Material；否则只回传位置和 StepID 会让算法无法恢复在途路径。
-    已有非空 Route 属于现场权威数据，不在这里覆盖。
+    ``DummyReturnInfo`` 是算法为具体 Dummy MatID 返回的实际路径。在途 Dummy
+    保持该路径和任务归属；已经回到来源 DummyPort 且没有 Running Move 的库存片
+    恢复默认 TaskID、PJobName、StepID、CurrentModuleName 和 Route。``Count`` 是
+    物理片跨任务累计寿命，不在恢复默认状态时修改。
 
     参数:
         update_params: 即将再次发送给算法的全量标准 update，会被原地更新。
@@ -47,6 +113,10 @@ def restore_dummy_routes_from_algorithm_output(
     return_info = algorithm_output.get("DummyReturnInfo") or {}
     if not isinstance(return_info, Mapping):
         return []
+    assignment_hints, running_material_ids = _dummy_assignment_hints(
+        update_params,
+        algorithm_output,
+    )
     materials = update_params.get("Materials") or []
     if isinstance(materials, Mapping):
         material_items = materials.values()
@@ -65,10 +135,36 @@ def restore_dummy_routes_from_algorithm_output(
             raw_entries = [raw_entries]
         if not isinstance(raw_entries, list):
             continue
-        route = material.get("Route") or {}
-        if isinstance(route, Mapping) and route.get("RouteSteps"):
-            continue
+        material_key = str(material_id)
+        source_port = str(material.get("SrcPortName") or "DummyPort")
         current_module = str(material.get("CurrentModuleName") or "")
+        if (
+            current_module == source_port
+            and material_key not in running_material_ids
+        ):
+            material["TaskID"] = ""
+            material["PJobName"] = ""
+            material["StepID"] = 0
+            material["CurrentModuleName"] = source_port
+            material["Route"] = _empty_dummy_route()
+            restored.append(material_id)
+            continue
+        route = material.get("Route") or {}
+        hinted_task_id, hinted_pjob_name = assignment_hints.get(
+            material_key,
+            ("", ""),
+        )
+        if isinstance(route, Mapping) and route.get("RouteSteps"):
+            task_matches = (
+                not hinted_task_id
+                or str(material.get("TaskID") or "") == hinted_task_id
+            )
+            pjob_matches = (
+                not hinted_pjob_name
+                or str(material.get("PJobName") or "") == hinted_pjob_name
+            )
+            if task_matches and pjob_matches:
+                continue
         current_step_id = material.get("StepID")
         candidates = [
             entry
@@ -81,8 +177,20 @@ def restore_dummy_routes_from_algorithm_output(
             continue
 
         def route_score(entry: Mapping[str, Any]) -> int:
-            """优先选择同时匹配现场 StepID 和模块的返回路径。"""
+            """优先匹配在途 Move 的任务归属，再匹配现场 StepID 和模块。"""
             score = 0
+            if hinted_task_id:
+                score += (
+                    1000
+                    if str(entry.get("TaskID") or "") == hinted_task_id
+                    else -1000
+                )
+            if hinted_pjob_name:
+                score += (
+                    1000
+                    if str(entry.get("PJobName") or "") == hinted_pjob_name
+                    else -1000
+                )
             route_steps = entry["RouteRecipe"].get("RouteSteps") or []
             if isinstance(route_steps, Mapping):
                 route_steps = route_steps.values()
@@ -102,10 +210,8 @@ def restore_dummy_routes_from_algorithm_output(
 
         selected = max(candidates, key=route_score)
         material["Route"] = deepcopy(dict(selected["RouteRecipe"]))
-        if not str(material.get("PJobName") or ""):
-            material["PJobName"] = str(selected.get("PJobName") or "")
-        if not str(material.get("TaskID") or ""):
-            material["TaskID"] = str(selected.get("TaskID") or "")
+        material["PJobName"] = str(selected.get("PJobName") or "")
+        material["TaskID"] = str(selected.get("TaskID") or "")
         restored.append(material_id)
     return restored
 
