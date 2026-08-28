@@ -62,6 +62,87 @@ class OptionalAlgorithmRepositoryTests(unittest.TestCase):
             )
         return completed
 
+    def test_builtin_repository_replaces_preloaded_external_src_package(self) -> None:
+        """内置算法必须替换启动前已缓存的外部 src 同名包。"""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            algorithm_root = temporary_root / "alg"
+            source_root = algorithm_root / "src"
+            (source_root / "schedule").mkdir(parents=True)
+            (source_root / "__init__.py").write_text("", encoding="utf-8")
+            (source_root / "api.py").write_text(
+                "from contextlib import contextmanager\n"
+                "SUPPORTED_ALGORITHMS = frozenset({'heuristic'})\n"
+                "def get_last_strategy_diagnostics():\n    return {}\n"
+                "@contextmanager\n"
+                "def session():\n    yield\n",
+                encoding="utf-8",
+            )
+            (source_root / "compiler.py").write_text(
+                "def compile_problem(payload):\n    return payload\n",
+                encoding="utf-8",
+            )
+            (source_root / "paths.py").write_text(
+                "from pathlib import Path\nMODELS_DIR = Path('.')\n",
+                encoding="utf-8",
+            )
+            (source_root / "schedule" / "__init__.py").write_text(
+                "", encoding="utf-8"
+            )
+            (source_root / "schedule" / "realtime.py").write_text(
+                "TIME_TOLERANCE = 1e-6\nclass RealtimeRescheduler:\n    pass\n",
+                encoding="utf-8",
+            )
+
+            # 真实冲突包位于 alg/other_alg 内；仅判断模块是否在
+            # ALGORITHM_ROOT 下会把它误认为内置 alg/src。
+            external_root = algorithm_root / "other_alg" / "framework"
+            external_src = external_root / "src"
+            external_src.mkdir(parents=True)
+            (external_src / "__init__.py").write_text(
+                "EXTERNAL_PACKAGE = True\n", encoding="utf-8"
+            )
+
+            environment = os.environ.copy()
+            environment["CT_ALGORITHM_ROOT"] = str(algorithm_root)
+            environment["CT_OTHER_ALGORITHM_ROOT"] = str(algorithm_root / "other_alg")
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    textwrap.dedent(
+                        f"""
+                        import sys
+                        from pathlib import Path
+
+                        sys.path.insert(0, {str(external_root)!r})
+                        import src
+                        assert Path(src.__file__).resolve().is_relative_to(
+                            Path({str(external_root)!r}).resolve()
+                        )
+
+                        import realtime_scheduler.server as server
+                        assert server.BUILTIN_ALGORITHM_AVAILABLE is True
+                        assert server.BUILTIN_ALGORITHM_IMPORT_ERROR == ""
+                        assert Path(server.builtin_algorithm_api.__file__).resolve() == (
+                            Path({str(source_root)!r}) / "api.py"
+                        ).resolve()
+                        """
+                    ),
+                ],
+                cwd=ROOT,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+        self.assertEqual(
+            0,
+            completed.returncode,
+            completed.stdout + completed.stderr,
+        )
+
     def test_server_imports_without_any_algorithm(self) -> None:
         """算法目录为空时服务端模块应正常导入，并把内置策略标为不可用。"""
         with tempfile.TemporaryDirectory() as temporary_directory:

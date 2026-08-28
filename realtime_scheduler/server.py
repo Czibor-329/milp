@@ -60,10 +60,33 @@ ALGORITHM_REPOSITORY_PRESENT = (
     (ALGORITHM_ROOT / "src" / "api.py").is_file()
     and (ALGORITHM_ROOT / "src").is_dir()
 )
-if ALGORITHM_REPOSITORY_PRESENT and str(ALGORITHM_ROOT) not in sys.path:
-    # 保留父仓库自身 tests/scripts 等包的解析优先级，算法仓库只提供
-    # 父仓库中不存在的 src 命名空间。
-    sys.path.append(str(ALGORITHM_ROOT))
+if ALGORITHM_REPOSITORY_PRESENT:
+    # 保留平台根目录的最高优先级，但算法仓库必须早于当前工作
+    # 目录及第三方路径，避免 other_alg 交付包中的同名 src 被选中。
+    algorithm_root_text = str(ALGORITHM_ROOT)
+    while algorithm_root_text in sys.path:
+        sys.path.remove(algorithm_root_text)
+    sys.path.insert(1, algorithm_root_text)
+
+    # 外部算法可能在服务端之前已导入自己的 src 包。Python 会优先
+    # 复用 sys.modules，仅调整 sys.path 无法纠正这种污染；启动内置算法前
+    # 清理非当前算法仓库的 src 命名空间，使 src.api 始终绑定到配置根。
+    loaded_src = sys.modules.get("src")
+    loaded_src_file = getattr(loaded_src, "__file__", None)
+    loaded_src_is_builtin = False
+    if loaded_src_file:
+        try:
+            Path(str(loaded_src_file)).resolve().relative_to(
+                (ALGORITHM_ROOT / "src").resolve()
+            )
+        except (OSError, ValueError):
+            pass
+        else:
+            loaded_src_is_builtin = True
+    if loaded_src is not None and not loaded_src_is_builtin:
+        for module_name in tuple(sys.modules):
+            if module_name == "src" or module_name.startswith("src."):
+                sys.modules.pop(module_name, None)
 
 BUILTIN_ALGORITHM_IMPORT_ERROR = ""
 BUILTIN_ALGORITHM_AVAILABLE = False
