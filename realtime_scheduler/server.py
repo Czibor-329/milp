@@ -1445,13 +1445,17 @@ def _alg_output_info(
 ) -> Dict[str, Any]:
     """生成与 input_data 中 AlgOutput 相同的顶层结构。"""
     source = output or {}
-    return {
+    normalized = {
         "MoveList": deepcopy(list(source.get("MoveList") or [])),
         "Feedback": deepcopy(list(feedback if feedback is not None else source.get("Feedback") or [])),
         "JobList": deepcopy(list(source.get("JobList") or [])),
         "DummyReturnInfo": deepcopy(dict(source.get("DummyReturnInfo") or {})),
         "MatIntoPM": deepcopy(dict(source.get("MatIntoPM") or {})),
     }
+    diagnostic = source.get("DeadlockDiagnostic")
+    if isinstance(diagnostic, Mapping) and diagnostic:
+        normalized["DeadlockDiagnostic"] = deepcopy(dict(diagnostic))
+    return normalized
 
 
 def _deadlock_feedback(
@@ -1489,6 +1493,183 @@ def _deadlock_feedback(
     return None
 
 
+def _classify_deadlock_diagnostic(
+    diagnostic: Mapping[str, Any],
+) -> Optional[Dict[str, str]]:
+    """按 Machine 权威现场识别可证明的死锁类型。
+
+    分类只使用物料当前位置、下一站、站点占用、Robot 手槽和 Dummy 标记；
+    证据不足时返回 ``None``，由调用方保留通用无动作类型。
+    """
+    pending = [
+        dict(row)
+        for row in diagnostic.get("PendingMaterials") or []
+        if isinstance(row, Mapping)
+    ]
+    held_robots = [
+        dict(row)
+        for row in diagnostic.get("HeldRobots") or []
+        if isinstance(row, Mapping)
+    ]
+    occupied_stations = {
+        str(row.get("Station") or ""): dict(row)
+        for row in diagnostic.get("OccupiedStations") or []
+        if isinstance(row, Mapping) and row.get("Station")
+    }
+    load_lock_names = {
+        str(row.get("Station") or "")
+        for row in diagnostic.get("LoadLocks") or []
+        if isinstance(row, Mapping) and row.get("Station")
+    }
+    pending_by_id = {
+        str(row.get("MaterialID")): row
+        for row in pending
+        if row.get("MaterialID") is not None
+    }
+
+    def string_set(value: Any) -> set[str]:
+        """把协议列表字段规范化为非空字符串集合。"""
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+            return set()
+        return {str(item) for item in value if str(item)}
+
+    # Dummy 位于自己仍需服务的同一 PM 时，没有搬运能够推进清洗 Route。
+    for row in pending:
+        location = str(row.get("Location") or "")
+        if row.get("IsDummy") and location in string_set(row.get("NextStations")):
+            return {
+                "Code": "DEADLOCK.CLEANING_SELF_BLOCKED",
+                "Category": "cleaning-self-blocked",
+                "Message": f"Dummy 清洗片 {row.get('MaterialID')} 位于 {location}，下一步仍要求同一腔室，清洗 Route 无法推进。",
+            }
+
+    for held_robot in held_robots:
+        robot_name = str(held_robot.get("Robot") or "Robot")
+        hands = held_robot.get("Hands")
+        held_ids = {
+            str(value)
+            for value in (hands.values() if isinstance(hands, Mapping) else [])
+        }
+        capacity = max(1, int(held_robot.get("Capacity") or len(held_ids) or 1))
+        for material_id in held_ids:
+            material = pending_by_id.get(material_id)
+            if material is None:
+                continue
+            targets = string_set(material.get("NextStations"))
+            if not targets:
+                continue
+            if all(bool(occupied_stations.get(target, {}).get("Full")) for target in targets):
+                if capacity <= 1:
+                    code = "DEADLOCK.SINGLE_ARM_TARGET_FULL"
+                    category = "single-arm-target-full"
+                elif len(held_ids) >= capacity:
+                    code = "DEADLOCK.DUAL_ARM_TARGETS_FULL"
+                    category = "dual-arm-targets-full"
+                else:
+                    code = "DEADLOCK.DUAL_ARM_SINGLE_HELD_TARGET_FULL"
+                    category = "dual-arm-single-held-target-full"
+                return {
+                    "Code": code,
+                    "Category": category,
+                    "Message": f"{robot_name} 持有晶圆 {material_id}，其目标 {', '.join(sorted(targets))} 均已满。",
+                }
+            cleaning_conflicts = [
+                row for row in pending
+                if row.get("IsDummy")
+                and str(row.get("MaterialID")) not in held_ids
+                and targets & string_set(row.get("RemainingProcessStations"))
+            ]
+            if cleaning_conflicts:
+                dummy_ids = ", ".join(str(row.get("MaterialID")) for row in cleaning_conflicts)
+                return {
+                    "Code": "DEADLOCK.ROBOT_HELD_CLEANING_CONFLICT",
+                    "Category": "robot-held-cleaning-conflict",
+                    "Message": f"{robot_name} 持有晶圆 {material_id}，但目标 {', '.join(sorted(targets))} 必须先由 Dummy {dummy_ids} 完成清洗；Robot 无法同时推进清洗片。",
+                }
+            if targets & load_lock_names:
+                return {
+                    "Code": "DEADLOCK.ROBOT_HELD_LOADLOCK_BLOCKED",
+                    "Category": "robot-held-loadlock-blocked",
+                    "Message": f"{robot_name} 持有晶圆 {material_id}，目标 LoadLock {', '.join(sorted(targets & load_lock_names))} 无法接片或切换方向。",
+                }
+            return {
+                "Code": "DEADLOCK.ROBOT_HELD_RESOURCE_WAIT",
+                "Category": "robot-held-resource-wait",
+                "Message": f"{robot_name} 持有晶圆 {material_id}，目标 {', '.join(sorted(targets))} 当前无法接片，Robot 也无法推进其他搬运。",
+            }
+
+    # 没有 Robot 持片时，从满载目标构造物料等待图；含 LoadLock 的环单独命名。
+    dependency_edges: Dict[str, set[str]] = {}
+    for row in pending:
+        source_id = str(row.get("MaterialID"))
+        for target in string_set(row.get("NextStations")):
+            station = occupied_stations.get(target)
+            if not station or not station.get("Full"):
+                continue
+            occupied = station.get("Occupied")
+            if isinstance(occupied, Mapping):
+                dependency_edges.setdefault(source_id, set()).update(
+                    str(value) for value in occupied.values()
+                )
+
+    def find_cycle(node: str, path: list[str], completed: set[str]) -> set[str]:
+        """深度优先返回等待图中的一组环节点；无环时返回空集。"""
+        if node in path:
+            return set(path[path.index(node):])
+        if node in completed:
+            return set()
+        path.append(node)
+        for target in dependency_edges.get(node, set()):
+            cycle = find_cycle(target, path, completed)
+            if cycle:
+                return cycle
+        path.pop()
+        completed.add(node)
+        return set()
+
+    completed: set[str] = set()
+    cycle_nodes = next((
+        cycle
+        for node in dependency_edges
+        if (cycle := find_cycle(node, [], completed))
+    ), set())
+    if cycle_nodes:
+        if any(
+            str(pending_by_id.get(node, {}).get("Location") or "") in load_lock_names
+            for node in cycle_nodes
+        ):
+            return {
+                "Code": "DEADLOCK.LOADLOCK_DIRECTION_CYCLE",
+                "Category": "loadlock-direction-cycle",
+                "Message": "LoadLock 内外物料同时等待反向服务，当前压力方向与回程容量形成循环依赖。",
+            }
+        return {
+            "Code": "DEADLOCK.RESOURCE_WAIT_CYCLE",
+            "Category": "resource-wait-cycle",
+            "Message": "多个晶圆的下一目标被彼此占用，形成满腔资源等待环。",
+        }
+
+    # LoadLock 的算法安全容量可能小于物理槽位，图中没有“物理满载”边时仍可确认方向环。
+    if load_lock_names:
+        leaves_load_lock = any(
+            str(row.get("Location") or "") in load_lock_names
+            and bool(string_set(row.get("NextStations")) - load_lock_names)
+            for row in pending
+        )
+        enters_load_lock = any(
+            str(row.get("Location") or "") not in load_lock_names
+            and bool(string_set(row.get("NextStations")) & load_lock_names)
+            for row in pending
+        )
+        if leaves_load_lock and enters_load_lock:
+            return {
+                "Code": "DEADLOCK.LOADLOCK_DIRECTION_CYCLE",
+                "Category": "loadlock-direction-cycle",
+                "Message": "LoadLock 内外物料同时等待反向服务，当前压力方向与回程容量形成循环依赖。",
+            }
+    return None
+
+
 def _raise_deadlock_feedback(
     output: Mapping[str, Any],
     reproduction: ReproductionLog,
@@ -1501,12 +1682,15 @@ def _raise_deadlock_feedback(
     if feedback is None:
         return
     failure_output = _alg_output_info(output)
+    diagnostic = deepcopy(dict(output.get("DeadlockDiagnostic") or {}))
+    classification = _classify_deadlock_diagnostic(diagnostic)
     failure_output["FailureContext"] = {
         "Stage": "algorithm-deadlock",
         "Context": context,
-        "Code": str(feedback.get("Code") or "DEADLOCK.NO_EXECUTABLE_ACTION"),
-        "Category": str(feedback.get("Category") or "unknown"),
-        "Message": str(feedback.get("Message") or "算法规划进入死锁"),
+        "Code": str((classification or feedback).get("Code") or "DEADLOCK.NO_EXECUTABLE_ACTION"),
+        "Category": str((classification or feedback).get("Category") or "unknown"),
+        "Message": str((classification or feedback).get("Message") or "算法规划进入死锁"),
+        "Diagnostic": diagnostic,
     }
     reproduction.add(
         "AlgOutput",

@@ -53,7 +53,7 @@ const DEFAULT_SCHEDULE_OPTIONS = Object.freeze({
 });
 const SCHEDULE_OPTION_KEYS = new Set(Object.keys(DEFAULT_SCHEDULE_OPTIONS));
 
-/** 前端在 MoveList 回放终点能够确认的三种死锁。 */
+/** 平台通过 MoveList 回放或 Machine 结构化现场能够确认的死锁类型。 */
 const DEADLOCK_TYPE_CATALOG = Object.freeze({
   "DEADLOCK.SINGLE_ARM_TARGET_FULL": {
     deadlockCode: "DLK-ROB-001",
@@ -67,9 +67,33 @@ const DEADLOCK_TYPE_CATALOG = Object.freeze({
     deadlockCode: "DLK-ROB-003",
     title: "双臂机器手持有一片，目标腔室已满且无交换出口",
   },
+  "DEADLOCK.ROBOT_HELD_CLEANING_CONFLICT": {
+    deadlockCode: "DLK-ROB-004",
+    title: "机器手持片与前置清洗顺序冲突",
+  },
+  "DEADLOCK.ROBOT_HELD_LOADLOCK_BLOCKED": {
+    deadlockCode: "DLK-ROB-005",
+    title: "机器手持片，目标 LoadLock 无法接片",
+  },
+  "DEADLOCK.ROBOT_HELD_RESOURCE_WAIT": {
+    deadlockCode: "DLK-ROB-006",
+    title: "机器手持片且目标资源无法推进",
+  },
+  "DEADLOCK.LOADLOCK_DIRECTION_CYCLE": {
+    deadlockCode: "DLK-LL-001",
+    title: "LoadLock 压力方向与回程循环等待",
+  },
+  "DEADLOCK.CLEANING_SELF_BLOCKED": {
+    deadlockCode: "DLK-CLN-001",
+    title: "Dummy 清洗片在同腔自阻塞",
+  },
+  "DEADLOCK.RESOURCE_WAIT_CYCLE": {
+    deadlockCode: "DLK-RES-001",
+    title: "满腔资源等待环",
+  },
 });
 
-/** 展示前端回放结论；算法只负责声明规划无法继续，不参与死锁分类。 */
+/** 展示平台判型结论；算法只声明规划无法继续，不自行提供具体分类。 */
 function deadlockDisplay(deadlock) {
   if (!deadlock || typeof deadlock !== "object") return null;
   const code = String(deadlock.Code || "DEADLOCK.UNCLASSIFIED").toUpperCase();
@@ -3812,7 +3836,11 @@ async function prepareWorkspaceView(result) {
   visualizationWorkspace.setReplayPlan(buildPayload());
   await visualizationWorkspace.loadResult(result.resultId, state.testCaseName || "当前运行结果");
   const replayDeadlock = visualizationWorkspace.getTerminalDeadlock();
-  if (result.deadlock) result.deadlock = replayDeadlock || { Code: "DEADLOCK.UNCLASSIFIED" };
+  if (result.deadlock) {
+    const serverCode = String(result.deadlock.Code || "").toUpperCase();
+    result.deadlock = replayDeadlock
+      || (DEADLOCK_TYPE_CATALOG[serverCode] ? result.deadlock : { Code: "DEADLOCK.UNCLASSIFIED" });
+  }
   if (latestSearchTelemetry?.algorithm === "schedule-alphago") {
     renderSearchTelemetry(latestSearchTelemetry);
   }

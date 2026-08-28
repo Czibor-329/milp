@@ -102,7 +102,7 @@ class FrontendTemplateTests(unittest.TestCase):
     """验证不依赖算法数据夹具的前端模板与样式约束。"""
 
     def test_frontend_registers_stable_deadlock_catalog(self) -> None:
-        """前端回放登记三种持片满腔死锁，未知现场保留兜底。"""
+        """前端登记回放和 Machine 现场可证明的死锁，未知现场保留兜底。"""
         script = EDITOR_SCRIPT_PATH.read_text(encoding="utf-8")
 
         for code in (
@@ -113,6 +113,18 @@ class FrontendTemplateTests(unittest.TestCase):
             "DLK-ROB-001",
             "DLK-ROB-002",
             "DLK-ROB-003",
+            "DEADLOCK.ROBOT_HELD_CLEANING_CONFLICT",
+            "DEADLOCK.ROBOT_HELD_LOADLOCK_BLOCKED",
+            "DEADLOCK.ROBOT_HELD_RESOURCE_WAIT",
+            "DEADLOCK.LOADLOCK_DIRECTION_CYCLE",
+            "DEADLOCK.CLEANING_SELF_BLOCKED",
+            "DEADLOCK.RESOURCE_WAIT_CYCLE",
+            "DLK-ROB-004",
+            "DLK-ROB-005",
+            "DLK-ROB-006",
+            "DLK-LL-001",
+            "DLK-CLN-001",
+            "DLK-RES-001",
             "DLK-UNK-001",
         ):
             self.assertIn(code, script)
@@ -150,6 +162,61 @@ class FrontendTemplateTests(unittest.TestCase):
             failure["FailureContext"]["Message"],
         )
         self.assertEqual("AlgOutput", reproduction.entries[-1]["Describe"])
+
+    def test_machine_diagnostic_classifies_cleaning_and_loadlock_deadlocks(self) -> None:
+        """结构化现场应区分持片清洗冲突、Dummy 自阻塞和 LoadLock 方向环。"""
+        held_cleaning = {
+            "PendingMaterials": [
+                {"MaterialID": 1, "Location": "VTR", "NextStations": ["PM4"]},
+                {"MaterialID": 100000, "Location": "LB", "IsDummy": True,
+                 "RemainingProcessStations": ["PM4"]},
+            ],
+            "HeldRobots": [{"Robot": "VTR", "Capacity": 2, "Hands": {"2": 1}}],
+            "OccupiedStations": [],
+            "LoadLocks": [{"Station": "LB"}],
+        }
+        self.assertEqual(
+            "DEADLOCK.ROBOT_HELD_CLEANING_CONFLICT",
+            config_server._classify_deadlock_diagnostic(held_cleaning)["Code"],
+        )
+
+        cleaning_self_blocked = {
+            "PendingMaterials": [{
+                "MaterialID": 100000, "Location": "PM2", "IsDummy": True,
+                "NextStations": ["PM2"],
+            }],
+        }
+        self.assertEqual(
+            "DEADLOCK.CLEANING_SELF_BLOCKED",
+            config_server._classify_deadlock_diagnostic(cleaning_self_blocked)["Code"],
+        )
+
+        loadlock_cycle = {
+            "PendingMaterials": [
+                {"MaterialID": 1, "Location": "LA", "NextStations": ["PM1"]},
+                {"MaterialID": 2, "Location": "PM1", "NextStations": ["LA"]},
+            ],
+            "LoadLocks": [{"Station": "LA"}],
+        }
+        self.assertEqual(
+            "DEADLOCK.LOADLOCK_DIRECTION_CYCLE",
+            config_server._classify_deadlock_diagnostic(loadlock_cycle)["Code"],
+        )
+
+        process_cycle = {
+            "PendingMaterials": [
+                {"MaterialID": 1, "Location": "PM1", "NextStations": ["PM2"]},
+                {"MaterialID": 2, "Location": "PM2", "NextStations": ["PM1"]},
+            ],
+            "OccupiedStations": [
+                {"Station": "PM1", "Full": True, "Occupied": {"1": 1}},
+                {"Station": "PM2", "Full": True, "Occupied": {"1": 2}},
+            ],
+        }
+        self.assertEqual(
+            "DEADLOCK.RESOURCE_WAIT_CYCLE",
+            config_server._classify_deadlock_diagnostic(process_cycle)["Code"],
+        )
 
     def test_single_run_responds_before_preflight_and_reuses_pending_save(self) -> None:
         """单测点击应立即显示准备状态，且运行前只保存确有修改的测试。"""
@@ -355,19 +422,19 @@ class RecomputeFailureOutputTests(unittest.TestCase):
         self.assertIn("!rec.removedByRecompute", viewer)
         self.assertIn('fillOpacity = bar.rec.removedByRecompute ? "0.24" : "1"', viewer)
 
-    def test_frontend_version_and_cache_keys_are_1_5_11(self) -> None:
+    def test_frontend_version_and_cache_keys_are_1_5_12(self) -> None:
         """前端显示版本、包版本和主资源缓存键必须同步。"""
         frontend_root = ROOT / "realtime_scheduler" / "frontend"
         template = (frontend_root / "config_editor.html").read_text(encoding="utf-8")
         package = json.loads((frontend_root / "package.json").read_text(encoding="utf-8"))
         package_lock = json.loads((frontend_root / "package-lock.json").read_text(encoding="utf-8"))
 
-        self.assertEqual("1.5.11", package["version"])
-        self.assertEqual("1.5.11", package_lock["version"])
-        self.assertEqual("1.5.11", package_lock["packages"][""]["version"])
-        self.assertIn('class="frontend-version">前端 v1.5.11</span>', template)
-        self.assertIn('/assets/config_editor.css?v=1.5.11', template)
-        self.assertIn('/assets/config_editor.js?v=1.5.11', template)
+        self.assertEqual("1.5.12", package["version"])
+        self.assertEqual("1.5.12", package_lock["version"])
+        self.assertEqual("1.5.12", package_lock["packages"][""]["version"])
+        self.assertIn('class="frontend-version">前端 v1.5.12</span>', template)
+        self.assertIn('/assets/config_editor.css?v=1.5.12', template)
+        self.assertIn('/assets/config_editor.js?v=1.5.12', template)
 
     def test_batch_status_refresh_obeys_frontend_performance_limit(self) -> None:
         """批量状态最多每秒轮询一次，且明细未变化时不得重建整组 DOM。"""
@@ -1965,7 +2032,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("<span>结果分析</span>", html)
         self.assertIn("<span>路径配置</span>", html)
         self.assertNotIn('data-tab-view="clean"', html)
-        self.assertIn('class="frontend-version">前端 v1.5.11</span>', html)
+        self.assertIn('class="frontend-version">前端 v1.5.12</span>', html)
         self.assertIn('data-option="residencyGuardSeconds"', html)
         self.assertIn('data-option="maximumRobotHoldingSeconds"', html)
         self.assertIn('data-option="maximumSystemResidenceCv"', html)

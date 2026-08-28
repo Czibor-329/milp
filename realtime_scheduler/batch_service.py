@@ -1070,7 +1070,10 @@ def _execute_workspace_test_batch(
                 if isinstance(error, LoggedPlanError):
                     log_id = save_reproduction_log(error.reproduction_log)
                     failure.update(_log_response_fields(log_id))
-                    failure.update(_logged_failure_result_fields(error))
+                    failure.update(_logged_failure_result_fields(
+                        error,
+                        replay_plan=selected_plan,
+                    ))
                     # 外部算法的 MoveList 即使未通过平台校验，仍是该算法的原始
                     # 输出。保留其客观指标、Baseline 对比和诊断入口；状态仍为
                     # failed，避免误把无效计划计入校验通过的成功结果。

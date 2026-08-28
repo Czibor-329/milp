@@ -18246,6 +18246,30 @@ var DEADLOCK_TYPE_CATALOG = Object.freeze({
   "DEADLOCK.DUAL_ARM_SINGLE_HELD_TARGET_FULL": {
     deadlockCode: "DLK-ROB-003",
     title: "\u53CC\u81C2\u673A\u5668\u624B\u6301\u6709\u4E00\u7247\uFF0C\u76EE\u6807\u8154\u5BA4\u5DF2\u6EE1\u4E14\u65E0\u4EA4\u6362\u51FA\u53E3"
+  },
+  "DEADLOCK.ROBOT_HELD_CLEANING_CONFLICT": {
+    deadlockCode: "DLK-ROB-004",
+    title: "\u673A\u5668\u624B\u6301\u7247\u4E0E\u524D\u7F6E\u6E05\u6D17\u987A\u5E8F\u51B2\u7A81"
+  },
+  "DEADLOCK.ROBOT_HELD_LOADLOCK_BLOCKED": {
+    deadlockCode: "DLK-ROB-005",
+    title: "\u673A\u5668\u624B\u6301\u7247\uFF0C\u76EE\u6807 LoadLock \u65E0\u6CD5\u63A5\u7247"
+  },
+  "DEADLOCK.ROBOT_HELD_RESOURCE_WAIT": {
+    deadlockCode: "DLK-ROB-006",
+    title: "\u673A\u5668\u624B\u6301\u7247\u4E14\u76EE\u6807\u8D44\u6E90\u65E0\u6CD5\u63A8\u8FDB"
+  },
+  "DEADLOCK.LOADLOCK_DIRECTION_CYCLE": {
+    deadlockCode: "DLK-LL-001",
+    title: "LoadLock \u538B\u529B\u65B9\u5411\u4E0E\u56DE\u7A0B\u5FAA\u73AF\u7B49\u5F85"
+  },
+  "DEADLOCK.CLEANING_SELF_BLOCKED": {
+    deadlockCode: "DLK-CLN-001",
+    title: "Dummy \u6E05\u6D17\u7247\u5728\u540C\u8154\u81EA\u963B\u585E"
+  },
+  "DEADLOCK.RESOURCE_WAIT_CYCLE": {
+    deadlockCode: "DLK-RES-001",
+    title: "\u6EE1\u8154\u8D44\u6E90\u7B49\u5F85\u73AF"
   }
 });
 function deadlockDisplay(deadlock) {
@@ -21635,7 +21659,10 @@ async function prepareWorkspaceView(result) {
   visualizationWorkspace.setReplayPlan(buildPayload());
   await visualizationWorkspace.loadResult(result.resultId, state.testCaseName || "\u5F53\u524D\u8FD0\u884C\u7ED3\u679C");
   const replayDeadlock = visualizationWorkspace.getTerminalDeadlock();
-  if (result.deadlock) result.deadlock = replayDeadlock || { Code: "DEADLOCK.UNCLASSIFIED" };
+  if (result.deadlock) {
+    const serverCode = String(result.deadlock.Code || "").toUpperCase();
+    result.deadlock = replayDeadlock || (DEADLOCK_TYPE_CATALOG[serverCode] ? result.deadlock : { Code: "DEADLOCK.UNCLASSIFIED" });
+  }
   if (latestSearchTelemetry?.algorithm === "schedule-alphago") {
     renderSearchTelemetry(latestSearchTelemetry);
   }
