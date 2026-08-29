@@ -1563,6 +1563,18 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual(list(range(1, 6)), update["ProcessJobs"][0]["MatList"])
         self.assertEqual(list(range(6, 11)), update["ProcessJobs"][1]["MatList"])
         self.assertEqual(list(range(1, 11)), [material["SlotID"] for material in update["Materials"]])
+        # Material 内嵌 Route 是实例化 Route：首/末 LoadPort 步骤的 Visit 槽位
+        # 必须等于该晶圆所在槽位，而不是 LP 展开的全部槽位。
+        for material in update["Materials"]:
+            expected_slot = [material["SlotID"]]
+            route_steps = material["Route"]["RouteSteps"]
+            self.assertEqual(expected_slot, route_steps[0]["Visits"][0]["SlotID"])
+            self.assertEqual(expected_slot, route_steps[-1]["Visits"][0]["SlotID"])
+        # Route 模板（OriginRoute）仍保留 LP 全部可用槽位。
+        self.assertEqual(
+            self.device["Stations"]["LP1"]["Slots"],
+            update["ProcessJobs"][0]["OriginRoute"]["RouteSteps"][0]["Visits"][0]["SlotID"],
+        )
 
     def test_same_cjob_rejects_different_load_ports(self) -> None:
         """同一 CJob 的全部 PJob 必须属于同一个 LoadPort。"""

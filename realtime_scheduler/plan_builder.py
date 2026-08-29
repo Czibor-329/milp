@@ -937,6 +937,22 @@ def _round_pjob_count(round_config: Mapping[str, Any]) -> int:
     return len([job for job in (round_config.get("jobs") or []) if isinstance(job, Mapping)])
 
 
+def _instantiate_load_port_slots(route: Mapping[str, Any], slot_id: int) -> None:
+    """把 Material 内嵌 Route 的首/末 LoadPort 步骤槽位实例化为晶圆所在槽位。
+
+    标准 update 中 ``Material.Route`` 是实例化 Route：首站/末站（LoadPort）的
+    ``Visits.SlotID`` 必须等于该晶圆当前所在槽位，而不是 Route 模板展开的站点
+    全部槽位。``ProcessJob.OriginRoute`` 仍是模板，保持全量槽位不变；只有随
+    Material 下发的实例化 Route 需要逐片改写。
+    """
+    route_steps = route.get("RouteSteps") or []
+    for step_index in (0, len(route_steps) - 1):
+        if 0 <= step_index < len(route_steps):
+            for visit in route_steps[step_index].get("Visits") or []:
+                if isinstance(visit, dict):
+                    visit["SlotID"] = [int(slot_id)]
+
+
 def build_round_update(
     plan: Mapping[str, Any],
     round_config: Mapping[str, Any],
@@ -1083,13 +1099,17 @@ def build_round_update(
                 material_id = build_state.next_material_id
                 build_state.next_material_id += 1
                 material_ids.append(material_id)
+                material_route = deepcopy(runtime_route)
+                # Material 内嵌 Route 是实例化 Route：首/末 LoadPort 步骤的
+                # Visit 槽位必须指向该晶圆所在槽位，而不是模板展开的全部槽位。
+                _instantiate_load_port_slots(material_route, next_slot)
                 materials.append({
                     "Name": str(material_id), "ID": material_id, "TaskID": task_id,
                     "LotID": f"{task_id}.C{cjob_index}",
                     "FoupID": f"{task_id}-C{cjob_index}-{display_name}",
                     "Priority": priority, "StepID": 0, "CurrentModuleName": load_port,
                     "SlotID": next_slot, "NeedSchedule": True, "PJobName": pjob_name,
-                    "SrcPortName": load_port, "Route": deepcopy(runtime_route),
+                    "SrcPortName": load_port, "Route": material_route,
                 })
             build_state.next_slot_by_port[load_port] = next_slot
             process_jobs.append({
