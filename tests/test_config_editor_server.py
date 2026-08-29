@@ -517,19 +517,19 @@ class RecomputeFailureOutputTests(unittest.TestCase):
         self.assertIn("!rec.removedByRecompute", viewer)
         self.assertIn('fillOpacity = bar.rec.removedByRecompute ? "0.24" : "1"', viewer)
 
-    def test_frontend_version_and_cache_keys_are_1_5_14(self) -> None:
+    def test_frontend_version_and_cache_keys_are_1_5_15(self) -> None:
         """前端显示版本、包版本和主资源缓存键必须同步。"""
         frontend_root = ROOT / "realtime_scheduler" / "frontend"
         template = (frontend_root / "config_editor.html").read_text(encoding="utf-8")
         package = json.loads((frontend_root / "package.json").read_text(encoding="utf-8"))
         package_lock = json.loads((frontend_root / "package-lock.json").read_text(encoding="utf-8"))
 
-        self.assertEqual("1.5.14", package["version"])
-        self.assertEqual("1.5.14", package_lock["version"])
-        self.assertEqual("1.5.14", package_lock["packages"][""]["version"])
-        self.assertIn('class="frontend-version">前端 v1.5.14</span>', template)
-        self.assertIn('/assets/config_editor.css?v=1.5.14', template)
-        self.assertIn('/assets/config_editor.js?v=1.5.14', template)
+        self.assertEqual("1.5.15", package["version"])
+        self.assertEqual("1.5.15", package_lock["version"])
+        self.assertEqual("1.5.15", package_lock["packages"][""]["version"])
+        self.assertIn('class="frontend-version">前端 v1.5.15</span>', template)
+        self.assertIn('/assets/config_editor.css?v=1.5.15', template)
+        self.assertIn('/assets/config_editor.js?v=1.5.15', template)
 
     def test_batch_status_refresh_obeys_frontend_performance_limit(self) -> None:
         """批量状态最多每秒轮询一次，且明细未变化时不得重建整组 DOM。"""
@@ -584,13 +584,75 @@ class RecomputeFailureOutputTests(unittest.TestCase):
 
         with patch.object(config_server, "_execute_plan", side_effect=fail_after_initial_output):
             with self.assertRaises(LoggedPlanError) as context:
-                execute_plan({"rounds": []})
+                execute_plan({"rounds": [], "hongYeCheck": False})
 
         failure_output = context.exception.failure_output
         self.assertIsNotNone(failure_output)
         self.assertEqual([1, 2], [move["MoveID"] for move in failure_output["MoveList"]])
         self.assertEqual("after-algorithm-output", failure_output["FailureContext"]["Stage"])
         self.assertEqual("旧计划回放失败", failure_output["Feedback"][-1]["Message"])
+
+    def test_recompute_preparation_error_combines_committed_prefix_and_latest_plan(self) -> None:
+        """跨代现场回放失败时，甘特图必须拼接旧代已启动前缀与最新计划。"""
+        entries = [
+            {
+                "Describe": "AlgSchedule",
+                "SimTime": 0.0,
+                "Info": {},
+            },
+            {
+                "Describe": "AlgOutput",
+                "SimTime": 0.0,
+                "Info": {
+                    "MoveList": [
+                        {"MoveID": 1, "StartTime": 0.0, "EndTime": 5.0},
+                        {"MoveID": 2, "StartTime": 5.0, "EndTime": 12.0},
+                        {"MoveID": 3, "StartTime": 12.0, "EndTime": 20.0},
+                    ],
+                    "Feedback": [],
+                },
+            },
+            {
+                "Describe": "RecomputeControl",
+                "SimTime": 10.0,
+                "Info": {
+                    "RecomputeInfo": {
+                        "CurrentTime": 10.0,
+                        "EffectiveTime": 10.0,
+                        "Reason": "CJobCycle 补片（LP1 2/4）",
+                    }
+                },
+            },
+            {
+                "Describe": "AlgSchedule",
+                "SimTime": 10.0,
+                "Info": {},
+            },
+            {
+                "Describe": "AlgOutput",
+                "SimTime": 10.0,
+                "Info": {
+                    "MoveList": [
+                        {"MoveID": 4, "StartTime": 10.0, "EndTime": 15.0},
+                        {"MoveID": 5, "StartTime": 15.0, "EndTime": 25.0},
+                    ],
+                    "Feedback": [],
+                },
+            },
+        ]
+
+        output = config_server._build_prior_plan_failure_output(
+            entries,
+            RuntimeError("第二代现场回放失败"),
+        )
+
+        self.assertIsNotNone(output)
+        self.assertEqual([1, 2, 4, 5], [move["MoveID"] for move in output["MoveList"]])
+        self.assertEqual(0.0, output["MoveList"][0]["StartTime"])
+        self.assertEqual(25.0, output["MoveList"][-1]["EndTime"])
+        self.assertEqual(1, len(output["RecomputePoints"]))
+        self.assertEqual(10.0, output["RecomputePoints"][0]["Time"])
+        self.assertIn("CJobCycle 补片", output["RecomputePoints"][0]["Reason"])
 
 
 class ConfigEditorServerTests(unittest.TestCase):
@@ -2135,7 +2197,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("<span>结果分析</span>", html)
         self.assertIn("<span>路径配置</span>", html)
         self.assertNotIn('data-tab-view="clean"', html)
-        self.assertIn('class="frontend-version">前端 v1.5.14</span>', html)
+        self.assertIn('class="frontend-version">前端 v1.5.15</span>', html)
         self.assertIn('data-option="residencyGuardSeconds"', html)
         self.assertIn('data-option="maximumRobotHoldingSeconds"', html)
         self.assertIn('data-option="maximumSystemResidenceCv"', html)

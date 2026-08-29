@@ -2684,25 +2684,81 @@ def _build_prior_plan_failure_output(
     reproduction_entries: Sequence[Mapping[str, Any]],
     error: Exception,
 ) -> Optional[Dict[str, Any]]:
-    """从复现日志恢复异常发生前最后一份可回放计划。
+    """从复现日志恢复异常发生前的累计可回放计划。
 
     CJobCycle 或定时重算可能在旧计划推进、现场投影、update 构造阶段失败，
     此时还没有进入算法调用，也就没有常规重算失败快照。只要此前已有非空
-    AlgOutput，就将其作为只读诊断甘特图返回；该计划代表报错前最后一代，
-    不把尚未发送的 RemoveList 误标为已经取消。
+    AlgOutput，就按后续 AlgSchedule 的绝对时刻提交各旧代已经启动的 Move，
+    再拼接最后一代完整计划。这样即使跳过输出校验后在下一轮现场回放失败，
+    诊断甘特图也不会丢失重算前缀；尚未发送的 RemoveList 不会被误标为已经
+    取消。
     """
-    latest_output: Optional[Mapping[str, Any]] = None
+    generation_time = 0.0
+    generation_outputs: List[Tuple[float, Mapping[str, Any]]] = []
+    recompute_points: List[Dict[str, Any]] = []
     for entry in reproduction_entries:
-        if str(entry.get("Describe") or "") != "AlgOutput":
+        describe = str(entry.get("Describe") or "")
+        if describe == "AlgSchedule":
+            generation_time = float(entry.get("SimTime") or 0.0)
+            continue
+        if describe == "RecomputeControl":
+            info = entry.get("Info")
+            recompute_info = (
+                info.get("RecomputeInfo")
+                if isinstance(info, Mapping)
+                and isinstance(info.get("RecomputeInfo"), Mapping)
+                else {}
+            )
+            point_time = float(
+                recompute_info.get("CurrentTime")
+                or entry.get("SimTime")
+                or 0.0
+            )
+            recompute_points.append({
+                "Time": point_time,
+                "EffectiveTime": float(
+                    recompute_info.get("EffectiveTime") or point_time
+                ),
+                "ScheduleStartTime": point_time,
+                "RecoveryEndTime": point_time,
+                "Index": len(recompute_points) + 1,
+                "Reason": str(recompute_info.get("Reason") or "重算"),
+            })
+            continue
+        if describe != "AlgOutput":
             continue
         info = entry.get("Info")
         if isinstance(info, Mapping) and list(info.get("MoveList") or []):
-            latest_output = info
-    if latest_output is None:
+            generation_outputs.append((generation_time, info))
+    if not generation_outputs:
         return None
 
+    latest_output = generation_outputs[-1][1]
+    combined_moves: List[Dict[str, Any]] = []
+    for index, (_schedule_time, generation_output) in enumerate(generation_outputs):
+        moves = generation_output.get("MoveList") or []
+        if index + 1 < len(generation_outputs):
+            next_schedule_time = generation_outputs[index + 1][0]
+            moves = [
+                move
+                for move in moves
+                if isinstance(move, Mapping)
+                and float(move.get("StartTime") or 0.0)
+                < next_schedule_time - TIME_TOLERANCE
+            ]
+        combined_moves.extend(
+            deepcopy(dict(move))
+            for move in moves
+            if isinstance(move, Mapping)
+        )
+    combined_moves.sort(key=lambda move: (
+        float(move.get("StartTime") or 0.0),
+        int(move.get("MoveID") or 0),
+    ))
+
     output = deepcopy(dict(latest_output))
-    output["MoveList"] = deepcopy(list(latest_output.get("MoveList") or []))
+    output["MoveList"] = combined_moves
+    output["RecomputePoints"] = recompute_points
     output["Feedback"] = [
         *deepcopy(list(latest_output.get("Feedback") or [])),
         {
