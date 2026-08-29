@@ -11,6 +11,8 @@
     "workspaceListP95": 200,
     "deviceOverviewP95": 300,
     "singleTestReadP95": 150,
+    "singleTestDeleteMaximum": 300,
+    "testGroupDeleteMaximum": 300,
     "singleRunPreparationP95": 300,
     "batch130Maximum": 260000,
     "batchStatusPollIntervalMinimum": 1000,

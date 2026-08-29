@@ -256,6 +256,58 @@ class WorkspaceStorageComplexityTests(unittest.TestCase):
             {path: digest for path, digest in after.items() if path != target_path},
         )
 
+    def test_single_test_delete_uses_only_summary_index(self) -> None:
+        """删除单测试不得解析或回传同设备的其他完整测试。"""
+        before = _test_file_hashes(self.store_dir)
+        target_path = next(
+            path for path in before if path.parent.name == self.test_id
+        )
+        context, reads = self._record_json_reads()
+        with context, patch.object(
+            server,
+            "_read_workspace_catalog_unlocked",
+            side_effect=AssertionError("单测试删除不得读取完整目录"),
+        ):
+            remaining = server.delete_workspace_test(
+                self.device_id,
+                self.test_id,
+                self.store_dir,
+            )
+        after = _test_file_hashes(self.store_dir)
+
+        self.assertFalse(target_path.exists())
+        self.assertEqual(11, len(remaining))
+        self.assertFalse(any(path.name == "test.json" for path in reads))
+        self.assertEqual(
+            {path: digest for path, digest in before.items() if path != target_path},
+            after,
+        )
+
+    def test_test_group_delete_uses_only_summary_index(self) -> None:
+        """删除测试组不得为定位组成员而解析全部完整测试。"""
+        context, reads = self._record_json_reads()
+        with context, patch.object(
+            server,
+            "_read_workspace_catalog_unlocked",
+            side_effect=AssertionError("测试组删除不得读取完整目录"),
+        ):
+            result = server.delete_workspace_test_group(
+                self.device_id,
+                "性能",
+                self.store_dir,
+            )
+
+        self.assertEqual(12, result["deletedTestCount"])
+        self.assertEqual([], result["tests"])
+        self.assertEqual([], result["groups"])
+        self.assertFalse(any(path.name == "test.json" for path in reads))
+        remaining_device_tests = {
+            path: digest
+            for path, digest in _test_file_hashes(self.store_dir).items()
+            if path.parents[2].name == self.device_id
+        }
+        self.assertEqual({}, remaining_device_tests)
+
     def test_route_save_does_not_read_or_rewrite_tests(self) -> None:
         """保存无冲突模板时只能修改设备级 routes 和元数据。"""
         before = _test_file_hashes(self.store_dir)

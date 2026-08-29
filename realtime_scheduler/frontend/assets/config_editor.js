@@ -20174,8 +20174,10 @@ async function deleteCurrentTestGroup() {
   state.testCaseGroup = nextGroup;
   state.dirty = false;
   const nextTest = result.tests.find((test) => String(test.group || "").trim() === nextGroup) || result.tests[0];
-  if (nextTest) applyTestCase(nextTest);
-  else {
+  if (nextTest) {
+    const nextResult = await requestJson(`/api/workspaces/${state.workspaceDeviceId}/tests/${nextTest.id}`);
+    applyTestCase(nextResult.test);
+  } else {
     renderWorkspaceControls();
     resetRunResult();
     setWorkspaceStatus(`\u5DF2\u5220\u9664\u6D4B\u8BD5\u7EC4\u522B\u201C${displayName}\u201D`, "saved");
@@ -20192,7 +20194,9 @@ async function deleteCurrentTest() {
   if (summary) summary.testCount = result.tests.length;
   const nextTestInCurrentGroup = result.tests.find((test) => String(test.group || "").trim() === currentGroup);
   if (nextTestInCurrentGroup) {
-    applyTestCase(nextTestInCurrentGroup);
+    state.dirty = false;
+    const nextResult = await requestJson(`/api/workspaces/${state.workspaceDeviceId}/tests/${nextTestInCurrentGroup.id}`);
+    applyTestCase(nextResult.test);
     return;
   }
   state.activeTestGroup = currentGroup;

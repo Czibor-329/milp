@@ -2249,7 +2249,10 @@ async function deleteCurrentTestGroup() {
   const nextGroup = result.groups[0] || "";
   state.activeTestGroup = nextGroup; state.testCaseId = ""; state.testCaseName = ""; state.testCaseGroup = nextGroup; state.dirty = false;
   const nextTest = result.tests.find(test => String(test.group || "").trim() === nextGroup) || result.tests[0];
-  if (nextTest) applyTestCase(nextTest);
+  if (nextTest) {
+    const nextResult = await requestJson(`/api/workspaces/${state.workspaceDeviceId}/tests/${nextTest.id}`);
+    applyTestCase(nextResult.test);
+  }
   else { renderWorkspaceControls(); resetRunResult(); setWorkspaceStatus(`已删除测试组别“${displayName}”`, "saved"); }
 }
 
@@ -2264,7 +2267,9 @@ async function deleteCurrentTest() {
   const summary = state.workspaceDevices.find(device => device.id === state.workspaceDeviceId); if (summary) summary.testCount = result.tests.length;
   const nextTestInCurrentGroup = result.tests.find(test => String(test.group || "").trim() === currentGroup);
   if (nextTestInCurrentGroup) {
-    applyTestCase(nextTestInCurrentGroup);
+    state.dirty = false;
+    const nextResult = await requestJson(`/api/workspaces/${state.workspaceDeviceId}/tests/${nextTestInCurrentGroup.id}`);
+    applyTestCase(nextResult.test);
     return;
   }
   // 当前组已为空时仍保留该组选择，方便继续新建测试而不跳转到其他组。

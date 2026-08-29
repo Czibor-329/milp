@@ -9,7 +9,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from realtime_scheduler import server
-from scripts.run_performance_suite import _evaluate_relative_budgets
+from scripts.run_performance_suite import (
+    _evaluate_absolute_budgets,
+    _evaluate_relative_budgets,
+)
 from tests.performance.fixture_factory import generate_v5_workspace_file
 
 
@@ -59,6 +62,48 @@ class RelativeBudgetTests(unittest.TestCase):
         self.assertIn("workspaceList.p50Ms", failed_ids)
         self.assertIn("workspaceList.p95Ms", failed_ids)
         self.assertIn("workspaceList.maximumResponseBytes", failed_ids)
+
+    def test_absolute_budget_includes_test_and_group_delete(self) -> None:
+        """绝对预算必须分别门禁单测试和测试组删除的最大耗时。"""
+        metric = {
+            "p50Ms": 10,
+            "p95Ms": 20,
+            "maximumMs": 20,
+            "maximumResponseBytes": 100,
+        }
+        metrics = {
+            name: dict(metric)
+            for name in (
+                "health",
+                "workspaceList",
+                "deviceOverview",
+                "singleTestRead",
+                "singleTestDelete",
+                "testGroupDelete",
+                "singleTestSave",
+            )
+        }
+
+        evaluation = _evaluate_absolute_budgets(
+            metrics,
+            100,
+            self.budgets,
+            migration=False,
+        )
+
+        delete_evaluation = next(
+            item for item in evaluation if item["id"] == "testGroupDeleteMaximum"
+        )
+        self.assertEqual(20, delete_evaluation["actualMs"])
+        self.assertEqual(300, delete_evaluation["budgetMs"])
+        self.assertTrue(delete_evaluation["passed"])
+
+        single_delete_evaluation = next(
+            item for item in evaluation if item["id"] == "singleTestDeleteMaximum"
+        )
+        self.assertEqual(20, single_delete_evaluation["actualMs"])
+        self.assertEqual(300, single_delete_evaluation["budgetMs"])
+        self.assertTrue(single_delete_evaluation["passed"])
 
 
 class MigrationPerformanceFixtureTests(unittest.TestCase):

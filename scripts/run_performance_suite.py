@@ -1,8 +1,9 @@
 """在独立服务进程中运行调度平台 HTTP 性能预算。
 
-脚本生成确定性的 v6 数据目录，通过 ``CT_DATA_DIR`` 启动隔离服务，测量冷启动、
-健康检查、设备列表、设备概览和单测试读写。报告同时保存 P50、P95、最大值与响应
-字节数；``--enforce`` 用于固定 Windows 环境中的发布门禁。
+脚本生成确定性的 v7 数据目录，通过 ``CT_DATA_DIR`` 启动隔离服务，测量冷启动、
+健康检查、设备列表、设备概览、单测试读取和保存，以及单测试与整组测试删除。报告
+同时保存 P50、P95、最大值与响应字节数；``--enforce`` 用于固定 Windows 环境中的
+发布门禁。
 """
 
 from __future__ import annotations
@@ -200,6 +201,16 @@ def _evaluate_absolute_budgets(
         ("workspaceListP95", metrics["workspaceList"]["p95Ms"], absolute["workspaceListP95"]),
         ("deviceOverviewP95", metrics["deviceOverview"]["p95Ms"], absolute["deviceOverviewP95"]),
         ("singleTestReadP95", metrics["singleTestRead"]["p95Ms"], absolute["singleTestReadP95"]),
+        (
+            "singleTestDeleteMaximum",
+            metrics["singleTestDelete"]["maximumMs"],
+            absolute["singleTestDeleteMaximum"],
+        ),
+        (
+            "testGroupDeleteMaximum",
+            metrics["testGroupDelete"]["maximumMs"],
+            absolute["testGroupDeleteMaximum"],
+        ),
         ("singleTestSaveP95", metrics["singleTestSave"]["p95Ms"], absolute["singleTestSaveP95"]),
     ]
     optional_metrics = {
@@ -441,6 +452,51 @@ def run_suite(
                     warmup_count=1,
                     sample_count=int(budgets["nightlySampleCount"]),
                 )
+            # 两种删除都是不可重复的破坏性操作，必须在其他指标完成后执行。
+            # 先删除夹具最后一个测试，再删除仍包含其余测试的完整“性能”组。
+            # 单次端到端耗时使用 maximumMs 门禁，避免用一个样本伪装 P95。
+            deleting_test_id = (
+                f"performance-test-00-{int(profile['testsPerDevice']) - 1:04d}"
+            )
+
+            def delete_single_test() -> tuple[dict[str, Any], int]:
+                """删除单测试并读取前端随后载入的下一测试，覆盖完整等待链路。"""
+                delete_result, delete_response_bytes = _request_json(
+                    f"{base_url}/api/workspaces/{device_id}/tests/{deleting_test_id}",
+                    method="DELETE",
+                )
+                remaining_tests = delete_result.get("tests") or []
+                next_test = remaining_tests[0] if remaining_tests else {}
+                next_test_id = str(next_test.get("id") or "")
+                if not next_test_id:
+                    return delete_result, delete_response_bytes
+                next_result, next_response_bytes = _request_json(
+                    f"{base_url}/api/workspaces/{device_id}/tests/{next_test_id}"
+                )
+                return next_result, delete_response_bytes + next_response_bytes
+
+            metrics["singleTestDelete"] = _measure(
+                delete_single_test,
+                warmup_count=0,
+                sample_count=1,
+            )
+            metrics["testGroupDelete"] = _measure(
+                lambda: _request_json(
+                    f"{base_url}/api/workspaces/{device_id}/groups",
+                    method="DELETE",
+                    payload={"name": "性能"},
+                ),
+                warmup_count=0,
+                sample_count=1,
+            )
+            # 暂存目录的后台物理回收不计入用户等待时间，但隔离性能夹具退出前
+            # 必须等待它结束，避免 Windows 在服务进程终止时留下占用中的文件。
+            cleanup_deadline = time.perf_counter() + 30.0
+            while (
+                any(data_dir.glob("datasets/*/tests/.deleting-*"))
+                and time.perf_counter() < cleanup_deadline
+            ):
+                time.sleep(0.05)
             peak_rss_bytes = _process_peak_rss_bytes(process.pid)
         finally:
             process.terminate()

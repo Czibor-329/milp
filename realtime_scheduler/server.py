@@ -186,6 +186,7 @@ MAX_SAVED_RESULTS = 8
 MAX_SAVED_BATCH_RUNS = 8
 MAX_SAVED_SINGLE_RUNS = 8
 MAX_CJOB_CYCLE = 1000
+WORKSPACE_DELETE_CLEANUP_RETRY_DELAYS_SECONDS = (0.0, 0.05, 0.2, 0.5, 1.0)
 MAX_WORKSPACE_DEVICE_COUNT = 10
 CJOB_CYCLE_EVENT_EPSILON_MULTIPLIER = 2.0
 WORKSPACE_STORE_VERSION = 7
@@ -5135,6 +5136,28 @@ def _remove_directory_test_file(store_dir: Path, device_id: str, test_id: str) -
             (store_dir / device_id / "tests" / f"{test_id}.json").unlink(missing_ok=True)
 
 
+def _schedule_directory_cleanup(directory: Path) -> None:
+    """在后台清理已移出活动数据树的删除暂存目录。
+
+    调用前必须保证目录不再被索引引用。清理失败或进程中断时目录保持隐藏，
+    后续读取不会把其中的测试重新识别为有效数据。
+    """
+    def cleanup() -> None:
+        """递归删除单个已隔离目录；失败时留待后续维护清理。"""
+        for delay_seconds in WORKSPACE_DELETE_CLEANUP_RETRY_DELAYS_SECONDS:
+            if delay_seconds:
+                time.sleep(delay_seconds)
+            shutil.rmtree(directory, ignore_errors=True)
+            if not directory.exists():
+                return
+
+    threading.Thread(
+        target=cleanup,
+        name=f"workspace-delete-{directory.name}",
+        daemon=True,
+    ).start()
+
+
 def _remove_directory_device_dir(store_dir: Path, device_id: str) -> None:
     """目录模式下物理删除整个设备目录（含全部测试集文件）；文件模式为空操作。"""
     if store_dir.suffix == "":
@@ -6882,6 +6905,11 @@ def delete_workspace_test_group(
     """删除一个测试组及其包含的测试集；空名称代表“未分组”。"""
     group = str(name or "").strip()
     with _workspace_catalog_guard(path):
+        fast_result = _fast_delete_readable_workspace_test_group_unlocked(
+            device_id, group, path,
+        )
+        if fast_result is not None:
+            return fast_result
         catalog = _read_workspace_catalog_unlocked(path)
         device = next((item for item in catalog["devices"] if item.get("id") == device_id), None)
         if device is None:
@@ -6913,18 +6941,165 @@ def delete_workspace_test_group(
         _write_workspace_catalog_unlocked(path, catalog)
         return {
             "groups": deepcopy(device["testGroups"]),
-            "tests": deepcopy(device["tests"]),
+            "tests": [
+                _workspace_test_summary(test_case)
+                for test_case in device["tests"]
+                if isinstance(test_case, Mapping)
+            ],
             "deletedTestCount": len(deleted_tests),
         }
+
+
+def _fast_delete_readable_workspace_test_unlocked(
+    device_id: str,
+    test_id: str,
+    path: Path,
+) -> Optional[List[Dict[str, Any]]]:
+    """仅凭测试摘要索引删除一个 v7 测试，并返回剩余摘要。
+
+    该快速路径不解析任何完整 ``test.json``，也不重写其他测试。返回摘要而非
+    完整测试，避免 HTTP 删除响应随设备测试总数据量线性膨胀。
+    """
+    if (
+        path.suffix
+        or not _uses_readable_dataset_layout(path)
+        or not _workspace_store_is_current(path)
+        or not re.fullmatch(r"[A-Za-z0-9_-]+", device_id)
+        or not re.fullmatch(r"[A-Za-z0-9_-]+", test_id)
+    ):
+        return None
+    device_dir = _find_dataset_device_directory(path, device_id)
+    if device_dir is None:
+        return None
+    tests_dir = device_dir / "tests"
+    index_file = _workspace_test_index_path(tests_dir)
+    try:
+        summaries = json.loads(index_file.read_text(encoding="utf-8"))
+        metadata = json.loads(
+            (device_dir / "metadata.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+    if (
+        not isinstance(summaries, list)
+        or not all(isinstance(summary, Mapping) for summary in summaries)
+        or not isinstance(metadata, dict)
+    ):
+        return None
+    if len(summaries) <= 1:
+        raise ValueError("设备至少需要保留一个测试集")
+    if not any(str(summary.get("id") or "") == test_id for summary in summaries):
+        raise ValueError(f"测试集不存在：{test_id}")
+    test_file = _find_dataset_test_file(device_dir, test_id)
+    if test_file is None:
+        return None
+    remaining = [
+        _workspace_test_summary(summary)
+        for summary in summaries
+        if str(summary.get("id") or "") != test_id
+    ]
+    # 先删除目标目录再更新索引，防止中断后已删测试由索引之外的文件复活。
+    shutil.rmtree(test_file.parent)
+    metadata["updatedAt"] = _workspace_timestamp()
+    _write_json_atomic(index_file, remaining)
+    _write_json_if_changed(device_dir / "metadata.json", metadata)
+    _write_workspace_store_version(path)
+    return remaining
+
+
+def _fast_delete_readable_workspace_test_group_unlocked(
+    device_id: str,
+    group: str,
+    path: Path,
+) -> Optional[Dict[str, Any]]:
+    """仅凭组清单和测试摘要索引删除一个 v7 测试组。"""
+    if (
+        path.suffix
+        or not _uses_readable_dataset_layout(path)
+        or not _workspace_store_is_current(path)
+        or not re.fullmatch(r"[A-Za-z0-9_-]+", device_id)
+    ):
+        return None
+    device_dir = _find_dataset_device_directory(path, device_id)
+    if device_dir is None:
+        return None
+    tests_dir = device_dir / "tests"
+    index_file = _workspace_test_index_path(tests_dir)
+    groups_file = device_dir / "groups.json"
+    metadata_file = device_dir / "metadata.json"
+    try:
+        summaries = json.loads(index_file.read_text(encoding="utf-8"))
+        groups_payload = json.loads(groups_file.read_text(encoding="utf-8"))
+        metadata = json.loads(metadata_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+    if (
+        not isinstance(summaries, list)
+        or not all(isinstance(summary, Mapping) for summary in summaries)
+        or not isinstance(groups_payload, dict)
+        or not isinstance(groups_payload.get("testGroups"), list)
+        or not isinstance(metadata, dict)
+    ):
+        return None
+    groups = groups_payload["testGroups"]
+    deleted_summaries = [
+        summary
+        for summary in summaries
+        if str(summary.get("group") or "").strip() == group
+    ]
+    if group and group not in groups:
+        raise ValueError(f"测试组别不存在：{group}")
+    if not group and not deleted_summaries:
+        raise ValueError("“未分组”中没有可删除的测试")
+    deleted_test_files: List[Path] = []
+    for summary in deleted_summaries:
+        deleting_test_id = str(summary.get("id") or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", deleting_test_id):
+            return None
+        test_file = _find_dataset_test_file(device_dir, deleting_test_id)
+        if test_file is None:
+            return None
+        deleted_test_files.append(test_file)
+    remaining = [
+        _workspace_test_summary(summary)
+        for summary in summaries
+        if str(summary.get("group") or "").strip() != group
+    ]
+    if group:
+        groups_payload["testGroups"] = [item for item in groups if item != group]
+    # 全部目标验证完成后，把组内目录原子移出活动树。Windows 上同步递归删除
+    # 数百个测试目录可能耗时数秒；隔离后先提交索引，再由后台回收文件。
+    deletion_staging = tests_dir / f".deleting-{uuid.uuid4().hex}"
+    if deleted_test_files:
+        deletion_staging.mkdir()
+        for test_file in deleted_test_files:
+            test_file.parent.replace(deletion_staging / test_file.parent.name)
+    metadata["updatedAt"] = _workspace_timestamp()
+    _write_json_atomic(index_file, remaining)
+    _write_json_if_changed(groups_file, groups_payload)
+    _write_json_if_changed(metadata_file, metadata)
+    _write_workspace_store_version(path)
+    if deleted_test_files:
+        _schedule_directory_cleanup(deletion_staging)
+    return {
+        "groups": deepcopy(groups_payload["testGroups"]),
+        "tests": remaining,
+        "deletedTestCount": len(deleted_summaries),
+    }
 
 
 def delete_workspace_test(
     device_id: str,
     test_id: str,
     path: Path = WORKSPACE_STORE_PATH,
-) -> None:
-    """删除指定测试集；设备至少保留一个测试集以维持可运行状态。"""
+) -> List[Dict[str, Any]]:
+    """删除指定测试集，并返回剩余测试摘要。"""
     with _workspace_catalog_guard(path):
+        fast_result = _fast_delete_readable_workspace_test_unlocked(
+            device_id, test_id, path,
+        )
+        if fast_result is not None:
+            return fast_result
         catalog = _read_workspace_catalog_unlocked(path)
         device = next((item for item in catalog["devices"] if item.get("id") == device_id), None)
         if device is None:
@@ -6940,6 +7115,11 @@ def delete_workspace_test(
         # 先物理删除测试集文件再写目录：即使中途中断，下次扫描也不会让已删测试复活。
         _remove_directory_test_file(path, device_id, test_id)
         _write_workspace_catalog_unlocked(path, catalog)
+        return [
+            _workspace_test_summary(test_case)
+            for test_case in remaining
+            if isinstance(test_case, Mapping)
+        ]
 
 
 def save_result(output: Dict[str, Any]) -> str:
@@ -7815,9 +7995,8 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": "Not found"}, HTTPStatus.NOT_FOUND)
             return
         try:
-            delete_workspace_test(parts[2], parts[4])
-            device = get_workspace_device(parts[2])
-            self._send_json({"ok": True, "tests": device["tests"]})
+            remaining_tests = delete_workspace_test(parts[2], parts[4])
+            self._send_json({"ok": True, "tests": remaining_tests})
         except Exception as error:  # noqa: BLE001
             self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
 
