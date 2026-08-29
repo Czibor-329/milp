@@ -111,6 +111,27 @@ def test_device_archive_round_trip_includes_all_tests() -> None:
         assert [test["name"] for test in imported["tests"]] == ["基础测试"]
 
 
+def test_exchange_archive_has_separate_upload_and_uncompressed_limits() -> None:
+    """高压缩率合法包可超过上传上限，解压总量仍受独立上限保护。"""
+    content = server._zip_json_bytes({
+        "manifest.json": {
+            "kind": server.DATA_EXCHANGE_KIND_DEVICE,
+            "schemaVersion": server.WORKSPACE_STORE_VERSION,
+        },
+        "payload.json": {"value": "x" * 2048},
+    })
+
+    assert server.DATA_EXCHANGE_MAX_ARCHIVE_BYTES == 64 * 1024 * 1024
+    assert server.DATA_EXCHANGE_MAX_UNCOMPRESSED_BYTES == 512 * 1024 * 1024
+    with patch.object(server, "DATA_EXCHANGE_MAX_UNCOMPRESSED_BYTES", 4096):
+        assert server._read_exchange_archive(content)["payload.json"]["value"] == "x" * 2048
+    with (
+        patch.object(server, "DATA_EXCHANGE_MAX_UNCOMPRESSED_BYTES", 1024),
+        pytest.raises(ValueError, match="解压后超过 512 MiB 限制"),
+    ):
+        server._read_exchange_archive(content)
+
+
 def test_test_archive_requires_matching_device() -> None:
     """测试集包只能导入 init 指纹完全相同的设备。"""
     with tempfile.TemporaryDirectory() as directory:

@@ -195,7 +195,10 @@ WORKSPACE_STORE_VERSION = 7
 WORKSPACE_STORE_VERSION_FILE = "manifest.json"
 LEGACY_WORKSPACE_STORE_VERSION_FILE = ".workspace-version.json"
 WORKSPACE_TEST_INDEX_FILE = ".tests-index.json"
-DATA_EXCHANGE_MAX_BYTES = 64 * 1024 * 1024
+# 交换包上传体积与解压体积必须分别限制：设备 JSON 重复结构较多，合法包的
+# 压缩率可能很高，不能把 HTTP 上传上限误用为解压后总量上限。
+DATA_EXCHANGE_MAX_ARCHIVE_BYTES = 64 * 1024 * 1024
+DATA_EXCHANGE_MAX_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
 DATA_EXCHANGE_KIND_DEVICE = "ct-device"
 DATA_EXCHANGE_KIND_TEST = "ct-test"
 API_SCHEMA_VERSION = "cjob-pjob-v3"
@@ -5412,8 +5415,8 @@ def _read_exchange_archive(content: bytes) -> Dict[str, Any]:
             ):
                 raise ValueError("导入包包含无效或重复路径")
             total_size += info.file_size
-            if total_size > DATA_EXCHANGE_MAX_BYTES:
-                raise ValueError("导入包解压后超过 64 MB 限制")
+            if total_size > DATA_EXCHANGE_MAX_UNCOMPRESSED_BYTES:
+                raise ValueError("导入包解压后超过 512 MiB 限制")
             try:
                 payload = json.loads(archive.read(info).decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -7257,7 +7260,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
         if path == "/api/workspaces/import/device":
             try:
                 device, created_device, imported_tests = import_workspace_device_archive(
-                    self._read_binary_body(DATA_EXCHANGE_MAX_BYTES),
+                    self._read_binary_body(DATA_EXCHANGE_MAX_ARCHIVE_BYTES),
                 )
                 self._send_json({
                     "ok": True,
@@ -7281,7 +7284,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             try:
                 test_case, created = import_workspace_test_archive(
                     import_test_parts[2],
-                    self._read_binary_body(DATA_EXCHANGE_MAX_BYTES),
+                    self._read_binary_body(DATA_EXCHANGE_MAX_ARCHIVE_BYTES),
                 )
                 self._send_json({"ok": True, "created": created, "test": test_case})
             except Exception as error:  # noqa: BLE001
