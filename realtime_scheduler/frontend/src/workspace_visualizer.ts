@@ -1718,6 +1718,43 @@ function topologyGroups(modules: ModuleSnapshot[]): TopologyGroups {
   };
 }
 
+/** 双腔展开后的腔室视图；view 为可直接渲染的伪模块，sourceName 指向原 PM 模块。 */
+interface DualChamberView {
+  view: ModuleSnapshot;
+  sourceName: string;
+}
+
+/**
+ * 把双腔工艺模块展开为独立腔室卡片。
+ *
+ * 回放快照中一个 MultiProcessChamber（Capacity≥2）同时承载两个腔室，晶圆统一挂在
+ * 模块名下。拓扑渲染时按槽位拆分为 "PM1-1" / "PM1-2" 两个腔室视图，各自持有一片
+ * 晶圆，名称附加 "-N" 后缀以便区分；单腔模块保持原样返回。
+ */
+function expandDualProcessChambers(modules: ModuleSnapshot[]): DualChamberView[] {
+  const expanded: DualChamberView[] = [];
+  for (const module of modules) {
+    if (module.slotCapacity < 2) {
+      expanded.push({ view: module, sourceName: module.name });
+      continue;
+    }
+    for (let index = 0; index < module.slotCapacity; index += 1) {
+      const wafer = module.wafers[index] ?? "";
+      expanded.push({
+        view: {
+          ...module,
+          name: `${module.name}-${index + 1}`,
+          wafers: wafer ? [wafer] : [],
+          processedWafers: wafer && module.processedWafers.includes(wafer) ? [wafer] : [],
+          slotCapacity: 1,
+        },
+        sourceName: module.name,
+      });
+    }
+  }
+  return expanded;
+}
+
 /** 绘制原版风格的绿色晶圆；外圈由当前腔室加工进度驱动。 */
 function renderWaferToken(wafer: string, progress: number, processed = false): string {
   const normalizedProgress = Math.max(0, Math.min(1, progress));
@@ -2431,6 +2468,11 @@ export function renderEquipmentTopology(
   const layout = device
     ? detectDeviceTopologyLayout(device)
     : detectTopologyLayout(visibleModules, snapshot.robots.length);
+  /* 双腔布局把 MultiProcessChamber 拆成独立腔室卡片，占满单腔 6 腔室 U 形布局。 */
+  const processChamberViews = layout === "dual"
+    ? expandDualProcessChambers(groups.processModules)
+    : groups.processModules.map(module => ({ view: module, sourceName: module.name }));
+  const processSourceNames = new Map(processChamberViews.map(item => [item.view.name, item.sourceName]));
   const loadLockNameSet = new Set(groups.loadLocks.map(module => module.name));
   const configuredLoadLockOrder = Object.keys(device?.Stations ?? {})
     .filter(name => loadLockNameSet.has(name));
@@ -2452,10 +2494,26 @@ export function renderEquipmentTopology(
     const position = moduleTopologyPosition(module, role, index, modules, layout, bridgeLoadLockNames);
     modulePositions.set(module.name, position);
   });
-  positionModuleGroup(groups.processModules, "process");
+  positionModuleGroup(processChamberViews.map(item => item.view), "process");
   positionModuleGroup(groups.loadLocks, "lock");
   positionModuleGroup(groups.loadPorts, "port");
   positionModuleGroup(groups.auxiliaryModules, "auxiliary");
+  /* 双腔展开后，原 PM 模块名指向两腔中心，供机器手目标箭头复用。 */
+  if (layout === "dual") {
+    for (const item of processChamberViews) {
+      if (item.view.name === item.sourceName) continue;
+      const first = modulePositions.get(`${item.sourceName}-1`);
+      const second = modulePositions.get(`${item.sourceName}-2`);
+      if (first && second) {
+        modulePositions.set(item.sourceName, {
+          leftPercent: (first.leftPercent + second.leftPercent) / 2,
+          topPixels: (first.topPixels + second.topPixels) / 2,
+          widthPixels: TOPOLOGY_PROCESS_WIDTH,
+          heightPixels: TOPOLOGY_PROCESS_HEIGHT,
+        });
+      }
+    }
+  }
 
   const robotPositions = new Map<string, TopologyPosition>();
   const positionRobotGroup = (
@@ -2499,7 +2557,7 @@ export function renderEquipmentTopology(
   /* 级联布局中桥接腔归入真空区，其余 LoadLock 作为大气/真空接口。 */
   const interfaceLoadLocks = groups.loadLocks.filter(module => !bridgeLoadLockNames.has(module.name));
   const vacuumExtent = topologyVerticalExtent([
-    ...positionedModules(groups.processModules),
+    ...positionedModules(processChamberViews.map(item => item.view)),
     ...positionedRobots(vacuumRobots),
     ...positionedModules(groups.loadLocks.filter(module => bridgeLoadLockNames.has(module.name))),
   ]);
@@ -2558,7 +2616,9 @@ export function renderEquipmentTopology(
   ): string => modules.map((module, roleIndex) => {
     const position = modulePositions.get(module.name);
     if (!position) return "";
-    return `<div class="reference-module-position" style="--module-left:${position.leftPercent}%;--module-top:${position.topPixels}px">${renderModule(module, role, destinations.get(module.name), layout, roleIndex)}</div>`;
+    /* 展开后的腔室卡片仍用原 PM 模块名查询候选动作高亮。 */
+    const candidateSource = processSourceNames.get(module.name) ?? module.name;
+    return `<div class="reference-module-position" style="--module-left:${position.leftPercent}%;--module-top:${position.topPixels}px">${renderModule(module, role, destinations.get(candidateSource), layout, roleIndex)}</div>`;
   }).join("");
   const positionedLoadPorts = positionedModules(groups.loadPorts);
   const loadPortBaseMarkup = positionedLoadPorts.length ? (() => {
@@ -2569,7 +2629,7 @@ export function renderEquipmentTopology(
     return `<div class="load-port-shared-base" style="--base-left:${baseCenter.toFixed(2)}%;--base-width:${baseWidth.toFixed(2)}%;--base-top:${baseTop.toFixed(1)}px" aria-hidden="true"></div>`;
   })() : "";
   const moduleMarkup = [
-    renderModuleGroup(groups.processModules, "process"),
+    renderModuleGroup(processChamberViews.map(item => item.view), "process"),
     renderModuleGroup(groups.loadLocks, "lock"),
     renderModuleGroup(groups.loadPorts, "port"),
     renderModuleGroup(groups.auxiliaryModules, "auxiliary"),

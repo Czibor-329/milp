@@ -1355,6 +1355,29 @@ function topologyGroups(modules) {
     auxiliaryModules: modules.filter((module) => !assignedNames.has(module.name))
   };
 }
+function expandDualProcessChambers(modules) {
+  const expanded = [];
+  for (const module of modules) {
+    if (module.slotCapacity < 2) {
+      expanded.push({ view: module, sourceName: module.name });
+      continue;
+    }
+    for (let index = 0; index < module.slotCapacity; index += 1) {
+      const wafer = module.wafers[index] ?? "";
+      expanded.push({
+        view: {
+          ...module,
+          name: `${module.name}-${index + 1}`,
+          wafers: wafer ? [wafer] : [],
+          processedWafers: wafer && module.processedWafers.includes(wafer) ? [wafer] : [],
+          slotCapacity: 1
+        },
+        sourceName: module.name
+      });
+    }
+  }
+  return expanded;
+}
 function renderWaferToken(wafer, progress, processed = false) {
   const normalizedProgress = Math.max(0, Math.min(1, progress));
   const state2 = processed ? "processed" : "unprocessed";
@@ -1804,6 +1827,8 @@ function renderEquipmentTopology(snapshot, decision, hiddenFilters, device) {
   const atmosphereNames = new Set(atmosphereRobots.map((robot) => robot.name));
   const vacuumRobots = snapshot.robots.filter((robot) => !atmosphereNames.has(robot.name));
   const layout = device ? detectDeviceTopologyLayout(device) : detectTopologyLayout(visibleModules, snapshot.robots.length);
+  const processChamberViews = layout === "dual" ? expandDualProcessChambers(groups.processModules) : groups.processModules.map((module) => ({ view: module, sourceName: module.name }));
+  const processSourceNames = new Map(processChamberViews.map((item) => [item.view.name, item.sourceName]));
   const loadLockNameSet = new Set(groups.loadLocks.map((module) => module.name));
   const configuredLoadLockOrder = Object.keys(device?.Stations ?? {}).filter((name) => loadLockNameSet.has(name));
   const orderedLoadLockNames = configuredLoadLockOrder.length === groups.loadLocks.length ? configuredLoadLockOrder : groups.loadLocks.map((module) => module.name);
@@ -1817,10 +1842,25 @@ function renderEquipmentTopology(snapshot, decision, hiddenFilters, device) {
     const position = moduleTopologyPosition(module, role, index, modules, layout, bridgeLoadLockNames);
     modulePositions.set(module.name, position);
   });
-  positionModuleGroup(groups.processModules, "process");
+  positionModuleGroup(processChamberViews.map((item) => item.view), "process");
   positionModuleGroup(groups.loadLocks, "lock");
   positionModuleGroup(groups.loadPorts, "port");
   positionModuleGroup(groups.auxiliaryModules, "auxiliary");
+  if (layout === "dual") {
+    for (const item of processChamberViews) {
+      if (item.view.name === item.sourceName) continue;
+      const first = modulePositions.get(`${item.sourceName}-1`);
+      const second = modulePositions.get(`${item.sourceName}-2`);
+      if (first && second) {
+        modulePositions.set(item.sourceName, {
+          leftPercent: (first.leftPercent + second.leftPercent) / 2,
+          topPixels: (first.topPixels + second.topPixels) / 2,
+          widthPixels: TOPOLOGY_PROCESS_WIDTH,
+          heightPixels: TOPOLOGY_PROCESS_HEIGHT
+        });
+      }
+    }
+  }
   const robotPositions = /* @__PURE__ */ new Map();
   const positionRobotGroup = (robots, environment) => robots.forEach((robot, index) => {
     const position = robotTopologyPosition(index, robots.length, environment, layout);
@@ -1849,7 +1889,7 @@ function renderEquipmentTopology(snapshot, decision, hiddenFilters, device) {
   const positionedRobots = (robots) => robots.map((robot) => robotPositions.get(robot.name)).filter((position) => Boolean(position));
   const interfaceLoadLocks = groups.loadLocks.filter((module) => !bridgeLoadLockNames.has(module.name));
   const vacuumExtent = topologyVerticalExtent([
-    ...positionedModules(groups.processModules),
+    ...positionedModules(processChamberViews.map((item) => item.view)),
     ...positionedRobots(vacuumRobots),
     ...positionedModules(groups.loadLocks.filter((module) => bridgeLoadLockNames.has(module.name)))
   ]);
@@ -1895,7 +1935,8 @@ function renderEquipmentTopology(snapshot, decision, hiddenFilters, device) {
   const renderModuleGroup = (modules, role) => modules.map((module, roleIndex) => {
     const position = modulePositions.get(module.name);
     if (!position) return "";
-    return `<div class="reference-module-position" style="--module-left:${position.leftPercent}%;--module-top:${position.topPixels}px">${renderModule(module, role, destinations.get(module.name), layout, roleIndex)}</div>`;
+    const candidateSource = processSourceNames.get(module.name) ?? module.name;
+    return `<div class="reference-module-position" style="--module-left:${position.leftPercent}%;--module-top:${position.topPixels}px">${renderModule(module, role, destinations.get(candidateSource), layout, roleIndex)}</div>`;
   }).join("");
   const positionedLoadPorts = positionedModules(groups.loadPorts);
   const loadPortBaseMarkup = positionedLoadPorts.length ? (() => {
@@ -1906,7 +1947,7 @@ function renderEquipmentTopology(snapshot, decision, hiddenFilters, device) {
     return `<div class="load-port-shared-base" style="--base-left:${baseCenter.toFixed(2)}%;--base-width:${baseWidth.toFixed(2)}%;--base-top:${baseTop.toFixed(1)}px" aria-hidden="true"></div>`;
   })() : "";
   const moduleMarkup = [
-    renderModuleGroup(groups.processModules, "process"),
+    renderModuleGroup(processChamberViews.map((item) => item.view), "process"),
     renderModuleGroup(groups.loadLocks, "lock"),
     renderModuleGroup(groups.loadPorts, "port"),
     renderModuleGroup(groups.auxiliaryModules, "auxiliary")
