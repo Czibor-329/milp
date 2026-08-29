@@ -1171,6 +1171,66 @@ class ConfigEditorServerTests(unittest.TestCase):
                 for transfer_type in (0, 1)
             ))
 
+    def test_pse300_expansion_does_not_duplicate_explicit_transfer_keys(self) -> None:
+        """已有 LC/LD 转位时间优先，扩展不得按不同 Time 追加同一查找键。"""
+        device = json.loads(PSE300_PATH.read_text(encoding="utf-8"))
+        config_server.expand_pse300_loadlocks(device)
+        explicit_ld_heater_time = 3.0
+        ld_heater_row = next(
+            row
+            for row in device["Robots"]["VTR"]["PrepTransTime"]
+            if (row["SrcStation"], row["DestStation"], row["TransType"])
+            == ("LD", "heater", 0)
+        )
+        ld_heater_row["Time"] = explicit_ld_heater_time
+
+        config_server.expand_pse300_loadlocks(device)
+
+        for robot in device["Robots"].values():
+            transfer_keys = [
+                (row["SrcStation"], row["DestStation"], row["TransType"])
+                for row in robot["PrepTransTime"]
+            ]
+            self.assertEqual(len(transfer_keys), len(set(transfer_keys)))
+        self.assertEqual(
+            [explicit_ld_heater_time],
+            [
+                row["Time"]
+                for row in device["Robots"]["VTR"]["PrepTransTime"]
+                if (row["SrcStation"], row["DestStation"], row["TransType"])
+                == ("LD", "heater", 0)
+            ],
+        )
+
+    def test_task_alg_init_removes_every_unreferenced_module(self) -> None:
+        """任务级 AlgInit 应同步移除 PM5/PM6、LC/LD 等所有未引用模块信息。"""
+        device = json.loads(PSE300_PATH.read_text(encoding="utf-8"))
+        config_server.expand_pse300_loadlocks(device)
+        route = _route("R1", "PM1", "R1_Step4")
+        rounds = [{"jobs": [{**_job("P1", "R1", "LP1"), "waferCount": 1}]}]
+
+        alg_init = config_server.build_task_alg_init(device, [route], rounds)
+
+        used_stations = {"LP1", "LA", "LB", "PM1"}
+        self.assertEqual(used_stations, set(alg_init["Stations"]))
+        self.assertEqual({"ATR", "VTR"}, set(alg_init["Robots"]))
+        for robot in alg_init["Robots"].values():
+            self.assertTrue(set(robot.get("PickTime", {})) <= used_stations)
+            self.assertTrue(set(robot.get("PlaceTime", {})) <= used_stations)
+            self.assertTrue(all(
+                row["SrcStation"] in used_stations
+                and row["DestStation"] in used_stations
+                for row in robot.get("PrepTransTime", [])
+            ))
+            for arm in robot.get("ArmInfo", {}).values():
+                self.assertTrue(set(arm.get("AccessibleStations", [])) <= used_stations)
+                self.assertTrue(all(
+                    candidate["Key"] in used_stations
+                    for slots in arm.get("SlotsStationMap", {}).values()
+                    for candidates in slots.values()
+                    for candidate in candidates
+                ))
+
     def test_pse300_loadlock_does_not_switch_environment_twice_without_opening(self) -> None:
         """PSE300 多槽换片时，两次抽充气之间必须存在一次真实开门访问。"""
         device = json.loads(PSE300_PATH.read_text(encoding="utf-8"))

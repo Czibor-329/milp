@@ -149,6 +149,7 @@ from realtime_scheduler.plan_builder import (
     build_process_recipes,
     build_round_update,
     build_route,
+    build_task_alg_init,
     expand_pse300_loadlocks,
     extract_init_data,
 )
@@ -3681,6 +3682,12 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
     plan = deepcopy(dict(raw_plan))
     plan["device"] = extract_init_data(plan.get("device"))
     expand_pse300_loadlocks(plan["device"])
+    plan["device"] = build_task_alg_init(
+        plan["device"],
+        [row for row in (plan.get("routes") or []) if isinstance(row, Mapping)],
+        [row for row in (plan.get("rounds") or []) if isinstance(row, Mapping)],
+        [row for row in (plan.get("cleans") or []) if isinstance(row, Mapping)],
+    )
     reproduction.add("AlgInit", plan["device"])
     strategy = str(plan.get("strategy") or "heuristic").strip()
     normalized_strategy = strategy.lower()

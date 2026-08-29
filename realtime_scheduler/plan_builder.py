@@ -1,7 +1,8 @@
 """调度请求数据建模。
 
-本模块负责设备初始化数据归一化、PSE300 LoadLock 扩展、Route/Recipe 构造以及
-各轮 CJob/PJob 请求展开。它不执行调度算法，也不处理 HTTP 或工作区持久化。
+本模块负责设备初始化数据归一化、任务级 AlgInit 裁剪、PSE300 LoadLock 扩展、
+Route/Recipe 构造以及各轮 CJob/PJob 请求展开。它不执行调度算法，也不处理 HTTP
+或工作区持久化。
 """
 
 from __future__ import annotations
@@ -103,7 +104,7 @@ def _expand_robot_loadlocks(robot: Dict[str, Any]) -> None:
         known_transfers = {
             (
                 str(item.get("SrcStation") or ""), str(item.get("DestStation") or ""),
-                item.get("TransType"), item.get("Time"),
+                item.get("TransType"),
             )
             for item in original_transfers
         }
@@ -119,7 +120,9 @@ def _expand_robot_loadlocks(robot: Dict[str, Any]) -> None:
                 destination_variants.append(copies_by_source[destination_station])
             for new_source in source_variants:
                 for new_destination in destination_variants:
-                    key = (new_source, new_destination, transfer.get("TransType"), transfer.get("Time"))
+                    # ITransferInfo 的查找键不包含 Time；设备已经显式配置目标站时，
+                    # 即使时间与源 LoadLock 不同也必须保留原值，不能追加重复四元组。
+                    key = (new_source, new_destination, transfer.get("TransType"))
                     if key in known_transfers:
                         continue
                     new_transfer = deepcopy(dict(transfer))
@@ -174,6 +177,197 @@ def expand_pse300_loadlocks(device: Dict[str, Any]) -> bool:
         if isinstance(robot, dict):
             _expand_robot_loadlocks(robot)
     return changed
+
+
+def _task_module_names(
+    routes: Sequence[Mapping[str, Any]],
+    rounds: Sequence[Mapping[str, Any]],
+    cleans: Sequence[Mapping[str, Any]],
+) -> set[str]:
+    """汇总当前任务通过 Route、固定 LoadPort 和已引用 Clean 使用的模块。"""
+    module_names: set[str] = set()
+    clean_names: set[str] = set()
+    for route in routes:
+        for field_name in ("prePJobCleanRefs", "postPJobCleanRefs", "postCJobCleanRefs"):
+            clean_names.update(_string_list(route.get(field_name)))
+        for stage in route.get("stages") or []:
+            if not isinstance(stage, Mapping):
+                continue
+            for visit in _stage_visit_rows(stage):
+                module_name = str(
+                    visit.get("stationName") or visit.get("StationName") or ""
+                ).strip()
+                if module_name:
+                    module_names.add(module_name)
+                for field_name in ("beforeCleanRefs", "afterCleanRefs"):
+                    clean_names.update(_string_list(visit.get(field_name)))
+    for round_config in rounds:
+        for control_job in _round_cjob_rows(round_config):
+            load_port = str(
+                control_job.get("loadPort") or control_job.get("LoadPort") or ""
+            ).strip()
+            if load_port:
+                module_names.add(load_port)
+            for process_job in control_job.get("pjobs") or []:
+                if not isinstance(process_job, Mapping):
+                    continue
+                load_port = str(
+                    process_job.get("loadPort") or process_job.get("LoadPort") or ""
+                ).strip()
+                if load_port:
+                    module_names.add(load_port)
+    for clean in cleans:
+        if not isinstance(clean, Mapping):
+            continue
+        clean_name = str(clean.get("name") or clean.get("Name") or "").strip()
+        if clean_name not in clean_names:
+            continue
+        module_names.update(_string_list(clean.get("modules") or clean.get("Modules")))
+        clean_type = str(clean.get("cleanType") or clean.get("CleanType") or "")
+        if clean_type.casefold().replace("-", "").replace("_", "") in {"dummy", "dummywac"}:
+            module_names.add("DummyPort")
+    return module_names
+
+
+def _filtered_arm_station_map(raw_map: Any, station_names: set[str]) -> Dict[str, Any]:
+    """裁剪 SlotsStationMap 候选，并保留仍覆盖实际 Station 的组合站名。"""
+    if not isinstance(raw_map, Mapping):
+        return {}
+    result: Dict[str, Any] = {}
+    for group_name, raw_slots in raw_map.items():
+        if not isinstance(raw_slots, Mapping):
+            continue
+        slots: Dict[str, Any] = {}
+        for slot_id, raw_candidates in raw_slots.items():
+            if not isinstance(raw_candidates, list):
+                continue
+            candidates = [
+                deepcopy(dict(candidate))
+                for candidate in raw_candidates
+                if isinstance(candidate, Mapping)
+                and str(candidate.get("Key") or "") in station_names
+            ]
+            if candidates:
+                slots[str(slot_id)] = candidates
+        if slots:
+            result[str(group_name)] = slots
+    return result
+
+
+def build_task_alg_init(
+    device: Mapping[str, Any],
+    routes: Sequence[Mapping[str, Any]],
+    rounds: Sequence[Mapping[str, Any]],
+    cleans: Sequence[Mapping[str, Any]] = (),
+) -> Dict[str, Any]:
+    """构造仅包含当前任务所用模块及其 Robot 引用的 AlgInit 副本。"""
+    result = extract_init_data(device)
+    stations = result.get("Stations") or {}
+    robots = result.get("Robots") or {}
+    requested_names = _task_module_names(routes, rounds, cleans)
+
+    # Route 可以引用 SlotsStationMap 的组合站名，需要展开到实际 Station。
+    for robot in robots.values():
+        if not isinstance(robot, Mapping):
+            continue
+        for arm in (robot.get("ArmInfo") or {}).values():
+            if not isinstance(arm, Mapping):
+                continue
+            for group_name, station_slots in (arm.get("SlotsStationMap") or {}).items():
+                if str(group_name) not in requested_names or not isinstance(station_slots, Mapping):
+                    continue
+                for candidates in station_slots.values():
+                    if isinstance(candidates, list):
+                        requested_names.update(
+                            str(candidate.get("Key") or "")
+                            for candidate in candidates
+                            if isinstance(candidate, Mapping) and candidate.get("Key")
+                        )
+    if "DummyPort" in requested_names:
+        requested_names.update(
+            str(name)
+            for name, station in stations.items()
+            if isinstance(station, Mapping)
+            and str(station.get("Type") or "").casefold() == "dummyport"
+        )
+
+    used_stations = requested_names & {str(name) for name in stations}
+    used_robots = requested_names & {str(name) for name in robots}
+    result["Stations"] = {
+        str(name): deepcopy(station)
+        for name, station in stations.items()
+        if str(name) in used_stations
+    }
+    result["Robots"] = {
+        str(name): deepcopy(robot)
+        for name, robot in robots.items()
+        if str(name) in used_robots
+    }
+
+    for station in result["Stations"].values():
+        if not isinstance(station, dict):
+            continue
+        for field_name in (
+            "PickPrepareTime", "PickCompleteTime", "PlacePrepareTime",
+            "PlaceCompleteTime", "PostCompleteTime",
+        ):
+            timing = station.get(field_name)
+            if isinstance(timing, Mapping):
+                station[field_name] = {
+                    str(name): deepcopy(value)
+                    for name, value in timing.items()
+                    if str(name) in used_robots
+                }
+
+    for robot in result["Robots"].values():
+        if not isinstance(robot, dict):
+            continue
+        for field_name in ("PickTime", "PlaceTime"):
+            timing = robot.get(field_name)
+            if isinstance(timing, Mapping):
+                robot[field_name] = {
+                    str(name): deepcopy(value)
+                    for name, value in timing.items()
+                    if str(name) in used_stations
+                }
+        transfers = robot.get("PrepTransTime")
+        if isinstance(transfers, list):
+            robot["PrepTransTime"] = [
+                deepcopy(dict(row))
+                for row in transfers
+                if isinstance(row, Mapping)
+                and str(row.get("SrcStation") or "") in used_stations
+                and str(row.get("DestStation") or "") in used_stations
+            ]
+        retained_groups: set[str] = set()
+        arm_info = robot.get("ArmInfo")
+        if isinstance(arm_info, Mapping):
+            for arm in arm_info.values():
+                if not isinstance(arm, dict):
+                    continue
+                arm["AccessibleStations"] = [
+                    str(name)
+                    for name in arm.get("AccessibleStations") or []
+                    if str(name) in used_stations
+                ]
+                arm["SlotsStationMap"] = _filtered_arm_station_map(
+                    arm.get("SlotsStationMap"), used_stations,
+                )
+                retained_groups.update(arm["SlotsStationMap"])
+                current_station = str(arm.get("SlotAtStation") or "")
+                if current_station not in used_stations and current_station not in retained_groups:
+                    arm["SlotAtStation"] = (
+                        arm["AccessibleStations"][0] if arm["AccessibleStations"] else ""
+                    )
+        pointer_names = used_stations | retained_groups
+        if isinstance(robot.get("ArmPointerPair"), list):
+            robot["ArmPointerPair"] = [
+                deepcopy(pair)
+                for pair in robot["ArmPointerPair"]
+                if isinstance(pair, list)
+                and all(str(name) in pointer_names for name in pair)
+            ]
+    return result
 
 
 def _name_index(rows: Sequence[Mapping[str, Any]], label: str) -> Dict[str, Dict[str, Any]]:
