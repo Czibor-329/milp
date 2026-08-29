@@ -25,42 +25,23 @@ class OptionalAlgorithmRepositoryTests(unittest.TestCase):
     ) -> subprocess.CompletedProcess[str]:
         """在新进程中屏蔽本地 alg，并执行一段服务端断言脚本。
 
-        登记数据目录同样被重定向到临时目录，使测试不依赖真实
-        ``data/registered_algorithms.json`` 中已存在的登记条目。
+        ``other_alg`` 根目录由参数指向临时目录，测试不会读取真实算法包。
         """
         environment = os.environ.copy()
-        environment["CT_ALGORITHM_ROOT"] = str(
-            packaged_root.parent / "missing-private-alg"
-        )
-        environment["CT_OTHER_ALGORITHM_ROOT"] = str(packaged_root)
+        environment["CT_ALGORITHM_ROOT"] = str(packaged_root.parent)
         # 屏蔽本机代理：测试直连 127.0.0.1，避免 HTTP_PROXY 等环境变量
         # 把 /api/health 请求转发到代理端口导致 502。
         environment["NO_PROXY"] = "*"
         environment["no_proxy"] = "*"
-        with tempfile.TemporaryDirectory() as registry_directory:
-            environment["CT_REGISTERED_ALGORITHMS_DATA_DIR"] = registry_directory
-            isolation = (
-                "import os\n"
-                "from pathlib import Path\n"
-                "import realtime_scheduler.algorithm_interface as _algorithm_interface\n"
-                "_registered_data = Path(os.environ['CT_REGISTERED_ALGORITHMS_DATA_DIR'])\n"
-                "_algorithm_interface.REGISTERED_ALGORITHMS_FILE = (\n"
-                "    _registered_data / 'registered_algorithms.json'\n"
-                ")\n"
-                "_algorithm_interface.REGISTERED_ALGORITHMS_DIR = (\n"
-                "    _registered_data / 'registered_algorithms'\n"
-                ")\n"
-            )
-            completed = subprocess.run(
-                [sys.executable, "-c", isolation + textwrap.dedent(script)],
-                cwd=ROOT,
-                env=environment,
-                capture_output=True,
-                text=True,
-                timeout=30,
-                check=False,
-            )
-        return completed
+        return subprocess.run(
+            [sys.executable, "-c", textwrap.dedent(script)],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
 
     def test_builtin_repository_replaces_preloaded_external_src_package(self) -> None:
         """内置算法必须替换启动前已缓存的外部 src 同名包。"""
@@ -105,7 +86,6 @@ class OptionalAlgorithmRepositoryTests(unittest.TestCase):
 
             environment = os.environ.copy()
             environment["CT_ALGORITHM_ROOT"] = str(algorithm_root)
-            environment["CT_OTHER_ALGORITHM_ROOT"] = str(algorithm_root / "other_alg")
             completed = subprocess.run(
                 [
                     sys.executable,
@@ -356,8 +336,8 @@ class OptionalAlgorithmRepositoryTests(unittest.TestCase):
                     # 平台 src 包对象与原始路径条目必须保留。
                     assert sys.modules["src"] is platform_src
                     algorithm_src_text = str(
-                        Path(os.environ["CT_OTHER_ALGORITHM_ROOT"])
-                        / "SrcAlgo" / "src"
+                        Path(os.environ["CT_ALGORITHM_ROOT"])
+                        / "other_alg" / "SrcAlgo" / "src"
                     )
                     assert algorithm_src_text in sys.modules["src"].__path__
                     assert str(fake_src) in sys.modules["src"].__path__

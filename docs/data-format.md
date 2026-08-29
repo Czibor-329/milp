@@ -84,4 +84,4 @@ v5 的 `workspaces/` 与 `devices/` 首次升级时执行以下过程：
 
 ## 运行时数据
 
-`checkpoints/`、`registered_algorithms/`、锁文件、`exports/` 结果与复现日志均不属于设备或测试集交换包，也不能作为设备主数据来源。
+`checkpoints/`、锁文件、`exports/` 结果与复现日志均不属于设备或测试集交换包，也不能作为设备主数据来源。外部策略只从 `alg/other_alg/` 检测，不写入 `data/`。

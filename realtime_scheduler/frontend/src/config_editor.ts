@@ -3728,36 +3728,6 @@ function validationDisplay(value) {
   return value ? String(value) : "";
 }
 
-/** 读取算法文件并提交给本地服务登记，成功后刷新策略卡片并选中新算法。 */
-async function registerAlgorithmFile(file: File) {
-  const content = await new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUrl = String(reader.result || "");
-      const separatorIndex = dataUrl.indexOf(",");
-      resolve(separatorIndex >= 0 ? dataUrl.slice(separatorIndex + 1) : "");
-    };
-    reader.onerror = () => reject(new Error("读取算法文件失败"));
-    reader.readAsDataURL(file);
-  });
-  if (!content) throw new Error("读取算法文件失败");
-  const response = await fetch("/api/algorithms/register", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ filename: file.name, content }),
-  });
-  const result = await response.json().catch(() => ({}));
-  if (!response.ok || !result?.ok) {
-    throw new Error(result?.error || `服务返回 ${response.status}`);
-  }
-  state.strategy = result.algorithm?.strategy || state.strategy;
-  await checkService();
-  setWorkspaceStatus(
-    `已登记算法“${result.algorithm?.name || file.name}”，策略 ${state.strategy} 已选中；刷新页面后仍会保留`,
-    "saved",
-  );
-}
-
 /** 根据健康检查返回值绘制全部本地和标准算法。 */
 function renderOtherAlgorithmOptions(algorithms) {
   state.availableAlgorithms = Array.isArray(algorithms) ? algorithms : [];
@@ -5252,14 +5222,6 @@ document.getElementById("testExchangeFile").addEventListener("change", event => 
     status.classList.add("error");
     writeTerminal(`$ 测试集导入失败\n  ${error.message}`, true);
   });
-});
-document.getElementById("addAlgorithmButton").addEventListener("click", () => document.getElementById("addAlgorithmFileInput").click());
-document.getElementById("addAlgorithmFileInput").addEventListener("change", event => {
-  const input = event.currentTarget;
-  const file = input instanceof HTMLInputElement ? input.files?.[0] : null;
-  if (input instanceof HTMLInputElement) input.value = "";
-  if (!file) return;
-  registerAlgorithmFile(file).catch(error => writeTerminal(`$ 添加算法失败\n  ${error.message || "未知错误"}`, true));
 });
 document.getElementById("deviceSelect").addEventListener("change", event => (async () => {
   if (state.dirty) await saveCurrentTest(true);

@@ -22,9 +22,9 @@
 指向其他位置。完整算法仓库是可选依赖：缺席时服务和工作区仍可启动，
 内置策略在健康检查中标记为不可用。
 
-独立交付的标准算法包默认从父仓库的 `other_alg/` 加载；若该目录不存在，
-兼容读取 `alg/other_alg/`。也可用 `CT_OTHER_ALGORITHM_ROOT` 指向任意打包
-算法目录。只有打包算法时，多轮重算由算法包自带的重算桥接器根据
+独立交付的标准算法包只从算法仓库的 `other_alg/` 子目录加载。可以用
+`CT_ALGORITHM_ROOT` 整体调整算法仓库位置，但不能另行指定策略目录。
+只有打包算法时，多轮重算由算法包自带的重算桥接器根据
 `MoveStates/RemoveList` 恢复状态；本地完整算法仓库存在时仍使用原有
 `src.schedule.core` 状态机做平台侧校验。
 
@@ -61,7 +61,7 @@ npm run build
 - `启发式`：使用默认实时排程器。
 - `LoadLock 管理器`：Heuristic 默认共用 Petri-ETA 管理器；上层策略只决定发哪片和工艺顺序，管理器在 Petri 安全候选内按动态完成时刻绑定 LA/LB。
 - `other_alg 标准算法`：自动扫描算法仓库 `alg/other_alg/<算法名>`，通过包内正式 `CT.infer.scheduler.init/update`（或公司端 `src.infer.scheduler.init/update` 布局）入口运行。每次重算前使用算法仓库的状态回放能力生成全量物料、机台、机器人快照以及 `RemoveList`，支持连续多轮重算；结果中的 `updates` 保留每次实际发送的数据。
-- `添加算法`：策略面板上的「＋ 添加算法」按钮用于登记单个 Python 文件（管理员可见）。文件只需在顶层定义 `init` 和 `update` 两个函数，不要求 `CT/infer/scheduler.py` 结构；登记信息与源文件保存在 `data/registered_algorithms.json` 与 `data/registered_algorithms/` 下，重启保留。登记后刷新页面即出现在策略列表，与 `other_alg` 算法共用同一套标准调用。
+- 外部策略只通过扫描 `alg/other_alg/<算法名>` 检测，不支持在前端上传或直接导入算法文件。
 - 输出校验默认开启并默认选择 `HongYe check`：服务端把 AlgInit、AlgSchedule、AlgUpdateMove、AlgOutput 逐条发送给仓库内独立的 HongYe/SchStateLib 进程，不生成中间日志；取消 `HongYe check` 后使用原平台校验器。勾选“跳过输出校验”时两种校验器都不运行，结果标记为 `skipped`；单次与批量运行语义一致。
 
 本地算法列表不在前端写死，而是由算法仓库根目录的 `algorithms.json` 控制。

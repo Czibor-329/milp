@@ -81,11 +81,9 @@ python scripts/run_performance_suite.py --profile medium --migration --enforce
 <本仓库>/alg/other_alg/<算法名>/CT/infer/scheduler.py     # 交付目录 CT/infer 布局
 ```
 
-目录名 `<算法名>` 同时作为稳定算法 ID。若打包算法位于其他目录，设置：
-
-```powershell
-$env:CT_OTHER_ALGORITHM_ROOT = "D:\path\to\alg\other_alg"
-```
+目录名 `<算法名>` 同时作为稳定算法 ID。平台只扫描该目录，不支持通过前端
+直接导入策略。需要整体迁移算法仓库时设置 `CT_ALGORITHM_ROOT`，策略仍须位于
+该仓库根目录的 `other_alg/` 子目录。
 
 ## 数据说明
 
@@ -109,8 +107,6 @@ data/
 ├── checkpoints/                    # 页面上传的模型检查点文件（运行时产生）
 ├── documentation/                  # 本地使用手册（Markdown）
 ├── migration-backups/              # 自动升级前的旧数据备份
-├── registered_algorithms/          # 页面登记的单个算法源文件（运行时产生）
-├── registered_algorithms.json      # 页面登记的算法索引（运行时产生）
 └── *.lock                          # 运行时文件锁
 ```
 
@@ -134,7 +130,5 @@ data/
 - **checkpoints/**：页面上传的模型检查点文件（仅支持 `.npz/.pt/.pth/.ckpt`）。浏览器不会提供用户选择文件的真实路径，因此服务把文件复制到该目录，并返回算法运行时可读取的绝对路径。
   
 - **documentation/**：本地使用手册，`*.md` 文件由页面「文档」面板通过`/api/documentation` 加载展示。算法仓库维护的接口文档可放在算法包的`docs/documentation/`，两者共用导航与 slug 唯一性校验。
-  
-- **registered_algorithms/ + registered_algorithms.json**：页面登记的单个算法源文件与登记索引，见「外部算法部署」。
   
 - **\*.lock**：服务运行时的文件锁（如 `workspaces.lock`），只承载跨进程互斥、不保存业务数据，服务停止后可删除。
