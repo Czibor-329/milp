@@ -969,6 +969,28 @@ function renderDeviceTimingSelectors() {
     : `<option value="">请先选择设备</option>`;
   stationSelect.disabled = !state.stationNames.length;
   robotSelect.disabled = !state.robotNames.length;
+  const stationIndex = state.stationNames.indexOf(state.deviceStationName);
+  const robotIndex = state.robotNames.indexOf(state.deviceRobotName);
+  document.getElementById("previousDeviceStationButton").disabled = stationIndex <= 0;
+  document.getElementById("nextDeviceStationButton").disabled = stationIndex < 0 || stationIndex >= state.stationNames.length - 1;
+  document.getElementById("previousDeviceRobotButton").disabled = robotIndex <= 0;
+  document.getElementById("nextDeviceRobotButton").disabled = robotIndex < 0 || robotIndex >= state.robotNames.length - 1;
+}
+
+/** 按页面当前顺序切换站点或机器手，减少大型设备中反复展开下拉框的操作。 */
+function stepDeviceTimingSelection(kind, offset) {
+  const stationSelection = kind === "station";
+  const names = stationSelection ? state.stationNames : state.robotNames;
+  const currentName = stationSelection ? state.deviceStationName : state.deviceRobotName;
+  const nextIndex = names.indexOf(currentName) + offset;
+  if (nextIndex < 0 || nextIndex >= names.length) return;
+  if (stationSelection) {
+    state.deviceStationName = names[nextIndex];
+    renderDeviceTimingConfiguration();
+    return;
+  }
+  state.deviceRobotName = names[nextIndex];
+  renderDeviceTimingConfiguration();
 }
 
 /** 绘制当前站点的动作时间表和 LoadLock/Aligner 等专项状态切换时间。 */
@@ -5249,12 +5271,16 @@ document.getElementById("saveDeviceTimingButton").addEventListener("click", () =
 document.getElementById("resetDeviceTimingButton").addEventListener("click", () => resetDeviceTimingDraft("已撤销尚未保存的时间修改"));
 document.getElementById("deviceStationSelect").addEventListener("change", event => {
   state.deviceStationName = event.target.value;
-  renderDeviceStationTiming();
+  renderDeviceTimingConfiguration();
 });
 document.getElementById("deviceRobotSelect").addEventListener("change", event => {
   state.deviceRobotName = event.target.value;
-  renderDeviceRobotTiming();
+  renderDeviceTimingConfiguration();
 });
+document.getElementById("previousDeviceStationButton").addEventListener("click", () => stepDeviceTimingSelection("station", -1));
+document.getElementById("nextDeviceStationButton").addEventListener("click", () => stepDeviceTimingSelection("station", 1));
+document.getElementById("previousDeviceRobotButton").addEventListener("click", () => stepDeviceTimingSelection("robot", -1));
+document.getElementById("nextDeviceRobotButton").addEventListener("click", () => stepDeviceTimingSelection("robot", 1));
 document.getElementById("testGroupSelect").addEventListener("change", event => selectWorkspaceGroup(event.target.value).catch(error => writeTerminal(`$ 测试组别切换失败\n  ${error.message}`, true)));
 document.getElementById("testCaseSelect").addEventListener("change", event => selectWorkspaceTest(event.target.value).catch(error => writeTerminal(`$ 测试集切换失败\n  ${error.message}`, true)));
 document.getElementById("testCaseName").addEventListener("input", event => { state.testCaseName = event.target.value; markTestDirty(); });

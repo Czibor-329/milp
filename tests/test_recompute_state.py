@@ -225,6 +225,7 @@ def test_merge_algorithm_update_consumes_previous_dummy_return_info() -> None:
         }],
         "ProcessJobs": [],
         "ControlJobs": [],
+        "Route": {"legacy": {}},
         "Routes": {},
     }
     new_round_update = {
@@ -254,6 +255,8 @@ def test_merge_algorithm_update_consumes_previous_dummy_return_info() -> None:
     )
 
     material = merged["Materials"][0]
+    assert "Route" not in merged
+    assert "Routes" not in merged
     assert material["Route"] == route_recipe
     assert material["PJobName"] == "1.C1.P1"
     assert material["TaskID"] == "1"
@@ -466,7 +469,6 @@ def test_external_validation_compile_clears_predummy_only_in_copy(monkeypatch) -
         "PrePJob": {"PM1": [{"CheckConditions": {"Dummy": []}}]},
     }
     update = {
-        "Routes": {"product-route": deepcopy(route)},
         "ProcessJobs": [{"JobName": "1.C1.P1", "OriginRoute": deepcopy(route)}],
     }
     captured = {}
@@ -483,9 +485,7 @@ def test_external_validation_compile_clears_predummy_only_in_copy(monkeypatch) -
 
     assert result == "validation-problem"
     assert captured["update"]["ProcessJobs"][0]["OriginRoute"]["PrePJob"] == {}
-    assert captured["update"]["Routes"]["product-route"]["PrePJob"] == {}
     assert update["ProcessJobs"][0]["OriginRoute"]["PrePJob"]
-    assert update["Routes"]["product-route"]["PrePJob"]
 
 
 def test_server_does_not_implement_machine_state_snapshot_replay() -> None:

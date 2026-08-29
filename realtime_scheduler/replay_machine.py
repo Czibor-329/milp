@@ -571,7 +571,6 @@ class ReplayMachine:
 
         combined = deepcopy(updates[0])
         for update in updates[1:]:
-            combined["Routes"].update(deepcopy(update.get("Routes") or {}))
             for field_name in ("Materials", "ProcessJobs", "ControlJobs"):
                 combined[field_name].extend(deepcopy(update.get(field_name) or []))
         combined["CurrentTime"] = 0.0

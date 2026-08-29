@@ -19027,6 +19027,26 @@ function renderDeviceTimingSelectors() {
   robotSelect.innerHTML = state.robotNames.length ? state.robotNames.map((name) => `<option value="${escapeHtml4(name)}" ${name === state.deviceRobotName ? "selected" : ""}>${escapeHtml4(name)}</option>`).join("") : `<option value="">\u8BF7\u5148\u9009\u62E9\u8BBE\u5907</option>`;
   stationSelect.disabled = !state.stationNames.length;
   robotSelect.disabled = !state.robotNames.length;
+  const stationIndex = state.stationNames.indexOf(state.deviceStationName);
+  const robotIndex = state.robotNames.indexOf(state.deviceRobotName);
+  document.getElementById("previousDeviceStationButton").disabled = stationIndex <= 0;
+  document.getElementById("nextDeviceStationButton").disabled = stationIndex < 0 || stationIndex >= state.stationNames.length - 1;
+  document.getElementById("previousDeviceRobotButton").disabled = robotIndex <= 0;
+  document.getElementById("nextDeviceRobotButton").disabled = robotIndex < 0 || robotIndex >= state.robotNames.length - 1;
+}
+function stepDeviceTimingSelection(kind, offset) {
+  const stationSelection = kind === "station";
+  const names = stationSelection ? state.stationNames : state.robotNames;
+  const currentName = stationSelection ? state.deviceStationName : state.deviceRobotName;
+  const nextIndex = names.indexOf(currentName) + offset;
+  if (nextIndex < 0 || nextIndex >= names.length) return;
+  if (stationSelection) {
+    state.deviceStationName = names[nextIndex];
+    renderDeviceTimingConfiguration();
+    return;
+  }
+  state.deviceRobotName = names[nextIndex];
+  renderDeviceTimingConfiguration();
 }
 function renderDeviceStationTiming() {
   const container = document.getElementById("deviceStationTimingEditor");
@@ -22991,12 +23011,16 @@ document.getElementById("saveDeviceTimingButton").addEventListener("click", () =
 document.getElementById("resetDeviceTimingButton").addEventListener("click", () => resetDeviceTimingDraft("\u5DF2\u64A4\u9500\u5C1A\u672A\u4FDD\u5B58\u7684\u65F6\u95F4\u4FEE\u6539"));
 document.getElementById("deviceStationSelect").addEventListener("change", (event) => {
   state.deviceStationName = event.target.value;
-  renderDeviceStationTiming();
+  renderDeviceTimingConfiguration();
 });
 document.getElementById("deviceRobotSelect").addEventListener("change", (event) => {
   state.deviceRobotName = event.target.value;
-  renderDeviceRobotTiming();
+  renderDeviceTimingConfiguration();
 });
+document.getElementById("previousDeviceStationButton").addEventListener("click", () => stepDeviceTimingSelection("station", -1));
+document.getElementById("nextDeviceStationButton").addEventListener("click", () => stepDeviceTimingSelection("station", 1));
+document.getElementById("previousDeviceRobotButton").addEventListener("click", () => stepDeviceTimingSelection("robot", -1));
+document.getElementById("nextDeviceRobotButton").addEventListener("click", () => stepDeviceTimingSelection("robot", 1));
 document.getElementById("testGroupSelect").addEventListener("change", (event) => selectWorkspaceGroup(event.target.value).catch((error) => writeTerminal(`$ \u6D4B\u8BD5\u7EC4\u522B\u5207\u6362\u5931\u8D25
   ${error.message}`, true)));
 document.getElementById("testCaseSelect").addEventListener("change", (event) => selectWorkspaceTest(event.target.value).catch((error) => writeTerminal(`$ \u6D4B\u8BD5\u96C6\u5207\u6362\u5931\u8D25

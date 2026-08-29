@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>调度平台</title>
   <link rel="stylesheet" href="/assets/katex.min.css?v=1.4.4">
-  <link rel="stylesheet" href="/assets/config_editor.css?v=1.5.13">
+  <link rel="stylesheet" href="/assets/config_editor.css?v=1.5.15">
 </head>
 <body>
   <a class="skip-link" href="#mainContent">跳到主要内容</a>
@@ -40,7 +40,7 @@
       <div class="sidebar-footer">
         <span class="sidebar-footer-label">系统状态</span>
         <div class="service-pill" id="serviceState">本地服务</div>
-        <span class="frontend-version">前端 v1.5.13</span>
+        <span class="frontend-version">前端 v1.5.15</span>
       </div>
     </aside>
 
@@ -342,7 +342,6 @@
           </header>
           <div class="device-config-layout">
             <nav class="device-config-nav" aria-label="设备配置分类">
-              <div class="device-config-nav-title">配置分类</div>
               <button class="device-config-nav-item active" type="button" data-device-config-section="station-time" aria-current="page">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 7v5l3 2"/></svg>
                 <span><strong>设备时间</strong><small>站点动作 / 状态切换</small></span>
@@ -363,7 +362,11 @@
                     <h2>设备动作时间</h2>
                     <p>按站点校准开门、准备、取放片完成及状态切换时间。</p>
                   </div>
-                  <label class="device-config-picker" for="deviceStationSelect"><span>当前站点</span><select id="deviceStationSelect"><option value="">请先选择设备</option></select></label>
+                  <div class="device-config-entity-picker">
+                    <button class="device-config-step-button" id="previousDeviceStationButton" type="button" aria-label="上一个站点" disabled>‹</button>
+                    <label class="device-config-picker" for="deviceStationSelect"><span>当前站点</span><select id="deviceStationSelect"><option value="">请先选择设备</option></select></label>
+                    <button class="device-config-step-button" id="nextDeviceStationButton" type="button" aria-label="下一个站点" disabled>›</button>
+                  </div>
                 </div>
                 <div class="panel-body device-timing-body">
                   <div class="device-config-notice">
@@ -380,7 +383,11 @@
                     <h2>机器手动作时间</h2>
                     <p>分别校准各站点取片、放片以及站点间移动耗时。</p>
                   </div>
-                  <label class="device-config-picker" for="deviceRobotSelect"><span>当前机器手</span><select id="deviceRobotSelect"><option value="">请先选择设备</option></select></label>
+                  <div class="device-config-entity-picker">
+                    <button class="device-config-step-button" id="previousDeviceRobotButton" type="button" aria-label="上一个机器手" disabled>‹</button>
+                    <label class="device-config-picker" for="deviceRobotSelect"><span>当前机器手</span><select id="deviceRobotSelect"><option value="">请先选择设备</option></select></label>
+                    <button class="device-config-step-button" id="nextDeviceRobotButton" type="button" aria-label="下一个机器手" disabled>›</button>
+                  </div>
                 </div>
                 <div class="panel-body device-timing-body">
                   <div class="device-config-notice">
@@ -736,6 +743,6 @@
     </aside>
   </dialog>
 
-  <script type="module" src="/assets/config_editor.js?v=1.5.13"></script>
+  <script type="module" src="/assets/config_editor.js?v=1.5.15"></script>
 </body>
 </html>
