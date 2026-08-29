@@ -128,22 +128,22 @@ const BATCH_STATUS_POLL_MILLISECONDS = 1000;
 const TEST_ORDER_COLLATOR = new Intl.Collator("zh-CN", { numeric: true, sensitivity: "base" });
 const DEFAULT_DUMMY_WAFER_COUNT = 8;
 const STATION_ACTION_TIME_FIELDS = [
-  { key: "PickPrepareTime", label: "取片准备" },
-  { key: "PickCompleteTime", label: "取片完成" },
-  { key: "PlacePrepareTime", label: "放片准备" },
-  { key: "PlaceCompleteTime", label: "放片完成" },
-  { key: "PostCompleteTime", label: "动作后处理" },
+  { key: "PickPrepareTime", label: "PickPrepareTime" },
+  { key: "PickCompleteTime", label: "PickCompleteTime" },
+  { key: "PlacePrepareTime", label: "PlacePrepareTime" },
+  { key: "PlaceCompleteTime", label: "PlaceCompleteTime" },
+  { key: "PostCompleteTime", label: "PostCompleteTime" },
 ];
 const ROBOT_ACTION_TIME_FIELDS = [
-  { key: "PickTime", label: "取片" },
-  { key: "PlaceTime", label: "放片" },
+  { key: "PickTime", label: "PickTime" },
+  { key: "PlaceTime", label: "PlaceTime" },
 ];
 
 const state = {
   workspaceDevices: [], workspaceDevice: null, workspaceDeviceId: "", testCaseId: "", testCaseName: "", testCaseGroup: "", activeTestGroup: "", serviceCompatible: false, dirty: false,
   activeBatchId: "", batchRunning: false, batchCancelRequested: false, batchCancelSent: false, batchResult: null, selectedBatchTestId: "", parameterComparison: null,
   deviceName: "", baseDevice: null, device: null, stationNames: [], loadPorts: [], processModules: [], robotNames: [], robotScopes: {}, robotSlots: {}, robotSlotsSaving: new Set(),
-  deviceConfigSection: "station-time", deviceStationName: "", deviceRobotName: "", deviceRobotTransferSources: {}, deviceTimingDraft: null, deviceTimingDirty: false, deviceTimingSaving: false, deviceTimingStatusMessage: "选择设备后开始配置",
+  deviceConfigSection: "station-time", deviceStationName: "", deviceRobotName: "", deviceRobotTransferAxes: {}, deviceRobotTransferSources: {}, deviceTimingDraft: null, deviceTimingDirty: false, deviceTimingSaving: false, deviceTimingStatusMessage: "选择设备后开始配置",
   strategy: "heuristic", availableAlgorithms: [], algorithmMetadata: {}, roundCount: 2, times: [0, 70], options: { ...DEFAULT_SCHEDULE_OPTIONS },
   cleans: [],
   routes: [{ name: "RouteA", group: "RouteA", bufferOption: 0, prePJobCleanRefs: [], postPJobCleanRefs: [], postCJobCleanRefs: [], stages: linkRouteSteps([makeStage("LP1"), makeStage("Robot"), makeStage("PM1,PM2", true, "RouteA_Step2"), makeStage("Robot"), makeStage("LP1")]) }],
@@ -1009,7 +1009,7 @@ function renderDeviceStationTiming() {
   ))].sort((left, right) => left.localeCompare(right, undefined, { numeric: true }));
   const actionRows = actionControllers.map(controller => `
     <tr>
-      <th scope="row"><strong>${escapeHtml(controller)}</strong><small>控制机器手</small></th>
+      <th scope="row"><strong>${escapeHtml(controller)}</strong></th>
       ${STATION_ACTION_TIME_FIELDS.map(({ key, label }) => {
         if (!Object.prototype.hasOwnProperty.call(timing[key] || {}, controller)) return `<td><span class="device-time-unavailable">—</span></td>`;
         return `<td>${deviceTimeInput(timing[key][controller], `${stationName} ${controller} ${label}`, {
@@ -1027,9 +1027,9 @@ function renderDeviceStationTiming() {
   const specialRows = [
     ...alignmentEntries.map(([slotId, value]) => `
       <div class="device-transition-row">
-        <span class="device-transition-kind">对准</span>
+        <span class="device-transition-kind">AlignmentTime</span>
         <strong>Slot ${escapeHtml(slotId)}</strong>
-        <span class="device-transition-route">晶圆定位时间</span>
+        <span class="device-transition-route">key=${escapeHtml(slotId)}</span>
         ${deviceTimeInput(value, `${stationName} Slot ${slotId} 对准时间`, {
           "device-timing-target": "station-map",
           "device-name": stationName,
@@ -1040,9 +1040,9 @@ function renderDeviceStationTiming() {
     `),
     ...prePrepareRows.map((row, index) => `
       <div class="device-transition-row">
-        <span class="device-transition-kind">${escapeHtml(row?.PrePrepareType || "状态切换")}</span>
+        <span class="device-transition-kind">PrePrepareTime</span>
         <strong>${escapeHtml(row?.LastItem || "—")} <i aria-hidden="true">→</i> ${escapeHtml(row?.CurrentItem || "—")}</strong>
-        <span class="device-transition-route">${escapeHtml(row?.PrePrepareType === "PumpTime" ? "抽气" : row?.PrePrepareType === "VentTime" ? "充气" : "预处理")}</span>
+        <span class="device-transition-route">${escapeHtml(row?.PrePrepareType || "PrePrepareType")}</span>
         ${deviceTimeInput(timing.PrePrepareTime?.[index] ?? row?.Time ?? 0, `${stationName} ${row?.PrePrepareType || "状态切换"}`, {
           "device-timing-target": "station-sequence",
           "device-name": stationName,
@@ -1052,24 +1052,14 @@ function renderDeviceStationTiming() {
       </div>
     `),
   ];
-  const timingCount = actionControllers.reduce((count, controller) => count + STATION_ACTION_TIME_FIELDS.filter(
-    ({ key }) => Object.prototype.hasOwnProperty.call(timing[key] || {}, controller),
-  ).length, 0) + specialRows.length;
-
   container.innerHTML = `
-    <div class="device-timing-overview">
-      <div><span>站点类型</span><strong>${escapeHtml(station.Type || "Station")}</strong></div>
-      <div><span>容量</span><strong>${Number(station.Capacity) || 0} <small>槽</small></strong></div>
-      <div><span>关联机器手</span><strong>${actionControllers.length} <small>台</small></strong></div>
-      <div><span>计时参数</span><strong>${timingCount} <small>项</small></strong></div>
-    </div>
     <section class="device-time-section" aria-labelledby="stationActionTimingTitle">
-      <header><div><h3 id="stationActionTimingTitle">取放片动作</h3><p>站点与对应机器手协同动作的分段耗时。</p></div><span>${actionControllers.length} 组控制关系</span></header>
-      ${actionRows ? `<div class="device-time-table-wrap"><table class="device-time-table"><thead><tr><th>机器手</th>${STATION_ACTION_TIME_FIELDS.map(({ label }) => `<th>${label}</th>`).join("")}</tr></thead><tbody>${actionRows}</tbody></table></div>` : `<div class="device-time-inline-empty">当前站点未声明取放片分段时间。</div>`}
+      <header><h3 id="stationActionTimingTitle">Station action fields</h3></header>
+      ${actionRows ? `<div class="device-time-table-wrap"><table class="device-time-table"><thead><tr><th>Robot</th>${STATION_ACTION_TIME_FIELDS.map(({ label }) => `<th><code>${label}</code></th>`).join("")}</tr></thead><tbody>${actionRows}</tbody></table></div>` : `<div class="device-time-inline-empty">无可编辑字段</div>`}
     </section>
     <section class="device-time-section" aria-labelledby="stationTransitionTimingTitle">
-      <header><div><h3 id="stationTransitionTimingTitle">专项处理与状态切换</h3><p>LoadLock 抽充气、Aligner 对准等站点专属时间。</p></div><span>${specialRows.length} 项</span></header>
-      ${specialRows.length ? `<div class="device-transition-list">${specialRows.join("")}</div>` : `<div class="device-time-inline-empty">当前站点没有额外的状态切换时间。</div>`}
+      <header><h3 id="stationTransitionTimingTitle">Station-specific fields</h3></header>
+      ${specialRows.length ? `<div class="device-transition-list">${specialRows.join("")}</div>` : `<div class="device-time-inline-empty">无可编辑字段</div>`}
     </section>`;
 }
 
@@ -1088,7 +1078,7 @@ function renderDeviceRobotTiming() {
     ({ key }) => Object.keys(timing[key] || {}),
   ))].sort((left, right) => left.localeCompare(right, undefined, { numeric: true }));
   const actionRows = actionStations.map(stationName => `
-    <tr><th scope="row"><strong>${escapeHtml(stationName)}</strong><small>目标站点</small></th>${ROBOT_ACTION_TIME_FIELDS.map(({ key, label }) => {
+    <tr><th scope="row"><strong>${escapeHtml(stationName)}</strong></th>${ROBOT_ACTION_TIME_FIELDS.map(({ key, label }) => {
       if (!Object.prototype.hasOwnProperty.call(timing[key] || {}, stationName)) return `<td><span class="device-time-unavailable">—</span></td>`;
       return `<td>${deviceTimeInput(timing[key][stationName], `${robotName} 在 ${stationName} 的${label}时间`, {
         "device-timing-target": "robot-map",
@@ -1100,43 +1090,98 @@ function renderDeviceRobotTiming() {
   `).join("");
 
   const transferRows = Array.isArray(robot.PrepTransTime) ? robot.PrepTransTime : [];
-  const sources = [...new Set(transferRows.map(row => String(row?.SrcStation || "")).filter(Boolean))]
+  const selectedAxis = state.deviceRobotTransferAxes[robotName] === "dest" ? "dest" : "src";
+  const selectedField = selectedAxis === "src" ? "SrcStation" : "DestStation";
+  const counterpartField = selectedAxis === "src" ? "DestStation" : "SrcStation";
+  const selectableStations = [...new Set(transferRows.map(row => String(row?.[selectedField] || "")).filter(Boolean))]
     .sort((left, right) => left.localeCompare(right, undefined, { numeric: true }));
-  let selectedSource = state.deviceRobotTransferSources[robotName];
-  if (!sources.includes(selectedSource)) selectedSource = sources[0] || "";
-  state.deviceRobotTransferSources[robotName] = selectedSource;
+  const selectionKey = `${robotName}:${selectedAxis}`;
+  let selectedStation = state.deviceRobotTransferSources[selectionKey];
+  if (!selectableStations.includes(selectedStation)) selectedStation = selectableStations[0] || "";
+  state.deviceRobotTransferSources[selectionKey] = selectedStation;
   const visibleTransfers = transferRows
     .map((row, index) => ({ row, index }))
-    .filter(({ row }) => String(row?.SrcStation || "") === selectedSource);
-  const transferTableRows = visibleTransfers.map(({ row, index }) => `
-    <tr>
-      <th scope="row"><strong>${escapeHtml(row?.DestStation || "—")}</strong><small>${Number(row?.TransType) === 1 ? "载片移动" : "空载移动"}</small></th>
-      <td><span class="device-transfer-type type-${Number(row?.TransType) === 1 ? "loaded" : "empty"}">${Number(row?.TransType) === 1 ? "载片" : "空载"}</span></td>
-      <td>${deviceTimeInput(timing.PrepTransTime?.[index] ?? row?.Time ?? 0, `${robotName} 从 ${row?.SrcStation || "—"} 到 ${row?.DestStation || "—"} 的移动时间`, {
-        "device-timing-target": "robot-sequence",
-        "device-name": robotName,
-        "timing-field": "PrepTransTime",
-        "timing-index": index,
-      })}</td>
-    </tr>
-  `).join("");
-  const activeArms = Object.values(robot.ArmInfo || {}).filter(arm => arm?.IsEnable !== false).length;
+    .filter(({ row }) => String(row?.[selectedField] || "") === selectedStation);
+  const transfersByCounterpart = new Map();
+  visibleTransfers.forEach(item => {
+    const counterpart = String(item.row?.[counterpartField] || "");
+    if (!transfersByCounterpart.has(counterpart)) transfersByCounterpart.set(counterpart, { 0: [], 1: [] });
+    const type = Number(item.row?.TransType) === 1 ? 1 : 0;
+    transfersByCounterpart.get(counterpart)[type].push(item);
+  });
+  const transferMatrixRows = [...transfersByCounterpart.entries()]
+    .sort(([left], [right]) => left.localeCompare(right, undefined, { numeric: true }))
+    .map(([destination, byType]) => `
+      <tr>
+        <th scope="row"><strong>${escapeHtml(destination || "—")}</strong></th>
+        ${[0, 1].map(type => {
+          const entries = byType[type];
+          if (!entries.length) return `<td><span class="device-time-unavailable">—</span></td>`;
+          return `<td>${entries.map(({ row, index }) => deviceTimeInput(
+            timing.PrepTransTime?.[index] ?? row?.Time ?? 0,
+            `${robotName} ${row?.SrcStation || "—"} → ${row?.DestStation || "—"} ${type === 1 ? "OnLoad" : "NoLoad"} Time`,
+            {
+              "device-timing-target": "robot-sequence",
+              "device-name": robotName,
+              "timing-field": "PrepTransTime",
+              "timing-index": index,
+            },
+          )).join("")}</td>`;
+        }).join("")}
+      </tr>
+    `).join("");
 
   container.innerHTML = `
-    <div class="device-timing-overview">
-      <div><span>机器手类型</span><strong>${escapeHtml(robot.Type || "Robot")}</strong></div>
-      <div><span>启用手臂</span><strong>${activeArms} <small>条</small></strong></div>
-      <div><span>服务站点</span><strong>${actionStations.length} <small>个</small></strong></div>
-      <div><span>移动规则</span><strong>${transferRows.length} <small>条</small></strong></div>
-    </div>
     <section class="device-time-section robot-action-section" aria-labelledby="robotActionTimingTitle">
-      <header><div><h3 id="robotActionTimingTitle">取片与放片</h3><p>同一机器手在不同站点可使用独立动作时间。</p></div><span>${actionStations.length} 个站点</span></header>
-      ${actionRows ? `<div class="device-time-table-wrap"><table class="device-time-table compact"><thead><tr><th>站点</th>${ROBOT_ACTION_TIME_FIELDS.map(({ label }) => `<th>${label}时间</th>`).join("")}</tr></thead><tbody>${actionRows}</tbody></table></div>` : `<div class="device-time-inline-empty">当前机器手未声明取放片时间。</div>`}
+      <header><h3 id="robotActionTimingTitle">Robot action fields</h3></header>
+      ${actionRows ? `<div class="device-time-table-wrap"><table class="device-time-table compact"><thead><tr><th>Station</th>${ROBOT_ACTION_TIME_FIELDS.map(({ label }) => `<th><code>${label}</code></th>`).join("")}</tr></thead><tbody>${actionRows}</tbody></table></div>` : `<div class="device-time-inline-empty">无可编辑字段</div>`}
     </section>
     <section class="device-time-section" aria-labelledby="robotTransferTimingTitle">
-      <header class="device-transfer-head"><div><h3 id="robotTransferTimingTitle">站点间移动</h3><p>按起点查看移动规则，避免在大型设备中一次展示整张矩阵。</p></div><label><span>起点</span><select data-robot-transfer-source="${escapeHtml(robotName)}" ${sources.length ? "" : "disabled"}>${sources.length ? sources.map(source => `<option value="${escapeHtml(source)}" ${source === selectedSource ? "selected" : ""}>${escapeHtml(source)}</option>`).join("") : `<option>无移动规则</option>`}</select></label></header>
-      ${transferTableRows ? `<div class="device-time-table-wrap"><table class="device-time-table transfer"><thead><tr><th>目标站点</th><th>搬运类型</th><th>移动时间</th></tr></thead><tbody>${transferTableRows}</tbody></table></div>` : `<div class="device-time-inline-empty">当前起点没有可配置的移动时间。</div>`}
+      <header class="device-transfer-head">
+        <h3 id="robotTransferTimingTitle">PrepTransTime</h3>
+        <div class="device-transfer-filters">
+          <label><span>Field</span><select data-robot-transfer-axis="${escapeHtml(robotName)}"><option value="src" ${selectedAxis === "src" ? "selected" : ""}>SrcStation</option><option value="dest" ${selectedAxis === "dest" ? "selected" : ""}>DestStation</option></select></label>
+          <label><span>Station</span><select data-robot-transfer-station="${escapeHtml(robotName)}" ${selectableStations.length ? "" : "disabled"}>${selectableStations.length ? selectableStations.map(stationName => `<option value="${escapeHtml(stationName)}" ${stationName === selectedStation ? "selected" : ""}>${escapeHtml(stationName)}</option>`).join("") : `<option>无移动规则</option>`}</select></label>
+        </div>
+      </header>
+      ${transferMatrixRows ? `
+        <div class="device-transfer-fill" data-robot-transfer-fill-toolbar>
+          <label><span>批量 Time</span><span class="device-time-input"><input type="number" min="0" step="any" inputmode="decimal" data-robot-transfer-fill-value aria-label="批量填写 PrepTransTime"><span>s</span></span></label>
+          <button class="btn small" type="button" data-robot-transfer-fill="0">填入 NoLoad</button>
+          <button class="btn small" type="button" data-robot-transfer-fill="1">填入 OnLoad</button>
+          <button class="btn small" type="button" data-robot-transfer-fill="all">填入全部</button>
+        </div>
+        <div class="device-time-table-wrap"><table class="device-time-table transfer"><thead><tr><th>${counterpartField}</th><th><code>Time</code> · NoLoad <small>TransType=0</small></th><th><code>Time</code> · OnLoad <small>TransType=1</small></th></tr></thead><tbody>${transferMatrixRows}</tbody></table></div>` : `<div class="device-time-inline-empty">当前 ${selectedField} 无可编辑字段</div>`}
     </section>`;
+}
+
+/** 将一个秒数批量写入当前机器手、当前选中轴（SrcStation/DestStation）下所选站点的 NoLoad、OnLoad 或全部移动规则。 */
+function fillRobotTransferTimes(button) {
+  const toolbar = button.closest("[data-robot-transfer-fill-toolbar]");
+  const input = toolbar?.querySelector("[data-robot-transfer-fill-value]");
+  const value = Number(input?.value);
+  const valid = input && input.value.trim() !== "" && Number.isFinite(value) && value >= 0;
+  if (!valid) {
+    input?.setCustomValidity("请输入大于或等于 0 的有限秒数");
+    input?.reportValidity();
+    return;
+  }
+  input.setCustomValidity("");
+  const robotName = state.deviceRobotName;
+  const selectedAxis = state.deviceRobotTransferAxes[robotName] === "dest" ? "dest" : "src";
+  const selectedField = selectedAxis === "src" ? "SrcStation" : "DestStation";
+  const selectedStation = state.deviceRobotTransferSources[`${robotName}:${selectedAxis}`];
+  const scope = button.dataset.robotTransferFill;
+  const robot = state.baseDevice?.Robots?.[robotName];
+  const draft = state.deviceTimingDraft?.robots?.[robotName];
+  if (!robot || !draft || !Array.isArray(robot.PrepTransTime) || !Array.isArray(draft.PrepTransTime)) return;
+  robot.PrepTransTime.forEach((row, index) => {
+    const matchesStation = String(row?.[selectedField] || "") === selectedStation;
+    const matchesType = scope === "all" || Number(row?.TransType) === Number(scope);
+    if (matchesStation && matchesType) draft.PrepTransTime[index] = value;
+  });
+  markDeviceTimingDirty();
+  renderDeviceRobotTiming();
 }
 
 /** 刷新设备配置分类、表单与保存状态；仅显示当前分类以控制高密度表格的认知负担。 */
@@ -5370,9 +5415,17 @@ document.addEventListener("input", event => {
   if (event.target.matches("[data-scope], [data-option], [data-time-index], [data-round-time-index]")) updateStateFromControl(event.target);
 });
 document.addEventListener("change", event => {
-  const transferSource = event.target.closest?.("[data-robot-transfer-source]");
-  if (transferSource) {
-    state.deviceRobotTransferSources[transferSource.dataset.robotTransferSource] = transferSource.value;
+  const transferAxis = event.target.closest?.("[data-robot-transfer-axis]");
+  if (transferAxis) {
+    state.deviceRobotTransferAxes[transferAxis.dataset.robotTransferAxis] = transferAxis.value;
+    renderDeviceRobotTiming();
+    return;
+  }
+  const transferStation = event.target.closest?.("[data-robot-transfer-station]");
+  if (transferStation) {
+    const robotName = transferStation.dataset.robotTransferStation;
+    const selectedAxis = state.deviceRobotTransferAxes[robotName] === "dest" ? "dest" : "src";
+    state.deviceRobotTransferSources[`${robotName}:${selectedAxis}`] = transferStation.value;
     renderDeviceRobotTiming();
     return;
   }
@@ -5405,6 +5458,11 @@ document.addEventListener("change", event => {
 });
 document.addEventListener("click", event => {
   const tab = event.target.closest("[data-tab-target]"); if (tab) switchTab(tab.dataset.tabTarget);
+  const transferFillButton = event.target.closest("[data-robot-transfer-fill]");
+  if (transferFillButton) {
+    fillRobotTransferTimes(transferFillButton);
+    return;
+  }
   const deviceConfigSection = event.target.closest("[data-device-config-section]");
   if (deviceConfigSection) {
     switchDeviceConfigSection(deviceConfigSection.dataset.deviceConfigSection);

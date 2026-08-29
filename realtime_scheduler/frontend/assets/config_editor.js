@@ -18305,15 +18305,15 @@ var BATCH_STATUS_POLL_MILLISECONDS = 1e3;
 var TEST_ORDER_COLLATOR = new Intl.Collator("zh-CN", { numeric: true, sensitivity: "base" });
 var DEFAULT_DUMMY_WAFER_COUNT = 8;
 var STATION_ACTION_TIME_FIELDS = [
-  { key: "PickPrepareTime", label: "\u53D6\u7247\u51C6\u5907" },
-  { key: "PickCompleteTime", label: "\u53D6\u7247\u5B8C\u6210" },
-  { key: "PlacePrepareTime", label: "\u653E\u7247\u51C6\u5907" },
-  { key: "PlaceCompleteTime", label: "\u653E\u7247\u5B8C\u6210" },
-  { key: "PostCompleteTime", label: "\u52A8\u4F5C\u540E\u5904\u7406" }
+  { key: "PickPrepareTime", label: "PickPrepareTime" },
+  { key: "PickCompleteTime", label: "PickCompleteTime" },
+  { key: "PlacePrepareTime", label: "PlacePrepareTime" },
+  { key: "PlaceCompleteTime", label: "PlaceCompleteTime" },
+  { key: "PostCompleteTime", label: "PostCompleteTime" }
 ];
 var ROBOT_ACTION_TIME_FIELDS = [
-  { key: "PickTime", label: "\u53D6\u7247" },
-  { key: "PlaceTime", label: "\u653E\u7247" }
+  { key: "PickTime", label: "PickTime" },
+  { key: "PlaceTime", label: "PlaceTime" }
 ];
 var state = {
   workspaceDevices: [],
@@ -18345,6 +18345,7 @@ var state = {
   deviceConfigSection: "station-time",
   deviceStationName: "",
   deviceRobotName: "",
+  deviceRobotTransferAxes: {},
   deviceRobotTransferSources: {},
   deviceTimingDraft: null,
   deviceTimingDirty: false,
@@ -19062,7 +19063,7 @@ function renderDeviceStationTiming() {
   ))].sort((left, right) => left.localeCompare(right, void 0, { numeric: true }));
   const actionRows = actionControllers.map((controller) => `
     <tr>
-      <th scope="row"><strong>${escapeHtml4(controller)}</strong><small>\u63A7\u5236\u673A\u5668\u624B</small></th>
+      <th scope="row"><strong>${escapeHtml4(controller)}</strong></th>
       ${STATION_ACTION_TIME_FIELDS.map(({ key, label }) => {
     if (!Object.prototype.hasOwnProperty.call(timing[key] || {}, controller)) return `<td><span class="device-time-unavailable">\u2014</span></td>`;
     return `<td>${deviceTimeInput(timing[key][controller], `${stationName} ${controller} ${label}`, {
@@ -19079,9 +19080,9 @@ function renderDeviceStationTiming() {
   const specialRows = [
     ...alignmentEntries.map(([slotId, value]) => `
       <div class="device-transition-row">
-        <span class="device-transition-kind">\u5BF9\u51C6</span>
+        <span class="device-transition-kind">AlignmentTime</span>
         <strong>Slot ${escapeHtml4(slotId)}</strong>
-        <span class="device-transition-route">\u6676\u5706\u5B9A\u4F4D\u65F6\u95F4</span>
+        <span class="device-transition-route">key=${escapeHtml4(slotId)}</span>
         ${deviceTimeInput(value, `${stationName} Slot ${slotId} \u5BF9\u51C6\u65F6\u95F4`, {
       "device-timing-target": "station-map",
       "device-name": stationName,
@@ -19092,9 +19093,9 @@ function renderDeviceStationTiming() {
     `),
     ...prePrepareRows.map((row, index) => `
       <div class="device-transition-row">
-        <span class="device-transition-kind">${escapeHtml4(row?.PrePrepareType || "\u72B6\u6001\u5207\u6362")}</span>
+        <span class="device-transition-kind">PrePrepareTime</span>
         <strong>${escapeHtml4(row?.LastItem || "\u2014")} <i aria-hidden="true">\u2192</i> ${escapeHtml4(row?.CurrentItem || "\u2014")}</strong>
-        <span class="device-transition-route">${escapeHtml4(row?.PrePrepareType === "PumpTime" ? "\u62BD\u6C14" : row?.PrePrepareType === "VentTime" ? "\u5145\u6C14" : "\u9884\u5904\u7406")}</span>
+        <span class="device-transition-route">${escapeHtml4(row?.PrePrepareType || "PrePrepareType")}</span>
         ${deviceTimeInput(timing.PrePrepareTime?.[index] ?? row?.Time ?? 0, `${stationName} ${row?.PrePrepareType || "\u72B6\u6001\u5207\u6362"}`, {
       "device-timing-target": "station-sequence",
       "device-name": stationName,
@@ -19104,23 +19105,14 @@ function renderDeviceStationTiming() {
       </div>
     `)
   ];
-  const timingCount = actionControllers.reduce((count, controller) => count + STATION_ACTION_TIME_FIELDS.filter(
-    ({ key }) => Object.prototype.hasOwnProperty.call(timing[key] || {}, controller)
-  ).length, 0) + specialRows.length;
   container.innerHTML = `
-    <div class="device-timing-overview">
-      <div><span>\u7AD9\u70B9\u7C7B\u578B</span><strong>${escapeHtml4(station.Type || "Station")}</strong></div>
-      <div><span>\u5BB9\u91CF</span><strong>${Number(station.Capacity) || 0} <small>\u69FD</small></strong></div>
-      <div><span>\u5173\u8054\u673A\u5668\u624B</span><strong>${actionControllers.length} <small>\u53F0</small></strong></div>
-      <div><span>\u8BA1\u65F6\u53C2\u6570</span><strong>${timingCount} <small>\u9879</small></strong></div>
-    </div>
     <section class="device-time-section" aria-labelledby="stationActionTimingTitle">
-      <header><div><h3 id="stationActionTimingTitle">\u53D6\u653E\u7247\u52A8\u4F5C</h3><p>\u7AD9\u70B9\u4E0E\u5BF9\u5E94\u673A\u5668\u624B\u534F\u540C\u52A8\u4F5C\u7684\u5206\u6BB5\u8017\u65F6\u3002</p></div><span>${actionControllers.length} \u7EC4\u63A7\u5236\u5173\u7CFB</span></header>
-      ${actionRows ? `<div class="device-time-table-wrap"><table class="device-time-table"><thead><tr><th>\u673A\u5668\u624B</th>${STATION_ACTION_TIME_FIELDS.map(({ label }) => `<th>${label}</th>`).join("")}</tr></thead><tbody>${actionRows}</tbody></table></div>` : `<div class="device-time-inline-empty">\u5F53\u524D\u7AD9\u70B9\u672A\u58F0\u660E\u53D6\u653E\u7247\u5206\u6BB5\u65F6\u95F4\u3002</div>`}
+      <header><h3 id="stationActionTimingTitle">Station action fields</h3></header>
+      ${actionRows ? `<div class="device-time-table-wrap"><table class="device-time-table"><thead><tr><th>Robot</th>${STATION_ACTION_TIME_FIELDS.map(({ label }) => `<th><code>${label}</code></th>`).join("")}</tr></thead><tbody>${actionRows}</tbody></table></div>` : `<div class="device-time-inline-empty">\u65E0\u53EF\u7F16\u8F91\u5B57\u6BB5</div>`}
     </section>
     <section class="device-time-section" aria-labelledby="stationTransitionTimingTitle">
-      <header><div><h3 id="stationTransitionTimingTitle">\u4E13\u9879\u5904\u7406\u4E0E\u72B6\u6001\u5207\u6362</h3><p>LoadLock \u62BD\u5145\u6C14\u3001Aligner \u5BF9\u51C6\u7B49\u7AD9\u70B9\u4E13\u5C5E\u65F6\u95F4\u3002</p></div><span>${specialRows.length} \u9879</span></header>
-      ${specialRows.length ? `<div class="device-transition-list">${specialRows.join("")}</div>` : `<div class="device-time-inline-empty">\u5F53\u524D\u7AD9\u70B9\u6CA1\u6709\u989D\u5916\u7684\u72B6\u6001\u5207\u6362\u65F6\u95F4\u3002</div>`}
+      <header><h3 id="stationTransitionTimingTitle">Station-specific fields</h3></header>
+      ${specialRows.length ? `<div class="device-transition-list">${specialRows.join("")}</div>` : `<div class="device-time-inline-empty">\u65E0\u53EF\u7F16\u8F91\u5B57\u6BB5</div>`}
     </section>`;
 }
 function renderDeviceRobotTiming() {
@@ -19136,7 +19128,7 @@ function renderDeviceRobotTiming() {
     ({ key }) => Object.keys(timing[key] || {})
   ))].sort((left, right) => left.localeCompare(right, void 0, { numeric: true }));
   const actionRows = actionStations.map((stationName) => `
-    <tr><th scope="row"><strong>${escapeHtml4(stationName)}</strong><small>\u76EE\u6807\u7AD9\u70B9</small></th>${ROBOT_ACTION_TIME_FIELDS.map(({ key, label }) => {
+    <tr><th scope="row"><strong>${escapeHtml4(stationName)}</strong></th>${ROBOT_ACTION_TIME_FIELDS.map(({ key, label }) => {
     if (!Object.prototype.hasOwnProperty.call(timing[key] || {}, stationName)) return `<td><span class="device-time-unavailable">\u2014</span></td>`;
     return `<td>${deviceTimeInput(timing[key][stationName], `${robotName} \u5728 ${stationName} \u7684${label}\u65F6\u95F4`, {
       "device-timing-target": "robot-map",
@@ -19147,39 +19139,90 @@ function renderDeviceRobotTiming() {
   }).join("")}</tr>
   `).join("");
   const transferRows = Array.isArray(robot.PrepTransTime) ? robot.PrepTransTime : [];
-  const sources = [...new Set(transferRows.map((row) => String(row?.SrcStation || "")).filter(Boolean))].sort((left, right) => left.localeCompare(right, void 0, { numeric: true }));
-  let selectedSource = state.deviceRobotTransferSources[robotName];
-  if (!sources.includes(selectedSource)) selectedSource = sources[0] || "";
-  state.deviceRobotTransferSources[robotName] = selectedSource;
-  const visibleTransfers = transferRows.map((row, index) => ({ row, index })).filter(({ row }) => String(row?.SrcStation || "") === selectedSource);
-  const transferTableRows = visibleTransfers.map(({ row, index }) => `
-    <tr>
-      <th scope="row"><strong>${escapeHtml4(row?.DestStation || "\u2014")}</strong><small>${Number(row?.TransType) === 1 ? "\u8F7D\u7247\u79FB\u52A8" : "\u7A7A\u8F7D\u79FB\u52A8"}</small></th>
-      <td><span class="device-transfer-type type-${Number(row?.TransType) === 1 ? "loaded" : "empty"}">${Number(row?.TransType) === 1 ? "\u8F7D\u7247" : "\u7A7A\u8F7D"}</span></td>
-      <td>${deviceTimeInput(timing.PrepTransTime?.[index] ?? row?.Time ?? 0, `${robotName} \u4ECE ${row?.SrcStation || "\u2014"} \u5230 ${row?.DestStation || "\u2014"} \u7684\u79FB\u52A8\u65F6\u95F4`, {
-    "device-timing-target": "robot-sequence",
-    "device-name": robotName,
-    "timing-field": "PrepTransTime",
-    "timing-index": index
-  })}</td>
-    </tr>
-  `).join("");
-  const activeArms = Object.values(robot.ArmInfo || {}).filter((arm) => arm?.IsEnable !== false).length;
+  const selectedAxis = state.deviceRobotTransferAxes[robotName] === "dest" ? "dest" : "src";
+  const selectedField = selectedAxis === "src" ? "SrcStation" : "DestStation";
+  const counterpartField = selectedAxis === "src" ? "DestStation" : "SrcStation";
+  const selectableStations = [...new Set(transferRows.map((row) => String(row?.[selectedField] || "")).filter(Boolean))].sort((left, right) => left.localeCompare(right, void 0, { numeric: true }));
+  const selectionKey = `${robotName}:${selectedAxis}`;
+  let selectedStation = state.deviceRobotTransferSources[selectionKey];
+  if (!selectableStations.includes(selectedStation)) selectedStation = selectableStations[0] || "";
+  state.deviceRobotTransferSources[selectionKey] = selectedStation;
+  const visibleTransfers = transferRows.map((row, index) => ({ row, index })).filter(({ row }) => String(row?.[selectedField] || "") === selectedStation);
+  const transfersByCounterpart = /* @__PURE__ */ new Map();
+  visibleTransfers.forEach((item) => {
+    const counterpart = String(item.row?.[counterpartField] || "");
+    if (!transfersByCounterpart.has(counterpart)) transfersByCounterpart.set(counterpart, { 0: [], 1: [] });
+    const type = Number(item.row?.TransType) === 1 ? 1 : 0;
+    transfersByCounterpart.get(counterpart)[type].push(item);
+  });
+  const transferMatrixRows = [...transfersByCounterpart.entries()].sort(([left], [right]) => left.localeCompare(right, void 0, { numeric: true })).map(([destination, byType]) => `
+      <tr>
+        <th scope="row"><strong>${escapeHtml4(destination || "\u2014")}</strong></th>
+        ${[0, 1].map((type) => {
+    const entries = byType[type];
+    if (!entries.length) return `<td><span class="device-time-unavailable">\u2014</span></td>`;
+    return `<td>${entries.map(({ row, index }) => deviceTimeInput(
+      timing.PrepTransTime?.[index] ?? row?.Time ?? 0,
+      `${robotName} ${row?.SrcStation || "\u2014"} \u2192 ${row?.DestStation || "\u2014"} ${type === 1 ? "OnLoad" : "NoLoad"} Time`,
+      {
+        "device-timing-target": "robot-sequence",
+        "device-name": robotName,
+        "timing-field": "PrepTransTime",
+        "timing-index": index
+      }
+    )).join("")}</td>`;
+  }).join("")}
+      </tr>
+    `).join("");
   container.innerHTML = `
-    <div class="device-timing-overview">
-      <div><span>\u673A\u5668\u624B\u7C7B\u578B</span><strong>${escapeHtml4(robot.Type || "Robot")}</strong></div>
-      <div><span>\u542F\u7528\u624B\u81C2</span><strong>${activeArms} <small>\u6761</small></strong></div>
-      <div><span>\u670D\u52A1\u7AD9\u70B9</span><strong>${actionStations.length} <small>\u4E2A</small></strong></div>
-      <div><span>\u79FB\u52A8\u89C4\u5219</span><strong>${transferRows.length} <small>\u6761</small></strong></div>
-    </div>
     <section class="device-time-section robot-action-section" aria-labelledby="robotActionTimingTitle">
-      <header><div><h3 id="robotActionTimingTitle">\u53D6\u7247\u4E0E\u653E\u7247</h3><p>\u540C\u4E00\u673A\u5668\u624B\u5728\u4E0D\u540C\u7AD9\u70B9\u53EF\u4F7F\u7528\u72EC\u7ACB\u52A8\u4F5C\u65F6\u95F4\u3002</p></div><span>${actionStations.length} \u4E2A\u7AD9\u70B9</span></header>
-      ${actionRows ? `<div class="device-time-table-wrap"><table class="device-time-table compact"><thead><tr><th>\u7AD9\u70B9</th>${ROBOT_ACTION_TIME_FIELDS.map(({ label }) => `<th>${label}\u65F6\u95F4</th>`).join("")}</tr></thead><tbody>${actionRows}</tbody></table></div>` : `<div class="device-time-inline-empty">\u5F53\u524D\u673A\u5668\u624B\u672A\u58F0\u660E\u53D6\u653E\u7247\u65F6\u95F4\u3002</div>`}
+      <header><h3 id="robotActionTimingTitle">Robot action fields</h3></header>
+      ${actionRows ? `<div class="device-time-table-wrap"><table class="device-time-table compact"><thead><tr><th>Station</th>${ROBOT_ACTION_TIME_FIELDS.map(({ label }) => `<th><code>${label}</code></th>`).join("")}</tr></thead><tbody>${actionRows}</tbody></table></div>` : `<div class="device-time-inline-empty">\u65E0\u53EF\u7F16\u8F91\u5B57\u6BB5</div>`}
     </section>
     <section class="device-time-section" aria-labelledby="robotTransferTimingTitle">
-      <header class="device-transfer-head"><div><h3 id="robotTransferTimingTitle">\u7AD9\u70B9\u95F4\u79FB\u52A8</h3><p>\u6309\u8D77\u70B9\u67E5\u770B\u79FB\u52A8\u89C4\u5219\uFF0C\u907F\u514D\u5728\u5927\u578B\u8BBE\u5907\u4E2D\u4E00\u6B21\u5C55\u793A\u6574\u5F20\u77E9\u9635\u3002</p></div><label><span>\u8D77\u70B9</span><select data-robot-transfer-source="${escapeHtml4(robotName)}" ${sources.length ? "" : "disabled"}>${sources.length ? sources.map((source) => `<option value="${escapeHtml4(source)}" ${source === selectedSource ? "selected" : ""}>${escapeHtml4(source)}</option>`).join("") : `<option>\u65E0\u79FB\u52A8\u89C4\u5219</option>`}</select></label></header>
-      ${transferTableRows ? `<div class="device-time-table-wrap"><table class="device-time-table transfer"><thead><tr><th>\u76EE\u6807\u7AD9\u70B9</th><th>\u642C\u8FD0\u7C7B\u578B</th><th>\u79FB\u52A8\u65F6\u95F4</th></tr></thead><tbody>${transferTableRows}</tbody></table></div>` : `<div class="device-time-inline-empty">\u5F53\u524D\u8D77\u70B9\u6CA1\u6709\u53EF\u914D\u7F6E\u7684\u79FB\u52A8\u65F6\u95F4\u3002</div>`}
+      <header class="device-transfer-head">
+        <h3 id="robotTransferTimingTitle">PrepTransTime</h3>
+        <div class="device-transfer-filters">
+          <label><span>Field</span><select data-robot-transfer-axis="${escapeHtml4(robotName)}"><option value="src" ${selectedAxis === "src" ? "selected" : ""}>SrcStation</option><option value="dest" ${selectedAxis === "dest" ? "selected" : ""}>DestStation</option></select></label>
+          <label><span>Station</span><select data-robot-transfer-station="${escapeHtml4(robotName)}" ${selectableStations.length ? "" : "disabled"}>${selectableStations.length ? selectableStations.map((stationName) => `<option value="${escapeHtml4(stationName)}" ${stationName === selectedStation ? "selected" : ""}>${escapeHtml4(stationName)}</option>`).join("") : `<option>\u65E0\u79FB\u52A8\u89C4\u5219</option>`}</select></label>
+        </div>
+      </header>
+      ${transferMatrixRows ? `
+        <div class="device-transfer-fill" data-robot-transfer-fill-toolbar>
+          <label><span>\u6279\u91CF Time</span><span class="device-time-input"><input type="number" min="0" step="any" inputmode="decimal" data-robot-transfer-fill-value aria-label="\u6279\u91CF\u586B\u5199 PrepTransTime"><span>s</span></span></label>
+          <button class="btn small" type="button" data-robot-transfer-fill="0">\u586B\u5165 NoLoad</button>
+          <button class="btn small" type="button" data-robot-transfer-fill="1">\u586B\u5165 OnLoad</button>
+          <button class="btn small" type="button" data-robot-transfer-fill="all">\u586B\u5165\u5168\u90E8</button>
+        </div>
+        <div class="device-time-table-wrap"><table class="device-time-table transfer"><thead><tr><th>${counterpartField}</th><th><code>Time</code> \xB7 NoLoad <small>TransType=0</small></th><th><code>Time</code> \xB7 OnLoad <small>TransType=1</small></th></tr></thead><tbody>${transferMatrixRows}</tbody></table></div>` : `<div class="device-time-inline-empty">\u5F53\u524D ${selectedField} \u65E0\u53EF\u7F16\u8F91\u5B57\u6BB5</div>`}
     </section>`;
+}
+function fillRobotTransferTimes(button) {
+  const toolbar = button.closest("[data-robot-transfer-fill-toolbar]");
+  const input = toolbar?.querySelector("[data-robot-transfer-fill-value]");
+  const value = Number(input?.value);
+  const valid = input && input.value.trim() !== "" && Number.isFinite(value) && value >= 0;
+  if (!valid) {
+    input?.setCustomValidity("\u8BF7\u8F93\u5165\u5927\u4E8E\u6216\u7B49\u4E8E 0 \u7684\u6709\u9650\u79D2\u6570");
+    input?.reportValidity();
+    return;
+  }
+  input.setCustomValidity("");
+  const robotName = state.deviceRobotName;
+  const selectedAxis = state.deviceRobotTransferAxes[robotName] === "dest" ? "dest" : "src";
+  const selectedField = selectedAxis === "src" ? "SrcStation" : "DestStation";
+  const selectedStation = state.deviceRobotTransferSources[`${robotName}:${selectedAxis}`];
+  const scope = button.dataset.robotTransferFill;
+  const robot = state.baseDevice?.Robots?.[robotName];
+  const draft = state.deviceTimingDraft?.robots?.[robotName];
+  if (!robot || !draft || !Array.isArray(robot.PrepTransTime) || !Array.isArray(draft.PrepTransTime)) return;
+  robot.PrepTransTime.forEach((row, index) => {
+    const matchesStation = String(row?.[selectedField] || "") === selectedStation;
+    const matchesType = scope === "all" || Number(row?.TransType) === Number(scope);
+    if (matchesStation && matchesType) draft.PrepTransTime[index] = value;
+  });
+  markDeviceTimingDirty();
+  renderDeviceRobotTiming();
 }
 function renderDeviceTimingConfiguration() {
   renderDeviceConfigHeader();
@@ -23148,9 +23191,17 @@ document.addEventListener("input", (event) => {
   if (event.target.matches("[data-scope], [data-option], [data-time-index], [data-round-time-index]")) updateStateFromControl(event.target);
 });
 document.addEventListener("change", (event) => {
-  const transferSource = event.target.closest?.("[data-robot-transfer-source]");
-  if (transferSource) {
-    state.deviceRobotTransferSources[transferSource.dataset.robotTransferSource] = transferSource.value;
+  const transferAxis = event.target.closest?.("[data-robot-transfer-axis]");
+  if (transferAxis) {
+    state.deviceRobotTransferAxes[transferAxis.dataset.robotTransferAxis] = transferAxis.value;
+    renderDeviceRobotTiming();
+    return;
+  }
+  const transferStation = event.target.closest?.("[data-robot-transfer-station]");
+  if (transferStation) {
+    const robotName = transferStation.dataset.robotTransferStation;
+    const selectedAxis = state.deviceRobotTransferAxes[robotName] === "dest" ? "dest" : "src";
+    state.deviceRobotTransferSources[`${robotName}:${selectedAxis}`] = transferStation.value;
     renderDeviceRobotTiming();
     return;
   }
@@ -23184,6 +23235,11 @@ document.addEventListener("change", (event) => {
 document.addEventListener("click", (event) => {
   const tab = event.target.closest("[data-tab-target]");
   if (tab) switchTab(tab.dataset.tabTarget);
+  const transferFillButton = event.target.closest("[data-robot-transfer-fill]");
+  if (transferFillButton) {
+    fillRobotTransferTimes(transferFillButton);
+    return;
+  }
   const deviceConfigSection = event.target.closest("[data-device-config-section]");
   if (deviceConfigSection) {
     switchDeviceConfigSection(deviceConfigSection.dataset.deviceConfigSection);

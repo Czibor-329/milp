@@ -524,12 +524,12 @@ class RecomputeFailureOutputTests(unittest.TestCase):
         package = json.loads((frontend_root / "package.json").read_text(encoding="utf-8"))
         package_lock = json.loads((frontend_root / "package-lock.json").read_text(encoding="utf-8"))
 
-        self.assertEqual("1.5.17", package["version"])
-        self.assertEqual("1.5.17", package_lock["version"])
-        self.assertEqual("1.5.17", package_lock["packages"][""]["version"])
-        self.assertIn('class="frontend-version">前端 v1.5.17</span>', template)
-        self.assertIn('/assets/config_editor.css?v=1.5.17', template)
-        self.assertIn('/assets/config_editor.js?v=1.5.17', template)
+        self.assertEqual("1.5.18", package["version"])
+        self.assertEqual("1.5.18", package_lock["version"])
+        self.assertEqual("1.5.18", package_lock["packages"][""]["version"])
+        self.assertIn('class="frontend-version">前端 v1.5.18</span>', template)
+        self.assertIn('/assets/config_editor.css?v=1.5.18', template)
+        self.assertIn('/assets/config_editor.js?v=1.5.18', template)
 
     def test_batch_status_refresh_obeys_frontend_performance_limit(self) -> None:
         """批量状态最多每秒轮询一次，且明细未变化时不得重建整组 DOM。"""
@@ -770,6 +770,25 @@ class ConfigEditorServerTests(unittest.TestCase):
             'id="nextDeviceRobotButton"',
             'id="saveDeviceTimingButton"',
             '"device-timing-target":',
+            'data-robot-transfer-axis=',
+            'data-robot-transfer-station=',
+            'data-robot-transfer-fill="0"',
+            'data-robot-transfer-fill="1"',
+            'data-robot-transfer-fill="all"',
+            "Station action fields",
+            "PickPrepareTime",
+            "PickCompleteTime",
+            "PlacePrepareTime",
+            "PlaceCompleteTime",
+            "PostCompleteTime",
+            "Robot action fields",
+            "PickTime",
+            "PlaceTime",
+            "PrepTransTime",
+            "SrcStation",
+            "DestStation",
+            "TransType=0",
+            "TransType=1",
             "/device-timing",
             'id="robotSlotList"',
             'data-robot-arm-count="1"',
@@ -782,6 +801,8 @@ class ConfigEditorServerTests(unittest.TestCase):
             "JSON.parse(`[${records}]`)",
         ):
             self.assertIn(marker, source)
+        self.assertNotIn("所有数值单位均为秒。这里只编辑设备文件已经声明的计时项", source)
+        self.assertNotIn("机器手的取放片时间按目标站点配置", source)
 
     def test_robot_slot_selection_projects_single_and_dual_arm_fields(self) -> None:
         """单/双臂只投影为独立 Arm，不创建 Robot.Slot 或改写 CanMultiTrans。"""
@@ -2269,7 +2290,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("<span>结果分析</span>", html)
         self.assertIn("<span>路径配置</span>", html)
         self.assertNotIn('data-tab-view="clean"', html)
-        self.assertIn('class="frontend-version">前端 v1.5.17</span>', html)
+        self.assertIn('class="frontend-version">前端 v1.5.18</span>', html)
         self.assertIn('data-option="residencyGuardSeconds"', html)
         self.assertIn('data-option="maximumRobotHoldingSeconds"', html)
         self.assertIn('data-option="maximumSystemResidenceCv"', html)

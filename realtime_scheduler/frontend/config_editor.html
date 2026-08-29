@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>调度平台</title>
   <link rel="stylesheet" href="/assets/katex.min.css?v=1.4.4">
-  <link rel="stylesheet" href="/assets/config_editor.css?v=1.5.17">
+  <link rel="stylesheet" href="/assets/config_editor.css?v=1.5.18">
 </head>
 <body>
   <a class="skip-link" href="#mainContent">跳到主要内容</a>
@@ -40,7 +40,7 @@
       <div class="sidebar-footer">
         <span class="sidebar-footer-label">系统状态</span>
         <div class="service-pill" id="serviceState">本地服务</div>
-        <span class="frontend-version">前端 v1.5.17</span>
+        <span class="frontend-version">前端 v1.5.18</span>
       </div>
     </aside>
 
@@ -326,17 +326,16 @@
           <header class="device-config-heading">
             <div>
               <h1>设备配置</h1>
-              <p>统一校准设备动作时间、机器手搬运时间与槽位能力，保存后应用到当前设备的全部测试。</p>
             </div>
             <div class="device-config-heading-actions">
               <div class="device-config-save-state">
                 <span id="deviceConfigSelectedName">尚未选择设备</span>
                 <strong id="deviceTimingStatus" role="status" aria-live="polite">选择设备后开始配置</strong>
               </div>
-              <button class="btn" id="resetDeviceTimingButton" type="button" disabled>撤销时间修改</button>
+              <button class="btn" id="resetDeviceTimingButton" type="button" disabled>撤销修改</button>
               <button class="btn primary" id="saveDeviceTimingButton" type="button" disabled>
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h12l2 2v14H5zM8 4v6h7V4M8 20v-6h8v6"/></svg>
-                保存时间参数
+                保存修改
               </button>
             </div>
           </header>
@@ -344,15 +343,15 @@
             <nav class="device-config-nav" aria-label="设备配置分类">
               <button class="device-config-nav-item active" type="button" data-device-config-section="station-time" aria-current="page">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 7v5l3 2"/></svg>
-                <span><strong>设备时间</strong><small>站点动作 / 状态切换</small></span>
+                <span><strong>设备时间</strong></span>
               </button>
               <button class="device-config-nav-item" type="button" data-device-config-section="robot-time">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 18h14M8 18v-4l4-2 3-5 3 2-3 6-3 3"/><circle cx="18" cy="7" r="2"/><path d="M6 14h4"/></svg>
-                <span><strong>机器手时间</strong><small>取放片 / 站点间移动</small></span>
+                <span><strong>机器手时间</strong></span>
               </button>
               <button class="device-config-nav-item" type="button" data-device-config-section="robot-slot">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="7" width="16" height="11" rx="3"/><path d="M12 3v4M8 12h.01M16 12h.01M8 18v3m8-3v3"/></svg>
-                <span><strong>机器手槽位</strong><small>单臂 / 双臂模式</small></span>
+                <span><strong>机器手槽位</strong></span>
               </button>
             </nav>
             <div class="device-config-content">
@@ -360,7 +359,6 @@
                 <div class="panel-head device-timing-panel-head">
                   <div>
                     <h2>设备动作时间</h2>
-                    <p>按站点校准开门、准备、取放片完成及状态切换时间。</p>
                   </div>
                   <div class="device-config-entity-picker">
                     <button class="device-config-step-button" id="previousDeviceStationButton" type="button" aria-label="上一个站点" disabled>‹</button>
@@ -369,10 +367,6 @@
                   </div>
                 </div>
                 <div class="panel-body device-timing-body">
-                  <div class="device-config-notice">
-                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8v5m0 3h.01"/><circle cx="12" cy="12" r="9"/></svg>
-                    <span>所有数值单位均为秒。这里只编辑设备文件已经声明的计时项，不会改变站点容量、可达关系或运行状态。</span>
-                  </div>
                   <div id="deviceStationTimingEditor"></div>
                 </div>
               </article>
@@ -381,7 +375,6 @@
                 <div class="panel-head device-timing-panel-head">
                   <div>
                     <h2>机器手动作时间</h2>
-                    <p>分别校准各站点取片、放片以及站点间移动耗时。</p>
                   </div>
                   <div class="device-config-entity-picker">
                     <button class="device-config-step-button" id="previousDeviceRobotButton" type="button" aria-label="上一个机器手" disabled>‹</button>
@@ -390,10 +383,6 @@
                   </div>
                 </div>
                 <div class="panel-body device-timing-body">
-                  <div class="device-config-notice">
-                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8v5m0 3h.01"/><circle cx="12" cy="12" r="9"/></svg>
-                    <span>机器手的取放片时间按目标站点配置；移动时间按起点、终点和搬运类型精确匹配。</span>
-                  </div>
                   <div id="deviceRobotTimingEditor"></div>
                 </div>
               </article>
@@ -739,6 +728,6 @@
     </aside>
   </dialog>
 
-  <script type="module" src="/assets/config_editor.js?v=1.5.17"></script>
+  <script type="module" src="/assets/config_editor.js?v=1.5.18"></script>
 </body>
 </html>
