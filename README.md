@@ -49,6 +49,8 @@ python realtime_scheduler\server.py --open
 使用 `--list` 逐级查看设备、测试组和测试 ID；使用重复的 `--test` 精确选择案例，
 或用 `--json-output output\dataset-run.json` 保存完整结果。完整参数运行
 `.\venv\Scripts\python.exe scripts\run_dataset_suite.py --help` 查看。
+需要与页面默认校验口径一致时传入 `--hongye-check`，脚本会改用 HongYe
+SchStateLib 校验器。
 
 ## 性能回归
 

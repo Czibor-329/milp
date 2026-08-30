@@ -65,3 +65,40 @@ def test_terminal_suite_uses_builtin_validation_and_selected_limit() -> None:
     assert captured["hongye_check"] is False
     assert captured["skip_baseline"] is True
     assert captured["test_ids"] == ["test-1"]
+
+
+def test_terminal_suite_can_enable_hongye_validation() -> None:
+    """显式开关应把测试组交给 HongYe 校验器。"""
+    device = _device()
+    captured = {}
+
+    def fake_run(*args, **kwargs):
+        """记录批量参数并返回成功摘要。"""
+        captured.update(kwargs)
+        return {
+            "ok": True,
+            "succeeded": 2,
+            "failed": 0,
+            "totalElapsedMs": 12.0,
+            "items": [],
+        }
+
+    from realtime_scheduler import server as scheduler_server
+
+    with (
+        patch.object(
+            scheduler_server,
+            "list_workspace_devices",
+            return_value=[{"id": device["id"], "name": device["name"], "testCount": 2}],
+        ),
+        patch.object(scheduler_server, "get_workspace_device", return_value=device),
+        patch.object(scheduler_server, "run_workspace_test_batch", side_effect=fake_run),
+    ):
+        exit_code = run_dataset_suite.main([
+            "--device", "12kChamber",
+            "--group", "公司示例集",
+            "--hongye-check",
+        ])
+
+    assert exit_code == 0
+    assert captured["hongye_check"] is True

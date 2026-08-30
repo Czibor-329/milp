@@ -1,8 +1,8 @@
 """从终端运行本地设备测试集，并输出适合 AI 调试的逐项结果。
 
 脚本直接读取 ``realtime_scheduler/data/datasets`` 的单一数据源，调用与前端
-批量运行相同的计划构造和执行逻辑。默认使用平台内置 MoveList 校验器，不启动
-HongYe；运行结果和复现日志仍按平台现有规则保存。
+批量运行相同的计划构造和执行逻辑。默认使用平台内置 MoveList 校验器；传入
+``--hongye-check`` 时改用 HongYe 校验器。运行结果和复现日志仍按平台现有规则保存。
 """
 
 from __future__ import annotations
@@ -46,6 +46,11 @@ def _argument_parser() -> argparse.ArgumentParser:
         "--with-baseline",
         action="store_true",
         help="同时计算 Heuristic Baseline；默认跳过以缩短调试时间",
+    )
+    parser.add_argument(
+        "--hongye-check",
+        action="store_true",
+        help="使用 HongYe SchStateLib 校验；默认使用平台内置 MoveList 校验器",
     )
     parser.add_argument("--json-output", type=Path, help="把完整批量结果另存为 JSON")
     parser.add_argument(
@@ -170,7 +175,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     expected_count = len(test_ids) if test_ids is not None else len(group_tests)
     print(
         f"设备={selected_device.get('name')} 组={args.group or '<未分组>'} "
-        f"策略={args.strategy} 测试={expected_count} 校验=内置",
+        f"策略={args.strategy} 测试={expected_count} "
+        f"校验={'HongYe' if args.hongye_check else '内置'}",
         flush=True,
     )
     print_lock = threading.Lock()
@@ -189,7 +195,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.strategy,
         {},
         skip_validation=False,
-        hongye_check=False,
+        hongye_check=args.hongye_check,
         skip_baseline=not args.with_baseline,
         maximum_workers=args.workers,
         test_ids=test_ids,
