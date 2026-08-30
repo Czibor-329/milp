@@ -18,7 +18,7 @@ from unittest.mock import patch
 
 import realtime_scheduler.server as config_server
 from realtime_scheduler.algorithm_interface import discover_other_algorithms
-from realtime_scheduler.plan_builder import _runtime_clean
+from realtime_scheduler.plan_builder import _runtime_clean, build_process_recipes
 from src.compiler import compile_problem
 from scripts.config_editor_server import (
     BuildState,
@@ -524,12 +524,12 @@ class RecomputeFailureOutputTests(unittest.TestCase):
         package = json.loads((frontend_root / "package.json").read_text(encoding="utf-8"))
         package_lock = json.loads((frontend_root / "package-lock.json").read_text(encoding="utf-8"))
 
-        self.assertEqual("1.5.19", package["version"])
-        self.assertEqual("1.5.19", package_lock["version"])
-        self.assertEqual("1.5.19", package_lock["packages"][""]["version"])
-        self.assertIn('class="frontend-version">前端 v1.5.19</span>', template)
-        self.assertIn('/assets/config_editor.css?v=1.5.19', template)
-        self.assertIn('/assets/config_editor.js?v=1.5.19', template)
+        self.assertEqual("1.5.20", package["version"])
+        self.assertEqual("1.5.20", package_lock["version"])
+        self.assertEqual("1.5.20", package_lock["packages"][""]["version"])
+        self.assertIn('class="frontend-version">前端 v1.5.20</span>', template)
+        self.assertIn('/assets/config_editor.css?v=1.5.20', template)
+        self.assertIn('/assets/config_editor.js?v=1.5.20', template)
 
     def test_batch_status_refresh_obeys_frontend_performance_limit(self) -> None:
         """批量状态最多每秒轮询一次，且明细未变化时不得重建整组 DOM。"""
@@ -2005,6 +2005,27 @@ class ConfigEditorServerTests(unittest.TestCase):
         )
         self.assertEqual({"ProcessCount": 1}, product_recipe["Weight"])
 
+    def test_dummy_clean_adds_standard_dummy_count_recipe_weight(self) -> None:
+        """Dummy 带片 Recipe 必须递增 CleanTask 声明的 DummyCount。"""
+        recipes = [{
+            "name": "DummyRecipe",
+            "time": 20,
+            "modules": ["PM1"],
+            "weight": {},
+        }]
+        cleans = [{
+            "name": "Dummy",
+            "cleanType": "dummy",
+            "recipeRef": "DummyRecipe",
+            "modules": ["PM1"],
+            "materialCount": 2,
+            "updateStateVariables": ["IdleTime", "DummyCount"],
+        }]
+
+        built = build_process_recipes(recipes, [], cleans)
+
+        self.assertEqual({"DummyCount": 1}, built[0]["Weight"])
+
     def test_standard_clean_weight_preserves_explicit_recipe_value(self) -> None:
         """自动补齐标准计数器时不得覆盖用户显式配置的 Recipe 权重。"""
         route = _route("WacRoute", "PM1", "ProductRecipe")
@@ -2290,7 +2311,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("<span>结果分析</span>", html)
         self.assertIn("<span>路径配置</span>", html)
         self.assertNotIn('data-tab-view="clean"', html)
-        self.assertIn('class="frontend-version">前端 v1.5.19</span>', html)
+        self.assertIn('class="frontend-version">前端 v1.5.20</span>', html)
         self.assertIn('data-option="residencyGuardSeconds"', html)
         self.assertIn('data-option="maximumRobotHoldingSeconds"', html)
         self.assertIn('data-option="maximumSystemResidenceCv"', html)

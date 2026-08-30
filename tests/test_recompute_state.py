@@ -158,6 +158,100 @@ def test_completed_process_increments_station_slot_material_count() -> None:
     assert update["Stations"]["Cooler"]["MaterialCount"] == {"1": 4, "2": 5}
 
 
+def test_completed_process_applies_recipe_weights_to_state_variables() -> None:
+    """ProcessMove 应把 Recipe Weight 写回 ProcessCount、DummyCount 等 Counter。"""
+    update = {
+        "Materials": [{
+            "ID": 101,
+            "CurrentModuleName": "PM1",
+            "SlotID": 1,
+        }],
+        "Robots": {},
+        "Stations": {"PM1": {
+            "Type": "ProcessChamber",
+            "Capacity": 1,
+            "StateVariables": {
+                "ProcessCount": {"Value": {"Value": 3}},
+                "DummyCount": {"Value": {"Value": 4}},
+            },
+        }},
+        "ProcessRecipes": [{
+            "ModuleName": "PM1",
+            "Name": "Recipe1",
+            "Weight": {"ProcessCount": 1, "DummyCount": 2},
+        }],
+    }
+    state = MachineState.from_sources(None, update)
+    state.stations["PM1"].slots[1].phase = SlotPhase.UNPROCESSED
+    move = {
+        "MoveID": 1,
+        "MoveType": 9,
+        "StartTime": 0.0,
+        "EndTime": 1.0,
+        "ModuleName": "PM1",
+        "MatIDList": [101],
+        "SlotList": [1],
+        "ProcessRecipe": "Recipe1",
+    }
+    replay = MoveStateReplay(None, [move], state)
+    replay.update_move_state({"MoveID": 1, "MoveState": MoveStateReplay.RUNNING})
+    replay.update_move_state({"MoveID": 1, "MoveState": MoveStateReplay.DONE})
+
+    apply_machine_state_to_update(update, replay.state, 1.0)
+
+    variables = update["Stations"]["PM1"]["StateVariables"]
+    assert variables["ProcessCount"]["Value"]["Value"] == 4
+    assert variables["DummyCount"]["Value"]["Value"] == 6
+
+
+def test_last_clean_move_resets_declared_state_variables() -> None:
+    """CleanTask 最后一条 ProcessMove 应归零 UpdateStateVariables。"""
+    update = {
+        "Materials": [],
+        "Robots": {},
+        "Stations": {"PM1": {
+            "Type": "ProcessChamber",
+            "Capacity": 1,
+            "StateVariables": {
+                "ProcessCount": {"Value": {"Value": 3}},
+            },
+        }},
+        "ProcessJobs": [{
+            "OriginRoute": {
+                "RouteSteps": [{
+                    "Visits": [{
+                        "AfterOutPM": [{
+                            "CheckConditions": {"Wac": [{
+                                "TaskName": "WacClean",
+                                "UpdateStateVariables": ["ProcessCount"],
+                            }]},
+                        }],
+                    }],
+                }],
+            },
+        }],
+    }
+    state = MachineState.from_sources(None, update)
+    move = {
+        "MoveID": 1,
+        "MoveType": 9,
+        "StartTime": 0.0,
+        "EndTime": 1.0,
+        "ModuleName": "PM1",
+        "MatIDList": [],
+        "SlotList": [1],
+        "CleanTaskName": "WacClean",
+        "IsLastCleanTaskMove": True,
+    }
+    replay = MoveStateReplay(None, [move], state)
+    replay.update_move_state({"MoveID": 1, "MoveState": MoveStateReplay.RUNNING})
+    replay.update_move_state({"MoveID": 1, "MoveState": MoveStateReplay.DONE})
+
+    apply_machine_state_to_update(update, replay.state, 1.0)
+
+    assert update["Stations"]["PM1"]["StateVariables"]["ProcessCount"]["Value"]["Value"] == 0
+
+
 def test_dummy_route_returned_by_algorithm_is_sent_back_on_recompute() -> None:
     """平台应把上一轮 DummyReturnInfo 原样回填到在途 Dummy Material。"""
     route_recipe = {

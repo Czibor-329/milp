@@ -1017,6 +1017,20 @@ def build_process_recipes(
         for clean in cleans
         if str(clean.get("name") or "").strip()
     }
+    # Dummy 带片清洁同样依赖 ProcessRecipe.Weight 推进 Counter。旧实现只为
+    # 产品 Recipe 推导 ProcessCount，导致 DummyCount 在每轮快照中始终为零。
+    for clean in clean_by_name.values():
+        if int(_finite_number(clean.get("materialCount"), 0)) <= 0:
+            continue
+        recipe_name = str(clean.get("recipeRef") or "").strip()
+        if not recipe_name:
+            continue
+        for module in _string_list(clean.get("modules")):
+            for variable_name in _string_list(clean.get("updateStateVariables")):
+                if variable_name and variable_name != "IdleTime":
+                    required_weights.setdefault((recipe_name, module), set()).add(
+                        variable_name
+                    )
     for route in routes:
         for stage in route.get("stages") or []:
             if not isinstance(stage, Mapping):

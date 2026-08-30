@@ -140,6 +140,7 @@ class StationState:
     door_busy_until: float = 0.0
     transfer_busy_until: float = 0.0
     environment_busy_until: float = 0.0
+    state_variables: Dict[str, float] = field(default_factory=dict)
 
     @property
     def is_load_lock(self) -> bool:
@@ -212,6 +213,8 @@ class MachineState:
     stations: Dict[str, StationState] = field(default_factory=dict)
     robots: Dict[str, RobotState] = field(default_factory=dict)
     robot_aliases: Dict[str, str] = field(default_factory=dict)
+    process_recipe_weights: Dict[Tuple[str, str], Dict[str, float]] = field(default_factory=dict)
+    clean_task_state_variables: Dict[str, Set[str]] = field(default_factory=dict)
 
     @classmethod
     def from_sources(
@@ -228,6 +231,8 @@ class MachineState:
         robot_configs = _mapping(payload.get("Robots"))
         task_stations = getattr(task, "chambers", {}) or {}
         task_robots = getattr(task, "robots", {}) or {}
+        state.process_recipe_weights = _process_recipe_weights(payload)
+        state.clean_task_state_variables = _clean_task_state_variables(payload)
 
         for name, config in station_configs.items():
             task_station = task_stations.get(name)
@@ -254,9 +259,15 @@ class MachineState:
                     environment=_environment_from_last_item(str(config.get("LastItem") or ""), aliases),
                     environment_aliases=aliases,
                     environment_state_space=_environment_state_space(config),
+                    state_variables=_station_state_variables(config),
                 )
             else:
-                state.stations[name] = StationState(name, station_type, slots)
+                state.stations[name] = StationState(
+                    name,
+                    station_type,
+                    slots,
+                    state_variables=_station_state_variables(config),
+                )
 
         for name, task_station in task_stations.items():
             station_name = str(name)
@@ -1374,11 +1385,31 @@ def _start_process(state: MachineState, move: Mapping[str, Any], end_time: float
         _reserve_slot(slot, end_time, "清洁" if material is None else "加工")
 
     def complete() -> None:
-        """同时完成本动作引用的全部槽位。"""
+        """同时完成槽位，并按 ProcessRecipe.Weight 累计站点状态变量。"""
         for slot, material, _ in targets:
             _set_slot(slot, SlotPhase.CLEANED if material is None else SlotPhase.COMPLETED, material)
             if material is not None:
                 slot.material_process_count += 1
+        recipe_name = str(
+            move.get("ProcessRecipe")
+            or move.get("RecipeName")
+            or move.get("CleanRecipe")
+            or ""
+        )
+        for variable_name, increment in state.process_recipe_weights.get(
+            (station.name, recipe_name),
+            {},
+        ).items():
+            station.state_variables[variable_name] = (
+                station.state_variables.get(variable_name, 0.0) + increment
+            )
+        clean_task_name = str(move.get("CleanTaskName") or "")
+        if clean_task_name and move.get("IsLastCleanTaskMove") is True:
+            for variable_name in state.clean_task_state_variables.get(
+                clean_task_name,
+                set(),
+            ):
+                station.state_variables[variable_name] = 0.0
 
     _schedule(scheduled, move, end_time, complete)
     return None
@@ -1644,8 +1675,6 @@ def _start_swap(state: MachineState, move: Mapping[str, Any], end_time: float, _
         physical_stations.append(station)
     if not _available(robot.busy_until, start_time):
         return _issue(move, ValidationErrorCode.ROBOT_BUSY, f"{robot.name} 正在执行其他动作")
-    if not robot.can_swap or len(robot.hands) < 2:
-        return _issue(move, ValidationErrorCode.ROBOT_SWAP_UNSUPPORTED, f"{robot.name} 不支持双臂换片")
     send_stations = (
         physical_stations
         if is_twin_load_lock_swap
@@ -1668,8 +1697,29 @@ def _start_swap(state: MachineState, move: Mapping[str, Any], end_time: float, _
     recv_robot_slots = {row[2] for row in recv_rows}
     if len(send_robot_slots) != send_count or len(recv_robot_slots) != recv_count:
         return _issue(move, ValidationErrorCode.SWAP_INPUT_INVALID, "SwapMove 的 Send/Recv 手槽不能重复")
-    if send_robot_slots & recv_robot_slots:
-        return _issue(move, ValidationErrorCode.SWAP_INPUT_INVALID, "SwapMove 的 Send 与 Recv 不能共用同一个手槽")
+    shared_robot_slots = send_robot_slots & recv_robot_slots
+    swap_mode = int(move.get("SwapMode") or 0)
+    place_first_shared_slots = {
+        robot_slot_id
+        for robot_slot_id in shared_robot_slots
+        if swap_mode == 1
+        and any(
+            send_station.name == recv_station.name
+            and len(send_station.slots) > 1
+            and send_station_slot != recv_station_slot
+            for send_station, _, send_slot, send_station_slot, _ in send_rows
+            for recv_station, _, recv_slot, recv_station_slot, _ in recv_rows
+            if send_slot == recv_slot == robot_slot_id
+        )
+    }
+    if shared_robot_slots - place_first_shared_slots:
+        return _issue(
+            move,
+            ValidationErrorCode.SWAP_INPUT_INVALID,
+            "SwapMove 仅允许多槽目标腔室的 place-first 动作共用 Send/Recv 手槽",
+        )
+    if not place_first_shared_slots and (not robot.can_swap or len(robot.hands) < 2):
+        return _issue(move, ValidationErrorCode.ROBOT_SWAP_UNSUPPORTED, f"{robot.name} 不支持双臂换片")
     for slot_id in send_robot_slots | recv_robot_slots:
         if slot_id not in robot.hands:
             return _issue(move, ValidationErrorCode.ROBOT_SLOT_DISABLED, f"{robot.name} 未启用手槽 {slot_id}")
@@ -1684,7 +1734,7 @@ def _start_swap(state: MachineState, move: Mapping[str, Any], end_time: float, _
             return _issue(move, ValidationErrorCode.STATION_SLOT_UNKNOWN, f"{station.name} 不存在槽位 {station_slot_id}")
         if slot.phase is not SlotPhase.COMPLETED or not _material_matches(slot.material, material_id):
             return _issue(move, ValidationErrorCode.SWAP_STATE_INVALID, f"{station.name}#{station_slot_id} 没有可换出的物料")
-        if robot.hands.get(robot_slot_id) is not None:
+        if robot_slot_id not in place_first_shared_slots and robot.hands.get(robot_slot_id) is not None:
             return _issue(move, ValidationErrorCode.SWAP_STATE_INVALID, f"{robot.name}#{robot_slot_id} 不是空手")
         if not _available(slot.busy_until, start_time):
             return _issue(move, ValidationErrorCode.STATION_SLOT_BUSY, f"{station.name}#{station_slot_id} 正在{slot.busy_action}")
@@ -1716,18 +1766,27 @@ def _start_swap(state: MachineState, move: Mapping[str, Any], end_time: float, _
     for station, _, _, station_slot_id, _ in send_rows:
         _reserve_slot(station.slots[station_slot_id], end_time, "换片")
 
+    received_materials = [
+        station.slots[station_slot_id].material
+        for station, _, _, station_slot_id, _ in recv_rows
+    ]
+    sent_materials = [
+        robot.hands[robot_slot_id]
+        for _, _, robot_slot_id, _, _ in send_rows
+    ]
+
     def complete() -> None:
         """同时落地 Swap 中所有进出晶圆，并落地槽位级指向。
 
-        Recv 先取出旧物料进手槽，Send 再放入新物料（换片槽位被覆盖），
-        未被 Send 覆盖的纯 Recv 槽位最后清空。
+        开始时已分别保存进出物料，因此统一按 Send 后 Recv 落地；这既兼容
+        普通双臂换片，也支持 place-first 共用手槽。纯 Recv 槽位最后清空。
         """
-        for station, _, robot_slot_id, station_slot_id, index in recv_rows:
-            robot.hands[robot_slot_id] = _material_with_metadata(station.slots[station_slot_id].material, move, index, "RecvMatStepIDList")
-            robot.slot_targets[robot_slot_id] = (station.name, station_slot_id)
-        for station, _, robot_slot_id, station_slot_id, index in send_rows:
-            _set_slot(station.slots[station_slot_id], SlotPhase.UNPROCESSED, _material_with_metadata(robot.hands[robot_slot_id], move, index, "SendMatStepIDList"))
+        for row_index, (station, _, robot_slot_id, station_slot_id, index) in enumerate(send_rows):
+            _set_slot(station.slots[station_slot_id], SlotPhase.UNPROCESSED, _material_with_metadata(sent_materials[row_index], move, index, "SendMatStepIDList"))
             robot.hands[robot_slot_id] = None
+            robot.slot_targets[robot_slot_id] = (station.name, station_slot_id)
+        for row_index, (station, _, robot_slot_id, station_slot_id, index) in enumerate(recv_rows):
+            robot.hands[robot_slot_id] = _material_with_metadata(received_materials[row_index], move, index, "RecvMatStepIDList")
             robot.slot_targets[robot_slot_id] = (station.name, station_slot_id)
         for station, _, _, station_slot_id, _ in recv_rows:
             if (station.name, station_slot_id) not in send_station_slots:
@@ -2072,6 +2131,72 @@ def _environment_state_space(config: Mapping[str, Any]) -> frozenset[str]:
             if alias:
                 labels.add(alias)
     return frozenset(labels)
+
+
+def _station_state_variables(config: Mapping[str, Any]) -> Dict[str, float]:
+    """读取站点 StateVariables 中可按数值累计的当前值。"""
+    result: Dict[str, float] = {}
+    variables = config.get("StateVariables") or {}
+    if not isinstance(variables, Mapping):
+        return result
+    for variable_name, variable in variables.items():
+        if not isinstance(variable, Mapping):
+            continue
+        value = variable.get("Value") or {}
+        raw_value = value.get("Value") if isinstance(value, Mapping) else None
+        number = _number(raw_value)
+        if number is not None:
+            result[str(variable_name)] = number
+    return result
+
+
+def _process_recipe_weights(payload: Mapping[str, Any]) -> Dict[Tuple[str, str], Dict[str, float]]:
+    """按 ``(ModuleName, RecipeName)`` 索引 Counter 状态变量增量。"""
+    result: Dict[Tuple[str, str], Dict[str, float]] = {}
+    recipes = payload.get("ProcessRecipes") or []
+    if not isinstance(recipes, Sequence) or isinstance(recipes, (str, bytes)):
+        return result
+    for recipe in recipes:
+        if not isinstance(recipe, Mapping):
+            continue
+        station_name = str(recipe.get("ModuleName") or "")
+        recipe_name = str(recipe.get("Name") or "")
+        raw_weights = recipe.get("Weight") or {}
+        if not isinstance(raw_weights, Mapping):
+            continue
+        weights: Dict[str, float] = {}
+        for variable_name, raw_increment in raw_weights.items():
+            increment = _number(raw_increment)
+            if increment is not None:
+                weights[str(variable_name)] = increment
+        if station_name and recipe_name and weights:
+            result[(station_name, recipe_name)] = weights
+    return result
+
+
+def _clean_task_state_variables(payload: Mapping[str, Any]) -> Dict[str, Set[str]]:
+    """递归收集 CleanTask 完成后需要归零的状态变量。"""
+    result: Dict[str, Set[str]] = {}
+
+    def visit(value: Any) -> None:
+        """遍历标准 Update 中嵌套的 Route 与 CleanCondition 对象。"""
+        if isinstance(value, Mapping):
+            task_name = str(value.get("TaskName") or "")
+            raw_variables = value.get("UpdateStateVariables")
+            if task_name and isinstance(raw_variables, Sequence) and not isinstance(raw_variables, (str, bytes)):
+                result.setdefault(task_name, set()).update(
+                    str(variable_name)
+                    for variable_name in raw_variables
+                    if str(variable_name)
+                )
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+            for child in value:
+                visit(child)
+
+    visit(payload.get("ProcessJobs") or [])
+    return result
 
 
 def _environment_side_labels(aliases: Mapping[str, str]) -> Tuple[str, str]:

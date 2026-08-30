@@ -996,6 +996,40 @@ def test_swap_move_rejects_internal_field_length_mismatch() -> None:
     assert issues and "Recv 组数组数量不一致" in issues[0]
 
 
+def test_place_first_swap_can_reuse_one_robot_slot_for_multi_slot_station() -> None:
+    """多槽腔室可先放后取，因此 SwapMode=1 允许收发共用同一 Robot 槽。"""
+    update = {
+        "Stations": {
+            "LP1": {"Type": "LoadPort", "Capacity": 1},
+            "PM1": {"Type": "MultiProcessChamber", "Capacity": 2},
+        },
+        "Robots": {"R": {"Capacity": 1, "CanMultiTrans": False}},
+        "Materials": [
+            {"ID": 1, "CurrentModuleName": "LP1", "SlotID": 1},
+            {"ID": 2, "CurrentModuleName": "PM1", "SlotID": 1},
+        ],
+    }
+    moves = [
+        _move(1, 6, 0, 1, ModuleName="LP1"),
+        _move(2, 0, 1, 2, ModuleName="R", MatIDList=[1], SrcStationList=["LP1"], SrcSlotList=[1], RobotSlotList=[1]),
+        _move(3, 7, 2, 3, ModuleName="LP1"),
+        _move(4, 6, 3, 4, ModuleName="PM1"),
+        _move(
+            5, 4, 4, 5, ModuleName="R", StationList=["PM1", "PM1"],
+            StnRecvSlotList=[2], StnSendSlotList=[1], RecvSlotList=[1],
+            SendSlotList=[1], RecvMatList=[2], SendMatList=[1], SwapMode=1,
+        ),
+    ]
+
+    assert validate_move_list(None, moves, update) == []
+    replay = MoveStateReplay(None, moves, update)
+    for move in moves:
+        replay.update_move_state({"MoveID": move["MoveID"], "MoveState": MoveStateReplay.RUNNING}, snapshot=False)
+        replay.update_move_state({"MoveID": move["MoveID"], "MoveState": MoveStateReplay.DONE}, snapshot=False)
+    assert replay.state.stations["PM1"].slots[2].material.material_id == 1
+    assert replay.state.robots["R"].hands[1].material_id == 2
+
+
 def _cascade_loadlock_update() -> dict:
     """级联 LoadLock：连接 VTR_1/VTR_2 两个真空手，初始 LastItem 为空、State=0（大气态）。"""
     return {

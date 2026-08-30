@@ -1951,13 +1951,6 @@ def _build_algorithm_recompute_update(
         new_round_update,
     )
     apply_machine_state_to_update(update, projected_state, requested_time)
-    _apply_committed_process_variables(
-        update,
-        runtime.current_update,
-        runtime.current_plan,
-        requested_time,
-        previous_output,
-    )
     update["MoveStates"] = [
         deepcopy(dict(notification))
         for notification in move_states
@@ -1994,13 +1987,6 @@ def _build_packaged_algorithm_recompute_update(
         projected_state if projected_state is not None else runtime.state,
         requested_time,
     )
-    _apply_committed_process_variables(
-        update,
-        runtime.current_update,
-        runtime.current_plan,
-        requested_time,
-        previous_output,
-    )
     update["MoveStates"] = [
         deepcopy(dict(notification))
         for notification in move_states
@@ -2023,99 +2009,6 @@ def _build_packaged_algorithm_recompute_update(
         # 算法返回的 Dummy 信息，确保发出的 AlgSchedule 保留恢复结果。
         restore_dummy_routes_from_algorithm_output(update, previous_output)
     return update
-
-
-def _state_variable_number(
-    stations: Mapping[str, Any],
-    station_name: str,
-    variable_name: str,
-) -> float:
-    """读取企业 StateVariable 的 ``Value.Value`` 数值，缺失时返回零。"""
-    station = stations.get(station_name) or {}
-    variable = (station.get("StateVariables") or {}).get(variable_name) or {}
-    value = variable.get("Value") or {}
-    return _finite_number(value.get("Value"), 0.0)
-
-
-def _set_state_variable_number(
-    stations: Dict[str, Any],
-    station_name: str,
-    variable_name: str,
-    value: float,
-) -> None:
-    """保留 StateVariable 元数据，仅更新重算快照中的当前数值。"""
-    station = stations.setdefault(station_name, {})
-    variables = station.setdefault("StateVariables", {})
-    variable = variables.setdefault(variable_name, {
-        "Name": variable_name,
-        "ComputeRule": "",
-        "Type": 1,
-    })
-    variable.setdefault("Value", {})["Value"] = value
-
-
-def _apply_committed_process_variables(
-    update: Dict[str, Any],
-    previous_update: Mapping[str, Any],
-    current_plan: Sequence[Mapping[str, Any]],
-    current_time: float,
-    previous_output: Optional[Mapping[str, Any]],
-) -> None:
-    """把本代已启动工艺对 ProcessCount 的影响投影到下一代完整快照。
-
-    Machine 重算会把 Running Move 投影到其完成态，因此过程变量必须采用同一
-    口径。否则 HongYe 从新 ``AlgSchedule`` 独立校验时会把计数重新当成零，
-    将合法 WacClean 误判为提前执行。
-    """
-    stations = update.setdefault("Stations", {})
-    previous_stations = previous_update.get("Stations") or {}
-    dummy_ids = {
-        str(material_id)
-        for material_id in (previous_output or {}).get("DummyReturnInfo", {})
-    }
-    process_counts: Dict[str, float] = {}
-    committed_process_moves = sorted(
-        (
-            move
-            for move in current_plan
-            if int(move.get("MoveType") or -1) == 9
-            and float(move.get("StartTime") or 0.0)
-            < float(current_time) - TIME_TOLERANCE
-        ),
-        key=lambda move: (
-            float(move.get("EndTime") or move.get("StartTime") or 0.0),
-            int(move.get("MoveID") or 0),
-        ),
-    )
-    for move in committed_process_moves:
-        station_name = str(move.get("ModuleName") or move.get("Station") or "")
-        if not station_name:
-            continue
-        if station_name not in process_counts:
-            process_counts[station_name] = _state_variable_number(
-                previous_stations,
-                station_name,
-                "ProcessCount",
-            )
-        clean_task_name = str(move.get("CleanTaskName") or "")
-        if clean_task_name:
-            if "wac" in clean_task_name.casefold():
-                process_counts[station_name] = 0.0
-            continue
-        product_count = sum(
-            1
-            for material_id in (move.get("MatIDList") or [])
-            if str(material_id) not in dummy_ids
-        )
-        process_counts[station_name] += float(product_count)
-
-    for station_name, process_count in process_counts.items():
-        _set_state_variable_number(
-            stations,
-            station_name,
-            "ProcessCount",
-            process_count,
-        )
 
 
 def _apply_packaged_running_resource_times(

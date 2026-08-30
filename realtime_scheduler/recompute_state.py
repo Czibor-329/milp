@@ -468,6 +468,12 @@ def apply_machine_state_to_update(
                 str(slot_id): slot_state.material_process_count
                 for slot_id, slot_state in sorted(station_state.slots.items())
             }
+        for variable_name, value in station_state.state_variables.items():
+            variable = station.setdefault("StateVariables", {}).setdefault(
+                variable_name,
+                {"Name": variable_name, "ComputeRule": "", "Type": 1},
+            )
+            variable.setdefault("Value", {})["Value"] = value
         if isinstance(station_state, LoadLockState):
             station["LastItem"] = _configured_loadlock_last_item(
                 station,
