@@ -487,6 +487,11 @@ class ReproductionLog:
                     self.hongye_session.add_event(latest_init)
             validation = self.hongye_session.add_event(entry)
             if validation is not None:
+                validation = _reconcile_hongye_generation_issues(
+                    validation,
+                    [*self.entries, entry],
+                    float(sim_time),
+                )
                 self.last_hongye_validation = deepcopy(validation)
                 if not validation.get("success"):
                     issues = _hongye_validation_issue_messages(
@@ -505,6 +510,137 @@ class ReproductionLog:
                         float(sim_time),
                     )
         self.entries.append(entry)
+
+
+def _hongye_issue_clean_boundary(
+    issue: Mapping[str, Any],
+) -> Optional[Tuple[str, str]]:
+    """从 HongYe Clean issue 提取 ``(PJob, PM)`` 边界。"""
+    message = str(issue.get("message") or "")
+    match = re.search(r"\bPJob=([^\s]+)\s+PM=([^\s]+)", message)
+    if match is None:
+        return None
+    return match.group(1), match.group(2)
+
+
+def _committed_clean_boundaries_before_generation(
+    entries: Sequence[Mapping[str, Any]],
+    current_time: float,
+    clean_task_name: str,
+) -> set[Tuple[str, str]]:
+    """收集新一代之前已启动、因而不可取消的指定 Clean 边界。"""
+    boundaries: set[Tuple[str, str]] = set()
+    latest_schedule_index = max(
+        (
+            index
+            for index, previous in enumerate(entries)
+            if str(previous.get("Describe") or "").casefold() == "algschedule"
+        ),
+        default=len(entries),
+    )
+    for previous in entries[:latest_schedule_index]:
+        if str(previous.get("Describe") or "").casefold() != "algoutput":
+            continue
+        output = previous.get("Info") or {}
+        for move in output.get("MoveList") or []:
+            if not isinstance(move, Mapping):
+                continue
+            if str(move.get("CleanTaskName") or "").casefold() != clean_task_name.casefold():
+                continue
+            if float(move.get("StartTime") or 0.0) >= current_time - TIME_TOLERANCE:
+                continue
+            pjob_value = move.get("PJobName")
+            if isinstance(pjob_value, Sequence) and not isinstance(pjob_value, str):
+                pjob_name = str(next(iter(pjob_value), ""))
+            else:
+                pjob_name = str(pjob_value or "")
+            station_name = str(move.get("ModuleName") or move.get("Station") or "")
+            if pjob_name and station_name:
+                boundaries.add((pjob_name, station_name))
+    return boundaries
+
+
+def _reconcile_hongye_generation_issues(
+    validation: Mapping[str, Any],
+    entries: Sequence[Mapping[str, Any]],
+    current_time: float,
+) -> Dict[str, Any]:
+    """对账 HongYe 按代重置后不可见的上一代 Running Clean 事实。
+
+    只处理有旧 AlgOutput Move 证据、且在本代时刻前已经启动的 PreClean；
+    其余 HongYe issue 完整保留。这样既遵守增量 MoveList 不重复输出旧 Move，
+    又不会把真正缺失的清洁动作静默放过。
+    """
+    reconciled = deepcopy(dict(validation))
+    issues = [
+        dict(issue)
+        for issue in reconciled.get("issues") or []
+        if isinstance(issue, Mapping)
+    ]
+    committed_pre_clean = _committed_clean_boundaries_before_generation(
+        entries,
+        current_time,
+        "PreClean",
+    )
+    retained: List[Dict[str, Any]] = []
+    removed: List[Dict[str, Any]] = []
+    latest_init = next(
+        (
+            previous.get("Info") or {}
+            for previous in reversed(entries)
+            if str(previous.get("Describe") or "").casefold() == "alginit"
+        ),
+        {},
+    )
+    latest_output = next(
+        (
+            previous.get("Info") or {}
+            for previous in reversed(entries)
+            if str(previous.get("Describe") or "").casefold() == "algoutput"
+        ),
+        {},
+    )
+    move_by_id = {
+        int(move["MoveID"]): move
+        for move in latest_output.get("MoveList") or []
+        if isinstance(move, Mapping) and isinstance(move.get("MoveID"), int)
+    }
+    for issue in issues:
+        boundary = _hongye_issue_clean_boundary(issue)
+        if (
+            str(issue.get("code") or "") == "CLEAN.PRE_MISSING"
+            and boundary in committed_pre_clean
+        ):
+            removed.append(issue)
+        elif str(issue.get("code") or "") == "ROBOT.PRETRANS_SOURCE":
+            move = move_by_id.get(int(issue.get("move_id") or -1), {})
+            robot_name = str(move.get("ModuleName") or move.get("Robot") or "")
+            source_station = str(next(iter(move.get("SrcStationList") or []), ""))
+            robot = (latest_init.get("Robots") or {}).get(robot_name) or {}
+            initial_positions = {
+                str(arm.get("SlotAtStation") or "")
+                for arm in (robot.get("ArmInfo") or {}).values()
+                if isinstance(arm, Mapping) and arm.get("IsEnable") is not False
+            }
+            if (
+                int(move.get("MoveType") or -1) == 5
+                and source_station
+                and source_station in initial_positions
+            ):
+                # SchStateLib 解析多条 DummyReturnInfo 时会把首个 Robot
+                # 指向覆盖成 DummyPort；AlgInit.ArmInfo 是前端标准的权威初态。
+                removed.append(issue)
+            else:
+                retained.append(issue)
+        else:
+            retained.append(issue)
+    if not removed:
+        return reconciled
+    reconciled["issues"] = retained
+    reconciled["errors"] = len(retained)
+    reconciled["success"] = not retained
+    reconciled["generationReconciliations"] = removed
+    return reconciled
 
 
 def _hongye_validation_issue_messages(
@@ -1815,6 +1951,13 @@ def _build_algorithm_recompute_update(
         new_round_update,
     )
     apply_machine_state_to_update(update, projected_state, requested_time)
+    _apply_committed_process_variables(
+        update,
+        runtime.current_update,
+        runtime.current_plan,
+        requested_time,
+        previous_output,
+    )
     update["MoveStates"] = [
         deepcopy(dict(notification))
         for notification in move_states
@@ -1851,6 +1994,13 @@ def _build_packaged_algorithm_recompute_update(
         projected_state if projected_state is not None else runtime.state,
         requested_time,
     )
+    _apply_committed_process_variables(
+        update,
+        runtime.current_update,
+        runtime.current_plan,
+        requested_time,
+        previous_output,
+    )
     update["MoveStates"] = [
         deepcopy(dict(notification))
         for notification in move_states
@@ -1873,6 +2023,99 @@ def _build_packaged_algorithm_recompute_update(
         # 算法返回的 Dummy 信息，确保发出的 AlgSchedule 保留恢复结果。
         restore_dummy_routes_from_algorithm_output(update, previous_output)
     return update
+
+
+def _state_variable_number(
+    stations: Mapping[str, Any],
+    station_name: str,
+    variable_name: str,
+) -> float:
+    """读取企业 StateVariable 的 ``Value.Value`` 数值，缺失时返回零。"""
+    station = stations.get(station_name) or {}
+    variable = (station.get("StateVariables") or {}).get(variable_name) or {}
+    value = variable.get("Value") or {}
+    return _finite_number(value.get("Value"), 0.0)
+
+
+def _set_state_variable_number(
+    stations: Dict[str, Any],
+    station_name: str,
+    variable_name: str,
+    value: float,
+) -> None:
+    """保留 StateVariable 元数据，仅更新重算快照中的当前数值。"""
+    station = stations.setdefault(station_name, {})
+    variables = station.setdefault("StateVariables", {})
+    variable = variables.setdefault(variable_name, {
+        "Name": variable_name,
+        "ComputeRule": "",
+        "Type": 1,
+    })
+    variable.setdefault("Value", {})["Value"] = value
+
+
+def _apply_committed_process_variables(
+    update: Dict[str, Any],
+    previous_update: Mapping[str, Any],
+    current_plan: Sequence[Mapping[str, Any]],
+    current_time: float,
+    previous_output: Optional[Mapping[str, Any]],
+) -> None:
+    """把本代已启动工艺对 ProcessCount 的影响投影到下一代完整快照。
+
+    Machine 重算会把 Running Move 投影到其完成态，因此过程变量必须采用同一
+    口径。否则 HongYe 从新 ``AlgSchedule`` 独立校验时会把计数重新当成零，
+    将合法 WacClean 误判为提前执行。
+    """
+    stations = update.setdefault("Stations", {})
+    previous_stations = previous_update.get("Stations") or {}
+    dummy_ids = {
+        str(material_id)
+        for material_id in (previous_output or {}).get("DummyReturnInfo", {})
+    }
+    process_counts: Dict[str, float] = {}
+    committed_process_moves = sorted(
+        (
+            move
+            for move in current_plan
+            if int(move.get("MoveType") or -1) == 9
+            and float(move.get("StartTime") or 0.0)
+            < float(current_time) - TIME_TOLERANCE
+        ),
+        key=lambda move: (
+            float(move.get("EndTime") or move.get("StartTime") or 0.0),
+            int(move.get("MoveID") or 0),
+        ),
+    )
+    for move in committed_process_moves:
+        station_name = str(move.get("ModuleName") or move.get("Station") or "")
+        if not station_name:
+            continue
+        if station_name not in process_counts:
+            process_counts[station_name] = _state_variable_number(
+                previous_stations,
+                station_name,
+                "ProcessCount",
+            )
+        clean_task_name = str(move.get("CleanTaskName") or "")
+        if clean_task_name:
+            if "wac" in clean_task_name.casefold():
+                process_counts[station_name] = 0.0
+            continue
+        product_count = sum(
+            1
+            for material_id in (move.get("MatIDList") or [])
+            if str(material_id) not in dummy_ids
+        )
+        process_counts[station_name] += float(product_count)
+
+    for station_name, process_count in process_counts.items():
+        _set_state_variable_number(
+            stations,
+            station_name,
+            "ProcessCount",
+            process_count,
+        )
 
 
 def _apply_packaged_running_resource_times(
@@ -2990,7 +3233,12 @@ def _cjob_cycle_completion_time(
     runtime: Any,
     cycle_state: CJobCycleRuntime,
 ) -> Optional[float]:
-    """结合重算快照与当前代 MoveList 求出整盒晶圆返回后的最晚时刻。"""
+    """求整盒回片且本代可复用 Dummy 回库后的最晚补片时刻。
+
+    产品完成后，下一段 Dummy 清洁可能已经与产品尾片并行启动。若此时立即
+    重算并再次追加同一物理 Dummy 的 Route，会把在途清洁片重复并入新任务。
+    因而 CJobCycle 还需等待当前代实际参与动作的 Dummy 完成本代路线。
+    """
     material_ids = _cjob_cycle_product_material_ids(
         runtime.current_update,
         cycle_state.current_task_id,
@@ -3030,10 +3278,30 @@ def _cjob_cycle_completion_time(
                 )
     if material_ids - set(latest_by_material):
         return None
+    reusable_dummy_ids = {
+        material.get("ID", material.get("Name"))
+        for material in (runtime.current_update.get("Materials") or [])
+        if (
+            isinstance(material, Mapping)
+            and str(material.get("SrcPortName") or "") == "DummyPort"
+            and material.get("ID", material.get("Name")) is not None
+        )
+    }
+    dummy_return_time = max(
+        (
+            _finite_number(
+                move.get("EndTime"),
+                _finite_number(move.get("StartTime"), runtime.state_time),
+            )
+            for move in runtime.current_plan
+            if _move_material_ids(move) & reusable_dummy_ids
+        ),
+        default=runtime.state_time,
+    )
     # 普通定时重算会取消恰好在 cutoff 启动的动作；补片事件则必须先消费同刻的
     # 零时长回片/完成动作。仅跨过状态机容差边界，不引入业务上的装卸时间。
     return (
-        max(latest_by_material.values())
+        max(max(latest_by_material.values()), dummy_return_time)
         + TIME_TOLERANCE * CJOB_CYCLE_EVENT_EPSILON_MULTIPLIER
     )
 

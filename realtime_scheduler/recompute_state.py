@@ -49,14 +49,29 @@ def _dummy_assignment_hints(
     返回值第一项按 MatID 保存 ``(TaskID, PJobName)``；第二项是当前仍有
     Running Move 的 MatID。Running Move 优先于同一片更早的历史动作。
     """
-    running_move_ids = {
+    move_states = update_params.get("MoveStates") or []
+    # 每个 Move 通常有 RUNNING(0) 与 DONE(1) 两条通知；只有“已启动且尚未完成”
+    # 的 Move 才算 Running。若把历史已完成的启动通知也算 Running，重算会把
+    # 已回到 DummyPort 的库存 Dummy 误判为在途，导致 restore 不再恢复默认状态。
+    done_move_ids = {
         int(state["MoveID"])
-        for state in update_params.get("MoveStates") or []
+        for state in move_states
         if (
             isinstance(state, Mapping)
             and state.get("MoveID") is not None
             and str(state.get("MoveState", "")).strip().casefold()
-            in {"0", "running"}
+            in {"1", "done", "finished", "end", "completed"}
+        )
+    }
+    running_move_ids = {
+        int(state["MoveID"])
+        for state in move_states
+        if (
+            isinstance(state, Mapping)
+            and state.get("MoveID") is not None
+            and int(state["MoveID"]) not in done_move_ids
+            and str(state.get("MoveState", "")).strip().casefold()
+            in {"0", "running", "start"}
         )
     }
     current_time = float(update_params.get("CurrentTime") or 0.0)
