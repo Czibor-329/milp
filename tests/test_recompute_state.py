@@ -587,7 +587,14 @@ def test_server_does_not_implement_machine_state_snapshot_replay() -> None:
     server_source = (
         ROOT / "realtime_scheduler" / "server.py"
     ).read_text(encoding="utf-8")
+    backend_source = (
+        ROOT / "realtime_scheduler" / "backend" / "execution" / "recompute_state.py"
+    ).read_text(encoding="utf-8")
+    run_state_source = (
+        ROOT / "realtime_scheduler" / "backend" / "execution" / "run_state.py"
+    ).read_text(encoding="utf-8")
 
     assert "def _apply_machine_state_to_update" not in server_source
-    assert "from realtime_scheduler.recompute_state import (" in server_source
-    assert "apply_machine_state_to_update(update" in server_source
+    assert "def apply_machine_state_to_update" in backend_source
+    assert "realtime_scheduler.backend.application" in server_source
+    assert "apply_machine_state_to_update(update" in run_state_source

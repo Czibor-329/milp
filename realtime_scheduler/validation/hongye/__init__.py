@@ -1,5 +1,3 @@
-"""HongYe 增量输出校验入口。"""
+"""兼容入口：HongYe 校验会话已迁移至后端校验包。"""
 
-from .session import HongYeValidationSession, HongYeValidatorError
-
-__all__ = ["HongYeValidationSession", "HongYeValidatorError"]
+from realtime_scheduler.backend.validation.hongye import *  # noqa: F401,F403

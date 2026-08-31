@@ -2,13 +2,18 @@
 
 此目录集中保存实时调度平台的前端、服务端和本地数据：
 
-- `server.py`：本地调度服务、工作区接口、分析 API 与静态资源入口，不承载页面分析实现。
+- `server.py`：兼容启动入口；实际后端实现统一位于 `backend/`。
+- `backend/api/`：HTTP、静态资源与文档边界。
+- `backend/execution/`：计划构建、算法运行、实时重算、CJob Cycle 与批量执行。
+- `backend/workspace/`：数据集存储、迁移、交换与设备/测试业务操作。
+- `backend/artifacts/`：运行结果、复现日志与 Baseline。
+- `backend/validation/`：平台 MoveList 回放与 HongYe 进程会话。
 - `backend/analysis.py`：服务端唯一的 MoveList 性能、瓶颈和测试组分析实现。
 - 内置 `heuristic/loadlock-macro/e2e-ctq/dual-actor-e2e`：统一调用独立算法仓库
   `alg/src/api.py` 的 `init/update`，`update` 的可选 `algorithm`
   参数决定算法。
-- `batch_service.py`：批量运行、Heuristic Baseline、并发进度与取消状态。
-- `plan_builder.py`：设备归一化、Route/Recipe 和各轮 CJob/PJob 请求建模。
+- `backend/execution/batch_service.py`：批量运行、Heuristic Baseline、并发进度与取消状态。
+- `backend/execution/plan_builder.py`：设备归一化、Route/Recipe 和各轮 CJob/PJob 请求建模。
 - `frontend/config_editor.html`：只保存调度平台的页面骨架。
 - `frontend/src/`：TypeScript 前端源码，按 API、数据模型、Route 逻辑和页面入口拆分。
 - `frontend/src/workspace_visualizer.ts`：MoveList 回放、腔室门状态与设备工作台；性能指标通过 `/api/analysis/*` 获取。

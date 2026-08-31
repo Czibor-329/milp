@@ -12,7 +12,7 @@ from urllib.error import HTTPError
 from urllib.request import ProxyHandler, Request, build_opener
 from unittest.mock import patch
 
-import realtime_scheduler.algorithm_interface as algorithm_interface
+import realtime_scheduler.backend.algorithms.interface as algorithm_interface
 import realtime_scheduler.server as config_server
 
 

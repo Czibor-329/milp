@@ -7,14 +7,15 @@ from pathlib import Path
 import unittest
 from unittest.mock import Mock
 
-from realtime_scheduler.batch_service import build_workspace_batch_plan
+from realtime_scheduler.backend.execution.batch_service import build_workspace_batch_plan
 from realtime_scheduler.server import MoveListValidationError, ReproductionLog
-from realtime_scheduler.validation.hongye import HongYeValidationSession
+from realtime_scheduler.backend.validation.hongye import HongYeValidationSession
 
 
 RUNTIME_DIR = (
     Path(__file__).resolve().parents[1]
     / "realtime_scheduler"
+    / "backend"
     / "validation"
     / "hongye"
     / "runtime"

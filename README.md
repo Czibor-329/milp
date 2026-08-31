@@ -37,6 +37,9 @@ python realtime_scheduler\server.py --open
 
 默认地址为 `http://127.0.0.1:8765/config_editor.html`
 
+终端默认显示调度业务阶段并隐藏浏览器轮询访问日志；调试 HTTP 时可增加
+`--access-log`，需要更详细的后端日志时可增加 `--log-level DEBUG`。
+
 ## 终端运行测试集
 
 调试算法时可以绕过浏览器，直接运行本地数据目录中的设备测试组。该入口默认使用

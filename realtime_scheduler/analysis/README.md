@@ -16,7 +16,7 @@ Node 回归测试所需的纯函数兼容实现，不被浏览器生产入口导
   - `analyzeTestGroupPerformance`：计算逐测试基线对比、胜/平/退化、CPU Time
     分位数、瓶颈频次、吞吐与出站波动等组级统计。
 
-输出校验默认使用 `realtime_scheduler/validation/hongye/` 中的独立 SchStateLib
+输出校验默认使用 `realtime_scheduler/backend/validation/hongye/` 中的独立 SchStateLib
 增量进程；服务端逐条发送标准调度事件，并在每个 AlgOutput 到达时读取结构化结果。
 取消 HongYe check 时才使用 `realtime_scheduler/move_validation.py` 导出的
 `validate_move_list`。两种实现都只在服务端运行，页面不得复制校验规则；失败文本均

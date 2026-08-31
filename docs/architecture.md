@@ -22,17 +22,31 @@
 | 目录 | 职责 | 不负责 |
 | --- | --- | --- |
 | `realtime_scheduler/frontend/src/` | 表单交互、回放投影、HTML/CSS 呈现、API 客户端 | 指标计算、瓶颈判断、结果持久化 |
+| `realtime_scheduler/backend/api/` | HTTP 请求、静态资源和文档 API | 调度决策、文件布局 |
+| `realtime_scheduler/backend/execution/` | 计划构建、算法运行、实时重算、CJob Cycle 和批量运行 | HTTP、页面渲染 |
+| `realtime_scheduler/backend/workspace/` | v7 存储、迁移、交换和设备/测试业务操作 | 算法决策、前端状态 |
+| `realtime_scheduler/backend/artifacts/` | 结果、复现日志和 Baseline 持久化 | 设备主数据 |
+| `realtime_scheduler/backend/validation/` | 平台状态回放和 HongYe 校验会话 | 调度策略选择 |
+| `realtime_scheduler/backend/algorithms/` | 发现和调用独立标准算法包 | 工作区和页面渲染 |
 | `realtime_scheduler/backend/analysis.py` | MoveList 性能、瓶颈、诊断、测试组汇总 | HTTP、DOM、文件读写 |
-| `realtime_scheduler/plan_builder.py` | 将编辑模型展开为标准算法请求 | 算法决策、页面状态 |
-| `realtime_scheduler/algorithm_interface.py` | 发现和调用独立算法包 | 工作区和页面渲染 |
-| `realtime_scheduler/batch_service.py` | 批量运行、Baseline、并发状态 | HTML、浏览器存储 |
-| `realtime_scheduler/server.py` | 组合现有应用服务并暴露 HTTP API | 页面分析逻辑 |
+| `realtime_scheduler/server.py` | 兼容启动入口和旧 Python 门面 | 业务实现、存储、调度和校验 |
 | `realtime_scheduler/data/datasets/` | 设备 init、共享路径模板、测试独有的 Route 参数/Clean 与任务的唯一主数据 | 浏览器缓存、设备镜像 |
 | `realtime_scheduler/exports/` | MoveList 结果和复现日志 | 前端临时状态 |
 
 `realtime_scheduler/analysis/` 中的 TypeScript/JavaScript 只用于旧 Node 回归测试
 入口，生产构建不再导入它。新功能必须在 `backend/analysis.py` 中实现，并通过
 HTTP 契约提供给前端。
+
+后端依赖方向固定为 HTTP → 应用装配 → execution/workspace/artifacts →
+validation/algorithm interface。下层模块不得反向导入 `server.py`。历史模块路径只保留
+兼容入口；新增后端代码必须直接放入 `realtime_scheduler/backend/`。运行时 Python
+文件以 2000 行为硬上限，达到 1500 行时应复核是否混入第二项独立职责。
+
+## 后端终端日志
+
+默认终端显示启动、Baseline、算法和校验等业务阶段，浏览器轮询产生的逐条 HTTP
+访问日志默认关闭。`--log-level DEBUG` 可提高详细度，显式传入 `--access-log` 才显示
+HTTP 请求。批量运行会输出测试 ID、校验状态、Move 数量和 makespan。
 
 ## 分析 API
 
