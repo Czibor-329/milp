@@ -18373,7 +18373,6 @@ var state = {
   batchCancelSent: false,
   batchResult: null,
   selectedBatchTestId: "",
-  parameterComparison: null,
   deviceName: "",
   baseDevice: null,
   device: null,
@@ -19616,7 +19615,6 @@ function renderWorkspaceControls() {
   document.getElementById("deleteTestButton").disabled = tests.length <= 1;
   const batchDisabled = state.batchRunning && state.batchCancelRequested || singleRunActive || !state.serviceCompatible || !visibleTests.length;
   document.getElementById("batchRunButton").disabled = batchDisabled;
-  document.getElementById("openParameterComparisonDialogButton").disabled = state.batchRunning || !state.serviceCompatible || !state.parameterComparison?.baseline;
   const emptyHint = document.getElementById("emptyGroupHint");
   emptyHint.classList.toggle("visible", Boolean(state.workspaceDeviceId) && !visibleTests.length);
   document.getElementById("emptyGroupNewTestButton").disabled = !state.workspaceDeviceId;
@@ -19672,10 +19670,6 @@ function resetRunResult() {
   document.getElementById("testGroupAnalysisButton").hidden = true;
   document.getElementById("testGroupAnalysisPanel").hidden = true;
   document.getElementById("testGroupAnalysisPanel").innerHTML = "";
-  state.parameterComparison = null;
-  document.getElementById("parameterComparisonPanel").hidden = true;
-  document.getElementById("parameterComparisonResults").innerHTML = "";
-  document.getElementById("openParameterComparisonDialogButton").disabled = true;
   document.getElementById("metricTimeLabel").textContent = "Total Time";
   document.getElementById("metricMakespanLabel").textContent = "Makespan";
   setBottleneckMetric(null);
@@ -21764,21 +21758,6 @@ function displayStrategyName(strategy) {
   const cardName = document.querySelector(`[data-strategy-card="${CSS.escape(normalized)}"] b`)?.textContent;
   return state.algorithmMetadata[normalized]?.name || cardName || normalized;
 }
-function batchParameterSummary(options, strategy) {
-  const values = options && typeof options === "object" ? options : {};
-  const normalizedStrategy = String(strategy || "heuristic");
-  const definitions = [
-    ["loadLockManager", "LoadLock", "", []],
-    ["residencyGuardSeconds", "\u9A7B\u7559\u4F59\u91CF", "s", []],
-    ["maximumRobotHoldingSeconds", "\u6301\u7247\u4E0A\u9650", "s", []],
-    ["maximumSystemResidenceCv", "\u505C\u7559 CV", "", []],
-    ["seed", "\u968F\u673A\u79CD\u5B50", "", []],
-    ["loadLockMacroSearchSeconds", "\u5B8F\u641C\u7D22", "s", ["loadlock-macro"]],
-    ["loadLockMacroRollouts", "\u5B8F\u91C7\u6837", "", ["loadlock-macro"]]
-  ];
-  const labels = definitions.flatMap(([key, label, suffix, strategies]) => strategies.length && !strategies.includes(normalizedStrategy) ? [] : values[key] === void 0 || values[key] === null || values[key] === "" ? [] : [`${label} ${values[key]}${suffix}`]);
-  return labels.length ? labels.join(" \xB7 ") : "\u9ED8\u8BA4\u53C2\u6570";
-}
 function renderAlgorithmMetadata() {
   document.querySelectorAll("[data-strategy-card]").forEach((card) => {
     const strategy = card.dataset.strategyCard;
@@ -21935,7 +21914,6 @@ async function runPlan() {
   const button = document.getElementById("runButton");
   const stepRunButton = document.getElementById("stepRunButton");
   const batchButton = document.getElementById("batchRunButton");
-  const comparisonButton = document.getElementById("openParameterComparisonDialogButton");
   if (singleRunActive) {
     try {
       await requestSingleRunCancellation();
@@ -21950,7 +21928,6 @@ async function runPlan() {
   let telemetryStopped = false;
   button.disabled = true;
   batchButton.disabled = true;
-  comparisonButton.disabled = true;
   button.classList.add("running");
   button.classList.remove("cancel");
   button.textContent = "\u6B63\u5728\u51C6\u5907\u2026";
@@ -21975,7 +21952,6 @@ async function runPlan() {
     singleRunAbortController = new AbortController();
     button.disabled = false;
     batchButton.disabled = true;
-    comparisonButton.disabled = true;
     button.classList.remove("running");
     button.classList.add("cancel");
     button.textContent = "\u25A0 \u505C\u6B62\u5F53\u524D\u6D4B\u8BD5";
@@ -22159,7 +22135,6 @@ function runBatchSelection(runAll = false) {
 }
 async function runCurrentTestGroup(selectedTestIds = null) {
   const button = document.getElementById("batchRunButton");
-  const comparisonButton = document.getElementById("openParameterComparisonDialogButton");
   const runButton = document.getElementById("runButton");
   if (state.batchRunning) {
     try {
@@ -22203,7 +22178,6 @@ async function runCurrentTestGroup(selectedTestIds = null) {
     document.getElementById("testGroupAnalysisPanel").innerHTML = "";
     document.getElementById("batchOverviewButton").hidden = true;
     button.disabled = false;
-    comparisonButton.disabled = true;
     runButton.disabled = true;
     button.classList.add("cancel");
     button.textContent = "\u25A0 \u7EC8\u6B62\u8C03\u5EA6";
@@ -22627,157 +22601,6 @@ function showBatchResult(result) {
     allGantt.removeAttribute("aria-disabled");
   }
 }
-function objectiveComparisonMetrics(result) {
-  const diagnostics = [...result?.rounds || []].reverse().map((round) => round.strategyDiagnostics).find((value) => value?.metrics);
-  const metrics = diagnostics?.metrics || {};
-  return {
-    residencyViolationCount: Number(metrics.residencyViolationCount) || 0,
-    maximumRobotHoldingSeconds: Number(metrics.maximumRobotHoldingSeconds),
-    systemResidenceCv: Number(metrics.systemResidenceCv)
-  };
-}
-function comparisonNumber(value, digits = 2, suffix = "") {
-  return Number.isFinite(Number(value)) ? `${Number(value).toFixed(digits)}${suffix}` : "\u2014";
-}
-function comparisonDelta(baselineValue, candidateValue, digits = 2, suffix = "", lowerIsBetter = true) {
-  const baseline = Number(baselineValue);
-  const candidate = Number(candidateValue);
-  if (!Number.isFinite(baseline) || !Number.isFinite(candidate)) return { text: "\u2014", kind: "neutral" };
-  const delta = candidate - baseline;
-  const sign = delta > 0 ? "+" : "";
-  const percent = Math.abs(baseline) > 1e-9 ? ` (${sign}${(delta / baseline * 100).toFixed(1)}%)` : "";
-  const kind = delta === 0 ? "neutral" : lowerIsBetter ? delta < 0 ? "gain" : "loss" : delta > 0 ? "gain" : "loss";
-  return { text: `${sign}${delta.toFixed(digits)}${suffix}${percent}`, kind };
-}
-function comparisonLimit(value, digits = 2, suffix = "") {
-  const numeric = Number(value) || 0;
-  return numeric > 0 ? `${numeric.toFixed(digits)}${suffix}` : "\u4E0D\u9650";
-}
-function comparisonSettingDelta(baselineValue, candidateValue, digits = 2, suffix = "") {
-  return { ...comparisonDelta(baselineValue, candidateValue, digits, suffix, false), kind: "neutral" };
-}
-function renderParameterComparisonRows(baseline, experiment) {
-  const baselineMetrics = objectiveComparisonMetrics(baseline.result);
-  const experimentMetrics = objectiveComparisonMetrics(experiment.result);
-  const baselineMakespan = Number(baseline.result?.makespan);
-  const experimentMakespan = Number(experiment.result?.makespan);
-  const strategyChanged = baseline.plan.strategy !== experiment.plan.strategy;
-  const rows = [
-    ["\u7B56\u7565", displayStrategyName(baseline.plan.strategy), displayStrategyName(experiment.plan.strategy), strategyChanged ? "\u5DF2\u5207\u6362" : "\u76F8\u540C", strategyChanged ? "gain" : "neutral"],
-    ["\u9A7B\u7559\u4F59\u91CF", comparisonNumber(baseline.options.residencyGuardSeconds, 1, " s"), comparisonNumber(experiment.options.residencyGuardSeconds, 1, " s"), comparisonSettingDelta(baseline.options.residencyGuardSeconds, experiment.options.residencyGuardSeconds, 1, " s")],
-    ["\u6301\u7247\u4E0A\u9650", comparisonLimit(baseline.options.maximumRobotHoldingSeconds, 1, " s"), comparisonLimit(experiment.options.maximumRobotHoldingSeconds, 1, " s"), comparisonSettingDelta(baseline.options.maximumRobotHoldingSeconds, experiment.options.maximumRobotHoldingSeconds, 1, " s")],
-    ["CV \u4E0A\u9650", comparisonLimit(baseline.options.maximumSystemResidenceCv, 3), comparisonLimit(experiment.options.maximumSystemResidenceCv, 3), comparisonSettingDelta(baseline.options.maximumSystemResidenceCv, experiment.options.maximumSystemResidenceCv, 3)],
-    ["Makespan", comparisonNumber(baselineMakespan, 2, " s"), comparisonNumber(experimentMakespan, 2, " s"), comparisonDelta(baselineMakespan, experimentMakespan, 2, " s")],
-    ["\u9A7B\u7559\u8D85\u9650", `${baselineMetrics.residencyViolationCount} \u6B21`, `${experimentMetrics.residencyViolationCount} \u6B21`, comparisonDelta(baselineMetrics.residencyViolationCount, experimentMetrics.residencyViolationCount, 0, " \u6B21")],
-    ["\u5B9E\u9645\u6700\u5927\u6301\u7247", comparisonNumber(baselineMetrics.maximumRobotHoldingSeconds, 2, " s"), comparisonNumber(experimentMetrics.maximumRobotHoldingSeconds, 2, " s"), comparisonDelta(baselineMetrics.maximumRobotHoldingSeconds, experimentMetrics.maximumRobotHoldingSeconds, 2, " s")],
-    ["\u7CFB\u7EDF\u505C\u7559 CV", comparisonNumber(baselineMetrics.systemResidenceCv, 3), comparisonNumber(experimentMetrics.systemResidenceCv, 3), comparisonDelta(baselineMetrics.systemResidenceCv, experimentMetrics.systemResidenceCv, 3)]
-  ];
-  return rows.map(([label, base, candidate, delta, kind]) => {
-    const deltaValue = typeof delta === "string" ? { text: delta, kind } : delta;
-    return `<div class="comparison-row"><span>${escapeHtml4(label)}</span><strong>${escapeHtml4(base)}</strong><strong>${escapeHtml4(candidate)}</strong><strong class="comparison-delta ${escapeHtml4(deltaValue.kind)}">${escapeHtml4(deltaValue.text)}</strong></div>`;
-  }).join("");
-}
-function renderParameterComparisonCard(index, baseline, experiment) {
-  const makespanDelta = comparisonDelta(baseline.result?.makespan, experiment.result?.makespan, 2, " s");
-  const validation = experiment.result?.validation === "passed" ? "\u6821\u9A8C\u901A\u8FC7" : experiment.result?.validation === "skipped" ? "\u6821\u9A8C\u8DF3\u8FC7" : `\u6821\u9A8C ${experiment.result?.validation || "\u672A\u77E5"}`;
-  return `<article class="comparison-experiment">
-    <header class="comparison-experiment-head"><div><strong>\u57FA\u51C6 vs \u5BF9\u6BD4 ${index + 1}</strong><span> ${escapeHtml4(displayStrategyName(baseline.plan.strategy))} \u2192 ${escapeHtml4(displayStrategyName(experiment.plan.strategy))}</span></div><div><span class="comparison-delta ${escapeHtml4(makespanDelta.kind)}">Makespan ${escapeHtml4(makespanDelta.text)}</span>${experiment.result?.ganttUrl ? `<a class="btn" href="${escapeHtml4(experiment.result.ganttUrl)}" target="_blank">\u7518\u7279\u56FE</a>` : ""}</div></header>
-    <div class="comparison-table"><div class="comparison-row comparison-row-head"><span>\u6307\u6807</span><strong>\u57FA\u51C6</strong><strong>\u5BF9\u6BD4</strong><strong>\u5DEE\u503C</strong></div>${renderParameterComparisonRows(baseline, experiment)}</div>
-    <small>${escapeHtml4(validation)}</small>
-  </article>`;
-}
-function renderParameterComparison() {
-  const panel = document.getElementById("parameterComparisonPanel");
-  const comparison = state.parameterComparison;
-  if (!comparison?.baseline || !comparison.variants.length) {
-    panel.hidden = true;
-    document.getElementById("parameterComparisonBase").textContent = "";
-    document.getElementById("parameterComparisonResults").innerHTML = "";
-    return;
-  }
-  const baseline = comparison.baseline;
-  panel.hidden = false;
-  document.getElementById("parameterComparisonBase").textContent = `\u57FA\u51C6\uFF1A${displayStrategyName(baseline.plan.strategy)} \xB7 ${batchParameterSummary(baseline.options, baseline.plan.strategy)}`;
-  document.getElementById("parameterComparisonResults").innerHTML = comparison.variants.map((variant, index) => renderParameterComparisonCard(index, baseline, variant)).join("");
-}
-function renderParameterComparisonStrategyFields(strategy, options = {}) {
-  const definitions = {
-    "loadlock-macro": [["loadLockMacroSearchSeconds", "\u5B8F\u641C\u7D22\u65F6\u95F4\uFF08\u79D2\uFF09", "number", "0.1"], ["loadLockMacroRollouts", "\u5B8F\u91C7\u6837\u6B21\u6570", "number", "1"]]
-  };
-  const fields = definitions[strategy] || [];
-  document.getElementById("parameterComparisonStrategyOptions").innerHTML = fields.length ? `<div class="grid">${fields.map(([key, label, type, step]) => `<div class="field span-4"><label>${escapeHtml4(label)}<input data-comparison-option="${escapeHtml4(key)}" type="${type}" min="0" step="${step}" value="${escapeHtml4(String(options[key] ?? 0))}" required></label></div>`).join("")}</div>` : `<div class="hint">\u8BE5\u7B56\u7565\u6CA1\u6709\u989D\u5916\u7684\u7B56\u7565\u4E13\u5C5E\u53C2\u6570\uFF1B\u4E0A\u65B9\u901A\u7528\u7EA6\u675F\u53C2\u6570\u4ECD\u4F1A\u751F\u6548\u3002</div>`;
-}
-function openParameterComparisonDialog() {
-  const comparison = state.parameterComparison;
-  if (!comparison?.baseline) return;
-  const baseline = comparison.baseline;
-  const strategySelect = document.getElementById("parameterComparisonStrategy");
-  const strategies = [...document.querySelectorAll('input[name="strategy"]')].filter((input) => !input.disabled || input.value === baseline.plan.strategy).map((input) => input.value);
-  strategySelect.innerHTML = strategies.map((strategy) => `<option value="${escapeHtml4(strategy)}">${escapeHtml4(displayStrategyName(strategy))}</option>`).join("");
-  strategySelect.value = baseline.plan.strategy;
-  document.getElementById("comparisonLoadLockManager").value = baseline.options.loadLockManager || "petri-look";
-  document.getElementById("comparisonResidencyGuardSeconds").value = String(Number(baseline.options.residencyGuardSeconds) || 0);
-  document.getElementById("comparisonMaximumRobotHoldingSeconds").value = String(Number(baseline.options.maximumRobotHoldingSeconds) || 0);
-  document.getElementById("comparisonMaximumSystemResidenceCv").value = String(Number(baseline.options.maximumSystemResidenceCv) || 0);
-  document.getElementById("comparisonSeed").value = String(Number(baseline.options.seed) || 0);
-  renderParameterComparisonStrategyFields(baseline.plan.strategy, baseline.options);
-  document.getElementById("parameterComparisonDialogStatus").textContent = "";
-  document.getElementById("parameterComparisonDialog").showModal();
-}
-function parameterComparisonOptions() {
-  const optionInputs = [
-    ["comparisonResidencyGuardSeconds", "residencyGuardSeconds"],
-    ["comparisonMaximumRobotHoldingSeconds", "maximumRobotHoldingSeconds"],
-    ["comparisonMaximumSystemResidenceCv", "maximumSystemResidenceCv"],
-    ["comparisonSeed", "seed"]
-  ];
-  const options = Object.fromEntries(optionInputs.map(([inputId, optionKey]) => {
-    const value = Number(document.getElementById(inputId).value);
-    if (!Number.isFinite(value) || value < 0) throw new Error("\u5BF9\u6BD4\u53C2\u6570\u5FC5\u987B\u4E3A\u5927\u4E8E\u6216\u7B49\u4E8E 0 \u7684\u6570\u5B57");
-    return [optionKey, value];
-  }));
-  options.loadLockManager = document.getElementById("comparisonLoadLockManager").value;
-  document.querySelectorAll("[data-comparison-option]").forEach((input) => {
-    const value = Number(input.value);
-    if (!Number.isFinite(value) || value < 0) throw new Error("\u7B56\u7565\u53C2\u6570\u5FC5\u987B\u4E3A\u5927\u4E8E\u6216\u7B49\u4E8E 0 \u7684\u6570\u5B57");
-    options[input.dataset.comparisonOption] = value;
-  });
-  return options;
-}
-async function runParameterComparison() {
-  const comparison = state.parameterComparison;
-  if (!comparison?.baseline) throw new Error("\u8BF7\u5148\u5B8C\u6210\u4E00\u6B21\u5355\u6D4B\u8BD5\u8FD0\u884C\uFF0C\u518D\u521B\u5EFA\u53C2\u6570\u5BF9\u6BD4");
-  const button = document.getElementById("runParameterComparisonButton");
-  const status = document.getElementById("parameterComparisonDialogStatus");
-  const overrides = parameterComparisonOptions();
-  const plan = structuredClone(comparison.baseline.plan);
-  plan.strategy = document.getElementById("parameterComparisonStrategy").value;
-  plan.options = { ...plan.options, ...overrides };
-  delete plan.workspaceDeviceId;
-  delete plan.workspaceTestId;
-  button.disabled = true;
-  button.textContent = "\u6B63\u5728\u8FD0\u884C\u5BF9\u6BD4\u2026";
-  status.textContent = "\u6B63\u5728\u63D0\u4EA4\u5BF9\u6BD4\u6D4B\u8BD5\uFF0C\u8BF7\u7A0D\u5019\u2026";
-  try {
-    const response = await fetch("/api/run", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(plan)
-    });
-    const result = await response.json();
-    if (!response.ok || !result.ok) throw new Error(result.error || `\u670D\u52A1\u8FD4\u56DE ${response.status}`);
-    comparison.variants.push({ plan, options: plan.options, result });
-    renderParameterComparison();
-    document.getElementById("parameterComparisonDialog").close();
-    writeTerminal(`$ \u53C2\u6570\u5BF9\u6BD4\u5B8C\u6210
-  ${displayStrategyName(plan.strategy)} \xB7 ${batchParameterSummary(overrides, plan.strategy)}
-  Makespan: ${Number(result.makespan).toFixed(2)} s`);
-  } finally {
-    button.disabled = false;
-    button.textContent = "\u8FD0\u884C\u5BF9\u6BD4\u6D4B\u8BD5";
-    status.textContent = "";
-  }
-}
 async function clearExportedArtifacts() {
   if (!window.confirm("\u5C06\u5220\u9664\u5168\u90E8\u5DF2\u5BFC\u51FA\u7684\u7ED3\u679C\u548C\u590D\u73B0\u65E5\u5FD7\uFF0C\u4E14\u65E0\u6CD5\u6062\u590D\u3002\u662F\u5426\u7EE7\u7EED\uFF1F")) return;
   const button = document.getElementById("clearExportsButton");
@@ -22844,13 +22667,6 @@ function showResult(result) {
     document.getElementById("metricValidationLabel").textContent = "Validation / Dual Actor";
     document.getElementById("metricValidationDetail").textContent = `\u51B3\u7B56\uFF1A\u5927\u6C14 ${totals.atmosphere} \xB7 \u771F\u7A7A ${totals.vacuum}\uFF1B\u539F\u5B50\u52A8\u4F5C\uFF1APick ${totals.pick} \xB7 Place ${totals.place} \xB7 Swap ${totals.swap}`;
   }
-  const baselinePlan = structuredClone(buildPayload());
-  state.parameterComparison = {
-    baseline: { plan: baselinePlan, options: baselinePlan.options, result },
-    variants: []
-  };
-  document.getElementById("openParameterComparisonDialogButton").disabled = !state.serviceCompatible;
-  renderParameterComparison();
   writeTerminal(["$ \u8C03\u5EA6\u5B8C\u6210", ...(result.rounds || []).map((round) => {
     if (round.kind === "initial") return `  #${round.index} \u9996\u6B21 | ${round.elapsedMs.toFixed(1)} ms`;
     const request = Number(round.requestedTime);
@@ -22885,8 +22701,6 @@ function showFailedResultMetrics(result) {
   setResultMetric("Validation", "Validation", result?.validation === "failed" ? "\u672A\u901A\u8FC7" : String(result?.validation || "\u5931\u8D25"), result?.error || "");
   document.getElementById("metricValidation").closest(".metric").classList.remove("is-success");
   document.getElementById("metricValidation").closest(".metric").classList.add("is-error");
-  state.parameterComparison = null;
-  document.getElementById("openParameterComparisonDialogButton").disabled = true;
 }
 function writeTerminal(message, error = false) {
   const panel = document.getElementById("resultErrorPanel");
@@ -22953,7 +22767,6 @@ async function checkService() {
   const pill = document.getElementById("serviceState");
   const runButton = document.getElementById("runButton");
   const batchRunButton = document.getElementById("batchRunButton");
-  const comparisonButton = document.getElementById("openParameterComparisonDialogButton");
   try {
     const response = await fetch("/api/health", { cache: "no-store" });
     if (!response.ok) throw new Error();
@@ -22971,7 +22784,6 @@ async function checkService() {
     renderOtherAlgorithmOptions(status.algorithms || status.otherAlgorithms || []);
     runButton.disabled = !compatible || singleRunCancelling || state.batchRunning;
     batchRunButton.disabled = !compatible || singleRunActive || state.batchRunning && state.batchCancelRequested;
-    comparisonButton.disabled = !compatible || state.batchRunning || !state.parameterComparison?.baseline;
     document.getElementById("stepRunButton").disabled = stepRunActive ? false : !compatible || state.strategy !== "schedule-alphago";
     renderWorkspaceControls();
     pill.textContent = compatible ? "\u672C\u5730\u670D\u52A1\u5DF2\u8FDE\u63A5" : "\u670D\u52A1\u7248\u672C\u8FC7\u65E7";
@@ -22984,7 +22796,6 @@ async function checkService() {
     state.serviceCompatible = false;
     runButton.disabled = true;
     batchRunButton.disabled = true;
-    comparisonButton.disabled = true;
     document.getElementById("stepRunButton").disabled = true;
     renderWorkspaceControls();
     pill.textContent = "\u672C\u5730\u670D\u52A1\u672A\u8FDE\u63A5";
@@ -23211,8 +23022,6 @@ document.getElementById("batchTestSelectionForm").addEventListener("submit", (ev
   event.preventDefault();
   runBatchSelection(false);
 });
-document.getElementById("openParameterComparisonDialogButton").addEventListener("click", openParameterComparisonDialog);
-document.getElementById("parameterComparisonDialogCancel").addEventListener("click", () => document.getElementById("parameterComparisonDialog").close());
 document.getElementById("openScheduleAlphaGoOptionsDialogButton").addEventListener("click", openScheduleAlphaGoOptionsDialog);
 document.getElementById("scheduleAlphaGoOptionsDialogCancel").addEventListener("click", () => document.getElementById("scheduleAlphaGoOptionsDialog").close());
 document.getElementById("alphaGoCheckpointFile").addEventListener("change", (event) => {
@@ -23231,18 +23040,6 @@ document.getElementById("scheduleAlphaGoOptionsForm").addEventListener("submit",
   event.preventDefault();
   saveScheduleAlphaGoOptions().catch((error) => {
     document.getElementById("alphaGoCheckpointHint").textContent = error.message || "\u53C2\u6570\u4FDD\u5B58\u5931\u8D25";
-  });
-});
-document.getElementById("parameterComparisonStrategy").addEventListener("change", (event) => {
-  const baselineOptions = state.parameterComparison?.baseline?.options || {};
-  renderParameterComparisonStrategyFields(event.target.value, baselineOptions);
-});
-document.getElementById("parameterComparisonForm").addEventListener("submit", (event) => {
-  event.preventDefault();
-  runParameterComparison().catch((error) => {
-    document.getElementById("parameterComparisonDialogStatus").textContent = error.message || "\u672A\u77E5\u9519\u8BEF";
-    writeTerminal(`$ \u53C2\u6570\u5BF9\u6BD4\u5931\u8D25
-  ${error.message || "\u672A\u77E5\u9519\u8BEF"}`, true);
   });
 });
 document.getElementById("clearExportsButton").addEventListener("click", clearExportedArtifacts);

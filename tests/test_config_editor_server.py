@@ -101,6 +101,25 @@ def _job(name: str, route: str, load_port: str) -> dict:
 class FrontendTemplateTests(unittest.TestCase):
     """验证不依赖算法数据夹具的前端模板与样式约束。"""
 
+    def test_workspace_switches_do_not_enter_global_pending_lock(self) -> None:
+        """设备和测试组切换不得用全局等待锁重绘并禁用自身选择器。"""
+        source = EDITOR_SCRIPT_PATH.read_text(encoding="utf-8")
+        template = EDITOR_PATH.read_text(encoding="utf-8")
+
+        self.assertNotIn("runWorkspaceInteraction", source)
+        self.assertNotIn("workspaceInteractionPending", source)
+        self.assertNotIn('id="pageActivity"', template)
+        self.assertIn(
+            'document.getElementById("testGroupSelect").addEventListener("change", '
+            'event => selectWorkspaceGroup(event.target.value)',
+            source,
+        )
+        self.assertIn(
+            'document.getElementById("deviceSelect").addEventListener("change", '
+            'event => (async () => {',
+            source,
+        )
+
     def test_data_transfer_uses_accessible_background_progress(self) -> None:
         """设备交换必须显示后台阶段、上传进度并提供可访问进度语义。"""
         html = _editor_source()
@@ -528,19 +547,19 @@ class RecomputeFailureOutputTests(unittest.TestCase):
         self.assertIn("!rec.removedByRecompute", viewer)
         self.assertIn('fillOpacity = bar.rec.removedByRecompute ? "0.24" : "1"', viewer)
 
-    def test_frontend_version_and_cache_keys_are_1_5_19(self) -> None:
+    def test_frontend_version_and_cache_keys_are_1_5_22(self) -> None:
         """前端显示版本、包版本和主资源缓存键必须同步。"""
         frontend_root = ROOT / "realtime_scheduler" / "frontend"
         template = (frontend_root / "config_editor.html").read_text(encoding="utf-8")
         package = json.loads((frontend_root / "package.json").read_text(encoding="utf-8"))
         package_lock = json.loads((frontend_root / "package-lock.json").read_text(encoding="utf-8"))
 
-        self.assertEqual("1.5.20", package["version"])
-        self.assertEqual("1.5.20", package_lock["version"])
-        self.assertEqual("1.5.20", package_lock["packages"][""]["version"])
-        self.assertIn('class="frontend-version">前端 v1.5.20</span>', template)
-        self.assertIn('/assets/config_editor.css?v=1.5.20', template)
-        self.assertIn('/assets/config_editor.js?v=1.5.20', template)
+        self.assertEqual("1.5.22", package["version"])
+        self.assertEqual("1.5.22", package_lock["version"])
+        self.assertEqual("1.5.22", package_lock["packages"][""]["version"])
+        self.assertIn('class="frontend-version">前端 v1.5.22</span>', template)
+        self.assertIn('/assets/config_editor.css?v=1.5.22', template)
+        self.assertIn('/assets/config_editor.js?v=1.5.22', template)
 
     def test_batch_status_refresh_obeys_frontend_performance_limit(self) -> None:
         """批量状态最多每秒轮询一次，且明细未变化时不得重建整组 DOM。"""
@@ -2325,7 +2344,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("<span>结果分析</span>", html)
         self.assertIn("<span>路径配置</span>", html)
         self.assertNotIn('data-tab-view="clean"', html)
-        self.assertIn('class="frontend-version">前端 v1.5.20</span>', html)
+        self.assertIn('class="frontend-version">前端 v1.5.22</span>', html)
         self.assertIn('data-option="residencyGuardSeconds"', html)
         self.assertIn('data-option="maximumRobotHoldingSeconds"', html)
         self.assertIn('data-option="maximumSystemResidenceCv"', html)
@@ -2485,12 +2504,9 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn('id="testGroupSelect"', html)
         self.assertIn('id="newGroupButton"', html)
         self.assertIn('id="batchRunButton"', html)
-        self.assertIn('id="openParameterComparisonDialogButton"', html)
-        self.assertIn("运行对比测试", html)
-        self.assertIn('id="parameterComparisonDialog"', html)
-        self.assertIn('id="parameterComparisonPanel"', html)
-        self.assertIn('id="runParameterComparisonButton"', html)
-        self.assertIn("runParameterComparison", html)
+        self.assertNotIn('openParameterComparisonDialogButton', html)
+        self.assertNotIn('parameterComparison', html)
+        self.assertNotIn('运行对比测试', html)
         self.assertIn('id="batchResults"', html)
         self.assertIn('id="batchProgress"', html)
         self.assertIn('id="batchGanttButton"', html)

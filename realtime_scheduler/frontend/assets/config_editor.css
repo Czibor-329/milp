@@ -642,35 +642,9 @@
     .result-actions { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
     .btn.analysis { border-color: #bcd8cb; color: #087f5b; background: #ecf8f2; }
     .btn.analysis:hover { border-color: #75b79b; background: #e1f4ea; }
-    .parameter-comparison { display: grid; gap: 12px; margin: 24px 0 16px; padding: 16px; border: 1px solid #cbd8f4; border-radius: 12px; background: #f7f9ff; }
-    .parameter-comparison[hidden] { display: none; }
-    .parameter-comparison-head h3 { margin: 3px 0 5px; font-size: 17px; }
-    .parameter-comparison-head p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
-    .parameter-comparison-base { color: #284d9d; font-size: 12px; font-weight: 700; }
-    .comparison-empty { padding: 12px; border: 1px dashed #b7c8ed; border-radius: 9px; color: #52637b; background: #fff; font-size: 12px; }
-    .comparison-experiment { display: grid; gap: 9px; padding: 12px; border: 1px solid #b8d9ca; border-radius: 10px; background: #fff; }
-    .comparison-experiment-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-    .comparison-experiment-head > div { display: flex; align-items: center; gap: 8px; min-width: 0; }
-    .comparison-experiment-head strong { color: #172554; font-size: 13px; }
-    .comparison-experiment-head span { color: #52637b; font-size: 11px; font-weight: 700; }
-    .comparison-experiment-head .btn { min-height: 25px; padding: 4px 7px; border-radius: 7px; font-size: 9px; }
-    .comparison-table { overflow: hidden; border: 1px solid #d5deea; border-radius: 8px; }
-    .comparison-row { display: grid; grid-template-columns: minmax(94px, 1.2fr) repeat(3, minmax(0, 1fr)); border-top: 1px solid #e4eaf2; }
-    .comparison-row:first-child { border-top: 0; }
-    .comparison-row > * { min-width: 0; padding: 7px 8px; overflow: hidden; color: #334155; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-    .comparison-row > span { color: #64748b; font-weight: 750; background: #f8fafc; }
-    .comparison-row > strong { border-left: 1px solid #e4eaf2; font-weight: 800; font-variant-numeric: tabular-nums; }
-    .comparison-row-head { background: #edf3ff; }
-    .comparison-row-head > * { color: #284d9d; font-size: 10px; font-weight: 900; }
-    .comparison-delta { display: inline-flex; align-items: center; width: fit-content; border-radius: 999px; font-weight: 900; }
-    .comparison-row .comparison-delta { padding: 4px 6px; margin: 3px 5px; }
-    .comparison-delta.gain { color: #087f5b; background: #e0f5ea; }
-    .comparison-delta.loss { color: #b42332; background: #fff0f1; }
-    .comparison-delta.neutral { color: #52637b; background: #eef2f7; }
-    .comparison-experiment > small { color: #087f5b; font-size: 10px; font-weight: 800; }
     @container result-area (max-width: 1100px) { .batch-results { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
-    @container result-area (max-width: 720px) { .batch-results, .result-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } .metric:nth-child(odd) { border-left: 0; } .metric:nth-child(n+3) { border-top: 1px solid var(--line); } .comparison-row { grid-template-columns: 86px repeat(3, minmax(0, 1fr)); } }
-    @container result-area (max-width: 520px) { .batch-results, .result-metrics { grid-template-columns: 1fr; } .metric { border-top: 1px solid var(--line); border-left: 0; } .metric:first-child { border-top: 0; } .comparison-experiment-head { align-items: flex-start; flex-direction: column; } .comparison-row { grid-template-columns: 76px repeat(3, minmax(0, 1fr)); } .comparison-row > * { padding: 6px 4px; font-size: 10px; } }
+    @container result-area (max-width: 720px) { .batch-results, .result-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } .metric:nth-child(odd) { border-left: 0; } .metric:nth-child(n+3) { border-top: 1px solid var(--line); } }
+    @container result-area (max-width: 520px) { .batch-results, .result-metrics { grid-template-columns: 1fr; } .metric { border-top: 1px solid var(--line); border-left: 0; } .metric:first-child { border-top: 0; } }
     /* -------- MoveList 结果分析与独立拓扑回放 -------- */
     .visual-workbench { min-width: 0; }
     .visual-toolbar { display: flex; align-items: center; justify-content: flex-end; margin-bottom: 16px; padding: 0; }
