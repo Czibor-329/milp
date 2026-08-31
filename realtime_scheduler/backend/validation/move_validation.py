@@ -19,10 +19,12 @@ from .move_validation_core import (
     PRE_PREPARE_MOVE,
     PRE_TRANS_MOVE,
     PROCESS_MOVE,
+    RobotState,
     SWAP_MOVE,
     SlotPhase,
     SlotState,
     ValidationErrorCode,
+    VACUUM,
     release_completed_load_port_materials,
     validate_move_list,
 )
@@ -30,7 +32,8 @@ from .move_validation_core import (
 __all__ = [
     "ALIGN_MOVE", "ATMOSPHERE", "COMPLETE_MOVE", "DoorState", "LoadLockState",
     "MachineState", "MaterialState", "MoveStateReplay", "PICK_MOVE", "PLACE_MOVE",
-    "PREPARE_MOVE", "PRE_PREPARE_MOVE", "PRE_TRANS_MOVE", "PROCESS_MOVE", "SWAP_MOVE",
-    "SlotPhase", "SlotState", "ValidationErrorCode", "release_completed_load_port_materials",
+    "PREPARE_MOVE", "PRE_PREPARE_MOVE", "PRE_TRANS_MOVE", "PROCESS_MOVE", "RobotState",
+    "SWAP_MOVE", "SlotPhase", "SlotState", "ValidationErrorCode", "VACUUM",
+    "release_completed_load_port_materials",
     "validate_move_list",
 ]

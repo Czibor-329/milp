@@ -338,7 +338,8 @@ def run_suite(
         process = subprocess.Popen(
             [
                 sys.executable,
-                str(ROOT / "realtime_scheduler" / "server.py"),
+                "-m",
+                "realtime_scheduler.backend.main",
                 "--host",
                 "127.0.0.1",
                 "--port",

@@ -17,6 +17,8 @@ milp/
 │   ├── data.rar
 │   └── alg-heuristic-20260813-7750ba9.zip
 ├── realtime_scheduler/
+│   ├── backend/                      # 服务端正式实现与模块启动入口
+│   ├── frontend/                     # 浏览器页面与构建产物
 │   ├── data/                         # 由 data.rar 解压得到，各目录含义见「数据说明」
 │   │   └── datasets/                 # 设备与测试集的唯一主数据
 │   └── exports/                      # 运行结果与复现日志（可随时清理）
@@ -32,7 +34,7 @@ milp/
 启动：
 
 ```powershell
-python realtime_scheduler\server.py --open
+python -m realtime_scheduler.backend.main --open
 ```
 
 默认地址为 `http://127.0.0.1:8765/config_editor.html`
@@ -99,6 +101,8 @@ python scripts/run_performance_suite.py --profile medium --migration --enforce
 
 交换包上传大小限制为 64 MiB，ZIP 内 JSON 解压后的总量限制为 512 MiB；两者独立
 校验，以支持包含大量测试集但压缩率较高的设备包，同时防止异常压缩包过度膨胀。
+设备包导入导出会在弹窗中显示上传、校验、压缩和写入进度。服务端只读取或更新当前
+设备目录；导出不解析其他设备的测试，导入也不会重写未参与交换的设备与测试。
 
 `realtime_scheduler/data/` 由服务自动维护，整个目录不在 Git 版本控制中。简化结构：
 

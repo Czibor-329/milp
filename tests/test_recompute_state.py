@@ -10,19 +10,19 @@ from __future__ import annotations
 from copy import deepcopy
 from pathlib import Path
 
-from realtime_scheduler.move_validation import (
+from realtime_scheduler.backend.validation.move_validation import (
     ATMOSPHERE,
     MachineState,
     MoveStateReplay,
     SlotPhase,
     VACUUM,
 )
-from realtime_scheduler.recompute_state import (
+from realtime_scheduler.backend.execution.recompute_state import (
     apply_machine_state_to_update,
     merge_algorithm_update,
     restore_dummy_routes_from_algorithm_output,
 )
-from realtime_scheduler.server import _compile_external_validation_problem
+from realtime_scheduler.backend.application import _compile_external_validation_problem
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -573,7 +573,7 @@ def test_external_validation_compile_clears_predummy_only_in_copy(monkeypatch) -
         captured["update"] = validation_update
         return "validation-problem"
 
-    monkeypatch.setattr("realtime_scheduler.server.compile_problem", capture_compile)
+    monkeypatch.setattr("realtime_scheduler.backend.application.compile_problem", capture_compile)
 
     result = _compile_external_validation_problem({"Stations": {}}, update)
 
@@ -582,10 +582,10 @@ def test_external_validation_compile_clears_predummy_only_in_copy(monkeypatch) -
     assert update["ProcessJobs"][0]["OriginRoute"]["PrePJob"]
 
 
-def test_server_does_not_implement_machine_state_snapshot_replay() -> None:
-    """HTTP 服务边界不得重新承载 MachineState 到 update 的回写实现。"""
-    server_source = (
-        ROOT / "realtime_scheduler" / "server.py"
+def test_application_does_not_implement_machine_state_snapshot_replay() -> None:
+    """应用装配边界不得重新承载 MachineState 到 update 的回写实现。"""
+    application_source = (
+        ROOT / "realtime_scheduler" / "backend" / "application.py"
     ).read_text(encoding="utf-8")
     backend_source = (
         ROOT / "realtime_scheduler" / "backend" / "execution" / "recompute_state.py"
@@ -594,7 +594,7 @@ def test_server_does_not_implement_machine_state_snapshot_replay() -> None:
         ROOT / "realtime_scheduler" / "backend" / "execution" / "run_state.py"
     ).read_text(encoding="utf-8")
 
-    assert "def _apply_machine_state_to_update" not in server_source
+    assert "def _apply_machine_state_to_update" not in application_source
     assert "def apply_machine_state_to_update" in backend_source
-    assert "realtime_scheduler.backend.application" in server_source
+    assert "from realtime_scheduler.backend.execution.run_state import *" in application_source
     assert "apply_machine_state_to_update(update" in run_state_source

@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import tempfile
+import time
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from realtime_scheduler import server
+from realtime_scheduler.backend import application as server
 
 
 def _device(station_name: str = "LP1") -> dict:
@@ -174,3 +175,137 @@ def test_completed_v6_store_archives_leftover_v5_directory() -> None:
         assert len(loaded["devices"]) == 1
         assert not legacy_dir.exists()
         assert list((data_dir / "migration-backups").glob("workspaces-v5-*"))
+
+
+def test_current_directory_device_export_skips_full_catalog_read() -> None:
+    """当前目录导出直接压缩目标设备文件，不回退到全目录解析。"""
+    with tempfile.TemporaryDirectory() as directory:
+        store_dir = Path(directory) / "datasets"
+        server._write_json_atomic(store_dir / "manifest.json", {
+            "kind": "ct-scheduler-datasets",
+            "schemaVersion": server.WORKSPACE_STORE_VERSION,
+        })
+        device, _ = server.import_workspace_device("PSE300.json", _device(), store_dir)
+        server.create_workspace_test(device["id"], {"name": "基础测试"}, store_dir)
+
+        with patch.object(
+            server,
+            "get_workspace_device",
+            side_effect=AssertionError("不应读取完整目录"),
+        ):
+            content, _ = server.export_workspace_device(device["id"], store_dir)
+
+        files = server._read_exchange_archive(content)
+        assert files["manifest.json"]["deviceId"] == device["id"]
+        assert len([name for name in files if name.endswith("/test.json")]) == 1
+
+
+def test_current_directory_device_import_only_updates_target_device() -> None:
+    """当前目录导入使用定向写入，不读取并重写其他设备的完整测试。"""
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        source = root / "source.json"
+        target = root / "datasets"
+        source_device, _ = server.import_workspace_device("source.json", _device("LP2"), source)
+        server.create_workspace_test(source_device["id"], {"name": "导入测试"}, source)
+        content, _ = server.export_workspace_device(source_device["id"], source)
+
+        server._write_json_atomic(target / "manifest.json", {
+            "kind": "ct-scheduler-datasets",
+            "schemaVersion": server.WORKSPACE_STORE_VERSION,
+        })
+        local_device, _ = server.import_workspace_device("local.json", _device(), target)
+        local_test = server.create_workspace_test(local_device["id"], {"name": "本地测试"}, target)
+        with patch.object(
+            server,
+            "_read_workspace_catalog_unlocked",
+            side_effect=AssertionError("不应读取完整目录"),
+        ):
+            imported, created_device, imported_tests = server.import_workspace_device_archive(
+                content, target,
+            )
+
+        assert created_device == 1
+        assert imported_tests == 1
+        assert server.get_workspace_test(local_device["id"], local_test["id"], target)["name"] == "本地测试"
+
+
+def test_current_directory_device_import_merges_matching_device_directly() -> None:
+    """相同指纹设备只合并新增测试，并保留目标设备原有测试文件。"""
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        source = root / "source.json"
+        target = root / "datasets"
+        source_device, _ = server.import_workspace_device("source.json", _device(), source)
+        source_test = server.create_workspace_test(
+            source_device["id"], {"name": "导入测试"}, source,
+        )
+        content, _ = server.export_workspace_device(source_device["id"], source)
+
+        server._write_json_atomic(target / "manifest.json", {
+            "kind": "ct-scheduler-datasets",
+            "schemaVersion": server.WORKSPACE_STORE_VERSION,
+        })
+        local_device, _ = server.import_workspace_device("local.json", _device(), target)
+        local_test = server.create_workspace_test(
+            local_device["id"], {"name": "本地测试"}, target,
+        )
+
+        imported, created_device, imported_tests = server.import_workspace_device_archive(
+            content, target,
+        )
+
+        assert created_device == 0
+        assert imported_tests == 1
+        assert {test["id"] for test in imported["tests"]} == {
+            local_test["id"], source_test["id"],
+        }
+        assert server.get_workspace_test(
+            local_device["id"], local_test["id"], target,
+        )["name"] == "本地测试"
+
+
+def test_workspace_transfer_reports_progress_and_download() -> None:
+    """后台导出任务可轮询至完成，并保留可下载归档。"""
+    archive = b"PK-test"
+    with patch.object(
+        server,
+        "export_workspace_device",
+        return_value=(archive, "device.zip"),
+    ):
+        transfer = server.create_workspace_transfer("export", "device", "device-id")
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            snapshot = server.read_workspace_transfer(transfer["id"])
+            if snapshot and snapshot["status"] in {"completed", "failed"}:
+                break
+            time.sleep(0.01)
+
+    assert snapshot is not None
+    assert snapshot["status"] == "completed"
+    assert snapshot["progress"] == 100
+    assert server.download_workspace_transfer(transfer["id"]) == (archive, "device.zip")
+
+
+def test_workspace_import_transfer_finishes_with_result() -> None:
+    """后台导入任务在上传后返回设备摘要，供前端完成刷新。"""
+    imported_device = {"id": "device-id", "name": "设备", "tests": [{"id": "test-id"}]}
+    with patch.object(
+        server,
+        "import_workspace_device_archive",
+        return_value=(imported_device, 1, 1),
+    ):
+        transfer = server.create_workspace_transfer("import", "device")
+        uploaded = server.upload_workspace_transfer(transfer["id"], b"archive")
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            snapshot = server.read_workspace_transfer(transfer["id"])
+            if snapshot and snapshot["status"] in {"completed", "failed"}:
+                break
+            time.sleep(0.01)
+
+    assert uploaded["progress"] == 20
+    assert snapshot is not None
+    assert snapshot["status"] == "completed"
+    assert snapshot["result"]["device"]["id"] == "device-id"
+    assert snapshot["result"]["importedTests"] == 1

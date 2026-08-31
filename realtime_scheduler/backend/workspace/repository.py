@@ -382,6 +382,18 @@ def _natural_name_key(value: str) -> Tuple[Any, ...]:
     )
 
 
+def _unique_workspace_name(name: str, existing_names: Iterable[str]) -> str:
+    """为工作区实体生成易读且不重复的名称。"""
+    normalized = name.strip() or "未命名"
+    occupied = {str(item) for item in existing_names}
+    if normalized not in occupied:
+        return normalized
+    suffix = 2
+    while f"{normalized} ({suffix})" in occupied:
+        suffix += 1
+    return f"{normalized} ({suffix})"
+
+
 def _workspace_load_ports(device: Mapping[str, Any]) -> List[str]:
     """按前端一致的自然顺序返回设备中的 LoadPort 名称。"""
     topology = device.get("device") if isinstance(device.get("device"), Mapping) else device

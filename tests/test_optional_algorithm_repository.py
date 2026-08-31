@@ -101,7 +101,7 @@ class OptionalAlgorithmRepositoryTests(unittest.TestCase):
                             Path({str(external_root)!r}).resolve()
                         )
 
-                        import realtime_scheduler.server as server
+                        import realtime_scheduler.backend.application as server
                         assert server.BUILTIN_ALGORITHM_AVAILABLE is True
                         assert server.BUILTIN_ALGORITHM_IMPORT_ERROR == ""
                         assert Path(server.builtin_algorithm_api.__file__).resolve() == (
@@ -135,7 +135,7 @@ class OptionalAlgorithmRepositoryTests(unittest.TestCase):
                 from http.server import ThreadingHTTPServer
                 from urllib.request import urlopen
 
-                import realtime_scheduler.server as server
+                import realtime_scheduler.backend.application as server
 
                 assert server.BUILTIN_ALGORITHM_AVAILABLE is False
                 assert server.discover_other_algorithms() == []
@@ -185,8 +185,8 @@ class OptionalAlgorithmRepositoryTests(unittest.TestCase):
             )
             completed = self._run_isolated_server_script(
                 """
-                import realtime_scheduler.server as server
-                from realtime_scheduler.algorithm_interface import (
+                import realtime_scheduler.backend.application as server
+                from realtime_scheduler.backend.algorithms.interface import (
                     init,
                     session,
                     update,
@@ -243,8 +243,8 @@ class OptionalAlgorithmRepositoryTests(unittest.TestCase):
             completed = self._run_isolated_server_script(
                 """
                 import sys
-                import realtime_scheduler.server as server
-                from realtime_scheduler.algorithm_interface import (
+                import realtime_scheduler.backend.application as server
+                from realtime_scheduler.backend.algorithms.interface import (
                     init,
                     session,
                     update,
@@ -323,7 +323,7 @@ class OptionalAlgorithmRepositoryTests(unittest.TestCase):
                     platform_src.__path__ = [str(fake_src)]
                     sys.modules["src"] = platform_src
 
-                    from realtime_scheduler.algorithm_interface import (
+                    from realtime_scheduler.backend.algorithms.interface import (
                         init,
                         session,
                         update,
@@ -392,7 +392,7 @@ class OptionalAlgorithmRepositoryTests(unittest.TestCase):
             completed = self._run_isolated_server_script(
                 """
                 import sys
-                from realtime_scheduler.algorithm_interface import (
+                from realtime_scheduler.backend.algorithms.interface import (
                     init,
                     session,
                     update,
@@ -424,7 +424,7 @@ class OptionalAlgorithmRepositoryTests(unittest.TestCase):
             packaged_root.mkdir()
             completed = self._run_isolated_server_script(
                 """
-                import realtime_scheduler.server as server
+                import realtime_scheduler.backend.application as server
 
                 first_update = {
                     "CurrentTime": 0,
@@ -519,7 +519,7 @@ class OptionalAlgorithmRepositoryTests(unittest.TestCase):
             packaged_root.mkdir()
             completed = self._run_isolated_server_script(
                 """
-                import realtime_scheduler.server as server
+                import realtime_scheduler.backend.application as server
 
                 first_update = {
                     "CurrentTime": 0,

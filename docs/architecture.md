@@ -24,12 +24,15 @@
 | `realtime_scheduler/frontend/src/` | 表单交互、回放投影、HTML/CSS 呈现、API 客户端 | 指标计算、瓶颈判断、结果持久化 |
 | `realtime_scheduler/backend/api/` | HTTP 请求、静态资源和文档 API | 调度决策、文件布局 |
 | `realtime_scheduler/backend/execution/` | 计划构建、算法运行、实时重算、CJob Cycle 和批量运行 | HTTP、页面渲染 |
-| `realtime_scheduler/backend/workspace/` | v7 存储、迁移、交换和设备/测试业务操作 | 算法决策、前端状态 |
+| `realtime_scheduler/backend/workspace/` | v7 存储、迁移和设备/测试业务操作 | 算法决策、前端状态 |
+| `realtime_scheduler/backend/workspace/catalog_service.py` | 设备、Route、测试组和测试集目录业务 | 交换包格式、后台传输任务 |
+| `realtime_scheduler/backend/workspace/exchange_service.py` | 交换包编解码和设备/测试导入导出规则 | 后台任务状态、普通 CRUD |
+| `realtime_scheduler/backend/workspace/transfer_jobs.py` | 导入导出后台任务、进度状态和制品下载 | 交换包格式、普通 CRUD |
 | `realtime_scheduler/backend/artifacts/` | 结果、复现日志和 Baseline 持久化 | 设备主数据 |
 | `realtime_scheduler/backend/validation/` | 平台状态回放和 HongYe 校验会话 | 调度策略选择 |
 | `realtime_scheduler/backend/algorithms/` | 发现和调用独立标准算法包 | 工作区和页面渲染 |
 | `realtime_scheduler/backend/analysis.py` | MoveList 性能、瓶颈、诊断、测试组汇总 | HTTP、DOM、文件读写 |
-| `realtime_scheduler/server.py` | 兼容启动入口和旧 Python 门面 | 业务实现、存储、调度和校验 |
+| `realtime_scheduler/backend/main.py` | 命令行参数、启动检查和 HTTP 服务生命周期 | 业务实现、存储、调度和校验 |
 | `realtime_scheduler/data/datasets/` | 设备 init、共享路径模板、测试独有的 Route 参数/Clean 与任务的唯一主数据 | 浏览器缓存、设备镜像 |
 | `realtime_scheduler/exports/` | MoveList 结果和复现日志 | 前端临时状态 |
 
@@ -38,8 +41,8 @@
 HTTP 契约提供给前端。
 
 后端依赖方向固定为 HTTP → 应用装配 → execution/workspace/artifacts →
-validation/algorithm interface。下层模块不得反向导入 `server.py`。历史模块路径只保留
-兼容入口；新增后端代码必须直接放入 `realtime_scheduler/backend/`。运行时 Python
+validation/algorithm interface。后端和仓库脚本必须直接导入 `realtime_scheduler.backend`
+下的正式模块，根包不保留历史兼容模块。运行时 Python
 文件以 2000 行为硬上限，达到 1500 行时应复核是否混入第二项独立职责。
 
 ## 后端终端日志
@@ -100,3 +103,6 @@ HTTP 请求。批量运行会输出测试 ID、校验状态、Move 数量和 mak
 8. 正常运行期间，设备列表只读取设备元数据和测试摘要索引，设备概览不得解析完整
    `test.json`，单测试读写只触碰目标测试及必要索引。完整目录扫描只允许出现在启动
    迁移、显式全库维护或确实需要跨测试同步的操作中。
+9. 设备和测试集交换通过 `/api/workspace-transfers` 创建进程内后台任务；前端轮询任务
+   状态并在导出完成后下载归档。当前目录格式的整设备导出只压缩目标设备文件，导入
+   只合并目标设备和对应测试摘要索引，不得退化为全工作区读写。

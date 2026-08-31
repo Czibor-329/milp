@@ -59,7 +59,19 @@
    - A function, class, or module that only forwards to another implementation must add a stable abstraction, unified semantics, error handling, resource management, or meaningful caller simplification.
    - Entry points may exist when they represent a real boundary; do not add one-line indirection merely to create the appearance of layering.
 
-8. Scheduling feature changes must update the corresponding user documentation.
+8. Decide module ownership before adding a feature.
+   - Do not append a new feature to the nearest existing file by default. First identify its business capability, state ownership, input/output boundary, and callers, then place it in the module whose documented responsibility matches all four.
+   - A feature with an independent lifecycle, state container, persistence format, external protocol, or background task belongs in a dedicated, specifically named module. For example, workspace CRUD, exchange-package encoding, and background transfer jobs must not share one catch-all service file.
+   - If a change introduces a second independent responsibility, pushes a runtime file beyond 1500 lines, or makes the top-of-file responsibility description inaccurate, split the module in the same task. Runtime Python files have a hard limit of 2000 lines.
+   - Update all imports, tests, architecture documentation, and entry points when moving ownership. Do not leave compatibility wrappers in the root package unless an explicit supported external compatibility contract requires them.
+   - The only current exception is `realtime_scheduler/server.py`: it may remain solely as a no-import deprecation notice for the historical startup command. It must not start the service, import backend modules, or re-export any API.
+
+9. Clean names when defining or moving boundaries.
+   - Module, class, function, state-container, and dependency names must state the concrete capability they own. Prefer names such as `exchange_service`, `transfer_jobs`, or `workspace_repository` over vague buckets such as `utils`, `common`, `manager`, or an ever-growing generic `service`.
+   - Remove stale historical names, duplicated aliases, and misleading comments as part of a move. A symbol exposed across modules must use one canonical name and one canonical import path.
+   - Do not encode an obsolete file location in logs, protocol metadata, UI guidance, or tests after the implementation has moved.
+
+10. Scheduling feature changes must update the corresponding user documentation.
    - When changing quick start, input APIs, constraint semantics, scheduling strategies, timing layers, Machine action feasibility, LoadLock management, or result analysis, update the corresponding pages in `realtime_scheduler/data/documentation/*.md` and verify page switching, body rendering, and the right-side table of contents in the user-documentation tab.
    - Each Markdown file is a separate page and must retain `title`, `slug`, `group`, `order`, and `description` front matter. Its level-one heading must match `title`. Split overly long content by topic instead of continuing to expand a single page.
    - Standard API documentation must remain last in document navigation. Changes to API fields, types, enums, inheritance, or aggregation must update the API overview, device objects, job objects, and Move/output pages, not only summary fields.

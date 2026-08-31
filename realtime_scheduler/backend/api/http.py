@@ -6,7 +6,9 @@ from realtime_scheduler.backend.bootstrap import *
 from realtime_scheduler.backend.execution.run_state import *
 from realtime_scheduler.backend.execution.service import *
 from realtime_scheduler.backend.workspace.repository import *
-from realtime_scheduler.backend.workspace.service import *
+from realtime_scheduler.backend.workspace.catalog_service import *
+from realtime_scheduler.backend.workspace.exchange_service import *
+from realtime_scheduler.backend.workspace.transfer_jobs import *
 from realtime_scheduler.backend.artifacts.repository import *
 from realtime_scheduler.backend.wiring import *
 
@@ -87,6 +89,31 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                 return
             self._send_json({"ok": True, "document": document})
             return
+        if path.startswith("/api/workspace-transfers/"):
+            transfer_parts = [part for part in path.split("/") if part]
+            if (
+                len(transfer_parts) == 4
+                and transfer_parts[:2] == ["api", "workspace-transfers"]
+                and transfer_parts[3] == "download"
+            ):
+                try:
+                    content, download_name = download_workspace_transfer(transfer_parts[2])
+                    self._send_bytes(content, "application/zip", download_name)
+                except LookupError as error:
+                    self._send_json({"ok": False, "error": str(error)}, HTTPStatus.NOT_FOUND)
+                except ValueError as error:
+                    self._send_json({"ok": False, "error": str(error)}, HTTPStatus.CONFLICT)
+                return
+            if (
+                len(transfer_parts) == 3
+                and transfer_parts[:2] == ["api", "workspace-transfers"]
+            ):
+                transfer = read_workspace_transfer(transfer_parts[2])
+                if transfer is None:
+                    self._send_json({"ok": False, "error": "交换任务不存在或已过期"}, HTTPStatus.NOT_FOUND)
+                else:
+                    self._send_json({"ok": True, "transfer": transfer})
+                return
         if path == "/api/search-telemetry":
             if not BUILTIN_ALGORITHM_AVAILABLE:
                 self._send_json(
@@ -201,6 +228,40 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         """接收控制台配置并同步运行后端策略。"""
         path = unquote(urlparse(self.path).path)
+        if path == "/api/workspace-transfers":
+            try:
+                payload = self._read_json_object()
+                transfer = create_workspace_transfer(
+                    str(payload.get("direction") or ""),
+                    str(payload.get("kind") or ""),
+                    str(payload.get("deviceId") or ""),
+                    str(payload.get("testId") or ""),
+                )
+                self._send_json(
+                    {"ok": True, "transfer": transfer},
+                    HTTPStatus.ACCEPTED,
+                )
+            except Exception as error:  # noqa: BLE001
+                self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
+            return
+        transfer_parts = [part for part in path.split("/") if part]
+        if (
+            len(transfer_parts) == 4
+            and transfer_parts[:2] == ["api", "workspace-transfers"]
+            and transfer_parts[3] == "content"
+        ):
+            try:
+                transfer = upload_workspace_transfer(
+                    transfer_parts[2],
+                    self._read_binary_body(DATA_EXCHANGE_MAX_ARCHIVE_BYTES),
+                )
+                self._send_json(
+                    {"ok": True, "transfer": transfer},
+                    HTTPStatus.ACCEPTED,
+                )
+            except Exception as error:  # noqa: BLE001
+                self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
+            return
         if path == "/api/workspaces/import/device":
             try:
                 device, created_device, imported_tests = import_workspace_device_archive(

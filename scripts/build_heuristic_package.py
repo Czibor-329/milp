@@ -76,14 +76,14 @@ python -m venv .venv
 然后运行：
 
 ```powershell
-.\alg\.venv\Scripts\python.exe .\realtime_scheduler\server.py --open
+.\alg\.venv\Scripts\python.exe -m realtime_scheduler.backend.main --open
 ```
 
 也可以放在任意目录，通过环境变量指定：
 
 ```powershell
 $env:CT_ALGORITHM_ROOT = "D:\path\to\alg"
-python .\realtime_scheduler\server.py --open
+python -m realtime_scheduler.backend.main --open
 ```
 
 标准接口只接受 `heuristic`；传入其他算法名会明确报错。

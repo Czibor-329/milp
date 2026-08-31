@@ -7,7 +7,7 @@ from realtime_scheduler.backend.time_utils import _workspace_timestamp
 from realtime_scheduler.backend.execution.run_state import *
 from realtime_scheduler.backend.execution.service import execute_plan
 from realtime_scheduler.backend.workspace.repository import *
-from realtime_scheduler.backend.workspace.service import *
+from realtime_scheduler.backend.workspace.catalog_service import *
 
 def save_result(output: Dict[str, Any]) -> str:
     """把甘特图数据写入专用导出目录并放入有界内存缓存。"""

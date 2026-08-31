@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from realtime_scheduler import server
+from realtime_scheduler.backend import application as server
 from scripts.run_performance_suite import (
     _evaluate_absolute_budgets,
     _evaluate_relative_budgets,

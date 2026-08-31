@@ -1,6 +1,6 @@
 """验证重算快照的清洁过程变量与 HongYe 跨代对账。"""
 
-from realtime_scheduler import server
+from realtime_scheduler.backend import application as server
 
 
 def test_hongye_reconciles_only_committed_running_preclean() -> None:

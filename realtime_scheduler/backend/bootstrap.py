@@ -5,13 +5,11 @@
 标准调度接口数据，依次运行首次排程与实时重算，并通过 backend.analysis 提供统一的
 MoveList 性能分析 API。设备、共享工艺库、测试集、甘特图结果和复现日志统一保存在
 realtime_scheduler 目录中。批处理、Baseline 与并发运行状态由 batch_service 模块负责，
-本模块保留 HTTP 边界与兼容入口。
+本模块只保存跨后端模块共享的启动配置和进程状态。
 
 用法：
-    python realtime_scheduler/server.py
-    python realtime_scheduler/server.py --port 8765 --open
-
-兼容入口：python scripts/config_editor_server.py
+    python -m realtime_scheduler.backend.main
+    python -m realtime_scheduler.backend.main --port 8765 --open
 """
 
 from __future__ import annotations
@@ -43,9 +41,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 
 ROOT = Path(__file__).resolve().parents[2]
-# 直接执行 ``python realtime_scheduler/server.py`` 时，脚本目录会排在仓库根目录
-# 之前；若环境中恰好安装过旧版同名包，就可能读取到过期模块。始终把当前仓库
-# 放到首位，确保服务端、Markdown 文档加载器与本次检出的源码保持一致。
+# 始终把当前仓库放到模块搜索首位，避免环境中安装的旧版同名包遮蔽当前源码。
 if str(ROOT) in sys.path:
     sys.path.remove(str(ROOT))
 sys.path.insert(0, str(ROOT))

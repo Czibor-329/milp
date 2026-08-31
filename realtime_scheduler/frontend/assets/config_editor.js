@@ -18343,6 +18343,7 @@ var FIRST_ROBOT_SLOT_ID = 1;
 var DUAL_ARM_SLOT_COUNT = 2;
 var SEARCH_TELEMETRY_POLL_MILLISECONDS = 75;
 var BATCH_STATUS_POLL_MILLISECONDS = 1e3;
+var WORKSPACE_TRANSFER_POLL_MILLISECONDS = 500;
 var TEST_ORDER_COLLATOR = new Intl.Collator("zh-CN", { numeric: true, sensitivity: "base" });
 var DEFAULT_DUMMY_WAFER_COUNT = 8;
 var STATION_ACTION_TIME_FIELDS = [
@@ -18803,16 +18804,23 @@ function parseDeviceFileText(text2) {
 async function loadDevice(file) {
   if (!file) return;
   if (state.dirty) await saveCurrentTest(true);
-  const device = unwrapDevice(parseDeviceFileText(await file.text()));
+  updateDataTransferProgress({ progress: 5, message: "\u6B63\u5728\u8BFB\u53D6 init JSON" });
+  const fileText = await file.text();
+  updateDataTransferProgress({ progress: 25, message: "\u6B63\u5728\u6821\u9A8C\u8BBE\u5907\u62D3\u6251" });
+  const device = unwrapDevice(parseDeviceFileText(fileText));
+  updateDataTransferProgress({ progress: 45, message: "\u6B63\u5728\u4FDD\u5B58\u8BBE\u5907" });
   const result = await requestJson("/api/workspaces/devices", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name: file.name, device })
   });
+  updateDataTransferProgress({ progress: 80, message: "\u6B63\u5728\u5237\u65B0\u8BBE\u5907\u4E0E\u6D4B\u8BD5\u96C6" });
   await loadWorkspaceCatalog(result.device.id);
+  updateDataTransferProgress({ progress: 100, message: "\u8BBE\u5907\u5BFC\u5165\u5B8C\u6210" });
   writeTerminal(`$ ${result.created ? "\u5DF2\u5BFC\u5165" : "\u5DF2\u9009\u62E9\u5DF2\u6709"}\u8BBE\u5907 ${result.device.name}
   \u8BE5\u8BBE\u5907\u4E0B\u6709 ${state.workspaceDevice?.tests?.length || 0} \u4E2A\u6D4B\u8BD5\u96C6`);
   document.getElementById("deviceFile").value = "";
+  document.getElementById("dataTransferDialog").close();
 }
 function openDataTransferDialog(mode) {
   dataTransferMode = mode;
@@ -18828,7 +18836,101 @@ function openDataTransferDialog(mode) {
   const status = document.getElementById("dataTransferStatus");
   status.textContent = importing && !state.workspaceDeviceId ? "\u5C1A\u672A\u9009\u62E9\u8BBE\u5907\u65F6\uFF0C\u53EA\u80FD\u5BFC\u5165\u8BBE\u5907\u3002" : "";
   status.classList.remove("error");
+  resetDataTransferProgress();
   document.getElementById("dataTransferDialog").showModal();
+}
+function resetDataTransferProgress() {
+  const progress = document.getElementById("dataTransferProgress");
+  const bar = document.getElementById("dataTransferProgressBar");
+  progress.hidden = true;
+  bar.setAttribute("aria-valuenow", "0");
+  bar.firstElementChild.style.width = "0%";
+  document.getElementById("dataTransferPercent").textContent = "0%";
+  document.getElementById("dataTransferPhase").textContent = "\u51C6\u5907\u4E2D";
+  setDataTransferBusy(false);
+}
+function updateDataTransferProgress(transfer) {
+  const progress = Math.max(0, Math.min(100, Number(transfer?.progress) || 0));
+  const bar = document.getElementById("dataTransferProgressBar");
+  document.getElementById("dataTransferProgress").hidden = false;
+  bar.setAttribute("aria-valuenow", String(progress));
+  bar.firstElementChild.style.width = `${progress}%`;
+  document.getElementById("dataTransferPercent").textContent = `${progress}%`;
+  document.getElementById("dataTransferPhase").textContent = String(transfer?.message || transfer?.phase || "\u5904\u7406\u4E2D");
+}
+function setDataTransferBusy(busy) {
+  document.getElementById("deviceTransferOption").disabled = busy || dataTransferMode === "export" && !state.workspaceDeviceId;
+  document.getElementById("testTransferOption").disabled = busy || !state.workspaceDeviceId || dataTransferMode === "export" && !state.testCaseId;
+  document.getElementById("dataTransferDialogClose").disabled = busy;
+  document.getElementById("dataTransferDialog").classList.toggle("is-busy", busy);
+}
+function uploadWorkspaceTransferContent(transferId, file) {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open("POST", `/api/workspace-transfers/${encodeURIComponent(transferId)}/content`);
+    request.setRequestHeader("Content-Type", "application/zip");
+    request.setRequestHeader("X-Data-Filename", encodeURIComponent(file.name));
+    request.upload.onprogress = (event) => {
+      if (event.lengthComputable) updateDataTransferProgress({ progress: Math.round(event.loaded / event.total * 20), message: "\u6B63\u5728\u4E0A\u4F20\u4EA4\u6362\u5305" });
+    };
+    request.onerror = () => reject(new Error("\u4EA4\u6362\u5305\u4E0A\u4F20\u5931\u8D25"));
+    request.onload = () => {
+      let result = {};
+      try {
+        result = JSON.parse(request.responseText || "{}");
+      } catch {
+      }
+      if (request.status < 200 || request.status >= 300 || result?.ok === false) reject(new Error(result?.error || `\u670D\u52A1\u8FD4\u56DE ${request.status}`));
+      else resolve();
+    };
+    request.send(file);
+  });
+}
+async function runWorkspaceTransfer(kind, file) {
+  if (dataTransferMode === "export") {
+    if (!state.workspaceDeviceId) throw new Error("\u8BF7\u5148\u9009\u62E9\u8BBE\u5907");
+    if (state.dirty) await saveCurrentTest(true);
+    if (state.deviceTimingDirty) await saveDeviceTiming();
+    if (kind === "test" && !state.testCaseId) throw new Error("\u8BF7\u5148\u9009\u62E9\u6D4B\u8BD5\u96C6");
+  }
+  const payload = {
+    direction: dataTransferMode,
+    kind,
+    ...kind === "test" && state.workspaceDeviceId ? { deviceId: state.workspaceDeviceId } : {},
+    ...dataTransferMode === "export" && kind === "device" && state.workspaceDeviceId ? { deviceId: state.workspaceDeviceId } : {},
+    ...dataTransferMode === "export" && kind === "test" && state.testCaseId ? { testId: state.testCaseId } : {}
+  };
+  const created = await requestJson("/api/workspace-transfers", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+  const transferId = created.transfer?.id;
+  if (!transferId) throw new Error("\u670D\u52A1\u672A\u8FD4\u56DE\u4EA4\u6362\u4EFB\u52A1\u7F16\u53F7");
+  updateDataTransferProgress(created.transfer);
+  if (dataTransferMode === "import") {
+    if (!file) throw new Error("\u8BF7\u9009\u62E9\u4EA4\u6362\u6587\u4EF6");
+    await uploadWorkspaceTransferContent(String(transferId), file);
+  }
+  let transfer = created.transfer;
+  while (!["completed", "failed"].includes(String(transfer.status))) {
+    await new Promise((resolve) => window.setTimeout(resolve, WORKSPACE_TRANSFER_POLL_MILLISECONDS));
+    transfer = (await requestJson(`/api/workspace-transfers/${encodeURIComponent(String(transferId))}`, { cache: "no-store" })).transfer;
+    updateDataTransferProgress(transfer);
+  }
+  if (transfer.status === "failed") throw new Error(transfer.message || "\u4EA4\u6362\u4EFB\u52A1\u5931\u8D25");
+  if (dataTransferMode === "export") {
+    updateDataTransferProgress({ ...transfer, message: "\u6B63\u5728\u4E0B\u8F7D\u4EA4\u6362\u5305" });
+    await downloadWorkspaceArchive(`/api/workspace-transfers/${encodeURIComponent(String(transferId))}/download`);
+    document.getElementById("dataTransferDialog").close();
+    setWorkspaceStatus(kind === "device" ? "\u5DF2\u5BFC\u51FA\u5F53\u524D\u8BBE\u5907" : "\u5DF2\u5BFC\u51FA\u5F53\u524D\u6D4B\u8BD5\u96C6", "saved");
+  } else {
+    const result = transfer.result || {};
+    if (kind === "device" && result.device?.id) {
+      await loadWorkspaceCatalog(result.device.id);
+      setWorkspaceStatus(`\u5DF2\u5BFC\u5165\u8BBE\u5907\u201C${result.device.name}\u201D\u53CA ${result.importedTests || 0} \u4E2A\u6D4B\u8BD5\u96C6`, "saved");
+    } else if (kind === "test" && result.test?.id) {
+      await loadWorkspaceCatalog(state.workspaceDeviceId, result.test.id);
+      setWorkspaceStatus(result.created ? `\u5DF2\u5BFC\u5165\u6D4B\u8BD5\u96C6\u201C${result.test.name}\u201D` : `\u6D4B\u8BD5\u96C6\u201C${result.test.name}\u201D\u5DF2\u5B58\u5728`, "saved");
+    }
+    document.getElementById("dataTransferDialog").close();
+  }
 }
 async function downloadWorkspaceArchive(url) {
   const response = await fetch(url, { cache: "no-store" });
@@ -18848,43 +18950,14 @@ async function downloadWorkspaceArchive(url) {
   anchor.remove();
   URL.revokeObjectURL(objectUrl);
 }
-async function exportWorkspaceData(kind) {
-  if (!state.workspaceDeviceId) throw new Error("\u8BF7\u5148\u9009\u62E9\u8BBE\u5907");
-  if (state.dirty) await saveCurrentTest(true);
-  if (state.deviceTimingDirty) await saveDeviceTiming();
-  if (kind === "test" && !state.testCaseId) throw new Error("\u8BF7\u5148\u9009\u62E9\u6D4B\u8BD5\u96C6");
-  const url = kind === "device" ? `/api/workspaces/${encodeURIComponent(state.workspaceDeviceId)}/export` : `/api/workspaces/${encodeURIComponent(state.workspaceDeviceId)}/tests/${encodeURIComponent(state.testCaseId)}/export`;
-  await downloadWorkspaceArchive(url);
-  document.getElementById("dataTransferDialog").close();
-  setWorkspaceStatus(kind === "device" ? "\u5DF2\u5F00\u59CB\u5BFC\u51FA\u5F53\u524D\u8BBE\u5907" : "\u5DF2\u5F00\u59CB\u5BFC\u51FA\u5F53\u524D\u6D4B\u8BD5\u96C6", "saved");
-}
-async function uploadWorkspaceArchive(file, kind) {
-  if (!file) return;
-  if (state.dirty) await saveCurrentTest(true);
-  const url = kind === "device" ? "/api/workspaces/import/device" : `/api/workspaces/${encodeURIComponent(state.workspaceDeviceId)}/import-test`;
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/zip", "X-Data-Filename": encodeURIComponent(file.name) },
-    body: file
-  });
-  const result = await response.json().catch(() => ({}));
-  if (!response.ok || result?.ok === false) throw new Error(result?.error || `\u670D\u52A1\u8FD4\u56DE ${response.status}`);
-  if (kind === "device") {
-    await loadWorkspaceCatalog(result.device.id);
-    setWorkspaceStatus(`\u5DF2\u5BFC\u5165\u8BBE\u5907\u201C${result.device.name}\u201D\u53CA ${result.importedTests} \u4E2A\u6D4B\u8BD5\u96C6`, "saved");
-  } else {
-    await loadWorkspaceCatalog(state.workspaceDeviceId, result.test.id);
-    setWorkspaceStatus(result.created ? `\u5DF2\u5BFC\u5165\u6D4B\u8BD5\u96C6\u201C${result.test.name}\u201D` : `\u6D4B\u8BD5\u96C6\u201C${result.test.name}\u201D\u5DF2\u5B58\u5728`, "saved");
-  }
-  document.getElementById("dataTransferDialog").close();
-}
 async function chooseDataTransfer(kind) {
   const status = document.getElementById("dataTransferStatus");
   status.textContent = "";
   status.classList.remove("error");
   try {
     if (dataTransferMode === "export") {
-      await exportWorkspaceData(kind);
+      setDataTransferBusy(true);
+      await runWorkspaceTransfer(kind);
       return;
     }
     if (kind === "test" && !state.workspaceDeviceId) throw new Error("\u8BF7\u5148\u9009\u62E9\u6D4B\u8BD5\u96C6\u6240\u5C5E\u7684\u76F8\u540C\u8BBE\u5907");
@@ -18892,6 +18965,7 @@ async function chooseDataTransfer(kind) {
   } catch (error) {
     status.textContent = error.message || "\u64CD\u4F5C\u5931\u8D25";
     status.classList.add("error");
+    setDataTransferBusy(false);
   }
 }
 function robotAvailableSlots(robot) {
@@ -20199,7 +20273,7 @@ async function createTestGroup() {
       body: JSON.stringify({ name: group })
     });
   } catch (error) {
-    if (error.message === "Not found") throw new Error("\u672C\u5730\u670D\u52A1\u7248\u672C\u8FC7\u65E7\uFF0C\u8BF7\u91CD\u542F server.py \u540E\u518D\u65B0\u5EFA\u7EC4\u522B");
+    if (error.message === "Not found") throw new Error("\u672C\u5730\u670D\u52A1\u7248\u672C\u8FC7\u65E7\uFF0C\u8BF7\u91CD\u542F realtime_scheduler.backend.main \u540E\u518D\u65B0\u5EFA\u7EC4\u522B");
     throw error;
   }
   state.workspaceDevice.testGroups = result.groups;
@@ -21883,7 +21957,7 @@ async function runPlan() {
   startRunStatus(`\u51C6\u5907\u8FD0\u884C \xB7 ${state.testCaseName || "\u5F53\u524D\u6D4B\u8BD5"}`, "\u68C0\u67E5\u670D\u52A1\u4E0E\u6D4B\u8BD5\u914D\u7F6E");
   try {
     const healthResponse = await fetch("/api/health", { cache: "no-store" }), health = await healthResponse.json();
-    if (!healthResponse.ok || health.schemaVersion !== EXPECTED_API_SCHEMA) throw new Error("\u672C\u5730\u670D\u52A1\u7248\u672C\u8FC7\u65E7\uFF0C\u8BF7\u91CD\u542F scripts/config_editor_server.py");
+    if (!healthResponse.ok || health.schemaVersion !== EXPECTED_API_SCHEMA) throw new Error("\u672C\u5730\u670D\u52A1\u7248\u672C\u8FC7\u65E7\uFF0C\u8BF7\u91CD\u542F realtime_scheduler.backend.main");
     if (state.strategy.startsWith("other_alg:")) {
       const algorithm = (health.otherAlgorithms || []).find((item) => item.strategy === state.strategy);
       if (!algorithm?.available) throw new Error(`${state.strategy} \u7B97\u6CD5\u5305\u4E0D\u5B58\u5728\u6216\u5165\u53E3\u4E0D\u5B8C\u6574`);
@@ -22904,7 +22978,7 @@ async function checkService() {
     if (!compatible) {
       pill.style.color = "var(--red)";
       pill.style.background = "var(--red-soft)";
-      writeTerminal("$ \u672C\u5730\u670D\u52A1\u7248\u672C\u8FC7\u65E7\n  \u8BF7\u91CD\u542F: py scripts/config_editor_server.py", true);
+      writeTerminal("$ \u672C\u5730\u670D\u52A1\u7248\u672C\u8FC7\u65E7\n  \u8BF7\u91CD\u542F: python -m realtime_scheduler.backend.main", true);
     }
   } catch {
     state.serviceCompatible = false;
@@ -22916,7 +22990,7 @@ async function checkService() {
     pill.textContent = "\u672C\u5730\u670D\u52A1\u672A\u8FDE\u63A5";
     pill.style.color = "var(--red)";
     pill.style.background = "var(--red-soft)";
-    writeTerminal("$ \u65E0\u6CD5\u8FDE\u63A5\u672C\u5730\u670D\u52A1\n  \u8BF7\u8FD0\u884C: py scripts/config_editor_server.py", true);
+    writeTerminal("$ \u65E0\u6CD5\u8FDE\u63A5\u672C\u5730\u670D\u52A1\n  \u8BF7\u8FD0\u884C: python -m realtime_scheduler.backend.main", true);
   }
 }
 document.getElementById("workspaceDialogCancel").addEventListener("click", () => document.getElementById("workspaceDialog").close("cancel"));
@@ -23014,21 +23088,26 @@ document.getElementById("cleanDialogForm").addEventListener("submit", (event) =>
 document.getElementById("workspaceImportButton").addEventListener("click", () => openDataTransferDialog("import"));
 document.getElementById("workspaceExportButton").addEventListener("click", () => openDataTransferDialog("export"));
 document.getElementById("dataTransferDialogClose").addEventListener("click", () => document.getElementById("dataTransferDialog").close());
+document.getElementById("dataTransferDialog").addEventListener("cancel", (event) => {
+  if (document.getElementById("dataTransferDialog").classList.contains("is-busy")) event.preventDefault();
+});
 document.getElementById("deviceTransferOption").addEventListener("click", () => chooseDataTransfer("device"));
 document.getElementById("testTransferOption").addEventListener("click", () => chooseDataTransfer("test"));
 document.getElementById("dataTransferDialog").addEventListener("click", (event) => {
-  if (event.target === document.getElementById("dataTransferDialog")) event.target.close();
+  if (event.target === document.getElementById("dataTransferDialog") && !document.getElementById("dataTransferDialog").classList.contains("is-busy")) event.target.close();
 });
 document.getElementById("deviceFile").addEventListener("change", (event) => {
   const input = event.currentTarget;
   const file = input.files?.[0];
   input.value = "";
   if (!file) return;
-  const operation = file.name.toLowerCase().endsWith(".json") ? loadDevice(file) : uploadWorkspaceArchive(file, "device");
+  setDataTransferBusy(true);
+  const operation = file.name.toLowerCase().endsWith(".json") ? loadDevice(file) : runWorkspaceTransfer("device", file);
   operation.catch((error) => {
     const status = document.getElementById("dataTransferStatus");
     status.textContent = error.message || "\u8BBE\u5907\u5BFC\u5165\u5931\u8D25";
     status.classList.add("error");
+    setDataTransferBusy(false);
     writeTerminal(`$ \u8BBE\u5907\u8BFB\u53D6\u5931\u8D25
   ${error.message}`, true);
   });
@@ -23038,10 +23117,12 @@ document.getElementById("testExchangeFile").addEventListener("change", (event) =
   const file = input.files?.[0];
   input.value = "";
   if (!file) return;
-  uploadWorkspaceArchive(file, "test").catch((error) => {
+  setDataTransferBusy(true);
+  runWorkspaceTransfer("test", file).catch((error) => {
     const status = document.getElementById("dataTransferStatus");
     status.textContent = error.message || "\u6D4B\u8BD5\u96C6\u5BFC\u5165\u5931\u8D25";
     status.classList.add("error");
+    setDataTransferBusy(false);
     writeTerminal(`$ \u6D4B\u8BD5\u96C6\u5BFC\u5165\u5931\u8D25
   ${error.message}`, true);
   });

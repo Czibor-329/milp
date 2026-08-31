@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>调度平台</title>
   <link rel="stylesheet" href="/assets/katex.min.css?v=1.4.4">
-  <link rel="stylesheet" href="/assets/config_editor.css?v=1.5.20">
+  <link rel="stylesheet" href="/assets/config_editor.css?v=1.5.21">
 </head>
 <body>
   <a class="skip-link" href="#mainContent">跳到主要内容</a>
@@ -40,7 +40,7 @@
       <div class="sidebar-footer">
         <span class="sidebar-footer-label">系统状态</span>
         <div class="service-pill" id="serviceState">本地服务</div>
-        <span class="frontend-version">前端 v1.5.20</span>
+        <span class="frontend-version">前端 v1.5.21</span>
       </div>
     </aside>
 
@@ -490,6 +490,10 @@
           <span class="data-transfer-option-arrow" aria-hidden="true">→</span>
         </button>
       </div>
+      <div class="data-transfer-progress" id="dataTransferProgress" hidden>
+        <div class="data-transfer-progress-head"><span id="dataTransferPhase">准备中</span><output id="dataTransferPercent">0%</output></div>
+        <div class="data-transfer-progress-track" role="progressbar" aria-label="设备或测试集传输进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="dataTransferProgressBar"><span></span></div>
+      </div>
       <div class="data-transfer-status" id="dataTransferStatus" role="status" aria-live="polite"></div>
     </section>
   </dialog>
@@ -728,6 +732,6 @@
     </aside>
   </dialog>
 
-  <script type="module" src="/assets/config_editor.js?v=1.5.20"></script>
+  <script type="module" src="/assets/config_editor.js?v=1.5.21"></script>
 </body>
 </html>

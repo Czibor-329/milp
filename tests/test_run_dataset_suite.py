@@ -43,7 +43,7 @@ def test_terminal_suite_uses_builtin_validation_and_selected_limit() -> None:
             "items": [],
         }
 
-    from realtime_scheduler import server as scheduler_server
+    from realtime_scheduler.backend import application as scheduler_server
 
     with (
         patch.object(
@@ -83,7 +83,7 @@ def test_terminal_suite_can_enable_hongye_validation() -> None:
             "items": [],
         }
 
-    from realtime_scheduler import server as scheduler_server
+    from realtime_scheduler.backend import application as scheduler_server
 
     with (
         patch.object(

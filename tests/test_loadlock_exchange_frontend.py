@@ -7,8 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from realtime_scheduler import server as scheduler_server
-from realtime_scheduler.batch_service import build_workspace_batch_plan
+from realtime_scheduler.backend import application as scheduler_server
+from realtime_scheduler.backend.application import build_workspace_batch_plan
 from scripts.seed_neural_recompute_workspaces import (
     LOADLOCK_CADENCE_GROUP,
     LOADLOCK_CADENCE_TEST,

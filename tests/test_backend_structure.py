@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+import subprocess
+import sys
 
 from realtime_scheduler.backend.execution import run_state
 
@@ -22,6 +24,15 @@ FORBIDDEN_COMPATIBILITY_IMPORTS = (
     "from realtime_scheduler.algorithm_interface",
     "from realtime_scheduler.batch_service",
 )
+REMOVED_COMPATIBILITY_MODULES = (
+    "algorithm_interface.py",
+    "batch_service.py",
+    "documentation.py",
+    "move_validation.py",
+    "plan_builder.py",
+    "recompute_state.py",
+    "replay_machine.py",
+)
 
 
 def test_runtime_python_modules_stay_below_line_limit() -> None:
@@ -36,15 +47,61 @@ def test_runtime_python_modules_stay_below_line_limit() -> None:
     assert violations == []
 
 
-def test_backend_does_not_import_compatibility_layer() -> None:
-    """真实后端不得反向依赖 server 或迁移前的兼容模块。"""
+def test_repository_does_not_import_removed_compatibility_modules() -> None:
+    """仓库 Python 代码不得继续依赖已经删除的根目录兼容模块。"""
     violations = []
-    for path in BACKEND_ROOT.rglob("*.py"):
-        source = path.read_text(encoding="utf-8-sig")
-        for forbidden in FORBIDDEN_COMPATIBILITY_IMPORTS:
-            if forbidden in source:
-                violations.append(f"{path.relative_to(ROOT)}: {forbidden}")
+    for source_root in (ROOT / "realtime_scheduler", ROOT / "scripts", ROOT / "tests"):
+        for path in source_root.rglob("*.py"):
+            if path == Path(__file__).resolve():
+                continue
+            source = path.read_text(encoding="utf-8-sig")
+            for forbidden in FORBIDDEN_COMPATIBILITY_IMPORTS:
+                if forbidden in source:
+                    violations.append(f"{path.relative_to(ROOT)}: {forbidden}")
     assert violations == []
+
+
+def test_root_compatibility_modules_are_removed() -> None:
+    """根包只保留包标记，后端实现与入口必须位于 backend。"""
+    package_root = ROOT / "realtime_scheduler"
+    existing = [name for name in REMOVED_COMPATIBILITY_MODULES if (package_root / name).exists()]
+    assert existing == []
+    legacy_validation_modules = list((package_root / "validation").rglob("*.py"))
+    assert legacy_validation_modules == []
+
+
+def test_legacy_server_command_only_prints_migration_notice() -> None:
+    """旧启动命令必须给出新命令提示，且不得重新成为后端兼容门面。"""
+    legacy_entry = ROOT / "realtime_scheduler" / "server.py"
+    source = legacy_entry.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    assert all(
+        not (
+            isinstance(node, (ast.Import, ast.ImportFrom))
+            and "realtime_scheduler.backend" in ast.unparse(node)
+        )
+        for node in ast.walk(tree)
+    )
+    completed = subprocess.run(
+        [sys.executable, "-X", "utf8", str(legacy_entry), "--open"],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    assert completed.returncode == 0
+    assert "已不再作为服务启动入口" in completed.stdout
+    assert "python -m realtime_scheduler.backend.main --open" in completed.stdout
+
+
+def test_workspace_modules_use_explicit_capability_names() -> None:
+    """工作区不得恢复含糊的 service.py，也不得重新混合目录、交换和任务职责。"""
+    workspace_root = BACKEND_ROOT / "workspace"
+    assert not (workspace_root / "service.py").exists()
+    assert (workspace_root / "catalog_service.py").is_file()
+    assert (workspace_root / "exchange_service.py").is_file()
+    assert (workspace_root / "transfer_jobs.py").is_file()
 
 
 def test_backend_does_not_assemble_source_with_exec() -> None:

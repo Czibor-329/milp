@@ -142,14 +142,14 @@ def _execute_standard_algorithm(
                     output,
                     skip_validation=skip_platform_validation,
                 )
-                state_source = "realtime_scheduler.move_validation.MachineState"
+                state_source = "realtime_scheduler.backend.validation.move_validation.MachineState"
             else:
                 runtime = PackagedAlgorithmRuntime(
                     prepared_first_update,
                     output,
                     skip_validation=skip_platform_validation,
                 )
-                state_source = "realtime_scheduler.move_validation.MachineState"
+                state_source = "realtime_scheduler.backend.validation.move_validation.MachineState"
         except Exception as error:
             _report_run_event("validation-1", "校验 output #1", "failed", str(error))
             raise

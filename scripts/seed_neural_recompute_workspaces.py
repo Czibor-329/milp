@@ -18,7 +18,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Sequence
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from realtime_scheduler import server as scheduler_server
+from realtime_scheduler.backend import application as scheduler_server
 from scripts.benchmark_neural_route_decomposition import six_pm_device
 
 

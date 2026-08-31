@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import Mock
 
 from realtime_scheduler.backend.execution.batch_service import build_workspace_batch_plan
-from realtime_scheduler.server import MoveListValidationError, ReproductionLog
+from realtime_scheduler.backend.application import MoveListValidationError, ReproductionLog
 from realtime_scheduler.backend.validation.hongye import HongYeValidationSession
 
 

@@ -18,7 +18,7 @@
 在项目目录打开 PowerShell：
 
 ```powershell
-python realtime_scheduler\server.py --open
+python -m realtime_scheduler.backend.main --open
 ```
 
 默认地址为 `http://127.0.0.1:8765/`，打开后可直接使用。
@@ -30,7 +30,7 @@ python realtime_scheduler\server.py --open
 如需让同一局域网中的其他电脑访问，可监听所有网卡：
 
 ```powershell
-python realtime_scheduler\server.py --host 0.0.0.0 --port 8765
+python -m realtime_scheduler.backend.main --host 0.0.0.0 --port 8765
 ```
 
 其他电脑通过 `http://部署电脑的IP:8765` 访问。此模式没有应用层登录保护，
@@ -53,7 +53,7 @@ netsh advfirewall firewall delete rule name="CTScheduler-8765"
 下面的任务会在开机后启动服务：
 
 ```powershell
-schtasks /Create /TN "CTScheduler" /TR "cmd /c cd /d D:\milp && python realtime_scheduler\server.py --host 0.0.0.0 --port 8765 > D:\milp\server.log 2>&1" /SC ONSTART /RU SYSTEM /RL HIGHEST /F
+schtasks /Create /TN "CTScheduler" /TR "cmd /c cd /d D:\milp && python -m realtime_scheduler.backend.main --host 0.0.0.0 --port 8765 > D:\milp\server.log 2>&1" /SC ONSTART /RU SYSTEM /RL HIGHEST /F
 ```
 
 把 `D:\milp` 替换为实际项目路径。验证与删除命令：

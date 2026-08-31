@@ -18,7 +18,7 @@ from typing import Any, Mapping, Sequence
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from realtime_scheduler import server as scheduler_server
+from realtime_scheduler.backend import application as scheduler_server
 
 
 PSE300_DEVICE_NAME = "PSE300.json"

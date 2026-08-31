@@ -13,7 +13,7 @@ import time
 import unittest
 from pathlib import Path
 
-from realtime_scheduler import server
+from realtime_scheduler.backend import application as server
 
 
 ROOT = Path(__file__).resolve().parents[2]

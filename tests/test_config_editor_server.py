@@ -16,11 +16,11 @@ from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import patch
 
-import realtime_scheduler.server as config_server
-from realtime_scheduler.algorithm_interface import discover_other_algorithms
-from realtime_scheduler.plan_builder import _runtime_clean, build_process_recipes
+import realtime_scheduler.backend.application as config_server
+from realtime_scheduler.backend.algorithms.interface import discover_other_algorithms
+from realtime_scheduler.backend.execution.plan_builder import _runtime_clean, build_process_recipes
 from src.compiler import compile_problem
-from scripts.config_editor_server import (
+from realtime_scheduler.backend.application import (
     BuildState,
     LoggedPlanError,
     build_round_update,
@@ -100,6 +100,17 @@ def _job(name: str, route: str, load_port: str) -> dict:
 
 class FrontendTemplateTests(unittest.TestCase):
     """验证不依赖算法数据夹具的前端模板与样式约束。"""
+
+    def test_data_transfer_uses_accessible_background_progress(self) -> None:
+        """设备交换必须显示后台阶段、上传进度并提供可访问进度语义。"""
+        html = _editor_source()
+
+        self.assertIn('/api/workspace-transfers', html)
+        self.assertIn('request.upload.onprogress', html)
+        self.assertIn('id="dataTransferProgressBar"', html)
+        self.assertIn('role="progressbar"', html)
+        self.assertIn('aria-valuenow="0"', html)
+        self.assertIn('data-transfer-progress-track', html)
 
     def test_frontend_registers_stable_deadlock_catalog(self) -> None:
         """前端登记回放和 Machine 现场可证明的死锁，未知现场保留兜底。"""
@@ -1447,7 +1458,10 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual(3, len(third_update["ProcessJobs"]))
         self.assertEqual(3, len(third_update["ControlJobs"]))
         self.assertEqual("ATR", second_update["Stations"]["LA"]["LastItem"])
-        self.assertEqual("realtime_scheduler.move_validation.MachineState", result["rounds"][1]["strategyDiagnostics"]["stateSource"])
+        self.assertEqual(
+            "realtime_scheduler.backend.validation.move_validation.MachineState",
+            result["rounds"][1]["strategyDiagnostics"]["stateSource"],
+        )
         self.assertEqual(3, len(result["updates"]))
         self.assertEqual(2, len(result["output"]["RecomputePoints"]))
 

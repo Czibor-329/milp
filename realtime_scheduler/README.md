@@ -2,10 +2,13 @@
 
 此目录集中保存实时调度平台的前端、服务端和本地数据：
 
-- `server.py`：兼容启动入口；实际后端实现统一位于 `backend/`。
+- `backend/main.py`：后端命令行启动入口。
 - `backend/api/`：HTTP、静态资源与文档边界。
 - `backend/execution/`：计划构建、算法运行、实时重算、CJob Cycle 与批量执行。
-- `backend/workspace/`：数据集存储、迁移、交换与设备/测试业务操作。
+- `backend/workspace/`：数据集存储、迁移与设备/测试业务操作。
+- `backend/workspace/catalog_service.py`：设备、Route、测试组和测试集目录业务。
+- `backend/workspace/exchange_service.py`：设备/测试交换包编解码与导入导出规则。
+- `backend/workspace/transfer_jobs.py`：导入导出后台任务、进度状态和制品下载。
 - `backend/artifacts/`：运行结果、复现日志与 Baseline。
 - `backend/validation/`：平台 MoveList 回放与 HongYe 进程会话。
 - `backend/analysis.py`：服务端唯一的 MoveList 性能、瓶颈和测试组分析实现。
@@ -35,9 +38,7 @@
 
 完整开发环境启动：
 
-`alg\.venv\Scripts\python.exe realtime_scheduler/server.py --port 8765 --open`
-
-旧命令 `python scripts/config_editor_server.py` 仍可使用。
+`alg\.venv\Scripts\python.exe -m realtime_scheduler.backend.main --port 8765 --open`
 
 ## 前端开发
 

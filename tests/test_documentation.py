@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from realtime_scheduler.documentation import DocumentationError, load_documentation
+from realtime_scheduler.backend.api.documentation import DocumentationError, load_documentation
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,7 +37,7 @@ def _write_page(
             "",
             "## 启动服务",
             "",
-            "运行 `python realtime_scheduler/server.py`。",
+            "运行 `python -m realtime_scheduler.backend.main`。",
         ]),
         encoding="utf-8",
     )

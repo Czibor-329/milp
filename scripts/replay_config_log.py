@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.config_editor_server import LoggedPlanError, execute_plan
+from realtime_scheduler.backend.application import LoggedPlanError, execute_plan
 
 
 def load_plan_from_log(raw: Any) -> Dict[str, Any]:

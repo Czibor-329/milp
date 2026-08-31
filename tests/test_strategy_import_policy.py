@@ -13,7 +13,7 @@ from urllib.request import ProxyHandler, Request, build_opener
 from unittest.mock import patch
 
 import realtime_scheduler.backend.algorithms.interface as algorithm_interface
-import realtime_scheduler.server as config_server
+import realtime_scheduler.backend.application as config_server
 
 
 class StrategyImportPolicyTests(unittest.TestCase):

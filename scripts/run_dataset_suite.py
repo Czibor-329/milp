@@ -151,7 +151,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not 1 <= args.workers <= 4:
         raise ValueError("--workers 必须在 1 到 4 之间")
 
-    from realtime_scheduler import server as scheduler_server
+    from realtime_scheduler.backend import application as scheduler_server
 
     devices = scheduler_server.list_workspace_devices()
     if args.list and not args.device:

@@ -23,7 +23,7 @@ from realtime_scheduler.backend.workspace.repository import (
     _write_workspace_catalog_unlocked,
 )
 from realtime_scheduler.backend.time_utils import _workspace_timestamp
-from realtime_scheduler.backend.workspace.service import (
+from realtime_scheduler.backend.workspace.catalog_service import (
     apply_robot_slot_selection,
     get_workspace_device,
 )

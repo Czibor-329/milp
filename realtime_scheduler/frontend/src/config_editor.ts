@@ -125,6 +125,7 @@ const FIRST_ROBOT_SLOT_ID = 1;
 const DUAL_ARM_SLOT_COUNT = 2;
 const SEARCH_TELEMETRY_POLL_MILLISECONDS = 75;
 const BATCH_STATUS_POLL_MILLISECONDS = 1000;
+const WORKSPACE_TRANSFER_POLL_MILLISECONDS = 500;
 const TEST_ORDER_COLLATOR = new Intl.Collator("zh-CN", { numeric: true, sensitivity: "base" });
 const DEFAULT_DUMMY_WAFER_COUNT = 8;
 const STATION_ACTION_TIME_FIELDS = [
@@ -646,13 +647,20 @@ function parseDeviceFileText(text: string) {
 async function loadDevice(file) {
   if (!file) return;
   if (state.dirty) await saveCurrentTest(true);
-  const device = unwrapDevice(parseDeviceFileText(await file.text()));
+  updateDataTransferProgress({ progress: 5, message: "正在读取 init JSON" });
+  const fileText = await file.text();
+  updateDataTransferProgress({ progress: 25, message: "正在校验设备拓扑" });
+  const device = unwrapDevice(parseDeviceFileText(fileText));
+  updateDataTransferProgress({ progress: 45, message: "正在保存设备" });
   const result = await requestJson("/api/workspaces/devices", {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: file.name, device })
   });
+  updateDataTransferProgress({ progress: 80, message: "正在刷新设备与测试集" });
   await loadWorkspaceCatalog(result.device.id);
+  updateDataTransferProgress({ progress: 100, message: "设备导入完成" });
   writeTerminal(`$ ${result.created ? "已导入" : "已选择已有"}设备 ${result.device.name}\n  该设备下有 ${state.workspaceDevice?.tests?.length || 0} 个测试集`);
   document.getElementById("deviceFile").value = "";
+  (document.getElementById("dataTransferDialog") as HTMLDialogElement).close();
 }
 
 /** 打开统一的设备/测试集导入导出选择窗口。 */
@@ -676,7 +684,108 @@ function openDataTransferDialog(mode: "import" | "export") {
   const status = document.getElementById("dataTransferStatus");
   status.textContent = importing && !state.workspaceDeviceId ? "尚未选择设备时，只能导入设备。" : "";
   status.classList.remove("error");
+  resetDataTransferProgress();
   (document.getElementById("dataTransferDialog") as HTMLDialogElement).showModal();
+}
+
+/** 重置交换任务进度显示，并恢复可操作状态。 */
+function resetDataTransferProgress() {
+  const progress = document.getElementById("dataTransferProgress");
+  const bar = document.getElementById("dataTransferProgressBar");
+  progress.hidden = true;
+  bar.setAttribute("aria-valuenow", "0");
+  bar.firstElementChild.style.width = "0%";
+  document.getElementById("dataTransferPercent").textContent = "0%";
+  document.getElementById("dataTransferPhase").textContent = "准备中";
+  setDataTransferBusy(false);
+}
+
+/** 设置交换任务的可见进度、阶段和屏幕阅读器可读状态。 */
+function updateDataTransferProgress(transfer) {
+  const progress = Math.max(0, Math.min(100, Number(transfer?.progress) || 0));
+  const bar = document.getElementById("dataTransferProgressBar");
+  document.getElementById("dataTransferProgress").hidden = false;
+  bar.setAttribute("aria-valuenow", String(progress));
+  bar.firstElementChild.style.width = `${progress}%`;
+  document.getElementById("dataTransferPercent").textContent = `${progress}%`;
+  document.getElementById("dataTransferPhase").textContent = String(transfer?.message || transfer?.phase || "处理中");
+}
+
+/** 交换任务运行期间锁定两个选项和关闭按钮，避免重复提交或中断状态。 */
+function setDataTransferBusy(busy) {
+  document.getElementById("deviceTransferOption").disabled = busy || (dataTransferMode === "export" && !state.workspaceDeviceId);
+  document.getElementById("testTransferOption").disabled = busy || !state.workspaceDeviceId || (dataTransferMode === "export" && !state.testCaseId);
+  document.getElementById("dataTransferDialogClose").disabled = busy;
+  document.getElementById("dataTransferDialog").classList.toggle("is-busy", busy);
+}
+
+/** 使用 XMLHttpRequest 上传交换包，以便显示浏览器上传百分比。 */
+function uploadWorkspaceTransferContent(transferId: string, file: File) {
+  return new Promise<void>((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open("POST", `/api/workspace-transfers/${encodeURIComponent(transferId)}/content`);
+    request.setRequestHeader("Content-Type", "application/zip");
+    request.setRequestHeader("X-Data-Filename", encodeURIComponent(file.name));
+    request.upload.onprogress = event => {
+      if (event.lengthComputable) updateDataTransferProgress({ progress: Math.round(event.loaded / event.total * 20), message: "正在上传交换包" });
+    };
+    request.onerror = () => reject(new Error("交换包上传失败"));
+    request.onload = () => {
+      let result = {};
+      try { result = JSON.parse(request.responseText || "{}"); } catch { /* 由统一错误提示处理 */ }
+      if (request.status < 200 || request.status >= 300 || result?.ok === false) reject(new Error(result?.error || `服务返回 ${request.status}`));
+      else resolve();
+    };
+    request.send(file);
+  });
+}
+
+/** 创建交换任务、上传内容（导入）并轮询直至完成。 */
+async function runWorkspaceTransfer(kind: "device" | "test", file?: File) {
+  if (dataTransferMode === "export") {
+    if (!state.workspaceDeviceId) throw new Error("请先选择设备");
+    if (state.dirty) await saveCurrentTest(true);
+    if (state.deviceTimingDirty) await saveDeviceTiming();
+    if (kind === "test" && !state.testCaseId) throw new Error("请先选择测试集");
+  }
+  const payload = {
+    direction: dataTransferMode,
+    kind,
+    ...(kind === "test" && state.workspaceDeviceId ? { deviceId: state.workspaceDeviceId } : {}),
+    ...(dataTransferMode === "export" && kind === "device" && state.workspaceDeviceId ? { deviceId: state.workspaceDeviceId } : {}),
+    ...(dataTransferMode === "export" && kind === "test" && state.testCaseId ? { testId: state.testCaseId } : {}),
+  };
+  const created = await requestJson("/api/workspace-transfers", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+  const transferId = created.transfer?.id;
+  if (!transferId) throw new Error("服务未返回交换任务编号");
+  updateDataTransferProgress(created.transfer);
+  if (dataTransferMode === "import") {
+    if (!file) throw new Error("请选择交换文件");
+    await uploadWorkspaceTransferContent(String(transferId), file);
+  }
+  let transfer = created.transfer;
+  while (!["completed", "failed"].includes(String(transfer.status))) {
+    await new Promise(resolve => window.setTimeout(resolve, WORKSPACE_TRANSFER_POLL_MILLISECONDS));
+    transfer = (await requestJson(`/api/workspace-transfers/${encodeURIComponent(String(transferId))}`, { cache: "no-store" })).transfer;
+    updateDataTransferProgress(transfer);
+  }
+  if (transfer.status === "failed") throw new Error(transfer.message || "交换任务失败");
+  if (dataTransferMode === "export") {
+    updateDataTransferProgress({ ...transfer, message: "正在下载交换包" });
+    await downloadWorkspaceArchive(`/api/workspace-transfers/${encodeURIComponent(String(transferId))}/download`);
+    (document.getElementById("dataTransferDialog") as HTMLDialogElement).close();
+    setWorkspaceStatus(kind === "device" ? "已导出当前设备" : "已导出当前测试集", "saved");
+  } else {
+    const result = transfer.result || {};
+    if (kind === "device" && result.device?.id) {
+      await loadWorkspaceCatalog(result.device.id);
+      setWorkspaceStatus(`已导入设备“${result.device.name}”及 ${result.importedTests || 0} 个测试集`, "saved");
+    } else if (kind === "test" && result.test?.id) {
+      await loadWorkspaceCatalog(state.workspaceDeviceId, result.test.id);
+      setWorkspaceStatus(result.created ? `已导入测试集“${result.test.name}”` : `测试集“${result.test.name}”已存在`, "saved");
+    }
+    (document.getElementById("dataTransferDialog") as HTMLDialogElement).close();
+  }
 }
 
 /** 下载交换包，并在服务端拒绝时显示真实业务错误。 */
@@ -699,44 +808,6 @@ async function downloadWorkspaceArchive(url: string) {
   URL.revokeObjectURL(objectUrl);
 }
 
-/** 在导出前保存当前草稿，确保交换包与页面看到的内容一致。 */
-async function exportWorkspaceData(kind: "device" | "test") {
-  if (!state.workspaceDeviceId) throw new Error("请先选择设备");
-  if (state.dirty) await saveCurrentTest(true);
-  if (state.deviceTimingDirty) await saveDeviceTiming();
-  if (kind === "test" && !state.testCaseId) throw new Error("请先选择测试集");
-  const url = kind === "device"
-    ? `/api/workspaces/${encodeURIComponent(state.workspaceDeviceId)}/export`
-    : `/api/workspaces/${encodeURIComponent(state.workspaceDeviceId)}/tests/${encodeURIComponent(state.testCaseId)}/export`;
-  await downloadWorkspaceArchive(url);
-  (document.getElementById("dataTransferDialog") as HTMLDialogElement).close();
-  setWorkspaceStatus(kind === "device" ? "已开始导出当前设备" : "已开始导出当前测试集", "saved");
-}
-
-/** 上传新版交换包，并把后端错误转换为页面可读消息。 */
-async function uploadWorkspaceArchive(file: File, kind: "device" | "test") {
-  if (!file) return;
-  if (state.dirty) await saveCurrentTest(true);
-  const url = kind === "device"
-    ? "/api/workspaces/import/device"
-    : `/api/workspaces/${encodeURIComponent(state.workspaceDeviceId)}/import-test`;
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/zip", "X-Data-Filename": encodeURIComponent(file.name) },
-    body: file,
-  });
-  const result = await response.json().catch(() => ({}));
-  if (!response.ok || result?.ok === false) throw new Error(result?.error || `服务返回 ${response.status}`);
-  if (kind === "device") {
-    await loadWorkspaceCatalog(result.device.id);
-    setWorkspaceStatus(`已导入设备“${result.device.name}”及 ${result.importedTests} 个测试集`, "saved");
-  } else {
-    await loadWorkspaceCatalog(state.workspaceDeviceId, result.test.id);
-    setWorkspaceStatus(result.created ? `已导入测试集“${result.test.name}”` : `测试集“${result.test.name}”已存在`, "saved");
-  }
-  (document.getElementById("dataTransferDialog") as HTMLDialogElement).close();
-}
-
 /** 根据弹窗模式执行设备或测试集操作。 */
 async function chooseDataTransfer(kind: "device" | "test") {
   const status = document.getElementById("dataTransferStatus");
@@ -744,7 +815,8 @@ async function chooseDataTransfer(kind: "device" | "test") {
   status.classList.remove("error");
   try {
     if (dataTransferMode === "export") {
-      await exportWorkspaceData(kind);
+      setDataTransferBusy(true);
+      await runWorkspaceTransfer(kind);
       return;
     }
     if (kind === "test" && !state.workspaceDeviceId) throw new Error("请先选择测试集所属的相同设备");
@@ -752,6 +824,7 @@ async function chooseDataTransfer(kind: "device" | "test") {
   } catch (error) {
     status.textContent = error.message || "操作失败";
     status.classList.add("error");
+    setDataTransferBusy(false);
   }
 }
 
@@ -2250,7 +2323,7 @@ async function createTestGroup() {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: group })
     });
   } catch (error) {
-    if (error.message === "Not found") throw new Error("本地服务版本过旧，请重启 server.py 后再新建组别");
+    if (error.message === "Not found") throw new Error("本地服务版本过旧，请重启 realtime_scheduler.backend.main 后再新建组别");
     throw error;
   }
   state.workspaceDevice.testGroups = result.groups;
@@ -4037,7 +4110,7 @@ async function runPlan() {
   startRunStatus(`准备运行 · ${state.testCaseName || "当前测试"}`, "检查服务与测试配置");
   try {
     const healthResponse = await fetch("/api/health", { cache: "no-store" }), health = await healthResponse.json();
-    if (!healthResponse.ok || health.schemaVersion !== EXPECTED_API_SCHEMA) throw new Error("本地服务版本过旧，请重启 scripts/config_editor_server.py");
+    if (!healthResponse.ok || health.schemaVersion !== EXPECTED_API_SCHEMA) throw new Error("本地服务版本过旧，请重启 realtime_scheduler.backend.main");
     if (state.strategy.startsWith("other_alg:")) {
       const algorithm = (health.otherAlgorithms || []).find(item => item.strategy === state.strategy);
       if (!algorithm?.available) throw new Error(`${state.strategy} 算法包不存在或入口不完整`);
@@ -5140,7 +5213,7 @@ async function checkService() {
     pill.textContent = compatible ? "本地服务已连接" : "服务版本过旧";
     if (!compatible) {
       pill.style.color = "var(--red)"; pill.style.background = "var(--red-soft)";
-      writeTerminal("$ 本地服务版本过旧\n  请重启: py scripts/config_editor_server.py", true);
+      writeTerminal("$ 本地服务版本过旧\n  请重启: python -m realtime_scheduler.backend.main", true);
     }
   }
   catch {
@@ -5153,7 +5226,7 @@ async function checkService() {
     pill.textContent = "本地服务未连接";
     pill.style.color = "var(--red)";
     pill.style.background = "var(--red-soft)";
-    writeTerminal("$ 无法连接本地服务\n  请运行: py scripts/config_editor_server.py", true);
+    writeTerminal("$ 无法连接本地服务\n  请运行: python -m realtime_scheduler.backend.main", true);
   }
 }
 
@@ -5243,21 +5316,28 @@ document.getElementById("cleanDialogForm").addEventListener("submit", event => {
 document.getElementById("workspaceImportButton").addEventListener("click", () => openDataTransferDialog("import"));
 document.getElementById("workspaceExportButton").addEventListener("click", () => openDataTransferDialog("export"));
 document.getElementById("dataTransferDialogClose").addEventListener("click", () => (document.getElementById("dataTransferDialog") as HTMLDialogElement).close());
+document.getElementById("dataTransferDialog").addEventListener("cancel", event => {
+  if (document.getElementById("dataTransferDialog").classList.contains("is-busy")) event.preventDefault();
+});
 document.getElementById("deviceTransferOption").addEventListener("click", () => chooseDataTransfer("device"));
 document.getElementById("testTransferOption").addEventListener("click", () => chooseDataTransfer("test"));
 document.getElementById("dataTransferDialog").addEventListener("click", event => {
-  if (event.target === document.getElementById("dataTransferDialog")) (event.target as HTMLDialogElement).close();
+  if (event.target === document.getElementById("dataTransferDialog") && !document.getElementById("dataTransferDialog").classList.contains("is-busy")) (event.target as HTMLDialogElement).close();
 });
 document.getElementById("deviceFile").addEventListener("change", event => {
   const input = event.currentTarget as HTMLInputElement;
   const file = input.files?.[0];
   input.value = "";
   if (!file) return;
-  const operation = file.name.toLowerCase().endsWith(".json") ? loadDevice(file) : uploadWorkspaceArchive(file, "device");
+  setDataTransferBusy(true);
+  const operation = file.name.toLowerCase().endsWith(".json")
+    ? loadDevice(file)
+    : runWorkspaceTransfer("device", file);
   operation.catch(error => {
     const status = document.getElementById("dataTransferStatus");
     status.textContent = error.message || "设备导入失败";
     status.classList.add("error");
+    setDataTransferBusy(false);
     writeTerminal(`$ 设备读取失败\n  ${error.message}`, true);
   });
 });
@@ -5266,10 +5346,12 @@ document.getElementById("testExchangeFile").addEventListener("change", event => 
   const file = input.files?.[0];
   input.value = "";
   if (!file) return;
-  uploadWorkspaceArchive(file, "test").catch(error => {
+  setDataTransferBusy(true);
+  runWorkspaceTransfer("test", file).catch(error => {
     const status = document.getElementById("dataTransferStatus");
     status.textContent = error.message || "测试集导入失败";
     status.classList.add("error");
+    setDataTransferBusy(false);
     writeTerminal(`$ 测试集导入失败\n  ${error.message}`, true);
   });
 });

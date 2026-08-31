@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from realtime_scheduler.move_validation import (
+from realtime_scheduler.backend.validation.move_validation import (
     ATMOSPHERE,
     VACUUM,
     DoorState,

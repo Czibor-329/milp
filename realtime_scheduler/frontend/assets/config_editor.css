@@ -145,6 +145,10 @@
     .data-transfer-option-arrow { color: #7890ae; font-size: 18px; }
     .data-transfer-status { min-height: 18px; margin-top: 12px; color: var(--muted); font-size: 11px; }
     .data-transfer-status.error { color: var(--red); }
+    .data-transfer-progress { margin-top: 14px; }
+    .data-transfer-progress-head { display: flex; justify-content: space-between; gap: 12px; color: #385274; font-size: 11px; }
+    .data-transfer-progress-track { height: 8px; margin-top: 7px; overflow: hidden; border-radius: 999px; background: #e5edf8; }
+    .data-transfer-progress-track span { display: block; width: 0%; height: 100%; border-radius: inherit; background: var(--brand); transition: width .18s ease; }
     .dialog-body { padding: 18px; }
     .dialog-body h3 { margin: 0 0 6px; font-size: 16px; }
     .dialog-body p { margin: 0; color: var(--muted); }

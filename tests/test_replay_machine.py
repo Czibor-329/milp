@@ -11,9 +11,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from realtime_scheduler.replay_machine import ReplayMachine
-from realtime_scheduler.plan_builder import extract_init_data
-from realtime_scheduler.server import (
+from realtime_scheduler.backend.validation.replay_machine import ReplayMachine
+from realtime_scheduler.backend.execution.plan_builder import extract_init_data
+from realtime_scheduler.backend.application import (
     DUAL_ACTOR_MODEL_PATH,
     E2E_CTQ_MODEL_PATH,
     execute_plan,
