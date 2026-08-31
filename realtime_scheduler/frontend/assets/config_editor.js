@@ -21710,13 +21710,47 @@ function buildPayload() {
   if (state.strategy === "schedule-alphago") {
     options.scheduleAlphaGoExecutionMode = playbackMode === "step" ? "stepped" : "continuous";
   }
-  return { schemaVersion: EXPECTED_API_SCHEMA, workspaceDeviceId: state.workspaceDeviceId, workspaceTestId: state.testCaseId, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options, skipValidation: skipValidationEnabled(), hongYeCheck: hongYeCheckEnabled(), skipBaseline: skipBaselineEnabled(), recipes: collectRecipes(routes), cleans, routes, rounds: instances.rounds };
+  return { schemaVersion: EXPECTED_API_SCHEMA, workspaceDeviceId: state.workspaceDeviceId, workspaceTestId: state.testCaseId, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options, skipValidation: skipValidationEnabled(), hongYeCheck: hongYeCheckEnabled(), compatibilityMode: compatibilityModeEnabled(), skipBaseline: skipBaselineEnabled(), recipes: collectRecipes(routes), cleans, routes, rounds: instances.rounds };
 }
 function skipValidationEnabled() {
   return document.getElementById("skipValidationInput")?.checked === true;
 }
 function hongYeCheckEnabled() {
   return document.getElementById("hongYeCheckInput")?.checked === true;
+}
+var runSettingsTrigger = null;
+function updateRunSettingsButtonLabel() {
+  const button = document.getElementById("openRunSettingsButton");
+  if (!button) return;
+  const compatibility = document.getElementById("compatibilityModeInput")?.checked === true;
+  const hongYe = document.getElementById("hongYeCheckInput")?.checked === true;
+  const skipBaseline = document.getElementById("skipBaselineInput")?.checked === true;
+  const skipValidation = document.getElementById("skipValidationInput")?.checked === true;
+  const labels = [compatibility && "\u517C\u5BB9\u6A21\u5F0F", hongYe && "HongYe Check", skipBaseline && "\u8DF3\u8FC7 Baseline", skipValidation && "\u8DF3\u8FC7\u6821\u9A8C"].filter(Boolean);
+  const summary = labels.length ? `\u8FD0\u884C\u8BBE\u7F6E\uFF1A${labels.join("\u3001")}` : "\u8FD0\u884C\u8BBE\u7F6E\uFF1A\u5168\u90E8\u5173\u95ED";
+  button.setAttribute("aria-label", summary);
+  button.setAttribute("title", summary);
+  button.classList.toggle("is-customized", !compatibility || !hongYe || !skipBaseline || skipValidation);
+}
+function openRunSettingsDialog() {
+  const dialog = document.getElementById("runSettingsDialog");
+  runSettingsTrigger = document.getElementById("openRunSettingsButton");
+  runSettingsTrigger?.setAttribute("aria-expanded", "true");
+  dialog.showModal();
+  window.setTimeout(() => document.getElementById("compatibilityModeInput")?.focus(), 0);
+}
+function closeRunSettingsDialog() {
+  const dialog = document.getElementById("runSettingsDialog");
+  if (dialog?.open) dialog.close();
+}
+function finishRunSettingsDialog() {
+  updateRunSettingsButtonLabel();
+  runSettingsTrigger?.setAttribute("aria-expanded", "false");
+  if (runSettingsTrigger?.isConnected) runSettingsTrigger.focus();
+  runSettingsTrigger = null;
+}
+function compatibilityModeEnabled() {
+  return document.getElementById("compatibilityModeInput")?.checked === true;
 }
 function skipBaselineEnabled() {
   return document.getElementById("skipBaselineInput")?.checked === true;
@@ -22190,7 +22224,7 @@ async function runCurrentTestGroup(selectedTestIds = null) {
     const response = await fetch("/api/run-batch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ deviceId: state.workspaceDeviceId, group: state.activeTestGroup, testIds: tests.map((test) => test.id), strategy: state.strategy, options: state.options, skipValidation: skipValidationEnabled(), hongYeCheck: hongYeCheckEnabled(), skipBaseline: skipBaselineEnabled() })
+      body: JSON.stringify({ deviceId: state.workspaceDeviceId, group: state.activeTestGroup, testIds: tests.map((test) => test.id), strategy: state.strategy, options: state.options, skipValidation: skipValidationEnabled(), hongYeCheck: hongYeCheckEnabled(), compatibilityMode: compatibilityModeEnabled(), skipBaseline: skipBaselineEnabled() })
     });
     let result = await response.json();
     if (!response.ok || !result.batchId || !Array.isArray(result.items)) throw new Error(result.error || `\u670D\u52A1\u8FD4\u56DE ${response.status}`);
@@ -23001,6 +23035,13 @@ document.getElementById("roundCount").addEventListener("input", (event) => {
 document.getElementById("runButton").addEventListener("click", runPlan);
 document.getElementById("stepRunButton").addEventListener("click", runModelStepped);
 document.getElementById("batchRunButton").addEventListener("click", runCurrentTestGroup);
+document.getElementById("openRunSettingsButton").addEventListener("click", openRunSettingsDialog);
+document.getElementById("runSettingsDialogClose").addEventListener("click", closeRunSettingsDialog);
+document.getElementById("runSettingsDialog").addEventListener("close", finishRunSettingsDialog);
+["skipValidationInput", "hongYeCheckInput", "compatibilityModeInput", "skipBaselineInput"].forEach((id) => {
+  document.getElementById(id).addEventListener("change", updateRunSettingsButtonLabel);
+});
+updateRunSettingsButtonLabel();
 document.getElementById("batchTestSelectionDialogClose").addEventListener("click", () => document.getElementById("batchTestSelectionDialog").close());
 document.getElementById("batchTestSelectionDialogCancel").addEventListener("click", () => document.getElementById("batchTestSelectionDialog").close());
 document.getElementById("batchSelectionSelectAll").addEventListener("click", () => setBatchTestSelection(() => true));

@@ -3821,7 +3821,7 @@ function buildPayload() {
     // 初始执行模式随回放/步进模式走，避免 update 启动时的会话重置覆盖用户选择。
     options.scheduleAlphaGoExecutionMode = playbackMode === "step" ? "stepped" : "continuous";
   }
-  return { schemaVersion: EXPECTED_API_SCHEMA, workspaceDeviceId: state.workspaceDeviceId, workspaceTestId: state.testCaseId, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options, skipValidation: skipValidationEnabled(), hongYeCheck: hongYeCheckEnabled(), skipBaseline: skipBaselineEnabled(), recipes: collectRecipes(routes), cleans, routes, rounds: instances.rounds };
+  return { schemaVersion: EXPECTED_API_SCHEMA, workspaceDeviceId: state.workspaceDeviceId, workspaceTestId: state.testCaseId, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options, skipValidation: skipValidationEnabled(), hongYeCheck: hongYeCheckEnabled(), compatibilityMode: compatibilityModeEnabled(), skipBaseline: skipBaselineEnabled(), recipes: collectRecipes(routes), cleans, routes, rounds: instances.rounds };
 }
 
 /** 返回“跳过输出校验”是否已勾选。 */
@@ -3832,6 +3832,51 @@ function skipValidationEnabled() {
 /** 返回是否选择 HongYe SchStateLib 输出校验器。 */
 function hongYeCheckEnabled() {
   return document.getElementById("hongYeCheckInput")?.checked === true;
+}
+
+let runSettingsTrigger = null;
+
+/** 更新齿轮按钮的无障碍摘要，并标记是否偏离推荐默认设置。 */
+function updateRunSettingsButtonLabel() {
+  const button = document.getElementById("openRunSettingsButton");
+  if (!button) return;
+  const compatibility = document.getElementById("compatibilityModeInput")?.checked === true;
+  const hongYe = document.getElementById("hongYeCheckInput")?.checked === true;
+  const skipBaseline = document.getElementById("skipBaselineInput")?.checked === true;
+  const skipValidation = document.getElementById("skipValidationInput")?.checked === true;
+  const labels = [compatibility && "兼容模式", hongYe && "HongYe Check", skipBaseline && "跳过 Baseline", skipValidation && "跳过校验"].filter(Boolean);
+  const summary = labels.length ? `运行设置：${labels.join("、")}` : "运行设置：全部关闭";
+  button.setAttribute("aria-label", summary);
+  button.setAttribute("title", summary);
+  button.classList.toggle("is-customized", !compatibility || !hongYe || !skipBaseline || skipValidation);
+}
+
+/** 打开运行设置原生 dialog，并在关闭后把焦点归还到触发按钮。 */
+function openRunSettingsDialog() {
+  const dialog = document.getElementById("runSettingsDialog");
+  runSettingsTrigger = document.getElementById("openRunSettingsButton");
+  runSettingsTrigger?.setAttribute("aria-expanded", "true");
+  dialog.showModal();
+  window.setTimeout(() => document.getElementById("compatibilityModeInput")?.focus(), 0);
+}
+
+/** 关闭运行设置 dialog；原生 Escape 和完成按钮都会经过这里的 close 事件收尾。 */
+function closeRunSettingsDialog() {
+  const dialog = document.getElementById("runSettingsDialog");
+  if (dialog?.open) dialog.close();
+}
+
+/** 收尾运行设置 dialog 的关闭状态并恢复焦点。 */
+function finishRunSettingsDialog() {
+  updateRunSettingsButtonLabel();
+  runSettingsTrigger?.setAttribute("aria-expanded", "false");
+  if (runSettingsTrigger?.isConnected) runSettingsTrigger.focus();
+  runSettingsTrigger = null;
+}
+
+/** 返回是否按 HongYe 兼容语义推进；完整日志始终保留 AlgUpdateMove。 */
+function compatibilityModeEnabled() {
+  return document.getElementById("compatibilityModeInput")?.checked === true;
 }
 
 /** 返回“跳过Baseline”是否已勾选。 */
@@ -4322,7 +4367,7 @@ async function runCurrentTestGroup(selectedTestIds = null) {
     const response = await fetch("/api/run-batch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ deviceId: state.workspaceDeviceId, group: state.activeTestGroup, testIds: tests.map(test => test.id), strategy: state.strategy, options: state.options, skipValidation: skipValidationEnabled(), hongYeCheck: hongYeCheckEnabled(), skipBaseline: skipBaselineEnabled() }),
+      body: JSON.stringify({ deviceId: state.workspaceDeviceId, group: state.activeTestGroup, testIds: tests.map(test => test.id), strategy: state.strategy, options: state.options, skipValidation: skipValidationEnabled(), hongYeCheck: hongYeCheckEnabled(), compatibilityMode: compatibilityModeEnabled(), skipBaseline: skipBaselineEnabled() }),
     });
     let result = await response.json();
     if (!response.ok || !result.batchId || !Array.isArray(result.items)) throw new Error(result.error || `服务返回 ${response.status}`);
@@ -5171,6 +5216,13 @@ document.getElementById("roundCount").addEventListener("input", event => { resiz
 document.getElementById("runButton").addEventListener("click", runPlan);
 document.getElementById("stepRunButton").addEventListener("click", runModelStepped);
 document.getElementById("batchRunButton").addEventListener("click", runCurrentTestGroup);
+document.getElementById("openRunSettingsButton").addEventListener("click", openRunSettingsDialog);
+document.getElementById("runSettingsDialogClose").addEventListener("click", closeRunSettingsDialog);
+document.getElementById("runSettingsDialog").addEventListener("close", finishRunSettingsDialog);
+["skipValidationInput", "hongYeCheckInput", "compatibilityModeInput", "skipBaselineInput"].forEach(id => {
+  document.getElementById(id).addEventListener("change", updateRunSettingsButtonLabel);
+});
+updateRunSettingsButtonLabel();
 document.getElementById("batchTestSelectionDialogClose").addEventListener("click", () => (document.getElementById("batchTestSelectionDialog") as HTMLDialogElement).close());
 document.getElementById("batchTestSelectionDialogCancel").addEventListener("click", () => (document.getElementById("batchTestSelectionDialog") as HTMLDialogElement).close());
 document.getElementById("batchSelectionSelectAll").addEventListener("click", () => setBatchTestSelection(() => true));

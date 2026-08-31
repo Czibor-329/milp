@@ -547,19 +547,33 @@ class RecomputeFailureOutputTests(unittest.TestCase):
         self.assertIn("!rec.removedByRecompute", viewer)
         self.assertIn('fillOpacity = bar.rec.removedByRecompute ? "0.24" : "1"', viewer)
 
-    def test_frontend_version_and_cache_keys_are_1_5_22(self) -> None:
+    def test_frontend_version_and_cache_keys_are_1_5_23(self) -> None:
         """前端显示版本、包版本和主资源缓存键必须同步。"""
         frontend_root = ROOT / "realtime_scheduler" / "frontend"
         template = (frontend_root / "config_editor.html").read_text(encoding="utf-8")
         package = json.loads((frontend_root / "package.json").read_text(encoding="utf-8"))
         package_lock = json.loads((frontend_root / "package-lock.json").read_text(encoding="utf-8"))
 
-        self.assertEqual("1.5.22", package["version"])
-        self.assertEqual("1.5.22", package_lock["version"])
-        self.assertEqual("1.5.22", package_lock["packages"][""]["version"])
-        self.assertIn('class="frontend-version">前端 v1.5.22</span>', template)
-        self.assertIn('/assets/config_editor.css?v=1.5.22', template)
-        self.assertIn('/assets/config_editor.js?v=1.5.22', template)
+        self.assertEqual("1.5.23", package["version"])
+        self.assertEqual("1.5.23", package_lock["version"])
+        self.assertEqual("1.5.23", package_lock["packages"][""]["version"])
+        self.assertIn('class="frontend-version">前端 v1.5.23</span>', template)
+        self.assertIn('/assets/config_editor.css?v=1.5.23', template)
+        self.assertIn('/assets/config_editor.js?v=1.5.23', template)
+
+    def test_run_options_live_in_compact_settings_dialog(self) -> None:
+        """运行选项应收纳到设置弹窗，齿轮按钮与状态灯保持紧凑。"""
+        template = EDITOR_PATH.read_text(encoding="utf-8")
+        style = EDITOR_STYLE_PATH.read_text(encoding="utf-8")
+
+        self.assertIn('id="openRunSettingsButton"', template)
+        self.assertIn('id="runSettingsDialog"', template)
+        self.assertIn('id="compatibilityModeInput" type="checkbox" checked', template)
+        self.assertIn('id="hongYeCheckInput" type="checkbox" checked', template)
+        self.assertIn('id="skipBaselineInput" type="checkbox" checked', template)
+        self.assertIn('id="skipValidationInput" type="checkbox"', template)
+        self.assertIn("width: 34px; min-width: 34px; height: 34px", style)
+        self.assertIn("top: 3px; right: 3px; width: 5px; height: 5px", style)
 
     def test_batch_status_refresh_obeys_frontend_performance_limit(self) -> None:
         """批量状态最多每秒轮询一次，且明细未变化时不得重建整组 DOM。"""
@@ -2344,7 +2358,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("<span>结果分析</span>", html)
         self.assertIn("<span>路径配置</span>", html)
         self.assertNotIn('data-tab-view="clean"', html)
-        self.assertIn('class="frontend-version">前端 v1.5.22</span>', html)
+        self.assertIn('class="frontend-version">前端 v1.5.23</span>', html)
         self.assertIn('data-option="residencyGuardSeconds"', html)
         self.assertIn('data-option="maximumRobotHoldingSeconds"', html)
         self.assertIn('data-option="maximumSystemResidenceCv"', html)

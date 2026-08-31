@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>调度平台</title>
   <link rel="stylesheet" href="/assets/katex.min.css?v=1.4.4">
-  <link rel="stylesheet" href="/assets/config_editor.css?v=1.5.22">
+  <link rel="stylesheet" href="/assets/config_editor.css?v=1.5.23">
 </head>
 <body>
   <a class="skip-link" href="#mainContent">跳到主要内容</a>
@@ -40,7 +40,7 @@
       <div class="sidebar-footer">
         <span class="sidebar-footer-label">系统状态</span>
         <div class="service-pill" id="serviceState">本地服务</div>
-        <span class="frontend-version">前端 v1.5.22</span>
+        <span class="frontend-version">前端 v1.5.23</span>
       </div>
     </aside>
 
@@ -436,11 +436,11 @@
             </div>
           </div>
           <div class="run-box">
-            <h2>开始运行</h2>
-            <div class="run-options">
-              <label class="export-option"><input id="skipValidationInput" type="checkbox">跳过输出校验</label>
-              <label class="export-option" title="勾选后使用 HongYe SchStateLib 校验；取消勾选则使用原平台校验"><input id="hongYeCheckInput" type="checkbox" checked>HongYe check</label>
-              <label class="export-option"><input id="skipBaselineInput" type="checkbox" checked>跳过Baseline</label>
+            <div class="run-box-head">
+              <h2>开始运行</h2>
+              <button class="btn run-settings-button" id="openRunSettingsButton" type="button" aria-label="运行设置" title="运行设置" aria-haspopup="dialog" aria-controls="runSettingsDialog" aria-expanded="false">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V21h-4v-.08A1.7 1.7 0 0 0 8.97 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.52-1.03H3v-4h.08A1.7 1.7 0 0 0 4.6 8.94a1.7 1.7 0 0 0-.34-1.88L4.2 7l2.83-2.83.06.06a1.7 1.7 0 0 0 1.88.34A1.7 1.7 0 0 0 10 3.05V3h4v.05a1.7 1.7 0 0 0 1.03 1.52 1.7 1.7 0 0 0 1.88-.34l.06-.06L19.8 7l-.06.06a1.7 1.7 0 0 0-.34 1.88A1.7 1.7 0 0 0 20.92 10H21v4h-.08A1.7 1.7 0 0 0 19.4 15Z"/></svg>
+              </button>
             </div>
             <div class="run-actions"><button class="btn" id="runButton">▶ 运行当前测试</button><button class="btn" id="stepRunButton" title="以步进模式运行 Schedule-AlphaGo：每次决策完成后从 3 条稳定动作链中选择一条整体提交">⟳ 运行模型步进</button><button class="btn batch" id="batchRunButton">▦ 运行当前测试组</button></div>
             <section class="run-status-card" id="runStatusCard" aria-labelledby="runStatusTitle">
@@ -523,6 +523,39 @@
       <p id="workspaceDialogMessage"></p>
       <input id="workspaceDialogInput" type="text" maxlength="80" autocomplete="off">
       <div class="dialog-actions"><button class="btn small" type="button" id="workspaceDialogCancel">取消</button><button class="btn primary small" id="workspaceDialogConfirm" value="confirm">确认</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="run-settings-dialog" id="runSettingsDialog" aria-labelledby="runSettingsDialogTitle" aria-describedby="runSettingsDialogDescription">
+    <form class="dialog-body run-settings-dialog-body" id="runSettingsForm" method="dialog">
+      <header class="run-settings-dialog-head">
+        <div>
+          <h3 id="runSettingsDialogTitle">运行设置</h3>
+          <p id="runSettingsDialogDescription">选择本次运行使用的推进、校验和基线策略。</p>
+        </div>
+        <button class="btn workspace-icon-button" id="runSettingsDialogClose" type="button" aria-label="关闭运行设置">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+        </button>
+      </header>
+      <div class="run-settings-options">
+        <label class="run-setting-option" for="compatibilityModeInput">
+          <span class="run-setting-option-main"><input id="compatibilityModeInput" type="checkbox" checked><span>兼容模式</span></span>
+          <small>模块并行推进；按 PreMoveID 延后动作；缺失的开关门动作自动补齐。</small>
+        </label>
+        <label class="run-setting-option" for="hongYeCheckInput">
+          <span class="run-setting-option-main"><input id="hongYeCheckInput" type="checkbox" checked><span>HongYe Check <em>（推荐）</em></span></span>
+          <small>使用 HongYe 原始日志校验；关闭后使用平台内置校验器。</small>
+        </label>
+        <label class="run-setting-option" for="skipBaselineInput">
+          <span class="run-setting-option-main"><input id="skipBaselineInput" type="checkbox" checked><span>跳过 Baseline</span></span>
+          <small>Baseline 使用 Heuristic 结果作为性能基线；勾选后跳过基线计算。</small>
+        </label>
+        <label class="run-setting-option" for="skipValidationInput">
+          <span class="run-setting-option-main"><input id="skipValidationInput" type="checkbox"><span>跳过校验</span></span>
+          <small>不执行任何输出校验，仅用于调试。</small>
+        </label>
+      </div>
+      <div class="dialog-actions"><button class="btn primary small" id="runSettingsDialogDone" type="submit">完成</button></div>
     </form>
   </dialog>
 
@@ -707,6 +740,6 @@
     </aside>
   </dialog>
 
-  <script type="module" src="/assets/config_editor.js?v=1.5.22"></script>
+  <script type="module" src="/assets/config_editor.js?v=1.5.23"></script>
 </body>
 </html>
