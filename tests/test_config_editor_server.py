@@ -3285,6 +3285,39 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual("skipped", baseline["status"])
         persist.assert_not_called()
 
+    def test_batch_compatibility_mode_reaches_selected_plan(self) -> None:
+        """批量执行链路应将显式关闭的兼容模式写入最终执行计划。"""
+        test_case = {
+            "id": "test-compatibility-mode", "name": "兼容模式链路", "group": "回归",
+            "roundCount": 1, "options": {},
+            "rounds": [{"currentTime": 0, "jobs": [_job("A", "BatchRoute", "LP1")]}],
+        }
+        device = {
+            "id": "device-compatibility-mode", "name": "fixture.json", "device": self.device,
+            "routes": [_route("BatchRoute", "PM1,PM2", "BatchRecipe")],
+            "cleans": [], "tests": [test_case],
+        }
+        captured_plans = []
+
+        def fake_execute(plan):
+            captured_plans.append(plan)
+            return {
+                "ok": True, "totalElapsedMs": 1.0, "makespan": 2.0,
+                "moveCount": 0, "validation": "skipped",
+                "output": {"MoveList": []}, "reproductionLog": [],
+            }
+
+        with patch.object(config_server, "execute_plan", side_effect=fake_execute):
+            result, _baseline, error = config_server._execute_workspace_test_with_baseline(
+                device, test_case, "heuristic", {},
+                skip_baseline=True, hongye_check=False, compatibility_mode=False,
+            )
+
+        self.assertIsNone(error)
+        self.assertIsNotNone(result)
+        self.assertEqual(1, len(captured_plans))
+        self.assertFalse(captured_plans[0]["compatibilityMode"])
+
     def test_batch_log_archive_contains_each_available_test_log_and_manifest(self) -> None:
         """批量日志下载应将各测试日志及其测试集映射一次性打包。"""
         batch_id = "a" * 32
@@ -3444,6 +3477,11 @@ class ConfigEditorServerTests(unittest.TestCase):
         # 默认不写 skipValidation 键，保证 Baseline 指纹与旧版本一致。
         default_plan = config_server.build_workspace_batch_plan(device, test_case, "heuristic", {})
         self.assertNotIn("skipValidation", default_plan)
+        self.assertTrue(default_plan["compatibilityMode"])
+        explicit_incompatible_plan = config_server.build_workspace_batch_plan(
+            device, test_case, "heuristic", {}, compatibility_mode=False,
+        )
+        self.assertFalse(explicit_incompatible_plan["compatibilityMode"])
         with (
             patch.object(config_server, "get_workspace_device", return_value=device),
             patch.object(config_server, "validate_move_list", return_value=["Mock 无效动作"]) as mocked,
@@ -4410,7 +4448,8 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual(3, descriptions.count("AlgSchedule"))
         self.assertEqual(3, descriptions.count("AlgOutput"))
         self.assertEqual(2, descriptions.count("RecomputeControl"))
-        self.assertIn("AlgUpdateMove", descriptions)
+        self.assertGreater(descriptions.count("AlgUpdateMove"), 0)
+        self.assertTrue(result["updates"][1]["MoveStates"])
         self.assertTrue(all(set(entry) == {"Time", "Describe", "SimTime", "Info"} for entry in reproduction))
 
     def test_frontend_exposes_available_dual_actor_strategy(self) -> None:

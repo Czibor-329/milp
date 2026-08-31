@@ -630,6 +630,7 @@ def build_workspace_batch_plan(
     *,
     skip_validation: bool = False,
     hongye_check: bool = True,
+    compatibility_mode: bool = True,
 ) -> Dict[str, Any]:
     """将持久化测试与设备共享库组合成可直接执行的单次请求。"""
     test_case = _apply_device_route_aliases(
@@ -679,6 +680,7 @@ def build_workspace_batch_plan(
         "strategy": str(strategy or "heuristic"),
         "roundCount": len(rounds),
         "hongYeCheck": bool(hongye_check),
+        "compatibilityMode": bool(compatibility_mode),
         "options": merged_options,
         "recipes": _batch_test_recipes(routes, cleans),
         "cleans": cleans,
@@ -695,6 +697,7 @@ def _workspace_baseline_fingerprint(
     device: Mapping[str, Any],
     test_case: Mapping[str, Any],
     options: Optional[Mapping[str, Any]] = None,
+    compatibility_mode: bool = True,
 ) -> str:
     """对实际 Heuristic 输入做稳定摘要，绑定测试及其引用的共享工艺配置。"""
     plan = build_workspace_batch_plan(
@@ -702,6 +705,7 @@ def _workspace_baseline_fingerprint(
         test_case,
         "heuristic",
         options if options is not None else dict(test_case.get("options") or {}),
+        compatibility_mode=compatibility_mode,
     )
     canonical = json.dumps(
         {
@@ -804,13 +808,16 @@ def _execute_workspace_test_with_baseline(
     skip_validation: bool = False,
     hongye_check: bool = True,
     skip_baseline: bool = False,
+    compatibility_mode: bool = True,
 ) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any], Optional[Exception]]:
     """确保 Baseline 有效并执行所选策略；Baseline 失败不复用旧值。
 
     ``skip_baseline`` 为 True 时既不计算也不复用 Baseline，返回 ``skipped``
     占位记录，避免因缺失 Baseline 连带运行本地 heuristic 触发其自身校验。
     """
-    fingerprint = _workspace_baseline_fingerprint(device, test_case, options)
+    fingerprint = _workspace_baseline_fingerprint(
+        device, test_case, options, compatibility_mode=compatibility_mode,
+    )
     existing = test_case.get("baseline")
     if skip_baseline:
         # 显式跳过：即使存在指纹匹配的旧基线也不读取，统一按缺失处理。
@@ -856,7 +863,10 @@ def _execute_workspace_test_with_baseline(
             device, test_case, "heuristic", options,
             skip_validation=skip_validation,
             hongye_check=hongye_check,
+            compatibility_mode=compatibility_mode,
         )
+        if selected_plan is not None:
+            plan["compatibilityMode"] = bool(compatibility_mode)
         try:
             log_run_event(test_id, "selected", "算法执行", "running")
             result = execute_plan(plan)
@@ -882,6 +892,7 @@ def _execute_workspace_test_with_baseline(
                 device, test_case, "heuristic", options,
                 skip_validation=skip_validation,
                 hongye_check=hongye_check,
+                compatibility_mode=compatibility_mode,
             ))
             baseline = record(_successful_baseline(fingerprint, baseline_result))
             report_success(baseline_result, "baseline")
@@ -895,7 +906,10 @@ def _execute_workspace_test_with_baseline(
         device, test_case, strategy, options,
         skip_validation=skip_validation,
         hongye_check=hongye_check,
+        compatibility_mode=compatibility_mode,
     )
+    if selected_plan is not None:
+        plan["compatibilityMode"] = bool(compatibility_mode)
     try:
         log_run_event(test_id, "selected", "算法执行", "running")
         result = execute_plan(plan)
@@ -915,6 +929,7 @@ def _execute_workspace_test_in_process(
     skip_validation: bool,
     hongye_check: bool,
     skip_baseline: bool,
+    compatibility_mode: bool = True,
 ) -> Dict[str, Any]:
     """在独立进程中执行一个批量测试并返回可序列化结果。
 
@@ -934,6 +949,7 @@ def _execute_workspace_test_in_process(
         skip_validation=skip_validation,
         hongye_check=hongye_check,
         skip_baseline=skip_baseline,
+        compatibility_mode=compatibility_mode,
     )
     if error is None:
         return {
@@ -1038,6 +1054,7 @@ def _execute_workspace_test_batch(
     use_process_isolation: bool = False,
     progress_callback: Optional[Any] = None,
     cancel_event: Optional[threading.Event] = None,
+    compatibility_mode: bool = True,
 ) -> Dict[str, Any]:
     """执行已解析的批量测试，并通过回调报告每项状态变化。"""
     worker_count = max(1, min(int(maximum_workers), MAXIMUM_BATCH_WORKERS, len(tests)))
@@ -1086,6 +1103,7 @@ def _execute_workspace_test_batch(
                 device, test_case, strategy, options,
                 skip_validation=skip_validation,
                 hongye_check=hongye_check,
+                compatibility_mode=compatibility_mode,
             )
             if process_executor is None:
                 result, baseline, run_error = _execute_workspace_test_with_baseline(
@@ -1097,6 +1115,7 @@ def _execute_workspace_test_batch(
                     skip_validation=skip_validation,
                     hongye_check=hongye_check,
                     skip_baseline=skip_baseline,
+                    compatibility_mode=compatibility_mode,
                 )
             else:
                 process_result = process_executor.submit(
@@ -1109,6 +1128,7 @@ def _execute_workspace_test_batch(
                     skip_validation,
                     hongye_check,
                     skip_baseline,
+                    compatibility_mode,
                 ).result()
                 result = process_result.get("result")
                 baseline = process_result.get("baseline") or {}
@@ -1266,6 +1286,7 @@ def run_workspace_test_batch(
     maximum_workers: int = 4,
     test_ids: Optional[Sequence[str]] = None,
     progress_callback: Optional[Any] = None,
+    compatibility_mode: bool = True,
 ) -> Dict[str, Any]:
     """同步运行测试组或其指定子集，供测试、终端脚本和非 HTTP 调用方使用。"""
     device = get_workspace_device(device_id)
@@ -1281,6 +1302,7 @@ def run_workspace_test_batch(
         skip_baseline=skip_baseline,
         maximum_workers=maximum_workers,
         progress_callback=progress_callback,
+        compatibility_mode=compatibility_mode,
     )
     result.update({
         "deviceId": device_id,
@@ -1336,6 +1358,7 @@ def start_workspace_test_batch(
     maximum_workers: int = 4,
     use_process_isolation: bool = False,
     test_ids: Optional[Sequence[str]] = None,
+    compatibility_mode: bool = True,
 ) -> Dict[str, Any]:
     """创建后台批量任务；可按 ID 选择子集，结果仍按名称自然顺序排列。"""
     device = get_workspace_device(device_id)
@@ -1406,6 +1429,7 @@ def start_workspace_test_batch(
                 use_process_isolation=use_process_isolation,
                 progress_callback=update_item,
                 cancel_event=cancel_event,
+                compatibility_mode=compatibility_mode,
             )
             with _BATCH_RUNS_LOCK:
                 batch = _BATCH_RUNS.get(batch_id)

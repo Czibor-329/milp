@@ -25,6 +25,7 @@ from .move_validation_core import (
     SlotState,
     ValidationErrorCode,
     VACUUM,
+    materialize_module_parallel_moves,
     release_completed_load_port_materials,
     validate_move_list,
 )
@@ -34,6 +35,7 @@ __all__ = [
     "MachineState", "MaterialState", "MoveStateReplay", "PICK_MOVE", "PLACE_MOVE",
     "PREPARE_MOVE", "PRE_PREPARE_MOVE", "PRE_TRANS_MOVE", "PROCESS_MOVE", "RobotState",
     "SWAP_MOVE", "SlotPhase", "SlotState", "ValidationErrorCode", "VACUUM",
+    "materialize_module_parallel_moves",
     "release_completed_load_port_materials",
     "validate_move_list",
 ]

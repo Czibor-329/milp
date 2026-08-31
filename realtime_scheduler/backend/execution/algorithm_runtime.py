@@ -15,6 +15,7 @@ class StandardAlgorithmRuntime:
         output: Mapping[str, Any],
         *,
         skip_validation: bool = False,
+        compatibility_mode: bool = False,
     ) -> None:
         """解析首轮完整 update，并把外部 MoveList 挂到实时状态回放器。
 
@@ -24,9 +25,15 @@ class StandardAlgorithmRuntime:
         self.tool_topo = deepcopy(dict(tool_topo))
         self.current_update = deepcopy(dict(update_params))
         self.skip_validation = bool(skip_validation)
+        self.compatibility_mode = bool(compatibility_mode)
         self.problem = compile_problem(self.tool_topo, self.current_update)
         initial_state = MachineState.from_sources(self.problem, self.current_update)
         initial_moves = list(output.get("MoveList") or [])
+        if self.compatibility_mode:
+            initial_moves = materialize_module_parallel_moves(
+                initial_moves,
+                float(self.current_update.get("CurrentTime") or 0.0),
+            )
         validation_issues = (
             []
             if self.skip_validation
@@ -183,37 +190,30 @@ class StandardAlgorithmRuntime:
         )
         started: set[int] = set()
         finished: set[int] = set()
-        for group in _planned_event_groups(self.current_plan):
-            for _, notification in group["priorFinishes"]:
-                move_id = int(notification["MoveID"])
-                if move_id in committed_ids and move_id in started and move_id not in finished:
-                    projection.update_move_state(
-                        notification,
-                        snapshot=False,
-                        track_reservations=False,
-                    )
-                    finished.add(move_id)
-            for event_kind, _, notification in _planned_start_events(group):
-                move_id = int(notification["MoveID"])
-                if event_kind == "start" and move_id in committed_ids and move_id not in started:
-                    projection.update_move_state(
-                        notification,
-                        snapshot=False,
-                        track_reservations=False,
-                    )
-                    started.add(move_id)
-                elif (
-                    event_kind == "finish"
-                    and move_id in committed_ids
-                    and move_id in started
-                    and move_id not in finished
-                ):
-                    projection.update_move_state(
-                        notification,
-                        snapshot=False,
-                        track_reservations=False,
-                    )
-                    finished.add(move_id)
+        for event_kind, _, notification in _planned_events(
+            self.current_plan,
+            module_parallel=self.compatibility_mode,
+        ):
+            move_id = int(notification["MoveID"])
+            if event_kind == "start" and move_id in committed_ids and move_id not in started:
+                projection.update_move_state(
+                    notification,
+                    snapshot=False,
+                    track_reservations=False,
+                )
+                started.add(move_id)
+            elif (
+                event_kind == "finish"
+                and move_id in committed_ids
+                and move_id in started
+                and move_id not in finished
+            ):
+                projection.update_move_state(
+                    notification,
+                    snapshot=False,
+                    track_reservations=False,
+                )
+                finished.add(move_id)
         missing = committed_ids - finished
         if missing:
             raise ValueError(
@@ -272,6 +272,11 @@ class StandardAlgorithmRuntime:
             else _compile_external_validation_problem(self.tool_topo, next_update)
         )
         next_moves = list(output.get("MoveList") or [])
+        if self.compatibility_mode:
+            next_moves = materialize_module_parallel_moves(
+                next_moves,
+                float(effective_time),
+            )
         committed = (
             deepcopy(list(committed_moves))
             if committed_moves is not None
@@ -364,12 +369,19 @@ class PackagedAlgorithmRuntime:
         output: Mapping[str, Any],
         *,
         skip_validation: bool = False,
+        compatibility_mode: bool = False,
     ) -> None:
         """以标准 update 建立首轮物理快照，并校验算法包输出。"""
         self.current_update = deepcopy(dict(update_params))
         self.skip_validation = bool(skip_validation)
+        self.compatibility_mode = bool(compatibility_mode)
         initial_state = MachineState.from_sources(None, self.current_update)
         initial_moves = deepcopy(list(output.get("MoveList") or []))
+        if self.compatibility_mode:
+            initial_moves = materialize_module_parallel_moves(
+                initial_moves,
+                float(self.current_update.get("CurrentTime") or 0.0),
+            )
         validation_issues = (
             []
             if self.skip_validation
@@ -518,37 +530,30 @@ class PackagedAlgorithmRuntime:
         )
         started: set[int] = set()
         finished: set[int] = set()
-        for group in _planned_event_groups(self.current_plan):
-            for _, notification in group["priorFinishes"]:
-                move_id = int(notification["MoveID"])
-                if move_id in committed_ids and move_id in started and move_id not in finished:
-                    projection.update_move_state(
-                        notification,
-                        snapshot=False,
-                        track_reservations=False,
-                    )
-                    finished.add(move_id)
-            for event_kind, _, notification in _planned_start_events(group):
-                move_id = int(notification["MoveID"])
-                if event_kind == "start" and move_id in committed_ids and move_id not in started:
-                    projection.update_move_state(
-                        notification,
-                        snapshot=False,
-                        track_reservations=False,
-                    )
-                    started.add(move_id)
-                elif (
-                    event_kind == "finish"
-                    and move_id in committed_ids
-                    and move_id in started
-                    and move_id not in finished
-                ):
-                    projection.update_move_state(
-                        notification,
-                        snapshot=False,
-                        track_reservations=False,
-                    )
-                    finished.add(move_id)
+        for event_kind, _, notification in _planned_events(
+            self.current_plan,
+            module_parallel=self.compatibility_mode,
+        ):
+            move_id = int(notification["MoveID"])
+            if event_kind == "start" and move_id in committed_ids and move_id not in started:
+                projection.update_move_state(
+                    notification,
+                    snapshot=False,
+                    track_reservations=False,
+                )
+                started.add(move_id)
+            elif (
+                event_kind == "finish"
+                and move_id in committed_ids
+                and move_id in started
+                and move_id not in finished
+            ):
+                projection.update_move_state(
+                    notification,
+                    snapshot=False,
+                    track_reservations=False,
+                )
+                finished.add(move_id)
         missing_ids = committed_ids - finished
         if missing_ids:
             raise ValueError(
@@ -590,6 +595,11 @@ class PackagedAlgorithmRuntime:
         )
         add_new_materials_to_machine_state(next_state, update_params)
         next_moves = deepcopy(list(output.get("MoveList") or []))
+        if self.compatibility_mode:
+            next_moves = materialize_module_parallel_moves(
+                next_moves,
+                float(requested_time),
+            )
         committed = deepcopy(list(committed_moves))
         validation_issues = (
             []

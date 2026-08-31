@@ -476,6 +476,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                     skip_validation=bool(payload.get("skipValidation")),
                     hongye_check=bool(payload.get("hongYeCheck", True)),
                     skip_baseline=bool(payload.get("skipBaseline")),
+                    compatibility_mode=bool(payload.get("compatibilityMode", True)),
                     use_process_isolation=True,
                     test_ids=test_ids,
                 )
@@ -561,6 +562,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                             skip_validation=bool(payload.get("skipValidation")),
                             hongye_check=bool(payload.get("hongYeCheck", True)),
                             skip_baseline=bool(payload.get("skipBaseline")),
+                            compatibility_mode=bool(payload.get("compatibilityMode", True)),
                         )
                 else:
                     result, baseline, run_error = _execute_workspace_test_with_baseline(
@@ -572,6 +574,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                         skip_validation=bool(payload.get("skipValidation")),
                         hongye_check=bool(payload.get("hongYeCheck", True)),
                         skip_baseline=bool(payload.get("skipBaseline")),
+                        compatibility_mode=bool(payload.get("compatibilityMode", True)),
                     )
                 baseline_response = deepcopy(baseline)
                 if run_error is not None or result is None:

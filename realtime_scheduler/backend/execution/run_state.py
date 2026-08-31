@@ -1088,6 +1088,119 @@ def _planned_start_events(
             yield "finish", event_time, notification
 
 
+def _planned_events(
+    moves: Sequence[Mapping[str, Any]],
+    *,
+    module_parallel: bool = False,
+) -> Iterator[Tuple[str, float, Dict[str, Any]]]:
+    """按平台时间线或 HongYe 模块并行规则产生完整开始/结束事件。
+
+    模块并行时间已经由 ``materialize_module_parallel_moves`` 写回 Move。这里继续
+    对齐 HongYe 的同刻顺序：先结束此前已运行的 Move，再按 ModuleName 启动各
+    模块当前队首；零时长 Move 随后结束，解锁的同模块后继进入下一波。
+    """
+    groups = _planned_event_groups(moves)
+    if not module_parallel:
+        for group in groups:
+            for event_time, notification in group["priorFinishes"]:
+                yield "finish", event_time, notification
+            yield from _planned_start_events(group)
+        return
+
+    planned_by_id = {
+        int(move["MoveID"]): dict(move)
+        for move in moves
+        if isinstance(move.get("MoveID"), int)
+    }
+    known_ids = set(planned_by_id)
+    module_previous: Dict[int, Optional[int]] = {}
+    module_name_by_id: Dict[int, str] = {}
+    module_queues: Dict[str, List[dict]] = {}
+    for move in planned_by_id.values():
+        module_name = str(move.get("ModuleName") or "").strip() or "__GLOBAL__"
+        module_name_by_id[int(move["MoveID"])] = module_name
+        module_queues.setdefault(module_name, []).append(move)
+    for queue in module_queues.values():
+        queue.sort(key=lambda move: (
+            float(move.get("StartTime") or 0.0),
+            int(move.get("MoveID") or 0),
+        ))
+        previous_id: Optional[int] = None
+        for move in queue:
+            move_id = int(move["MoveID"])
+            module_previous[move_id] = previous_id
+            previous_id = move_id
+
+    started: set[int] = set()
+    ended: set[int] = set()
+    for group in groups:
+        for event_time, notification in sorted(
+            group["priorFinishes"],
+            key=lambda item: int(item[1]["MoveID"]),
+        ):
+            move_id = int(notification["MoveID"])
+            yield "finish", event_time, notification
+            ended.add(move_id)
+
+        pending = {
+            int(notification["MoveID"]): (event_time, notification)
+            for event_time, notification in group["starts"]
+        }
+        same_finishes = {
+            int(notification["MoveID"]): (event_time, notification)
+            for event_time, notification in group["sameFinishes"]
+        }
+        while pending:
+            ready: List[Tuple[str, int, float, Dict[str, Any]]] = []
+            for move_id, (event_time, notification) in pending.items():
+                previous_id = module_previous.get(move_id)
+                predecessors = {
+                    int(value)
+                    for value in (planned_by_id[move_id].get("PreMoveID") or [])
+                    if isinstance(value, int) and int(value) in known_ids
+                }
+                if previous_id is not None and previous_id not in ended:
+                    continue
+                if not predecessors <= ended:
+                    continue
+                ready.append((
+                    module_name_by_id[move_id],
+                    move_id,
+                    event_time,
+                    notification,
+                ))
+            if not ready:
+                # 依赖环会由 MoveList 结构校验报告；保持确定性事件输出，避免
+                # 跳过剩余 Move 后把诊断误报成物料凭空消失。
+                ready = [
+                    (
+                        module_name_by_id[move_id],
+                        move_id,
+                        event_time,
+                        notification,
+                    )
+                    for move_id, (event_time, notification) in pending.items()
+                ]
+
+            selected_by_module: Dict[str, Tuple[str, int, float, Dict[str, Any]]] = {}
+            for candidate in sorted(ready, key=lambda item: (item[0], item[1])):
+                selected_by_module.setdefault(candidate[0], candidate)
+            selected = list(selected_by_module.values())
+            for _module_name, move_id, event_time, notification in selected:
+                yield "start", event_time, notification
+                started.add(move_id)
+                pending.pop(move_id, None)
+            for _module_name, move_id, _event_time, _notification in sorted(
+                selected,
+                key=lambda item: item[1],
+            ):
+                same_finish = same_finishes.pop(move_id, None)
+                if same_finish is None:
+                    continue
+                yield "finish", same_finish[0], same_finish[1]
+                ended.add(move_id)
+
+
 def advance_packaged_algorithm_to_update(
     runtime: PackagedAlgorithmRuntime,
     cutoff: float,
@@ -1105,33 +1218,26 @@ def advance_packaged_algorithm_to_update(
     notifications: List[Dict[str, Any]] = []
     started: set[int] = set()
     finished: set[int] = set()
-    for group in _planned_event_groups(runtime.current_plan):
-        for event_time, notification in group["priorFinishes"]:
-            move_id = int(notification["MoveID"])
-            if (
-                event_time <= cutoff + TIME_TOLERANCE
-                and move_id in started
-                and move_id not in finished
-            ):
-                notifications.append(deepcopy(notification))
-                finished.add(move_id)
-        for event_kind, event_time, notification in _planned_start_events(group):
-            move_id = int(notification["MoveID"])
-            if (
-                event_kind == "start"
-                and event_time < cutoff - TIME_TOLERANCE
-                and move_id not in started
-            ):
-                notifications.append(deepcopy(notification))
-                started.add(move_id)
-            elif (
-                event_kind == "finish"
-                and event_time <= cutoff + TIME_TOLERANCE
-                and move_id in started
-                and move_id not in finished
-            ):
-                notifications.append(deepcopy(notification))
-                finished.add(move_id)
+    for event_kind, event_time, notification in _planned_events(
+        runtime.current_plan,
+        module_parallel=runtime.compatibility_mode,
+    ):
+        move_id = int(notification["MoveID"])
+        if (
+            event_kind == "start"
+            and event_time < cutoff - TIME_TOLERANCE
+            and move_id not in started
+        ):
+            notifications.append(deepcopy(notification))
+            started.add(move_id)
+        elif (
+            event_kind == "finish"
+            and event_time <= cutoff + TIME_TOLERANCE
+            and move_id in started
+            and move_id not in finished
+        ):
+            notifications.append(deepcopy(notification))
+            finished.add(move_id)
     for notification in notifications:
         runtime.update_move_state(
             notification,
@@ -1512,30 +1618,24 @@ def advance_to_algorithm_update(
         if recorded_events is not None:
             recorded_events.append(deepcopy(applied))
 
-    for group in _planned_event_groups(runtime.current_plan):
-        for event_time, notification in group["priorFinishes"]:
-            move_id = int(notification["MoveID"])
-            if (
-                event_time <= cutoff + TIME_TOLERANCE
-                and move_id in started
-                and move_id not in finished
-            ):
-                apply_notification(notification)
-        for event_kind, event_time, notification in _planned_start_events(group):
-            move_id = int(notification["MoveID"])
-            if (
-                event_kind == "start"
-                and event_time < cutoff - TIME_TOLERANCE
-                and move_id not in started
-            ):
-                apply_notification(notification)
-            elif (
-                event_kind == "finish"
-                and event_time <= cutoff + TIME_TOLERANCE
-                and move_id in started
-                and move_id not in finished
-            ):
-                apply_notification(notification)
+    for event_kind, event_time, notification in _planned_events(
+        runtime.current_plan,
+        module_parallel=runtime.compatibility_mode,
+    ):
+        move_id = int(notification["MoveID"])
+        if (
+            event_kind == "start"
+            and event_time < cutoff - TIME_TOLERANCE
+            and move_id not in started
+        ):
+            apply_notification(notification)
+        elif (
+            event_kind == "finish"
+            and event_time <= cutoff + TIME_TOLERANCE
+            and move_id in started
+            and move_id not in finished
+        ):
+            apply_notification(notification)
 
 
 def advance_to_recompute(

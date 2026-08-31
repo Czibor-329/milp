@@ -30,6 +30,7 @@ def _execute_standard_algorithm(
     use_hongye_validation = (
         not skip_validation and bool(plan.get("hongYeCheck", True))
     )
+    compatibility_mode = bool(plan.get("compatibilityMode", True))
     skip_platform_validation = skip_validation or use_hongye_validation
     round_count = len(rounds)
     if builtin_strategy is not None:
@@ -141,6 +142,7 @@ def _execute_standard_algorithm(
                     prepared_first_update,
                     output,
                     skip_validation=skip_platform_validation,
+                    compatibility_mode=compatibility_mode,
                 )
                 state_source = "realtime_scheduler.backend.validation.move_validation.MachineState"
             else:
@@ -148,6 +150,7 @@ def _execute_standard_algorithm(
                     prepared_first_update,
                     output,
                     skip_validation=skip_platform_validation,
+                    compatibility_mode=compatibility_mode,
                 )
                 state_source = "realtime_scheduler.backend.validation.move_validation.MachineState"
         except Exception as error:
@@ -168,7 +171,7 @@ def _execute_standard_algorithm(
             "recoveryEndTime": 0.0,
             "jobCount": _round_pjob_count(rounds[0]),
             "elapsedMs": elapsed_ms,
-            "segmentEnd": _segment_end(output["MoveList"]),
+            "segmentEnd": _segment_end(runtime.current_plan),
             "strategyDiagnostics": {
                 "backend": backend,
                 "entry": entry_name,
@@ -433,7 +436,7 @@ def _execute_standard_algorithm(
                 "recoveryEndTime": requested_time,
                 "jobCount": _round_pjob_count(round_config),
                 "elapsedMs": elapsed_ms,
-                "segmentEnd": _segment_end(output["MoveList"]),
+                "segmentEnd": _segment_end(runtime.current_plan),
                 "strategyDiagnostics": {
                     "backend": backend,
                     "entry": entry_name,
@@ -609,6 +612,7 @@ def _execute_standard_algorithm(
         "makespan": makespan,
         "moveCount": len(combined_output["MoveList"]),
         "validation": "skipped" if skip_validation else "passed",
+        "compatibilityMode": compatibility_mode,
         "validationEngine": (
             "skipped"
             if skip_validation

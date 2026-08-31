@@ -435,6 +435,92 @@ class MoveStateReplay:
         return self.state.clone() if snapshot else None
 
 
+def materialize_module_parallel_moves(
+    moves: Sequence[Mapping[str, Any]],
+    clock_floor: float = 0.0,
+) -> List[dict]:
+    """按 HongYe ``module-parallel`` 规则计算 Move 的实际时间。
+
+    每个 ``ModuleName`` 是一条独立串行时间线；不同模块并行推进。同一模块的
+    Move 按计划开始时刻和 MoveID 排序，实际开始时刻不得早于模块上一条 Move
+    的结束时刻。当前 Move 引用的本代 ``PreMoveID`` 也必须全部结束，并把最晚
+    前驱结束时刻作为开始下界。跨代前驱不在本 MoveList 中，其完成事实已经包含
+    在本代初始快照里，因此不会阻塞。
+
+    参数:
+        moves: 当前代算法输出的 MoveList。
+        clock_floor: 当前代现场时刻，所有 Move 的实际开始时间不得早于该值。
+
+    返回:
+        深拷贝后的 MoveList，其中 StartTime/EndTime 已替换为实际执行时间。
+    """
+    floor = _number(clock_floor)
+    normalized_floor = max(0.0, floor if floor is not None else 0.0)
+    copied = [deepcopy(dict(move)) for move in moves]
+    known_ids = {
+        int(move["MoveID"])
+        for move in copied
+        if isinstance(move.get("MoveID"), int)
+    }
+    queues: Dict[str, List[dict]] = {}
+    for move in copied:
+        module_name = str(move.get("ModuleName") or "").strip() or "__GLOBAL__"
+        queues.setdefault(module_name, []).append(move)
+    for queue in queues.values():
+        queue.sort(key=_sort_key)
+
+    module_available: Dict[str, float] = {
+        module_name: normalized_floor for module_name in queues
+    }
+    actual_end_by_id: Dict[int, float] = {}
+    ended_ids: Set[int] = set()
+    materialized: List[dict] = []
+
+    while queues:
+        candidates: List[Tuple[float, str, int, dict]] = []
+        blocked_heads: List[Tuple[float, str, int, dict]] = []
+        for module_name, queue in queues.items():
+            move = queue[0]
+            move_id = int(move.get("MoveID")) if isinstance(move.get("MoveID"), int) else 0
+            predecessors = {
+                int(value)
+                for value in (move.get("PreMoveID") or [])
+                if isinstance(value, int) and int(value) in known_ids
+            }
+            planned_start = _number(move.get("StartTime")) or 0.0
+            earliest_start = max(
+                normalized_floor,
+                planned_start,
+                module_available[module_name],
+                *(actual_end_by_id[value] for value in predecessors if value in actual_end_by_id),
+            )
+            candidate = (earliest_start, module_name, move_id, move)
+            blocked_heads.append(candidate)
+            if predecessors <= ended_ids:
+                candidates.append(candidate)
+
+        # 依赖环属于后续结构校验的职责。这里沿用 HongYe 的容错行为继续生成
+        # 确定性时间线，使调用方仍能得到带稳定错误码的依赖环诊断。
+        selected = min(candidates or blocked_heads, key=lambda item: item[:3])
+        actual_start, module_name, move_id, move = selected
+        planned_start = _number(move.get("StartTime")) or 0.0
+        planned_end = _number(move.get("EndTime"))
+        duration = max(0.0, (planned_end if planned_end is not None else planned_start) - planned_start)
+        actual_end = actual_start + duration
+        move["StartTime"] = actual_start
+        move["EndTime"] = actual_end
+        materialized.append(move)
+        module_available[module_name] = actual_end
+        if isinstance(move.get("MoveID"), int):
+            actual_end_by_id[move_id] = actual_end
+            ended_ids.add(move_id)
+        queues[module_name].pop(0)
+        if not queues[module_name]:
+            del queues[module_name]
+
+    return materialized
+
+
 def validate_move_list(
     task: Any,
     moves: List[dict],

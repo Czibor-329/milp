@@ -167,6 +167,7 @@ from realtime_scheduler.backend.validation.move_validation import (
     PRE_TRANS_MOVE,
     SWAP_MOVE,
     SlotPhase,
+    materialize_module_parallel_moves,
     release_completed_load_port_materials,
     validate_move_list,
 )
