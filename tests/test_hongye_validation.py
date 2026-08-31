@@ -1,200 +1,128 @@
-"""HongYe 增量输出校验器及平台选择开关的回归测试。"""
+"""HongYe 完整日志校验、兼容推进与运行设置的回归测试。"""
 
-from __future__ import annotations
-
-import os
 from pathlib import Path
-import unittest
-from unittest.mock import Mock
+from unittest.mock import patch
 
+from realtime_scheduler.backend import application as scheduler_application
+from realtime_scheduler.backend.execution import service as execution_service
 from realtime_scheduler.backend.execution.batch_service import build_workspace_batch_plan
-from realtime_scheduler.backend.application import MoveListValidationError, ReproductionLog
-from realtime_scheduler.backend.validation.hongye import HongYeValidationSession
+from realtime_scheduler.backend.execution.run_state import ReproductionLog, _planned_events
+from realtime_scheduler.backend.validation.move_validation import materialize_module_parallel_moves
+from realtime_scheduler.backend.validation.hongye.log_validator import HongYeLogValidator
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
-RUNTIME_DIR = (
-    Path(__file__).resolve().parents[1]
-    / "realtime_scheduler"
-    / "backend"
-    / "validation"
-    / "hongye"
-    / "runtime"
-)
+def test_runtime_contains_original_checkminlog_module() -> None:
+    """运行目录包含原始 MoveStateSim 及 CheckMinLog 所需依赖。"""
+    runtime = ROOT / "realtime_scheduler" / "backend" / "validation" / "hongye" / "runtime"
+    required = {"MoveStateSim.exe", "MoveStateSim.exe.config", "Newtonsoft.Json.dll", "SchedulerStandardInterface.dll", "SchStateLib.dll"}
+    assert required == {path.name for path in runtime.iterdir() if path.is_file()}
 
 
-def _minimal_events(move_list: list[dict]) -> list[dict]:
-    """构造不依赖设备数据文件的最小合法事件前缀。"""
-    return [
-        {
-            "Describe": "AlgInit",
-            "SimTime": 0,
-            "Info": {"Robots": {}, "Stations": {}},
-        },
-        {
-            "Describe": "AlgSchedule",
-            "SimTime": 0,
-            "Info": {
-                "CurrentTime": 0,
-                "Robots": {},
-                "Stations": {},
-                "Materials": [],
-            },
-        },
-        {
-            "Describe": "AlgOutput",
-            "SimTime": 0,
-            "Info": {"MoveList": move_list},
-        },
+def test_complete_log_is_sent_to_new_validator_once() -> None:
+    """新版原始模块应直接校验完整多代日志，不再截取末代二次复核。"""
+    entries = [
+        {"Describe": "AlgInit", "Info": {"Robots": {}, "Stations": {}}},
+        {"Describe": "AlgSchedule", "Info": {"CurrentTime": 0}},
+        {"Describe": "AlgOutput", "Info": {"MoveList": [{"MoveID": 1}]}},
+        {"Describe": "AlgUpdateMove", "Info": {"MoveID": 1, "MoveState": 1}},
+        {"Describe": "AlgSchedule", "Info": {"CurrentTime": 10}},
+        {"Describe": "AlgOutput", "Info": {"MoveList": [{"MoveID": 578}]}},
     ]
+    validator = HongYeLogValidator.__new__(HongYeLogValidator)
+    with patch.object(
+        validator,
+        "_run_original_validator",
+        return_value={"success": True, "errors": 0},
+    ) as run_original:
+        result = validator.validate(entries)
+
+    assert result == {"success": True, "errors": 0}
+    run_original.assert_called_once_with(entries)
 
 
-@unittest.skipUnless(os.name == "nt", "HongYe 运行包使用 .NET Framework x64")
-class HongYeValidationSessionTests(unittest.TestCase):
-    """验证最小运行包和逐事件协议。"""
+def test_reproduction_log_keeps_all_events_for_full_log_check() -> None:
+    """完整日志应保留 Input、重算通知和所有 AlgUpdateMove。"""
+    reproduction = ReproductionLog()
+    reproduction.add("Input", [{"skipValidation": False}])
+    reproduction.add("AlgInit", {"Stations": {}, "Robots": {}})
+    reproduction.add("AlgSchedule", {"CurrentTime": 0})
+    reproduction.add("AlgUpdateMove", {"MoveID": 1, "MoveState": 1})
+    assert [entry["Describe"] for entry in reproduction.entries] == ["Input", "AlgInit", "AlgSchedule", "AlgUpdateMove"]
 
-    def test_runtime_contains_only_required_files(self) -> None:
-        """运行目录不得重新引入旧 Python/日志/适配依赖。"""
-        self.assertEqual(
-            {path.name for path in RUNTIME_DIR.iterdir() if path.is_file()},
-            {
-                "HongYeValidator.exe",
-                "HongYeValidator.exe.config",
-                "Newtonsoft.Json.dll",
-                "SchStateLib.dll",
-            },
-        )
 
-    def test_events_are_validated_without_a_log_file(self) -> None:
-        """逐条发送事件时，仅 AlgOutput 返回 module-parallel 摘要。"""
-        with HongYeValidationSession() as session:
-            results = [
-                session.add_event(event)
-                for event in _minimal_events([])
-            ]
-        self.assertEqual(results[:2], [None, None])
-        self.assertEqual(results[2]["advance"], "module-parallel")
-        self.assertTrue(results[2]["success"])
-        self.assertEqual(results[2]["errors"], 0)
+def test_hongye_receives_original_terminal_generation_output() -> None:
+    """甘特图累计历史不得覆盖最后一代算法输出后再交给原始校验器。"""
+    captured: list[dict] = []
 
-    def test_session_can_reset_between_recompute_generations(self) -> None:
-        """重算代次之间应能清空旧事件，再独立校验完整现场快照。"""
-        with HongYeValidationSession() as session:
-            for event in _minimal_events([]):
-                first = session.add_event(event)
-            session.reset()
-            for event in _minimal_events([]):
-                second = session.add_event(event)
-        self.assertTrue(first["success"])
-        self.assertTrue(second["success"])
+    class RecordingValidator:
+        """记录传入 MoveStateSim 的完整日志。"""
 
-    def test_reproduction_log_resets_validator_before_next_schedule(self) -> None:
-        """平台保留完整日志，但第二代 AlgSchedule 应重启 HongYe 校验上下文。"""
-        class RecordingSession:
-            """记录 ReproductionLog 发给校验器的事件与 reset 次数。"""
+        def validate(self, entries):
+            """保存深层字段足够本测试断言，并返回成功摘要。"""
+            captured.extend(entries)
+            return {"success": True, "errors": 0, "advance": "module-parallel"}
 
-            def __init__(self) -> None:
-                self.events: list[dict] = []
-                self.reset_count = 0
-
-            def add_event(self, event: dict) -> None:
-                """记录一条事件；本测试不返回校验错误。"""
-                self.events.append(event)
-                return None
-
-            def reset(self) -> None:
-                """模拟清空校验器事件。"""
-                self.reset_count += 1
-                self.events.clear()
-
-        session = RecordingSession()
-        reproduction = ReproductionLog(hongye_session=session)
-        reproduction.add("AlgInit", {"Stations": {}, "Robots": {}})
-        reproduction.add("AlgSchedule", {"CurrentTime": 0})
-        reproduction.add("AlgOutput", {"MoveList": []})
-        reproduction.add("AlgUpdateMove", {"MoveID": 1, "MoveState": 1})
-        reproduction.add("AlgSchedule", {"CurrentTime": 10}, 10)
-
-        self.assertEqual(1, session.reset_count)
-        self.assertEqual(
-            ["AlgInit", "AlgSchedule"],
-            [event["Describe"] for event in session.events],
-        )
-        self.assertEqual(
-            ["AlgInit", "AlgSchedule", "AlgOutput", "AlgUpdateMove", "AlgSchedule"],
-            [event["Describe"] for event in reproduction.entries],
-        )
-
-    def test_reproduction_log_converts_hongye_issue_for_gantt(self) -> None:
-        """HongYe 错误应保留 MoveID，并沿用现有失败甘特图通道。"""
-        invalid_move = {
-            "MoveID": 7,
-            "MoveType": 99,
-            "ModuleName": "Unknown",
-            "StartTime": 0,
-            "EndTime": 1,
+    def fake_execute(_plan, reproduction):
+        """模拟末代原始输出与包含历史动作的甘特图累计输出。"""
+        reproduction.add("AlgOutput", {"MoveList": [{"MoveID": 200}]}, 10)
+        return {
+            "ok": True,
+            "output": {"MoveList": [{"MoveID": 1}, {"MoveID": 200}]},
         }
-        with HongYeValidationSession() as session:
-            reproduction = ReproductionLog(hongye_session=session)
-            events = _minimal_events([invalid_move])
-            reproduction.add("AlgInit", events[0]["Info"])
-            reproduction.add("AlgSchedule", events[1]["Info"])
-            with self.assertRaises(MoveListValidationError) as raised:
-                reproduction.add("AlgOutput", events[2]["Info"])
-        self.assertIn("MoveID=7", raised.exception.validation_issues[0])
-        self.assertEqual(
-            raised.exception.gantt_output["Validation"]["InvalidMoveIDs"],
-            [7],
-        )
-        self.assertEqual(
-            raised.exception.gantt_output["Validation"]["Issues"][0]["Code"],
-            "MOVE.TYPE",
-        )
 
-    def test_reproduction_input_is_not_forwarded_to_hongye(self) -> None:
-        """前端完整计划只进入复现日志，不得增加校验进程的启动前传输耗时。"""
-        validator = Mock()
-        reproduction = ReproductionLog(hongye_session=validator)
+    with (
+        patch.object(execution_service, "_execute_plan", side_effect=fake_execute),
+        patch.object(execution_service, "HongYeLogValidator", RecordingValidator),
+    ):
+        result = execution_service.execute_plan({"hongYeCheck": True})
 
-        reproduction.add(
-            "Input",
-            [{"options": {"largeFrontendPayload": "x" * 10_000}}],
-            forward_to_validator=False,
-        )
-
-        validator.add_event.assert_not_called()
-        self.assertEqual("Input", reproduction.entries[0]["Describe"])
+    terminal = next(entry for entry in reversed(captured) if entry["Describe"] == "AlgOutput")
+    assert terminal["Info"]["MoveList"] == [{"MoveID": 200}]
+    assert result["output"]["MoveList"] == [{"MoveID": 1}, {"MoveID": 200}]
 
 
-class HongYeSelectionDefaultsTests(unittest.TestCase):
-    """验证后端生成的批量计划默认选择 HongYe。"""
-
-    def test_batch_plan_enables_hongye_by_default(self) -> None:
-        """缺省批量请求也必须使用新的默认校验器。"""
-        device = {
-            "name": "test",
-            "device": {"Robots": {}, "Stations": {}},
-            "routes": [],
-            "cleans": [],
-        }
-        test_case = {"rounds": [], "options": {}}
-        plan = build_workspace_batch_plan(device, test_case, "heuristic", {})
-        self.assertIs(plan["hongYeCheck"], True)
-        self.assertNotIn("skipValidation", plan)
-
-    def test_frontend_enables_validation_and_hongye_by_default(self) -> None:
-        """开始运行区域默认校验、默认 HongYe，仍保留显式跳过入口。"""
-        template = (
-            Path(__file__).resolve().parents[1]
-            / "realtime_scheduler"
-            / "frontend"
-            / "config_editor.html"
-        ).read_text(encoding="utf-8")
-        self.assertIn('id="skipValidationInput" type="checkbox">', template)
-        self.assertIn(
-            'id="hongYeCheckInput" type="checkbox" checked',
-            template,
-        )
+def test_module_parallel_delays_module_lane_and_premove_successor() -> None:
+    """同模块及 PreMoveID 后继必须等待前序实际结束。"""
+    moves = [{"MoveID": 1, "ModuleName": "A", "StartTime": 0, "EndTime": 10}, {"MoveID": 2, "ModuleName": "B", "StartTime": 1, "EndTime": 3, "PreMoveID": [1]}, {"MoveID": 3, "ModuleName": "A", "StartTime": 2, "EndTime": 4}, {"MoveID": 4, "ModuleName": "C", "StartTime": 1, "EndTime": 2}]
+    times = {move["MoveID"]: (move["StartTime"], move["EndTime"]) for move in materialize_module_parallel_moves(moves)}
+    assert times == {1: (0, 10), 2: (10, 12), 3: (10, 12), 4: (1, 2)}
 
 
-if __name__ == "__main__":
-    unittest.main()
+def test_module_parallel_same_time_order_is_deterministic() -> None:
+    """同刻先推进各 Module 队首，零时长结束后再解锁后继。"""
+    moves = materialize_module_parallel_moves([
+        {"MoveID": 3, "ModuleName": "A", "StartTime": 0, "EndTime": 0},
+        {"MoveID": 2, "ModuleName": "B", "StartTime": 0, "EndTime": 1},
+        {"MoveID": 4, "ModuleName": "A", "StartTime": 0, "EndTime": 1, "PreMoveID": [3]},
+    ])
+    events = [(kind, notification["MoveID"]) for kind, _time, notification in _planned_events(moves, module_parallel=True)]
+    assert events == [("start", 3), ("start", 2), ("finish", 3), ("start", 4), ("finish", 2), ("finish", 4)]
+
+
+def test_batch_plan_defaults_to_hongye_and_compatibility() -> None:
+    """批量计划默认打开 HongYe Check 与兼容模式。"""
+    device = {"name": "test", "device": {"Robots": {}, "Stations": {}}, "routes": [], "cleans": []}
+    plan = build_workspace_batch_plan(device, {"rounds": [], "options": {}}, "heuristic", {})
+    assert plan["hongYeCheck"] is True
+    assert plan["compatibilityMode"] is True
+
+
+def test_frontend_moves_run_options_into_settings_dialog() -> None:
+    """开始运行区只保留设置按钮，四个选项在可访问 dialog 中。"""
+    template = (ROOT / "realtime_scheduler" / "frontend" / "config_editor.html").read_text(encoding="utf-8")
+    assert 'id="openRunSettingsButton"' in template
+    assert 'id="runSettingsDialog"' in template
+    assert 'id="compatibilityModeInput" type="checkbox" checked' in template
+    assert "模块并行推进；按 PreMoveID 延后动作；缺失的开关门动作自动补齐。" in template
+    assert "HongYe Check <em>（推荐）</em>" in template
+    assert "Baseline 使用 Heuristic 结果作为性能基线" in template
+    assert "不执行任何输出校验，仅用于调试。" in template
+
+
+def test_all_recompute_notifications_are_recorded() -> None:
+    """服务实现不应再按兼容模式抑制 AlgUpdateMove。"""
+    source = (ROOT / "realtime_scheduler" / "backend" / "execution" / "service.py").read_text(encoding="utf-8")
+    assert "if not compatibility_mode:\n                for notification" not in source
+    assert 'reproduction.add(\n                    "AlgUpdateMove"' in source

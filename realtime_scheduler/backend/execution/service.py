@@ -775,20 +775,62 @@ def execute_plan(raw_plan: Mapping[str, Any]) -> Dict[str, Any]:
         not bool(raw_plan.get("skipValidation"))
         and bool(raw_plan.get("hongYeCheck", True))
     )
-    hongye_session = (
-        HongYeValidationSession() if use_hongye_validation else None
-    )
-    reproduction = ReproductionLog(hongye_session=hongye_session)
-    # Input 是前端复现上下文，不属于 HongYe 的增量校验协议。把整份页面计划
-    # 发送给校验子进程只会产生一次无效的 JSON 序列化和跨进程复制。
-    reproduction.add(
-        "Input",
-        [deepcopy(dict(raw_plan))],
-        forward_to_validator=False,
-    )
+    reproduction = ReproductionLog()
+    reproduction.add("Input", [deepcopy(dict(raw_plan))])
     cpu_started = time.thread_time() if hasattr(time, "thread_time") else time.process_time()
+    hongye_validation: Optional[Dict[str, Any]] = None
     try:
         result = _execute_plan(raw_plan, reproduction)
+        if use_hongye_validation:
+            # 原始 MoveStateSim 直接消费完整日志。各代 AlgOutput 必须保持算法当时
+            # 返回的计划，不能替换成甘特图累计历史，否则最新 AlgSchedule 的现场
+            # 会被错误地套到早期 Move 上，制造槽位物料不匹配等假错误。
+            hongye_validation = HongYeLogValidator().validate(
+                reproduction.entries
+            )
+            if not hongye_validation.get("success"):
+                raw_issues = (
+                    hongye_validation.get("error_issues")
+                    or hongye_validation.get("issues")
+                    or []
+                )
+                issues = _hongye_validation_issue_messages(raw_issues)
+                output_index, output_entry = next(
+                    (
+                        (index, entry)
+                        for index, entry in reversed(
+                            list(enumerate(reproduction.entries))
+                        )
+                        if str(entry.get("Describe") or "").casefold()
+                        == "algoutput"
+                    ),
+                    (-1, {}),
+                )
+                terminal_output = (
+                    output_entry.get("Info")
+                    if isinstance(output_entry.get("Info"), Mapping)
+                    else {}
+                )
+                prefix_moves, recompute_points = (
+                    _reproduction_history_before_current_output(
+                        reproduction.entries[:output_index]
+                    )
+                )
+                message = (
+                    "HongYe MoveList 状态校验失败："
+                    + (issues[0] if issues else "存在未分类错误")
+                )
+                raise LoggedPlanError(
+                    message,
+                    reproduction.entries,
+                    failure_output=_build_validation_gantt_output(
+                        terminal_output,
+                        issues,
+                        prefix_moves=prefix_moves,
+                        recompute_points=recompute_points,
+                    ),
+                    validation_issues=issues,
+                )
     except LoggedPlanError:
         # 多轮重算的算法调用失败可能已附带按 RemoveList 裁剪的旧计划；
         # 不能再包装为普通异常，否则 /api/run 将丢失甘特图所需的结果。
@@ -813,7 +855,6 @@ def execute_plan(raw_plan: Mapping[str, Any]) -> Dict[str, Any]:
                 "AlgOutput",
                 _alg_output_info(error.algorithm_output, feedback=feedback),
                 error.sim_time,
-                forward_to_validator=False,
             )
             raise LoggedPlanError(
                 str(error),
@@ -828,22 +869,16 @@ def execute_plan(raw_plan: Mapping[str, Any]) -> Dict[str, Any]:
         reproduction.add(
             "AlgOutput",
             _alg_output_info(feedback=feedback),
-            forward_to_validator=False,
         )
         raise LoggedPlanError(
             str(error),
             reproduction.entries,
             failure_output=prior_plan_output,
         ) from error
-    finally:
-        if hongye_session is not None:
-            hongye_session.close()
     cpu_finished = time.thread_time() if hasattr(time, "thread_time") else time.process_time()
     result["cpuTimeMs"] = max(0.0, (cpu_finished - cpu_started) * 1000.0)
-    if reproduction.last_hongye_validation is not None:
-        result["validationDetails"] = deepcopy(
-            reproduction.last_hongye_validation
-        )
+    if hongye_validation is not None:
+        result["validationDetails"] = deepcopy(hongye_validation)
     result["reproductionLog"] = deepcopy(reproduction.entries)
     return result
 

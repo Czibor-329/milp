@@ -1452,3 +1452,24 @@ def test_cascade_dbr_open_pressure_uses_preprepare_side_mapping() -> None:
         replay.update_move_state({"MoveID": move["MoveID"], "MoveState": MoveStateReplay.RUNNING}, snapshot=False)
         replay.update_move_state({"MoveID": move["MoveID"], "MoveState": MoveStateReplay.DONE}, snapshot=False)
     assert replay.state.stations["DBR"].environment == VACUUM
+
+
+def test_platform_rejects_slot_list_on_pick_move() -> None:
+    """平台校验器应拒绝 PickMove 上错误的通用 SlotList 字段。"""
+    move = _move(
+        1,
+        0,
+        0,
+        1,
+        ModuleName="VACRobot",
+        RobotSlotList=[1],
+        SrcStationList=["PM1"],
+        SrcSlotList=[1],
+        SlotList=[1],
+        MatIDList=[101],
+    )
+
+    issues = validate_move_list(None, [move], _dual_chamber_update())
+
+    assert issues[0].startswith("[MVL-FMT-004]")
+    assert "PickMove 不允许携带 SlotList" in issues[0]

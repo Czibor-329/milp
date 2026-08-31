@@ -173,7 +173,7 @@ from realtime_scheduler.backend.validation.move_validation import (
 )
 from realtime_scheduler.backend.validation.replay_machine import ReplayMachine
 from realtime_scheduler.backend.api.documentation import DocumentationError, load_documentation
-from realtime_scheduler.backend.validation.hongye import HongYeValidationSession
+from realtime_scheduler.backend.validation.hongye import HongYeLogValidator
 from realtime_scheduler.backend.observability import (
     configure_logging,
     log_http_access,

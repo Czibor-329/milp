@@ -15,206 +15,24 @@ class RecoveryProjection:
 
 @dataclass
 class ReproductionLog:
-    """收集一次运行的事件，并可同步推送给 HongYe 增量校验会话。"""
+    """按发生顺序收集一次运行的完整标准日志。"""
 
     entries: List[Dict[str, Any]] = field(default_factory=list)
-    hongye_session: Optional[HongYeValidationSession] = None
-    last_hongye_validation: Optional[Dict[str, Any]] = None
 
     def add(
         self,
         describe: str,
         info: Any,
         sim_time: float = 0.0,
-        *,
-        forward_to_validator: bool = True,
     ) -> None:
-        """追加标准事件；启用 HongYe 时先逐条发送并在 AlgOutput 处校验。"""
+        """追加一条可直接交给 MoveStateSim 的标准日志事件。"""
         entry = {
             "Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
             "Describe": describe,
             "SimTime": float(sim_time),
             "Info": deepcopy(info),
         }
-        if self.hongye_session is not None and forward_to_validator:
-            # AlgSchedule 是一代完整现场快照。HongYe 若跨代累积事件，会拿新一代
-            # Material 状态回头重放旧 AlgOutput，制造历史占用和 Route 冲突。
-            # 平台复现日志仍完整保留；校验器只在新代开始时重置并补发 AlgInit。
-            starts_new_generation = (
-                describe.casefold() == "algschedule"
-                and any(
-                    str(previous.get("Describe") or "").casefold() == "algoutput"
-                    for previous in self.entries
-                )
-            )
-            if starts_new_generation:
-                self.hongye_session.reset()
-                latest_init = next(
-                    (
-                        previous
-                        for previous in reversed(self.entries)
-                        if str(previous.get("Describe") or "").casefold() == "alginit"
-                    ),
-                    None,
-                )
-                if latest_init is not None:
-                    self.hongye_session.add_event(latest_init)
-            validation = self.hongye_session.add_event(entry)
-            if validation is not None:
-                validation = _reconcile_hongye_generation_issues(
-                    validation,
-                    [*self.entries, entry],
-                    float(sim_time),
-                )
-                self.last_hongye_validation = deepcopy(validation)
-                if not validation.get("success"):
-                    issues = _hongye_validation_issue_messages(
-                        validation.get("issues") or []
-                    )
-                    output = info if isinstance(info, Mapping) else {}
-                    message = (
-                        "HongYe MoveList 状态校验失败："
-                        + (issues[0] if issues else "存在未分类错误")
-                    )
-                    raise MoveListValidationError(
-                        message,
-                        output,
-                        issues,
-                        _build_validation_gantt_output(output, issues),
-                        float(sim_time),
-                    )
         self.entries.append(entry)
-
-
-def _hongye_issue_clean_boundary(
-    issue: Mapping[str, Any],
-) -> Optional[Tuple[str, str]]:
-    """从 HongYe Clean issue 提取 ``(PJob, PM)`` 边界。"""
-    message = str(issue.get("message") or "")
-    match = re.search(r"\bPJob=([^\s]+)\s+PM=([^\s]+)", message)
-    if match is None:
-        return None
-    return match.group(1), match.group(2)
-
-
-def _committed_clean_boundaries_before_generation(
-    entries: Sequence[Mapping[str, Any]],
-    current_time: float,
-    clean_task_name: str,
-) -> set[Tuple[str, str]]:
-    """收集新一代之前已启动、因而不可取消的指定 Clean 边界。"""
-    boundaries: set[Tuple[str, str]] = set()
-    latest_schedule_index = max(
-        (
-            index
-            for index, previous in enumerate(entries)
-            if str(previous.get("Describe") or "").casefold() == "algschedule"
-        ),
-        default=len(entries),
-    )
-    for previous in entries[:latest_schedule_index]:
-        if str(previous.get("Describe") or "").casefold() != "algoutput":
-            continue
-        output = previous.get("Info") or {}
-        for move in output.get("MoveList") or []:
-            if not isinstance(move, Mapping):
-                continue
-            if str(move.get("CleanTaskName") or "").casefold() != clean_task_name.casefold():
-                continue
-            if float(move.get("StartTime") or 0.0) >= current_time - TIME_TOLERANCE:
-                continue
-            pjob_value = move.get("PJobName")
-            if isinstance(pjob_value, Sequence) and not isinstance(pjob_value, str):
-                pjob_name = str(next(iter(pjob_value), ""))
-            else:
-                pjob_name = str(pjob_value or "")
-            station_name = str(move.get("ModuleName") or move.get("Station") or "")
-            if pjob_name and station_name:
-                boundaries.add((pjob_name, station_name))
-    return boundaries
-
-
-def _reconcile_hongye_generation_issues(
-    validation: Mapping[str, Any],
-    entries: Sequence[Mapping[str, Any]],
-    current_time: float,
-) -> Dict[str, Any]:
-    """对账 HongYe 按代重置后不可见的上一代 Running Clean 事实。
-
-    只处理有旧 AlgOutput Move 证据、且在本代时刻前已经启动的 PreClean；
-    其余 HongYe issue 完整保留。这样既遵守增量 MoveList 不重复输出旧 Move，
-    又不会把真正缺失的清洁动作静默放过。
-    """
-    reconciled = deepcopy(dict(validation))
-    issues = [
-        dict(issue)
-        for issue in reconciled.get("issues") or []
-        if isinstance(issue, Mapping)
-    ]
-    committed_pre_clean = _committed_clean_boundaries_before_generation(
-        entries,
-        current_time,
-        "PreClean",
-    )
-    retained: List[Dict[str, Any]] = []
-    removed: List[Dict[str, Any]] = []
-    latest_init = next(
-        (
-            previous.get("Info") or {}
-            for previous in reversed(entries)
-            if str(previous.get("Describe") or "").casefold() == "alginit"
-        ),
-        {},
-    )
-    latest_output = next(
-        (
-            previous.get("Info") or {}
-            for previous in reversed(entries)
-            if str(previous.get("Describe") or "").casefold() == "algoutput"
-        ),
-        {},
-    )
-    move_by_id = {
-        int(move["MoveID"]): move
-        for move in latest_output.get("MoveList") or []
-        if isinstance(move, Mapping) and isinstance(move.get("MoveID"), int)
-    }
-    for issue in issues:
-        boundary = _hongye_issue_clean_boundary(issue)
-        if (
-            str(issue.get("code") or "") == "CLEAN.PRE_MISSING"
-            and boundary in committed_pre_clean
-        ):
-            removed.append(issue)
-        elif str(issue.get("code") or "") == "ROBOT.PRETRANS_SOURCE":
-            move = move_by_id.get(int(issue.get("move_id") or -1), {})
-            robot_name = str(move.get("ModuleName") or move.get("Robot") or "")
-            source_station = str(next(iter(move.get("SrcStationList") or []), ""))
-            robot = (latest_init.get("Robots") or {}).get(robot_name) or {}
-            initial_positions = {
-                str(arm.get("SlotAtStation") or "")
-                for arm in (robot.get("ArmInfo") or {}).values()
-                if isinstance(arm, Mapping) and arm.get("IsEnable") is not False
-            }
-            if (
-                int(move.get("MoveType") or -1) == 5
-                and source_station
-                and source_station in initial_positions
-            ):
-                # SchStateLib 解析多条 DummyReturnInfo 时会把首个 Robot
-                # 指向覆盖成 DummyPort；AlgInit.ArmInfo 是前端标准的权威初态。
-                removed.append(issue)
-            else:
-                retained.append(issue)
-        else:
-            retained.append(issue)
-    if not removed:
-        return reconciled
-    reconciled["issues"] = retained
-    reconciled["errors"] = len(retained)
-    reconciled["success"] = not retained
-    reconciled["generationReconciliations"] = removed
-    return reconciled
 
 
 def _hongye_validation_issue_messages(
@@ -775,7 +593,6 @@ def _raise_deadlock_feedback(
         "AlgOutput",
         failure_output,
         sim_time,
-        forward_to_validator=False,
     )
     raise LoggedPlanError(
         str(feedback.get("Message") or "算法规划进入死锁"),
@@ -1937,6 +1754,79 @@ def _build_prior_plan_failure_output(
         "Message": str(error) or type(error).__name__,
     }
     return output
+
+
+def _reproduction_history_before_current_output(
+    reproduction_entries: Sequence[Mapping[str, Any]],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """恢复当前 AlgOutput 之前已经承诺的跨代 Move 与重算点。
+
+    HongYe 在新代 ``AlgSchedule`` 时会重置校验上下文，因此校验失败只返回本代
+    Move。平台复现日志仍保存全部代次；这里按下一次 Schedule 时刻截断上一代
+    尚未启动的未来 Move，供失败甘特图拼回真实历史，而不复活已被重算替换的
+    动作。
+    """
+    schedule_time = 0.0
+    latest_schedule_time = 0.0
+    generation_outputs: List[Tuple[float, Mapping[str, Any]]] = []
+    recompute_points: List[Dict[str, Any]] = []
+    for entry in reproduction_entries:
+        describe = str(entry.get("Describe") or "")
+        if describe == "AlgSchedule":
+            schedule_time = float(entry.get("SimTime") or 0.0)
+            latest_schedule_time = schedule_time
+            continue
+        if describe == "RecomputeControl":
+            info = entry.get("Info")
+            recompute_info = (
+                info.get("RecomputeInfo")
+                if isinstance(info, Mapping)
+                and isinstance(info.get("RecomputeInfo"), Mapping)
+                else {}
+            )
+            point_time = float(
+                recompute_info.get("CurrentTime")
+                or entry.get("SimTime")
+                or 0.0
+            )
+            recompute_points.append({
+                "Time": point_time,
+                "EffectiveTime": float(
+                    recompute_info.get("EffectiveTime") or point_time
+                ),
+                "ScheduleStartTime": point_time,
+                "RecoveryEndTime": point_time,
+                "Index": len(recompute_points) + 1,
+                "Reason": str(recompute_info.get("Reason") or "重算"),
+            })
+            continue
+        if describe != "AlgOutput":
+            continue
+        info = entry.get("Info")
+        if isinstance(info, Mapping):
+            generation_outputs.append((schedule_time, info))
+
+    history: List[Dict[str, Any]] = []
+    for index, (generation_time, output) in enumerate(generation_outputs):
+        next_generation_time = (
+            generation_outputs[index + 1][0]
+            if index + 1 < len(generation_outputs)
+            else latest_schedule_time
+            if latest_schedule_time > generation_time + TIME_TOLERANCE
+            else math.inf
+        )
+        history.extend(
+            deepcopy(dict(move))
+            for move in (output.get("MoveList") or [])
+            if isinstance(move, Mapping)
+            and float(move.get("StartTime") or 0.0)
+            < next_generation_time - TIME_TOLERANCE
+        )
+    history.sort(key=lambda move: (
+        float(move.get("StartTime") or 0.0),
+        int(move.get("MoveID") or 0),
+    ))
+    return history, recompute_points
 
 
 def _release_finished_load_ports(

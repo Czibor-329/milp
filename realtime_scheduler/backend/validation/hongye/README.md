@@ -1,29 +1,22 @@
 # HongYe 输出校验器
 
-该目录把 HongYe 的 `SchStateLib.dll` 作为独立输出校验组件集成到调度平台。
-服务端为每次运行启动一个 `HongYeValidator.exe`，通过 JSON Lines 逐条发送
-`AlgInit`、`AlgSchedule`、`AlgUpdateMove` 和 `AlgOutput`。收到 `AlgOutput` 时，
-校验器按 `module-parallel` 推进并立即返回错误、警告和计划时长差异。
+该目录把 CheckMinLog 原始包的 `MoveStateSim.exe` 和 `SchStateLib.dll` 作为独立
+输出校验组件集成到调度平台。服务端先收集一次运行的完整日志，再按原始
+`check_log.py` 的文件协议调用 `MoveStateSim.exe --advance module-parallel`，读取
+`replay_modes.json` 中的 module-parallel 结果。当前集成的 CheckMinLog 版本为
+`2026.08.31.2309`：同一 Move 的 `MoveState=0/1` 会按 Start/End 成对抵消，只有
+“有 Start 无 End”才恢复为跨重算在飞动作。校验器不参与平台运行时状态推进，也不
+跨请求保留会话。
 
-每个 `AlgSchedule` 都是该代的完整现场快照。首排之后收到新的 `AlgSchedule` 时，
-Python 会先发送 `reset`，再补发 `AlgInit` 和当前 `AlgSchedule`；因此 HongYe 独立
-校验每一代 `AlgOutput`，不会用新一代 Material 状态回头重放旧计划。平台侧复现日志
-仍保留全部 `AlgUpdateMove` 和各代输入输出。
+平台兼容推进器使用相同时间语义：不同 `ModuleName` 独立并行，同一 Module 内按
+计划时刻与 MoveID 串行；Move 必须等待本代 `PreMoveID` 全部实际结束，延迟后的
+实际 StartTime/EndTime 同步用于重算切点、现场投影和最终甘特图。
 
-`runtime/` 是最小运行目录，只包含：
+`runtime/` 包含原始 CheckMinLog 运行依赖：
 
-- `HongYeValidator.exe` 与 .NET Framework 配置；
-- `SchStateLib.dll`；
-- `Newtonsoft.Json.dll`。
+- `MoveStateSim.exe` 及配置文件；
+- `SchStateLib.dll`、`Newtonsoft.Json.dll`；
+- `SchedulerStandardInterface.dll`。
 
-原 CheckMinLog 中的 Python 启动脚本、报告、示例、HTML、`Python.Runtime.dll`、
-`log4net.dll`、`Adapter4Scheduler.dll` 和 `SchedulerStandardInterface.dll` 均不参与
-当前增量校验路径。
-
-修改 `Program.cs` 后，在本目录执行：
-
-```powershell
-dotnet build HongYeValidator.csproj -c Release
-Copy-Item bin/Release/net472/HongYeValidator.exe runtime/ -Force
-Copy-Item bin/Release/net472/HongYeValidator.exe.config runtime/ -Force
-```
+原始包中的 `Adapter4Scheduler.dll`、`Python.Runtime.dll` 和 `log4net.dll` 不会被
+MoveStateSim 的日志校验路径加载，已通过逐项隔离启动验证，不随平台部署。

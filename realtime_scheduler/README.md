@@ -68,7 +68,14 @@ npm run build
 - `LoadLock 管理器`：Heuristic 默认共用 Petri-ETA 管理器；上层策略只决定发哪片和工艺顺序，管理器在 Petri 安全候选内按动态完成时刻绑定 LA/LB。
 - `other_alg 标准算法`：自动扫描算法仓库 `alg/other_alg/<算法名>`，通过包内正式 `CT.infer.scheduler.init/update`（或公司端 `src.infer.scheduler.init/update` 布局）入口运行。每次重算前使用算法仓库的状态回放能力生成全量物料、机台、机器人快照以及 `RemoveList`，支持连续多轮重算；结果中的 `updates` 保留每次实际发送的数据。
 - 外部策略只通过扫描 `alg/other_alg/<算法名>` 检测，不支持在前端上传或直接导入算法文件。
-- 输出校验默认开启并默认选择 `HongYe check`：服务端把 AlgInit、AlgSchedule、AlgUpdateMove、AlgOutput 逐条发送给仓库内独立的 HongYe/SchStateLib 进程，不生成中间日志；取消 `HongYe check` 后使用原平台校验器。勾选“跳过输出校验”时两种校验器都不运行，结果标记为 `skipped`；单次与批量运行语义一致。
+- 输出校验默认开启并默认选择 `HongYe Check（推荐）`：服务端先完整记录
+  `AlgInit`、`AlgSchedule`、`AlgUpdateMove`、`AlgOutput` 日志，再一次性交给
+  原始 CheckMinLog/`MoveStateSim.exe` 的 `module-parallel` 校验入口；取消 HongYe
+  后使用平台内置校验器。开始运行区域的“兼容模式”默认勾选，平台按 HongYe
+  `module-parallel` 规则让各 Module 并行推进、同 Module 串行推进，Move 等待其
+  本代 `PreMoveID` 实际结束后才开始；缺失的开关门动作会按设备语义自动补齐。
+  所有算法都会把实际推进通知记录为 `AlgUpdateMove`。勾选“跳过校验”时两种
+  校验器都不运行，结果标记为 `skipped`；单次与批量运行语义一致。
 
 本地算法列表不在前端写死，而是由算法仓库根目录的 `algorithms.json` 控制。
 服务会在每次健康检查时重读清单；配置中的算法还必须存在于

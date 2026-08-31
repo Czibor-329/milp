@@ -1,5 +1,5 @@
-"""HongYe 增量输出校验入口。"""
+"""HongYe 原始完整日志校验入口。"""
 
-from .session import HongYeValidationSession, HongYeValidatorError
+from .log_validator import HongYeLogValidator, HongYeValidatorError
 
-__all__ = ["HongYeValidationSession", "HongYeValidatorError"]
+__all__ = ["HongYeLogValidator", "HongYeValidatorError"]

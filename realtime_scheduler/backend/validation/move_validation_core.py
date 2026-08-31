@@ -18,6 +18,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Seque
 TIME_TOLERANCE = 1e-6
 DEFAULT_SLOT_ID = 1
 PICK_MOVE = 0
+MULTI_PICK_MOVE = 2
 PLACE_MOVE = 1
 SWAP_MOVE = 4
 PRE_TRANS_MOVE = 5
@@ -50,6 +51,7 @@ class ValidationErrorCode(str, Enum):
     MOVE_ITEM_INVALID = "MVL-FMT-001"
     MOVE_ID_INVALID = "MVL-FMT-002"
     MOVE_ID_DUPLICATE = "MVL-FMT-003"
+    MOVE_FIELD_INVALID = "MVL-FMT-004"
     PREDECESSOR_FORMAT_INVALID = "MVL-DEP-001"
     PREDECESSOR_VALUE_INVALID = "MVL-DEP-002"
     PREDECESSOR_SELF_REFERENCE = "MVL-DEP-003"
@@ -543,6 +545,9 @@ def validate_move_list(
                     f"MoveList[{index}] 必须是 JSON 对象",
                 )
             ]
+    field_error = _validate_move_field_shapes(moves)
+    if field_error:
+        return [field_error]
     dependency_error = _validate_move_dependencies(moves, external_predecessors)
     if dependency_error:
         return [dependency_error]
@@ -573,6 +578,18 @@ def validate_move_list(
             return [error]
     _finish_until(scheduled, float("inf"))
     return []
+
+
+def _validate_move_field_shapes(moves: Sequence[Mapping[str, Any]]) -> Optional[str]:
+    """校验 MoveType 与专属槽位字段的协议边界。"""
+    for move in moves:
+        if move.get("MoveType") in {PICK_MOVE, MULTI_PICK_MOVE} and "SlotList" in move:
+            return _issue(
+                move,
+                ValidationErrorCode.MOVE_FIELD_INVALID,
+                "PickMove 不允许携带 SlotList，请使用 SrcSlotList",
+            )
+    return None
 
 
 def _validate_move_dependencies(
