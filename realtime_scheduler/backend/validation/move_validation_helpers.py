@@ -434,6 +434,103 @@ def _clean_task_state_variables(payload: Mapping[str, Any]) -> Dict[str, Set[str
     return result
 
 
+def _clean_wac_trigger_rules(
+    payload: Mapping[str, Any],
+) -> Dict[Tuple[str, str], Tuple[Tuple[str, str, float, str], ...]]:
+    """读取按腔室和工艺 Recipe 生效的 WAC 计数阈值。
+
+    标准 update 把 WAC 条件放在 ``ProcessJobs[].OriginRoute`` 的
+    ``AfterOutPM`` 中，而状态值放在 ``Stations[].StateVariables`` 中。将两者
+    在初始化时按 ``(PJobName, ModuleName, ProcessRecipe)`` 关联，校验器就能
+    在产品 ``ProcessMove`` 开始前判断清洁是否已经到期。
+    """
+    result: Dict[Tuple[str, str], List[Tuple[str, str, float, str]]] = {}
+
+    def rows(value: Any) -> Sequence[Any]:
+        """把标准接口中可能是数组或对象的集合统一为可遍历序列。"""
+        if isinstance(value, Mapping):
+            return tuple(value.values())
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+            return value
+        return ()
+
+    def number(value: Any) -> Optional[float]:
+        """读取有限的数值阈值，忽略不完整的条件。"""
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if math.isfinite(parsed) else None
+
+    for process_job in rows(payload.get("ProcessJobs") or []):
+        if not isinstance(process_job, Mapping):
+            continue
+        pjob_name = str(process_job.get("JobName") or "").strip()
+        route = process_job.get("OriginRoute") or process_job.get("Route") or {}
+        if not isinstance(route, Mapping):
+            continue
+        for step in rows(route.get("RouteSteps") or []):
+            if not isinstance(step, Mapping):
+                continue
+            for visit in rows(step.get("Visits") or []):
+                if not isinstance(visit, Mapping):
+                    continue
+                station_name = str(
+                    visit.get("StationName") or visit.get("ModuleName") or ""
+                ).strip()
+                recipe_name = str(
+                    visit.get("ProcessRecipe") or visit.get("RecipeName") or ""
+                ).strip()
+                if not station_name:
+                    continue
+                for after_clean in rows(visit.get("AfterOutPM") or []):
+                    if not isinstance(after_clean, Mapping):
+                        continue
+                    conditions = after_clean.get("CheckConditions") or {}
+                    execute_orders = rows(after_clean.get("ExecuteOrder") or [])
+                    if not isinstance(conditions, Mapping):
+                        continue
+                    for _clean_alias, clean_rows in conditions.items():
+                        for clean in rows(clean_rows):
+                            if not isinstance(clean, Mapping):
+                                continue
+                            clean_task_name = str(clean.get("TaskName") or "").strip()
+                            if "wac" not in clean_task_name.casefold():
+                                continue
+                            update_variables = {
+                                str(name).strip()
+                                for name in (clean.get("UpdateStateVariables") or [])
+                                if str(name).strip()
+                            }
+                            for execute in execute_orders:
+                                if not isinstance(execute, Mapping):
+                                    continue
+                                variable_name = str(
+                                    execute.get("StateVariableName") or ""
+                                ).strip()
+                                if not variable_name or (
+                                    update_variables
+                                    and variable_name not in update_variables
+                                ):
+                                    continue
+                                thresholds = rows(
+                                    execute.get("ThresholdValueList") or []
+                                )
+                                lower = number(thresholds[0]) if thresholds else None
+                                if lower is None:
+                                    continue
+                                key = (station_name, recipe_name)
+                                rule = (
+                                    pjob_name,
+                                    variable_name,
+                                    lower,
+                                    clean_task_name,
+                                )
+                                if rule not in result.setdefault(key, []):
+                                    result[key].append(rule)
+    return {key: tuple(rules) for key, rules in result.items()}
+
+
 def _environment_side_labels(aliases: Mapping[str, str]) -> Tuple[str, str]:
     """由 LoadLock 的“标签→标准压力态”映射反推输出侧名称。
 

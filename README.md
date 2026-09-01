@@ -2,19 +2,7 @@
 
 ## 快速开始
 
-仓库不附带设备/测试数据或算法包。首次部署无需解压数据文件：服务会以空工作区启动，
-由使用者在页面中导入获授权的设备或测试集交换包。算法也须由使用者按自身交付渠道另行取得。
-
-部署后的最简文件树：
-
-```text
-milp/
-├── realtime_scheduler/
-│   ├── backend/                      # 服务端正式实现与模块启动入口
-│   ├── frontend/                     # 浏览器页面与构建产物
-│   └── data/                         # 首次运行时自动创建，仅保存本机运行数据
-└── docs/                             # 部署与格式说明，不含数据或算法归档
-```
+仓库不附带设备/测试数据或算法包。服务会以空工作区启动，由使用者在页面中导入设备或测试集交换包。
 
 启动：
 
@@ -30,31 +18,27 @@ python -m realtime_scheduler.backend.main --open
 2. 选择目标设备后可导入单个测试集包；目标设备的 init 必须与来源完全一致。
 3. 导入完成后，在设备和测试集选择器中选择刚导入的内容即可开始配置和运行。
 
-终端默认显示调度业务阶段并隐藏浏览器轮询访问日志；调试 HTTP 时可增加
-`--access-log`，需要更详细的后端日志时可增加 `--log-level DEBUG`。
+终端默认显示调度业务阶段并隐藏浏览器轮询访问日志；调试 HTTP 时可增加`--access-log`，需要更详细的后端日志时可增加 `--log-level DEBUG`。
 
-## 命令行运行测试集
+## 命令行运行测试
 
-使用 [`scripts/run_dataset_suite.py`](scripts/run_dataset_suite.py) 可直接运行本地
-`realtime_scheduler/data/datasets/` 中的测试集。默认使用平台内置 MoveList 校验器，
-不启动 HongYe，也跳过 Baseline，适合本地复现与调试。
+使用 [`scripts/run_dataset_suite.py`](scripts/run_dataset_suite.py) 可直接运行本地`realtime_scheduler/data/datasets/` 中的测试集。默认使用平台内置 MoveList 校验器，不启动 HongYe，也跳过 Baseline，适合本地复现与调试。
 
 先逐层列出可用设备、测试组和测试：
 
 ```powershell
-.\venv\Scripts\python.exe scripts\run_dataset_suite.py --list
-.\venv\Scripts\python.exe scripts\run_dataset_suite.py --device 12kChamber --list
-.\venv\Scripts\python.exe scripts\run_dataset_suite.py --device 12kChamber --group 公司示例集 --list
+python scripts\run_dataset_suite.py --list
+python scripts\run_dataset_suite.py --device 12kChamber --list
+python scripts\run_dataset_suite.py --device 12kChamber --group 公司示例集 --list
 ```
 
 运行一个测试组：
 
 ```powershell
-.\venv\Scripts\python.exe scripts\run_dataset_suite.py --device 12kChamber --group 公司示例集 --strategy heuristic
+python scripts\run_dataset_suite.py --device 12kChamber --group 公司示例集 --strategy heuristic
 ```
 
-快速复现时可加 `--limit 3 --workers 1`；精确复现可重复传入
-`--test <测试 ID 或完整名称>`，并可用 `--json-output <路径>` 保存机器可读结果。
+快速复现时可加 `--limit 3 --workers 1`；精确复现可重复传入`--test <测试 ID 或完整名称>`，并可用 `--json-output <路径>` 保存机器可读结果。
 
 ## 外部算法部署
 

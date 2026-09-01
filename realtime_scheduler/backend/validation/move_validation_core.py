@@ -93,6 +93,7 @@ class ValidationErrorCode(str, Enum):
     LOADLOCK_CONTENT_INVALID = "MVL-LL-003"
     SWAP_INPUT_INVALID = "MVL-SWAP-001"
     SWAP_STATE_INVALID = "MVL-SWAP-002"
+    CLEAN_WAC_MISSING = "CLEAN.WAC_MISSING"
 
 
 class DoorState(str, Enum):
@@ -217,6 +218,7 @@ class MachineState:
     robot_aliases: Dict[str, str] = field(default_factory=dict)
     process_recipe_weights: Dict[Tuple[str, str], Dict[str, float]] = field(default_factory=dict)
     clean_task_state_variables: Dict[str, Set[str]] = field(default_factory=dict)
+    clean_wac_trigger_rules: Dict[Tuple[str, str], Tuple[Tuple[str, str, float, str], ...]] = field(default_factory=dict)
 
     @classmethod
     def from_sources(
@@ -235,6 +237,7 @@ class MachineState:
         task_robots = getattr(task, "robots", {}) or {}
         state.process_recipe_weights = _process_recipe_weights(payload)
         state.clean_task_state_variables = _clean_task_state_variables(payload)
+        state.clean_wac_trigger_rules = _clean_wac_trigger_rules(payload)
 
         for name, config in station_configs.items():
             task_station = task_stations.get(name)
@@ -1458,6 +1461,31 @@ def _start_process(state: MachineState, move: Mapping[str, Any], end_time: float
     if station is None:
         return _issue(move, ValidationErrorCode.STATION_UNKNOWN, f"未知站点 {station_name or '<empty>'}")
     start_time = _start_time(move)
+    if material_ids and not move.get("CleanTaskName"):
+        recipe_name = str(
+            move.get("ProcessRecipe") or move.get("RecipeName") or ""
+        ).strip()
+        trigger_rules = state.clean_wac_trigger_rules.get(
+            (station.name, recipe_name),
+        ) or state.clean_wac_trigger_rules.get((station.name, ""), ())
+        pjob_names = _values(move, "PJobName")
+        pjob_name = str(pjob_names[0]) if pjob_names else ""
+        for rule_pjob_name, variable_name, lower, clean_task_name in trigger_rules:
+            if rule_pjob_name and rule_pjob_name != pjob_name:
+                continue
+            current_value = float(station.state_variables.get(variable_name, 0.0))
+            if current_value + TIME_TOLERANCE < lower:
+                continue
+            display_value = (
+                str(int(current_value))
+                if current_value.is_integer()
+                else str(current_value)
+            )
+            return _issue(
+                move,
+                ValidationErrorCode.CLEAN_WAC_MISSING,
+                f"{clean_task_name} 到期后仍开始产品工艺 count={display_value} PJob={pjob_name}",
+            )
     if station.door is not DoorState.CLOSED:
         return _issue(move, ValidationErrorCode.STATION_DOOR_STATE_INVALID, f"{station.name} 加工或清洁时必须关门")
     if not _available(station.door_busy_until, start_time) or not _available(station.transfer_busy_until, start_time):

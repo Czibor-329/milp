@@ -88,6 +88,76 @@ def _move(move_id: int, move_type: int, start: float, end: float, **fields) -> d
     }
 
 
+def test_platform_rejects_product_process_after_wac_counter_expires() -> None:
+    """当前 ProcessCount 已达到阈值时，产品工艺必须先执行 WAC。"""
+    update = {
+        "Stations": {
+            "PM1": {
+                "Type": "ProcessChamber",
+                "Capacity": 1,
+                "StateVariables": {
+                    "ProcessCount": {"Value": {"Value": 2}},
+                },
+            },
+        },
+        "Robots": {},
+        "Materials": [{
+            "ID": 101,
+            "CurrentModuleName": "PM1",
+            "SlotID": 1,
+            "StepID": 4,
+            "PJobName": "P1",
+        }],
+        "ProcessJobs": [{
+            "JobName": "P1",
+            "OriginRoute": {
+                "RouteSteps": [{
+                    "Visits": [{
+                        "StationName": "PM1",
+                        "ProcessRecipe": "ProductRecipe",
+                        "AfterOutPM": [{
+                            "CheckConditions": {
+                                "WAC": [{
+                                    "TaskName": "WacClean",
+                                    "UpdateStateVariables": ["ProcessCount"],
+                                }],
+                            },
+                            "ExecuteOrder": [{
+                                "StateVariableName": "ProcessCount",
+                                "ThresholdValueList": [2, 9999],
+                            }],
+                        }],
+                    }],
+                }],
+            },
+        }],
+    }
+    state = MachineState.from_sources(None, update)
+    state.stations["PM1"].slots[1].phase = SlotPhase.UNPROCESSED
+    state.stations["PM1"].slots[1].material = MaterialState(101, "P1", 4)
+
+    issues = validate_move_list(
+        None,
+        [_move(
+            1,
+            9,
+            0,
+            10,
+            ModuleName="PM1",
+            MatIDList=[101],
+            StepIDList=[4],
+            SlotList=[1],
+            PJobName=["P1"],
+            ProcessRecipe="ProductRecipe",
+        )],
+        state,
+    )
+
+    assert issues == [
+        "[CLEAN.WAC_MISSING] MoveID=1 MoveType=9：WacClean 到期后仍开始产品工艺 count=2 PJob=P1"
+    ]
+
+
 def _dual_transfer_moves() -> list[dict]:
     """创建双片从 PM 搬到 LL、满载充气并由大气手取出的完整动作链。"""
     return [
