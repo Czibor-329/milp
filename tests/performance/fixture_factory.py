@@ -31,7 +31,7 @@ def load_performance_profiles(path: Path) -> Mapping[str, Any]:
     """读取并校验性能规模配置。
 
     Args:
-        path: ``performance/profiles.json`` 路径。
+        path: ``docs/performance/profiles.json`` 路径。
 
     Returns:
         已校验的完整配置对象。

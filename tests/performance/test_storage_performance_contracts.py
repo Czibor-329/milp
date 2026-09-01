@@ -24,8 +24,8 @@ from tests.performance.fixture_factory import (
 
 
 ROOT = Path(__file__).resolve().parents[2]
-PROFILE_PATH = ROOT / "performance" / "profiles.json"
-BUDGET_PATH = ROOT / "performance" / "budgets.json"
+PROFILE_PATH = ROOT / "docs" / "performance" / "profiles.json"
+BUDGET_PATH = ROOT / "docs" / "performance" / "budgets.json"
 
 
 def _test_file_hashes(store_dir: Path) -> dict[Path, str]:

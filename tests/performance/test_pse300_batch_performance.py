@@ -17,7 +17,7 @@ from realtime_scheduler.backend import application as server
 
 
 ROOT = Path(__file__).resolve().parents[2]
-BUDGET_PATH = ROOT / "performance" / "budgets.json"
+BUDGET_PATH = ROOT / "docs" / "performance" / "budgets.json"
 PSE300_DEVICE_ID = "460fad299cda43298409d7ce16d54906"
 PSE300_TEST_GROUP = "公司单腔示例集-130"
 

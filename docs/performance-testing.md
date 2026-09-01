@@ -82,8 +82,8 @@ python scripts/run_performance_suite.py --profile concurrent --enforce
 python scripts/run_performance_suite.py --profile moves --enforce
 ```
 
-规模定义位于 `performance/profiles.json`，试运行预算位于
-`performance/budgets.json`。默认报告写入 `output/performance-report.json`；该目录
+规模定义位于 `docs/performance/profiles.json`，试运行预算位于
+`docs/performance/budgets.json`。默认报告写入 `output/performance-report.json`；该目录
 不进入版本控制。服务响应携带 `Server-Timing` 和 `X-Response-Bytes`，报告还记录
 Python、平台、夹具哈希、响应体积和服务进程峰值常驻内存。
 
