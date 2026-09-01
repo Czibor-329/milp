@@ -547,19 +547,19 @@ class RecomputeFailureOutputTests(unittest.TestCase):
         self.assertIn("!rec.removedByRecompute", viewer)
         self.assertIn('fillOpacity = bar.rec.removedByRecompute ? "0.24" : "1"', viewer)
 
-    def test_frontend_version_and_cache_keys_are_1_5_23(self) -> None:
+    def test_frontend_version_and_cache_keys_are_1_5_24(self) -> None:
         """前端显示版本、包版本和主资源缓存键必须同步。"""
         frontend_root = ROOT / "realtime_scheduler" / "frontend"
         template = (frontend_root / "config_editor.html").read_text(encoding="utf-8")
         package = json.loads((frontend_root / "package.json").read_text(encoding="utf-8"))
         package_lock = json.loads((frontend_root / "package-lock.json").read_text(encoding="utf-8"))
 
-        self.assertEqual("1.5.23", package["version"])
-        self.assertEqual("1.5.23", package_lock["version"])
-        self.assertEqual("1.5.23", package_lock["packages"][""]["version"])
-        self.assertIn('class="frontend-version">前端 v1.5.23</span>', template)
-        self.assertIn('/assets/config_editor.css?v=1.5.23', template)
-        self.assertIn('/assets/config_editor.js?v=1.5.23', template)
+        self.assertEqual("1.5.24", package["version"])
+        self.assertEqual("1.5.24", package_lock["version"])
+        self.assertEqual("1.5.24", package_lock["packages"][""]["version"])
+        self.assertIn('class="frontend-version">V1.5.24</span>', template)
+        self.assertIn('/assets/config_editor.css?v=1.5.24', template)
+        self.assertIn('/assets/config_editor.js?v=1.5.24', template)
 
     def test_run_options_live_in_compact_settings_dialog(self) -> None:
         """运行选项应收纳到设置弹窗，齿轮按钮与状态灯保持紧凑。"""
@@ -2358,7 +2358,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("<span>结果分析</span>", html)
         self.assertIn("<span>路径配置</span>", html)
         self.assertNotIn('data-tab-view="clean"', html)
-        self.assertIn('class="frontend-version">前端 v1.5.23</span>', html)
+        self.assertIn('class="frontend-version">V1.5.24</span>', html)
         self.assertIn('data-option="residencyGuardSeconds"', html)
         self.assertIn('data-option="maximumRobotHoldingSeconds"', html)
         self.assertIn('data-option="maximumSystemResidenceCv"', html)
@@ -2685,18 +2685,8 @@ class ConfigEditorServerTests(unittest.TestCase):
         ):
             self.assertNotIn(removed_content, group_view_source)
 
-    def test_schedule_analysis_is_reusable_without_frontend_dependencies(self) -> None:
-        """MoveList 与测试组统计应由无 DOM 的后端层统一计算，页面只请求 API。"""
-        analysis_root = ROOT / "realtime_scheduler" / "analysis"
-        movelist_source = (analysis_root / "movelist_performance.ts").read_text(
-            encoding="utf-8",
-        )
-        group_source = (analysis_root / "group_performance.ts").read_text(
-            encoding="utf-8",
-        )
-        context_source = (analysis_root / "schedule_context.ts").read_text(
-            encoding="utf-8",
-        )
+    def test_schedule_analysis_is_server_owned_without_frontend_dependencies(self) -> None:
+        """MoveList 与测试组统计应由后端统一计算，页面只能请求 API。"""
         workspace_source = (
             ROOT
             / "realtime_scheduler"
@@ -2715,14 +2705,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("requestScheduleAnalysis", workspace_source)
         self.assertIn("/api/analysis/schedule", api_source)
         self.assertIn("/api/analysis/test-group", api_source)
-        self.assertNotIn("../../analysis/", workspace_source)
-        self.assertIn("analyzeSchedulePerformance", movelist_source)
-        self.assertIn("analyzeTestGroupPerformance", group_source)
-        self.assertIn("buildScheduleAnalysisContext", context_source)
-        for browser_dependency in ("document.", "globalThis.window", "fetch("):
-            self.assertNotIn(browser_dependency, movelist_source)
-            self.assertNotIn(browser_dependency, group_source)
-            self.assertNotIn(browser_dependency, context_source)
+        self.assertNotIn("test_support", workspace_source)
 
     def test_device_workspace_persists_independent_test_cases(self) -> None:
         """同一设备的多套 Route/Clean/重算配置应独立保存并可复制、修改、删除。"""

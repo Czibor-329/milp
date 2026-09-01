@@ -36,9 +36,8 @@
 | `realtime_scheduler/data/datasets/` | 设备 init、共享路径模板、测试独有的 Route 参数/Clean 与任务的唯一主数据 | 浏览器缓存、设备镜像 |
 | `realtime_scheduler/exports/` | MoveList 结果和复现日志 | 前端临时状态 |
 
-`realtime_scheduler/analysis/` 中的 TypeScript/JavaScript 只用于旧 Node 回归测试
-入口，生产构建不再导入它。新功能必须在 `backend/analysis.py` 中实现，并通过
-HTTP 契约提供给前端。
+MoveList 指标、瓶颈和测试组统计只在 `backend/analysis.py` 中实现；前端通过 HTTP
+契约请求结果，不保留兼容计算副本。
 
 后端依赖方向固定为 HTTP → 应用装配 → execution/workspace/artifacts →
 validation/algorithm interface。后端和仓库脚本必须直接导入 `realtime_scheduler.backend`

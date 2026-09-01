@@ -5,7 +5,6 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const logic = require("../realtime_scheduler/frontend/workspace_visualizer_logic.js");
-const analysisLogic = require("../realtime_scheduler/analysis/schedule_analysis.js");
 
 const device = {
   Stations: {
@@ -1932,29 +1931,38 @@ const performanceMoves = [
   })),
 ];
 
-test("性能分析用首片完工到末片投料剔除启动与收尾", () => {
-  const performance = logic.analyzeSchedulePerformance(performanceMoves, device, "steady");
-  assert.equal(performance.window.method, "steady-overlap");
-  assert.equal(performance.window.start, 30);
-  assert.equal(performance.window.end, 50);
-  assert.equal(performance.completedWaferCount, 2);
-  assert.equal(performance.throughputPerHour, 240);
-  assert.equal(performance.departureIntervalCv, 0);
-  assert.equal(performance.waferSystemResidenceTime.sampleCount, 2);
-  assert.equal(performance.waferSystemResidenceTime.meanSeconds, 31.5);
-  assert.ok(Math.abs(performance.waferSystemResidenceTime.coefficientOfVariation - (1 / 9)) < 1e-9);
-  assert.deepEqual(performance.waferSystemResidenceTimes, [
-    { wafer: "W1", enteredAt: 2, completedAt: 30, duration: 28, chamberDwellSeconds: 0, robotDwellSeconds: 27 },
-    { wafer: "W2", enteredAt: 10, completedAt: 45, duration: 35, chamberDwellSeconds: 0, robotDwellSeconds: 53 },
-    { wafer: "W3", enteredAt: 40, completedAt: 60, duration: 20, chamberDwellSeconds: 0, robotDwellSeconds: 19 },
-    { wafer: "W4", enteredAt: 50, completedAt: 75, duration: 25, chamberDwellSeconds: 0, robotDwellSeconds: 24 },
-  ]);
-  assert.equal(logic.analyzeSchedulePerformance(performanceMoves, device, "full").completedWaferCount, 4);
-});
+/** 为渲染测试构造服务端分析 API 已返回的最小性能响应。 */
+function visualPerformanceFixture() {
+  return {
+    window: {
+      label: "稳态交叠窗", duration: 20, trimmedStart: 0, trimmedEnd: 0,
+    },
+    resources: [],
+    bottleneckCandidates: [],
+    throughputPerHour: 0,
+    throughputSampleCount: 0,
+    throughputReason: "样本不足，完工片数必须大于 150",
+    cpuTimeMs: null,
+    recomputeCount: 0,
+    averageRecomputeTimeMs: null,
+    waferSystemResidenceTimes: [
+      { wafer: "W1", enteredAt: 2, completedAt: 30, duration: 28, chamberDwellSeconds: 0, robotDwellSeconds: 27 },
+      { wafer: "W2", enteredAt: 10, completedAt: 45, duration: 35, chamberDwellSeconds: 0, robotDwellSeconds: 53 },
+      { wafer: "W3", enteredAt: 40, completedAt: 60, duration: 20, chamberDwellSeconds: 0, robotDwellSeconds: 19 },
+      { wafer: "W4", enteredAt: 50, completedAt: 75, duration: 25, chamberDwellSeconds: 0, robotDwellSeconds: 24 },
+    ],
+    loadLockEfficiency: {
+      cycleCount: 0, waferCycleCount: 0, wafersPerCycle: 0,
+      fullLoadCycleCount: 0, emptyLoadCycleCount: 0,
+      fullLoadCycleRatio: 0, emptyLoadCycleRatio: 0,
+    },
+  };
+}
+
 
 test("KPI 总览展示 CPU Time 和平均重算时间且不再渲染独立指标卡片", () => {
   const performance = {
-    ...logic.analyzeSchedulePerformance(performanceMoves, device, "steady"),
+    ...visualPerformanceFixture(),
     throughputPerHour: 67.4,
     throughputSampleCount: 120,
     throughputReason: "",
@@ -2009,7 +2017,7 @@ test("双 Actor 回放在 Pick 结束后的原子决策边界暂停", async () =
 });
 
 test("逐片晶圆驻留图可选择单一指标展示", () => {
-  const performance = logic.analyzeSchedulePerformance(performanceMoves, device, "steady");
+  const performance = visualPerformanceFixture();
   const chart = logic.renderWaferResidenceChart(performance);
   assert.match(chart, /驻留时间分析/);
   assert.match(chart, /id="residenceMetricSelect"[\s\S]*系统驻留时间[\s\S]*腔室驻留时间[\s\S]*机器手驻留时间/);
@@ -2029,149 +2037,7 @@ test("逐片晶圆驻留图可选择单一指标展示", () => {
   assert.equal((chart.match(/class="residence-metric-bar-item"/g) ?? []).length, 12);
 });
 
-test("旧分析响应缺少逐片字段时从当前 MoveList 补齐驻留图", () => {
-  const current = logic.analyzeSchedulePerformance(performanceMoves, device, "steady");
-  const legacy = { ...current };
-  delete legacy.waferSystemResidenceTimes;
 
-  const hydrated = logic.withWaferResidenceTimes(legacy, performanceMoves, device);
-  assert.deepEqual(hydrated.waferSystemResidenceTimes, [
-    { wafer: "W1", enteredAt: 2, completedAt: 30, duration: 28, chamberDwellSeconds: 0, robotDwellSeconds: 27 },
-    { wafer: "W2", enteredAt: 10, completedAt: 45, duration: 35, chamberDwellSeconds: 0, robotDwellSeconds: 53 },
-    { wafer: "W3", enteredAt: 40, completedAt: 60, duration: 20, chamberDwellSeconds: 0, robotDwellSeconds: 19 },
-    { wafer: "W4", enteredAt: 50, completedAt: 75, duration: 25, chamberDwellSeconds: 0, robotDwellSeconds: 24 },
-  ]);
-  assert.doesNotMatch(logic.renderWaferResidenceChart(hydrated), /没有完成往返 LoadPort/);
-});
-
-test("旧分析响应缺少 LoadLock 利用效率时从当前 MoveList 补算", () => {
-  const moves = [
-    { MoveID: 1, MoveType: 12, ModuleName: "LA", MatIDList: ["W1", "W2"], StartTime: 1, EndTime: 5 },
-    { MoveID: 2, MoveType: 13, ModuleName: "LA", MatIDList: ["W1"], StartTime: 10, EndTime: 14 },
-    { MoveID: 3, MoveType: 12, ModuleName: "LA", MatIDList: [], StartTime: 20, EndTime: 24 },
-    { MoveID: 4, MoveType: 13, ModuleName: "LA", MatIDList: [], StartTime: 30, EndTime: 34 },
-  ];
-  const loadLockDevice = { Stations: { LA: { Type: "LoadLock", Capacity: 2 } } };
-  const legacy = logic.analyzeSchedulePerformance(moves, loadLockDevice, "full");
-  delete legacy.loadLockEfficiency;
-
-  assert.deepEqual(logic.withWaferResidenceTimes(legacy, moves, loadLockDevice).loadLockEfficiency, {
-    cycleCount: 2, waferCycleCount: 2, wafersPerCycle: 1,
-    fullLoadCycleCount: 1, emptyLoadCycleCount: 1,
-    fullLoadCycleRatio: 0.5, emptyLoadCycleRatio: 0.5,
-  });
-});
-
-test("性能分析统计加工腔、机器手非运输驻留和晶圆系统停留", () => {
-  const residenceMoves = [
-    {
-      MoveID: 1, MoveType: 0, ModuleName: "VTR", SrcStationList: ["LP1"],
-      MatIDList: ["W1"], StartTime: 0, EndTime: 1,
-    },
-    {
-      MoveID: 2, MoveType: 1, ModuleName: "VTR", DestStationList: ["PM1"],
-      MatIDList: ["W1"], StartTime: 2, EndTime: 3,
-    },
-    {
-      MoveID: 3, MoveType: 9, ModuleName: "PM1", MatIDList: ["W1"],
-      StartTime: 3, EndTime: 10,
-    },
-    {
-      MoveID: 4, MoveType: 6, ModuleName: "PM1", MatIDList: ["W1"],
-      StartTime: 10, EndTime: 11,
-    },
-    {
-      MoveID: 5, MoveType: 0, ModuleName: "VTR", SrcStationList: ["PM1"],
-      MatIDList: ["W1"], StartTime: 12, EndTime: 14,
-    },
-    {
-      MoveID: 6, MoveType: 5, ModuleName: "VTR",
-      StartTime: 14, EndTime: 16,
-    },
-    {
-      MoveID: 7, MoveType: 1, ModuleName: "VTR", DestStationList: ["LP1"],
-      MatIDList: ["W1"], StartTime: 19, EndTime: 20,
-    },
-  ];
-
-  const performance = logic.analyzeSchedulePerformance(residenceMoves, device, "full");
-
-  assert.deepEqual(performance.processChamberDwellTime, {
-    totalSeconds: 4,
-    meanSeconds: 4,
-    medianSeconds: 4,
-    maxSeconds: 4,
-    coefficientOfVariation: 0,
-    sampleCount: 1,
-  });
-  assert.equal(performance.robotWaferDwellTime.sampleCount, 2);
-  assert.equal(performance.robotWaferDwellTime.totalSeconds, 4);
-  assert.equal(performance.robotWaferDwellTime.maxSeconds, 3);
-  assert.equal(performance.waferSystemResidenceTime.meanSeconds, 19);
-  assert.equal(performance.waferSystemResidenceTime.sampleCount, 1);
-  assert.deepEqual(performance.waferSystemResidenceTimes, [{
-    wafer: "W1", enteredAt: 1, completedAt: 20, duration: 19,
-    chamberDwellSeconds: 4, robotDwellSeconds: 4,
-  }]);
-});
-
-test("模块物理占用包含开门、取放和加工，界面隐藏未使用并行腔", () => {
-  const performance = logic.analyzeSchedulePerformance(performanceMoves, device, "steady");
-  const pm1 = performance.resources.find(resource => resource.name === "PM1");
-  const pm2 = performance.resources.find(resource => resource.name === "PM2");
-  assert.equal(pm1.busyTime, 10);
-  assert.equal(pm1.utilization, 0.5);
-  assert.equal(pm1.categoryTimes.door, 1);
-  assert.equal(pm1.categoryTimes.transfer, 2);
-  assert.equal(pm1.categoryTimes.process, 7);
-  assert.equal(pm2.busyTime, 0);
-  assert.equal(performance.bottleneck.name, "PM1");
-  assert.deepEqual(logic.summarizeBottleneckUtilization(performance), {
-    resourceName: "工序容量组 · PM1",
-    utilization: 0.5,
-    windowLabel: "稳态交叠窗",
-    confidence: "medium",
-    candidateCount: 1,
-    score: 0.53,
-  });
-  assert.equal(
-    logic.displayedPerformanceResources(performance).some(resource => resource.name === "PM2"),
-    false,
-  );
-});
-
-test("并行工艺腔按完整工序容量组识别，即使其中一台没有被使用", () => {
-  const parallelDevice = {
-    Stations: {
-      PM1: { Type: "ProcessChamber" },
-      PM2: { Type: "ProcessChamber" },
-    },
-    Robots: {},
-  };
-  const performance = logic.analyzeSchedulePerformance([
-    {
-      MoveID: 1,
-      MoveType: 9,
-      ModuleName: "PM1",
-      PJobName: ["1.C1.P1"],
-      StepID: 2,
-      StartTime: 0,
-      EndTime: 100,
-    },
-  ], parallelDevice, "full", {
-    processStages: [{
-      id: "p1-step-2",
-      label: "P1 · 工序 1",
-      pjobName: "1.C1.P1",
-      stepId: 2,
-      resourceNames: ["PM1", "PM2"],
-    }],
-  });
-
-  assert.equal(performance.primaryBottleneck.label, "工序容量组 · PM1 / PM2");
-  assert.deepEqual(performance.primaryBottleneck.resourceNames, ["PM1", "PM2"]);
-  assert.equal(performance.primaryBottleneck.utilization, 0.5);
-});
 
 test("瓶颈分析合并同工序设备、取组平均且最多显示四行", () => {
   const categoryTimes = (process, transfer = 0, environment = 0) => ({
@@ -2220,150 +2086,13 @@ test("瓶颈分析合并同工序设备、取组平均且最多显示四行", ()
   assert.equal(groups[1].categoryTimes.environment, 40);
 });
 
-test("路径配置可独立提取并行工序容量组", () => {
-  const context = analysisLogic.buildScheduleAnalysisContext([
-    {
-      name: "RouteA",
-      stages: [
-        { stepId: 0, needProcess: false, visits: [{ stationName: "LP1" }] },
-        {
-          stepId: 2,
-          needProcess: true,
-          visits: [{ stationName: "PM1" }, { stationName: "PM2" }],
-        },
-      ],
-    },
-  ], [{
-    cjobs: [{ key: "C1", pjobs: [{ jobName: "P1", routeRef: "RouteA" }] }],
-  }]);
 
-  assert.deepEqual(context.processStages, [{
-    id: "1.C1.P1:step-2",
-    label: "P1 · 工序 1",
-    pjobName: "1.C1.P1",
-    stepId: 2,
-    resourceNames: ["PM1", "PM2"],
-  }]);
-});
 
-test("高占用 VTR 不再被低占用长加工腔误判覆盖", () => {
-  const transportDevice = {
-    Stations: { PM1: { Type: "ProcessChamber" } },
-    Robots: { VTR: {} },
-  };
-  const performance = logic.analyzeSchedulePerformance([
-    { MoveID: 1, MoveType: 9, ModuleName: "PM1", StartTime: 0, EndTime: 30 },
-    { MoveID: 2, MoveType: 5, ModuleName: "VTR", StartTime: 0, EndTime: 80 },
-  ], transportDevice, "full");
 
-  assert.equal(performance.primaryBottleneck.kind, "robot");
-  assert.equal(performance.primaryBottleneck.label, "VTR");
-  assert.equal(performance.primaryBottleneck.utilization, 1);
-});
 
-test("LoadLock 高容量占用可成为首位候选", () => {
-  const loadLockDevice = {
-    Stations: {
-      LA: { Type: "LoadLock" },
-      PM1: { Type: "ProcessChamber" },
-    },
-    Robots: { VTR: {} },
-  };
-  const performance = logic.analyzeSchedulePerformance([
-    { MoveID: 1, MoveType: 10, ModuleName: "LA", StartTime: 0, EndTime: 80 },
-    { MoveID: 2, MoveType: 9, ModuleName: "PM1", StartTime: 0, EndTime: 20 },
-    { MoveID: 3, MoveType: 5, ModuleName: "VTR", StartTime: 0, EndTime: 10 },
-  ], loadLockDevice, "full");
 
-  assert.equal(performance.primaryBottleneck.kind, "loadlock-group");
-  assert.equal(performance.primaryBottleneck.label, "LoadLock 容量组 · LA");
-});
 
-test("得分接近时保留多个瓶颈候选并按可能性排序", () => {
-  const mixedDevice = {
-    Stations: { PM1: { Type: "ProcessChamber" } },
-    Robots: { VTR: {} },
-  };
-  const performance = logic.analyzeSchedulePerformance([
-    { MoveID: 1, MoveType: 9, ModuleName: "PM1", StartTime: 0, EndTime: 75 },
-    { MoveID: 2, MoveType: 5, ModuleName: "VTR", StartTime: 0, EndTime: 80 },
-    { MoveID: 3, MoveType: 5, ModuleName: "OTHER", StartTime: 80, EndTime: 100 },
-  ], mixedDevice, "full");
 
-  assert.equal(performance.bottleneckCandidates.length, 2);
-  assert.equal(performance.bottleneckCandidates[0].label, "VTR");
-  assert.equal(performance.bottleneckCandidates[1].label, "工序容量组 · PM1");
-});
-
-test("清洁与门动作重叠时按物理并集计时", () => {
-  const movesWithClean = [
-    ...performanceMoves,
-    {
-      MoveID: 450,
-      MoveType: 14,
-      ModuleName: "PM2",
-      StartTime: 34,
-      EndTime: 39,
-    },
-    {
-      MoveID: 451,
-      MoveType: 6,
-      ModuleName: "PM2",
-      StartTime: 38,
-      EndTime: 40,
-    },
-  ];
-  const performance = logic.analyzeSchedulePerformance(movesWithClean, device, "steady");
-  const pm2 = performance.resources.find(resource => resource.name === "PM2");
-  assert.equal(pm2.busyTime, 6);
-  assert.equal(pm2.categoryTimes.clean, 5);
-  assert.equal(pm2.categoryTimes.door, 1);
-});
-
-test("性能分析统计 LoadLock 完整抽充气周期的峰值载荷", () => {
-  const performance = logic.analyzeSchedulePerformance([
-    { MoveID: 1, MoveType: 10, ModuleName: "LA", LastState: "ATM", CurState: "VAC", MatIDList: ["W1"], StartTime: 1, EndTime: 5 },
-    { MoveID: 2, MoveType: 10, ModuleName: "LA", LastState: "VAC", CurState: "ATM", MatIDList: ["W4"], StartTime: 10, EndTime: 14 },
-    { MoveID: 3, MoveType: 10, ModuleName: "LA", LastState: "ATM", CurState: "VAC", MatIDList: ["W2", "W3"], StartTime: 20, EndTime: 24 },
-    { MoveID: 4, MoveType: 10, ModuleName: "LA", LastState: "VAC", CurState: "ATM", MatIDList: [], StartTime: 30, EndTime: 34 },
-  ], device, "full");
-
-  assert.deepEqual(performance.loadLockEfficiency, {
-    cycleCount: 2, waferCycleCount: 3, wafersPerCycle: 1.5,
-    fullLoadCycleCount: 1, emptyLoadCycleCount: 0,
-    fullLoadCycleRatio: 0.5, emptyLoadCycleRatio: 0,
-  });
-});
-
-test("LoadLock 利用效率同时识别满载、空载与跨周期滞留晶圆", () => {
-  const performance = logic.analyzeSchedulePerformance([
-    { MoveID: 1, MoveType: 12, ModuleName: "LA", MatIDList: ["W5"], StartTime: 1, EndTime: 5 },
-    { MoveID: 2, MoveType: 13, ModuleName: "LA", MatIDList: ["W5"], StartTime: 10, EndTime: 14 },
-    { MoveID: 3, MoveType: 12, ModuleName: "LA", MatIDList: ["W5", "W6"], StartTime: 20, EndTime: 24 },
-    { MoveID: 4, MoveType: 13, ModuleName: "LA", MatIDList: ["W5"], StartTime: 30, EndTime: 34 },
-    { MoveID: 5, MoveType: 12, ModuleName: "LA", MatIDList: [], StartTime: 40, EndTime: 44 },
-    { MoveID: 6, MoveType: 13, ModuleName: "LA", MatIDList: [], StartTime: 50, EndTime: 54 },
-  ], device, "full");
-
-  assert.deepEqual(performance.loadLockEfficiency, {
-    cycleCount: 3, waferCycleCount: 3, wafersPerCycle: 1,
-    fullLoadCycleCount: 1, emptyLoadCycleCount: 1,
-    fullLoadCycleRatio: 1 / 3, emptyLoadCycleRatio: 1 / 3,
-  });
-});
-
-test("LoadLock 利用效率识别 PSE300 的 ATR/VTR 环境状态", () => {
-  const performance = logic.analyzeSchedulePerformance([
-    { MoveID: 1, MoveType: 10, ModuleName: "LA", LastState: "ATR", CurState: "VTR", MatIDList: ["W1"], StartTime: 1, EndTime: 5 },
-    { MoveID: 2, MoveType: 10, ModuleName: "LA", LastState: "VTR", CurState: "ATR", MatIDList: ["W1"], StartTime: 10, EndTime: 14 },
-  ], device, "full");
-
-  assert.deepEqual(performance.loadLockEfficiency, {
-    cycleCount: 1, waferCycleCount: 1, wafersPerCycle: 1,
-    fullLoadCycleCount: 0, emptyLoadCycleCount: 0,
-    fullLoadCycleRatio: 0, emptyLoadCycleRatio: 0,
-  });
-});
 
 test("晶圆必须完成全部加工工序后才标记为已加工", () => {
   const multiProcessDevice = {
