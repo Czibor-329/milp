@@ -5059,32 +5059,37 @@ function renderRunFailureCard({
     const message = matched ? issue.slice(matched[0].length) : issue;
     return `<li><code>${escapeHtml(code)}</code><span>${escapeHtml(message || issue)}</span></li>`;
   }).join("");
+  const validationFailure = validationIssues.length > 0;
   const informationType = cancelled
     ? "运行已终止"
     : deadlock
       ? "算法死锁"
-      : validationIssues.length
+      : validationFailure
         ? "MoveList 校验失败"
         : baselineError
           ? "Baseline 失败"
           : "运行异常";
   const primaryCode = deadlock?.deadlockCode || (validationIssues[0]?.match(/^\s*\[([A-Z0-9-]+)\]/)?.[1] ?? "RUN-ERR-001");
-  const validationSection = issueRows ? `
+  const summaryText = deadlock?.message || (cancelled ? "用户终止了本次运行" : errorMessage);
+  // 状态推进校验失败时只展示一条“状态推进失败|MVL-XXX-000|报错信息”，
+  // 去掉 meta 徽标与下方的重复问题列表，避免同一错误重复出现。
+  const summaryMarkup = validationFailure
+    ? `<strong>${escapeHtml(summaryText || "未提供错误说明")}</strong>`
+    : `<span class="error-summary-meta">[${escapeHtml(informationType)} <i aria-hidden="true">|</i> <code>${escapeHtml(primaryCode)}</code>]</span><strong>${escapeHtml(summaryText || "未提供错误说明")}</strong>`;
+  const validationSection = validationFailure ? "" : (issueRows ? `
     <section class="error-detail-section" aria-labelledby="errorValidationTitle">
       <div class="error-detail-heading"><span id="errorValidationTitle">MoveList 校验问题</span><b>${validationIssues.length} 项</b></div>
       <ul class="error-issue-list">${issueRows}</ul>
-    </section>` : "";
+    </section>` : "");
   const baselineSection = baselineError ? `
     <section class="error-detail-section">
       <div class="error-detail-heading"><span>Baseline</span><b>失败</b></div>
       <p>${escapeHtml(baselineError.replace(/^Baseline\s*失败：?\s*/, ""))}</p>
     </section>` : "";
-  const summaryText = deadlock?.message || (cancelled ? "用户终止了本次运行" : errorMessage);
 
   details.innerHTML = `
     <div class="error-summary-line">
-      <span class="error-summary-meta">[${escapeHtml(informationType)} <i aria-hidden="true">|</i> <code>${escapeHtml(primaryCode)}</code>]</span>
-      <strong>${escapeHtml(summaryText || "未提供错误说明")}</strong>
+      ${summaryMarkup}
     </div>
     ${validationSection}
     ${baselineSection}

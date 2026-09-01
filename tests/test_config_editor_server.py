@@ -547,19 +547,29 @@ class RecomputeFailureOutputTests(unittest.TestCase):
         self.assertIn("!rec.removedByRecompute", viewer)
         self.assertIn('fillOpacity = bar.rec.removedByRecompute ? "0.24" : "1"', viewer)
 
-    def test_frontend_version_and_cache_keys_are_1_5_25(self) -> None:
+    def test_frontend_version_and_cache_keys_are_1_5_27(self) -> None:
         """前端显示版本、包版本和主资源缓存键必须同步。"""
         frontend_root = ROOT / "realtime_scheduler" / "frontend"
         template = (frontend_root / "config_editor.html").read_text(encoding="utf-8")
         package = json.loads((frontend_root / "package.json").read_text(encoding="utf-8"))
         package_lock = json.loads((frontend_root / "package-lock.json").read_text(encoding="utf-8"))
 
-        self.assertEqual("1.5.26", package["version"])
-        self.assertEqual("1.5.26", package_lock["version"])
-        self.assertEqual("1.5.26", package_lock["packages"][""]["version"])
-        self.assertIn('class="frontend-version">V1.5.26</span>', template)
-        self.assertIn('/assets/config_editor.css?v=1.5.26', template)
-        self.assertIn('/assets/config_editor.js?v=1.5.26', template)
+        self.assertEqual("1.5.27", package["version"])
+        self.assertEqual("1.5.27", package_lock["version"])
+        self.assertEqual("1.5.27", package_lock["packages"][""]["version"])
+        self.assertIn('class="frontend-version">V1.5.27</span>', template)
+        self.assertIn('/assets/config_editor.css?v=1.5.27', template)
+        self.assertIn('/assets/config_editor.js?v=1.5.27', template)
+
+    def test_single_run_failure_card_does_not_duplicate_validation_issue(self) -> None:
+        """状态推进校验失败只展示一条完整错误，不再重复渲染问题列表。"""
+        source = EDITOR_SCRIPT_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("const validationFailure = validationIssues.length > 0;", source)
+        # 校验失败时摘要行直接显示完整 errorMessage，不叠加 meta 徽标。
+        self.assertIn("const summaryMarkup = validationFailure", source)
+        # 校验失败时不再渲染“MoveList 校验问题”重复分区。
+        self.assertIn("const validationSection = validationFailure ? \"\" : (issueRows ?", source)
 
     def test_run_options_live_in_compact_settings_dialog(self) -> None:
         """运行选项应收纳到设置弹窗，齿轮按钮与状态灯保持紧凑。"""
@@ -2288,7 +2298,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("<span>结果分析</span>", html)
         self.assertIn("<span>路径配置</span>", html)
         self.assertNotIn('data-tab-view="clean"', html)
-        self.assertIn('class="frontend-version">V1.5.26</span>', html)
+        self.assertIn('class="frontend-version">V1.5.27</span>', html)
         self.assertIn('data-option="residencyGuardSeconds"', html)
         self.assertIn('data-option="maximumRobotHoldingSeconds"', html)
         self.assertIn('data-option="maximumSystemResidenceCv"', html)

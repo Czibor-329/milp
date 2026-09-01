@@ -22724,9 +22724,12 @@ function renderRunFailureCard({
     const message = matched ? issue.slice(matched[0].length) : issue;
     return `<li><code>${escapeHtml4(code)}</code><span>${escapeHtml4(message || issue)}</span></li>`;
   }).join("");
-  const informationType = cancelled ? "\u8FD0\u884C\u5DF2\u7EC8\u6B62" : deadlock ? "\u7B97\u6CD5\u6B7B\u9501" : validationIssues.length ? "MoveList \u6821\u9A8C\u5931\u8D25" : baselineError ? "Baseline \u5931\u8D25" : "\u8FD0\u884C\u5F02\u5E38";
+  const validationFailure = validationIssues.length > 0;
+  const informationType = cancelled ? "\u8FD0\u884C\u5DF2\u7EC8\u6B62" : deadlock ? "\u7B97\u6CD5\u6B7B\u9501" : validationFailure ? "MoveList \u6821\u9A8C\u5931\u8D25" : baselineError ? "Baseline \u5931\u8D25" : "\u8FD0\u884C\u5F02\u5E38";
   const primaryCode = deadlock?.deadlockCode || (validationIssues[0]?.match(/^\s*\[([A-Z0-9-]+)\]/)?.[1] ?? "RUN-ERR-001");
-  const validationSection = issueRows ? `
+  const summaryText = deadlock?.message || (cancelled ? "\u7528\u6237\u7EC8\u6B62\u4E86\u672C\u6B21\u8FD0\u884C" : errorMessage);
+  const summaryMarkup = validationFailure ? `<strong>${escapeHtml4(summaryText || "\u672A\u63D0\u4F9B\u9519\u8BEF\u8BF4\u660E")}</strong>` : `<span class="error-summary-meta">[${escapeHtml4(informationType)} <i aria-hidden="true">|</i> <code>${escapeHtml4(primaryCode)}</code>]</span><strong>${escapeHtml4(summaryText || "\u672A\u63D0\u4F9B\u9519\u8BEF\u8BF4\u660E")}</strong>`;
+  const validationSection = validationFailure ? "" : issueRows ? `
     <section class="error-detail-section" aria-labelledby="errorValidationTitle">
       <div class="error-detail-heading"><span id="errorValidationTitle">MoveList \u6821\u9A8C\u95EE\u9898</span><b>${validationIssues.length} \u9879</b></div>
       <ul class="error-issue-list">${issueRows}</ul>
@@ -22736,11 +22739,9 @@ function renderRunFailureCard({
       <div class="error-detail-heading"><span>Baseline</span><b>\u5931\u8D25</b></div>
       <p>${escapeHtml4(baselineError.replace(/^Baseline\s*失败：?\s*/, ""))}</p>
     </section>` : "";
-  const summaryText = deadlock?.message || (cancelled ? "\u7528\u6237\u7EC8\u6B62\u4E86\u672C\u6B21\u8FD0\u884C" : errorMessage);
   details.innerHTML = `
     <div class="error-summary-line">
-      <span class="error-summary-meta">[${escapeHtml4(informationType)} <i aria-hidden="true">|</i> <code>${escapeHtml4(primaryCode)}</code>]</span>
-      <strong>${escapeHtml4(summaryText || "\u672A\u63D0\u4F9B\u9519\u8BEF\u8BF4\u660E")}</strong>
+      ${summaryMarkup}
     </div>
     ${validationSection}
     ${baselineSection}
