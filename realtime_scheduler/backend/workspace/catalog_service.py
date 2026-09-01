@@ -400,7 +400,6 @@ def import_workspace_device(
 ) -> Tuple[Dict[str, Any], bool]:
     """导入设备 init；相同拓扑通过指纹复用已有设备及其测试集。"""
     device_data = extract_init_data(raw_device)
-    expand_pse300_loadlocks(device_data)
     fingerprint = _device_fingerprint(device_data)
     with _workspace_catalog_guard(path):
         catalog = _read_workspace_catalog_unlocked(path)

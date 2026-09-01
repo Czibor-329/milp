@@ -116,6 +116,29 @@ def test_backend_does_not_assemble_source_with_exec() -> None:
     assert violations == []
 
 
+def test_validation_and_recompute_do_not_call_algorithm_repository_state() -> None:
+    """输出校验和重算只能使用平台状态机，不能调用 alg 的状态或动作实现。"""
+    checked_paths = (
+        BACKEND_ROOT / "execution" / "algorithm_runtime.py",
+        BACKEND_ROOT / "execution" / "run_state.py",
+        BACKEND_ROOT / "execution" / "service.py",
+        BACKEND_ROOT / "validation" / "move_validation_core.py",
+    )
+    forbidden = (
+        "compile_problem",
+        "StandardAlgorithmRuntime",
+        "src.schedule.core",
+        "from src.schedule",
+    )
+    violations = [
+        f"{path.relative_to(ROOT)}: {item}"
+        for path in checked_paths
+        for item in forbidden
+        if item in path.read_text(encoding="utf-8-sig")
+    ]
+    assert violations == []
+
+
 def test_single_run_status_has_timestamp_after_module_split() -> None:
     """带 clientRunId 的前端单次运行应能完成状态登记和事件更新时间写入。"""
     run_id = "split-regression-run"

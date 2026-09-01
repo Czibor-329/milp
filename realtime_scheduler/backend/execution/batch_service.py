@@ -635,7 +635,6 @@ def build_workspace_batch_plan(
     strategy: str,
     options: Mapping[str, Any],
     *,
-    skip_validation: bool = False,
     hongye_check: bool = True,
     compatibility_mode: bool = True,
 ) -> Dict[str, Any]:
@@ -694,9 +693,6 @@ def build_workspace_batch_plan(
         "routes": routes,
         "rounds": rounds,
     }
-    if skip_validation:
-        # 仅在显式跳过校验时写入该键，避免改变 Baseline 指纹并使其全部失效。
-        plan["skipValidation"] = True
     return plan
 
 
@@ -829,7 +825,6 @@ def _execute_workspace_test_with_baseline(
     options: Mapping[str, Any],
     *,
     selected_plan: Optional[Mapping[str, Any]] = None,
-    skip_validation: bool = False,
     hongye_check: bool = True,
     skip_baseline: bool = False,
     compatibility_mode: bool = True,
@@ -888,7 +883,6 @@ def _execute_workspace_test_with_baseline(
     if strategy == "heuristic":
         plan = dict(selected_plan) if selected_plan is not None else build_workspace_batch_plan(
             device, test_case, "heuristic", options,
-            skip_validation=skip_validation,
             hongye_check=hongye_check,
             compatibility_mode=compatibility_mode,
         )
@@ -918,7 +912,6 @@ def _execute_workspace_test_with_baseline(
             baseline_result = _execute_plan_with_validation_limiter(
                 build_workspace_batch_plan(
                     device, test_case, "heuristic", options,
-                    skip_validation=skip_validation,
                     hongye_check=hongye_check,
                     compatibility_mode=compatibility_mode,
                 ),
@@ -934,7 +927,6 @@ def _execute_workspace_test_with_baseline(
 
     plan = dict(selected_plan) if selected_plan is not None else build_workspace_batch_plan(
         device, test_case, strategy, options,
-        skip_validation=skip_validation,
         hongye_check=hongye_check,
         compatibility_mode=compatibility_mode,
     )
@@ -956,7 +948,6 @@ def _execute_workspace_test_in_process(
     strategy: str,
     options: Mapping[str, Any],
     selected_plan: Mapping[str, Any],
-    skip_validation: bool,
     hongye_check: bool,
     skip_baseline: bool,
     compatibility_mode: bool = True,
@@ -978,7 +969,6 @@ def _execute_workspace_test_in_process(
         strategy,
         options,
         selected_plan=selected_plan,
-        skip_validation=skip_validation,
         hongye_check=hongye_check,
         skip_baseline=skip_baseline,
         compatibility_mode=compatibility_mode,
@@ -1080,7 +1070,6 @@ def _execute_workspace_test_batch(
     strategy: str,
     options: Mapping[str, Any],
     *,
-    skip_validation: bool = False,
     hongye_check: bool = True,
     skip_baseline: bool = False,
     maximum_workers: int = DEFAULT_BATCH_WORKERS,
@@ -1100,7 +1089,7 @@ def _execute_workspace_test_batch(
     validation_count = max(
         1, min(int(validation_workers), MAXIMUM_VALIDATION_WORKERS, len(tests)),
     )
-    validation_limited = bool(hongye_check) and not bool(skip_validation)
+    validation_limited = bool(hongye_check)
     started = time.perf_counter()
     process_device = {
         key: value
@@ -1157,7 +1146,6 @@ def _execute_workspace_test_batch(
         try:
             selected_plan = build_workspace_batch_plan(
                 device, test_case, strategy, options,
-                skip_validation=skip_validation,
                 hongye_check=hongye_check,
                 compatibility_mode=compatibility_mode,
             )
@@ -1168,7 +1156,6 @@ def _execute_workspace_test_batch(
                     strategy,
                     options,
                     selected_plan=selected_plan,
-                    skip_validation=skip_validation,
                     hongye_check=hongye_check,
                     skip_baseline=skip_baseline,
                     compatibility_mode=compatibility_mode,
@@ -1182,7 +1169,6 @@ def _execute_workspace_test_batch(
                     strategy,
                     options,
                     selected_plan,
-                    skip_validation,
                     hongye_check,
                     skip_baseline,
                     compatibility_mode,
@@ -1270,7 +1256,6 @@ def run_workspace_test_batch(
     strategy: str,
     options: Mapping[str, Any],
     *,
-    skip_validation: bool = False,
     hongye_check: bool = True,
     skip_baseline: bool = False,
     maximum_workers: int = DEFAULT_BATCH_WORKERS,
@@ -1288,7 +1273,6 @@ def run_workspace_test_batch(
         normalized_group,
         strategy,
         options,
-        skip_validation=skip_validation,
         hongye_check=hongye_check,
         skip_baseline=skip_baseline,
         maximum_workers=maximum_workers,
@@ -1344,7 +1328,6 @@ def start_workspace_test_batch(
     strategy: str,
     options: Mapping[str, Any],
     *,
-    skip_validation: bool = False,
     hongye_check: bool = True,
     skip_baseline: bool = False,
     maximum_workers: int = DEFAULT_BATCH_WORKERS,
@@ -1361,7 +1344,7 @@ def start_workspace_test_batch(
     validation_count = max(
         1, min(int(validation_workers), MAXIMUM_VALIDATION_WORKERS, len(tests)),
     )
-    validation_limited = bool(hongye_check) and not bool(skip_validation)
+    validation_limited = bool(hongye_check)
     initial = {
         "batchId": batch_id,
         "ok": True,
@@ -1420,7 +1403,6 @@ def start_workspace_test_batch(
                 normalized_group,
                 strategy,
                 options,
-                skip_validation=skip_validation,
                 hongye_check=hongye_check,
                 skip_baseline=skip_baseline,
                 maximum_workers=worker_count,

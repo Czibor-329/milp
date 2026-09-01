@@ -65,6 +65,11 @@ PSE300 真实批量门禁在固定性能机设置
 `tests/performance/test_pse300_batch_performance.py`。它使用“公司单腔示例集-130”、
 平台校验、跳过 Baseline 和生产四进程路径，完整墙钟必须不超过 260 秒。
 
+平台状态推进门禁运行
+`tests/performance/test_state_transition_performance.py`，它用 1000 个 Move 的
+确定性时间线计量纯平台 MoveList 状态推进 P95，必须不超过 500 毫秒；该用例属于
+PR 门禁与发布门禁，不达预算不得发布。
+
 ## 基准与报告
 
 基准报告至少包含：提交号、基准版本、运行时间、固定机器配置、夹具清单、设备数、测试数、文件数、总字节数、P50/P95/P99、峰值内存、响应体积、文件访问计数和失败原因。报告应保留历史结果以绘制趋势，但不得把被 `.gitignore` 排除的真实运行数据提交到仓库。
@@ -75,6 +80,7 @@ PSE300 真实批量门禁在固定性能机设置
 
 ```powershell
 python -m pytest tests/performance/test_storage_performance_contracts.py -q
+python -m pytest tests/performance/test_state_transition_performance.py -q
 python scripts/run_performance_suite.py --profile small --enforce
 python scripts/run_performance_suite.py --profile medium --migration --enforce
 python scripts/run_performance_suite.py --profile medium --baseline previous.json --enforce

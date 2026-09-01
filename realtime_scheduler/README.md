@@ -32,9 +32,12 @@
 
 独立交付的标准算法包只从算法仓库的 `other_alg/` 子目录加载。可以用
 `CT_ALGORITHM_ROOT` 整体调整算法仓库位置，但不能另行指定策略目录。
-只有打包算法时，多轮重算由算法包自带的重算桥接器根据
-`MoveStates/RemoveList` 恢复状态；本地完整算法仓库存在时仍使用原有
-`src.schedule.core` 状态机做平台侧校验。
+算法输出返回平台后，多轮重算、现场快照和 MoveList 校验统一由平台本地状态机
+根据 `MoveStates/RemoveList` 维护；无论本地完整算法仓库是否存在，都不会调用
+`src.schedule.core`、`Machine` 或算法动作实现参与校验。
+跨代重算会用新一代的 Route、Recipe 与 WAC 触发规则刷新校验元数据，但 PM 的
+`StateVariables`、清洗计数和在机物料属于持续运行状态，必须原样保留，不能被新
+一代初始化数据覆盖。
 
 完整开发环境启动：
 
@@ -66,16 +69,16 @@ npm run build
 
 - `启发式`：使用默认实时排程器。
 - `LoadLock 管理器`：Heuristic 默认共用 Petri-ETA 管理器；上层策略只决定发哪片和工艺顺序，管理器在 Petri 安全候选内按动态完成时刻绑定 LA/LB。
-- `other_alg 标准算法`：自动扫描算法仓库 `alg/other_alg/<算法名>`，通过包内正式 `CT.infer.scheduler.init/update`（或公司端 `src.infer.scheduler.init/update` 布局）入口运行。每次重算前使用算法仓库的状态回放能力生成全量物料、机台、机器人快照以及 `RemoveList`，支持连续多轮重算；结果中的 `updates` 保留每次实际发送的数据。
+- `other_alg 标准算法`：自动扫描算法仓库 `alg/other_alg/<算法名>`，通过包内正式 `CT.infer.scheduler.init/update`（或公司端 `src.infer.scheduler.init/update` 布局）入口运行。每次重算前由平台状态机生成全量物料、机台、机器人快照以及 `RemoveList`，支持连续多轮重算；结果中的 `updates` 保留每次实际发送的数据。
 - 外部策略只通过扫描 `alg/other_alg/<算法名>` 检测，不支持在前端上传或直接导入算法文件。
-- 输出校验默认开启并默认选择 `HongYe Check（推荐）`：服务端先完整记录
-  `AlgInit`、`AlgSchedule`、`AlgUpdateMove`、`AlgOutput` 日志，再一次性交给
-  原始 CheckMinLog/`MoveStateSim.exe` 的 `module-parallel` 校验入口；取消 HongYe
-  后使用平台内置校验器。开始运行区域的“兼容模式”默认勾选，平台按 HongYe
-  `module-parallel` 规则让各 Module 并行推进、同 Module 串行推进，Move 等待其
-  本代 `PreMoveID` 实际结束后才开始；缺失的开关门动作会按设备语义自动补齐。
-  所有算法都会把实际推进通知记录为 `AlgUpdateMove`。勾选“跳过校验”时两种
-  校验器都不运行，结果标记为 `skipped`；单次与批量运行语义一致。
+- 输出校验默认开启并默认选择 `HongYe Check（推荐）`：平台在每次状态推进时
+  先用自己的 MoveList 状态机执行一次校验，再完整记录 `AlgInit`、
+  `AlgSchedule`、`AlgUpdateMove`、`AlgOutput` 日志，交给原始
+  CheckMinLog/`MoveStateSim.exe` 的 `module-parallel` 校验入口作为二次校验；
+  取消 HongYe 后仍会保留平台状态推进校验。开始运行区域的“兼容模式”默认勾选，
+  平台按 HongYe `module-parallel` 规则让各 Module 并行推进、同 Module 串行推进，
+  Move 等待其本代 `PreMoveID` 实际结束后才开始；缺失的开关门动作会按设备语义
+  自动补齐。所有算法都会把实际推进通知记录为 `AlgUpdateMove`。
 
 本地算法列表不在前端写死，而是由算法仓库根目录的 `algorithms.json` 控制。
 服务会在每次健康检查时重读清单；配置中的算法还必须存在于

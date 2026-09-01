@@ -19,7 +19,6 @@ def _settings(**overrides) -> dict:
         "compatibilityMode": True,
         "hongYeCheck": True,
         "skipBaseline": True,
-        "skipValidation": False,
         "maximumWorkers": 4,
         "validationWorkers": 2,
     }

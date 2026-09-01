@@ -93,7 +93,12 @@ class ValidationErrorCode(str, Enum):
     LOADLOCK_CONTENT_INVALID = "MVL-LL-003"
     SWAP_INPUT_INVALID = "MVL-SWAP-001"
     SWAP_STATE_INVALID = "MVL-SWAP-002"
-    CLEAN_WAC_MISSING = "CLEAN.WAC_MISSING"
+    CLEAN_WAC_MISSING = "MVL-CLEAN-WAC-MISSING"
+    CLEAN_WAC_EARLY = "MVL-CLEAN-WAC-EARLY"
+    CLEAN_PRE_MISSING = "MVL-CLEAN-PRE-MISSING"
+    CLEAN_DUMMY_MISSING = "MVL-CLEAN-DUMMY-MISSING"
+    CLEAN_POST_MISSING = "MVL-CLEAN-POST-MISSING"
+    CLEAN_RECIPE_INVALID = "MVL-CLEAN-RECIPE-INVALID"
 
 
 class DoorState(str, Enum):
@@ -219,6 +224,9 @@ class MachineState:
     process_recipe_weights: Dict[Tuple[str, str], Dict[str, float]] = field(default_factory=dict)
     clean_task_state_variables: Dict[str, Set[str]] = field(default_factory=dict)
     clean_wac_trigger_rules: Dict[Tuple[str, str], Tuple[Tuple[str, str, float, str], ...]] = field(default_factory=dict)
+    clean_obligations: Dict[Tuple[str, str, str], Tuple[str, int, Tuple[str, ...]]] = field(default_factory=dict)
+    completed_clean_counts: Dict[Tuple[str, str, str], int] = field(default_factory=dict)
+    product_clean_entries: Set[Tuple[str, str]] = field(default_factory=set)
 
     @classmethod
     def from_sources(
@@ -238,6 +246,7 @@ class MachineState:
         state.process_recipe_weights = _process_recipe_weights(payload)
         state.clean_task_state_variables = _clean_task_state_variables(payload)
         state.clean_wac_trigger_rules = _clean_wac_trigger_rules(payload)
+        state.clean_obligations = _clean_obligation_specs(payload)
 
         for name, config in station_configs.items():
             task_station = task_stations.get(name)
@@ -330,6 +339,32 @@ class MachineState:
     def clone(self) -> "MachineState":
         """返回不共享可变状态的整机快照。"""
         return deepcopy(self)
+
+    def refresh_validation_metadata(
+        self,
+        update_params: Mapping[str, Any],
+    ) -> None:
+        """按下一代标准 update 刷新校验元数据，但保留持续物理状态。
+
+        重算代际切换后，PM 的 ``StateVariables``、槽位占用和机器人状态是已经
+        发生 Move 的事实，不能被新 update 中的初始化值重置；但 Route/Recipe
+        可能新增 PJob，因此 WAC 触发条件、清洁完成后的计数重置规则和 Recipe
+        权重必须从下一代 update 重新解析。
+        """
+        payload = _initial_payload(update_params)
+        self.process_recipe_weights = _process_recipe_weights(payload)
+        self.clean_task_state_variables = _clean_task_state_variables(payload)
+        self.clean_wac_trigger_rules = _clean_wac_trigger_rules(payload)
+        self.clean_obligations = _clean_obligation_specs(payload)
+
+        # 新一代可能首次声明某个状态变量。已有变量是已执行 Move 的累计事实，
+        # 只能补缺，不能用 update 初值覆盖。
+        for station_name, config in _mapping(payload.get("Stations")).items():
+            station = self.stations.get(station_name)
+            if station is None:
+                continue
+            for variable_name, value in _station_state_variables(config).items():
+                station.state_variables.setdefault(variable_name, value)
 
 
 @dataclass
@@ -580,6 +615,9 @@ def validate_move_list(
         if error:
             return [error]
     _finish_until(scheduled, float("inf"))
+    clean_issue = _final_clean_obligation_issue(state)
+    if clean_issue:
+        return [clean_issue]
     return []
 
 
@@ -1461,31 +1499,10 @@ def _start_process(state: MachineState, move: Mapping[str, Any], end_time: float
     if station is None:
         return _issue(move, ValidationErrorCode.STATION_UNKNOWN, f"未知站点 {station_name or '<empty>'}")
     start_time = _start_time(move)
-    if material_ids and not move.get("CleanTaskName"):
-        recipe_name = str(
-            move.get("ProcessRecipe") or move.get("RecipeName") or ""
-        ).strip()
-        trigger_rules = state.clean_wac_trigger_rules.get(
-            (station.name, recipe_name),
-        ) or state.clean_wac_trigger_rules.get((station.name, ""), ())
-        pjob_names = _values(move, "PJobName")
-        pjob_name = str(pjob_names[0]) if pjob_names else ""
-        for rule_pjob_name, variable_name, lower, clean_task_name in trigger_rules:
-            if rule_pjob_name and rule_pjob_name != pjob_name:
-                continue
-            current_value = float(station.state_variables.get(variable_name, 0.0))
-            if current_value + TIME_TOLERANCE < lower:
-                continue
-            display_value = (
-                str(int(current_value))
-                if current_value.is_integer()
-                else str(current_value)
-            )
-            return _issue(
-                move,
-                ValidationErrorCode.CLEAN_WAC_MISSING,
-                f"{clean_task_name} 到期后仍开始产品工艺 count={display_value} PJob={pjob_name}",
-            )
+    clean_task_name = str(move.get("CleanTaskName") or "").strip()
+    clean_issue = _validate_clean_start(state, station, move, material_ids, clean_task_name)
+    if clean_issue:
+        return clean_issue
     if station.door is not DoorState.CLOSED:
         return _issue(move, ValidationErrorCode.STATION_DOOR_STATE_INVALID, f"{station.name} 加工或清洁时必须关门")
     if not _available(station.door_busy_until, start_time) or not _available(station.transfer_busy_until, start_time):
@@ -1527,6 +1544,9 @@ def _start_process(state: MachineState, move: Mapping[str, Any], end_time: float
             _set_slot(slot, SlotPhase.CLEANED if material is None else SlotPhase.COMPLETED, material)
             if material is not None:
                 slot.material_process_count += 1
+                pjob_name = str(material.pjob_name or "").strip()
+                if pjob_name:
+                    state.product_clean_entries.add((pjob_name, station.name))
         recipe_name = str(
             move.get("ProcessRecipe")
             or move.get("RecipeName")
@@ -1541,6 +1561,22 @@ def _start_process(state: MachineState, move: Mapping[str, Any], end_time: float
                 station.state_variables.get(variable_name, 0.0) + increment
             )
         clean_task_name = str(move.get("CleanTaskName") or "")
+        if clean_task_name:
+            for pjob_name in _values(move, "PJobName"):
+                clean_key = (str(pjob_name).strip(), station.name, clean_task_name)
+                obligation = state.clean_obligations.get(clean_key)
+                if not clean_key[0] or obligation is None:
+                    continue
+                _phase, required_count, _recipes = obligation
+                increment = (
+                    len(material_ids)
+                    if required_count > 0 and material_ids
+                    else int(move.get("IsLastCleanTaskMove") is True)
+                )
+                if increment:
+                    state.completed_clean_counts[clean_key] = (
+                        state.completed_clean_counts.get(clean_key, 0) + increment
+                    )
         if clean_task_name and move.get("IsLastCleanTaskMove") is True:
             for variable_name in state.clean_task_state_variables.get(
                 clean_task_name,

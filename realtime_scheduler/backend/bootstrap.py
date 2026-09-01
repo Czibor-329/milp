@@ -145,7 +145,6 @@ from realtime_scheduler.backend.execution.plan_builder import (
     build_round_update,
     build_route,
     build_task_alg_init,
-    expand_pse300_loadlocks,
     extract_init_data,
 )
 from realtime_scheduler.backend.execution.recompute_state import (

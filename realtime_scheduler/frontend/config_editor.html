@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>调度平台</title>
   <link rel="stylesheet" href="/assets/katex.min.css?v=1.4.4">
-  <link rel="stylesheet" href="/assets/config_editor.css?v=1.5.25">
+  <link rel="stylesheet" href="/assets/config_editor.css?v=1.5.26">
 </head>
 <body>
   <a class="skip-link" href="#mainContent">跳到主要内容</a>
@@ -40,7 +40,7 @@
       <div class="sidebar-footer">
         <span class="sidebar-footer-label">系统状态</span>
         <div class="service-pill" id="serviceState">本地服务</div>
-        <span class="frontend-version">V1.5.25</span>
+        <span class="frontend-version">V1.5.26</span>
       </div>
     </aside>
 
@@ -550,10 +550,6 @@
           <span class="run-setting-option-main"><input id="skipBaselineInput" type="checkbox" checked><span>跳过 Baseline</span></span>
           <small>Baseline 使用 Heuristic 结果作为性能基线；勾选后跳过基线计算。</small>
         </label>
-        <label class="run-setting-option" for="skipValidationInput">
-          <span class="run-setting-option-main"><input id="skipValidationInput" type="checkbox"><span>跳过校验</span></span>
-          <small>不执行任何输出校验，仅用于调试。</small>
-        </label>
         <label class="run-setting-option" for="batchParallelismInput">
           <span class="run-setting-option-main"><span>算法并行数</span><input id="batchParallelismInput" class="run-setting-number" type="number" min="1" max="30" step="1" value="4" inputmode="numeric"></span>
           <small>同时执行的批量算法任务数；高配电脑可适当提高，范围 1~30。</small>
@@ -748,6 +744,6 @@
     </aside>
   </dialog>
 
-  <script type="module" src="/assets/config_editor.js?v=1.5.25"></script>
+  <script type="module" src="/assets/config_editor.js?v=1.5.26"></script>
 </body>
 </html>

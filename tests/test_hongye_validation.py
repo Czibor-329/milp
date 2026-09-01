@@ -148,7 +148,7 @@ def test_frontend_moves_run_options_into_settings_dialog() -> None:
     assert "模块并行推进；按 PreMoveID 延后动作；缺失的开关门动作自动补齐。" in template
     assert "HongYe Check <em>（推荐）</em>" in template
     assert "Baseline 使用 Heuristic 结果作为性能基线" in template
-    assert "不执行任何输出校验，仅用于调试。" in template
+    assert 'id="skipValidationInput"' not in template
     assert 'id="batchParallelismInput"' in template
     assert 'id="batchParallelismInput" class="run-setting-number" type="number" min="1" max="30"' in template
     assert 'id="validationParallelismInput"' in template

@@ -102,6 +102,15 @@ def _remove_released_materials_from_update(
     update_params["ControlJobs"] = control_jobs
 
 
+def _state_advance_error_message(issue: Any) -> str:
+    """把平台或补充校验的问题统一为状态推进失败的用户错误格式。"""
+    text = str(issue or "存在未分类错误").strip()
+    if text.startswith("[") and "]" in text:
+        code, detail = text[1:].split("]", 1)
+        return f"状态推进失败|{code}|{detail.lstrip('： ').strip()}"
+    return f"状态推进失败|MVL-STATE-UNKNOWN|{text}"
+
+
 class MoveListValidationError(RuntimeError):
     """携带原始算法输出和诊断甘特图数据的 MoveList 校验异常。"""
 
@@ -278,28 +287,6 @@ def _raise_if_single_run_cancelled() -> None:
     cancel_event = _SINGLE_RUN_CANCEL_EVENTS.get(str(monitor.get("runId") or ""))
     if cancel_event is not None and cancel_event.is_set():
         raise UserRunCancelledError("运行已取消")
-
-
-def _compile_external_validation_problem(
-    tool_topology: Mapping[str, Any],
-    update_params: Mapping[str, Any],
-) -> Any:
-    """为外部算法输出构造不重复合成 Dummy 的平台校验 Problem。
-
-    标准外部算法已经消费 ``PreDummyClean`` 并返回具体 Dummy Route。平台这里只
-    需要产品 Route 的时长与驻留约束；在校验副本中清空 ``PrePJob``，可阻止
-    内置编译器再次按跨轮产品作业合成 Dummy PJob，同时不修改真正发送给算法、
-    保存为下一轮基线的标准 update。
-    """
-    validation_update = deepcopy(dict(update_params))
-    for process_job in validation_update.get("ProcessJobs") or []:
-        if not isinstance(process_job, dict):
-            continue
-        origin_route = process_job.get("OriginRoute")
-        if isinstance(origin_route, dict):
-            origin_route["PrePJob"] = {}
-    return compile_problem(tool_topology, validation_update)
-
 
 
 class LoggedPlanError(RuntimeError):
@@ -682,47 +669,15 @@ def _schedule_log_info(device: Mapping[str, Any], update: Mapping[str, Any]) -> 
     return info
 
 
-def _build_algorithm_recompute_update(
-    runtime: StandardAlgorithmRuntime,
-    new_round_update: Mapping[str, Any],
-    requested_time: float,
-    projected_state: MachineState,
-    move_states: Sequence[Mapping[str, Any]] = (),
-    previous_output: Optional[Mapping[str, Any]] = None,
-) -> Dict[str, Any]:
-    """按原始重算时刻生成标准 update，并携带真实 Move 状态通知。"""
-    update = merge_algorithm_update(
-        runtime.current_update,
-        new_round_update,
-    )
-    apply_machine_state_to_update(update, projected_state, requested_time)
-    update["MoveStates"] = [
-        deepcopy(dict(notification))
-        for notification in move_states
-    ]
-    update["RemoveList"] = [
-        int(move["MoveID"])
-        for move in runtime.current_plan
-        if isinstance(move.get("MoveID"), int)
-        and float(move.get("StartTime") or 0.0)
-        >= float(requested_time) - TIME_TOLERANCE
-    ]
-    if previous_output is not None:
-        # 现场投影会重建 Material 字段；DummyReturnInfo 必须最后回填，避免刚恢复的
-        # Route/PJobName/TaskID 又被状态机中上一份空值覆盖。
-        restore_dummy_routes_from_algorithm_output(update, previous_output)
-    return update
-
-
-def _build_packaged_algorithm_recompute_update(
-    runtime: PackagedAlgorithmRuntime,
+def _build_platform_recompute_update(
+    runtime: PlatformMoveListRuntime,
     new_round_update: Mapping[str, Any],
     requested_time: float,
     move_states: Sequence[Mapping[str, Any]],
     projected_state: Optional[MachineState] = None,
     previous_output: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """用平台物理快照为算法包构造下一轮标准 update。"""
+    """用平台物理快照为下一轮算法调用构造标准 update。"""
     update = merge_algorithm_update(
         runtime.current_update,
         new_round_update,
@@ -736,7 +691,7 @@ def _build_packaged_algorithm_recompute_update(
         deepcopy(dict(notification))
         for notification in move_states
     ]
-    _apply_packaged_running_resource_times(
+    _apply_running_resource_times(
         update,
         runtime.current_plan,
         requested_time,
@@ -756,15 +711,15 @@ def _build_packaged_algorithm_recompute_update(
     return update
 
 
-def _apply_packaged_running_resource_times(
+def _apply_running_resource_times(
     update: Dict[str, Any],
     moves: Sequence[Mapping[str, Any]],
     current_time: float,
     move_states: Sequence[Mapping[str, Any]],
 ) -> None:
-    """把仍在运行的 Move 剩余时长写入算法包要求的资源快照。
+    """把仍在运行的 Move 剩余时长写入下一轮调用的资源快照。
 
-    标准算法包会用 ``MoveStates`` 恢复动作语义，同时要求关联 Robot/Station
+    标准接口会用 ``MoveStates`` 恢复动作语义，同时要求关联 Robot/Station
     的 ``TimeToAvailable`` 作为运行中动作结束时间证据。这里只写协议资源
     占用；物料和槽位状态由平台状态记录器统一提供。
     """
@@ -1018,18 +973,21 @@ def _planned_events(
                 ended.add(move_id)
 
 
-def advance_packaged_algorithm_to_update(
-    runtime: PackagedAlgorithmRuntime,
+def advance_platform_move_list_to_update(
+    runtime: PlatformMoveListRuntime,
     cutoff: float,
 ) -> List[Dict[str, Any]]:
-    """从 MoveList 时间线生成算法包重算所需的 Running/Done 通知。
+    """从 MoveList 时间线生成重算边界前的全部 Running/Done 通知。
 
     参数:
-        runtime: 只保存标准协议事实的打包算法运行时。
+        runtime: 只保存标准协议事实的平台 MoveList 运行时。
         cutoff: 本轮原始重算时刻。
 
     返回:
-        按计划事件顺序排列、严格发生在重算边界内的 MoveState 通知。
+        按计划事件顺序排列、严格发生在重算边界内的完整 MoveState 通知。
+        调用方写入 ``AlgUpdateMove`` 日志时必须保留完整集合，使 HongYe 在
+        下一次 ``AlgSchedule`` 中能恢复已经完成的 PreClean/Dummy Clean；发给
+        只接受在途 Move 的外部算法前，由调用方另行筛选。
     """
     cutoff = max(float(cutoff), runtime.state_time)
     notifications: List[Dict[str, Any]] = []
@@ -1062,15 +1020,7 @@ def advance_packaged_algorithm_to_update(
             track_reservations=False,
         )
     runtime.advance_to(cutoff)
-    running_ids = started - finished
-    return [
-        notification
-        for notification in notifications
-        if (
-            notification.get("MoveState") == MoveStateReplay.RUNNING
-            and int(notification["MoveID"]) in running_ids
-        )
-    ]
+    return notifications
 
 
 def _running_move_states(
@@ -1386,8 +1336,8 @@ def _required_recovery_ids(
     return required
 
 
-def advance_to_algorithm_update(
-    runtime: StandardAlgorithmRuntime,
+def advance_to_platform_update(
+    runtime: PlatformMoveListRuntime,
     cutoff: float,
     recorded_events: Optional[List[Dict[str, Any]]] = None,
 ) -> None:

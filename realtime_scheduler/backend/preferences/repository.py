@@ -31,13 +31,11 @@ _BOOLEAN_FIELDS = (
     "compatibilityMode",
     "hongYeCheck",
     "skipBaseline",
-    "skipValidation",
 )
 _DEFAULT_RUN_SETTINGS = {
     "compatibilityMode": True,
     "hongYeCheck": True,
     "skipBaseline": True,
-    "skipValidation": False,
     "maximumWorkers": DEFAULT_BATCH_WORKERS,
     "validationWorkers": DEFAULT_VALIDATION_WORKERS,
 }

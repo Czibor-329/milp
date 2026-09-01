@@ -18,7 +18,6 @@ def _execute_standard_algorithm(
     algorithm_id: Optional[str] = None,
     *,
     builtin_strategy: Optional[str] = None,
-    skip_validation: bool = False,
 ) -> Dict[str, Any]:
     """通过同一次标准 ``init/update`` 会话执行首排和多次实时重算。
 
@@ -27,11 +26,8 @@ def _execute_standard_algorithm(
     """
     if (algorithm_id is None) == (builtin_strategy is None):
         raise ValueError("标准算法执行必须且只能选择一种算法来源")
-    use_hongye_validation = (
-        not skip_validation and bool(plan.get("hongYeCheck", True))
-    )
+    use_hongye_validation = bool(plan.get("hongYeCheck", True))
     compatibility_mode = bool(plan.get("compatibilityMode", True))
-    skip_platform_validation = skip_validation or use_hongye_validation
     round_count = len(rounds)
     if builtin_strategy is not None:
         if not BUILTIN_ALGORITHM_AVAILABLE:
@@ -133,33 +129,21 @@ def _execute_standard_algorithm(
         except Exception as error:
             _report_run_event("validation-1", "校验 output #1", "failed", str(error))
             raise
-        uses_full_platform_runtime = BUILTIN_ALGORITHM_AVAILABLE
         runtime: Any
         try:
-            if uses_full_platform_runtime:
-                runtime = StandardAlgorithmRuntime(
-                    plan["device"],
-                    prepared_first_update,
-                    output,
-                    skip_validation=skip_platform_validation,
-                    compatibility_mode=compatibility_mode,
-                )
-                state_source = "realtime_scheduler.backend.validation.move_validation.MachineState"
-            else:
-                runtime = PackagedAlgorithmRuntime(
-                    prepared_first_update,
-                    output,
-                    skip_validation=skip_platform_validation,
-                    compatibility_mode=compatibility_mode,
-                )
-                state_source = "realtime_scheduler.backend.validation.move_validation.MachineState"
+            runtime = PlatformMoveListRuntime(
+                prepared_first_update,
+                output,
+            compatibility_mode=compatibility_mode,
+            )
+            state_source = "realtime_scheduler.backend.validation.move_validation.MachineState"
         except Exception as error:
             _report_run_event("validation-1", "校验 output #1", "failed", str(error))
             raise
         _report_run_event(
             "validation-1",
-            "校验 output #1" if not skip_validation else "跳过校验 output #1",
-            "succeeded" if not skip_validation else "skipped",
+            "状态推进校验 #1",
+            "succeeded",
         )
         reproduction.add("AlgOutput", output)
         summaries.append({
@@ -202,18 +186,10 @@ def _execute_standard_algorithm(
         ) -> Tuple[set[Any], set[str]]:
             """执行一次定时或补片重算，并更新当前算法代次。"""
             nonlocal output
-            if uses_full_platform_runtime:
-                notifications: List[Dict[str, Any]] = []
-                advance_to_algorithm_update(
-                    runtime,
-                    requested_time,
-                    notifications,
-                )
-            else:
-                notifications = advance_packaged_algorithm_to_update(
-                    runtime,
-                    requested_time,
-                )
+            notifications = advance_platform_move_list_to_update(
+                runtime,
+                requested_time,
+            )
             cycle_material_ids = (
                 _completed_cycle_material_ids(
                     runtime.current_update,
@@ -242,11 +218,6 @@ def _execute_standard_algorithm(
                     runtime.current_update,
                     cycle_material_ids,
                 )
-                if hasattr(runtime, "problem"):
-                    runtime.problem.wafers = [
-                        wafer for wafer in runtime.problem.wafers
-                        if getattr(wafer, "mat_id", None) not in cycle_material_ids
-                    ]
                 for cycle_state in completed_cycles:
                     empty_ports.add(cycle_state.load_port)
                     build_state.next_slot_by_port[cycle_state.load_port] = 0
@@ -285,39 +256,28 @@ def _execute_standard_algorithm(
                 requested_time,
                 build_state,
             )
-            if uses_full_platform_runtime:
-                reused_slot_material_ids = release_reused_source_slots(
-                    projected_state,
-                    new_round_update,
+            reused_slot_material_ids = release_reused_source_slots(
+                projected_state,
+                new_round_update,
+            )
+            if reused_slot_material_ids:
+                released_ids.update(reused_slot_material_ids)
+                _remove_released_materials_from_update(
+                    runtime.current_update,
+                    reused_slot_material_ids,
                 )
-                if reused_slot_material_ids:
-                    released_ids.update(reused_slot_material_ids)
-                    _remove_released_materials_from_update(
-                        runtime.current_update,
-                        reused_slot_material_ids,
-                    )
-                protocol_move_states = (
+            update = _build_platform_recompute_update(
+                runtime,
+                new_round_update,
+                requested_time,
+                (
                     notifications
                     if builtin_strategy is not None
                     else _running_move_states(notifications)
-                )
-                update = _build_algorithm_recompute_update(
-                    runtime,
-                    new_round_update,
-                    requested_time,
-                    projected_state,
-                    protocol_move_states,
-                    output,
-                )
-            else:
-                update = _build_packaged_algorithm_recompute_update(
-                    runtime,
-                    new_round_update,
-                    requested_time,
-                    notifications,
-                    projected_state=projected_state,
-                    previous_output=output,
-                )
+                ),
+                projected_state=projected_state,
+                previous_output=output,
+            )
             update_snapshots.append(deepcopy(update))
             reproduction.add(
                 "AlgSchedule",
@@ -387,26 +347,14 @@ def _execute_standard_algorithm(
             )
             try:
                 _ensure_algorithm_output(output, update)
-                if uses_full_platform_runtime:
-                    runtime.replace_plan(
-                        update,
-                        output,
-                        requested_time,
-                        requested_time,
-                        reason,
-                        initial_state=projected_state,
-                        committed_moves=committed_moves,
-                        compile_for_validation=builtin_strategy is not None,
-                    )
-                else:
-                    runtime.replace_plan(
-                        update,
-                        output,
-                        requested_time,
-                        reason,
-                        committed_moves,
-                        initial_state=projected_state,
-                    )
+                runtime.replace_plan(
+                    update,
+                    output,
+                    requested_time,
+                    reason,
+                    committed_moves,
+                    initial_state=projected_state,
+                )
             except Exception as error:
                 _report_run_event(
                     f"validation-{recompute_index}",
@@ -417,12 +365,8 @@ def _execute_standard_algorithm(
                 raise
             _report_run_event(
                 f"validation-{recompute_index}",
-                (
-                    f"校验 output #{recompute_index}"
-                    if not skip_validation
-                    else f"跳过校验 output #{recompute_index}"
-                ),
-                "succeeded" if not skip_validation else "skipped",
+                f"状态推进校验 #{recompute_index}",
+                "succeeded",
             )
             reproduction.add("AlgOutput", output, requested_time)
             summaries.append({
@@ -611,14 +555,10 @@ def _execute_standard_algorithm(
         "totalElapsedMs": total_ms,
         "makespan": makespan,
         "moveCount": len(combined_output["MoveList"]),
-        "validation": "skipped" if skip_validation else "passed",
+        "validation": "passed",
         "compatibilityMode": compatibility_mode,
         "validationEngine": (
-            "skipped"
-            if skip_validation
-            else "hongye"
-            if use_hongye_validation
-            else "platform"
+            "platform+hongye" if use_hongye_validation else "platform"
         ),
         "logs": logs,
         "updates": update_snapshots,
@@ -654,7 +594,6 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
     started = time.perf_counter()
     plan = deepcopy(dict(raw_plan))
     plan["device"] = extract_init_data(plan.get("device"))
-    expand_pse300_loadlocks(plan["device"])
     plan["device"] = build_task_alg_init(
         plan["device"],
         [row for row in (plan.get("routes") or []) if isinstance(row, Mapping)],
@@ -742,7 +681,6 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
 
     first_update = build_round_update(plan, rounds[0], 0.0, build_state)
     reproduction.add("AlgSchedule", _schedule_log_info(plan["device"], first_update))
-    skip_validation = bool(plan.get("skipValidation"))
     if other_algorithm_id is not None:
         return _execute_standard_algorithm(
             plan,
@@ -753,7 +691,6 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
             reproduction,
             started,
             other_algorithm_id,
-            skip_validation=skip_validation,
         )
     return _execute_standard_algorithm(
         plan,
@@ -764,7 +701,6 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
         reproduction,
         started,
         builtin_strategy=strategy,
-        skip_validation=skip_validation,
     )
 
 def validate_reproduction_log(
@@ -804,9 +740,8 @@ def validate_reproduction_log(
     prefix_moves, recompute_points = (
         _reproduction_history_before_current_output(entries[:output_index])
     )
-    message = (
-        "HongYe MoveList 状态校验失败："
-        + (issues[0] if issues else "存在未分类错误")
+    message = _state_advance_error_message(
+        issues[0] if issues else "HongYe 存在未分类错误"
     )
     raise LoggedPlanError(
         message,
@@ -833,10 +768,7 @@ def execute_plan(
     """
     _set_run_monitor_scope(str(raw_plan.get("strategy") or "heuristic"))
     _raise_if_single_run_cancelled()
-    use_hongye_validation = (
-        not bool(raw_plan.get("skipValidation"))
-        and bool(raw_plan.get("hongYeCheck", True))
-    )
+    use_hongye_validation = bool(raw_plan.get("hongYeCheck", True))
     reproduction = ReproductionLog()
     reproduction.add("Input", [deepcopy(dict(raw_plan))])
     cpu_started = time.thread_time() if hasattr(time, "thread_time") else time.process_time()

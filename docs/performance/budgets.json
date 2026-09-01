@@ -14,6 +14,7 @@
     "singleTestDeleteMaximum": 300,
     "testGroupDeleteMaximum": 300,
     "singleRunPreparationP95": 300,
+    "stateTransition1000MovesP95": 500,
     "batch130Maximum": 260000,
     "batchStatusPollIntervalMinimum": 1000,
     "singleTestSaveP95": 300,

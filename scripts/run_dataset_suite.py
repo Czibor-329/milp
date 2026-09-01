@@ -194,7 +194,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         str(args.group or ""),
         args.strategy,
         {},
-        skip_validation=False,
         hongye_check=args.hongye_check,
         skip_baseline=not args.with_baseline,
         maximum_workers=args.workers,

@@ -61,7 +61,7 @@ def test_terminal_suite_uses_builtin_validation_and_selected_limit() -> None:
         ])
 
     assert exit_code == 0
-    assert captured["skip_validation"] is False
+    assert "skip_validation" not in captured
     assert captured["hongye_check"] is False
     assert captured["skip_baseline"] is True
     assert captured["test_ids"] == ["test-1"]

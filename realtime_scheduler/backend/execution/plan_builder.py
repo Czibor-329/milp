@@ -1,7 +1,7 @@
 """调度请求数据建模。
 
-本模块负责设备初始化数据归一化、任务级 AlgInit 裁剪、PSE300 LoadLock 扩展、
-Route/Recipe 构造以及各轮 CJob/PJob 请求展开。它不执行调度算法，也不处理 HTTP
+本模块负责设备初始化数据归一化、任务级 AlgInit 裁剪、Route/Recipe 构造以及各轮
+CJob/PJob 请求展开。它不执行调度算法，也不处理 HTTP
 或工作区持久化。
 """
 
@@ -24,12 +24,6 @@ DUMMY_MATERIAL_LIMIT_LEVEL = 10000
 DUMMY_MATERIAL_USAGE_MIX = 2
 CJOB_TYPE_VALUES = {"NormalLot": 0, "HighestLot": 2, "HigherLot": 3}
 TASK_MODE_VALUES = {"Smart": 0, "Pipeline": 1, "Sequential": 2, "Concurrent": 3}
-PSE300_REQUIRED_STATIONS = {
-    "PM1", "PM2", "PM3", "PM4", "Buffer1", "Buffer2", "Buffer3", "Buffer4",
-    "LA", "LB", "LP1", "LP2", "LP3", "LP4",
-}
-PSE300_REQUIRED_ROBOTS = {"ATR", "VTR"}
-PSE300_LOADLOCK_COPIES = {"LC": "LA", "LD": "LB"}
 
 
 @dataclass
@@ -74,109 +68,6 @@ def extract_init_data(raw: Any) -> Dict[str, Any]:
         for key, item in value.items()
         if str(key).casefold() not in {"route", "routes"}
     }
-
-
-def _clone_station_references(value: Any, source: str, target: str) -> Any:
-    """深复制一段设备配置，并把值中精确匹配的 Station 名称替换为新名称。"""
-    if isinstance(value, Mapping):
-        return {
-            (target if str(key) == source else str(key)): _clone_station_references(item, source, target)
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [_clone_station_references(item, source, target) for item in value]
-    return target if value == source else deepcopy(value)
-
-
-def _expand_robot_loadlocks(robot: Dict[str, Any]) -> None:
-    """为一台 PSE300 Robot 补齐 LC/LD 的时间矩阵、可达站点和手臂槽位映射。"""
-    for field_name in ("PlaceTime", "PickTime"):
-        station_times = robot.get(field_name)
-        if not isinstance(station_times, dict):
-            continue
-        for target, source in PSE300_LOADLOCK_COPIES.items():
-            if target not in station_times and source in station_times:
-                station_times[target] = deepcopy(station_times[source])
-
-    raw_transfers = robot.get("PrepTransTime")
-    if isinstance(raw_transfers, list):
-        original_transfers = [item for item in raw_transfers if isinstance(item, Mapping)]
-        known_transfers = {
-            (
-                str(item.get("SrcStation") or ""), str(item.get("DestStation") or ""),
-                item.get("TransType"),
-            )
-            for item in original_transfers
-        }
-        copies_by_source = {source: target for target, source in PSE300_LOADLOCK_COPIES.items()}
-        for transfer in original_transfers:
-            source_station = str(transfer.get("SrcStation") or "")
-            destination_station = str(transfer.get("DestStation") or "")
-            source_variants = [source_station]
-            destination_variants = [destination_station]
-            if source_station in copies_by_source:
-                source_variants.append(copies_by_source[source_station])
-            if destination_station in copies_by_source:
-                destination_variants.append(copies_by_source[destination_station])
-            for new_source in source_variants:
-                for new_destination in destination_variants:
-                    # ITransferInfo 的查找键不包含 Time；设备已经显式配置目标站时，
-                    # 即使时间与源 LoadLock 不同也必须保留原值，不能追加重复四元组。
-                    key = (new_source, new_destination, transfer.get("TransType"))
-                    if key in known_transfers:
-                        continue
-                    new_transfer = deepcopy(dict(transfer))
-                    new_transfer["SrcStation"] = new_source
-                    new_transfer["DestStation"] = new_destination
-                    raw_transfers.append(new_transfer)
-                    known_transfers.add(key)
-
-    arm_pairs = robot.get("ArmPointerPair")
-    if isinstance(arm_pairs, list):
-        for target, source in PSE300_LOADLOCK_COPIES.items():
-            copied_pairs = [
-                _clone_station_references(pair, source, target)
-                for pair in list(arm_pairs)
-                if isinstance(pair, list) and source in pair
-            ]
-            for pair in copied_pairs:
-                if pair not in arm_pairs:
-                    arm_pairs.append(pair)
-
-    arm_info = robot.get("ArmInfo")
-    if not isinstance(arm_info, Mapping):
-        return
-    for arm in arm_info.values():
-        if not isinstance(arm, dict):
-            continue
-        accessible = arm.get("AccessibleStations")
-        if isinstance(accessible, list):
-            for target, source in PSE300_LOADLOCK_COPIES.items():
-                if source in accessible and target not in accessible:
-                    accessible.append(target)
-        slot_map = arm.get("SlotsStationMap")
-        if isinstance(slot_map, dict):
-            for target, source in PSE300_LOADLOCK_COPIES.items():
-                if target not in slot_map and source in slot_map:
-                    slot_map[target] = _clone_station_references(slot_map[source], source, target)
-
-
-def expand_pse300_loadlocks(device: Dict[str, Any]) -> bool:
-    """识别 PSE300 拓扑并新增 LC/LD；LC 复制 LA，LD 复制 LB，返回是否发生修改。"""
-    stations = device.get("Stations")
-    robots = device.get("Robots")
-    if not isinstance(stations, dict) or not isinstance(robots, dict):
-        return False
-    if not PSE300_REQUIRED_STATIONS.issubset(stations) or not PSE300_REQUIRED_ROBOTS.issubset(robots):
-        return False
-    changed = any(target not in stations for target in PSE300_LOADLOCK_COPIES)
-    for target, source in PSE300_LOADLOCK_COPIES.items():
-        if target not in stations:
-            stations[target] = _clone_station_references(stations[source], source, target)
-    for robot in robots.values():
-        if isinstance(robot, dict):
-            _expand_robot_loadlocks(robot)
-    return changed
 
 
 def _task_module_names(

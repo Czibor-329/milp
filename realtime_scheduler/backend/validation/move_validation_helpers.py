@@ -531,6 +531,172 @@ def _clean_wac_trigger_rules(
     return {key: tuple(rules) for key, rules in result.items()}
 
 
+def _wac_rules_for_clean_move(
+    state: MachineState,
+    station_name: str,
+    pjob_names: Set[str],
+    clean_task_name: str,
+) -> Tuple[Tuple[str, str, float, str], ...]:
+    """反查当前无片 WAC 清洁对应的产品工艺阈值规则。
+
+    WAC 条件由产品 Recipe 索引，而无片清洁 Move 仅携带 CleanTaskName；因此按
+    PM、PJob 和任务名关联。对多个 Route Visit 的重复规则去重，保证一个非法
+    清洁 Move 只生成一条稳定诊断。
+    """
+    matched: List[Tuple[str, str, float, str]] = []
+    for (rule_station_name, _recipe_name), rules in (
+        state.clean_wac_trigger_rules.items()
+    ):
+        if rule_station_name != station_name:
+            continue
+        for rule in rules:
+            rule_pjob_name, _variable_name, _lower, rule_task_name = rule
+            if rule_task_name != clean_task_name:
+                continue
+            if rule_pjob_name and rule_pjob_name not in pjob_names:
+                continue
+            if rule not in matched:
+                matched.append(rule)
+    return tuple(matched)
+
+
+def _clean_obligation_specs(
+    payload: Mapping[str, Any],
+) -> Dict[Tuple[str, str, str], Tuple[str, int, Tuple[str, ...]]]:
+    """解析各 PJob/PM 的 Pre、Post 与带片 Dummy 清洁义务。
+
+    返回值为 ``(PJob, PM, TaskName) -> (阶段, MaterialCount, Recipe)``。平台状态机
+    只保存这个标准接口语义，不依赖 alg 编译后的 Problem 或动作对象。
+    """
+    result: Dict[Tuple[str, str, str], Tuple[str, int, Tuple[str, ...]]] = {}
+
+    def rows(value: Any) -> Sequence[Any]:
+        if isinstance(value, Mapping):
+            return tuple(value.values())
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+            return value
+        return ()
+
+    for process_job in rows(payload.get("ProcessJobs") or []):
+        if not isinstance(process_job, Mapping):
+            continue
+        pjob_name = str(process_job.get("JobName") or "").strip()
+        route = process_job.get("OriginRoute") or process_job.get("Route") or {}
+        if not pjob_name or not isinstance(route, Mapping):
+            continue
+        for phase, field_name in (("pre", "PrePJob"), ("post", "PostPJob")):
+            by_station = route.get(field_name) or {}
+            if not isinstance(by_station, Mapping):
+                continue
+            for station_name, conditions in by_station.items():
+                for condition in rows(conditions):
+                    if not isinstance(condition, Mapping):
+                        continue
+                    checks = condition.get("CheckConditions") or {}
+                    if not isinstance(checks, Mapping):
+                        continue
+                    for check_rows in checks.values():
+                        for check in rows(check_rows):
+                            if not isinstance(check, Mapping):
+                                continue
+                            task_name = str(check.get("TaskName") or "").strip()
+                            if not task_name:
+                                continue
+                            try:
+                                material_count = int(float(check.get("MaterialCount") or 0))
+                            except (TypeError, ValueError):
+                                material_count = 0
+                            recipes = tuple(
+                                recipe_name
+                                for recipe_name in (
+                                    str(check.get("CleanRecipe") or "").strip(),
+                                    str(check.get("EmptyCleanRecipeAfterMaterial") or "").strip(),
+                                )
+                                if recipe_name
+                            )
+                            result[(pjob_name, str(station_name), task_name)] = (
+                                phase,
+                                max(0, material_count),
+                                recipes,
+                            )
+    return result
+
+
+def _missing_pre_clean_obligation(
+    state: MachineState,
+    pjob_name: str,
+    station_name: str,
+) -> Optional[Tuple[str, int, int, bool]]:
+    """检查产品首次进入 PM 前的空腔或带片清洁是否已经完成。"""
+    for (required_pjob, required_station, task_name), (phase, required_count, _recipe) in (
+        state.clean_obligations.items()
+    ):
+        if phase != "pre" or required_pjob != pjob_name or required_station != station_name:
+            continue
+        clean_key = (required_pjob, required_station, task_name)
+        actual_count = state.completed_clean_counts.get(clean_key, 0)
+        expected_count = max(1, required_count)
+        if actual_count < expected_count:
+            return task_name, expected_count, actual_count, required_count > 0
+    return None
+
+
+def _validate_clean_start(
+    state: MachineState,
+    station: StationState,
+    move: Mapping[str, Any],
+    material_ids: Sequence[Any],
+    clean_task_name: str,
+) -> Optional[str]:
+    """校验产品加工前义务及空腔 WAC 的正反向阈值。"""
+    pjob_names = _values(move, "PJobName")
+    pjob_name = str(pjob_names[0]) if pjob_names else ""
+    if material_ids and not clean_task_name:
+        recipe_name = str(move.get("ProcessRecipe") or move.get("RecipeName") or "").strip()
+        rules = state.clean_wac_trigger_rules.get((station.name, recipe_name), ()) or state.clean_wac_trigger_rules.get((station.name, ""), ())
+        for rule_pjob_name, variable_name, lower, task_name in rules:
+            if rule_pjob_name and rule_pjob_name != pjob_name:
+                continue
+            value = float(station.state_variables.get(variable_name, 0.0))
+            if value + TIME_TOLERANCE >= lower:
+                shown = str(int(value)) if value.is_integer() else str(value)
+                return _issue(move, ValidationErrorCode.CLEAN_WAC_MISSING, f"{task_name} 到期后仍开始产品工艺 count={shown} PJob={pjob_name}")
+        if (pjob_name, station.name) not in state.product_clean_entries:
+            missing = _missing_pre_clean_obligation(state, pjob_name, station.name)
+            if missing is not None:
+                task_name, required, actual, is_dummy = missing
+                code = ValidationErrorCode.CLEAN_DUMMY_MISSING if is_dummy else ValidationErrorCode.CLEAN_PRE_MISSING
+                return _issue(move, code, f"{task_name} 未完成就开始产品工艺 required={required} actual={actual} PJob={pjob_name}")
+        return None
+    if clean_task_name:
+        recipe_name = str(move.get("ProcessRecipe") or move.get("CleanRecipe") or "").strip()
+        for name in pjob_names:
+            requirement = state.clean_obligations.get((str(name), station.name, clean_task_name))
+            if requirement and requirement[2] and recipe_name not in requirement[2]:
+                return _issue(move, ValidationErrorCode.CLEAN_RECIPE_INVALID, f"{clean_task_name} Recipe={recipe_name or '<empty>'}，期望 {list(requirement[2])} PJob={name}")
+    if not clean_task_name or "wac" not in clean_task_name.casefold():
+        return None
+    names = {str(name).strip() for name in pjob_names if str(name).strip()}
+    for _pjob, variable_name, lower, task_name in _wac_rules_for_clean_move(state, station.name, names, clean_task_name):
+        value = float(station.state_variables.get(variable_name, 0.0))
+        if value + TIME_TOLERANCE < lower:
+            shown = str(int(value)) if value.is_integer() else str(value)
+            return _issue(move, ValidationErrorCode.CLEAN_WAC_EARLY, f"{task_name} 未达到 Wac 阈值就执行 count={shown} PJob={next(iter(sorted(names)), '')}")
+    return None
+
+
+def _final_clean_obligation_issue(state: MachineState) -> Optional[str]:
+    """在当前代计划回放完成后验证已加工 PJob 的 PostClean 义务。"""
+    for (pjob_name, station_name, task_name), (phase, required_count, _recipe) in state.clean_obligations.items():
+        if phase != "post" or (pjob_name, station_name) not in state.product_clean_entries:
+            continue
+        actual_count = state.completed_clean_counts.get((pjob_name, station_name, task_name), 0)
+        expected_count = max(1, required_count)
+        if actual_count < expected_count:
+            return f"[{ValidationErrorCode.CLEAN_POST_MISSING.value}] {task_name} 未完成 required={expected_count} actual={actual_count} PJob={pjob_name} PM={station_name}"
+    return None
+
+
 def _environment_side_labels(aliases: Mapping[str, str]) -> Tuple[str, str]:
     """由 LoadLock 的“标签→标准压力态”映射反推输出侧名称。
 

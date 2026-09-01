@@ -21594,10 +21594,7 @@ function buildPayload() {
   if (state.strategy === "schedule-alphago") {
     options.scheduleAlphaGoExecutionMode = playbackMode === "step" ? "stepped" : "continuous";
   }
-  return { schemaVersion: EXPECTED_API_SCHEMA, workspaceDeviceId: state.workspaceDeviceId, workspaceTestId: state.testCaseId, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options, skipValidation: skipValidationEnabled(), hongYeCheck: hongYeCheckEnabled(), compatibilityMode: compatibilityModeEnabled(), skipBaseline: skipBaselineEnabled(), recipes: collectRecipes(routes), cleans, routes, rounds: instances.rounds };
-}
-function skipValidationEnabled() {
-  return document.getElementById("skipValidationInput")?.checked === true;
+  return { schemaVersion: EXPECTED_API_SCHEMA, workspaceDeviceId: state.workspaceDeviceId, workspaceTestId: state.testCaseId, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options, hongYeCheck: hongYeCheckEnabled(), compatibilityMode: compatibilityModeEnabled(), skipBaseline: skipBaselineEnabled(), recipes: collectRecipes(routes), cleans, routes, rounds: instances.rounds };
 }
 function clampParallelismInput(elementId, min, max, fallback) {
   const input = document.getElementById(elementId);
@@ -21620,7 +21617,6 @@ function currentRunSettingsPreferences() {
     compatibilityMode: compatibilityModeEnabled(),
     hongYeCheck: hongYeCheckEnabled(),
     skipBaseline: skipBaselineEnabled(),
-    skipValidation: skipValidationEnabled(),
     maximumWorkers: batchParallelism(),
     validationWorkers: validationParallelism()
   };
@@ -21630,8 +21626,7 @@ function applyRunSettingsPreferences(settings) {
   const checkboxFields = {
     compatibilityMode: "compatibilityModeInput",
     hongYeCheck: "hongYeCheckInput",
-    skipBaseline: "skipBaselineInput",
-    skipValidation: "skipValidationInput"
+    skipBaseline: "skipBaselineInput"
   };
   Object.entries(checkboxFields).forEach(([field, elementId]) => {
     const input = document.getElementById(elementId);
@@ -21668,19 +21663,18 @@ function updateRunSettingsButtonLabel() {
   const compatibility = document.getElementById("compatibilityModeInput")?.checked === true;
   const hongYe = document.getElementById("hongYeCheckInput")?.checked === true;
   const skipBaseline = document.getElementById("skipBaselineInput")?.checked === true;
-  const skipValidation = document.getElementById("skipValidationInput")?.checked === true;
   const algorithmWorkers = batchParallelism();
   const validationWorkers = validationParallelism();
   const validationInput = document.getElementById("validationParallelismInput");
-  if (validationInput) validationInput.disabled = !hongYe || skipValidation;
-  const labels = [compatibility && "\u517C\u5BB9\u6A21\u5F0F", hongYe && "HongYe Check", skipBaseline && "\u8DF3\u8FC7 Baseline", skipValidation && "\u8DF3\u8FC7\u6821\u9A8C"].filter(Boolean);
-  const parallelism = `\u7B97\u6CD5\xD7${algorithmWorkers}${hongYe && !skipValidation ? ` \u6821\u9A8C\xD7${validationWorkers}` : ""}`;
+  if (validationInput) validationInput.disabled = !hongYe;
+  const labels = [compatibility && "\u517C\u5BB9\u6A21\u5F0F", hongYe && "HongYe Check", skipBaseline && "\u8DF3\u8FC7 Baseline"].filter(Boolean);
+  const parallelism = `\u7B97\u6CD5\xD7${algorithmWorkers}${hongYe ? ` \u6821\u9A8C\xD7${validationWorkers}` : ""}`;
   const summary = labels.length ? `\u8FD0\u884C\u8BBE\u7F6E\uFF1A${labels.join("\u3001")}\uFF08${parallelism}\uFF09` : `\u8FD0\u884C\u8BBE\u7F6E\uFF1A${parallelism}`;
   button.setAttribute("aria-label", summary);
   button.setAttribute("title", summary);
   button.classList.toggle(
     "is-customized",
-    !compatibility || !hongYe || !skipBaseline || skipValidation || algorithmWorkers !== 4 || validationWorkers !== 2
+    !compatibility || !hongYe || !skipBaseline || algorithmWorkers !== 4 || validationWorkers !== 2
   );
 }
 function openRunSettingsDialog() {
@@ -22174,7 +22168,7 @@ async function runCurrentTestGroup(selectedTestIds = null) {
     button.classList.add("cancel");
     button.textContent = "\u25A0 \u7EC8\u6B62\u8C03\u5EA6";
     document.getElementById("batchResults").innerHTML = "";
-    const validationSummary = hongYeCheckEnabled() && !skipValidationEnabled() ? ` \xB7 HongYe \u6821\u9A8C\u5E76\u884C ${validationParallelism()} \u8DEF` : "";
+    const validationSummary = hongYeCheckEnabled() ? ` \xB7 HongYe \u6821\u9A8C\u5E76\u884C ${validationParallelism()} \u8DEF` : "";
     writeTerminal(`$ \u6279\u91CF\u8FD0\u884C\u5F53\u524D\u6D4B\u8BD5\u7EC4
   \u7EC4\u522B: ${state.activeTestGroup || "\u672A\u5206\u7EC4"}
   \u7B56\u7565: ${displayStrategyName(state.strategy)}
@@ -22183,7 +22177,7 @@ async function runCurrentTestGroup(selectedTestIds = null) {
     const response = await fetch("/api/run-batch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ deviceId: state.workspaceDeviceId, group: state.activeTestGroup, testIds: tests.map((test) => test.id), strategy: state.strategy, options: state.options, skipValidation: skipValidationEnabled(), hongYeCheck: hongYeCheckEnabled(), compatibilityMode: compatibilityModeEnabled(), skipBaseline: skipBaselineEnabled(), maximumWorkers: batchParallelism(), validationWorkers: validationParallelism() })
+      body: JSON.stringify({ deviceId: state.workspaceDeviceId, group: state.activeTestGroup, testIds: tests.map((test) => test.id), strategy: state.strategy, options: state.options, hongYeCheck: hongYeCheckEnabled(), compatibilityMode: compatibilityModeEnabled(), skipBaseline: skipBaselineEnabled(), maximumWorkers: batchParallelism(), validationWorkers: validationParallelism() })
     });
     let result = await response.json();
     if (!response.ok || !result.batchId || !Array.isArray(result.items)) throw new Error(result.error || `\u670D\u52A1\u8FD4\u56DE ${response.status}`);
@@ -22997,7 +22991,7 @@ document.getElementById("batchRunButton").addEventListener("click", runCurrentTe
 document.getElementById("openRunSettingsButton").addEventListener("click", openRunSettingsDialog);
 document.getElementById("runSettingsDialogClose").addEventListener("click", closeRunSettingsDialog);
 document.getElementById("runSettingsDialog").addEventListener("close", finishRunSettingsDialog);
-["skipValidationInput", "hongYeCheckInput", "compatibilityModeInput", "skipBaselineInput", "batchParallelismInput", "validationParallelismInput"].forEach((id) => {
+["hongYeCheckInput", "compatibilityModeInput", "skipBaselineInput", "batchParallelismInput", "validationParallelismInput"].forEach((id) => {
   document.getElementById(id).addEventListener("change", () => {
     runSettingsPreferencesDirty = true;
     updateRunSettingsButtonLabel();

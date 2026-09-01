@@ -154,8 +154,128 @@ def test_platform_rejects_product_process_after_wac_counter_expires() -> None:
     )
 
     assert issues == [
-        "[CLEAN.WAC_MISSING] MoveID=1 MoveType=9：WacClean 到期后仍开始产品工艺 count=2 PJob=P1"
+        "[MVL-CLEAN-WAC-MISSING] MoveID=1 MoveType=9：WacClean 到期后仍开始产品工艺 count=2 PJob=P1"
     ]
+
+
+def test_platform_rejects_wac_clean_before_counter_threshold() -> None:
+    """WAC 清洁必须在同一 PM 的对应 PJob 计数达到阈值后才可执行。"""
+    update = {
+        "Stations": {
+            "PM1": {
+                "Type": "ProcessChamber",
+                "Capacity": 1,
+                "StateVariables": {
+                    "ProcessCount": {"Value": {"Value": 1}},
+                },
+            },
+        },
+        "Robots": {},
+        "Materials": [],
+        "ProcessJobs": [{
+            "JobName": "P1",
+            "OriginRoute": {
+                "RouteSteps": [{
+                    "Visits": [{
+                        "StationName": "PM1",
+                        "ProcessRecipe": "ProductRecipe",
+                        "AfterOutPM": [{
+                            "CheckConditions": {
+                                "WAC": [{
+                                    "TaskName": "WacClean",
+                                    "UpdateStateVariables": ["ProcessCount"],
+                                }],
+                            },
+                            "ExecuteOrder": [{
+                                "StateVariableName": "ProcessCount",
+                                "ThresholdValueList": [2, 9999],
+                            }],
+                        }],
+                    }],
+                }],
+            },
+        }],
+    }
+
+    issues = validate_move_list(
+        None,
+        [_move(
+            1,
+            9,
+            0,
+            10,
+            ModuleName="PM1",
+            MatIDList=[],
+            SlotList=[1],
+            PJobName=["P1"],
+            CleanTaskName="WacClean",
+            ProcessRecipe="WacRecipe",
+            IsLastCleanTaskMove=True,
+        )],
+        update,
+    )
+
+    assert issues == [
+        "[MVL-CLEAN-WAC-EARLY] MoveID=1 MoveType=9：WacClean 未达到 Wac 阈值就执行 count=1 PJob=P1"
+    ]
+
+
+def test_platform_requires_preclean_before_first_product_process() -> None:
+    """平台必须独立拦截未完成 PreClean 的 PJob 首片加工。"""
+    update = {
+        "Stations": {"PM1": {"Type": "ProcessChamber", "Capacity": 1}},
+        "Robots": {},
+        "Materials": [{
+            "ID": 101,
+            "CurrentModuleName": "PM1",
+            "SlotID": 1,
+            "StepID": 4,
+            "PJobName": "P1",
+        }],
+        "ProcessJobs": [{
+            "JobName": "P1",
+            "OriginRoute": {
+                "PrePJob": {"PM1": [{
+                    "CheckConditions": {"Pre": [{
+                        "TaskName": "PreClean",
+                        "CleanRecipe": "PreRecipe",
+                        "MaterialCount": 0,
+                    }]},
+                }]},
+            },
+        }],
+    }
+    state = MachineState.from_sources(None, update)
+    state.stations["PM1"].slots[1].phase = SlotPhase.UNPROCESSED
+    state.stations["PM1"].slots[1].material = MaterialState(101, "P1", 4)
+
+    issues = validate_move_list(
+        None,
+        [_move(
+            1, 9, 0, 10, ModuleName="PM1", MatIDList=[101], StepIDList=[4],
+            SlotList=[1], PJobName=["P1"], ProcessRecipe="ProductRecipe",
+        )],
+        state,
+    )
+
+    assert issues == [
+        "[MVL-CLEAN-PRE-MISSING] MoveID=1 MoveType=9：PreClean 未完成就开始产品工艺 required=1 actual=0 PJob=P1"
+    ]
+
+
+def test_platform_requires_postclean_after_product_process() -> None:
+    """产品加工已完成而当前代计划没有 PostClean 时必须报义务缺失。"""
+    update = {
+        "Stations": {"PM1": {"Type": "ProcessChamber", "Capacity": 1}},
+        "Robots": {},
+        "Materials": [{"ID": 101, "CurrentModuleName": "PM1", "SlotID": 1, "StepID": 4, "PJobName": "P1"}],
+        "ProcessJobs": [{"JobName": "P1", "OriginRoute": {"PostPJob": {"PM1": [{"CheckConditions": {"Post": [{"TaskName": "PostClean", "CleanRecipe": "PostRecipe", "MaterialCount": 0}]}}]}}}],
+    }
+    state = MachineState.from_sources(None, update)
+    state.stations["PM1"].slots[1].phase = SlotPhase.UNPROCESSED
+    state.stations["PM1"].slots[1].material = MaterialState(101, "P1", 4)
+    issues = validate_move_list(None, [_move(1, 9, 0, 10, ModuleName="PM1", MatIDList=[101], StepIDList=[4], SlotList=[1], PJobName=["P1"], ProcessRecipe="ProductRecipe")], state)
+    assert issues == ["[MVL-CLEAN-POST-MISSING] PostClean 未完成 required=1 actual=0 PJob=P1 PM=PM1"]
 
 
 def _dual_transfer_moves() -> list[dict]:

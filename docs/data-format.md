@@ -99,7 +99,6 @@ v5 的 `workspaces/` 与 `devices/` 首次升级时执行以下过程：
     "compatibilityMode": true,
     "hongYeCheck": true,
     "skipBaseline": true,
-    "skipValidation": false,
     "maximumWorkers": 4,
     "validationWorkers": 2
   }

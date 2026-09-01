@@ -49,7 +49,6 @@ class Pse300BatchPerformanceTests(unittest.TestCase):
             PSE300_TEST_GROUP,
             "heuristic",
             {},
-            skip_validation=False,
             hongye_check=False,
             skip_baseline=True,
             maximum_workers=4,

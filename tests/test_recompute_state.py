@@ -16,16 +16,151 @@ from realtime_scheduler.backend.validation.move_validation import (
     MoveStateReplay,
     SlotPhase,
     VACUUM,
+    validate_move_list,
 )
 from realtime_scheduler.backend.execution.recompute_state import (
     apply_machine_state_to_update,
     merge_algorithm_update,
     restore_dummy_routes_from_algorithm_output,
 )
-from realtime_scheduler.backend.application import _compile_external_validation_problem
+from realtime_scheduler.backend.execution.algorithm_runtime import (
+    PlatformMoveListRuntime,
+)
+from realtime_scheduler.backend.execution.run_state import (
+    advance_platform_move_list_to_update,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_recompute_notifications_keep_completed_clean_moves_for_hongye() -> None:
+    """重算日志必须保留已完成的清洁 Move，供 HongYe 恢复跨代清洁状态。"""
+    update = {
+        "CurrentTime": 0.0,
+        "Materials": [],
+        "ProcessJobs": [],
+        "ControlJobs": [],
+        "Routes": {},
+        "Robots": {},
+        "Stations": {"PM1": {"Type": "Process", "Slots": [1]}},
+    }
+    runtime = PlatformMoveListRuntime(
+        update,
+        {
+            "MoveList": [{
+                "MoveID": 1,
+                "MoveType": 9,
+                "ModuleName": "PM1",
+                "MatIDList": [],
+                "StartTime": 1.0,
+                "EndTime": 2.0,
+            }],
+            "Feedback": [],
+        },
+    )
+
+    notifications = advance_platform_move_list_to_update(runtime, 3.0)
+
+    assert [(item["MoveID"], item["MoveState"]) for item in notifications] == [
+        (1, MoveStateReplay.RUNNING),
+        (1, MoveStateReplay.DONE),
+    ]
+
+
+def _wac_update(
+    pjob_name: str,
+    recipe_name: str,
+    counter_value: float,
+) -> dict:
+    """构造一代携带 WAC 条件和 PM 计数的最小标准 update。"""
+    return {
+        "CurrentTime": 0.0,
+        "Materials": [],
+        "ProcessJobs": [{
+            "JobName": pjob_name,
+            "OriginRoute": {
+                "RouteSteps": [{
+                    "Visits": [{
+                        "StationName": "PM1",
+                        "ProcessRecipe": recipe_name,
+                        "AfterOutPM": [{
+                            "CheckConditions": {
+                                "WacClean": [{
+                                    "TaskName": "WacClean",
+                                    "UpdateStateVariables": ["WacCount"],
+                                }],
+                            },
+                            "ExecuteOrder": [{
+                                "StateVariableName": "WacCount",
+                                "ThresholdValueList": [3.0],
+                            }],
+                        }],
+                    }],
+                }],
+            },
+        }],
+        "ControlJobs": [],
+        "Routes": {},
+        "Robots": {},
+        "ProcessRecipes": [{
+            "ModuleName": "PM1",
+            "Name": recipe_name,
+            "Weight": {"WacCount": 1.0},
+        }],
+        "Stations": {
+            "PM1": {
+                "Type": "Process",
+                "Slots": [1],
+                "StateVariables": {
+                    "WacCount": {
+                        "Value": {"Value": counter_value},
+                    },
+                },
+            },
+        },
+    }
+
+
+def test_recompute_refreshes_wac_rules_without_resetting_pm_counter() -> None:
+    """跨代切换必须更新新 PJob 的 WAC 规则，同时保留 PM 已累计的计数。"""
+    runtime = PlatformMoveListRuntime(
+        _wac_update("old-pjob", "old-recipe", 7.0),
+        {"MoveList": [], "Feedback": []},
+    )
+
+    runtime.replace_plan(
+        _wac_update("new-pjob", "new-recipe", 0.0),
+        {"MoveList": [], "Feedback": []},
+        requested_time=10.0,
+        reason="测试重算",
+        committed_moves=[],
+    )
+
+    state = runtime.state
+    assert state.stations["PM1"].state_variables["WacCount"] == 7.0
+    assert state.process_recipe_weights[("PM1", "new-recipe")] == {
+        "WacCount": 1.0,
+    }
+    assert state.clean_wac_trigger_rules[("PM1", "new-recipe")] == (
+        ("new-pjob", "WacCount", 3.0, "WacClean"),
+    )
+    issues = validate_move_list(
+        None,
+        [{
+            "MoveID": 1,
+            "MoveType": 9,
+            "ModuleName": "PM1",
+            "MatIDList": [1],
+            "SlotList": [1],
+            "PJobName": ["new-pjob"],
+            "ProcessRecipe": "new-recipe",
+            "StartTime": 10.0,
+            "EndTime": 11.0,
+        }],
+        state,
+    )
+    assert "[MVL-CLEAN-WAC-MISSING]" in issues[0]
 
 
 def _loadlock(last_item: str, current_item: str) -> dict:
@@ -555,33 +690,6 @@ def test_dummy_projected_to_source_with_running_move_is_still_inflight() -> None
     assert material["Count"] == 4
 
 
-def test_external_validation_compile_clears_predummy_only_in_copy(monkeypatch) -> None:
-    """外部算法计划的校验副本应禁止二次合成 Dummy，且不能修改真实 update。"""
-    route = {
-        "Name": "product-route",
-        "RouteSteps": [],
-        "PrePJob": {"PM1": [{"CheckConditions": {"Dummy": []}}]},
-    }
-    update = {
-        "ProcessJobs": [{"JobName": "1.C1.P1", "OriginRoute": deepcopy(route)}],
-    }
-    captured = {}
-
-    def capture_compile(tool_topology, validation_update):
-        """捕获平台实际交给内置编译器的校验副本。"""
-        captured["tool"] = tool_topology
-        captured["update"] = validation_update
-        return "validation-problem"
-
-    monkeypatch.setattr("realtime_scheduler.backend.application.compile_problem", capture_compile)
-
-    result = _compile_external_validation_problem({"Stations": {}}, update)
-
-    assert result == "validation-problem"
-    assert captured["update"]["ProcessJobs"][0]["OriginRoute"]["PrePJob"] == {}
-    assert update["ProcessJobs"][0]["OriginRoute"]["PrePJob"]
-
-
 def test_application_does_not_implement_machine_state_snapshot_replay() -> None:
     """应用装配边界不得重新承载 MachineState 到 update 的回写实现。"""
     application_source = (
@@ -597,4 +705,4 @@ def test_application_does_not_implement_machine_state_snapshot_replay() -> None:
     assert "def _apply_machine_state_to_update" not in application_source
     assert "def apply_machine_state_to_update" in backend_source
     assert "from realtime_scheduler.backend.execution.run_state import *" in application_source
-    assert "apply_machine_state_to_update(update" in run_state_source
+    assert "apply_machine_state_to_update(" in run_state_source

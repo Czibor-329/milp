@@ -467,11 +467,11 @@ class OptionalAlgorithmRepositoryTests(unittest.TestCase):
                     ],
                     "Feedback": [],
                 }
-                runtime = server.PackagedAlgorithmRuntime(
+                runtime = server.PlatformMoveListRuntime(
                     first_update,
                     first_output,
                 )
-                notifications = server.advance_packaged_algorithm_to_update(
+                notifications = server.advance_platform_move_list_to_update(
                     runtime,
                     3,
                 )
@@ -492,7 +492,7 @@ class OptionalAlgorithmRepositoryTests(unittest.TestCase):
                         },
                     },
                 }
-                update = server._build_packaged_algorithm_recompute_update(
+                update = server._build_platform_recompute_update(
                     runtime,
                     next_update,
                     3,
@@ -572,10 +572,9 @@ class OptionalAlgorithmRepositoryTests(unittest.TestCase):
                     ],
                     "Feedback": [],
                 }
-                runtime = server.PackagedAlgorithmRuntime(
+                runtime = server.PlatformMoveListRuntime(
                     first_update,
                     first_output,
-                    skip_validation=True,
                 )
                 runtime.advance_to(20)
 

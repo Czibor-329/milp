@@ -554,12 +554,12 @@ class RecomputeFailureOutputTests(unittest.TestCase):
         package = json.loads((frontend_root / "package.json").read_text(encoding="utf-8"))
         package_lock = json.loads((frontend_root / "package-lock.json").read_text(encoding="utf-8"))
 
-        self.assertEqual("1.5.25", package["version"])
-        self.assertEqual("1.5.25", package_lock["version"])
-        self.assertEqual("1.5.25", package_lock["packages"][""]["version"])
-        self.assertIn('class="frontend-version">V1.5.25</span>', template)
-        self.assertIn('/assets/config_editor.css?v=1.5.25', template)
-        self.assertIn('/assets/config_editor.js?v=1.5.25', template)
+        self.assertEqual("1.5.26", package["version"])
+        self.assertEqual("1.5.26", package_lock["version"])
+        self.assertEqual("1.5.26", package_lock["packages"][""]["version"])
+        self.assertIn('class="frontend-version">V1.5.26</span>', template)
+        self.assertIn('/assets/config_editor.css?v=1.5.26', template)
+        self.assertIn('/assets/config_editor.js?v=1.5.26', template)
 
     def test_run_options_live_in_compact_settings_dialog(self) -> None:
         """运行选项应收纳到设置弹窗，齿轮按钮与状态灯保持紧凑。"""
@@ -571,7 +571,7 @@ class RecomputeFailureOutputTests(unittest.TestCase):
         self.assertIn('id="compatibilityModeInput" type="checkbox" checked', template)
         self.assertIn('id="hongYeCheckInput" type="checkbox" checked', template)
         self.assertIn('id="skipBaselineInput" type="checkbox" checked', template)
-        self.assertIn('id="skipValidationInput" type="checkbox"', template)
+        self.assertNotIn('id="skipValidationInput"', template)
         self.assertIn("width: 34px; min-width: 34px; height: 34px", style)
         self.assertIn("top: 3px; right: 3px; width: 5px; height: 5px", style)
 
@@ -1198,79 +1198,9 @@ class ConfigEditorServerTests(unittest.TestCase):
                 plan, {"jobs": [_job("Incoming", "Route12", "LP1")]}, 0.0, BuildState(),
             )
 
-    def test_pse300_expands_lc_and_ld_from_la_and_lb(self) -> None:
-        """PSE300 应完整复制 LoadLock 及两台 Robot 的相关访问和计时参数。"""
-        device = json.loads(PSE300_PATH.read_text(encoding="utf-8"))
-        original_transfer_counts = {
-            name: len(robot["PrepTransTime"]) for name, robot in device["Robots"].items()
-        }
-
-        self.assertTrue(config_server.expand_pse300_loadlocks(device))
-        self.assertFalse(config_server.expand_pse300_loadlocks(device))
-        for target, source in (("LC", "LA"), ("LD", "LB")):
-            expected_station = json.loads(json.dumps(device["Stations"][source]).replace(source, target))
-            self.assertEqual(expected_station, device["Stations"][target])
-            for robot in device["Robots"].values():
-                self.assertEqual(robot["PlaceTime"][source], robot["PlaceTime"][target])
-                self.assertEqual(robot["PickTime"][source], robot["PickTime"][target])
-                for arm in robot["ArmInfo"].values():
-                    self.assertIn(target, arm["AccessibleStations"])
-                    self.assertIn(target, arm["SlotsStationMap"])
-                    self.assertTrue(all(
-                        item["Key"] == target
-                        for slots in arm["SlotsStationMap"][target].values()
-                        for item in slots
-                    ))
-        self.assertIn(["LC", "LC"], device["Robots"]["VTR"]["ArmPointerPair"])
-        self.assertIn(["LD", "LD"], device["Robots"]["VTR"]["ArmPointerPair"])
-        for name, robot in device["Robots"].items():
-            self.assertGreater(len(robot["PrepTransTime"]), original_transfer_counts[name])
-            transfer_keys = {
-                (item["SrcStation"], item["DestStation"], item["TransType"])
-                for item in robot["PrepTransTime"]
-            }
-            self.assertTrue(all(
-                (source, destination, transfer_type) in transfer_keys
-                for source in ("LA", "LB", "LC", "LD")
-                for destination in ("LA", "LB", "LC", "LD")
-                for transfer_type in (0, 1)
-            ))
-
-    def test_pse300_expansion_does_not_duplicate_explicit_transfer_keys(self) -> None:
-        """已有 LC/LD 转位时间优先，扩展不得按不同 Time 追加同一查找键。"""
-        device = json.loads(PSE300_PATH.read_text(encoding="utf-8"))
-        config_server.expand_pse300_loadlocks(device)
-        explicit_ld_heater_time = 3.0
-        ld_heater_row = next(
-            row
-            for row in device["Robots"]["VTR"]["PrepTransTime"]
-            if (row["SrcStation"], row["DestStation"], row["TransType"])
-            == ("LD", "heater", 0)
-        )
-        ld_heater_row["Time"] = explicit_ld_heater_time
-
-        config_server.expand_pse300_loadlocks(device)
-
-        for robot in device["Robots"].values():
-            transfer_keys = [
-                (row["SrcStation"], row["DestStation"], row["TransType"])
-                for row in robot["PrepTransTime"]
-            ]
-            self.assertEqual(len(transfer_keys), len(set(transfer_keys)))
-        self.assertEqual(
-            [explicit_ld_heater_time],
-            [
-                row["Time"]
-                for row in device["Robots"]["VTR"]["PrepTransTime"]
-                if (row["SrcStation"], row["DestStation"], row["TransType"])
-                == ("LD", "heater", 0)
-            ],
-        )
-
     def test_task_alg_init_removes_every_unreferenced_module(self) -> None:
-        """任务级 AlgInit 应同步移除 PM5/PM6、LC/LD 等所有未引用模块信息。"""
+        """任务级 AlgInit 应同步移除 PM5/PM6 等所有未引用模块信息。"""
         device = json.loads(PSE300_PATH.read_text(encoding="utf-8"))
-        config_server.expand_pse300_loadlocks(device)
         route = _route("R1", "PM1", "R1_Step4")
         rounds = [{"jobs": [{**_job("P1", "R1", "LP1"), "waferCount": 1}]}]
 
@@ -2358,7 +2288,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("<span>结果分析</span>", html)
         self.assertIn("<span>路径配置</span>", html)
         self.assertNotIn('data-tab-view="clean"', html)
-        self.assertIn('class="frontend-version">V1.5.25</span>', html)
+        self.assertIn('class="frontend-version">V1.5.26</span>', html)
         self.assertIn('data-option="residencyGuardSeconds"', html)
         self.assertIn('data-option="maximumRobotHoldingSeconds"', html)
         self.assertIn('data-option="maximumSystemResidenceCv"', html)
@@ -3505,7 +3435,7 @@ class ConfigEditorServerTests(unittest.TestCase):
                     "output": {"MoveList": []}, "reproductionLog": [],
                 }
             raise LoggedPlanError(
-                "MoveList 状态校验失败：无效动作",
+                "状态推进失败|MVL-STATE-UNKNOWN|无效动作",
                 [],
                 failure_output={"MoveList": [{"MoveID": 1, "StartTime": 0, "EndTime": 80}]},
                 validation_issues=["MoveID=1 无效动作"],
@@ -3530,8 +3460,8 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual(20.0, item["improvementPercent"])
         self.assertEqual("/api/results/result-id", item["resultUrl"])
 
-    def test_skip_validation_bypasses_move_list_checks(self) -> None:
-        """勾选“跳过输出校验”后不再调用 MoveList 校验，结果标记为 skipped。"""
+    def test_legacy_skip_validation_flag_cannot_bypass_move_list_checks(self) -> None:
+        """遗留请求字段不能绕过平台状态推进校验。"""
         pse300 = json.loads(PSE300_PATH.read_text(encoding="utf-8"))
         plan = {
             "deviceName": PSE300_PATH.name,
@@ -3547,18 +3477,12 @@ class ConfigEditorServerTests(unittest.TestCase):
                 {"jobName": "P1", "routeRef": "R1", "loadPort": "LP1", "waferCount": 2, "priority": 1},
             ]}]}],
         }
-        with patch.object(config_server, "validate_move_list", return_value=["Mock 无效动作"]):
-            with self.assertRaisesRegex(LoggedPlanError, "MoveList 状态校验失败"):
-                execute_plan(plan)
-        with patch.object(config_server, "validate_move_list", return_value=["Mock 无效动作"]) as mocked:
-            result = execute_plan({**plan, "skipValidation": True})
-        self.assertTrue(result["ok"])
-        self.assertEqual("skipped", result["validation"])
-        self.assertEqual(1, len(result["rounds"]))
-        mocked.assert_not_called()
+        with patch.object(config_server, "validate_move_list", return_value=["[MVL-TEST] 无效动作"]):
+            with self.assertRaisesRegex(LoggedPlanError, "状态推进失败\\|MVL-TEST\\|无效动作"):
+                execute_plan({**plan, "skipValidation": True})
 
-    def test_batch_skip_validation_bypasses_move_list_checks(self) -> None:
-        """批量运行勾选“跳过输出校验”后，每项结果标记为 skipped 且不再校验。"""
+    def test_batch_plan_does_not_emit_legacy_skip_validation_flag(self) -> None:
+        """批量计划不再生成跳过平台状态推进校验的配置。"""
         pse300 = json.loads(PSE300_PATH.read_text(encoding="utf-8"))
         test_case = {
             "id": "test-skip-batch", "name": "跳过校验批量案例", "group": "回归",
@@ -3580,20 +3504,6 @@ class ConfigEditorServerTests(unittest.TestCase):
             device, test_case, "heuristic", {}, compatibility_mode=False,
         )
         self.assertFalse(explicit_incompatible_plan["compatibilityMode"])
-        with (
-            patch.object(config_server, "get_workspace_device", return_value=device),
-            patch.object(config_server, "validate_move_list", return_value=["Mock 无效动作"]) as mocked,
-            patch.object(config_server, "_persist_workspace_baseline", return_value=True),
-            patch.object(config_server, "save_result", return_value="result-id"),
-            patch.object(config_server, "save_reproduction_log", return_value="log-id"),
-        ):
-            result = config_server.run_workspace_test_batch(
-                "device-skip-batch", "回归", "heuristic", {}, skip_validation=True, maximum_workers=1, hongye_check=False,
-            )
-        item = result["items"][0]
-        self.assertEqual("succeeded", item["status"])
-        self.assertEqual("skipped", item["validation"])
-        mocked.assert_not_called()
 
     def test_batch_skip_baseline_skips_heuristic(self) -> None:
         """勾选“跳过Baseline”后批量运行不再连带执行本地 heuristic。"""

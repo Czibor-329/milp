@@ -770,7 +770,7 @@ def _deduplicate_workspace_route_templates(device: Dict[str, Any]) -> int:
 
 
 def _migrate_workspace_catalog(catalog: Dict[str, Any]) -> bool:
-    """迁移设备工作区结构，并为已有 PSE300 补齐 LC/LD LoadLock。"""
+    """迁移设备工作区结构并规范化旧版本的测试与路径数据。"""
     source_version = int(catalog.get("version") or 0)
     changed = source_version != WORKSPACE_STORE_VERSION
     for raw_device in catalog.get("devices") or []:
@@ -802,10 +802,6 @@ def _migrate_workspace_catalog(catalog: Dict[str, Any]) -> bool:
                 changed = True
         if raw_device.get("testGroups") != test_groups:
             raw_device["testGroups"] = test_groups
-            changed = True
-        raw_topology = raw_device.get("device")
-        if isinstance(raw_topology, dict) and expand_pse300_loadlocks(raw_topology):
-            raw_device["fingerprint"] = _device_fingerprint(raw_topology)
             changed = True
         # 旧数据按更新时间从早到晚合并；同时先把每个测试原有参数提取为独立配置。
         for test in sorted(tests, key=lambda item: str(item.get("updatedAt") or item.get("createdAt") or "")):
