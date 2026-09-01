@@ -1776,12 +1776,16 @@ def _start_swap(state: MachineState, move: Mapping[str, Any], end_time: float, _
         lengths = (recv_count, len(robot_receive_slots), len(station_send_slots))
         return _issue(move, ValidationErrorCode.SWAP_INPUT_INVALID, f"SwapMove 的 Recv 组数组数量不一致：RecvMatList={lengths[0]} RecvSlotList={lengths[1]} StnSendSlotList={lengths[2]}")
     if is_twin_load_lock_swap:
-        if any(count and count != len(stations) for count in (send_count, recv_count)):
-            return _issue(
-                move,
-                ValidationErrorCode.SWAP_INPUT_INVALID,
-                "孪生 LoadLock Swap 的每个非空 Send/Recv 组必须与 StationList 逐项对齐",
-            )
+        # 孪生 Swap 允许 Send/Recv 组不对称（如 LA 换入换出、LB 仅换入），
+        # 组内第 i 项按下标对齐 StationList 的第 i 个站点，因此任一组数量
+        # 都不能超过站点数。
+        for group_name, group_count in (("Send", send_count), ("Recv", recv_count)):
+            if group_count and group_count > len(stations):
+                return _issue(
+                    move,
+                    ValidationErrorCode.SWAP_INPUT_INVALID,
+                    f"孪生 LoadLock Swap 的 {group_name} 组数量不能超过 StationList",
+                )
         for field_name, slot_ids in (
             ("StnRecvSlotList", station_receive_slots),
             ("StnSendSlotList", station_send_slots),

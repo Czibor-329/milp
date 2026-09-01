@@ -992,6 +992,121 @@ def test_twin_loadlock_swap_maps_each_station_and_same_layer() -> None:
     assert issues and "必须使用同一层槽位" in issues[0]
 
 
+def test_twin_loadlock_swap_supports_asymmetric_groups() -> None:
+    """孪生 LoadLock 允许不对称换片：LA 换入换出、LB 仅换入。"""
+    state = MachineState(
+        stations={
+            "LA": LoadLockState(
+                "LA",
+                "LoadLock",
+                {1: SlotState(SlotPhase.COMPLETED, MaterialState(25, "P", 3))},
+                door=DoorState.OPEN,
+                environment=VACUUM,
+            ),
+            "LB": LoadLockState(
+                "LB",
+                "LoadLock",
+                {1: SlotState(SlotPhase.EMPTY, None)},
+                door=DoorState.OPEN,
+                environment=VACUUM,
+            ),
+        },
+        robots={
+            "VACRobot": RobotState(
+                "VACRobot",
+                hands={
+                    1: MaterialState(21, "P", 8),
+                    2: MaterialState(22, "P", 8),
+                    3: None,
+                    4: None,
+                },
+                scope={"LA", "LB"},
+                can_swap=True,
+            ),
+        },
+        robot_aliases={"VACRobot": "VACRobot"},
+    )
+    move = _move(
+        527,
+        4,
+        1380.94,
+        1397.74,
+        ModuleName="VACRobot",
+        StationList=["LA", "LB"],
+        StnRecvSlotList=[1, 1],
+        StnSendSlotList=[1],
+        RecvSlotList=[3],
+        SendSlotList=[1, 2],
+        RecvMatList=[25],
+        SendMatList=[21, 22],
+        RecvMatStepIDList=[3],
+        SendMatStepIDList=[8, 8],
+    )
+
+    assert validate_move_list(None, [move], state) == []
+    replay = MoveStateReplay(None, [move], state)
+    replay.update_move_state({"MoveID": 527, "MoveState": MoveStateReplay.RUNNING}, snapshot=False)
+    replay.update_move_state({"MoveID": 527, "MoveState": MoveStateReplay.DONE}, snapshot=False)
+
+    assert replay.state.stations["LA"].slots[1].material.material_id == 21
+    assert replay.state.stations["LB"].slots[1].material.material_id == 22
+    assert replay.state.robots["VACRobot"].hands[3].material_id == 25
+    assert replay.state.robots["VACRobot"].hands[1] is None
+    assert replay.state.robots["VACRobot"].hands[2] is None
+
+
+def test_twin_loadlock_swap_rejects_group_longer_than_stations() -> None:
+    """孪生 Swap 任一组数量超过 StationList 站点数时报错。"""
+    state = MachineState(
+        stations={
+            "LA": LoadLockState(
+                "LA",
+                "LoadLock",
+                {1: SlotState(SlotPhase.COMPLETED, MaterialState(25, "P", 3))},
+                door=DoorState.OPEN,
+                environment=VACUUM,
+            ),
+            "LB": LoadLockState(
+                "LB",
+                "LoadLock",
+                {1: SlotState(SlotPhase.EMPTY, None)},
+                door=DoorState.OPEN,
+                environment=VACUUM,
+            ),
+        },
+        robots={
+            "VACRobot": RobotState(
+                "VACRobot",
+                hands={
+                    1: MaterialState(21, "P", 8),
+                    2: MaterialState(22, "P", 8),
+                    4: MaterialState(23, "P", 8),
+                    3: None,
+                },
+                scope={"LA", "LB"},
+                can_swap=True,
+            ),
+        },
+        robot_aliases={"VACRobot": "VACRobot"},
+    )
+    move = _move(
+        600,
+        4,
+        10.0,
+        27.0,
+        ModuleName="VACRobot",
+        StationList=["LA", "LB"],
+        StnRecvSlotList=[1, 1, 1],
+        StnSendSlotList=[1],
+        RecvSlotList=[3],
+        SendSlotList=[1, 2, 4],
+        RecvMatList=[25],
+        SendMatList=[21, 22, 23],
+    )
+    issues = validate_move_list(None, [move], state)
+    assert issues and "Send 组数量不能超过 StationList" in issues[0]
+
+
 def _three_slot_robot_update() -> dict:
     """三槽 VACRobot（SlotIDs=[1,2,3]）连接 PM1 与 LoadPort LP1，用于不对称换片测试。"""
     return {
