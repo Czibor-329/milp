@@ -69,6 +69,8 @@ export interface WorkspaceSnapshot {
   activeMoves: MoveRecord[];
   modules: ModuleSnapshot[];
   robots: RobotSnapshot[];
+  /** 晶圆在本次 MoveList 中首次确认的来源模块和槽位，如 LP1.1。 */
+  waferOrigins: Record<string, string>;
   waferCount: number;
 }
 
@@ -765,6 +767,51 @@ function initialMaterialLocations(moves: NormalizedMove[]): Map<string, string> 
   return locations;
 }
 
+/**
+ * 返回晶圆在回放开始时的来源标识。
+ *
+ * 首次 Pick 能同时确认来源站与槽位，展示为 ``LP1.1``；缺少槽位或只能从
+ * Place/Process/Swap 推断时保留模块名，避免把当前所在位置误作来源。
+ */
+function initialMaterialOrigins(moves: NormalizedMove[]): Map<string, string> {
+  const origins = new Map<string, string>();
+  const setOrigin = (material: string, module: string, slot = 0): void => {
+    if (!material || !module || origins.has(material)) return;
+    origins.set(material, slot > 0 ? `${module}.${slot}` : module);
+  };
+  for (const move of moves) {
+    if (move.MoveType === SWAP_MOVE) {
+      materialIds(move, "RecvMatList").forEach((material, index) => {
+        setOrigin(
+          material,
+          indexedStation(move, "StationList", index),
+          indexedSlot(move, "StnSendSlotList", index),
+        );
+      });
+      for (const material of materialIds(move, "SendMatList")) {
+        setOrigin(material, move.ModuleName);
+      }
+      continue;
+    }
+    const source = PICK_MOVE_TYPES.has(move.MoveType)
+      ? "SrcStationList"
+      : "";
+    const fallback = source
+      ? ""
+      : PLACE_MOVE_TYPES.has(move.MoveType) || move.MoveType === PROCESS_MOVE
+        ? move.ModuleName
+        : "";
+    materialIds(move).forEach((material, index) => {
+      setOrigin(
+        material,
+        source ? indexedStation(move, source, index) : fallback,
+        source ? indexedSlot(move, "SrcSlotList", index) : 0,
+      );
+    });
+  }
+  return origins;
+}
+
 /** 把已经完成的传输动作应用到晶圆位置。 */
 function applyCompletedTransfer(move: NormalizedMove, locations: Map<string, string>): void {
   if (PICK_MOVE_TYPES.has(move.MoveType)) {
@@ -1123,6 +1170,7 @@ export function buildWorkspaceSnapshot(
   const robotNameSet = new Set(robotNames);
   const definitions = collectModuleDefinitions(records, device, robotNameSet);
   const initialLocations = initialMaterialLocations(records);
+  const waferOrigins = initialMaterialOrigins(records);
   const locations = new Map(initialLocations);
   const doorStates = new Map<string, DoorStatus>();
   const environments = new Map<string, string>();
@@ -1278,6 +1326,7 @@ export function buildWorkspaceSnapshot(
     activeMoves,
     modules,
     robots,
+    waferOrigins: Object.fromEntries(waferOrigins),
     waferCount: new Set(records.flatMap(move => materialIds(move))).size,
   };
 }
@@ -1755,11 +1804,17 @@ function expandDualProcessChambers(modules: ModuleSnapshot[]): DualChamberView[]
   return expanded;
 }
 
-/** 绘制原版风格的绿色晶圆；外圈由当前腔室加工进度驱动。 */
-function renderWaferToken(wafer: string, progress: number, processed = false): string {
+/** 绘制晶圆及其首次确认的来源模块；外圈由当前腔室加工进度驱动。 */
+function renderWaferToken(
+  wafer: string,
+  origin: string,
+  progress: number,
+  processed = false,
+): string {
   const normalizedProgress = Math.max(0, Math.min(1, progress));
   const state = processed ? "processed" : "unprocessed";
-  return `<span class="wafer-token wafer-${state}" style="--wafer-progress:${normalizedProgress * 360}deg" title="晶圆 ${escapeHtml(wafer)}，${processed ? "已加工" : "未加工"}"><span>${escapeHtml(wafer)}</span></span>`;
+  const originLabel = origin || "来源未知";
+  return `<span class="wafer-token wafer-${state}" style="--wafer-progress:${normalizedProgress * 360}deg" title="晶圆 ${escapeHtml(wafer)}，来源 ${escapeHtml(originLabel)}，${processed ? "已加工" : "未加工"}"><span><b>${escapeHtml(wafer)}</b><small>${escapeHtml(originLabel)}</small></span></span>`;
 }
 
 /** 门始终朝向对应机械手；LoadLock 改由正视双层结构单独表达。 */
@@ -1816,9 +1871,10 @@ function renderLoadPortCassette(module: ModuleSnapshot): string {
   </div>`;
 }
 
-/** 绘制拓扑中的紧凑腔室；可见文字只保留腔室名称和晶圆 ID。 */
+/** 绘制拓扑中的紧凑腔室；晶圆同时展示 ID 与其来源模块。 */
 function renderModule(
   module: ModuleSnapshot,
+  waferOrigins: Readonly<Record<string, string>>,
   role: "process" | "lock" | "port" | "auxiliary",
   candidate: CandidateDestinationSummary | undefined,
   layout: TopologyLayout = "single",
@@ -1828,7 +1884,7 @@ function renderModule(
   const visibleWaferCount = role === "lock" ? 2 : 1;
   const processedWafers = new Set(module.processedWafers ?? []);
   const wafers = module.wafers.slice(0, visibleWaferCount)
-    .map(wafer => renderWaferToken(wafer, waferProgress, processedWafers.has(wafer)))
+    .map(wafer => renderWaferToken(wafer, waferOrigins[wafer] ?? "", waferProgress, processedWafers.has(wafer)))
     .join("");
   const layerCount = role === "lock" && module.loadLockSlots.length
     ? module.loadLockSlots.filter(slot => slot.wafer).length
@@ -1924,6 +1980,7 @@ const ROBOT_DISPLAY_WAFER_LIMIT = 2;
 /** 绘制机器手：双片仅用轻微错层区分，不额外显示数量标签。 */
 function renderRobotHub(
   robot: RobotSnapshot,
+  waferOrigins: Readonly<Record<string, string>>,
   environment: RobotEnvironment,
   angleDegrees: number,
 ): string {
@@ -1933,7 +1990,7 @@ function renderRobotHub(
     ? `，持有 ${robot.wafers.length} 片晶圆 ${robot.wafers.join("、")}`
     : "，槽位为空";
   const waferMarkup = visibleWafers.map((wafer, index) => `
-    <span class="robot-held-wafer robot-held-wafer-${index}">${renderWaferToken(wafer, 0, robot.processedWafers.includes(wafer))}</span>`).join("");
+    <span class="robot-held-wafer robot-held-wafer-${index}">${renderWaferToken(wafer, waferOrigins[wafer] ?? "", 0, robot.processedWafers.includes(wafer))}</span>`).join("");
   const overflow = robot.wafers.length > ROBOT_DISPLAY_WAFER_LIMIT
     ? `<span class="robot-held-overflow">+${robot.wafers.length - ROBOT_DISPLAY_WAFER_LIMIT}</span>`
     : "";
@@ -2618,7 +2675,7 @@ export function renderEquipmentTopology(
     if (!position) return "";
     /* 展开后的腔室卡片仍用原 PM 模块名查询候选动作高亮。 */
     const candidateSource = processSourceNames.get(module.name) ?? module.name;
-    return `<div class="reference-module-position" style="--module-left:${position.leftPercent}%;--module-top:${position.topPixels}px">${renderModule(module, role, destinations.get(candidateSource), layout, roleIndex)}</div>`;
+    return `<div class="reference-module-position" style="--module-left:${position.leftPercent}%;--module-top:${position.topPixels}px">${renderModule(module, snapshot.waferOrigins, role, destinations.get(candidateSource), layout, roleIndex)}</div>`;
   }).join("");
   const positionedLoadPorts = positionedModules(groups.loadPorts);
   const loadPortBaseMarkup = positionedLoadPorts.length ? (() => {
@@ -2663,7 +2720,7 @@ export function renderEquipmentTopology(
       }
     }
     const angleDegrees = armAngle * 180 / Math.PI;
-    return `<div class="reference-robot-position" style="--robot-left:${position.leftPercent}%;--robot-top:${position.topPixels}px">${renderRobotHub(robot, environment, angleDegrees)}</div>`;
+    return `<div class="reference-robot-position" style="--robot-left:${position.leftPercent}%;--robot-top:${position.topPixels}px">${renderRobotHub(robot, snapshot.waferOrigins, environment, angleDegrees)}</div>`;
   }).join("");
   const robotMarkup = renderRobotGroup(vacuumRobots, "vacuum")
     + renderRobotGroup(atmosphereRobots, "atmosphere");
@@ -3269,7 +3326,10 @@ export class VisualizationWorkspace {
       : Number.NaN;
     const rawRecomputeCount = Number.isFinite(metadataRecomputeCount)
       ? metadataRecomputeCount
-      : Array.isArray(recomputePoints) ? recomputePoints.length : 0;
+      // 旧结果仅有 RecomputePoints；它不包含首轮算法 update。
+      : Array.isArray(recomputePoints) && Number.isFinite(rawCpuTimeMs)
+        ? recomputePoints.length + 1
+        : 0;
     await this.loadMoves(
       normalizeMovePayload(payload),
       normalizeDecisionTrace(payload),

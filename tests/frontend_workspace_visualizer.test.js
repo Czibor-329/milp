@@ -55,6 +55,23 @@ const moves = [
   },
 ];
 
+test("拓扑晶圆标签保留 ID 并显示首次来源模块和槽位", () => {
+  const snapshot = logic.buildWorkspaceSnapshot([
+    {
+      MoveID: 1, MoveType: 0, ModuleName: "ATR", SrcStationList: ["LP1"],
+      SrcSlotList: [1], MatIDList: ["W1"], StartTime: 0, EndTime: 1,
+    },
+    {
+      MoveID: 2, MoveType: 1, ModuleName: "ATR", DestStationList: ["PM1"],
+      DestSlotList: [1], MatIDList: ["W1"], StartTime: 1, EndTime: 2,
+    },
+  ], device, 2);
+
+  assert.equal(snapshot.waferOrigins.W1, "LP1.1");
+  const markup = logic.renderEquipmentTopology(snapshot, null, new Set(), device);
+  assert.match(markup, /<b>W1<\/b><small>LP1\.1<\/small>/);
+});
+
 const deadlockStage = (stepId, stationName, postStepIds = []) => ({
   stepId,
   postStepIds,
@@ -1967,15 +1984,15 @@ test("KPI 总览展示 CPU Time 和平均重算时间且不再渲染独立指标
     throughputSampleCount: 120,
     throughputReason: "",
     cpuTimeMs: 900,
-    recomputeCount: 3,
-    averageRecomputeTimeMs: 300,
+    recomputeCount: 4,
+    averageRecomputeTimeMs: 225,
   };
   const markup = logic.renderSchedulePerformance(performance);
 
   assert.match(markup, /<span>CPU Time<\/span>/);
   assert.match(markup, /900\.0 ms/);
   assert.match(markup, /<span>平均重算时间<\/span>/);
-  assert.match(markup, /CPU Time \/ 3 次重算/);
+  assert.match(markup, /CPU Time \/ 4 次重算/);
   assert.match(markup, /完工片数严格大于 150/);
   assert.doesNotMatch(markup, /指标导出参数设置|计算时间|单独导出 CSV/);
 });

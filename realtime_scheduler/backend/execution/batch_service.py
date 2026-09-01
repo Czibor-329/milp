@@ -1180,10 +1180,8 @@ def _execute_workspace_test_batch(
                     0.0,
                     float(result.get("cpuTimeMs", result.get("totalElapsedMs", 0.0))),
                 ),
-                "recomputeCount": sum(
-                    1 for row in (result.get("rounds") or [])
-                    if isinstance(row, Mapping) and row.get("kind") == "recompute"
-                ),
+                # updates 与每次算法 update 一一对应，包含首排 update #1。
+                "recomputeCount": len(list(result.get("updates") or [])),
             }
             artifact["ReplayContext"] = {
                 "schema": "machine-replay-context-v1",

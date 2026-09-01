@@ -100,15 +100,15 @@ class BackendAnalysisTests(unittest.TestCase):
             device,
             "full",
             context,
-            {"cpuTimeMs": 900.0, "recomputeCount": 3},
+            {"cpuTimeMs": 900.0, "recomputeCount": 4},
         )
 
         self.assertEqual(0, unavailable["throughputPerHour"])
         self.assertAlmostEqual(3600 * 120 / 1190, available["throughputPerHour"])
         self.assertEqual(120, available["throughputSampleCount"])
         self.assertEqual(900.0, available["cpuTimeMs"])
-        self.assertEqual(3, available["recomputeCount"])
-        self.assertEqual(300.0, available["averageRecomputeTimeMs"])
+        self.assertEqual(4, available["recomputeCount"])
+        self.assertEqual(225.0, available["averageRecomputeTimeMs"])
 
     def test_context_is_built_on_backend_from_routes_and_rounds(self) -> None:
         """工序容量上下文应由后端从原始 Route/PJob 配置构建。"""

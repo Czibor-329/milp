@@ -396,7 +396,13 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                                 if isinstance(legacy_metadata, Mapping)
                                 else None
                             ),
-                            "recomputeCount": len(list(saved_result.get("RecomputePoints") or [])),
+                            # RecomputePoints 只记录首排之后的重算点；首轮同样会
+                            # 调用一次算法 update，必须纳入 CPU Time 的平均分母。
+                            "recomputeCount": (
+                                len(list(saved_result.get("RecomputePoints") or [])) + 1
+                                if isinstance(legacy_metadata, Mapping)
+                                else 0
+                            ),
                         }
                 else:
                     moves = normalize_move_payload(
@@ -593,10 +599,8 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                     0.0,
                     float(result.get("cpuTimeMs", result.get("totalElapsedMs", 0.0))),
                 ),
-                "recomputeCount": sum(
-                    1 for row in (result.get("rounds") or [])
-                    if isinstance(row, Mapping) and row.get("kind") == "recompute"
-                ),
+                # updates 与每次算法 update 一一对应，包含首排 update #1。
+                "recomputeCount": len(list(result.get("updates") or [])),
             }
             if replay_plan is not None:
                 artifact["ReplayContext"] = {

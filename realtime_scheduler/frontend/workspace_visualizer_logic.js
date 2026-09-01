@@ -483,6 +483,38 @@ function initialMaterialLocations(moves) {
   }
   return locations;
 }
+function initialMaterialOrigins(moves) {
+  const origins = /* @__PURE__ */ new Map();
+  const setOrigin = (material, module2, slot = 0) => {
+    if (!material || !module2 || origins.has(material)) return;
+    origins.set(material, slot > 0 ? `${module2}.${slot}` : module2);
+  };
+  for (const move of moves) {
+    if (move.MoveType === SWAP_MOVE) {
+      materialIds(move, "RecvMatList").forEach((material, index) => {
+        setOrigin(
+          material,
+          indexedStation(move, "StationList", index),
+          indexedSlot(move, "StnSendSlotList", index)
+        );
+      });
+      for (const material of materialIds(move, "SendMatList")) {
+        setOrigin(material, move.ModuleName);
+      }
+      continue;
+    }
+    const source = PICK_MOVE_TYPES.has(move.MoveType) ? "SrcStationList" : "";
+    const fallback = source ? "" : PLACE_MOVE_TYPES.has(move.MoveType) || move.MoveType === PROCESS_MOVE ? move.ModuleName : "";
+    materialIds(move).forEach((material, index) => {
+      setOrigin(
+        material,
+        source ? indexedStation(move, source, index) : fallback,
+        source ? indexedSlot(move, "SrcSlotList", index) : 0
+      );
+    });
+  }
+  return origins;
+}
 function applyCompletedTransfer(move, locations) {
   if (PICK_MOVE_TYPES.has(move.MoveType)) {
     for (const material of materialIds(move)) locations.set(material, move.ModuleName);
@@ -755,6 +787,7 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
   const robotNameSet = new Set(robotNames);
   const definitions = collectModuleDefinitions(records, device, robotNameSet);
   const initialLocations = initialMaterialLocations(records);
+  const waferOrigins = initialMaterialOrigins(records);
   const locations = new Map(initialLocations);
   const doorStates = /* @__PURE__ */ new Map();
   const environments = /* @__PURE__ */ new Map();
@@ -881,6 +914,7 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
     activeMoves,
     modules,
     robots,
+    waferOrigins: Object.fromEntries(waferOrigins),
     waferCount: new Set(records.flatMap((move) => materialIds(move))).size
   };
 }
@@ -1225,10 +1259,11 @@ function expandDualProcessChambers(modules) {
   }
   return expanded;
 }
-function renderWaferToken(wafer, progress, processed = false) {
+function renderWaferToken(wafer, origin, progress, processed = false) {
   const normalizedProgress = Math.max(0, Math.min(1, progress));
   const state = processed ? "processed" : "unprocessed";
-  return `<span class="wafer-token wafer-${state}" style="--wafer-progress:${normalizedProgress * 360}deg" title="\u6676\u5706 ${escapeHtml(wafer)}\uFF0C${processed ? "\u5DF2\u52A0\u5DE5" : "\u672A\u52A0\u5DE5"}"><span>${escapeHtml(wafer)}</span></span>`;
+  const originLabel = origin || "\u6765\u6E90\u672A\u77E5";
+  return `<span class="wafer-token wafer-${state}" style="--wafer-progress:${normalizedProgress * 360}deg" title="\u6676\u5706 ${escapeHtml(wafer)}\uFF0C\u6765\u6E90 ${escapeHtml(originLabel)}\uFF0C${processed ? "\u5DF2\u52A0\u5DE5" : "\u672A\u52A0\u5DE5"}"><span><b>${escapeHtml(wafer)}</b><small>${escapeHtml(originLabel)}</small></span></span>`;
 }
 function moduleDoorSides(module2, role, layout = "single", roleIndex = 0) {
   if (module2.door === "doorless") return [];
@@ -1280,11 +1315,11 @@ function renderLoadPortCassette(module2) {
     <div class="load-port-slot-bank" style="--load-port-slot-count:${slots.length}">${slotMarkup}</div>
   </div>`;
 }
-function renderModule(module2, role, candidate, layout = "single", roleIndex = 0) {
+function renderModule(module2, waferOrigins, role, candidate, layout = "single", roleIndex = 0) {
   const waferProgress = module2.status === "processing" ? module2.progress : 0;
   const visibleWaferCount = role === "lock" ? 2 : 1;
   const processedWafers = new Set(module2.processedWafers ?? []);
-  const wafers = module2.wafers.slice(0, visibleWaferCount).map((wafer) => renderWaferToken(wafer, waferProgress, processedWafers.has(wafer))).join("");
+  const wafers = module2.wafers.slice(0, visibleWaferCount).map((wafer) => renderWaferToken(wafer, waferOrigins[wafer] ?? "", waferProgress, processedWafers.has(wafer))).join("");
   const layerCount = role === "lock" && module2.loadLockSlots.length ? module2.loadLockSlots.filter((slot) => slot.wafer).length : module2.wafers.length;
   const overflow = layerCount > visibleWaferCount ? `<span class="wafer-more">+ ${layerCount - visibleWaferCount}</span>` : "";
   const doors = moduleDoorSides(module2, role, layout, roleIndex).map((side) => `<i class="chamber-door chamber-door-${side}"></i>`).join("");
@@ -1340,12 +1375,12 @@ function renderModule(module2, role, candidate, layout = "single", roleIndex = 0
 }
 var ROBOT_DOUBLE_HOLD_CAPACITY = 2;
 var ROBOT_DISPLAY_WAFER_LIMIT = 2;
-function renderRobotHub(robot, environment, angleDegrees) {
+function renderRobotHub(robot, waferOrigins, environment, angleDegrees) {
   const visibleWafers = robot.wafers.slice(0, ROBOT_DISPLAY_WAFER_LIMIT);
   const capacityLabel = robot.capacity >= ROBOT_DOUBLE_HOLD_CAPACITY ? "\u53CC\u7247\u673A\u68B0\u624B" : "\u5355\u69FD\u673A\u68B0\u624B";
   const holdingLabel = robot.wafers.length ? `\uFF0C\u6301\u6709 ${robot.wafers.length} \u7247\u6676\u5706 ${robot.wafers.join("\u3001")}` : "\uFF0C\u69FD\u4F4D\u4E3A\u7A7A";
   const waferMarkup = visibleWafers.map((wafer, index) => `
-    <span class="robot-held-wafer robot-held-wafer-${index}">${renderWaferToken(wafer, 0, robot.processedWafers.includes(wafer))}</span>`).join("");
+    <span class="robot-held-wafer robot-held-wafer-${index}">${renderWaferToken(wafer, waferOrigins[wafer] ?? "", 0, robot.processedWafers.includes(wafer))}</span>`).join("");
   const overflow = robot.wafers.length > ROBOT_DISPLAY_WAFER_LIMIT ? `<span class="robot-held-overflow">+${robot.wafers.length - ROBOT_DISPLAY_WAFER_LIMIT}</span>` : "";
   return `
     <article class="robot-hub robot-hub-${environment} ${robot.busy ? "is-busy" : ""}" style="--robot-arm-angle:${angleDegrees.toFixed(1)}deg" aria-label="${escapeHtml(robot.name)}\uFF0C${capacityLabel}\uFF0C${robot.busy ? "\u5DE5\u4F5C\u4E2D" : "\u5F85\u547D"}${holdingLabel}">
@@ -1783,7 +1818,7 @@ function renderEquipmentTopology(snapshot, decision, hiddenFilters, device) {
     const position = modulePositions.get(module2.name);
     if (!position) return "";
     const candidateSource = processSourceNames.get(module2.name) ?? module2.name;
-    return `<div class="reference-module-position" style="--module-left:${position.leftPercent}%;--module-top:${position.topPixels}px">${renderModule(module2, role, destinations.get(candidateSource), layout, roleIndex)}</div>`;
+    return `<div class="reference-module-position" style="--module-left:${position.leftPercent}%;--module-top:${position.topPixels}px">${renderModule(module2, snapshot.waferOrigins, role, destinations.get(candidateSource), layout, roleIndex)}</div>`;
   }).join("");
   const positionedLoadPorts = positionedModules(groups.loadPorts);
   const loadPortBaseMarkup = positionedLoadPorts.length ? (() => {
@@ -1821,7 +1856,7 @@ function renderEquipmentTopology(snapshot, decision, hiddenFilters, device) {
       }
     }
     const angleDegrees = armAngle * 180 / Math.PI;
-    return `<div class="reference-robot-position" style="--robot-left:${position.leftPercent}%;--robot-top:${position.topPixels}px">${renderRobotHub(robot, environment, angleDegrees)}</div>`;
+    return `<div class="reference-robot-position" style="--robot-left:${position.leftPercent}%;--robot-top:${position.topPixels}px">${renderRobotHub(robot, snapshot.waferOrigins, environment, angleDegrees)}</div>`;
   }).join("");
   const robotMarkup = renderRobotGroup(vacuumRobots, "vacuum") + renderRobotGroup(atmosphereRobots, "atmosphere");
   return `
@@ -2280,7 +2315,7 @@ var VisualizationWorkspace = class {
     const rawCpuTimeMs = metadata && typeof metadata === "object" && !Array.isArray(metadata) ? Number(metadata.cpuTimeMs ?? Number(metadata.calculationSeconds) * 1e3) : Number.NaN;
     const recomputePoints = payload && typeof payload === "object" && !Array.isArray(payload) ? payload.RecomputePoints : null;
     const metadataRecomputeCount = metadata && typeof metadata === "object" && !Array.isArray(metadata) ? Number(metadata.recomputeCount) : Number.NaN;
-    const rawRecomputeCount = Number.isFinite(metadataRecomputeCount) ? metadataRecomputeCount : Array.isArray(recomputePoints) ? recomputePoints.length : 0;
+    const rawRecomputeCount = Number.isFinite(metadataRecomputeCount) ? metadataRecomputeCount : Array.isArray(recomputePoints) && Number.isFinite(rawCpuTimeMs) ? recomputePoints.length + 1 : 0;
     await this.loadMoves(
       normalizeMovePayload(payload),
       normalizeDecisionTrace(payload),
