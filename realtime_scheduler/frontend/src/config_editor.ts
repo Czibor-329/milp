@@ -3829,6 +3829,80 @@ function skipValidationEnabled() {
   return document.getElementById("skipValidationInput")?.checked === true;
 }
 
+/** 把数字输入限制在 [min, max] 并回填 DOM，防止手输越界值。 */
+function clampParallelismInput(elementId, min, max, fallback) {
+  const input = document.getElementById(elementId);
+  if (!input) return fallback;
+  let value = Number.parseInt(String(input.value), 10);
+  if (!Number.isFinite(value)) value = fallback;
+  value = Math.max(min, Math.min(max, value));
+  if (String(input.value) !== String(value)) input.value = String(value);
+  return value;
+}
+
+/** 返回“算法并行数”配置（1~30，默认 4）。 */
+function batchParallelism() {
+  return clampParallelismInput("batchParallelismInput", 1, 30, 4);
+}
+
+/** 返回“校验并行数”配置（1~15，默认 2）。 */
+function validationParallelism() {
+  return clampParallelismInput("validationParallelismInput", 1, 15, 2);
+}
+
+let runSettingsPreferencesDirty = false;
+
+/** 收集运行设置弹窗的完整状态，作为本地偏好 API 的稳定载荷。 */
+function currentRunSettingsPreferences() {
+  return {
+    compatibilityMode: compatibilityModeEnabled(),
+    hongYeCheck: hongYeCheckEnabled(),
+    skipBaseline: skipBaselineEnabled(),
+    skipValidation: skipValidationEnabled(),
+    maximumWorkers: batchParallelism(),
+    validationWorkers: validationParallelism(),
+  };
+}
+
+/** 将服务端保存的本地运行偏好应用到弹窗控件。 */
+function applyRunSettingsPreferences(settings) {
+  if (!settings || typeof settings !== "object") return;
+  const checkboxFields = {
+    compatibilityMode: "compatibilityModeInput",
+    hongYeCheck: "hongYeCheckInput",
+    skipBaseline: "skipBaselineInput",
+    skipValidation: "skipValidationInput",
+  };
+  Object.entries(checkboxFields).forEach(([field, elementId]) => {
+    const input = document.getElementById(elementId);
+    if (input && typeof settings[field] === "boolean") input.checked = settings[field];
+  });
+  const maximumWorkersInput = document.getElementById("batchParallelismInput");
+  const validationWorkersInput = document.getElementById("validationParallelismInput");
+  if (maximumWorkersInput) maximumWorkersInput.value = String(settings.maximumWorkers ?? 4);
+  if (validationWorkersInput) validationWorkersInput.value = String(settings.validationWorkers ?? 2);
+  batchParallelism();
+  validationParallelism();
+  runSettingsPreferencesDirty = false;
+  updateRunSettingsButtonLabel();
+}
+
+/** 从服务端 ``data/run_preferences.json`` 恢复当前安装实例的运行习惯。 */
+async function loadRunSettingsPreferences() {
+  const result = await requestJson("/api/preferences/run-settings", { cache: "no-store" });
+  if (!runSettingsPreferencesDirty) applyRunSettingsPreferences(result.runSettings);
+}
+
+/** 把运行设置原子保存到服务端本地数据目录。 */
+async function saveRunSettingsPreferences() {
+  const result = await requestJson("/api/preferences/run-settings", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ runSettings: currentRunSettingsPreferences() }),
+  });
+  applyRunSettingsPreferences(result.runSettings);
+}
+
 /** 返回是否选择 HongYe SchStateLib 输出校验器。 */
 function hongYeCheckEnabled() {
   return document.getElementById("hongYeCheckInput")?.checked === true;
@@ -3844,11 +3918,20 @@ function updateRunSettingsButtonLabel() {
   const hongYe = document.getElementById("hongYeCheckInput")?.checked === true;
   const skipBaseline = document.getElementById("skipBaselineInput")?.checked === true;
   const skipValidation = document.getElementById("skipValidationInput")?.checked === true;
+  const algorithmWorkers = batchParallelism();
+  const validationWorkers = validationParallelism();
+  const validationInput = document.getElementById("validationParallelismInput");
+  if (validationInput) validationInput.disabled = !hongYe || skipValidation;
   const labels = [compatibility && "兼容模式", hongYe && "HongYe Check", skipBaseline && "跳过 Baseline", skipValidation && "跳过校验"].filter(Boolean);
-  const summary = labels.length ? `运行设置：${labels.join("、")}` : "运行设置：全部关闭";
+  const parallelism = `算法×${algorithmWorkers}${hongYe && !skipValidation ? ` 校验×${validationWorkers}` : ""}`;
+  const summary = labels.length ? `运行设置：${labels.join("、")}（${parallelism}）` : `运行设置：${parallelism}`;
   button.setAttribute("aria-label", summary);
   button.setAttribute("title", summary);
-  button.classList.toggle("is-customized", !compatibility || !hongYe || !skipBaseline || skipValidation);
+  button.classList.toggle(
+    "is-customized",
+    !compatibility || !hongYe || !skipBaseline || skipValidation
+      || algorithmWorkers !== 4 || validationWorkers !== 2,
+  );
 }
 
 /** 打开运行设置原生 dialog，并在关闭后把焦点归还到触发按钮。 */
@@ -3869,6 +3952,12 @@ function closeRunSettingsDialog() {
 /** 收尾运行设置 dialog 的关闭状态并恢复焦点。 */
 function finishRunSettingsDialog() {
   updateRunSettingsButtonLabel();
+  if (runSettingsPreferencesDirty) {
+    saveRunSettingsPreferences().catch(error => {
+      runSettingsPreferencesDirty = true;
+      writeTerminal(`$ 运行设置保存失败\n  ${error.message || "未知错误"}`, true);
+    });
+  }
   runSettingsTrigger?.setAttribute("aria-expanded", "false");
   if (runSettingsTrigger?.isConnected) runSettingsTrigger.focus();
   runSettingsTrigger = null;
@@ -4363,11 +4452,14 @@ async function runCurrentTestGroup(selectedTestIds = null) {
     document.getElementById("batchOverviewButton").hidden = true;
     button.disabled = false; runButton.disabled = true; button.classList.add("cancel"); button.textContent = "■ 终止调度";
     document.getElementById("batchResults").innerHTML = "";
-    writeTerminal(`$ 批量运行当前测试组\n  组别: ${state.activeTestGroup || "未分组"}\n  策略: ${displayStrategyName(state.strategy)}\n  测试数: ${tests.length}\n  后端最多并行运行 4 项…`);
+    const validationSummary = hongYeCheckEnabled() && !skipValidationEnabled()
+      ? ` · HongYe 校验并行 ${validationParallelism()} 路`
+      : "";
+    writeTerminal(`$ 批量运行当前测试组\n  组别: ${state.activeTestGroup || "未分组"}\n  策略: ${displayStrategyName(state.strategy)}\n  测试数: ${tests.length}\n  算法并行 ${batchParallelism()} 项${validationSummary}…`);
     const response = await fetch("/api/run-batch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ deviceId: state.workspaceDeviceId, group: state.activeTestGroup, testIds: tests.map(test => test.id), strategy: state.strategy, options: state.options, skipValidation: skipValidationEnabled(), hongYeCheck: hongYeCheckEnabled(), compatibilityMode: compatibilityModeEnabled(), skipBaseline: skipBaselineEnabled() }),
+      body: JSON.stringify({ deviceId: state.workspaceDeviceId, group: state.activeTestGroup, testIds: tests.map(test => test.id), strategy: state.strategy, options: state.options, skipValidation: skipValidationEnabled(), hongYeCheck: hongYeCheckEnabled(), compatibilityMode: compatibilityModeEnabled(), skipBaseline: skipBaselineEnabled(), maximumWorkers: batchParallelism(), validationWorkers: validationParallelism() }),
     });
     let result = await response.json();
     if (!response.ok || !result.batchId || !Array.isArray(result.items)) throw new Error(result.error || `服务返回 ${response.status}`);
@@ -4699,7 +4791,7 @@ function showBatchProgress(result) {
   writeTerminal([
     "$ 批量运行当前测试组",
     `  组别: ${result.group || "未分组"} · 策略: ${displayStrategyName(result.strategy)}`,
-    `  进度: ${completed}/${total} (${percent}%) · 并行数: ${result.workerCount}`,
+    `  进度: ${completed}/${total} (${percent}%) · 算法并行: ${result.workerCount}${result.validationWorkers > 0 ? ` · HongYe 校验并行: ${result.validationWorkers}` : ""}`,
     `  等待: ${(result.items || []).filter(item => item.status === "queued").length} · 运行中: ${(result.items || []).filter(item => item.status === "running").length} · 成功: ${result.succeeded || 0} · 失败: ${result.failed || 0} · 终止: ${result.cancelled || 0}`,
   ].join("\n"));
 }
@@ -5219,8 +5311,11 @@ document.getElementById("batchRunButton").addEventListener("click", runCurrentTe
 document.getElementById("openRunSettingsButton").addEventListener("click", openRunSettingsDialog);
 document.getElementById("runSettingsDialogClose").addEventListener("click", closeRunSettingsDialog);
 document.getElementById("runSettingsDialog").addEventListener("close", finishRunSettingsDialog);
-["skipValidationInput", "hongYeCheckInput", "compatibilityModeInput", "skipBaselineInput"].forEach(id => {
-  document.getElementById(id).addEventListener("change", updateRunSettingsButtonLabel);
+["skipValidationInput", "hongYeCheckInput", "compatibilityModeInput", "skipBaselineInput", "batchParallelismInput", "validationParallelismInput"].forEach(id => {
+  document.getElementById(id).addEventListener("change", () => {
+    runSettingsPreferencesDirty = true;
+    updateRunSettingsButtonLabel();
+  });
 });
 updateRunSettingsButtonLabel();
 document.getElementById("batchTestSelectionDialogClose").addEventListener("click", () => (document.getElementById("batchTestSelectionDialog") as HTMLDialogElement).close());
@@ -5407,6 +5502,12 @@ document.addEventListener("click", event => {
   const card = event.target.closest("[data-step-card]"); if (card) openPJobStepDrawer(Number(card.dataset.routeIndex), Number(card.dataset.stageIndex));
 });
 window.addEventListener("pagehide", () => {
+  if (runSettingsPreferencesDirty) {
+    fetch("/api/preferences/run-settings", {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ runSettings: currentRunSettingsPreferences() }), keepalive: true,
+    }).catch(() => {});
+  }
   if (state.deviceTimingDirty && state.workspaceDeviceId && state.deviceTimingDraft) {
     fetch(`/api/workspaces/${state.workspaceDeviceId}/device-timing`, {
       method: "PUT", headers: { "Content-Type": "application/json" },
@@ -5422,4 +5523,6 @@ window.addEventListener("pagehide", () => {
 });
 
 initializeCompactSelects();
-renderAll(); renderWorkspaceControls(); renderDeviceTimingConfiguration(); checkService(); loadWorkspaceCatalog().catch(error => setWorkspaceStatus(`测试集读取失败：${error.message}`, "dirty"));
+renderAll(); renderWorkspaceControls(); renderDeviceTimingConfiguration(); checkService();
+loadRunSettingsPreferences().catch(error => writeTerminal(`$ 运行设置读取失败\n  ${error.message || "未知错误"}`, true));
+loadWorkspaceCatalog().catch(error => setWorkspaceStatus(`测试集读取失败：${error.message}`, "dirty"));

@@ -3,6 +3,8 @@
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from realtime_scheduler.backend import application as scheduler_application
 from realtime_scheduler.backend.execution import service as execution_service
 from realtime_scheduler.backend.execution.batch_service import build_workspace_batch_plan
@@ -83,6 +85,34 @@ def test_hongye_receives_original_terminal_generation_output() -> None:
     assert result["output"]["MoveList"] == [{"MoveID": 1}, {"MoveID": 200}]
 
 
+def test_hongye_validation_releases_batch_limiter_after_failure() -> None:
+    """HongYe 校验异常时也必须释放批量闸门，避免后续 worker 永久阻塞。"""
+    events = []
+
+    class RecordingLimiter:
+        """记录信号量的获取与释放顺序。"""
+
+        def acquire(self):
+            """记录进入校验段。"""
+            events.append("acquire")
+
+        def release(self):
+            """记录离开校验段。"""
+            events.append("release")
+
+    with (
+        patch.object(execution_service, "_execute_plan", return_value={"ok": True, "output": {"MoveList": []}}),
+        patch.object(execution_service, "validate_reproduction_log", side_effect=RuntimeError("校验器失败")),
+    ):
+        with pytest.raises(execution_service.LoggedPlanError):
+            execution_service.execute_plan(
+                {"hongYeCheck": True},
+                hongye_validation_limiter=RecordingLimiter(),
+            )
+
+    assert events == ["acquire", "release"]
+
+
 def test_module_parallel_delays_module_lane_and_premove_successor() -> None:
     """同模块及 PreMoveID 后继必须等待前序实际结束。"""
     moves = [{"MoveID": 1, "ModuleName": "A", "StartTime": 0, "EndTime": 10}, {"MoveID": 2, "ModuleName": "B", "StartTime": 1, "EndTime": 3, "PreMoveID": [1]}, {"MoveID": 3, "ModuleName": "A", "StartTime": 2, "EndTime": 4}, {"MoveID": 4, "ModuleName": "C", "StartTime": 1, "EndTime": 2}]
@@ -110,7 +140,7 @@ def test_batch_plan_defaults_to_hongye_and_compatibility() -> None:
 
 
 def test_frontend_moves_run_options_into_settings_dialog() -> None:
-    """开始运行区只保留设置按钮，四个选项在可访问 dialog 中。"""
+    """开始运行区只保留设置按钮，运行与批量并发选项位于可访问 dialog。"""
     template = (ROOT / "realtime_scheduler" / "frontend" / "config_editor.html").read_text(encoding="utf-8")
     assert 'id="openRunSettingsButton"' in template
     assert 'id="runSettingsDialog"' in template
@@ -119,6 +149,14 @@ def test_frontend_moves_run_options_into_settings_dialog() -> None:
     assert "HongYe Check <em>（推荐）</em>" in template
     assert "Baseline 使用 Heuristic 结果作为性能基线" in template
     assert "不执行任何输出校验，仅用于调试。" in template
+    assert 'id="batchParallelismInput"' in template
+    assert 'id="batchParallelismInput" class="run-setting-number" type="number" min="1" max="30"' in template
+    assert 'id="validationParallelismInput"' in template
+    assert 'id="validationParallelismInput" class="run-setting-number" type="number" min="1" max="15"' in template
+    assert "所有测试及自动 Baseline 共享" in template
+    assert 'requestJson("/api/preferences/run-settings"' in (
+        ROOT / "realtime_scheduler" / "frontend" / "src" / "config_editor.ts"
+    ).read_text(encoding="utf-8")
 
 
 def test_all_recompute_notifications_are_recorded() -> None:

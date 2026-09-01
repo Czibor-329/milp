@@ -87,6 +87,29 @@ v5 的 `workspaces/` 与 `devices/` 首次升级时执行以下过程：
 
 格式变化必须逐版本提供幂等迁移器和回归夹具。软件不得猜测或改写高于自身支持版本的数据。
 
+## 本地用户偏好
+
+`data/run_preferences.json` 保存当前安装实例共享的页面运行习惯，不属于
+`data/datasets/` 设备主数据，也不进入设备或测试集交换包。当前格式为：
+
+```json
+{
+  "schemaVersion": 1,
+  "runSettings": {
+    "compatibilityMode": true,
+    "hongYeCheck": true,
+    "skipBaseline": true,
+    "skipValidation": false,
+    "maximumWorkers": 4,
+    "validationWorkers": 2
+  }
+}
+```
+
+页面通过 `/api/preferences/run-settings` 读取和原子保存该文件。算法并行数范围为
+1~30，HongYe 校验并行数范围为 1~15；服务端会拒绝类型错误、越界值及高于当前
+支持版本的文件。文件不存在时使用内置默认值，并在用户首次修改后创建。
+
 ## 运行时数据
 
 `checkpoints/`、锁文件、`exports/` 结果与复现日志均不属于设备或测试集交换包，也不能作为设备主数据来源。外部策略只从 `alg/other_alg/` 检测，不写入 `data/`。

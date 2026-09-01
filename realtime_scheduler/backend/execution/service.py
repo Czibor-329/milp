@@ -767,8 +767,70 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
         skip_validation=skip_validation,
     )
 
-def execute_plan(raw_plan: Mapping[str, Any]) -> Dict[str, Any]:
-    """执行计划；成功和失败都生成可重放的 input_data 格式日志。"""
+def validate_reproduction_log(
+    entries: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """对完整复现日志执行 HongYe 校验；失败时抛出 LoggedPlanError。
+
+    ``execute_plan`` 与批量两阶段校验共用同一校验路径，保证失败语义一致：
+    成功返回校验结果字典，失败抛出携带甘特图失败输出与校验问题的
+    ``LoggedPlanError``，供批量层保存复现日志并生成诊断入口。
+    """
+    hongye_validation = HongYeLogValidator().validate(entries)
+    if hongye_validation.get("success"):
+        return hongye_validation
+    # 原始 MoveStateSim 直接消费完整日志。各代 AlgOutput 必须保持算法当时
+    # 返回的计划，不能替换成甘特图累计历史，否则最新 AlgSchedule 的现场
+    # 会被错误地套到早期 Move 上，制造槽位物料不匹配等假错误。
+    raw_issues = (
+        hongye_validation.get("error_issues")
+        or hongye_validation.get("issues")
+        or []
+    )
+    issues = _hongye_validation_issue_messages(raw_issues)
+    output_index, output_entry = next(
+        (
+            (index, entry)
+            for index, entry in reversed(list(enumerate(entries)))
+            if str(entry.get("Describe") or "").casefold() == "algoutput"
+        ),
+        (-1, {}),
+    )
+    terminal_output = (
+        output_entry.get("Info")
+        if isinstance(output_entry.get("Info"), Mapping)
+        else {}
+    )
+    prefix_moves, recompute_points = (
+        _reproduction_history_before_current_output(entries[:output_index])
+    )
+    message = (
+        "HongYe MoveList 状态校验失败："
+        + (issues[0] if issues else "存在未分类错误")
+    )
+    raise LoggedPlanError(
+        message,
+        entries,
+        failure_output=_build_validation_gantt_output(
+            terminal_output,
+            issues,
+            prefix_moves=prefix_moves,
+            recompute_points=recompute_points,
+        ),
+        validation_issues=issues,
+    )
+
+
+def execute_plan(
+    raw_plan: Mapping[str, Any],
+    *,
+    hongye_validation_limiter: Any = None,
+) -> Dict[str, Any]:
+    """执行计划；成功和失败都生成可重放的 input_data 格式日志。
+
+    ``hongye_validation_limiter`` 是批量运行可选的跨线程或跨进程信号量，
+    只包围内存占用较高的 MoveStateSim 校验段，不限制算法本身的并行度。
+    """
     _set_run_monitor_scope(str(raw_plan.get("strategy") or "heuristic"))
     _raise_if_single_run_cancelled()
     use_hongye_validation = (
@@ -782,55 +844,18 @@ def execute_plan(raw_plan: Mapping[str, Any]) -> Dict[str, Any]:
     try:
         result = _execute_plan(raw_plan, reproduction)
         if use_hongye_validation:
-            # 原始 MoveStateSim 直接消费完整日志。各代 AlgOutput 必须保持算法当时
-            # 返回的计划，不能替换成甘特图累计历史，否则最新 AlgSchedule 的现场
-            # 会被错误地套到早期 Move 上，制造槽位物料不匹配等假错误。
-            hongye_validation = HongYeLogValidator().validate(
-                reproduction.entries
-            )
-            if not hongye_validation.get("success"):
-                raw_issues = (
-                    hongye_validation.get("error_issues")
-                    or hongye_validation.get("issues")
-                    or []
-                )
-                issues = _hongye_validation_issue_messages(raw_issues)
-                output_index, output_entry = next(
-                    (
-                        (index, entry)
-                        for index, entry in reversed(
-                            list(enumerate(reproduction.entries))
-                        )
-                        if str(entry.get("Describe") or "").casefold()
-                        == "algoutput"
-                    ),
-                    (-1, {}),
-                )
-                terminal_output = (
-                    output_entry.get("Info")
-                    if isinstance(output_entry.get("Info"), Mapping)
-                    else {}
-                )
-                prefix_moves, recompute_points = (
-                    _reproduction_history_before_current_output(
-                        reproduction.entries[:output_index]
-                    )
-                )
-                message = (
-                    "HongYe MoveList 状态校验失败："
-                    + (issues[0] if issues else "存在未分类错误")
-                )
-                raise LoggedPlanError(
-                    message,
+            if hongye_validation_limiter is None:
+                hongye_validation = validate_reproduction_log(
                     reproduction.entries,
-                    failure_output=_build_validation_gantt_output(
-                        terminal_output,
-                        issues,
-                        prefix_moves=prefix_moves,
-                        recompute_points=recompute_points,
-                    ),
-                    validation_issues=issues,
                 )
+            else:
+                hongye_validation_limiter.acquire()
+                try:
+                    hongye_validation = validate_reproduction_log(
+                        reproduction.entries,
+                    )
+                finally:
+                    hongye_validation_limiter.release()
     except LoggedPlanError:
         # 多轮重算的算法调用失败可能已附带按 RemoveList 裁剪的旧计划；
         # 不能再包装为普通异常，否则 /api/run 将丢失甘特图所需的结果。

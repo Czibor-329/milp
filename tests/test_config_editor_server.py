@@ -547,19 +547,19 @@ class RecomputeFailureOutputTests(unittest.TestCase):
         self.assertIn("!rec.removedByRecompute", viewer)
         self.assertIn('fillOpacity = bar.rec.removedByRecompute ? "0.24" : "1"', viewer)
 
-    def test_frontend_version_and_cache_keys_are_1_5_24(self) -> None:
+    def test_frontend_version_and_cache_keys_are_1_5_25(self) -> None:
         """前端显示版本、包版本和主资源缓存键必须同步。"""
         frontend_root = ROOT / "realtime_scheduler" / "frontend"
         template = (frontend_root / "config_editor.html").read_text(encoding="utf-8")
         package = json.loads((frontend_root / "package.json").read_text(encoding="utf-8"))
         package_lock = json.loads((frontend_root / "package-lock.json").read_text(encoding="utf-8"))
 
-        self.assertEqual("1.5.24", package["version"])
-        self.assertEqual("1.5.24", package_lock["version"])
-        self.assertEqual("1.5.24", package_lock["packages"][""]["version"])
-        self.assertIn('class="frontend-version">V1.5.24</span>', template)
-        self.assertIn('/assets/config_editor.css?v=1.5.24', template)
-        self.assertIn('/assets/config_editor.js?v=1.5.24', template)
+        self.assertEqual("1.5.25", package["version"])
+        self.assertEqual("1.5.25", package_lock["version"])
+        self.assertEqual("1.5.25", package_lock["packages"][""]["version"])
+        self.assertIn('class="frontend-version">V1.5.25</span>', template)
+        self.assertIn('/assets/config_editor.css?v=1.5.25', template)
+        self.assertIn('/assets/config_editor.js?v=1.5.25', template)
 
     def test_run_options_live_in_compact_settings_dialog(self) -> None:
         """运行选项应收纳到设置弹窗，齿轮按钮与状态灯保持紧凑。"""
@@ -2358,7 +2358,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("<span>结果分析</span>", html)
         self.assertIn("<span>路径配置</span>", html)
         self.assertNotIn('data-tab-view="clean"', html)
-        self.assertIn('class="frontend-version">V1.5.24</span>', html)
+        self.assertIn('class="frontend-version">V1.5.25</span>', html)
         self.assertIn('data-option="residencyGuardSeconds"', html)
         self.assertIn('data-option="maximumRobotHoldingSeconds"', html)
         self.assertIn('data-option="maximumSystemResidenceCv"', html)
@@ -3085,7 +3085,7 @@ class ConfigEditorServerTests(unittest.TestCase):
             patch.object(config_server, "save_reproduction_log", return_value="log-id"),
         ):
             result = config_server.run_workspace_test_batch(
-                "device-batch", "回归", "e2e-ctq", {"seed": 9}, maximum_workers=2,
+                "device-batch", "回归", "e2e-ctq", {"seed": 9}, maximum_workers=2, hongye_check=False,
             )
 
         self.assertEqual(2, result["testCount"])
@@ -3165,9 +3165,12 @@ class ConfigEditorServerTests(unittest.TestCase):
             patch.object(config_server, "execute_plan", side_effect=fake_execute),
             patch.object(config_server, "save_result", return_value="result-id"),
             patch.object(config_server, "save_reproduction_log", return_value="log-id"),
+            # Baseline 持久化会全量解析工作区数据集目录，本测试只验证批量
+            # 编排状态机，不验证文件写入，mock 掉以避免慢 I/O 拖垮断言时限。
+            patch.object(config_server, "_persist_workspace_baseline", return_value=True),
         ):
             initial = config_server.start_workspace_test_batch(
-                "device-progress", "回归", "heuristic", {}, maximum_workers=1,
+                "device-progress", "回归", "heuristic", {}, maximum_workers=1, hongye_check=False,
             )
             self.assertTrue(first_started.wait(2))
             running = config_server.read_workspace_batch_run(initial["batchId"])
@@ -3186,8 +3189,8 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual(["succeeded", "succeeded"], [item["status"] for item in completed["items"]])
         self.assertTrue(all(item["resultUrl"] == "/api/results/result-id" for item in completed["items"]))
 
-    def test_large_batch_uses_four_isolated_algorithm_processes(self) -> None:
-        """8 项及以上批量任务必须启用四个隔离进程，不能被算法会话锁串行化。"""
+    def test_large_batch_uses_configured_isolated_algorithm_processes(self) -> None:
+        """8 项批量任务应使用配置的隔离进程数，不能被算法会话锁串行化。"""
         device = {
             "id": "device-process-batch", "name": "fixture.json", "device": self.device,
             "routes": [_route("BatchRoute", "PM1,PM2", "BatchRecipe")],
@@ -3243,14 +3246,112 @@ class ConfigEditorServerTests(unittest.TestCase):
                 {},
                 hongye_check=False,
                 skip_baseline=True,
+                maximum_workers=8,
                 use_process_isolation=True,
             )
 
         self.assertTrue(result["processIsolation"])
-        self.assertEqual(4, result["workerCount"])
+        self.assertEqual(8, result["workerCount"])
         self.assertEqual(8, result["succeeded"])
-        self.assertEqual(4, executor_options[0]["max_workers"])
+        self.assertEqual(8, executor_options[0]["max_workers"])
         self.assertTrue(all("tests" not in device for device in submitted_process_devices))
+
+    def _parallel_worker_device(self, device_id: str, count: int = 3) -> dict:
+        """构造并发配置测试共用的批量设备与测试组。"""
+        return {
+            "id": device_id, "name": "fixture.json", "device": self.device,
+            "routes": [_route("BatchRoute", "PM1,PM2", "BatchRecipe")],
+            "cleans": [],
+            "tests": [
+                {
+                    "id": f"test-{index}", "name": f"案例 {index}", "group": "回归",
+                    "roundCount": 1, "options": {},
+                    "rounds": [{"currentTime": 0, "jobs": [_job(f"J{index}", "BatchRoute", "LP1")]}],
+                }
+                for index in range(1, count + 1)
+            ],
+        }
+
+    def test_validation_limiter_is_shared_by_all_algorithm_workers(self) -> None:
+        """同一批算法 worker 必须收到同一个 HongYe 校验闸门。"""
+        device = self._parallel_worker_device("device-validation-limit")
+        received_limiters = []
+
+        def fake_execute(plan, **kwargs):
+            received_limiters.append(kwargs.get("hongye_validation_limiter"))
+            return {
+                "ok": True, "totalElapsedMs": 10.0, "cpuTimeMs": 8.0,
+                "makespan": 20.0, "moveCount": 3, "validation": "passed",
+                "output": {"MoveList": []}, "reproductionLog": [],
+            }
+
+        with (
+            patch.object(config_server, "get_workspace_device", return_value=device),
+            patch.object(config_server, "execute_plan", side_effect=fake_execute),
+            patch.object(config_server, "save_result", return_value="result-id"),
+            patch.object(config_server, "save_reproduction_log", return_value="log-id"),
+            patch.object(config_server, "_persist_workspace_baseline", return_value=True),
+        ):
+            result = config_server.run_workspace_test_batch(
+                "device-validation-limit", "回归", "heuristic", {},
+                maximum_workers=3, validation_workers=2, hongye_check=True,
+            )
+
+        self.assertEqual(3, result["workerCount"])
+        self.assertEqual(2, result["validationWorkers"])
+        self.assertEqual(3, result["succeeded"])
+        self.assertIsNotNone(received_limiters[0])
+        self.assertTrue(all(item is received_limiters[0] for item in received_limiters))
+
+    def test_automatic_baseline_uses_same_validation_limiter(self) -> None:
+        """外部策略补算 Baseline 时不得绕过配置的 HongYe 校验配额。"""
+        device = self._parallel_worker_device("device-baseline-limit", count=1)
+        received = []
+
+        def fake_execute(plan, **kwargs):
+            received.append((plan["strategy"], kwargs.get("hongye_validation_limiter")))
+            return {
+                "ok": True, "totalElapsedMs": 10.0, "cpuTimeMs": 8.0,
+                "makespan": 20.0, "moveCount": 3, "validation": "passed",
+                "output": {"MoveList": []}, "reproductionLog": [],
+            }
+
+        with (
+            patch.object(config_server, "get_workspace_device", return_value=device),
+            patch.object(config_server, "execute_plan", side_effect=fake_execute),
+            patch.object(config_server, "save_result", return_value="result-id"),
+            patch.object(config_server, "save_reproduction_log", return_value="log-id"),
+            patch.object(config_server, "_persist_workspace_baseline", return_value=True),
+        ):
+            result = config_server.run_workspace_test_batch(
+                "device-baseline-limit", "回归", "other_alg:demo", {},
+                maximum_workers=1, validation_workers=1, hongye_check=True,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(["heuristic", "other_alg:demo"], [row[0] for row in received])
+        self.assertIs(received[0][1], received[1][1])
+
+    def test_worker_configuration_is_clamped_to_server_limits(self) -> None:
+        """后端必须独立限制算法与校验并行数，不能信任 HTTP 输入。"""
+        device = self._parallel_worker_device("device-worker-clamp", count=31)
+        with (
+            patch.object(config_server, "get_workspace_device", return_value=device),
+            patch.object(config_server, "execute_plan", return_value={
+                "ok": True, "totalElapsedMs": 10.0, "cpuTimeMs": 8.0,
+                "makespan": 20.0, "moveCount": 3, "validation": "passed",
+                "output": {"MoveList": []}, "reproductionLog": [],
+            }),
+            patch.object(config_server, "save_result", return_value="result-id"),
+            patch.object(config_server, "save_reproduction_log", return_value="log-id"),
+            patch.object(config_server, "_persist_workspace_baseline", return_value=True),
+        ):
+            result = config_server.run_workspace_test_batch(
+                "device-worker-clamp", "回归", "heuristic", {},
+                maximum_workers=99, validation_workers=99, hongye_check=True,
+            )
+        self.assertEqual(30, result["workerCount"])
+        self.assertEqual(15, result["validationWorkers"])
 
     def test_skip_baseline_failure_does_not_persist_from_parallel_worker(self) -> None:
         """跳过 Baseline 后算法失败也不得抢占工作区写锁保存失败基线。"""
@@ -3372,7 +3473,7 @@ class ConfigEditorServerTests(unittest.TestCase):
             patch.object(config_server, "save_reproduction_log", return_value="log-id"),
         ):
             result = config_server.run_workspace_test_batch(
-                "device-baseline", "回归", "e2e-ctq", {}, maximum_workers=1,
+                "device-baseline", "回归", "e2e-ctq", {}, maximum_workers=1, hongye_check=False,
             )
 
         item = result["items"][0]
@@ -3418,7 +3519,7 @@ class ConfigEditorServerTests(unittest.TestCase):
             patch.object(config_server, "save_reproduction_log", return_value="log-id"),
         ):
             result = config_server.run_workspace_test_batch(
-                "device-external-invalid", "回归", "other_alg:demo", {}, maximum_workers=1,
+                "device-external-invalid", "回归", "other_alg:demo", {}, maximum_workers=1, hongye_check=False,
             )
 
         item = result["items"][0]
@@ -3487,7 +3588,7 @@ class ConfigEditorServerTests(unittest.TestCase):
             patch.object(config_server, "save_reproduction_log", return_value="log-id"),
         ):
             result = config_server.run_workspace_test_batch(
-                "device-skip-batch", "回归", "heuristic", {}, skip_validation=True, maximum_workers=1,
+                "device-skip-batch", "回归", "heuristic", {}, skip_validation=True, maximum_workers=1, hongye_check=False,
             )
         item = result["items"][0]
         self.assertEqual("succeeded", item["status"])
@@ -3525,7 +3626,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         ):
             result = config_server.run_workspace_test_batch(
                 "device-skip-baseline", "回归", "other_alg:demo", {},
-                skip_baseline=True, maximum_workers=1,
+                skip_baseline=True, maximum_workers=1, hongye_check=False,
             )
 
         # 只执行主策略，不再补算 heuristic baseline。
@@ -3666,7 +3767,7 @@ class ConfigEditorServerTests(unittest.TestCase):
             patch.object(config_server, "save_reproduction_log", return_value="log-id"),
         ):
             result = config_server.run_workspace_test_batch(
-                "device-refresh", "回归", "heuristic", {}, maximum_workers=1,
+                "device-refresh", "回归", "heuristic", {}, maximum_workers=1, hongye_check=False,
             )
 
         baseline = result["items"][0]["baseline"]
@@ -3707,7 +3808,7 @@ class ConfigEditorServerTests(unittest.TestCase):
             patch.object(config_server, "save_reproduction_log", return_value="log-id"),
         ):
             result = config_server.run_workspace_test_batch(
-                "device-failed-base", "回归", "e2e-ctq", {}, maximum_workers=1,
+                "device-failed-base", "回归", "e2e-ctq", {}, maximum_workers=1, hongye_check=False,
             )
 
         item = result["items"][0]
@@ -3776,7 +3877,7 @@ class ConfigEditorServerTests(unittest.TestCase):
             patch.object(config_server, "execute_plan", side_effect=fake_execute),
         ):
             initial = config_server.start_workspace_test_batch(
-                "device-cancel", "回归", "heuristic", {}, maximum_workers=1,
+                "device-cancel", "回归", "heuristic", {}, maximum_workers=1, hongye_check=False,
             )
             self.assertTrue(started.wait(2))
             cancelled = config_server.cancel_workspace_batch_run(initial["batchId"])
@@ -3800,6 +3901,21 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("cancel_workspace_batch_run", delete_source)
         self.assertIn('parts[2] == "devices"', delete_source)
         self.assertIn("delete_workspace_device", delete_source)
+
+    def test_batch_run_api_forwards_algorithm_and_validation_workers(self) -> None:
+        """批量 HTTP 入口必须把两个独立并发配置传给后台任务。"""
+        post_source = inspect.getsource(config_server.ConfigEditorHandler.do_POST)
+        self.assertIn('payload.get("maximumWorkers", DEFAULT_BATCH_WORKERS)', post_source)
+        self.assertIn('payload.get("validationWorkers", DEFAULT_VALIDATION_WORKERS)', post_source)
+
+    def test_run_settings_preferences_have_get_and_put_routes(self) -> None:
+        """页面运行习惯必须通过独立偏好 API 读取并保存到本地数据。"""
+        get_source = inspect.getsource(config_server.ConfigEditorHandler.do_GET)
+        put_source = inspect.getsource(config_server.ConfigEditorHandler.do_PUT)
+        self.assertIn('path == "/api/preferences/run-settings"', get_source)
+        self.assertIn("read_run_preferences()", get_source)
+        self.assertIn('path == "/api/preferences/run-settings"', put_source)
+        self.assertIn("update_run_preferences", put_source)
 
     def test_single_external_failure_keeps_elapsed_time_and_baseline_visible(self) -> None:
         """单次外部算法失败也应返回并绘制耗时及 Baseline 对比。"""

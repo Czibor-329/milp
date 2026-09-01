@@ -524,6 +524,8 @@
     .run-setting-option:focus-within { border-color: var(--brand); outline: 3px solid rgba(47, 91, 211, .13); }
     .run-setting-option-main { display: flex; align-items: center; gap: 9px; font-size: 13px; font-weight: 800; }
     .run-setting-option-main input { width: 16px; height: 16px; margin: 0; accent-color: var(--brand); }
+    .run-setting-option-main input.run-setting-number { width: 64px; height: auto; padding: 2px 6px; border: 1px solid #c6d2e8; border-radius: 6px; background: #fff; font-size: 12px; font-weight: 700; text-align: center; }
+    .run-setting-option-main input.run-setting-number:disabled { cursor: not-allowed; opacity: .55; background: #edf1f7; }
     .run-setting-option-main em { color: var(--brand); font-size: 11px; font-style: normal; }
     .run-setting-option small { padding-left: 25px; color: var(--muted); font-size: 11px; line-height: 1.45; }
     .run-settings-dialog .dialog-actions { margin: 0; padding: 10px 20px 18px; }

@@ -16,6 +16,7 @@ from realtime_scheduler.backend.workspace.catalog_service import *
 from realtime_scheduler.backend.workspace.exchange_service import *
 from realtime_scheduler.backend.workspace.transfer_jobs import *
 from realtime_scheduler.backend.artifacts.repository import *
+from realtime_scheduler.backend.preferences.repository import *
 from realtime_scheduler.backend.wiring import *
 from realtime_scheduler.backend.api.http import *
 from realtime_scheduler.backend.main import main
@@ -32,6 +33,7 @@ from realtime_scheduler.backend import bootstrap as _bootstrap_module
 from realtime_scheduler.backend.algorithms import interface as _algorithm_interface_module
 from realtime_scheduler.backend.api import http as _http_module
 from realtime_scheduler.backend.artifacts import repository as _artifacts_module
+from realtime_scheduler.backend.preferences import repository as _preferences_module
 from realtime_scheduler.backend.execution import algorithm_runtime as _algorithm_runtime_module
 from realtime_scheduler.backend.execution import batch_service as _batch_service_module
 from realtime_scheduler.backend.execution import cjob_cycle as _cjob_cycle_module
@@ -56,6 +58,7 @@ _APPLICATION_MODULES = (
     _workspace_exchange_module,
     _workspace_transfer_jobs_module,
     _artifacts_module,
+    _preferences_module,
     _wiring_module,
     _http_module,
 )

@@ -1,8 +1,8 @@
 """实时调度终端的批量运行与 Baseline 服务。
 
 本模块负责把设备测试组展开为排程计划、并发执行测试、维护批量任务状态并生成
-Heuristic Baseline。HTTP 传输和单次计划执行仍由 ``server`` 门面提供；通过显式配置的
-服务边界进行协作，以保留旧入口的替换与测试能力。
+Heuristic Baseline。最终结果项由 ``batch_results`` 组装，HongYe 并发资源由
+``validation_limiter`` 管理；HTTP 传输和单次计划执行通过显式配置的服务边界协作。
 """
 
 from __future__ import annotations
@@ -25,12 +25,18 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from realtime_scheduler.backend.execution.batch_results import BatchResultAssembler
 from realtime_scheduler.backend.execution.plan_builder import (
     _finite_number,
     _round_cjob_rows,
     _runtime_clean,
     _stage_visit_rows,
     _string_list,
+)
+from realtime_scheduler.backend.execution.validation_limiter import (
+    BatchValidationLimiter,
+    DEFAULT_VALIDATION_WORKERS,
+    MAXIMUM_VALIDATION_WORKERS,
 )
 from realtime_scheduler.backend.observability import log_run_event
 
@@ -42,7 +48,7 @@ class BatchServiceDependencies:
     模块，从而可以在 HTTP 服务、独立 worker 和测试中复用。
     """
 
-    execute_plan: Callable[[Mapping[str, Any]], Dict[str, Any]]
+    execute_plan: Callable[..., Dict[str, Any]]
     get_workspace_device: Callable[[str], Dict[str, Any]]
     save_result: Callable[[Dict[str, Any]], str]
     save_reproduction_log: Callable[[Sequence[Mapping[str, Any]]], str]
@@ -69,7 +75,8 @@ PLACE_MOVE_TYPES = frozenset({1, 3})
 SWAP_MOVE_TYPE = 4
 PRE_TRANS_MOVE_TYPE = 5
 TIME_TOLERANCE_SECONDS = 1e-9
-MAXIMUM_BATCH_WORKERS = 4
+DEFAULT_BATCH_WORKERS = 4
+MAXIMUM_BATCH_WORKERS = 30
 PROCESS_ISOLATION_MINIMUM_TESTS = 8
 ALGORITHM_FAILURE_FEEDBACK_PREFIX = "调度失败:"
 
@@ -798,6 +805,23 @@ def _skipped_baseline(fingerprint: str) -> Dict[str, Any]:
     }
 
 
+def _execute_plan_with_validation_limiter(
+    plan: Mapping[str, Any],
+    validation_limiter: Any,
+) -> Dict[str, Any]:
+    """执行计划，并在批量模式下把信号量传入 HongYe 校验段。
+
+    无闸门时保持原调用签名，兼容单次运行和现有测试替身；有闸门时通过
+    已装配依赖传递关键字参数，使算法阶段不受校验并发配额限制。
+    """
+    if validation_limiter is None:
+        return execute_plan(plan)
+    return _services().execute_plan(
+        plan,
+        hongye_validation_limiter=validation_limiter,
+    )
+
+
 def _execute_workspace_test_with_baseline(
     device: Mapping[str, Any],
     test_case: Mapping[str, Any],
@@ -809,11 +833,14 @@ def _execute_workspace_test_with_baseline(
     hongye_check: bool = True,
     skip_baseline: bool = False,
     compatibility_mode: bool = True,
+    validation_limiter: Any = None,
 ) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any], Optional[Exception]]:
     """确保 Baseline 有效并执行所选策略；Baseline 失败不复用旧值。
 
     ``skip_baseline`` 为 True 时既不计算也不复用 Baseline，返回 ``skipped``
     占位记录，避免因缺失 Baseline 连带运行本地 heuristic 触发其自身校验。
+    ``validation_limiter`` 只约束 HongYe 校验段；自动补算的 Heuristic
+    Baseline 与所选策略共享同一配额，避免绕过批量内存限制。
     """
     fingerprint = _workspace_baseline_fingerprint(
         device, test_case, options, compatibility_mode=compatibility_mode,
@@ -869,7 +896,7 @@ def _execute_workspace_test_with_baseline(
             plan["compatibilityMode"] = bool(compatibility_mode)
         try:
             log_run_event(test_id, "selected", "算法执行", "running")
-            result = execute_plan(plan)
+            result = _execute_plan_with_validation_limiter(plan, validation_limiter)
         except Exception as error:  # noqa: BLE001
             log_run_event(test_id, "selected", "算法执行", "failed", error)
             baseline = (
@@ -888,12 +915,15 @@ def _execute_workspace_test_with_baseline(
     if baseline is None and not skip_baseline:
         try:
             log_run_event(test_id, "baseline", "算法执行", "running", "heuristic")
-            baseline_result = execute_plan(build_workspace_batch_plan(
-                device, test_case, "heuristic", options,
-                skip_validation=skip_validation,
-                hongye_check=hongye_check,
-                compatibility_mode=compatibility_mode,
-            ))
+            baseline_result = _execute_plan_with_validation_limiter(
+                build_workspace_batch_plan(
+                    device, test_case, "heuristic", options,
+                    skip_validation=skip_validation,
+                    hongye_check=hongye_check,
+                    compatibility_mode=compatibility_mode,
+                ),
+                validation_limiter,
+            )
             baseline = record(_successful_baseline(fingerprint, baseline_result))
             report_success(baseline_result, "baseline")
         except Exception as error:  # noqa: BLE001
@@ -912,7 +942,7 @@ def _execute_workspace_test_with_baseline(
         plan["compatibilityMode"] = bool(compatibility_mode)
     try:
         log_run_event(test_id, "selected", "算法执行", "running")
-        result = execute_plan(plan)
+        result = _execute_plan_with_validation_limiter(plan, validation_limiter)
         report_success(result)
         return result, baseline, None
     except Exception as error:  # noqa: BLE001
@@ -930,12 +960,14 @@ def _execute_workspace_test_in_process(
     hongye_check: bool,
     skip_baseline: bool,
     compatibility_mode: bool = True,
+    validation_limiter: Any = None,
 ) -> Dict[str, Any]:
     """在独立进程中执行一个批量测试并返回可序列化结果。
 
     内置算法和标准外部算法都以模块级全局对象保存当前 ``init/update`` 会话，
     因此线程 worker 会被同一把会话锁串行化。独立进程为每个并行槽提供隔离的
-    算法状态；参数和返回值均为普通映射，避免把锁或模块对象跨进程传递。
+    算法状态；参数和返回值均为普通映射。校验闸门使用 Manager 代理，可在
+    ``spawn`` worker 之间共享同一 HongYe 并发配额。
     """
     from realtime_scheduler.backend import wiring
 
@@ -950,6 +982,7 @@ def _execute_workspace_test_in_process(
         hongye_check=hongye_check,
         skip_baseline=skip_baseline,
         compatibility_mode=compatibility_mode,
+        validation_limiter=validation_limiter,
     )
     if error is None:
         return {
@@ -1050,14 +1083,24 @@ def _execute_workspace_test_batch(
     skip_validation: bool = False,
     hongye_check: bool = True,
     skip_baseline: bool = False,
-    maximum_workers: int = 4,
+    maximum_workers: int = DEFAULT_BATCH_WORKERS,
+    validation_workers: int = DEFAULT_VALIDATION_WORKERS,
     use_process_isolation: bool = False,
     progress_callback: Optional[Any] = None,
     cancel_event: Optional[threading.Event] = None,
     compatibility_mode: bool = True,
 ) -> Dict[str, Any]:
-    """执行已解析的批量测试，并通过回调报告每项状态变化。"""
+    """执行已解析的批量测试，并通过回调报告每项状态变化。
+
+    算法 worker 与 HongYe 校验配额相互独立：每个测试仍按原有顺序完成算法、
+    校验和产物保存，但进入 MoveStateSim 前必须取得本批次共享的校验闸门。
+    自动补算的 Baseline 使用同一闸门，不会绕过内存上限。
+    """
     worker_count = max(1, min(int(maximum_workers), MAXIMUM_BATCH_WORKERS, len(tests)))
+    validation_count = max(
+        1, min(int(validation_workers), MAXIMUM_VALIDATION_WORKERS, len(tests)),
+    )
+    validation_limited = bool(hongye_check) and not bool(skip_validation)
     started = time.perf_counter()
     process_device = {
         key: value
@@ -1078,18 +1121,31 @@ def _execute_workspace_test_batch(
         if process_isolation_enabled
         else None
     )
+    validation_limiter = (
+        BatchValidationLimiter(
+            validation_count,
+            process_shared=process_isolation_enabled,
+        )
+        if validation_limited
+        else None
+    )
+    validation_semaphore = (
+        validation_limiter.semaphore if validation_limiter is not None else None
+    )
+    result_assembler = BatchResultAssembler(
+        save_result=save_result,
+        save_reproduction_log=save_reproduction_log,
+        log_response_fields=_log_response_fields,
+        logged_failure_fields=_logged_failure_result_fields,
+        baseline_comparison=_baseline_comparison,
+        robot_wafer_dwell_time=_robot_wafer_dwell_time,
+        is_external_algorithm=_is_external_algorithm,
+    )
 
     def run_one(index: int, test_case: Mapping[str, Any]) -> Dict[str, Any]:
-        """执行单个测试并生成统一的批处理结果项。"""
+        """执行单个测试，并在 HongYe 校验段使用批次共享闸门。"""
         if cancel_event is not None and cancel_event.is_set():
-            return {
-                "index": index,
-                "ok": False,
-                "status": "cancelled",
-                "testId": str(test_case.get("id") or ""),
-                "testName": str(test_case.get("name") or f"测试 {index + 1}"),
-                "error": "用户终止调度",
-            }
+            return result_assembler.cancelled(index, test_case)
         if progress_callback is not None:
             progress_callback(index, {
                 "status": "running",
@@ -1116,6 +1172,7 @@ def _execute_workspace_test_batch(
                     hongye_check=hongye_check,
                     skip_baseline=skip_baseline,
                     compatibility_mode=compatibility_mode,
+                    validation_limiter=validation_semaphore,
                 )
             else:
                 process_result = process_executor.submit(
@@ -1129,97 +1186,29 @@ def _execute_workspace_test_batch(
                     hongye_check,
                     skip_baseline,
                     compatibility_mode,
+                    validation_semaphore,
                 ).result()
                 result = process_result.get("result")
                 baseline = process_result.get("baseline") or {}
                 run_error = _restore_batch_process_error(process_result.get("error"))
             if run_error is not None or result is None:
                 error = run_error or RuntimeError("运行未返回结果")
-                failure = {
-                    "index": index,
-                    "ok": False,
-                    "status": "failed",
-                    "testId": str(test_case.get("id") or ""),
-                    "testName": str(test_case.get("name") or f"测试 {index + 1}"),
-                    "error": str(error) or type(error).__name__,
+                if isinstance(error, LoggedPlanError):
+                    return result_assembler.logged_failure(
+                        index, test_case, error, baseline, selected_plan,
+                        strategy, run_started,
+                    )
+                return {
+                    **result_assembler.plain_failure(index, test_case, error),
                     "baseline": deepcopy(baseline),
                 }
-                if isinstance(error, LoggedPlanError):
-                    log_id = save_reproduction_log(error.reproduction_log)
-                    failure.update(_log_response_fields(log_id))
-                    failure.update(_logged_failure_result_fields(
-                        error,
-                        replay_plan=selected_plan,
-                    ))
-                    # 外部算法的 MoveList 即使未通过平台校验，仍是该算法的原始
-                    # 输出。保留其客观指标、Baseline 对比和诊断入口；状态仍为
-                    # failed，避免误把无效计划计入校验通过的成功结果。
-                    if _is_external_algorithm(strategy) and error.validation_issues:
-                        elapsed_ms = (time.perf_counter() - run_started) * 1000.0
-                        moves = list((error.failure_output or {}).get("MoveList") or [])
-                        failure.update({
-                            "metricsAvailable": True,
-                            "totalElapsedMs": elapsed_ms,
-                            "cpuTimeMs": elapsed_ms,
-                            "robotWaferDwellTime": _robot_wafer_dwell_time(moves),
-                        })
-                        failure.update(_baseline_comparison(failure, baseline))
-                return failure
             if cancel_event is not None and cancel_event.is_set():
-                return {
-                    "index": index,
-                    "ok": False,
-                    "status": "cancelled",
-                    "testId": str(test_case.get("id") or ""),
-                    "testName": str(test_case.get("name") or f"测试 {index + 1}"),
-                    "error": "用户终止调度",
-                }
-            artifact = deepcopy(dict(result["output"]))
-            artifact["RunMetricsMetadata"] = {
-                "cpuTimeMs": max(
-                    0.0,
-                    float(result.get("cpuTimeMs", result.get("totalElapsedMs", 0.0))),
-                ),
-                # updates 与每次算法 update 一一对应，包含首排 update #1。
-                "recomputeCount": len(list(result.get("updates") or [])),
-            }
-            artifact["ReplayContext"] = {
-                "schema": "machine-replay-context-v1",
-                "plan": deepcopy(selected_plan),
-                "updates": deepcopy(list(result.get("updates") or [])),
-            }
-            result_id = save_result(artifact)
-            log_id = save_reproduction_log(result["reproductionLog"])
-            robot_wafer_dwell_time = _robot_wafer_dwell_time(
-                list(result["output"].get("MoveList") or []),
+                return result_assembler.cancelled(index, test_case)
+            return result_assembler.success(
+                index, test_case, result, baseline, selected_plan,
             )
-            item = {
-                "index": index,
-                "ok": True,
-                "status": "succeeded",
-                "testId": str(test_case.get("id") or ""),
-                "testName": str(test_case.get("name") or f"测试 {index + 1}"),
-                "totalElapsedMs": result["totalElapsedMs"],
-                "cpuTimeMs": result.get("cpuTimeMs", result["totalElapsedMs"]),
-                "makespan": result["makespan"],
-                "moveCount": result["moveCount"],
-                "validation": result["validation"],
-                "robotWaferDwellTime": robot_wafer_dwell_time,
-                "resultUrl": f"/api/results/{result_id}",
-                "ganttUrl": f"/movelist_gantt_viewer.html?src=/api/results/{result_id}",
-                **_log_response_fields(log_id),
-                **_baseline_comparison(result, baseline),
-            }
-            return item
         except Exception as error:  # noqa: BLE001
-            return {
-                "index": index,
-                "ok": False,
-                "status": "failed",
-                "testId": str(test_case.get("id") or ""),
-                "testName": str(test_case.get("name") or f"测试 {index + 1}"),
-                "error": str(error) or type(error).__name__,
-            }
+            return result_assembler.plain_failure(index, test_case, error)
 
     items: List[Dict[str, Any]] = []
     executor = ThreadPoolExecutor(max_workers=worker_count)
@@ -1252,6 +1241,8 @@ def _execute_workspace_test_batch(
                 wait=not cancelled,
                 cancel_futures=cancelled,
             )
+        if validation_limiter is not None:
+            validation_limiter.close()
     items.sort(key=lambda item: int(item["index"]))
     succeeded = sum(bool(item["ok"]) for item in items)
     batch_result = {
@@ -1265,6 +1256,7 @@ def _execute_workspace_test_batch(
         "failed": len(items) - succeeded,
         "cancelled": len(tests) - len(items) if cancelled else 0,
         "workerCount": worker_count,
+        "validationWorkers": validation_count if validation_limited else 0,
         "processIsolation": process_isolation_enabled,
         "totalElapsedMs": (time.perf_counter() - started) * 1000.0,
         "items": items,
@@ -1281,7 +1273,8 @@ def run_workspace_test_batch(
     skip_validation: bool = False,
     hongye_check: bool = True,
     skip_baseline: bool = False,
-    maximum_workers: int = 4,
+    maximum_workers: int = DEFAULT_BATCH_WORKERS,
+    validation_workers: int = DEFAULT_VALIDATION_WORKERS,
     test_ids: Optional[Sequence[str]] = None,
     progress_callback: Optional[Any] = None,
     compatibility_mode: bool = True,
@@ -1299,6 +1292,7 @@ def run_workspace_test_batch(
         hongye_check=hongye_check,
         skip_baseline=skip_baseline,
         maximum_workers=maximum_workers,
+        validation_workers=validation_workers,
         progress_callback=progress_callback,
         compatibility_mode=compatibility_mode,
     )
@@ -1353,7 +1347,8 @@ def start_workspace_test_batch(
     skip_validation: bool = False,
     hongye_check: bool = True,
     skip_baseline: bool = False,
-    maximum_workers: int = 4,
+    maximum_workers: int = DEFAULT_BATCH_WORKERS,
+    validation_workers: int = DEFAULT_VALIDATION_WORKERS,
     use_process_isolation: bool = False,
     test_ids: Optional[Sequence[str]] = None,
     compatibility_mode: bool = True,
@@ -1363,6 +1358,10 @@ def start_workspace_test_batch(
     normalized_group, tests = _workspace_group_tests(device, group, test_ids)
     batch_id = uuid.uuid4().hex
     worker_count = max(1, min(int(maximum_workers), MAXIMUM_BATCH_WORKERS, len(tests)))
+    validation_count = max(
+        1, min(int(validation_workers), MAXIMUM_VALIDATION_WORKERS, len(tests)),
+    )
+    validation_limited = bool(hongye_check) and not bool(skip_validation)
     initial = {
         "batchId": batch_id,
         "ok": True,
@@ -1377,6 +1376,7 @@ def start_workspace_test_batch(
         "failed": 0,
         "cancelled": 0,
         "workerCount": worker_count,
+        "validationWorkers": validation_count if validation_limited else 0,
         "totalElapsedMs": 0.0,
         "createdAt": _workspace_timestamp(),
         "items": [{
@@ -1424,6 +1424,7 @@ def start_workspace_test_batch(
                 hongye_check=hongye_check,
                 skip_baseline=skip_baseline,
                 maximum_workers=worker_count,
+                validation_workers=validation_count,
                 use_process_isolation=use_process_isolation,
                 progress_callback=update_item,
                 cancel_event=cancel_event,

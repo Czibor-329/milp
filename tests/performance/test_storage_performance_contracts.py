@@ -50,14 +50,17 @@ class PerformanceFixtureTests(unittest.TestCase):
         ))
 
     def test_batch_runtime_limits_match_performance_budget(self) -> None:
-        """130 项批量门禁必须绑定四进程并行与 260 秒产品预算。"""
+        """130 项批量门禁应保留四路默认值，并允许高配机器配置到三十路。"""
         budget = json.loads(BUDGET_PATH.read_text(encoding="utf-8"))[
             "absoluteMilliseconds"
         ]
 
         self.assertEqual(260_000, budget["batch130Maximum"])
         self.assertEqual(1_000, budget["batchStatusPollIntervalMinimum"])
-        self.assertEqual(4, batch_service.MAXIMUM_BATCH_WORKERS)
+        self.assertEqual(4, batch_service.DEFAULT_BATCH_WORKERS)
+        self.assertEqual(30, batch_service.MAXIMUM_BATCH_WORKERS)
+        self.assertEqual(2, batch_service.DEFAULT_VALIDATION_WORKERS)
+        self.assertEqual(15, batch_service.MAXIMUM_VALIDATION_WORKERS)
         self.assertLessEqual(batch_service.PROCESS_ISOLATION_MINIMUM_TESTS, 130)
 
     def test_fixture_generation_is_deterministic(self) -> None:

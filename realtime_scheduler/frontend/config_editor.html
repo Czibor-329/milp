@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>调度平台</title>
   <link rel="stylesheet" href="/assets/katex.min.css?v=1.4.4">
-  <link rel="stylesheet" href="/assets/config_editor.css?v=1.5.24">
+  <link rel="stylesheet" href="/assets/config_editor.css?v=1.5.25">
 </head>
 <body>
   <a class="skip-link" href="#mainContent">跳到主要内容</a>
@@ -40,7 +40,7 @@
       <div class="sidebar-footer">
         <span class="sidebar-footer-label">系统状态</span>
         <div class="service-pill" id="serviceState">本地服务</div>
-        <span class="frontend-version">V1.5.24</span>
+        <span class="frontend-version">V1.5.25</span>
       </div>
     </aside>
 
@@ -531,7 +531,7 @@
       <header class="run-settings-dialog-head">
         <div>
           <h3 id="runSettingsDialogTitle">运行设置</h3>
-          <p id="runSettingsDialogDescription">选择本次运行使用的推进、校验和基线策略。</p>
+          <p id="runSettingsDialogDescription">选择本次运行使用的推进、校验、基线和批量并发策略。</p>
         </div>
         <button class="btn workspace-icon-button" id="runSettingsDialogClose" type="button" aria-label="关闭运行设置">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
@@ -553,6 +553,14 @@
         <label class="run-setting-option" for="skipValidationInput">
           <span class="run-setting-option-main"><input id="skipValidationInput" type="checkbox"><span>跳过校验</span></span>
           <small>不执行任何输出校验，仅用于调试。</small>
+        </label>
+        <label class="run-setting-option" for="batchParallelismInput">
+          <span class="run-setting-option-main"><span>算法并行数</span><input id="batchParallelismInput" class="run-setting-number" type="number" min="1" max="30" step="1" value="4" inputmode="numeric"></span>
+          <small>同时执行的批量算法任务数；高配电脑可适当提高，范围 1~30。</small>
+        </label>
+        <label class="run-setting-option" for="validationParallelismInput">
+          <span class="run-setting-option-main"><span>校验并行数</span><input id="validationParallelismInput" class="run-setting-number" type="number" min="1" max="15" step="1" value="2" inputmode="numeric"></span>
+          <small>所有测试及自动 Baseline 共享的 MoveStateSim 并发上限，范围 1~15；单个进程约占 1~2GB，15 路可能需要约 15~30GB 可用内存。</small>
         </label>
       </div>
       <div class="dialog-actions"><button class="btn primary small" id="runSettingsDialogDone" type="submit">完成</button></div>
@@ -740,6 +748,6 @@
     </aside>
   </dialog>
 
-  <script type="module" src="/assets/config_editor.js?v=1.5.24"></script>
+  <script type="module" src="/assets/config_editor.js?v=1.5.25"></script>
 </body>
 </html>

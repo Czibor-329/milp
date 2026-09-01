@@ -5,6 +5,9 @@ from __future__ import annotations
 from realtime_scheduler.backend.bootstrap import *
 from realtime_scheduler.backend.execution.run_state import *
 from realtime_scheduler.backend.execution.service import *
+from realtime_scheduler.backend.execution.batch_service import DEFAULT_BATCH_WORKERS
+from realtime_scheduler.backend.execution.validation_limiter import DEFAULT_VALIDATION_WORKERS
+from realtime_scheduler.backend.preferences.repository import *
 from realtime_scheduler.backend.workspace.repository import *
 from realtime_scheduler.backend.workspace.catalog_service import *
 from realtime_scheduler.backend.workspace.exchange_service import *
@@ -37,6 +40,15 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             return
         if path.startswith("/assets/"):
             self._send_frontend_asset(path.removeprefix("/assets/"))
+            return
+        if path == "/api/preferences/run-settings":
+            try:
+                self._send_json({"ok": True, "runSettings": read_run_preferences()})
+            except Exception as error:  # noqa: BLE001
+                self._send_json(
+                    {"ok": False, "error": str(error)},
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
             return
         if path == "/api/health":
             builtin_algorithms = discover_builtin_algorithms()
@@ -483,6 +495,8 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                     hongye_check=bool(payload.get("hongYeCheck", True)),
                     skip_baseline=bool(payload.get("skipBaseline")),
                     compatibility_mode=bool(payload.get("compatibilityMode", True)),
+                    maximum_workers=int(payload.get("maximumWorkers", DEFAULT_BATCH_WORKERS)),
+                    validation_workers=int(payload.get("validationWorkers", DEFAULT_VALIDATION_WORKERS)),
                     use_process_isolation=True,
                     test_ids=test_ids,
                 )
@@ -680,6 +694,14 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
     def do_PUT(self) -> None:
         """保存测试、路径模板、机器手槽位或测试组别。"""
         path = unquote(urlparse(self.path).path)
+        if path == "/api/preferences/run-settings":
+            try:
+                payload = self._read_json_object()
+                settings = update_run_preferences(payload.get("runSettings"))
+                self._send_json({"ok": True, "runSettings": settings})
+            except Exception as error:  # noqa: BLE001
+                self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
+            return
         parts = [part for part in path.split("/") if part]
         if len(parts) == 4 and parts[:2] == ["api", "workspaces"] and parts[3] == "device-timing":
             try:
