@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>调度平台</title>
   <link rel="stylesheet" href="/assets/katex.min.css?v=1.4.4">
-  <link rel="stylesheet" href="/assets/config_editor.css?v=1.5.27">
+  <link rel="stylesheet" href="/assets/config_editor.css?v=1.5.28">
 </head>
 <body>
   <a class="skip-link" href="#mainContent">跳到主要内容</a>
@@ -40,7 +40,7 @@
       <div class="sidebar-footer">
         <span class="sidebar-footer-label">系统状态</span>
         <div class="service-pill" id="serviceState">本地服务</div>
-        <span class="frontend-version">V1.5.27</span>
+        <span class="frontend-version">V1.5.28</span>
       </div>
     </aside>
 
@@ -77,7 +77,7 @@
                 <section class="field workspace-editor-section">
                   <label for="testGroupSelect">测试组别</label>
                   <div class="workspace-control-row">
-                    <select id="testGroupSelect" data-compact-label="测试组别"><option value="">未分组</option></select>
+                    <select id="testGroupSelect" data-compact-label="测试组别"><option value="">尚无测试组</option></select>
                     <div class="workspace-icon-actions" aria-label="测试组别操作">
                       <button class="btn workspace-icon-button" id="newGroupButton" type="button" title="新增组别" aria-label="新增组别" disabled>
                         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
@@ -538,26 +538,36 @@
         </button>
       </header>
       <div class="run-settings-options">
-        <label class="run-setting-option" for="compatibilityModeInput">
-          <span class="run-setting-option-main"><input id="compatibilityModeInput" type="checkbox" checked><span>兼容模式</span></span>
-          <small>模块并行推进；按 PreMoveID 延后动作；缺失的开关门动作自动补齐。</small>
-        </label>
-        <label class="run-setting-option" for="hongYeCheckInput">
-          <span class="run-setting-option-main"><input id="hongYeCheckInput" type="checkbox" checked><span>HongYe Check <em>（推荐）</em></span></span>
-          <small>使用 HongYe 原始日志校验；关闭后使用平台内置校验器。</small>
-        </label>
-        <label class="run-setting-option" for="skipBaselineInput">
-          <span class="run-setting-option-main"><input id="skipBaselineInput" type="checkbox" checked><span>跳过 Baseline</span></span>
-          <small>Baseline 使用 Heuristic 结果作为性能基线；勾选后跳过基线计算。</small>
-        </label>
-        <label class="run-setting-option" for="batchParallelismInput">
-          <span class="run-setting-option-main"><span>算法并行数</span><input id="batchParallelismInput" class="run-setting-number" type="number" min="1" max="30" step="1" value="4" inputmode="numeric"></span>
-          <small>同时执行的批量算法任务数；高配电脑可适当提高，范围 1~30。</small>
-        </label>
-        <label class="run-setting-option" for="validationParallelismInput">
-          <span class="run-setting-option-main"><span>校验并行数</span><input id="validationParallelismInput" class="run-setting-number" type="number" min="1" max="15" step="1" value="2" inputmode="numeric"></span>
-          <small>所有测试及自动 Baseline 共享的 MoveStateSim 并发上限，范围 1~15；单个进程约占 1~2GB，15 路可能需要约 15~30GB 可用内存。</small>
-        </label>
+        <section class="run-settings-section" aria-labelledby="runSettingsBehaviorTitle">
+          <div class="run-settings-section-head"><span id="runSettingsBehaviorTitle">执行行为</span><small>控制调度推进、结果校验与基线计算</small></div>
+          <div class="run-settings-toggle-grid">
+            <label class="run-setting-option" for="compatibilityModeInput">
+              <span class="run-setting-option-main"><input id="compatibilityModeInput" type="checkbox" checked><span>兼容模式</span></span>
+              <small>模块并行推进；按 PreMoveID 延后动作，并自动补齐开关门动作。</small>
+            </label>
+            <label class="run-setting-option" for="hongYeCheckInput">
+              <span class="run-setting-option-main"><input id="hongYeCheckInput" type="checkbox" checked><span>HongYe Check <em>推荐</em></span></span>
+              <small>使用 HongYe 原始日志二次校验；关闭后仍保留平台内置校验。</small>
+            </label>
+            <label class="run-setting-option" for="skipBaselineInput">
+              <span class="run-setting-option-main"><input id="skipBaselineInput" type="checkbox" checked><span>跳过 Baseline</span></span>
+              <small>不计算 Heuristic 性能基线，可更快得到本次批量结果。</small>
+            </label>
+          </div>
+        </section>
+        <section class="run-settings-section" aria-labelledby="runSettingsParallelTitle">
+          <div class="run-settings-section-head"><span id="runSettingsParallelTitle">并发配额</span><small>按机器性能分配算法和校验进程</small></div>
+          <div class="run-settings-parallel-grid">
+            <label class="run-setting-option run-setting-number-option" for="batchParallelismInput">
+              <span class="run-setting-option-main"><span>算法并行数</span><span class="run-setting-number-control"><input id="batchParallelismInput" class="run-setting-number" type="number" min="1" max="30" step="1" value="4" inputmode="numeric"><span>路</span></span></span>
+              <small>同时执行的批量算法任务数，范围 1~30。</small>
+            </label>
+            <label class="run-setting-option run-setting-number-option" for="validationParallelismInput">
+              <span class="run-setting-option-main"><span>校验并行数</span><span class="run-setting-number-control"><input id="validationParallelismInput" class="run-setting-number" type="number" min="1" max="15" step="1" value="2" inputmode="numeric"><span>路</span></span></span>
+              <small>HongYe 校验共享配额，范围 1~15；每路约占 1~2GB 内存。</small>
+            </label>
+          </div>
+        </section>
       </div>
       <div class="dialog-actions"><button class="btn primary small" id="runSettingsDialogDone" type="submit">完成</button></div>
     </form>
@@ -744,6 +754,6 @@
     </aside>
   </dialog>
 
-  <script type="module" src="/assets/config_editor.js?v=1.5.27"></script>
+  <script type="module" src="/assets/config_editor.js?v=1.5.28"></script>
 </body>
 </html>

@@ -512,23 +512,33 @@
     .run-options { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; margin: 14px 0; }
     .export-option { display: inline-flex; align-items: center; gap: 8px; color: #e5ecff; font-size: 12px; cursor: pointer; margin: 0; }
     .export-option input { width: 16px; height: 16px; margin: 0; accent-color: #fff; flex: none; }
-    dialog.run-settings-dialog { width: min(560px, calc(100vw - 32px)); padding: 0; overflow: hidden; background: var(--surface); }
+    dialog.run-settings-dialog { width: min(680px, calc(100vw - 32px)); padding: 0; overflow: hidden; background: var(--surface); }
     .run-settings-dialog-body { padding: 0; }
-    .run-settings-dialog-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 18px 20px 15px; border-bottom: 1px solid var(--line); background: linear-gradient(90deg, #edf3ff, #f8faff); }
-    .run-settings-dialog-head h3 { margin: 0; color: #172b48; font-size: 17px; }
-    .run-settings-dialog-head p { margin: 4px 0 0; color: var(--muted); font-size: 11px; }
+    .run-settings-dialog-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 22px 24px 18px; border-bottom: 1px solid var(--line); background: linear-gradient(120deg, #eaf1ff 0%, #f8faff 62%, #fff 100%); }
+    .run-settings-dialog-head h3 { margin: 0; color: #172b48; font-size: 20px; letter-spacing: -.02em; }
+    .run-settings-dialog-head p { max-width: 470px; margin: 5px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
     .run-settings-dialog-head .workspace-icon-button { flex: none; }
-    .run-settings-options { display: grid; gap: 10px; padding: 18px 20px 8px; }
-    .run-setting-option { display: grid; gap: 5px; padding: 12px 13px; border: 1px solid #dce4f0; border-radius: 10px; color: var(--ink); background: #fbfcff; cursor: pointer; }
+    .run-settings-options { display: grid; gap: 18px; padding: 20px 24px 10px; }
+    .run-settings-section { display: grid; gap: 9px; }
+    .run-settings-section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; color: #263a5e; font-size: 13px; font-weight: 850; }
+    .run-settings-section-head small { color: var(--muted); font-size: 11px; font-weight: 500; }
+    .run-settings-toggle-grid, .run-settings-parallel-grid { display: grid; gap: 9px; }
+    .run-settings-toggle-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .run-settings-parallel-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .run-setting-option { display: grid; gap: 6px; min-width: 0; padding: 13px; border: 1px solid #dce4f0; border-radius: 11px; color: var(--ink); background: #fbfcff; cursor: pointer; transition: border-color .18s ease, background .18s ease, box-shadow .18s ease; }
     .run-setting-option:hover { border-color: #a9bde6; background: #f5f8ff; }
+    .run-setting-option:has(input[type="checkbox"]:checked) { border-color: #91adf0; background: linear-gradient(145deg, #f4f7ff, #fbfcff); box-shadow: inset 0 0 0 1px rgba(47,91,211,.08); }
     .run-setting-option:focus-within { border-color: var(--brand); outline: 3px solid rgba(47, 91, 211, .13); }
-    .run-setting-option-main { display: flex; align-items: center; gap: 9px; font-size: 13px; font-weight: 800; }
-    .run-setting-option-main input { width: 16px; height: 16px; margin: 0; accent-color: var(--brand); }
-    .run-setting-option-main input.run-setting-number { width: 64px; height: auto; padding: 2px 6px; border: 1px solid #c6d2e8; border-radius: 6px; background: #fff; font-size: 12px; font-weight: 700; text-align: center; }
+    .run-setting-option-main { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; font-weight: 800; }
+    .run-setting-option-main > span:first-child:not(.run-setting-number-control) { min-width: 0; }
+    .run-setting-option-main input[type="checkbox"] { width: 17px; height: 17px; margin: 0; accent-color: var(--brand); }
+    .run-setting-number-control { display: inline-flex; flex: none; align-items: center; gap: 5px; color: #53657e; font-size: 11px; font-weight: 700; }
+    .run-setting-option-main input.run-setting-number { width: 58px; height: 32px; margin: 0; padding: 2px 5px; border: 1px solid #c6d2e8; border-radius: 7px; background: #fff; font-size: 13px; font-weight: 800; text-align: center; }
     .run-setting-option-main input.run-setting-number:disabled { cursor: not-allowed; opacity: .55; background: #edf1f7; }
-    .run-setting-option-main em { color: var(--brand); font-size: 11px; font-style: normal; }
-    .run-setting-option small { padding-left: 25px; color: var(--muted); font-size: 11px; line-height: 1.45; }
-    .run-settings-dialog .dialog-actions { margin: 0; padding: 10px 20px 18px; }
+    .run-setting-option-main em { margin-left: 4px; color: var(--brand); font-size: 10px; font-style: normal; }
+    .run-setting-option small { color: var(--muted); font-size: 11px; line-height: 1.5; }
+    .run-settings-dialog .dialog-actions { margin: 0; padding: 12px 24px 20px; }
+    @media (max-width: 620px) { .run-settings-toggle-grid, .run-settings-parallel-grid { grid-template-columns: 1fr; } .run-settings-section-head { align-items: flex-start; flex-direction: column; gap: 2px; } }
     .run-box .btn.running::before { content: ""; width: 14px; height: 14px; border: 2px solid #b9c7eb; border-top-color: var(--brand); border-radius: 50%; animation: spin .8s linear infinite; }
     .run-status-card { display: grid; gap: 7px; margin-top: 11px; padding: 9px 11px; border: 1px solid #bcd6f5; border-radius: 10px; color: #1e3a6e; background: #e8f1ff; }
     .run-status-head { display: flex; min-width: 0; align-items: center; gap: 7px; }
@@ -1593,7 +1603,7 @@
     .reference-grid-canvas .wafer-token.wafer-processed { --wafer-state-color: var(--sim-done); color: #063c2c; }
     .reference-grid-canvas .wafer-token > span { display: grid; width: 100%; height: 100%; place-content: center; overflow: hidden; border: 2px solid color-mix(in srgb, var(--wafer-state-color) 88%, #1c2a3c); border-radius: 50%; background: color-mix(in srgb, var(--wafer-state-color) 52%, #f8fafc); box-shadow: inset 0 1px 2px rgba(15,23,42,.14); text-align: center; }
     .reference-grid-canvas .wafer-token > span > b, .reference-grid-canvas .wafer-token > span > small { display: block; max-width: 48px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .reference-grid-canvas .wafer-token > span > b { font-size: inherit; line-height: 1.05; }
+    .reference-grid-canvas .wafer-token > span > .wafer-origin-label { max-width: 52px; font-size: 13px; letter-spacing: -.04em; line-height: 1.05; }
     .reference-grid-canvas .wafer-token > span > small { margin-top: 1px; font: 800 7px/1 "Fira Code", Consolas, monospace; }
     .reference-grid-canvas .wafer-more { position: absolute; right: 2px; bottom: 2px; color: #475569; font: 900 10px/1 "Fira Code", Consolas, monospace; }
     .reference-grid-canvas .equipment-lock .equipment-body { z-index: 1; display: block; padding: 8px; }
@@ -1631,6 +1641,7 @@
     .buffer-tray { position: relative; display: grid; width: 100px; height: 48px; grid-template-rows: repeat(3, 1fr); gap: 3px; padding: 7px 9px; overflow: hidden; border: 2px solid #667b94; border-radius: 4px; background: linear-gradient(180deg, #eef3f7, #cbd6e1); box-shadow: inset 0 0 0 1px rgba(255,255,255,.58); }
     .buffer-tray > span { border: 1px solid #8798aa; border-radius: 2px; background: rgba(248,250,252,.62); }
     .buffer-tray .wafer-token { position: absolute; top: 50%; left: 50%; width: 36px; min-width: 36px; height: 36px; padding: 2px; font-size: 7px; transform: translate(-50%, -50%); }
+    .buffer-tray .wafer-token > span > .wafer-origin-label, .aligner-cross .wafer-token > span > .wafer-origin-label { font-size: 8px; }
     .equipment-aligner { width: 76px; height: 54px; }
     .aligner-cross { position: relative; width: 70px; height: 48px; border: 2px solid #667b94; border-radius: 5px; background: linear-gradient(145deg, #f5f8fb, #d7e1eb); box-shadow: inset 0 0 0 1px rgba(255,255,255,.64); }
     .aligner-cross > i { position: absolute; top: 50%; left: 50%; width: 50px; height: 7px; border: 1px solid #587088; border-radius: 999px; background: linear-gradient(180deg, #eef3f7, #aebdcb); transform: translate(-50%, -50%) rotate(45deg); }

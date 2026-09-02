@@ -1416,7 +1416,7 @@ function renderWaferToken(wafer, origin, progress, processed = false) {
   const normalizedProgress = Math.max(0, Math.min(1, progress));
   const state2 = processed ? "processed" : "unprocessed";
   const originLabel = origin || "\u6765\u6E90\u672A\u77E5";
-  return `<span class="wafer-token wafer-${state2}" style="--wafer-progress:${normalizedProgress * 360}deg" title="\u6676\u5706 ${escapeHtml(wafer)}\uFF0C\u6765\u6E90 ${escapeHtml(originLabel)}\uFF0C${processed ? "\u5DF2\u52A0\u5DE5" : "\u672A\u52A0\u5DE5"}"><span><b>${escapeHtml(wafer)}</b><small>${escapeHtml(originLabel)}</small></span></span>`;
+  return `<span class="wafer-token wafer-${state2}" style="--wafer-progress:${normalizedProgress * 360}deg" title="\u6676\u5706 ${escapeHtml(wafer)}\uFF0C\u6765\u6E90 ${escapeHtml(originLabel)}\uFF0C${processed ? "\u5DF2\u52A0\u5DE5" : "\u672A\u52A0\u5DE5"}"><span><b class="wafer-origin-label">${escapeHtml(originLabel)}</b></span></span>`;
 }
 function moduleDoorSides(module, role, layout = "single", roleIndex = 0) {
   if (module.door === "doorless") return [];
@@ -19469,12 +19469,18 @@ function renderWorkspaceControls() {
   const deviceSelect = document.getElementById("deviceSelect"), tests = state.workspaceDevice?.tests || [];
   deviceSelect.innerHTML = state.workspaceDevices.length ? state.workspaceDevices.map((device) => `<option value="${escapeHtml4(device.id)}" ${device.id === state.workspaceDeviceId ? "selected" : ""}>${escapeHtml4(displayDeviceName(device.name))}</option>`).join("") : `<option value="">\u5C1A\u672A\u5BFC\u5165\u8BBE\u5907</option>`;
   const natural = (left, right) => left.localeCompare(right, void 0, { numeric: true });
-  const groups = [.../* @__PURE__ */ new Set(["", ...state.workspaceDevice?.testGroups || [], ...tests.map((test) => String(test.group || "").trim())])].sort((left, right) => !left - !right || natural(left, right));
+  const ungroupedTests = tests.some((test) => !String(test.group || "").trim());
+  const groups = [.../* @__PURE__ */ new Set([
+    ...ungroupedTests ? [""] : [],
+    ...(state.workspaceDevice?.testGroups || []).map((group) => String(group || "").trim()).filter(Boolean),
+    ...tests.map((test) => String(test.group || "").trim()).filter(Boolean)
+  ])].sort((left, right) => !left - !right || natural(left, right));
   const selectedGroup = groups.includes(state.activeTestGroup) ? state.activeTestGroup : groups[0] || "";
+  state.activeTestGroup = selectedGroup;
   const groupSelect = document.getElementById("testGroupSelect");
-  groupSelect.innerHTML = groups.length ? groups.map((group) => `<option value="${escapeHtml4(group)}" title="${escapeHtml4(group || "\u672A\u5206\u7EC4")}" ${group === selectedGroup ? "selected" : ""}>${escapeHtml4(group || "\u672A\u5206\u7EC4")}</option>`).join("") : `<option value="">\u672A\u5206\u7EC4</option>`;
-  groupSelect.title = selectedGroup || "\u672A\u5206\u7EC4";
-  groupSelect.disabled = !state.workspaceDeviceId;
+  groupSelect.innerHTML = groups.length ? groups.map((group) => `<option value="${escapeHtml4(group)}" title="${escapeHtml4(group || "\u672A\u5206\u7EC4")}" ${group === selectedGroup ? "selected" : ""}>${escapeHtml4(group || "\u672A\u5206\u7EC4")}</option>`).join("") : `<option value="">\u5C1A\u65E0\u6D4B\u8BD5\u7EC4</option>`;
+  groupSelect.title = selectedGroup || (groups.length ? "\u672A\u5206\u7EC4" : "\u5C1A\u65E0\u6D4B\u8BD5\u7EC4");
+  groupSelect.disabled = !state.workspaceDeviceId || !groups.length;
   const testSelect = document.getElementById("testCaseSelect");
   const visibleTests = tests.filter((test) => String(test.group || "").trim() === selectedGroup).sort((left, right) => natural(left.name, right.name));
   testSelect.innerHTML = visibleTests.length ? visibleTests.map((test) => `<option value="${escapeHtml4(test.id)}" title="${escapeHtml4(test.name)}" ${test.id === state.testCaseId ? "selected" : ""}>${escapeHtml4(test.name)}</option>`).join("") : `<option value="">\u8BE5\u7EC4\u6682\u65E0\u6D4B\u8BD5</option>`;
@@ -22498,7 +22504,7 @@ function renderBatchItems(items) {
     return `
       <div class="batch-result ${escapeHtml4(item.status || "queued")}${selected ? " selected" : ""}" data-batch-item-index="${index}">
         <div class="batch-result-head">
-          <button class="batch-result-title" type="button" aria-pressed="${selected}" aria-label="\u67E5\u770B ${escapeHtml4(displayId)} ${escapeHtml4(item.testName || "")} \u7684\u8BE6\u7EC6\u6307\u6807"><strong title="${escapeHtml4(`${item.testId || ""} \xB7 ${item.testName || ""}`)}"><span class="batch-result-order">${escapeHtml4(displayId)}</span>${escapeHtml4(item.testName || `\u6D4B\u8BD5 ${index + 1}`)}</strong></button>
+          <button class="batch-result-title" type="button" aria-pressed="${selected}" aria-label="\u67E5\u770B ${escapeHtml4(item.testName || `\u6D4B\u8BD5 ${index + 1}`)} \u7684\u8BE6\u7EC6\u6307\u6807"><strong title="${escapeHtml4(item.testName || `\u6D4B\u8BD5 ${index + 1}`)}">${escapeHtml4(item.testName || `\u6D4B\u8BD5 ${index + 1}`)}</strong></button>
           <div class="batch-result-meta">
             <span class="batch-status">${statusLabels[item.status] || "\u7B49\u5F85\u4E2D"}</span>
             ${item.logUrl ? `<a class="btn" href="${escapeHtml4(item.logUrl)}" download>\u65E5\u5FD7</a>` : `<span class="btn" aria-disabled="true">\u65E5\u5FD7</span>`}

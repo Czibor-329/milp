@@ -1263,7 +1263,7 @@ function renderWaferToken(wafer, origin, progress, processed = false) {
   const normalizedProgress = Math.max(0, Math.min(1, progress));
   const state = processed ? "processed" : "unprocessed";
   const originLabel = origin || "\u6765\u6E90\u672A\u77E5";
-  return `<span class="wafer-token wafer-${state}" style="--wafer-progress:${normalizedProgress * 360}deg" title="\u6676\u5706 ${escapeHtml(wafer)}\uFF0C\u6765\u6E90 ${escapeHtml(originLabel)}\uFF0C${processed ? "\u5DF2\u52A0\u5DE5" : "\u672A\u52A0\u5DE5"}"><span><b>${escapeHtml(wafer)}</b><small>${escapeHtml(originLabel)}</small></span></span>`;
+  return `<span class="wafer-token wafer-${state}" style="--wafer-progress:${normalizedProgress * 360}deg" title="\u6676\u5706 ${escapeHtml(wafer)}\uFF0C\u6765\u6E90 ${escapeHtml(originLabel)}\uFF0C${processed ? "\u5DF2\u52A0\u5DE5" : "\u672A\u52A0\u5DE5"}"><span><b class="wafer-origin-label">${escapeHtml(originLabel)}</b></span></span>`;
 }
 function moduleDoorSides(module2, role, layout = "single", roleIndex = 0) {
   if (module2.door === "doorless") return [];

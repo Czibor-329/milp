@@ -1533,12 +1533,19 @@ function renderWorkspaceControls() {
   const deviceSelect = document.getElementById("deviceSelect"), tests = state.workspaceDevice?.tests || [];
   deviceSelect.innerHTML = state.workspaceDevices.length ? state.workspaceDevices.map(device => `<option value="${escapeHtml(device.id)}" ${device.id === state.workspaceDeviceId ? "selected" : ""}>${escapeHtml(displayDeviceName(device.name))}</option>`).join("") : `<option value="">尚未导入设备</option>`;
   const natural = (left, right) => left.localeCompare(right, undefined, { numeric: true });
-  const groups = [...new Set(["", ...(state.workspaceDevice?.testGroups || []), ...tests.map(test => String(test.group || "").trim())])].sort((left, right) => (!left) - (!right) || natural(left, right));
+  const ungroupedTests = tests.some(test => !String(test.group || "").trim());
+  // “未分组”只在迁移前遗留测试实际存在时显示，避免给每台设备留下空的默认组。
+  const groups = [...new Set([
+    ...(ungroupedTests ? [""] : []),
+    ...(state.workspaceDevice?.testGroups || []).map(group => String(group || "").trim()).filter(Boolean),
+    ...tests.map(test => String(test.group || "").trim()).filter(Boolean),
+  ])].sort((left, right) => (!left) - (!right) || natural(left, right));
   const selectedGroup = groups.includes(state.activeTestGroup) ? state.activeTestGroup : (groups[0] || "");
+  state.activeTestGroup = selectedGroup;
   const groupSelect = document.getElementById("testGroupSelect");
-  groupSelect.innerHTML = groups.length ? groups.map(group => `<option value="${escapeHtml(group)}" title="${escapeHtml(group || "未分组")}" ${group === selectedGroup ? "selected" : ""}>${escapeHtml(group || "未分组")}</option>`).join("") : `<option value="">未分组</option>`;
-  groupSelect.title = selectedGroup || "未分组";
-  groupSelect.disabled = !state.workspaceDeviceId;
+  groupSelect.innerHTML = groups.length ? groups.map(group => `<option value="${escapeHtml(group)}" title="${escapeHtml(group || "未分组")}" ${group === selectedGroup ? "selected" : ""}>${escapeHtml(group || "未分组")}</option>`).join("") : `<option value="">尚无测试组</option>`;
+  groupSelect.title = selectedGroup || (groups.length ? "未分组" : "尚无测试组");
+  groupSelect.disabled = !state.workspaceDeviceId || !groups.length;
   const testSelect = document.getElementById("testCaseSelect");
   const visibleTests = tests.filter(test => String(test.group || "").trim() === selectedGroup).sort((left, right) => natural(left.name, right.name));
   testSelect.innerHTML = visibleTests.length ? visibleTests.map(test => `<option value="${escapeHtml(test.id)}" title="${escapeHtml(test.name)}" ${test.id === state.testCaseId ? "selected" : ""}>${escapeHtml(test.name)}</option>`).join("") : `<option value="">该组暂无测试</option>`;
@@ -4821,7 +4828,7 @@ function renderBatchItems(items) {
     return `
       <div class="batch-result ${escapeHtml(item.status || "queued")}${selected ? " selected" : ""}" data-batch-item-index="${index}">
         <div class="batch-result-head">
-          <button class="batch-result-title" type="button" aria-pressed="${selected}" aria-label="查看 ${escapeHtml(displayId)} ${escapeHtml(item.testName || "")} 的详细指标"><strong title="${escapeHtml(`${item.testId || ""} · ${item.testName || ""}`)}"><span class="batch-result-order">${escapeHtml(displayId)}</span>${escapeHtml(item.testName || `测试 ${index + 1}`)}</strong></button>
+          <button class="batch-result-title" type="button" aria-pressed="${selected}" aria-label="查看 ${escapeHtml(item.testName || `测试 ${index + 1}`)} 的详细指标"><strong title="${escapeHtml(item.testName || `测试 ${index + 1}`)}">${escapeHtml(item.testName || `测试 ${index + 1}`)}</strong></button>
           <div class="batch-result-meta">
             <span class="batch-status">${statusLabels[item.status] || "等待中"}</span>
             ${item.logUrl ? `<a class="btn" href="${escapeHtml(item.logUrl)}" download>日志</a>` : `<span class="btn" aria-disabled="true">日志</span>`}

@@ -1804,7 +1804,7 @@ function expandDualProcessChambers(modules: ModuleSnapshot[]): DualChamberView[]
   return expanded;
 }
 
-/** 绘制晶圆及其首次确认的来源模块；外圈由当前腔室加工进度驱动。 */
+/** 绘制晶圆来源位置；外圈由当前腔室加工进度驱动，标签只显示 LPi.i 等位置标识。 */
 function renderWaferToken(
   wafer: string,
   origin: string,
@@ -1814,7 +1814,7 @@ function renderWaferToken(
   const normalizedProgress = Math.max(0, Math.min(1, progress));
   const state = processed ? "processed" : "unprocessed";
   const originLabel = origin || "来源未知";
-  return `<span class="wafer-token wafer-${state}" style="--wafer-progress:${normalizedProgress * 360}deg" title="晶圆 ${escapeHtml(wafer)}，来源 ${escapeHtml(originLabel)}，${processed ? "已加工" : "未加工"}"><span><b>${escapeHtml(wafer)}</b><small>${escapeHtml(originLabel)}</small></span></span>`;
+  return `<span class="wafer-token wafer-${state}" style="--wafer-progress:${normalizedProgress * 360}deg" title="晶圆 ${escapeHtml(wafer)}，来源 ${escapeHtml(originLabel)}，${processed ? "已加工" : "未加工"}"><span><b class="wafer-origin-label">${escapeHtml(originLabel)}</b></span></span>`;
 }
 
 /** 门始终朝向对应机械手；LoadLock 改由正视双层结构单独表达。 */
@@ -1871,7 +1871,7 @@ function renderLoadPortCassette(module: ModuleSnapshot): string {
   </div>`;
 }
 
-/** 绘制拓扑中的紧凑腔室；晶圆同时展示 ID 与其来源模块。 */
+/** 绘制拓扑中的紧凑腔室；晶圆标签只展示首次确认的来源模块。 */
 function renderModule(
   module: ModuleSnapshot,
   waferOrigins: Readonly<Record<string, string>>,
