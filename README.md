@@ -25,7 +25,7 @@ python -m realtime_scheduler.backend.main --open
 
 ## 命令行运行测试
 
-使用 [`scripts/run_dataset_suite.py`](scripts/run_dataset_suite.py) 可直接运行本地`realtime_scheduler/data/datasets/` 中的测试集。默认使用平台内置 MoveList 校验器，不启动 HongYe，也跳过 Baseline，适合本地复现与调试。
+使用 [`scripts/run_dataset_suite.py`](scripts/run_dataset_suite.py) 可直接运行本地`realtime_scheduler/data/datasets/` 中的测试集。默认启用 HongYe 校验并跳过 Baseline；如需使用平台内置 MoveList 校验器，可传入 `--no-hongye-check`。
 
 先逐层列出可用设备、测试组和测试：
 

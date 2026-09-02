@@ -1,4 +1,4 @@
-"""验证终端测试集入口的选择规则和内置校验默认值。"""
+"""验证终端测试集入口的选择规则和 HongYe 校验默认值。"""
 
 from __future__ import annotations
 
@@ -27,8 +27,8 @@ def test_select_unique_accepts_id_or_exact_name() -> None:
     assert run_dataset_suite._select_unique(rows, "CASE2", kind="测试")["id"] == "test-2"
 
 
-def test_terminal_suite_uses_builtin_validation_and_selected_limit() -> None:
-    """终端运行默认关闭 HongYe，并把筛选后的 ID 交给批量服务。"""
+def test_terminal_suite_uses_hongye_validation_and_selected_limit() -> None:
+    """终端运行默认启用 HongYe，并把筛选后的 ID 交给批量服务。"""
     device = _device()
     captured = {}
 
@@ -62,13 +62,13 @@ def test_terminal_suite_uses_builtin_validation_and_selected_limit() -> None:
 
     assert exit_code == 0
     assert "skip_validation" not in captured
-    assert captured["hongye_check"] is False
+    assert captured["hongye_check"] is True
     assert captured["skip_baseline"] is True
     assert captured["test_ids"] == ["test-1"]
 
 
-def test_terminal_suite_can_enable_hongye_validation() -> None:
-    """显式开关应把测试组交给 HongYe 校验器。"""
+def test_terminal_suite_can_disable_hongye_validation() -> None:
+    """关闭开关应把测试组交给平台内置校验器。"""
     device = _device()
     captured = {}
 
@@ -97,8 +97,8 @@ def test_terminal_suite_can_enable_hongye_validation() -> None:
         exit_code = run_dataset_suite.main([
             "--device", "12kChamber",
             "--group", "公司示例集",
-            "--hongye-check",
+            "--no-hongye-check",
         ])
 
     assert exit_code == 0
-    assert captured["hongye_check"] is True
+    assert captured["hongye_check"] is False

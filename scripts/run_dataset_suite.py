@@ -1,8 +1,9 @@
 """从终端运行本地设备测试集，并输出适合 AI 调试的逐项结果。
 
 脚本直接读取 ``realtime_scheduler/data/datasets`` 的单一数据源，调用与前端
-批量运行相同的计划构造和执行逻辑。默认使用平台内置 MoveList 校验器；传入
-``--hongye-check`` 时改用 HongYe 校验器。运行结果和复现日志仍按平台现有规则保存。
+批量运行相同的计划构造和执行逻辑。默认使用 HongYe 校验器；传入
+``--no-hongye-check`` 可改用平台内置 MoveList 校验器。运行结果和复现日志仍按平台
+现有规则保存。
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ if str(PROJECT_ROOT) not in sys.path:
 def _argument_parser() -> argparse.ArgumentParser:
     """构建测试集终端入口的参数解析器。"""
     parser = argparse.ArgumentParser(
-        description="运行调度平台本地测试集；默认使用内置校验器，不使用 HongYe。",
+        description="运行调度平台本地测试集；默认使用 HongYe 校验器。",
     )
     parser.add_argument("--device", help="设备 ID 或完整设备名称，例如 12kChamber")
     parser.add_argument("--group", help="完整测试组名称，例如 公司示例集")
@@ -49,8 +50,16 @@ def _argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--hongye-check",
+        dest="hongye_check",
         action="store_true",
-        help="使用 HongYe SchStateLib 校验；默认使用平台内置 MoveList 校验器",
+        default=True,
+        help="使用 HongYe SchStateLib 校验（默认）",
+    )
+    parser.add_argument(
+        "--no-hongye-check",
+        dest="hongye_check",
+        action="store_false",
+        help="改用平台内置 MoveList 校验器",
     )
     parser.add_argument("--json-output", type=Path, help="把完整批量结果另存为 JSON")
     parser.add_argument(
