@@ -760,6 +760,7 @@ def build_route(
     )
     route_steps: List[Dict[str, Any]] = []
     for index, stage in enumerate(stages):
+        has_product_recipe = False
         visit_rows = _stage_visit_rows(stage)
         stations = [
             str(visit.get("stationName") or visit.get("StationName") or "").strip()
@@ -782,6 +783,16 @@ def build_route(
                 raise ValueError(f"Route {route_name} 的 Robot Step {index} Visit 不能引用 Recipe")
             if recipe_name and recipe_name not in recipe_by_name:
                 raise ValueError(f"Route {route_name} Visit 引用了不存在的 Recipe：{recipe_name}")
+            has_visit_recipe = bool(recipe_name)
+            has_product_recipe = has_product_recipe or has_visit_recipe
+            # 零时长产品工艺不需要下发 Recipe；保留 NeedProcess 以表达该 Route
+            # Step 仍是一个 PM 工艺步骤，并让算法按即时加工处理。
+            if (
+                recipe_name
+                and _finite_number(recipe_by_name[recipe_name].get("time"), 0.0)
+                <= 0.0
+            ):
+                recipe_name = ""
             move_offsets = visit.get("moveTimeOffset") or visit.get("MoveTimeOffset") or {}
             if isinstance(move_offsets, str):
                 try:
@@ -814,7 +825,7 @@ def build_route(
                 clean_by_name,
                 station,
             )
-            if recipe_name:
+            if has_visit_recipe:
                 _append_module_clean_conditions(
                     pre_pjob,
                     station,
@@ -849,9 +860,16 @@ def build_route(
             if explicit_post is not None
             else ([index + 1] if index + 1 < len(stages) else [])
         )
-        need_process = bool(stage.get("needProcess", stage.get("NeedProcess", any(
-            visit["ProcessRecipe"] for visit in visits
-        ))))
+        declared_need_process = stage.get(
+            "needProcess",
+            stage.get("NeedProcess"),
+        )
+        need_process = (
+            bool(declared_need_process)
+            if declared_need_process is not None
+            else any(visit["ProcessRecipe"] for visit in visits)
+            or has_product_recipe
+        )
         route_steps.append({
             "StepID": step_id,
             "PostStepID": post_step_ids,

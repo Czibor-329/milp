@@ -227,6 +227,8 @@ class MachineState:
     clean_obligations: Dict[Tuple[str, str, str], Tuple[str, int, Tuple[str, ...]]] = field(default_factory=dict)
     completed_clean_counts: Dict[Tuple[str, str, str], int] = field(default_factory=dict)
     product_clean_entries: Set[Tuple[str, str]] = field(default_factory=set)
+    #: 外部算法可省略的零时长产品 ProcessMove；键为（物料、Route Step、PM）。
+    zero_duration_process_steps: Set[Tuple[str, str, str]] = field(default_factory=set)
 
     @classmethod
     def from_sources(
@@ -307,6 +309,59 @@ class MachineState:
                 if station_name:
                     state.ensure_station(station_name, int(getattr(stage, "slot", 0) or 0) + 1)
 
+        # 标准输出可能省略零时长产品 ProcessMove。ProcessRecipes 是本轮运行计划
+        # 的最终时长来源，优先于 Route 编译期默认值；保留可严格证明的三元组，
+        # 后续 Pick 时仅为该类 PM 物料补齐已加工状态。
+        recipe_durations = {
+            (str(recipe.get("Name") or ""), str(recipe.get("ModuleName") or "")): recipe.get("Time")
+            for recipe in payload.get("ProcessRecipes", []) or []
+            if isinstance(recipe, Mapping)
+        }
+        state.zero_duration_process_steps = _zero_duration_product_process_steps(
+            payload,
+            recipe_durations,
+        )
+        for wafer in getattr(task, "wafers", ()) or ():
+            material_id = str(getattr(wafer, "mat_id", ""))
+            for stage in getattr(wafer, "stages", ()) or ():
+                if str(getattr(stage, "stage_type", "")) != "process":
+                    continue
+                step_id = str(getattr(stage, "step_id", getattr(stage, "j", "")))
+                process_times = dict(
+                    getattr(stage, "process_time_by_chamber", {}) or {}
+                )
+                candidates = {
+                    str(getattr(stage, "chamber", "") or ""),
+                    *(
+                        str(candidate)
+                        for candidate in getattr(stage, "cands", ()) or ()
+                    ),
+                }
+                for candidate in candidates - {""}:
+                    try:
+                        recipe_name = str(
+                            dict(
+                                getattr(stage, "process_recipe_by_chamber", {})
+                                or {}
+                            ).get(candidate, getattr(stage, "process_recipe", ""))
+                            or ""
+                        )
+                        duration = float(
+                            recipe_durations.get(
+                                (recipe_name, candidate),
+                                process_times.get(
+                                    candidate,
+                                    getattr(stage, "proc", 0.0),
+                                ),
+                            )
+                        )
+                    except (TypeError, ValueError):
+                        continue
+                    if math.isfinite(duration) and abs(duration) <= TIME_TOLERANCE:
+                        state.zero_duration_process_steps.add(
+                            (material_id, step_id, candidate)
+                        )
+
         for station_name, slot_id, material in _initial_materials(task, payload):
             station = state.ensure_station(station_name, slot_id)
             if station.slots[slot_id].material is not None:
@@ -356,6 +411,14 @@ class MachineState:
         self.clean_task_state_variables = _clean_task_state_variables(payload)
         self.clean_wac_trigger_rules = _clean_wac_trigger_rules(payload)
         self.clean_obligations = _clean_obligation_specs(payload)
+        self.zero_duration_process_steps = _zero_duration_product_process_steps(
+            payload,
+            {
+                (str(recipe.get("Name") or ""), str(recipe.get("ModuleName") or "")): recipe.get("Time")
+                for recipe in payload.get("ProcessRecipes", []) or []
+                if isinstance(recipe, Mapping)
+            },
+        )
 
         # 新一代可能首次声明某个状态变量。已有变量是已执行 Move 的累计事实，
         # 只能补缺，不能用 update 初值覆盖。
@@ -365,6 +428,40 @@ class MachineState:
                 continue
             for variable_name, value in _station_state_variables(config).items():
                 station.state_variables.setdefault(variable_name, value)
+
+
+def _zero_duration_product_process_steps(
+    payload: Mapping[str, Any],
+    recipe_durations: Mapping[Tuple[str, str], Any],
+) -> Set[Tuple[str, str, str]]:
+    """从当前 AlgSchedule 精确提取可省略 ProcessMove 的零时长产品工艺。"""
+    zero_duration_steps: Set[Tuple[str, str, str]] = set()
+    for material in payload.get("Materials", []) or []:
+        if not isinstance(material, Mapping):
+            continue
+        material_id = str(material.get("ID", material.get("MatID", "")))
+        route = material.get("Route") or {}
+        for route_step in route.get("RouteSteps", []) or []:
+            if not isinstance(route_step, Mapping) or not route_step.get("NeedProcess"):
+                continue
+            step_id = str(route_step.get("StepID", ""))
+            for visit in route_step.get("Visits", []) or []:
+                if not isinstance(visit, Mapping):
+                    continue
+                module_name = str(visit.get("StationName") or "")
+                recipe_name = str(visit.get("ProcessRecipe") or "")
+                if not recipe_name and module_name:
+                    # 运行计划约定：产品 NeedProcess Visit 的 Recipe 为空即表示
+                    # 零时长即时加工。清洗使用独立 CleanTaskName，不走本分支。
+                    zero_duration_steps.add((material_id, step_id, module_name))
+                    continue
+                try:
+                    duration = float(recipe_durations[(recipe_name, module_name)])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if math.isfinite(duration) and abs(duration) <= TIME_TOLERANCE:
+                    zero_duration_steps.add((material_id, step_id, module_name))
+    return zero_duration_steps
 
 
 @dataclass
@@ -1218,6 +1315,25 @@ def _supplement_state_from_moves(
                 robot.can_swap = True
 
 
+def _is_omitted_zero_duration_process(
+    state: MachineState,
+    station_name: str,
+    material: Optional[MaterialState],
+) -> bool:
+    """判断未输出 ProcessMove 的 PM 物料能否按零时长工艺完成。
+
+    仅接受由当前任务 Route 明确声明的产品工艺、物料、Step 和 PM 三者完全匹配
+    的零时长记录，避免把任何缺失 ProcessMove 的普通加工误判为已完成。
+    """
+    if material is None:
+        return False
+    return (
+        str(material.material_id),
+        str(material.step_id),
+        station_name,
+    ) in state.zero_duration_process_steps
+
+
 def _start_pick(state: MachineState, move: Mapping[str, Any], end_time: float, _all_moves: Sequence[Mapping[str, Any]], scheduled: List[_ScheduledCompletion]) -> Optional[str]:
     """校验并执行可包含多片晶圆的原子 Pick。"""
     robot = _robot(state, move)
@@ -1250,6 +1366,22 @@ def _start_pick(state: MachineState, move: Mapping[str, Any], end_time: float, _
             return _issue(move, ValidationErrorCode.ROBOT_HAND_STATE_INVALID, f"{robot.name}#{robot_slot_id} 不是空手")
         if not _available(slot.busy_until, start_time):
             return _issue(move, ValidationErrorCode.STATION_SLOT_BUSY, f"{station_name}#{station_slot_id} 正在{slot.busy_action}")
+        if (
+            slot.phase is SlotPhase.UNPROCESSED
+            and _is_omitted_zero_duration_process(
+                state,
+                station_name,
+                slot.material,
+            )
+        ):
+            # 算法已在内部完成零时长工艺，但标准输出不会带对应 ProcessMove。
+            # 此处只按任务中可证明为零时长的 PM 工序补齐状态，不能放宽一般 Pick。
+            _set_slot(slot, SlotPhase.COMPLETED, slot.material)
+            slot.material_process_count += 1
+            if slot.material is not None and slot.material.pjob_name:
+                state.product_clean_entries.add(
+                    (str(slot.material.pjob_name), station_name)
+                )
         if slot.phase is not SlotPhase.COMPLETED or not _material_matches(slot.material, material_id):
             return _issue(move, ValidationErrorCode.PICK_SOURCE_INVALID, f"{station_name}#{station_slot_id} 没有匹配的已完成物料")
         transfers.append((station, slot, station_slot_id, robot_slot_id, _material_with_metadata(slot.material, move, index)))
