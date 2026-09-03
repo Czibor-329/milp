@@ -166,6 +166,7 @@ export interface TestGroupPerformanceSummary {
   totalCpuTimeMs: number;
   medianBottleneckUtilization: number | null;
   medianThroughputPerHour: number | null;
+  throughputEligibleCount: number;
   medianDepartureIntervalCv: number | null;
   medianProcessChamberDwellMeanSeconds: number | null;
   medianRobotWaferDwellMeanSeconds: number | null;

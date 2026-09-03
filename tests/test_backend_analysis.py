@@ -385,6 +385,43 @@ class BackendAnalysisTests(unittest.TestCase):
         self.assertEqual(10, result["weightedImprovementPercent"])
         self.assertEqual(10, result["medianCpuTimeMs"])
 
+    def test_group_analysis_reports_production_throughput(self) -> None:
+        """测试组统计应汇总官方产能，并把样本不足的 0 视为缺失。"""
+        result = analyze_test_group_performance(
+            [
+                {
+                    "id": "steady",
+                    "name": "稳态产能",
+                    "status": "succeeded",
+                    "validation": "passed",
+                    "makespan": 90,
+                    "performance": {
+                        "throughputPerHour": 64.8,
+                        "throughputSampleCount": 120,
+                        "throughputReason": "",
+                    },
+                },
+                {
+                    "id": "short",
+                    "name": "样本不足",
+                    "status": "succeeded",
+                    "validation": "passed",
+                    "makespan": 40,
+                    "performance": {
+                        "throughputPerHour": 0.0,
+                        "throughputSampleCount": 0,
+                        "throughputReason": "完工晶圆必须大于 150 片，才能按固定 120 片样本计算产能。",
+                    },
+                },
+            ]
+        )
+        self.assertEqual(64.8, result["medianThroughputPerHour"])
+        self.assertEqual(1, result["throughputEligibleCount"])
+        self.assertEqual(64.8, result["cases"][0]["throughputPerHour"])
+        self.assertEqual(120, result["cases"][0]["throughputSampleCount"])
+        self.assertIsNone(result["cases"][1]["throughputPerHour"])
+        self.assertEqual(0, result["cases"][1]["throughputSampleCount"])
+
 
 if __name__ == "__main__":
     unittest.main()

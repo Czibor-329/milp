@@ -3263,6 +3263,22 @@ function cpuChart(summary) {
     </div>`;
   }).join("") || '<p class="group-analysis-empty">\u6CA1\u6709 CPU Time \u6570\u636E\u3002</p>';
 }
+function throughputChart(summary) {
+  const rows = summary.cases.map((item, index) => ({ item, index })).filter(({ item }) => item.throughputPerHour !== null && item.throughputPerHour > 0);
+  const scale = Math.max(1, ...rows.map(({ item }) => item.throughputPerHour ?? 0));
+  return rows.map(({ item, index }) => {
+    const throughput = Math.max(item.throughputPerHour ?? 0, 0);
+    const sampleCount = Number(item.throughputSampleCount) || 0;
+    return `<div class="group-chart-row">
+      <span class="group-chart-label" title="${escapeHtml2(item.name)}">${escapeHtml2(caseLabel(item, index))}</span>
+      <div class="group-linear-track" role="img" aria-label="${escapeHtml2(caseLabel(item, index))} \u4EA7\u80FD ${throughput.toFixed(1)} \u7247/h">
+        <i class="throughput" style="width:${Math.min(throughput / scale * 100, 100).toFixed(2)}%"></i>
+      </div>
+      <strong>${throughput.toFixed(1)} \u7247/h</strong>
+      <small>${sampleCount ? `\u5C45\u4E2D ${sampleCount} \u7247` : "\u7A33\u6001\u6837\u672C"}</small>
+    </div>`;
+  }).join("") || '<p class="group-analysis-empty">\u6CA1\u6709\u53EF\u6309\u5C45\u4E2D 120 \u7247\u7A33\u6001\u6837\u672C\u8BA1\u7B97\u7684\u4EA7\u80FD\u3002</p>';
+}
 function csvEscape(value) {
   return /[",\r\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
 }
@@ -3275,7 +3291,7 @@ function testGroupSummaryCsv(summary) {
     "\u74F6\u9888",
     "\u5229\u7528\u7387",
     "CPU Time",
-    "\u541E\u5410",
+    "\u4EA7\u80FD",
     "\u51FA\u7AD9 CV",
     "\u52A0\u5DE5\u8154\u9A7B\u7559\u5747\u503C",
     "\u673A\u5668\u624B\u9A7B\u7559\u5747\u503C",
@@ -3333,7 +3349,7 @@ function renderTestGroupAnalysis(summary, groupName) {
       <article><span>\u9010\u4F8B\u4E2D\u4F4D\u6539\u5584</span><strong class="${(medianImprovement ?? 0) < 0 ? "loss" : "gain"}">${medianImprovement === null ? "\u2014" : `${medianImprovement > 0 ? "+" : ""}${medianImprovement.toFixed(2)}%`}</strong><small>${summary.winCount} \u80DC \xB7 ${summary.tieCount} \u5E73 \xB7 ${summary.regressionCount} \u9000\u5316</small></article>
       <article><span>CPU Time</span><strong>${durationText(summary.medianCpuTimeMs)}</strong><small>P90 ${durationText(summary.p90CpuTimeMs)} \xB7 \u603B\u8BA1 ${durationText(summary.totalCpuTimeMs)}</small></article>
       <article><span>\u4E3B\u8981\u5019\u9009\u5229\u7528\u7387\u4E2D\u4F4D\u6570</span><strong>${percentText(summary.medianBottleneckUtilization, true)}</strong><small>\u5DE5\u5E8F\u7EC4\u3001\u673A\u5668\u4EBA\u6216 LoadLock \u5BB9\u91CF</small></article>
-      <article><span>\u51FA\u7AD9\u8868\u73B0\u4E2D\u4F4D\u6570</span><strong>${finiteText(summary.medianThroughputPerHour, 1, " \u7247/h")}</strong><small>\u95F4\u9694\u6CE2\u52A8 CV ${finiteText(summary.medianDepartureIntervalCv, 2)}</small></article>
+      <article><span>\u4EA7\u80FD\u4E2D\u4F4D\u6570</span><strong>${finiteText(summary.medianThroughputPerHour, 1, " \u7247/h")}</strong><small>${summary.throughputEligibleCount ?? 0}/${summary.succeededCount} \u4E2A\u6D4B\u8BD5\u6709\u5C45\u4E2D 120 \u7247\u7A33\u6001\u6837\u672C \xB7 \u51FA\u7AD9 CV ${finiteText(summary.medianDepartureIntervalCv, 2)}</small></article>
       <article><span>\u52A0\u5DE5\u8154\u9A7B\u7559\u5747\u503C\u4E2D\u4F4D\u6570</span><strong>${finiteText(summary.medianProcessChamberDwellMeanSeconds, 2, " s")}</strong><small>\u5404\u6D4B\u8BD5\u201C\u52A0\u5DE5\u7ED3\u675F \u2192 \u5B8C\u5168\u79BB\u8154\u201D\u5747\u503C\u7684\u4E2D\u4F4D\u6570</small></article>
       <article><span>\u673A\u5668\u624B\u9A7B\u7559\u5747\u503C\u4E2D\u4F4D\u6570</span><strong>${finiteText(summary.medianRobotWaferDwellMeanSeconds, 2, " s")}</strong><small>\u5DF2\u5254\u9664\u663E\u5F0F PreTrans \u8FD0\u8F93\u533A\u95F4</small></article>
       <article><span>\u7CFB\u7EDF\u505C\u7559\u5747\u503C\u4E2D\u4F4D\u6570</span><strong>${finiteText(summary.medianWaferSystemResidenceMeanSeconds, 2, " s")}</strong><small>\u79BB\u5F00 LP \u2192 \u8FD4\u56DE LP \xB7 CV \u4E2D\u4F4D ${finiteText(summary.medianWaferSystemResidenceCv, 2)}</small></article>
@@ -3342,6 +3358,10 @@ function renderTestGroupAnalysis(summary, groupName) {
       <article class="group-chart-card">
         <header><div><h3>\u76F8\u5BF9 Baseline</h3><p>\u6B63\u503C\u4E3A makespan \u6539\u5584\uFF0C\u8D1F\u503C\u4E3A\u9000\u5316</p></div></header>
         <div class="group-chart-body">${improvementChart(summary)}</div>
+      </article>
+      <article class="group-chart-card">
+        <header><div><h3>\u4EA7\u80FD</h3><p>\u5404\u6D4B\u8BD5\u5C45\u4E2D 120 \u7247\u7A33\u6001\u6837\u672C\u4EA7\u80FD\uFF0C\u6309\u7EC4\u5185\u6700\u5927\u503C\u7F29\u653E</p></div></header>
+        <div class="group-chart-body">${throughputChart(summary)}</div>
       </article>
       <article class="group-chart-card">
         <header><div><h3>\u6240\u6709\u74F6\u9888\u5019\u9009\u5229\u7528\u7387</h3><p>\u6BCF\u4E2A\u6D4B\u8BD5\u6309\u53EF\u80FD\u6027\u4F9D\u6B21\u663E\u793A\u6240\u6709\u63A5\u8FD1\u5019\u9009</p></div></header>
@@ -3356,7 +3376,7 @@ function renderTestGroupAnalysis(summary, groupName) {
       <summary><span>\u67E5\u770B\u9010\u6D4B\u8BD5\u5B8C\u6574\u6307\u6807</span><button type="button" class="btn small group-analysis-export" data-group-export-csv>\u5BFC\u51FA CSV</button></summary>
       <div class="group-analysis-table-scroll">
         <table class="group-analysis-table">
-          <thead><tr><th>\u6D4B\u8BD5</th><th>Makespan</th><th>Baseline</th><th>\u6539\u5584</th><th>\u74F6\u9888</th><th>\u5229\u7528\u7387</th><th>CPU Time</th><th>\u541E\u5410</th><th>\u51FA\u7AD9 CV</th><th>\u52A0\u5DE5\u8154\u9A7B\u7559\u5747\u503C</th><th>\u673A\u5668\u624B\u9A7B\u7559\u5747\u503C</th><th>\u7CFB\u7EDF\u505C\u7559\u5747\u503C</th><th>\u7CFB\u7EDF\u505C\u7559 CV</th><th>\u6821\u9A8C</th></tr></thead>
+          <thead><tr><th>\u6D4B\u8BD5</th><th>Makespan</th><th>Baseline</th><th>\u6539\u5584</th><th>\u74F6\u9888</th><th>\u5229\u7528\u7387</th><th>CPU Time</th><th>\u4EA7\u80FD</th><th>\u51FA\u7AD9 CV</th><th>\u52A0\u5DE5\u8154\u9A7B\u7559\u5747\u503C</th><th>\u673A\u5668\u624B\u9A7B\u7559\u5747\u503C</th><th>\u7CFB\u7EDF\u505C\u7559\u5747\u503C</th><th>\u7CFB\u7EDF\u505C\u7559 CV</th><th>\u6821\u9A8C</th></tr></thead>
           <tbody>${resultTable(summary)}</tbody>
         </table>
       </div>

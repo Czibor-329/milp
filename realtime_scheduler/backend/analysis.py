@@ -1336,6 +1336,16 @@ def build_schedule_analysis_context(
     return {"processStages": process_stages, "pjobRoutes": pjob_routes}
 
 
+def _group_case_throughput(performance: Optional[Mapping[str, Any]]) -> Optional[float]:
+    """读取单测官方产能；样本不足或非正值视为缺失，避免把 0 当成有效产能。"""
+    if not isinstance(performance, Mapping):
+        return None
+    value = _finite_or_none(performance.get("throughputPerHour"))
+    if value is None or value <= 0:
+        return None
+    return value
+
+
 def _normalize_group_case(input_case: Mapping[str, Any]) -> Dict[str, Any]:
     """把一条测试结果规范化为组级统计的稳定字段。"""
     makespan = _finite_or_none(input_case.get("makespan"))
@@ -1427,10 +1437,16 @@ def _normalize_group_case(input_case: Mapping[str, Any]) -> Dict[str, Any]:
         ),
         "bottleneckCandidateCount": len(raw_candidates) if raw_candidates else int(bool(legacy)),
         "bottleneckCandidates": candidates,
-        "throughputPerHour": (
-            _finite_or_none(performance.get("throughputPerHour"))
+        "throughputPerHour": _group_case_throughput(performance),
+        "throughputSampleCount": (
+            max(0, int(_finite_number(performance.get("throughputSampleCount"), 0)))
             if isinstance(performance, Mapping)
-            else None
+            else 0
+        ),
+        "throughputReason": (
+            str(performance.get("throughputReason") or "")
+            if isinstance(performance, Mapping)
+            else ""
         ),
         "departureIntervalCv": (
             _finite_or_none(performance.get("departureIntervalCv"))
@@ -1551,6 +1567,9 @@ def analyze_test_group_performance(
         ),
         "medianThroughputPerHour": _percentile(
             succeeded_values("throughputPerHour", positive=True), 0.5,
+        ),
+        "throughputEligibleCount": len(
+            succeeded_values("throughputPerHour", positive=True),
         ),
         "medianDepartureIntervalCv": _percentile(
             succeeded_values("departureIntervalCv"), 0.5,

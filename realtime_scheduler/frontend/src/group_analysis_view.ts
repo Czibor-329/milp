@@ -97,6 +97,25 @@ function cpuChart(summary: TestGroupPerformanceSummary): string {
   }).join("") || '<p class="group-analysis-empty">没有 CPU Time 数据。</p>';
 }
 
+function throughputChart(summary: TestGroupPerformanceSummary): string {
+  const rows = summary.cases
+    .map((item, index) => ({ item, index }))
+    .filter(({ item }) => item.throughputPerHour !== null && item.throughputPerHour > 0);
+  const scale = Math.max(1, ...rows.map(({ item }) => item.throughputPerHour ?? 0));
+  return rows.map(({ item, index }) => {
+    const throughput = Math.max(item.throughputPerHour ?? 0, 0);
+    const sampleCount = Number(item.throughputSampleCount) || 0;
+    return `<div class="group-chart-row">
+      <span class="group-chart-label" title="${escapeHtml(item.name)}">${escapeHtml(caseLabel(item, index))}</span>
+      <div class="group-linear-track" role="img" aria-label="${escapeHtml(caseLabel(item, index))} 产能 ${throughput.toFixed(1)} 片/h">
+        <i class="throughput" style="width:${Math.min(throughput / scale * 100, 100).toFixed(2)}%"></i>
+      </div>
+      <strong>${throughput.toFixed(1)} 片/h</strong>
+      <small>${sampleCount ? `居中 ${sampleCount} 片` : "稳态样本"}</small>
+    </div>`;
+  }).join("") || '<p class="group-analysis-empty">没有可按居中 120 片稳态样本计算的产能。</p>';
+}
+
 function csvEscape(value: string): string {
   return /[",\r\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
 }
@@ -105,7 +124,7 @@ function csvEscape(value: string): string {
 export function testGroupSummaryCsv(summary: TestGroupPerformanceSummary): string {
   const headers = [
     "测试", "Makespan", "Baseline", "改善", "瓶颈", "利用率", "CPU Time",
-    "吞吐", "出站 CV", "加工腔驻留均值", "机器手驻留均值",
+    "产能", "出站 CV", "加工腔驻留均值", "机器手驻留均值",
     "系统停留均值", "系统停留 CV", "校验",
   ];
   const rows = summary.cases.map((item, index) => [
@@ -166,7 +185,7 @@ export function renderTestGroupAnalysis(
       <article><span>逐例中位改善</span><strong class="${(medianImprovement ?? 0) < 0 ? "loss" : "gain"}">${medianImprovement === null ? "—" : `${medianImprovement > 0 ? "+" : ""}${medianImprovement.toFixed(2)}%`}</strong><small>${summary.winCount} 胜 · ${summary.tieCount} 平 · ${summary.regressionCount} 退化</small></article>
       <article><span>CPU Time</span><strong>${durationText(summary.medianCpuTimeMs)}</strong><small>P90 ${durationText(summary.p90CpuTimeMs)} · 总计 ${durationText(summary.totalCpuTimeMs)}</small></article>
       <article><span>主要候选利用率中位数</span><strong>${percentText(summary.medianBottleneckUtilization, true)}</strong><small>工序组、机器人或 LoadLock 容量</small></article>
-      <article><span>出站表现中位数</span><strong>${finiteText(summary.medianThroughputPerHour, 1, " 片/h")}</strong><small>间隔波动 CV ${finiteText(summary.medianDepartureIntervalCv, 2)}</small></article>
+      <article><span>产能中位数</span><strong>${finiteText(summary.medianThroughputPerHour, 1, " 片/h")}</strong><small>${summary.throughputEligibleCount ?? 0}/${summary.succeededCount} 个测试有居中 120 片稳态样本 · 出站 CV ${finiteText(summary.medianDepartureIntervalCv, 2)}</small></article>
       <article><span>加工腔驻留均值中位数</span><strong>${finiteText(summary.medianProcessChamberDwellMeanSeconds, 2, " s")}</strong><small>各测试“加工结束 → 完全离腔”均值的中位数</small></article>
       <article><span>机器手驻留均值中位数</span><strong>${finiteText(summary.medianRobotWaferDwellMeanSeconds, 2, " s")}</strong><small>已剔除显式 PreTrans 运输区间</small></article>
       <article><span>系统停留均值中位数</span><strong>${finiteText(summary.medianWaferSystemResidenceMeanSeconds, 2, " s")}</strong><small>离开 LP → 返回 LP · CV 中位 ${finiteText(summary.medianWaferSystemResidenceCv, 2)}</small></article>
@@ -175,6 +194,10 @@ export function renderTestGroupAnalysis(
       <article class="group-chart-card">
         <header><div><h3>相对 Baseline</h3><p>正值为 makespan 改善，负值为退化</p></div></header>
         <div class="group-chart-body">${improvementChart(summary)}</div>
+      </article>
+      <article class="group-chart-card">
+        <header><div><h3>产能</h3><p>各测试居中 120 片稳态样本产能，按组内最大值缩放</p></div></header>
+        <div class="group-chart-body">${throughputChart(summary)}</div>
       </article>
       <article class="group-chart-card">
         <header><div><h3>所有瓶颈候选利用率</h3><p>每个测试按可能性依次显示所有接近候选</p></div></header>
@@ -189,7 +212,7 @@ export function renderTestGroupAnalysis(
       <summary><span>查看逐测试完整指标</span><button type="button" class="btn small group-analysis-export" data-group-export-csv>导出 CSV</button></summary>
       <div class="group-analysis-table-scroll">
         <table class="group-analysis-table">
-          <thead><tr><th>测试</th><th>Makespan</th><th>Baseline</th><th>改善</th><th>瓶颈</th><th>利用率</th><th>CPU Time</th><th>吞吐</th><th>出站 CV</th><th>加工腔驻留均值</th><th>机器手驻留均值</th><th>系统停留均值</th><th>系统停留 CV</th><th>校验</th></tr></thead>
+          <thead><tr><th>测试</th><th>Makespan</th><th>Baseline</th><th>改善</th><th>瓶颈</th><th>利用率</th><th>CPU Time</th><th>产能</th><th>出站 CV</th><th>加工腔驻留均值</th><th>机器手驻留均值</th><th>系统停留均值</th><th>系统停留 CV</th><th>校验</th></tr></thead>
           <tbody>${resultTable(summary)}</tbody>
         </table>
       </div>

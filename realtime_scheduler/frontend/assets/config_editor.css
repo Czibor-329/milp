@@ -697,7 +697,7 @@
     .group-kpi-grid small { display: block; margin-top: 6px; color: #718096; font-size: 11px; line-height: 1.45; }
     .group-kpi-grid .gain, .group-chart-row .gain, .group-analysis-table .gain { color: #087f5b; }
     .group-kpi-grid .loss, .group-chart-row .loss, .group-analysis-table .loss { color: #b42332; }
-    .group-chart-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+    .group-chart-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
     .group-chart-card { min-width: 0; overflow: hidden; border: 1px solid #d8e1ed; border-radius: 12px; background: #fff; }
     .group-chart-card > header { padding: 14px 15px 12px; border-bottom: 1px solid #e7edf4; }
     .group-chart-card h3 { margin: 0; color: #17233b; font-size: 15px; }
@@ -714,6 +714,7 @@
     .group-linear-track i { display: block; height: 100%; border-radius: inherit; }
     .group-linear-track i.utilization { background: #2d8e83; }
     .group-linear-track i.cpu { background: #4e70d8; }
+    .group-linear-track i.throughput { background: #2563eb; }
     .group-diverging-track { overflow: visible; border-radius: 0; background: linear-gradient(90deg, #eef2f7 0 49.5%, #acbacd 49.5% 50.5%, #eef2f7 50.5% 100%); }
     .group-diverging-track i { position: absolute; top: 0; width: var(--bar-width); height: 100%; border-radius: 999px; }
     .group-diverging-track i.gain { left: 50%; background: #27a879; border-radius: 0 999px 999px 0; }
