@@ -67,6 +67,13 @@ export interface WaferResidenceTime {
   robotDwellSeconds?: number;
 }
 
+export interface ThroughputTimelinePoint {
+  wafer: string;
+  completedWaferIndex: number;
+  completedAt: number;
+  throughputPerHour: number;
+}
+
 export interface ResourcePerformance {
   name: string;
   type: string;
@@ -104,6 +111,12 @@ export interface SchedulePerformance {
   throughputPerHour: number;
   throughputSampleCount: number;
   throughputReason: string;
+  throughputTimeline?: {
+    rollingWindowMinimum: number;
+    rollingWindowMaximum: number;
+    cumulative: ThroughputTimelinePoint[];
+    rollingByWindow: Record<string, ThroughputTimelinePoint[]>;
+  };
   cpuTimeMs: number | null;
   recomputeCount: number;
   averageRecomputeTimeMs: number | null;

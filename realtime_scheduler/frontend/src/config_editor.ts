@@ -15,7 +15,7 @@ import {
   requestSearchTelemetry,
   requestTestGroupAnalysis,
 } from "./api_client";
-import { createVisualizationWorkspace, detectDeviceTopologyLayout } from "./workspace_visualizer";
+import { createVisualizationWorkspace, detectDeviceTopologyLayout, updateThroughputChartRange } from "./workspace_visualizer";
 import { renderTestGroupAnalysis, testGroupSummaryCsv } from "./group_analysis_view";
 import { createDocumentationView } from "./documentation_view";
 import {
@@ -5187,6 +5187,8 @@ const bottleneckAnalysisHelpDialog = document.getElementById("bottleneckAnalysis
 document.getElementById("bottleneckAnalysisHelpDialogClose").addEventListener("click", () => bottleneckAnalysisHelpDialog.close());
 const residenceAnalysisHelpDialog = document.getElementById("residenceAnalysisHelpDialog") as HTMLDialogElement;
 document.getElementById("residenceAnalysisHelpDialogClose").addEventListener("click", () => residenceAnalysisHelpDialog.close());
+const throughputAnalysisHelpDialog = document.getElementById("throughputAnalysisHelpDialog") as HTMLDialogElement;
+document.getElementById("throughputAnalysisHelpDialogClose").addEventListener("click", () => throughputAnalysisHelpDialog.close());
 document.getElementById("visualPerformance").addEventListener("click", event => {
   if (!(event.target instanceof Element)) return;
   if (event.target.closest("#bottleneckAnalysisHelpButton") && !bottleneckAnalysisHelpDialog.open) {
@@ -5195,27 +5197,59 @@ document.getElementById("visualPerformance").addEventListener("click", event => 
   if (event.target.closest("#residenceAnalysisHelpButton") && !residenceAnalysisHelpDialog.open) {
     residenceAnalysisHelpDialog.showModal();
   }
+  if (event.target.closest("#throughputAnalysisHelpButton") && !throughputAnalysisHelpDialog.open) {
+    throughputAnalysisHelpDialog.showModal();
+  }
 });
 document.getElementById("visualPerformance").addEventListener("change", event => {
-  const select = event.target instanceof HTMLSelectElement && event.target.id === "residenceMetricSelect"
+  const select = event.target instanceof HTMLSelectElement && (
+    event.target.id === "residenceMetricSelect"
+    || event.target.id === "throughputMetricSelect"
+    || event.target.id === "throughputWindowSize"
+    || event.target.id === "throughputRangeSelect"
+  )
     ? event.target
     : null;
   if (!select) return;
   const performancePanel = event.currentTarget;
   if (!(performancePanel instanceof HTMLElement)) return;
   const selectedMetric = select.value;
-  performancePanel.querySelectorAll<HTMLElement>("[data-residence-metric-chart]").forEach(chart => {
-    chart.hidden = chart.dataset.residenceMetricChart !== selectedMetric;
+  if (select.id === "residenceMetricSelect") {
+    performancePanel.querySelectorAll<HTMLElement>("[data-residence-metric-chart]").forEach(chart => {
+      chart.hidden = chart.dataset.residenceMetricChart !== selectedMetric;
+    });
+    performancePanel.querySelectorAll<HTMLElement>("[data-residence-summary]").forEach(summary => {
+      summary.hidden = summary.dataset.residenceSummary !== selectedMetric;
+    });
+    return;
+  }
+  const throughputMode = performancePanel.querySelector<HTMLSelectElement>("#throughputMetricSelect")?.value ?? "cumulative";
+  const throughputWindow = performancePanel.querySelector<HTMLSelectElement>("#throughputWindowSize")?.value ?? "5";
+  const activeThroughputChart = throughputMode === "rolling"
+    ? `rolling-${throughputWindow}`
+    : "cumulative";
+  performancePanel.querySelectorAll<HTMLElement>("[data-throughput-window-control]").forEach(control => {
+    control.hidden = throughputMode !== "rolling";
   });
-  performancePanel.querySelectorAll<HTMLElement>("[data-residence-summary]").forEach(summary => {
-    summary.hidden = summary.dataset.residenceSummary !== selectedMetric;
+  performancePanel.querySelectorAll<HTMLElement>("[data-throughput-chart]").forEach(chart => {
+    chart.hidden = chart.dataset.throughputChart !== activeThroughputChart;
   });
+  performancePanel.querySelectorAll<HTMLElement>("[data-throughput-summary]").forEach(summary => {
+    summary.hidden = summary.dataset.throughputSummary !== activeThroughputChart;
+  });
+  const range = performancePanel.querySelector<HTMLSelectElement>("#throughputRangeSelect")?.value ?? "wafer:30";
+  const activeChart = performancePanel.querySelector<HTMLElement>(`[data-throughput-chart="${activeThroughputChart}"]`);
+  if (activeChart?.dataset.throughputPoints) updateThroughputChartRange(activeChart, range);
 });
+
 document.getElementById("bottleneckAnalysisHelpDialog").addEventListener("click", event => {
   if (event.target === bottleneckAnalysisHelpDialog) bottleneckAnalysisHelpDialog.close();
 });
 document.getElementById("residenceAnalysisHelpDialog").addEventListener("click", event => {
   if (event.target === residenceAnalysisHelpDialog) residenceAnalysisHelpDialog.close();
+});
+document.getElementById("throughputAnalysisHelpDialog").addEventListener("click", event => {
+  if (event.target === throughputAnalysisHelpDialog) throughputAnalysisHelpDialog.close();
 });
 document.getElementById("pjobRouteProcess").addEventListener("change", event => renderPJobRouteDialogGroup(event.target.value));
 document.getElementById("pjobRouteParallel").addEventListener("change", event => renderPJobRouteDialogGroup(pjobRoutePickerContext?.processKey, event.target.value));

@@ -29,7 +29,8 @@ VENT_MOVE_TYPE = 13
 SECONDS_PER_HOUR = 3600.0
 PRODUCTION_MINIMUM_COMPLETED_WAFERS = 150
 PRODUCTION_SAMPLE_SIZE = 120
-PRODUCTION_TRIMMED_HEAD_WAFERS = 15
+THROUGHPUT_ROLLING_WINDOW_MIN_WAFERS = 2
+THROUGHPUT_ROLLING_WINDOW_MAX_WAFERS = 10
 COMPARISON_TOLERANCE_PERCENT = 1e-6
 ACTIVITY_CATEGORIES = (
     "process", "clean", "door", "transfer", "environment", "other",
@@ -787,12 +788,24 @@ def _process_job_name(move: Mapping[str, Any]) -> str:
     return str(values[0]) if values else str(value or "")
 
 
+def _process_path_signature(move: Mapping[str, Any]) -> Tuple[str, int]:
+    """提取产能分组所需的工艺结构与加工时长签名。
+
+    Recipe 名称可能因批次、控制任务或 PJob 而不同，不能作为产品是否同工艺的
+    判断依据。产能分组只关心实际执行的 Step 顺序和每个 Step 的加工时长；使用
+    ``PERFORMANCE_TIME_TOLERANCE`` 量化时长，以消除浮点计算带来的微小误差。
+    """
+    duration = max(0.0, float(move["EndTime"]) - float(move["StartTime"]))
+    duration_units = int(round(duration / PERFORMANCE_TIME_TOLERANCE))
+    return _process_step_id(move), duration_units
+
+
 def _production_throughput(
     moves: Sequence[Mapping[str, Any]],
     device: Optional[Mapping[str, Any]],
     context: Optional[Mapping[str, Any]],
 ) -> Dict[str, Any]:
-    """按固定 120 片样本口径计算产能，且要求完工片数严格大于 150。"""
+    """按全部完工晶圆居中截取的固定 120 片口径计算产能。"""
     _, completions = _wafer_boundary_times(moves, device)
     completed = sorted(
         completions.items(),
@@ -805,39 +818,30 @@ def _production_throughput(
             "throughputReason": "完工晶圆必须大于 150 片，才能按固定 120 片样本计算产能。",
         }
 
+    middle_start_index = (
+        len(completed) - PRODUCTION_SAMPLE_SIZE
+    ) // 2
+    measurement_start = completed[middle_start_index - 1]
     selected = completed[
-        PRODUCTION_TRIMMED_HEAD_WAFERS:
-        PRODUCTION_TRIMMED_HEAD_WAFERS + PRODUCTION_SAMPLE_SIZE
+        middle_start_index:
+        middle_start_index + PRODUCTION_SAMPLE_SIZE
     ]
     selected_ids = {wafer for wafer, _ in selected}
-    route_by_job = {
-        str(row.get("pjobName") or ""): str(row.get("routeRef") or "")
-        for row in _list_value(context.get("pjobRoutes") if isinstance(context, Mapping) else None)
-        if isinstance(row, Mapping) and str(row.get("pjobName") or "")
-    }
-    process_paths: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
-    route_refs: Dict[str, set[str]] = defaultdict(set)
+    process_paths: Dict[str, List[Tuple[str, int]]] = defaultdict(list)
     for move in moves:
         if int(move["MoveType"]) != PROCESS_MOVE_TYPE:
             continue
-        job_name = _process_job_name(move)
-        route_ref = route_by_job.get(job_name, "")
-        process_signature = (
-            _process_step_id(move),
-            str(move.get("ProcessRecipe") or ""),
-        )
+        process_signature = _process_path_signature(move)
         for wafer in _material_ids(move):
             if wafer not in selected_ids:
                 continue
             process_paths[wafer].append(process_signature)
-            if route_ref:
-                route_refs[wafer].add(route_ref)
 
     signatures = [
-        (tuple(sorted(route_refs[wafer])), tuple(process_paths[wafer]))
+        tuple(process_paths[wafer])
         for wafer, _ in selected
     ]
-    if not signatures or not all(signature[1] for signature in signatures):
+    if not signatures or not all(signature for signature in signatures):
         return {
             "throughputPerHour": 0.0,
             "throughputSampleCount": 0,
@@ -847,10 +851,10 @@ def _production_throughput(
         return {
             "throughputPerHour": 0.0,
             "throughputSampleCount": 0,
-            "throughputReason": "固定样本并非相同 Recipe 和路径，无法计算产能。",
+            "throughputReason": "固定样本的工艺路径结构或各 Step 加工时长不一致，无法计算产能。",
         }
 
-    duration = selected[-1][1] - selected[0][1]
+    duration = selected[-1][1] - measurement_start[1]
     return {
         "throughputPerHour": (
             SECONDS_PER_HOUR * PRODUCTION_SAMPLE_SIZE / duration
@@ -859,6 +863,64 @@ def _production_throughput(
         ),
         "throughputSampleCount": PRODUCTION_SAMPLE_SIZE,
         "throughputReason": "",
+    }
+
+
+def _throughput_timeline(
+    completions: Mapping[str, float],
+) -> Dict[str, Any]:
+    """生成累计与可选 2–10 片滑动窗口的逐片产能曲线数据。
+
+    累计口径以仿真时间零点为起点，每有一片回到终点就以已完成片数除以
+    当前耗时。滑动窗口口径则以相隔指定数量完工事件的两个终点时间计算，
+    用于弱化启动和收尾阶段对瞬时产能的影响。
+    """
+    completed = sorted(
+        completions.items(),
+        key=lambda item: (item[1], _natural_key(item[0])),
+    )
+    cumulative: List[Dict[str, Any]] = []
+    rolling_by_window = {
+        str(window_size): []
+        for window_size in range(
+            THROUGHPUT_ROLLING_WINDOW_MIN_WAFERS,
+            THROUGHPUT_ROLLING_WINDOW_MAX_WAFERS + 1,
+        )
+    }
+    for index, (wafer, completed_at) in enumerate(completed, start=1):
+        cumulative.append({
+            "wafer": wafer,
+            "completedWaferIndex": index,
+            "completedAt": completed_at,
+            "throughputPerHour": (
+                SECONDS_PER_HOUR * index / completed_at
+                if completed_at > PERFORMANCE_TIME_TOLERANCE
+                else 0.0
+            ),
+        })
+        for window_size in range(
+            THROUGHPUT_ROLLING_WINDOW_MIN_WAFERS,
+            THROUGHPUT_ROLLING_WINDOW_MAX_WAFERS + 1,
+        ):
+            if index <= window_size:
+                continue
+            previous_completed_at = completed[index - window_size - 1][1]
+            elapsed = completed_at - previous_completed_at
+            rolling_by_window[str(window_size)].append({
+                "wafer": wafer,
+                "completedWaferIndex": index,
+                "completedAt": completed_at,
+                "throughputPerHour": (
+                    SECONDS_PER_HOUR * window_size / elapsed
+                    if elapsed > PERFORMANCE_TIME_TOLERANCE
+                    else 0.0
+                ),
+            })
+    return {
+        "rollingWindowMinimum": THROUGHPUT_ROLLING_WINDOW_MIN_WAFERS,
+        "rollingWindowMaximum": THROUGHPUT_ROLLING_WINDOW_MAX_WAFERS,
+        "cumulative": cumulative,
+        "rollingByWindow": rolling_by_window,
     }
 
 
@@ -1171,6 +1233,7 @@ def analyze_schedule_performance(
         "primaryBottleneck": primary,
         "bottleneck": bottleneck,
         "completedWaferCount": len(completion_times),
+        "throughputTimeline": _throughput_timeline(completions),
         **production_throughput,
         "cpuTimeMs": cpu_time_ms,
         "recomputeCount": recompute_count,

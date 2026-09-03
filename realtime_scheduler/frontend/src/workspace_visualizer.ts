@@ -18,6 +18,7 @@ import type {
   ResourcePerformance,
   ResourceKind,
   SchedulePerformance,
+  ThroughputTimelinePoint,
   WaferResidenceTime,
 } from "./analysis_contracts";
 
@@ -3047,7 +3048,8 @@ function renderBottleneckAnalysis(performance: SchedulePerformance): string {
     auxiliary: "辅助模块",
   };
 
-  const displayedResources = groupedBottleneckResources(performance);
+  // 表格聚焦最需要优先处理的三个资源；完整分组结果仍保留给既有数据逻辑使用。
+  const displayedResources = groupedBottleneckResources(performance).slice(0, 3);
   const resourceRows = (items: BottleneckResourceGroup[]): string => items.map((resource, index) => {
     const candidate = resource.candidate;
     const evidenceScore = candidate ? Math.round(candidate.score * 100) : null;
@@ -3057,32 +3059,30 @@ function renderBottleneckAnalysis(performance: SchedulePerformance): string {
       : resourceKindLabels[resource.kind];
     return `
       <li class="resource-utilization-row">
-        <div class="resource-utilization-name">
-          <span>${index + 1}</span>
-          <div><strong>${escapeHtml(resource.name)}</strong><small>${escapeHtml(resourceLabel)}</small></div>
+        <div class="resource-utilization-summary">
+          <div class="resource-utilization-name">
+            <span>${index + 1}</span>
+            <div><strong>${escapeHtml(resource.name)}</strong><small>${escapeHtml(resourceLabel)}</small></div>
+          </div>
+          <strong class="resource-utilization-percent">${formatPercent(resource.utilization)}</strong>
+          <div class="utilization-track" aria-label="${escapeHtml(resource.name)} 占用率 ${formatPercent(resource.utilization)}">${renderCategoryBars(resource, window.duration)}</div>
+          <div class="resource-evidence-score"><strong>${evidenceScore ?? "—"}</strong><small>${evidenceLabel}</small></div>
+          <span aria-hidden="true"></span>
         </div>
-        <strong class="resource-utilization-percent">${formatPercent(resource.utilization)}</strong>
-        <div class="utilization-track" aria-label="${escapeHtml(resource.name)} 占用率 ${formatPercent(resource.utilization)}">${renderCategoryBars(resource, window.duration)}</div>
-        <small class="resource-utilization-time">${formatSeconds(resource.busyTime)} s</small>
-        <div class="resource-evidence-score"><strong>${evidenceScore ?? "—"}</strong><small>${evidenceLabel}</small></div>
       </li>`;
   }).join("");
 
   const legend = ACTIVITY_CATEGORIES.map(category => (
     `<span><i class="performance-swatch category-${category}"></i>${ACTIVITY_CATEGORY_LABELS[category]}</span>`
   )).join("");
-
   return `
-    <header class="bottleneck-analysis-head">
-      <div>
-        <strong>瓶颈分析</strong>
-      </div>
+    <header class="analysis-section-head bottleneck-analysis-head">
+      <div class="analysis-section-title"><strong>瓶颈分析</strong></div>
       <div class="bottleneck-analysis-actions">
-        <button class="bottleneck-analysis-help" id="bottleneckAnalysisHelpButton" type="button" aria-haspopup="dialog" aria-controls="bottleneckAnalysisHelpDialog">瓶颈分析说明</button>
         <label class="bottleneck-window-control"><span class="visually-hidden">统计口径</span><div class="bottleneck-window-slot"></div></label>
+        <button class="analysis-secondary-button bottleneck-analysis-help" id="bottleneckAnalysisHelpButton" type="button" aria-haspopup="dialog" aria-controls="bottleneckAnalysisHelpDialog"><span aria-hidden="true">ⓘ</span> 说明</button>
       </div>
     </header>
-    <div class="resource-utilization-head" aria-hidden="true"><span>资源</span><span>利用率</span><span>占用组成</span><span>活跃时长</span><span>瓶颈证据得分</span></div>
     <ol class="resource-utilization-list">
       ${resourceRows(displayedResources)}
     </ol>
@@ -3092,7 +3092,7 @@ function renderBottleneckAnalysis(performance: SchedulePerformance): string {
 
 type ResidenceMetricKind = "system" | "chamber" | "robot";
 
-/** 渲染单一驻留口径的逐片柱状图，避免不同量级的时间互相遮蔽。 */
+/** 渲染单一驻留口径的逐片柱状图，保持三种口径的原有配色与平均线表达。 */
 function renderResidenceMetricChart(
   samples: WaferResidenceTime[],
   kind: ResidenceMetricKind,
@@ -3106,7 +3106,7 @@ function renderResidenceMetricChart(
   const values = samples.map(metric.value);
   const meanSeconds = values.reduce((sum, value) => sum + value, 0) / values.length;
   const maximumSeconds = Math.max(...values, 1);
-  const plotHeight = 120;
+  const plotHeight = 150;
   const scaleMaximum = maximumSeconds * 1.08;
   const meanHeight = Math.min(meanSeconds / scaleMaximum * plotHeight, plotHeight);
   const bars = samples.map(sample => {
@@ -3115,7 +3115,7 @@ function renderResidenceMetricChart(
     const wafer = escapeHtml(String(sample.wafer));
     const duration = formatSeconds(seconds);
     return `
-      <li class="residence-metric-bar-item" role="img" aria-label="晶圆 ${wafer}，${metric.label} ${duration} 秒" title="晶圆 ${wafer} · ${metric.label} ${duration} s">
+      <li class="residence-metric-bar-item" role="img" aria-label="晶圆 ${wafer}，${metric.label} ${duration} 秒">
         <strong>${duration}</strong>
         <span class="residence-metric-bar residence-bar-${kind}"><i style="height:${height.toFixed(2)}px"></i></span>
         <small>${wafer}</small>
@@ -3135,51 +3135,38 @@ function renderResidenceMetricChart(
 /** 渲染逐片晶圆的系统、腔室与机器手驻留时间图表。 */
 export function renderWaferResidenceChart(performance: SchedulePerformance): string {
   const samples = performance.waferSystemResidenceTimes ?? [];
-  const helpButton = `<button class="bottleneck-analysis-help residence-analysis-help" id="residenceAnalysisHelpButton" type="button" aria-haspopup="dialog" aria-controls="residenceAnalysisHelpDialog">说明</button>`;
+  const helpButton = `<button class="analysis-secondary-button residence-analysis-help" id="residenceAnalysisHelpButton" type="button" aria-haspopup="dialog" aria-controls="residenceAnalysisHelpDialog"><span aria-hidden="true">ⓘ</span> 说明</button>`;
   if (!samples.length) {
     return `
-      <header class="residence-chart-head"><strong>驻留时间分析</strong>${helpButton}</header>
-      <div class="residence-chart-empty">当前结果中没有完成往返 LoadPort 的晶圆。</div>`;
+      <header class="analysis-section-head residence-chart-head"><div class="analysis-section-title"><strong>驻留时间分析</strong></div>${helpButton}</header>
+      <div class="analysis-empty-state"><strong>暂无驻留数据</strong><span>当前结果中没有完成往返 LoadPort 的晶圆。</span></div>`;
   }
 
   const systemValues = samples.map(sample => sample.duration);
-  const systemMeanSeconds = systemValues.reduce((sum, value) => sum + value, 0) / systemValues.length;
-  const maximumSeconds = Math.max(...systemValues);
-  const minimumSeconds = Math.min(...systemValues);
-  const rangeToMinimumPercent = minimumSeconds > PERFORMANCE_DISPLAY_TOLERANCE
-    ? (maximumSeconds - minimumSeconds) / minimumSeconds * 100
-    : null;
-  const chamberMeanSeconds = samples.reduce((sum, sample) => sum + (sample.chamberDwellSeconds ?? 0), 0) / samples.length;
-  const robotMeanSeconds = samples.reduce((sum, sample) => sum + (sample.robotDwellSeconds ?? 0), 0) / samples.length;
   const chamberValues = samples.map(sample => sample.chamberDwellSeconds ?? 0);
   const robotValues = samples.map(sample => sample.robotDwellSeconds ?? 0);
+  const metricSummary = (values: number[], label: string): string => {
+    const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+    const deviation = Math.sqrt(values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length);
+    const upperControlLimit = mean + deviation * 2;
+    const abnormalCount = values.filter(value => value > upperControlLimit).length;
+    return `<span><small>平均</small><b>${formatSeconds(mean)}</b><em>s</em></span><span><small>最大</small><b>${formatSeconds(Math.max(...values))}</b><em>s</em></span><span class="${abnormalCount ? "is-warning" : ""}"><small>偏高比例</small><b>${(abnormalCount / values.length * 100).toFixed(1)}</b><em>%</em></span><span><small>样本</small><b>${values.length}</b><em>片</em></span><span class="visually-hidden">${label}</span>`;
+  };
   const summary = (kind: ResidenceMetricKind, content: string): string => (
-    `<div class="residence-chart-summary" data-residence-summary="${kind}"${kind === "system" ? "" : " hidden"}>${content}</div>`
+    `<div class="analysis-compact-stats residence-chart-summary" data-residence-summary="${kind}"${kind === "system" ? "" : " hidden"}>${content}</div>`
   );
 
   return `
-    <header class="residence-chart-head">
-      <strong>驻留时间分析</strong>
-      <label class="residence-metric-control"><span class="visually-hidden">选择驻留时间图表</span><select id="residenceMetricSelect" aria-label="选择驻留时间图表">
+    <header class="analysis-section-head residence-chart-head">
+      <div class="analysis-section-title"><strong>驻留时间分析</strong></div>
+      <label class="analysis-filter residence-metric-control"><select id="residenceMetricSelect" aria-label="选择驻留时间图表">
         <option value="system">系统驻留时间</option>
         <option value="chamber">腔室驻留时间</option>
         <option value="robot">机器手驻留时间</option>
       </select></label>
-      ${summary("system", `
-        <span>系统平均 <b>${formatSeconds(systemMeanSeconds)} s</b></span>
-        <span>系统最大 <b>${formatSeconds(maximumSeconds)} s</b></span>
-        <span>极差/最小值 <b>${rangeToMinimumPercent === null ? "—" : `${rangeToMinimumPercent.toFixed(1)}%`}</b></span>
-        <span>样本 <b>${samples.length} 片</b></span>`)}
-      ${summary("chamber", `
-        <span>腔室平均 <b>${formatSeconds(chamberMeanSeconds)} s</b></span>
-        <span>腔室最大 <b>${formatSeconds(Math.max(...chamberValues))} s</b></span>
-        <span>腔室累计 <b>${formatSeconds(chamberValues.reduce((sum, value) => sum + value, 0))} s</b></span>
-        <span>样本 <b>${samples.length} 片</b></span>`)}
-      ${summary("robot", `
-        <span>机器手平均 <b>${formatSeconds(robotMeanSeconds)} s</b></span>
-        <span>机器手最大 <b>${formatSeconds(Math.max(...robotValues))} s</b></span>
-        <span>机器手累计 <b>${formatSeconds(robotValues.reduce((sum, value) => sum + value, 0))} s</b></span>
-        <span>样本 <b>${samples.length} 片</b></span>`)}
+      ${summary("system", metricSummary(systemValues, "系统驻留"))}
+      ${summary("chamber", metricSummary(chamberValues, "腔室驻留"))}
+      ${summary("robot", metricSummary(robotValues, "机器手驻留"))}
       ${helpButton}
     </header>
     <div class="residence-chart-body">
@@ -3189,9 +3176,181 @@ export function renderWaferResidenceChart(performance: SchedulePerformance): str
     </div>`;
 }
 
+/** 根据用户选择的晶圆数或时间范围裁剪产能点。 */
+function filterThroughputPoints(points: ThroughputTimelinePoint[], range: string): ThroughputTimelinePoint[] {
+  if (!points.length || range === "all") return points;
+  const [kind, rawAmount] = range.split(":");
+  const amount = Number(rawAmount);
+  if (!Number.isFinite(amount) || amount <= 0) return points;
+  if (kind === "wafer") return points.slice(-Math.floor(amount));
+  if (kind === "time") {
+    const cutoff = points[points.length - 1].completedAt - amount;
+    const filtered = points.filter(point => point.completedAt >= cutoff);
+    return filtered.length ? filtered : points.slice(-1);
+  }
+  return points;
+}
+
+/** 生成自适应坐标轴、参考线、异常点和悬停命中区域。 */
+function renderThroughputSvg(
+  points: ThroughputTimelinePoint[],
+  title: string,
+): string {
+  const width = 760;
+  const height = 174;
+  const left = 12;
+  const right = 12;
+  const top = 12;
+  const bottom = 12;
+  const usableWidth = width - left - right;
+  const usableHeight = height - top - bottom;
+  const values = points.map(point => Math.max(0, Number(point.throughputPerHour) || 0));
+  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+  const observedMinimum = Math.min(...values);
+  const observedMaximum = Math.max(...values);
+  const spread = Math.max(observedMaximum - observedMinimum, Math.max(mean * .04, 1));
+  const padding = Math.max(1, spread * .18);
+  const step = spread > 20 ? 5 : spread > 8 ? 2 : 1;
+  const minimum = Math.max(0, Math.floor((observedMinimum - padding) / step) * step);
+  const maximum = Math.max(minimum + step * 3, Math.ceil((observedMaximum + padding) / step) * step);
+  const yRange = maximum - minimum;
+  const firstIndex = points[0].completedWaferIndex;
+  const lastIndex = points[points.length - 1].completedWaferIndex;
+  const indexRange = Math.max(1, lastIndex - firstIndex);
+  const coordinates = points.map((point, index) => ({
+    x: left + (point.completedWaferIndex - firstIndex) / indexRange * usableWidth,
+    y: top + (1 - (values[index] - minimum) / yRange) * usableHeight,
+  }));
+  const linePath = coordinates.length === 1
+    ? `M ${coordinates[0].x.toFixed(2)} ${coordinates[0].y.toFixed(2)}`
+    : coordinates.reduce((path, point, index) => {
+      if (index === 0) return `M ${point.x.toFixed(2)} ${point.y.toFixed(2)}`;
+      return `${path} L ${point.x.toFixed(2)} ${point.y.toFixed(2)}`;
+    }, "");
+  const latest = points[points.length - 1];
+  const yForValue = (value: number): number => top + (1 - (value - minimum) / yRange) * usableHeight;
+  const meanY = yForValue(mean);
+  const pointTargets = points.map((point, index) => {
+    const coordinate = coordinates[index];
+    const value = values[index];
+    const previousValue = values[index - 1] ?? value;
+    const nextValue = values[index + 1] ?? value;
+    const isLocalMinimum = index > 0 && index < values.length - 1 && value <= previousValue && value <= nextValue;
+    const labelY = isLocalMinimum
+      ? Math.min(top + usableHeight - 4, coordinate.y + 17)
+      : Math.max(top + 10, coordinate.y - 9);
+    const labelClass = isLocalMinimum ? "throughput-chart-value is-below" : "throughput-chart-value";
+    return `<text class="${labelClass}" x="${coordinate.x.toFixed(2)}" y="${labelY.toFixed(2)}" text-anchor="middle">${value.toFixed(1)}</text><circle class="throughput-chart-point" cx="${coordinate.x.toFixed(2)}" cy="${coordinate.y.toFixed(2)}" r="2.6"/>`;
+  }).join("");
+
+  return `
+        <svg class="throughput-chart-svg" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="${title}，最新为第 ${latest.completedWaferIndex} 片，每小时 ${latest.throughputPerHour.toFixed(1)} 片">
+          <g class="throughput-control-lines">
+            <line class="throughput-mean-line" x1="${left}" y1="${meanY.toFixed(2)}" x2="${width - right}" y2="${meanY.toFixed(2)}"/>
+          </g>
+          <path class="throughput-chart-line" d="${linePath}"/>
+          ${pointTargets}
+          <circle class="throughput-chart-latest" cx="${coordinates[coordinates.length - 1].x.toFixed(2)}" cy="${coordinates[coordinates.length - 1].y.toFixed(2)}" r="4"/>
+        </svg>`;
+}
+
+/** 将逐片产能点绘制为可切换范围的交互式 SVG 曲线。 */
+function renderThroughputLine(
+  points: ThroughputTimelinePoint[],
+  chartKey: string,
+  title: string,
+  visible: boolean,
+  initialRange = "wafer:30",
+): string {
+  const serializedPoints = escapeHtml(JSON.stringify(points));
+  const visiblePoints = filterThroughputPoints(points, initialRange);
+  return `
+    <div class="throughput-chart" data-throughput-chart="${chartKey}" data-throughput-title="${escapeHtml(title)}" data-throughput-points="${serializedPoints}"${visible ? "" : " hidden"}>
+      <div class="throughput-chart-scroll" tabindex="0" aria-label="${escapeHtml(title)}，逐点展示产能数值">
+        <div class="throughput-chart-canvas">${renderThroughputSvg(visiblePoints, title)}</div>
+      </div>
+    </div>`;
+}
+
+/** 在不重新请求分析接口的情况下，按选择范围刷新当前产能图。 */
+export function updateThroughputChartRange(chart: HTMLElement, range: string): void {
+  const rawPoints = chart.dataset.throughputPoints;
+  const chartKey = chart.dataset.throughputChart ?? "throughput";
+  const title = chart.dataset.throughputTitle ?? "产能曲线";
+  if (!rawPoints) return;
+  const points = filterThroughputPoints(JSON.parse(rawPoints) as ThroughputTimelinePoint[], range);
+  const canvas = chart.querySelector<HTMLElement>(".throughput-chart-canvas");
+  if (!canvas || !points.length) return;
+  canvas.innerHTML = renderThroughputSvg(points, title);
+}
+
+/** 渲染从仿真零点累计或按用户选择的 2–10 片窗口计算的逐片产能趋势。 */
+export function renderThroughputChart(performance: SchedulePerformance): string {
+  const timeline = performance.throughputTimeline;
+  const helpButton = `<button class="analysis-secondary-button throughput-analysis-help" id="throughputAnalysisHelpButton" type="button" aria-haspopup="dialog" aria-controls="throughputAnalysisHelpDialog"><span aria-hidden="true">ⓘ</span> 说明</button>`;
+  if (!timeline?.cumulative?.length) {
+    return `
+      <header class="analysis-section-head throughput-chart-head"><div class="analysis-section-title"><strong>产能分析</strong></div>${helpButton}</header>
+      <div class="analysis-empty-state"><strong>暂无生产数据</strong><span>请等待新的晶圆完成后查看分析结果。</span></div>`;
+  }
+  const cumulative = timeline.cumulative;
+  const minimumWindow = timeline.rollingWindowMinimum;
+  const maximumWindow = timeline.rollingWindowMaximum;
+  const defaultWindow = Math.min(Math.max(5, minimumWindow), maximumWindow);
+  const windowOptions = Array.from(
+    { length: maximumWindow - minimumWindow + 1 },
+    (_, index) => minimumWindow + index,
+  );
+  const lastCumulative = cumulative[cumulative.length - 1];
+  const summary = (chartKey: string, content: string, visible: boolean): string => (
+    `<div class="analysis-compact-stats throughput-chart-summary" data-throughput-summary="${chartKey}"${visible ? "" : " hidden"}>${content}</div>`
+  );
+  const rollingContent = windowOptions.map(windowSize => {
+    const points = timeline.rollingByWindow[String(windowSize)] ?? [];
+    const latest = points[points.length - 1];
+    const average = points.length
+      ? points.reduce((sum, point) => sum + point.throughputPerHour, 0) / points.length
+      : 0;
+    return summary(
+      `rolling-${windowSize}`,
+      latest
+        ? `<span><small>最新</small><b>${latest.throughputPerHour.toFixed(1)}</b><em>片/h</em></span><span><small>平均</small><b>${average.toFixed(1)}</b><em>片/h</em></span>`
+        : `<span class="is-muted"><small>样本状态</small><b>不足</b><em>至少 ${windowSize + 1} 片</em></span>`,
+      windowSize === defaultWindow,
+    );
+  }).join("");
+  const rollingCharts = windowOptions.map(windowSize => {
+    const points = timeline.rollingByWindow[String(windowSize)] ?? [];
+    const chartKey = `rolling-${windowSize}`;
+    return points.length
+      ? renderThroughputLine(points, chartKey, `${windowSize} 片滑动窗口产能曲线`, windowSize === defaultWindow)
+      : `<div class="throughput-chart-empty" data-throughput-chart="${chartKey}" hidden>尚未形成完整 ${windowSize} 片滑动窗口。</div>`;
+  }).join("");
+  const cumulativeAverage = cumulative.reduce((sum, point) => sum + point.throughputPerHour, 0) / cumulative.length;
+  return `
+    <header class="analysis-section-head throughput-chart-head">
+      <div class="analysis-section-title"><strong>产能分析</strong></div>
+      <div class="analysis-filter-group">
+      <label class="analysis-filter throughput-metric-control"><select id="throughputMetricSelect" aria-label="选择产能口径">
+        <option value="cumulative">累计产能（公司口径）</option>
+        <option value="rolling" selected>滑动窗口</option>
+      </select></label>
+      <label class="analysis-filter throughput-window-control" data-throughput-window-control><select id="throughputWindowSize" aria-label="滑动窗口大小">${windowOptions.map(windowSize => `<option value="${windowSize}"${windowSize === defaultWindow ? " selected" : ""}>${windowSize} 片</option>`).join("")}</select></label>
+      <label class="analysis-filter throughput-range-control"><select id="throughputRangeSelect" aria-label="选择产能图显示范围"><option value="wafer:30" selected>最近 30 片</option><option value="wafer:60">最近 60 片</option><option value="wafer:120">最近 120 片</option><option value="time:600">最近 10 分钟</option><option value="time:1800">最近 30 分钟</option><option value="all">全部</option></select></label>
+      </div>
+      ${summary("cumulative", `<span><small>最新</small><b>${lastCumulative.throughputPerHour.toFixed(1)}</b><em>片/h</em></span><span><small>平均</small><b>${cumulativeAverage.toFixed(1)}</b><em>片/h</em></span><span><small>时刻</small><b>${formatSeconds(lastCumulative.completedAt)}</b><em>s</em></span>`, false)}
+      ${rollingContent}
+      ${helpButton}
+    </header>
+    <div class="throughput-chart-body">
+      <div class="analysis-chart-legend" aria-label="产能图图例"><span><i class="legend-current"></i>当前产能</span><span><i class="legend-average"></i>显示范围平均</span></div>
+      ${renderThroughputLine(cumulative, "cumulative", "累计产能曲线", false)}
+      ${rollingCharts}
+    </div>`;
+}
+
 /** 绘制排程诊断面板 —— 总览、逐片驻留与瓶颈分析。 */
 export function renderSchedulePerformance(performance: SchedulePerformance): string {
-  const window = performance.window;
   // 兼容缓存的旧分析响应：服务端升级前的结果没有这个字段，也应能打开结果页。
   const loadLockEfficiency = performance.loadLockEfficiency ?? {
     cycleCount: 0,
@@ -3202,48 +3361,47 @@ export function renderSchedulePerformance(performance: SchedulePerformance): str
     fullLoadCycleRatio: 0,
     emptyLoadCycleRatio: 0,
   };
+  const kpiCard = (
+    label: string,
+    value: string,
+    unit: string,
+    detail: string,
+    cardClass = "",
+  ): string => `
+    <article class="performance-kpi-card ${cardClass}">
+      <div class="performance-kpi-label">
+        <span>${label}</span>
+        <span class="performance-kpi-help" tabindex="0" aria-label="${escapeHtml(detail)}">
+          <i aria-hidden="true">i</i><span class="performance-kpi-tooltip" role="tooltip">${detail}</span>
+        </span>
+      </div>
+      <div class="performance-kpi-value"><strong>${value}</strong>${unit ? `<small>${unit}</small>` : ""}</div>
+    </article>`;
+  const primaryBottleneck = performance.primaryBottleneck;
+  const bottleneckUtilization = primaryBottleneck?.utilization ?? performance.bottleneck?.utilization ?? null;
+  const bottleneckDetail = bottleneckUtilization !== null
+    ? "当前统计窗口内最高的资源利用率"
+    : "当前统计窗口内未形成明确瓶颈";
   return `
     <section class="result-card overview-card">
-      <header class="overview-head"><strong>KPI 总览</strong></header>
       <div class="performance-summary">
-        <div>
-          <span>统计窗口</span>
-          <strong>${escapeHtml(window.label)} · ${formatSeconds(window.duration)} s</strong>
-          <small>剔除开头 ${formatSeconds(window.trimmedStart)} s / 结尾 ${formatSeconds(window.trimmedEnd)} s</small>
-        </div>
-        <div>
-          <span>产能</span>
-          <strong>${performance.throughputPerHour > 0 ? `${performance.throughputPerHour.toFixed(1)} 片/h` : "—"}</strong>
-          <small>${performance.throughputSampleCount
-            ? `固定 ${performance.throughputSampleCount} 片样本 · 剔除前 15 片 · 完工片数严格大于 150`
-            : escapeHtml(performance.throughputReason || "样本不足，完工片数必须大于 150")}</small>
-        </div>
-        <div>
-          <span>LoadLock 利用效率</span>
-          <strong>${loadLockEfficiency.cycleCount ? `${loadLockEfficiency.wafersPerCycle.toFixed(2)} 片/周期` : "—"}</strong>
-          <small>${loadLockEfficiency.cycleCount
-            ? `${loadLockEfficiency.waferCycleCount} 片·周期 / ${loadLockEfficiency.cycleCount} 个完整抽充气周期 · 满载 ${formatPercent(loadLockEfficiency.fullLoadCycleRatio)}（${loadLockEfficiency.fullLoadCycleCount}/${loadLockEfficiency.cycleCount}）· 空载 ${formatPercent(loadLockEfficiency.emptyLoadCycleRatio)}（${loadLockEfficiency.emptyLoadCycleCount}/${loadLockEfficiency.cycleCount}）`
-            : "没有完整的抽气—充气周期"}</small>
-        </div>
-        <div>
-          <span>CPU Time</span>
-          <strong>${Number.isFinite(performance.cpuTimeMs) ? `${Number(performance.cpuTimeMs).toFixed(1)} ms` : "—"}</strong>
-          <small>本次运行累计 CPU 时间</small>
-        </div>
-        <div>
-          <span>平均重算时间</span>
-          <strong>${Number.isFinite(performance.averageRecomputeTimeMs) ? `${Number(performance.averageRecomputeTimeMs).toFixed(1)} ms` : "—"}</strong>
-          <small>${performance.recomputeCount ? `CPU Time / ${performance.recomputeCount} 次重算` : "没有重算轮次"}</small>
-        </div>
+        ${kpiCard("产能", performance.throughputPerHour > 0 ? performance.throughputPerHour.toFixed(1) : "—", performance.throughputPerHour > 0 ? "片/h" : "", performance.throughputSampleCount ? `居中 ${performance.throughputSampleCount} 片稳态样本` : escapeHtml(performance.throughputReason || "样本不足，完工片数必须大于 150"), "is-primary")}
+        ${kpiCard("平均重算时间", Number.isFinite(performance.averageRecomputeTimeMs) ? Number(performance.averageRecomputeTimeMs).toFixed(1) : "—", Number.isFinite(performance.averageRecomputeTimeMs) ? "ms" : "", performance.recomputeCount ? `CPU Time / ${performance.recomputeCount} 次重算` : "没有重算轮次")}
+        ${kpiCard("瓶颈利用率", bottleneckUtilization !== null ? formatPercent(bottleneckUtilization) : "—", "", bottleneckDetail)}
+        ${kpiCard("LoadLock 利用效率", loadLockEfficiency.cycleCount ? loadLockEfficiency.wafersPerCycle.toFixed(2) : "—", loadLockEfficiency.cycleCount ? "片/周期" : "", loadLockEfficiency.cycleCount ? `${loadLockEfficiency.cycleCount} 个完整周期 · 满载 ${formatPercent(loadLockEfficiency.fullLoadCycleRatio)} · 空载 ${formatPercent(loadLockEfficiency.emptyLoadCycleRatio)}` : "没有完整的抽气—充气周期")}
       </div>
     </section>
 
-    <section class="result-card wafer-residence-card">
-      ${renderWaferResidenceChart(performance)}
+    <section class="result-card throughput-analysis-card">
+      ${renderThroughputChart(performance)}
     </section>
 
     <section class="result-card bottleneck-analysis-card">
       ${renderBottleneckAnalysis(performance)}
+    </section>
+
+    <section class="result-card wafer-residence-card">
+      ${renderWaferResidenceChart(performance)}
     </section>
 
     `;
@@ -3957,7 +4115,11 @@ export class VisualizationWorkspace {
   private async renderPerformance(): Promise<void> {
     if (!this.moves.length) return;
     const requestVersion = ++this.analysisRequestVersion;
-    this.elements.performance.innerHTML = '<div class="visual-loader" aria-label="正在分析"></div>';
+    this.elements.performance.innerHTML = `
+      <section class="result-card analysis-skeleton" aria-label="正在加载结果分析">
+        <div class="analysis-skeleton-head"><i></i><span></span></div>
+        <div class="analysis-skeleton-grid">${Array.from({ length: 6 }, () => "<span></span>").join("")}</div>
+      </section>`;
     try {
       const result = await requestScheduleAnalysis({
         ...(this.analysisResultId
@@ -3980,15 +4142,22 @@ export class VisualizationWorkspace {
         this.elements.performanceWindow.tabIndex = 0;
         windowSlot.append(this.elements.performanceWindow);
       }
+      this.elements.performance.querySelectorAll<HTMLElement>(".residence-metric-scroll").forEach(scroller => {
+        scroller.scrollLeft = scroller.scrollWidth;
+      });
     } catch (error) {
       if (requestVersion !== this.analysisRequestVersion) return;
       this.analysis = null;
       this.bottleneckSummary = null;
       this.elements.performance.innerHTML = `
-        <div class="visual-empty is-error">
-          <strong>结果分析失败</strong>
+        <div class="analysis-error-state">
+          <strong>数据获取失败</strong>
           <span>${escapeHtml(error instanceof Error ? error.message : String(error))}</span>
+          <button class="analysis-secondary-button" type="button" data-performance-retry>重新加载</button>
         </div>`;
+      this.elements.performance.querySelector<HTMLButtonElement>("[data-performance-retry]")?.addEventListener("click", () => {
+        void this.renderPerformance();
+      });
     }
   }
 

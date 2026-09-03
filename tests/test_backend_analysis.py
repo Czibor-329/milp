@@ -104,11 +104,65 @@ class BackendAnalysisTests(unittest.TestCase):
         )
 
         self.assertEqual(0, unavailable["throughputPerHour"])
-        self.assertAlmostEqual(3600 * 120 / 1190, available["throughputPerHour"])
+        self.assertAlmostEqual(3600 * 120 / 1200, available["throughputPerHour"])
         self.assertEqual(120, available["throughputSampleCount"])
+        self.assertEqual(151, len(available["throughputTimeline"]["cumulative"]))
+        self.assertEqual(149, len(available["throughputTimeline"]["rollingByWindow"]["2"]))
+        self.assertEqual(141, len(available["throughputTimeline"]["rollingByWindow"]["10"]))
+        self.assertAlmostEqual(360.0, available["throughputTimeline"]["cumulative"][0]["throughputPerHour"])
+        self.assertAlmostEqual(360.0, available["throughputTimeline"]["rollingByWindow"]["2"][0]["throughputPerHour"])
         self.assertEqual(900.0, available["cpuTimeMs"])
         self.assertEqual(4, available["recomputeCount"])
         self.assertEqual(225.0, available["averageRecomputeTimeMs"])
+
+    def test_production_throughput_groups_by_path_and_duration_not_recipe_name(self) -> None:
+        """不同 Recipe 名称但路径结构与加工时长相同时应可合并计算产能。"""
+        def moves_for(process_duration: float) -> list[dict]:
+            rows = []
+            for index in range(151):
+                wafer = f"W{index + 1}"
+                completed_at = float((index + 1) * 20)
+                rows.extend([
+                    {"MoveType": 0, "ModuleName": "ATR", "SrcStationList": ["LP1"], "MatIDList": [wafer], "StartTime": completed_at - 19, "EndTime": completed_at - 18},
+                    {
+                        "MoveType": 9, "ModuleName": "PM1", "MatIDList": [wafer],
+                        "PJobName": [f"1.C1.P{index % 2 + 1}"], "StepID": 1,
+                        "ProcessRecipe": f"批次专用名称-{index % 2 + 1}",
+                        "StartTime": completed_at - 17,
+                        "EndTime": completed_at - 17 + process_duration,
+                    },
+                    {"MoveType": 1, "ModuleName": "ATR", "DestStationList": ["LP1"], "MatIDList": [wafer], "StartTime": completed_at - 1, "EndTime": completed_at},
+                ])
+            return rows
+
+        device = {"Stations": {"LP1": {"Type": "LoadPort"}, "PM1": {"Type": "ProcessModule"}}, "Robots": {"ATR": {}}}
+        same_process = analyze_schedule_performance(moves_for(5), device, "full")
+        self.assertEqual(120, same_process["throughputSampleCount"])
+        self.assertEqual("", same_process["throughputReason"])
+
+        mismatched = moves_for(5)
+        mismatched[16 * 3 + 1]["EndTime"] += 1
+        different_duration = analyze_schedule_performance(mismatched, device, "full")
+        self.assertEqual(0, different_duration["throughputSampleCount"])
+        self.assertIn("加工时长不一致", different_duration["throughputReason"])
+
+    def test_production_throughput_uses_the_middle_120_completed_wafers(self) -> None:
+        """300 片任务应只用完成顺序第 91 至第 210 片校验并计算产能。"""
+        moves = []
+        for index in range(300):
+            wafer = f"W{index + 1}"
+            completed_at = float((index + 1) * 10)
+            process_duration = 5 if 90 <= index < 210 else 8
+            moves.extend([
+                {"MoveType": 0, "ModuleName": "ATR", "SrcStationList": ["LP1"], "MatIDList": [wafer], "StartTime": completed_at - 9, "EndTime": completed_at - 8},
+                {"MoveType": 9, "ModuleName": "PM1", "MatIDList": [wafer], "StepID": 1, "ProcessRecipe": f"Recipe-{index}", "StartTime": completed_at - 7, "EndTime": completed_at - 7 + process_duration},
+                {"MoveType": 1, "ModuleName": "ATR", "DestStationList": ["LP1"], "MatIDList": [wafer], "StartTime": completed_at - 1, "EndTime": completed_at},
+            ])
+
+        device = {"Stations": {"LP1": {"Type": "LoadPort"}, "PM1": {"Type": "ProcessModule"}}, "Robots": {"ATR": {}}}
+        result = analyze_schedule_performance(moves, device, "full")
+        self.assertEqual(120, result["throughputSampleCount"])
+        self.assertAlmostEqual(360.0, result["throughputPerHour"])
 
     def test_context_is_built_on_backend_from_routes_and_rounds(self) -> None:
         """工序容量上下文应由后端从原始 Route/PJob 配置构建。"""

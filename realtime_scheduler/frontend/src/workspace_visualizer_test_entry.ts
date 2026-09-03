@@ -21,6 +21,7 @@ export {
   primitiveDecisionBoundaryTimes,
   renderEquipmentTopology,
   renderSchedulePerformance,
+  renderThroughputChart,
   renderWaferResidenceChart,
   snapshotWithFullDeviceModules,
 } from "./workspace_visualizer";

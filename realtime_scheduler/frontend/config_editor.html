@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>调度平台</title>
   <link rel="stylesheet" href="/assets/katex.min.css?v=1.4.4">
-  <link rel="stylesheet" href="/assets/config_editor.css?v=1.5.29">
+  <link rel="stylesheet" href="/assets/config_editor.css?v=1.5.30">
 </head>
 <body>
   <a class="skip-link" href="#mainContent">跳到主要内容</a>
@@ -40,7 +40,7 @@
       <div class="sidebar-footer">
         <span class="sidebar-footer-label">系统状态</span>
         <div class="service-pill" id="serviceState">本地服务</div>
-        <span class="frontend-version">V1.5.29</span>
+        <span class="frontend-version">V1.5.30</span>
       </div>
     </aside>
 
@@ -693,13 +693,44 @@
         </section>
         <section>
           <h4>如何阅读柱状图？</h4>
-          <p>图表按口径拆分为三张：蓝色为系统驻留、紫色为腔室驻留、绿色为机器手驻留。每张图只比较同一种时间，柱上方和悬停提示都显示对应晶圆的准确秒数。</p>
+          <p>图表按口径拆分为三张：蓝色为系统驻留、紫色为腔室驻留、绿色为机器手驻留。每张图只比较同一种时间，柱上方和悬停提示都显示对应晶圆的准确秒数，橙色虚线表示当前口径平均值。</p>
         </section>
         <section>
           <h4>如何用于优化？</h4>
           <p>优先关注明显高于同批次其他晶圆的柱。腔室驻留偏高通常表示取片或下游资源衔接不足；机器手驻留偏高表示持片等待或搬运调度需要检查；系统驻留偏高则需要结合前两者及 LoadLock 时序查看全流程原因。</p>
         </section>
         <p class="bottleneck-analysis-help-footnote">腔室和机器手值是对应驻留段的累计时间，不应与系统驻留简单相加；系统驻留还包含加工、LoadLock 和其他搬运环节。</p>
+      </div>
+    </section>
+  </dialog>
+
+  <dialog class="bottleneck-analysis-help-dialog" id="throughputAnalysisHelpDialog" aria-labelledby="throughputAnalysisHelpDialogTitle">
+    <section class="bottleneck-analysis-help-body">
+      <header class="bottleneck-analysis-help-head">
+        <div>
+          <h3 id="throughputAnalysisHelpDialogTitle">产能分析说明</h3>
+          <p>观察晶圆持续回片时的产能建立过程与短期波动。</p>
+        </div>
+        <button class="btn icon" type="button" id="throughputAnalysisHelpDialogClose" aria-label="关闭产能分析说明">×</button>
+      </header>
+      <div class="bottleneck-analysis-help-content">
+        <section>
+          <h4>累计产能（公司口径）</h4>
+          <p>每有一片晶圆到达终点，就用“截至当前的完成片数 ÷ 当前仿真秒数 × 3600”计算一次。它展示从启动到当前时刻的整体平均产能，因此曲线通常会逐步收敛。</p>
+        </section>
+        <section>
+          <h4>滑动窗口（2–10 片）</h4>
+          <p>选择 2 至 10 片的窗口大小后，每次以相隔该数量出片事件的两个终点时间计算产能。窗口越小，越能观察短期节拍变化，也越容易出现波动；至少需要“窗口大小加一”片完工后才会出现曲线。</p>
+        </section>
+        <section>
+          <h4>如何阅读曲线？</h4>
+          <p>趋势图刻意不显示坐标轴，减少实时监控时的视觉干扰。图形使用直线连接各晶圆的产能点，每个点上方显示真实片/h；灰蓝虚线为当前显示范围平均值。悬停或键盘聚焦数据点可查看完整片序号、平均差异和完成时间。</p>
+        </section>
+        <section>
+          <h4>显示范围与交互</h4>
+          <p>可按最近 30、60、120 片，最近 10、30 分钟或全部数据切换。默认显示最近 30 片，以提高实时判断效率；悬停或键盘聚焦数据点可查看当前产能、显示范围平均值、差值和完成时间。</p>
+        </section>
+        <p class="bottleneck-analysis-help-footnote">图表使用所有已完成晶圆绘制趋势；KPI 总览中的固定样本产能仍按居中 120 片的独立口径计算。</p>
       </div>
     </section>
   </dialog>
@@ -764,6 +795,6 @@
     </aside>
   </dialog>
 
-  <script type="module" src="/assets/config_editor.js?v=1.5.29"></script>
+  <script type="module" src="/assets/config_editor.js?v=1.5.30"></script>
 </body>
 </html>

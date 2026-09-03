@@ -2227,7 +2227,7 @@ function renderBottleneckAnalysis(performance2) {
     loadport: "LoadPort",
     auxiliary: "\u8F85\u52A9\u6A21\u5757"
   };
-  const displayedResources = groupedBottleneckResources(performance2);
+  const displayedResources = groupedBottleneckResources(performance2).slice(0, 3);
   const resourceRows = (items) => items.map((resource, index) => {
     const candidate = resource.candidate;
     const evidenceScore = candidate ? Math.round(candidate.score * 100) : null;
@@ -2235,28 +2235,27 @@ function renderBottleneckAnalysis(performance2) {
     const resourceLabel = resource.memberNames.length > 1 ? `${resourceKindLabels[resource.kind]} \xB7 ${resource.memberNames.length} \u53F0\u5E73\u5747` : resourceKindLabels[resource.kind];
     return `
       <li class="resource-utilization-row">
-        <div class="resource-utilization-name">
-          <span>${index + 1}</span>
-          <div><strong>${escapeHtml(resource.name)}</strong><small>${escapeHtml(resourceLabel)}</small></div>
+        <div class="resource-utilization-summary">
+          <div class="resource-utilization-name">
+            <span>${index + 1}</span>
+            <div><strong>${escapeHtml(resource.name)}</strong><small>${escapeHtml(resourceLabel)}</small></div>
+          </div>
+          <strong class="resource-utilization-percent">${formatPercent(resource.utilization)}</strong>
+          <div class="utilization-track" aria-label="${escapeHtml(resource.name)} \u5360\u7528\u7387 ${formatPercent(resource.utilization)}">${renderCategoryBars(resource, window2.duration)}</div>
+          <div class="resource-evidence-score"><strong>${evidenceScore ?? "\u2014"}</strong><small>${evidenceLabel}</small></div>
+          <span aria-hidden="true"></span>
         </div>
-        <strong class="resource-utilization-percent">${formatPercent(resource.utilization)}</strong>
-        <div class="utilization-track" aria-label="${escapeHtml(resource.name)} \u5360\u7528\u7387 ${formatPercent(resource.utilization)}">${renderCategoryBars(resource, window2.duration)}</div>
-        <small class="resource-utilization-time">${formatSeconds2(resource.busyTime)} s</small>
-        <div class="resource-evidence-score"><strong>${evidenceScore ?? "\u2014"}</strong><small>${evidenceLabel}</small></div>
       </li>`;
   }).join("");
   const legend = ACTIVITY_CATEGORIES.map((category) => `<span><i class="performance-swatch category-${category}"></i>${ACTIVITY_CATEGORY_LABELS[category]}</span>`).join("");
   return `
-    <header class="bottleneck-analysis-head">
-      <div>
-        <strong>\u74F6\u9888\u5206\u6790</strong>
-      </div>
+    <header class="analysis-section-head bottleneck-analysis-head">
+      <div class="analysis-section-title"><strong>\u74F6\u9888\u5206\u6790</strong></div>
       <div class="bottleneck-analysis-actions">
-        <button class="bottleneck-analysis-help" id="bottleneckAnalysisHelpButton" type="button" aria-haspopup="dialog" aria-controls="bottleneckAnalysisHelpDialog">\u74F6\u9888\u5206\u6790\u8BF4\u660E</button>
         <label class="bottleneck-window-control"><span class="visually-hidden">\u7EDF\u8BA1\u53E3\u5F84</span><div class="bottleneck-window-slot"></div></label>
+        <button class="analysis-secondary-button bottleneck-analysis-help" id="bottleneckAnalysisHelpButton" type="button" aria-haspopup="dialog" aria-controls="bottleneckAnalysisHelpDialog"><span aria-hidden="true">\u24D8</span> \u8BF4\u660E</button>
       </div>
     </header>
-    <div class="resource-utilization-head" aria-hidden="true"><span>\u8D44\u6E90</span><span>\u5229\u7528\u7387</span><span>\u5360\u7528\u7EC4\u6210</span><span>\u6D3B\u8DC3\u65F6\u957F</span><span>\u74F6\u9888\u8BC1\u636E\u5F97\u5206</span></div>
     <ol class="resource-utilization-list">
       ${resourceRows(displayedResources)}
     </ol>
@@ -2273,7 +2272,7 @@ function renderResidenceMetricChart(samples, kind) {
   const values = samples.map(metric.value);
   const meanSeconds = values.reduce((sum, value) => sum + value, 0) / values.length;
   const maximumSeconds = Math.max(...values, 1);
-  const plotHeight = 120;
+  const plotHeight = 150;
   const scaleMaximum = maximumSeconds * 1.08;
   const meanHeight = Math.min(meanSeconds / scaleMaximum * plotHeight, plotHeight);
   const bars = samples.map((sample) => {
@@ -2282,7 +2281,7 @@ function renderResidenceMetricChart(samples, kind) {
     const wafer = escapeHtml(String(sample.wafer));
     const duration = formatSeconds2(seconds);
     return `
-      <li class="residence-metric-bar-item" role="img" aria-label="\u6676\u5706 ${wafer}\uFF0C${metric.label} ${duration} \u79D2" title="\u6676\u5706 ${wafer} \xB7 ${metric.label} ${duration} s">
+      <li class="residence-metric-bar-item" role="img" aria-label="\u6676\u5706 ${wafer}\uFF0C${metric.label} ${duration} \u79D2">
         <strong>${duration}</strong>
         <span class="residence-metric-bar residence-bar-${kind}"><i style="height:${height.toFixed(2)}px"></i></span>
         <small>${wafer}</small>
@@ -2300,45 +2299,34 @@ function renderResidenceMetricChart(samples, kind) {
 }
 function renderWaferResidenceChart(performance2) {
   const samples = performance2.waferSystemResidenceTimes ?? [];
-  const helpButton = `<button class="bottleneck-analysis-help residence-analysis-help" id="residenceAnalysisHelpButton" type="button" aria-haspopup="dialog" aria-controls="residenceAnalysisHelpDialog">\u8BF4\u660E</button>`;
+  const helpButton = `<button class="analysis-secondary-button residence-analysis-help" id="residenceAnalysisHelpButton" type="button" aria-haspopup="dialog" aria-controls="residenceAnalysisHelpDialog"><span aria-hidden="true">\u24D8</span> \u8BF4\u660E</button>`;
   if (!samples.length) {
     return `
-      <header class="residence-chart-head"><strong>\u9A7B\u7559\u65F6\u95F4\u5206\u6790</strong>${helpButton}</header>
-      <div class="residence-chart-empty">\u5F53\u524D\u7ED3\u679C\u4E2D\u6CA1\u6709\u5B8C\u6210\u5F80\u8FD4 LoadPort \u7684\u6676\u5706\u3002</div>`;
+      <header class="analysis-section-head residence-chart-head"><div class="analysis-section-title"><strong>\u9A7B\u7559\u65F6\u95F4\u5206\u6790</strong></div>${helpButton}</header>
+      <div class="analysis-empty-state"><strong>\u6682\u65E0\u9A7B\u7559\u6570\u636E</strong><span>\u5F53\u524D\u7ED3\u679C\u4E2D\u6CA1\u6709\u5B8C\u6210\u5F80\u8FD4 LoadPort \u7684\u6676\u5706\u3002</span></div>`;
   }
   const systemValues = samples.map((sample) => sample.duration);
-  const systemMeanSeconds = systemValues.reduce((sum, value) => sum + value, 0) / systemValues.length;
-  const maximumSeconds = Math.max(...systemValues);
-  const minimumSeconds = Math.min(...systemValues);
-  const rangeToMinimumPercent = minimumSeconds > PERFORMANCE_DISPLAY_TOLERANCE ? (maximumSeconds - minimumSeconds) / minimumSeconds * 100 : null;
-  const chamberMeanSeconds = samples.reduce((sum, sample) => sum + (sample.chamberDwellSeconds ?? 0), 0) / samples.length;
-  const robotMeanSeconds = samples.reduce((sum, sample) => sum + (sample.robotDwellSeconds ?? 0), 0) / samples.length;
   const chamberValues = samples.map((sample) => sample.chamberDwellSeconds ?? 0);
   const robotValues = samples.map((sample) => sample.robotDwellSeconds ?? 0);
-  const summary = (kind, content) => `<div class="residence-chart-summary" data-residence-summary="${kind}"${kind === "system" ? "" : " hidden"}>${content}</div>`;
+  const metricSummary = (values, label) => {
+    const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+    const deviation = Math.sqrt(values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length);
+    const upperControlLimit = mean + deviation * 2;
+    const abnormalCount = values.filter((value) => value > upperControlLimit).length;
+    return `<span><small>\u5E73\u5747</small><b>${formatSeconds2(mean)}</b><em>s</em></span><span><small>\u6700\u5927</small><b>${formatSeconds2(Math.max(...values))}</b><em>s</em></span><span class="${abnormalCount ? "is-warning" : ""}"><small>\u504F\u9AD8\u6BD4\u4F8B</small><b>${(abnormalCount / values.length * 100).toFixed(1)}</b><em>%</em></span><span><small>\u6837\u672C</small><b>${values.length}</b><em>\u7247</em></span><span class="visually-hidden">${label}</span>`;
+  };
+  const summary = (kind, content) => `<div class="analysis-compact-stats residence-chart-summary" data-residence-summary="${kind}"${kind === "system" ? "" : " hidden"}>${content}</div>`;
   return `
-    <header class="residence-chart-head">
-      <strong>\u9A7B\u7559\u65F6\u95F4\u5206\u6790</strong>
-      <label class="residence-metric-control"><span class="visually-hidden">\u9009\u62E9\u9A7B\u7559\u65F6\u95F4\u56FE\u8868</span><select id="residenceMetricSelect" aria-label="\u9009\u62E9\u9A7B\u7559\u65F6\u95F4\u56FE\u8868">
+    <header class="analysis-section-head residence-chart-head">
+      <div class="analysis-section-title"><strong>\u9A7B\u7559\u65F6\u95F4\u5206\u6790</strong></div>
+      <label class="analysis-filter residence-metric-control"><select id="residenceMetricSelect" aria-label="\u9009\u62E9\u9A7B\u7559\u65F6\u95F4\u56FE\u8868">
         <option value="system">\u7CFB\u7EDF\u9A7B\u7559\u65F6\u95F4</option>
         <option value="chamber">\u8154\u5BA4\u9A7B\u7559\u65F6\u95F4</option>
         <option value="robot">\u673A\u5668\u624B\u9A7B\u7559\u65F6\u95F4</option>
       </select></label>
-      ${summary("system", `
-        <span>\u7CFB\u7EDF\u5E73\u5747 <b>${formatSeconds2(systemMeanSeconds)} s</b></span>
-        <span>\u7CFB\u7EDF\u6700\u5927 <b>${formatSeconds2(maximumSeconds)} s</b></span>
-        <span>\u6781\u5DEE/\u6700\u5C0F\u503C <b>${rangeToMinimumPercent === null ? "\u2014" : `${rangeToMinimumPercent.toFixed(1)}%`}</b></span>
-        <span>\u6837\u672C <b>${samples.length} \u7247</b></span>`)}
-      ${summary("chamber", `
-        <span>\u8154\u5BA4\u5E73\u5747 <b>${formatSeconds2(chamberMeanSeconds)} s</b></span>
-        <span>\u8154\u5BA4\u6700\u5927 <b>${formatSeconds2(Math.max(...chamberValues))} s</b></span>
-        <span>\u8154\u5BA4\u7D2F\u8BA1 <b>${formatSeconds2(chamberValues.reduce((sum, value) => sum + value, 0))} s</b></span>
-        <span>\u6837\u672C <b>${samples.length} \u7247</b></span>`)}
-      ${summary("robot", `
-        <span>\u673A\u5668\u624B\u5E73\u5747 <b>${formatSeconds2(robotMeanSeconds)} s</b></span>
-        <span>\u673A\u5668\u624B\u6700\u5927 <b>${formatSeconds2(Math.max(...robotValues))} s</b></span>
-        <span>\u673A\u5668\u624B\u7D2F\u8BA1 <b>${formatSeconds2(robotValues.reduce((sum, value) => sum + value, 0))} s</b></span>
-        <span>\u6837\u672C <b>${samples.length} \u7247</b></span>`)}
+      ${summary("system", metricSummary(systemValues, "\u7CFB\u7EDF\u9A7B\u7559"))}
+      ${summary("chamber", metricSummary(chamberValues, "\u8154\u5BA4\u9A7B\u7559"))}
+      ${summary("robot", metricSummary(robotValues, "\u673A\u5668\u624B\u9A7B\u7559"))}
       ${helpButton}
     </header>
     <div class="residence-chart-body">
@@ -2347,8 +2335,148 @@ function renderWaferResidenceChart(performance2) {
       ${renderResidenceMetricChart(samples, "robot")}
     </div>`;
 }
+function filterThroughputPoints(points, range) {
+  if (!points.length || range === "all") return points;
+  const [kind, rawAmount] = range.split(":");
+  const amount = Number(rawAmount);
+  if (!Number.isFinite(amount) || amount <= 0) return points;
+  if (kind === "wafer") return points.slice(-Math.floor(amount));
+  if (kind === "time") {
+    const cutoff = points[points.length - 1].completedAt - amount;
+    const filtered = points.filter((point) => point.completedAt >= cutoff);
+    return filtered.length ? filtered : points.slice(-1);
+  }
+  return points;
+}
+function renderThroughputSvg(points, title) {
+  const width = 760;
+  const height = 174;
+  const left = 12;
+  const right = 12;
+  const top = 12;
+  const bottom = 12;
+  const usableWidth = width - left - right;
+  const usableHeight = height - top - bottom;
+  const values = points.map((point) => Math.max(0, Number(point.throughputPerHour) || 0));
+  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+  const observedMinimum = Math.min(...values);
+  const observedMaximum = Math.max(...values);
+  const spread = Math.max(observedMaximum - observedMinimum, Math.max(mean * 0.04, 1));
+  const padding = Math.max(1, spread * 0.18);
+  const step = spread > 20 ? 5 : spread > 8 ? 2 : 1;
+  const minimum = Math.max(0, Math.floor((observedMinimum - padding) / step) * step);
+  const maximum = Math.max(minimum + step * 3, Math.ceil((observedMaximum + padding) / step) * step);
+  const yRange = maximum - minimum;
+  const firstIndex = points[0].completedWaferIndex;
+  const lastIndex = points[points.length - 1].completedWaferIndex;
+  const indexRange = Math.max(1, lastIndex - firstIndex);
+  const coordinates = points.map((point, index) => ({
+    x: left + (point.completedWaferIndex - firstIndex) / indexRange * usableWidth,
+    y: top + (1 - (values[index] - minimum) / yRange) * usableHeight
+  }));
+  const linePath = coordinates.length === 1 ? `M ${coordinates[0].x.toFixed(2)} ${coordinates[0].y.toFixed(2)}` : coordinates.reduce((path2, point, index) => {
+    if (index === 0) return `M ${point.x.toFixed(2)} ${point.y.toFixed(2)}`;
+    return `${path2} L ${point.x.toFixed(2)} ${point.y.toFixed(2)}`;
+  }, "");
+  const latest = points[points.length - 1];
+  const yForValue = (value) => top + (1 - (value - minimum) / yRange) * usableHeight;
+  const meanY = yForValue(mean);
+  const pointTargets = points.map((point, index) => {
+    const coordinate = coordinates[index];
+    const value = values[index];
+    const previousValue = values[index - 1] ?? value;
+    const nextValue = values[index + 1] ?? value;
+    const isLocalMinimum = index > 0 && index < values.length - 1 && value <= previousValue && value <= nextValue;
+    const labelY = isLocalMinimum ? Math.min(top + usableHeight - 4, coordinate.y + 17) : Math.max(top + 10, coordinate.y - 9);
+    const labelClass = isLocalMinimum ? "throughput-chart-value is-below" : "throughput-chart-value";
+    return `<text class="${labelClass}" x="${coordinate.x.toFixed(2)}" y="${labelY.toFixed(2)}" text-anchor="middle">${value.toFixed(1)}</text><circle class="throughput-chart-point" cx="${coordinate.x.toFixed(2)}" cy="${coordinate.y.toFixed(2)}" r="2.6"/>`;
+  }).join("");
+  return `
+        <svg class="throughput-chart-svg" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="${title}\uFF0C\u6700\u65B0\u4E3A\u7B2C ${latest.completedWaferIndex} \u7247\uFF0C\u6BCF\u5C0F\u65F6 ${latest.throughputPerHour.toFixed(1)} \u7247">
+          <g class="throughput-control-lines">
+            <line class="throughput-mean-line" x1="${left}" y1="${meanY.toFixed(2)}" x2="${width - right}" y2="${meanY.toFixed(2)}"/>
+          </g>
+          <path class="throughput-chart-line" d="${linePath}"/>
+          ${pointTargets}
+          <circle class="throughput-chart-latest" cx="${coordinates[coordinates.length - 1].x.toFixed(2)}" cy="${coordinates[coordinates.length - 1].y.toFixed(2)}" r="4"/>
+        </svg>`;
+}
+function renderThroughputLine(points, chartKey, title, visible, initialRange = "wafer:30") {
+  const serializedPoints = escapeHtml(JSON.stringify(points));
+  const visiblePoints = filterThroughputPoints(points, initialRange);
+  return `
+    <div class="throughput-chart" data-throughput-chart="${chartKey}" data-throughput-title="${escapeHtml(title)}" data-throughput-points="${serializedPoints}"${visible ? "" : " hidden"}>
+      <div class="throughput-chart-scroll" tabindex="0" aria-label="${escapeHtml(title)}\uFF0C\u9010\u70B9\u5C55\u793A\u4EA7\u80FD\u6570\u503C">
+        <div class="throughput-chart-canvas">${renderThroughputSvg(visiblePoints, title)}</div>
+      </div>
+    </div>`;
+}
+function updateThroughputChartRange(chart, range) {
+  const rawPoints = chart.dataset.throughputPoints;
+  const chartKey = chart.dataset.throughputChart ?? "throughput";
+  const title = chart.dataset.throughputTitle ?? "\u4EA7\u80FD\u66F2\u7EBF";
+  if (!rawPoints) return;
+  const points = filterThroughputPoints(JSON.parse(rawPoints), range);
+  const canvas = chart.querySelector(".throughput-chart-canvas");
+  if (!canvas || !points.length) return;
+  canvas.innerHTML = renderThroughputSvg(points, title);
+}
+function renderThroughputChart(performance2) {
+  const timeline = performance2.throughputTimeline;
+  const helpButton = `<button class="analysis-secondary-button throughput-analysis-help" id="throughputAnalysisHelpButton" type="button" aria-haspopup="dialog" aria-controls="throughputAnalysisHelpDialog"><span aria-hidden="true">\u24D8</span> \u8BF4\u660E</button>`;
+  if (!timeline?.cumulative?.length) {
+    return `
+      <header class="analysis-section-head throughput-chart-head"><div class="analysis-section-title"><strong>\u4EA7\u80FD\u5206\u6790</strong></div>${helpButton}</header>
+      <div class="analysis-empty-state"><strong>\u6682\u65E0\u751F\u4EA7\u6570\u636E</strong><span>\u8BF7\u7B49\u5F85\u65B0\u7684\u6676\u5706\u5B8C\u6210\u540E\u67E5\u770B\u5206\u6790\u7ED3\u679C\u3002</span></div>`;
+  }
+  const cumulative = timeline.cumulative;
+  const minimumWindow = timeline.rollingWindowMinimum;
+  const maximumWindow = timeline.rollingWindowMaximum;
+  const defaultWindow = Math.min(Math.max(5, minimumWindow), maximumWindow);
+  const windowOptions = Array.from(
+    { length: maximumWindow - minimumWindow + 1 },
+    (_, index) => minimumWindow + index
+  );
+  const lastCumulative = cumulative[cumulative.length - 1];
+  const summary = (chartKey, content, visible) => `<div class="analysis-compact-stats throughput-chart-summary" data-throughput-summary="${chartKey}"${visible ? "" : " hidden"}>${content}</div>`;
+  const rollingContent = windowOptions.map((windowSize) => {
+    const points = timeline.rollingByWindow[String(windowSize)] ?? [];
+    const latest = points[points.length - 1];
+    const average = points.length ? points.reduce((sum, point) => sum + point.throughputPerHour, 0) / points.length : 0;
+    return summary(
+      `rolling-${windowSize}`,
+      latest ? `<span><small>\u6700\u65B0</small><b>${latest.throughputPerHour.toFixed(1)}</b><em>\u7247/h</em></span><span><small>\u5E73\u5747</small><b>${average.toFixed(1)}</b><em>\u7247/h</em></span>` : `<span class="is-muted"><small>\u6837\u672C\u72B6\u6001</small><b>\u4E0D\u8DB3</b><em>\u81F3\u5C11 ${windowSize + 1} \u7247</em></span>`,
+      windowSize === defaultWindow
+    );
+  }).join("");
+  const rollingCharts = windowOptions.map((windowSize) => {
+    const points = timeline.rollingByWindow[String(windowSize)] ?? [];
+    const chartKey = `rolling-${windowSize}`;
+    return points.length ? renderThroughputLine(points, chartKey, `${windowSize} \u7247\u6ED1\u52A8\u7A97\u53E3\u4EA7\u80FD\u66F2\u7EBF`, windowSize === defaultWindow) : `<div class="throughput-chart-empty" data-throughput-chart="${chartKey}" hidden>\u5C1A\u672A\u5F62\u6210\u5B8C\u6574 ${windowSize} \u7247\u6ED1\u52A8\u7A97\u53E3\u3002</div>`;
+  }).join("");
+  const cumulativeAverage = cumulative.reduce((sum, point) => sum + point.throughputPerHour, 0) / cumulative.length;
+  return `
+    <header class="analysis-section-head throughput-chart-head">
+      <div class="analysis-section-title"><strong>\u4EA7\u80FD\u5206\u6790</strong></div>
+      <div class="analysis-filter-group">
+      <label class="analysis-filter throughput-metric-control"><select id="throughputMetricSelect" aria-label="\u9009\u62E9\u4EA7\u80FD\u53E3\u5F84">
+        <option value="cumulative">\u7D2F\u8BA1\u4EA7\u80FD\uFF08\u516C\u53F8\u53E3\u5F84\uFF09</option>
+        <option value="rolling" selected>\u6ED1\u52A8\u7A97\u53E3</option>
+      </select></label>
+      <label class="analysis-filter throughput-window-control" data-throughput-window-control><select id="throughputWindowSize" aria-label="\u6ED1\u52A8\u7A97\u53E3\u5927\u5C0F">${windowOptions.map((windowSize) => `<option value="${windowSize}"${windowSize === defaultWindow ? " selected" : ""}>${windowSize} \u7247</option>`).join("")}</select></label>
+      <label class="analysis-filter throughput-range-control"><select id="throughputRangeSelect" aria-label="\u9009\u62E9\u4EA7\u80FD\u56FE\u663E\u793A\u8303\u56F4"><option value="wafer:30" selected>\u6700\u8FD1 30 \u7247</option><option value="wafer:60">\u6700\u8FD1 60 \u7247</option><option value="wafer:120">\u6700\u8FD1 120 \u7247</option><option value="time:600">\u6700\u8FD1 10 \u5206\u949F</option><option value="time:1800">\u6700\u8FD1 30 \u5206\u949F</option><option value="all">\u5168\u90E8</option></select></label>
+      </div>
+      ${summary("cumulative", `<span><small>\u6700\u65B0</small><b>${lastCumulative.throughputPerHour.toFixed(1)}</b><em>\u7247/h</em></span><span><small>\u5E73\u5747</small><b>${cumulativeAverage.toFixed(1)}</b><em>\u7247/h</em></span><span><small>\u65F6\u523B</small><b>${formatSeconds2(lastCumulative.completedAt)}</b><em>s</em></span>`, false)}
+      ${rollingContent}
+      ${helpButton}
+    </header>
+    <div class="throughput-chart-body">
+      <div class="analysis-chart-legend" aria-label="\u4EA7\u80FD\u56FE\u56FE\u4F8B"><span><i class="legend-current"></i>\u5F53\u524D\u4EA7\u80FD</span><span><i class="legend-average"></i>\u663E\u793A\u8303\u56F4\u5E73\u5747</span></div>
+      ${renderThroughputLine(cumulative, "cumulative", "\u7D2F\u8BA1\u4EA7\u80FD\u66F2\u7EBF", false)}
+      ${rollingCharts}
+    </div>`;
+}
 function renderSchedulePerformance(performance2) {
-  const window2 = performance2.window;
   const loadLockEfficiency = performance2.loadLockEfficiency ?? {
     cycleCount: 0,
     waferCycleCount: 0,
@@ -2358,44 +2486,39 @@ function renderSchedulePerformance(performance2) {
     fullLoadCycleRatio: 0,
     emptyLoadCycleRatio: 0
   };
+  const kpiCard = (label, value, unit, detail, cardClass = "") => `
+    <article class="performance-kpi-card ${cardClass}">
+      <div class="performance-kpi-label">
+        <span>${label}</span>
+        <span class="performance-kpi-help" tabindex="0" aria-label="${escapeHtml(detail)}">
+          <i aria-hidden="true">i</i><span class="performance-kpi-tooltip" role="tooltip">${detail}</span>
+        </span>
+      </div>
+      <div class="performance-kpi-value"><strong>${value}</strong>${unit ? `<small>${unit}</small>` : ""}</div>
+    </article>`;
+  const primaryBottleneck = performance2.primaryBottleneck;
+  const bottleneckUtilization = primaryBottleneck?.utilization ?? performance2.bottleneck?.utilization ?? null;
+  const bottleneckDetail = bottleneckUtilization !== null ? "\u5F53\u524D\u7EDF\u8BA1\u7A97\u53E3\u5185\u6700\u9AD8\u7684\u8D44\u6E90\u5229\u7528\u7387" : "\u5F53\u524D\u7EDF\u8BA1\u7A97\u53E3\u5185\u672A\u5F62\u6210\u660E\u786E\u74F6\u9888";
   return `
     <section class="result-card overview-card">
-      <header class="overview-head"><strong>KPI \u603B\u89C8</strong></header>
       <div class="performance-summary">
-        <div>
-          <span>\u7EDF\u8BA1\u7A97\u53E3</span>
-          <strong>${escapeHtml(window2.label)} \xB7 ${formatSeconds2(window2.duration)} s</strong>
-          <small>\u5254\u9664\u5F00\u5934 ${formatSeconds2(window2.trimmedStart)} s / \u7ED3\u5C3E ${formatSeconds2(window2.trimmedEnd)} s</small>
-        </div>
-        <div>
-          <span>\u4EA7\u80FD</span>
-          <strong>${performance2.throughputPerHour > 0 ? `${performance2.throughputPerHour.toFixed(1)} \u7247/h` : "\u2014"}</strong>
-          <small>${performance2.throughputSampleCount ? `\u56FA\u5B9A ${performance2.throughputSampleCount} \u7247\u6837\u672C \xB7 \u5254\u9664\u524D 15 \u7247 \xB7 \u5B8C\u5DE5\u7247\u6570\u4E25\u683C\u5927\u4E8E 150` : escapeHtml(performance2.throughputReason || "\u6837\u672C\u4E0D\u8DB3\uFF0C\u5B8C\u5DE5\u7247\u6570\u5FC5\u987B\u5927\u4E8E 150")}</small>
-        </div>
-        <div>
-          <span>LoadLock \u5229\u7528\u6548\u7387</span>
-          <strong>${loadLockEfficiency.cycleCount ? `${loadLockEfficiency.wafersPerCycle.toFixed(2)} \u7247/\u5468\u671F` : "\u2014"}</strong>
-          <small>${loadLockEfficiency.cycleCount ? `${loadLockEfficiency.waferCycleCount} \u7247\xB7\u5468\u671F / ${loadLockEfficiency.cycleCount} \u4E2A\u5B8C\u6574\u62BD\u5145\u6C14\u5468\u671F \xB7 \u6EE1\u8F7D ${formatPercent(loadLockEfficiency.fullLoadCycleRatio)}\uFF08${loadLockEfficiency.fullLoadCycleCount}/${loadLockEfficiency.cycleCount}\uFF09\xB7 \u7A7A\u8F7D ${formatPercent(loadLockEfficiency.emptyLoadCycleRatio)}\uFF08${loadLockEfficiency.emptyLoadCycleCount}/${loadLockEfficiency.cycleCount}\uFF09` : "\u6CA1\u6709\u5B8C\u6574\u7684\u62BD\u6C14\u2014\u5145\u6C14\u5468\u671F"}</small>
-        </div>
-        <div>
-          <span>CPU Time</span>
-          <strong>${Number.isFinite(performance2.cpuTimeMs) ? `${Number(performance2.cpuTimeMs).toFixed(1)} ms` : "\u2014"}</strong>
-          <small>\u672C\u6B21\u8FD0\u884C\u7D2F\u8BA1 CPU \u65F6\u95F4</small>
-        </div>
-        <div>
-          <span>\u5E73\u5747\u91CD\u7B97\u65F6\u95F4</span>
-          <strong>${Number.isFinite(performance2.averageRecomputeTimeMs) ? `${Number(performance2.averageRecomputeTimeMs).toFixed(1)} ms` : "\u2014"}</strong>
-          <small>${performance2.recomputeCount ? `CPU Time / ${performance2.recomputeCount} \u6B21\u91CD\u7B97` : "\u6CA1\u6709\u91CD\u7B97\u8F6E\u6B21"}</small>
-        </div>
+        ${kpiCard("\u4EA7\u80FD", performance2.throughputPerHour > 0 ? performance2.throughputPerHour.toFixed(1) : "\u2014", performance2.throughputPerHour > 0 ? "\u7247/h" : "", performance2.throughputSampleCount ? `\u5C45\u4E2D ${performance2.throughputSampleCount} \u7247\u7A33\u6001\u6837\u672C` : escapeHtml(performance2.throughputReason || "\u6837\u672C\u4E0D\u8DB3\uFF0C\u5B8C\u5DE5\u7247\u6570\u5FC5\u987B\u5927\u4E8E 150"), "is-primary")}
+        ${kpiCard("\u5E73\u5747\u91CD\u7B97\u65F6\u95F4", Number.isFinite(performance2.averageRecomputeTimeMs) ? Number(performance2.averageRecomputeTimeMs).toFixed(1) : "\u2014", Number.isFinite(performance2.averageRecomputeTimeMs) ? "ms" : "", performance2.recomputeCount ? `CPU Time / ${performance2.recomputeCount} \u6B21\u91CD\u7B97` : "\u6CA1\u6709\u91CD\u7B97\u8F6E\u6B21")}
+        ${kpiCard("\u74F6\u9888\u5229\u7528\u7387", bottleneckUtilization !== null ? formatPercent(bottleneckUtilization) : "\u2014", "", bottleneckDetail)}
+        ${kpiCard("LoadLock \u5229\u7528\u6548\u7387", loadLockEfficiency.cycleCount ? loadLockEfficiency.wafersPerCycle.toFixed(2) : "\u2014", loadLockEfficiency.cycleCount ? "\u7247/\u5468\u671F" : "", loadLockEfficiency.cycleCount ? `${loadLockEfficiency.cycleCount} \u4E2A\u5B8C\u6574\u5468\u671F \xB7 \u6EE1\u8F7D ${formatPercent(loadLockEfficiency.fullLoadCycleRatio)} \xB7 \u7A7A\u8F7D ${formatPercent(loadLockEfficiency.emptyLoadCycleRatio)}` : "\u6CA1\u6709\u5B8C\u6574\u7684\u62BD\u6C14\u2014\u5145\u6C14\u5468\u671F")}
       </div>
     </section>
 
-    <section class="result-card wafer-residence-card">
-      ${renderWaferResidenceChart(performance2)}
+    <section class="result-card throughput-analysis-card">
+      ${renderThroughputChart(performance2)}
     </section>
 
     <section class="result-card bottleneck-analysis-card">
       ${renderBottleneckAnalysis(performance2)}
+    </section>
+
+    <section class="result-card wafer-residence-card">
+      ${renderWaferResidenceChart(performance2)}
     </section>
 
     `;
@@ -2977,7 +3100,11 @@ var VisualizationWorkspace = class {
   async renderPerformance() {
     if (!this.moves.length) return;
     const requestVersion = ++this.analysisRequestVersion;
-    this.elements.performance.innerHTML = '<div class="visual-loader" aria-label="\u6B63\u5728\u5206\u6790"></div>';
+    this.elements.performance.innerHTML = `
+      <section class="result-card analysis-skeleton" aria-label="\u6B63\u5728\u52A0\u8F7D\u7ED3\u679C\u5206\u6790">
+        <div class="analysis-skeleton-head"><i></i><span></span></div>
+        <div class="analysis-skeleton-grid">${Array.from({ length: 6 }, () => "<span></span>").join("")}</div>
+      </section>`;
     try {
       const result = await requestScheduleAnalysis({
         ...this.analysisResultId ? { resultId: this.analysisResultId } : { moves: this.moves },
@@ -2998,15 +3125,22 @@ var VisualizationWorkspace = class {
         this.elements.performanceWindow.tabIndex = 0;
         windowSlot.append(this.elements.performanceWindow);
       }
+      this.elements.performance.querySelectorAll(".residence-metric-scroll").forEach((scroller) => {
+        scroller.scrollLeft = scroller.scrollWidth;
+      });
     } catch (error) {
       if (requestVersion !== this.analysisRequestVersion) return;
       this.analysis = null;
       this.bottleneckSummary = null;
       this.elements.performance.innerHTML = `
-        <div class="visual-empty is-error">
-          <strong>\u7ED3\u679C\u5206\u6790\u5931\u8D25</strong>
+        <div class="analysis-error-state">
+          <strong>\u6570\u636E\u83B7\u53D6\u5931\u8D25</strong>
           <span>${escapeHtml(error instanceof Error ? error.message : String(error))}</span>
+          <button class="analysis-secondary-button" type="button" data-performance-retry>\u91CD\u65B0\u52A0\u8F7D</button>
         </div>`;
+      this.elements.performance.querySelector("[data-performance-retry]")?.addEventListener("click", () => {
+        void this.renderPerformance();
+      });
     }
   }
   /** 显示加载状态并保留明确的系统反馈。 */
@@ -22842,6 +22976,8 @@ var bottleneckAnalysisHelpDialog = document.getElementById("bottleneckAnalysisHe
 document.getElementById("bottleneckAnalysisHelpDialogClose").addEventListener("click", () => bottleneckAnalysisHelpDialog.close());
 var residenceAnalysisHelpDialog = document.getElementById("residenceAnalysisHelpDialog");
 document.getElementById("residenceAnalysisHelpDialogClose").addEventListener("click", () => residenceAnalysisHelpDialog.close());
+var throughputAnalysisHelpDialog = document.getElementById("throughputAnalysisHelpDialog");
+document.getElementById("throughputAnalysisHelpDialogClose").addEventListener("click", () => throughputAnalysisHelpDialog.close());
 document.getElementById("visualPerformance").addEventListener("click", (event) => {
   if (!(event.target instanceof Element)) return;
   if (event.target.closest("#bottleneckAnalysisHelpButton") && !bottleneckAnalysisHelpDialog.open) {
@@ -22850,25 +22986,49 @@ document.getElementById("visualPerformance").addEventListener("click", (event) =
   if (event.target.closest("#residenceAnalysisHelpButton") && !residenceAnalysisHelpDialog.open) {
     residenceAnalysisHelpDialog.showModal();
   }
+  if (event.target.closest("#throughputAnalysisHelpButton") && !throughputAnalysisHelpDialog.open) {
+    throughputAnalysisHelpDialog.showModal();
+  }
 });
 document.getElementById("visualPerformance").addEventListener("change", (event) => {
-  const select = event.target instanceof HTMLSelectElement && event.target.id === "residenceMetricSelect" ? event.target : null;
+  const select = event.target instanceof HTMLSelectElement && (event.target.id === "residenceMetricSelect" || event.target.id === "throughputMetricSelect" || event.target.id === "throughputWindowSize" || event.target.id === "throughputRangeSelect") ? event.target : null;
   if (!select) return;
   const performancePanel = event.currentTarget;
   if (!(performancePanel instanceof HTMLElement)) return;
   const selectedMetric = select.value;
-  performancePanel.querySelectorAll("[data-residence-metric-chart]").forEach((chart) => {
-    chart.hidden = chart.dataset.residenceMetricChart !== selectedMetric;
+  if (select.id === "residenceMetricSelect") {
+    performancePanel.querySelectorAll("[data-residence-metric-chart]").forEach((chart) => {
+      chart.hidden = chart.dataset.residenceMetricChart !== selectedMetric;
+    });
+    performancePanel.querySelectorAll("[data-residence-summary]").forEach((summary) => {
+      summary.hidden = summary.dataset.residenceSummary !== selectedMetric;
+    });
+    return;
+  }
+  const throughputMode = performancePanel.querySelector("#throughputMetricSelect")?.value ?? "cumulative";
+  const throughputWindow = performancePanel.querySelector("#throughputWindowSize")?.value ?? "5";
+  const activeThroughputChart = throughputMode === "rolling" ? `rolling-${throughputWindow}` : "cumulative";
+  performancePanel.querySelectorAll("[data-throughput-window-control]").forEach((control) => {
+    control.hidden = throughputMode !== "rolling";
   });
-  performancePanel.querySelectorAll("[data-residence-summary]").forEach((summary) => {
-    summary.hidden = summary.dataset.residenceSummary !== selectedMetric;
+  performancePanel.querySelectorAll("[data-throughput-chart]").forEach((chart) => {
+    chart.hidden = chart.dataset.throughputChart !== activeThroughputChart;
   });
+  performancePanel.querySelectorAll("[data-throughput-summary]").forEach((summary) => {
+    summary.hidden = summary.dataset.throughputSummary !== activeThroughputChart;
+  });
+  const range = performancePanel.querySelector("#throughputRangeSelect")?.value ?? "wafer:30";
+  const activeChart = performancePanel.querySelector(`[data-throughput-chart="${activeThroughputChart}"]`);
+  if (activeChart?.dataset.throughputPoints) updateThroughputChartRange(activeChart, range);
 });
 document.getElementById("bottleneckAnalysisHelpDialog").addEventListener("click", (event) => {
   if (event.target === bottleneckAnalysisHelpDialog) bottleneckAnalysisHelpDialog.close();
 });
 document.getElementById("residenceAnalysisHelpDialog").addEventListener("click", (event) => {
   if (event.target === residenceAnalysisHelpDialog) residenceAnalysisHelpDialog.close();
+});
+document.getElementById("throughputAnalysisHelpDialog").addEventListener("click", (event) => {
+  if (event.target === throughputAnalysisHelpDialog) throughputAnalysisHelpDialog.close();
 });
 document.getElementById("pjobRouteProcess").addEventListener("change", (event) => renderPJobRouteDialogGroup(event.target.value));
 document.getElementById("pjobRouteParallel").addEventListener("change", (event) => renderPJobRouteDialogGroup(pjobRoutePickerContext?.processKey, event.target.value));

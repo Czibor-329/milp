@@ -1959,6 +1959,20 @@ function visualPerformanceFixture() {
     throughputPerHour: 0,
     throughputSampleCount: 0,
     throughputReason: "样本不足，完工片数必须大于 150",
+    throughputTimeline: {
+      rollingWindowMinimum: 2,
+      rollingWindowMaximum: 10,
+      cumulative: [
+        { wafer: "W1", completedWaferIndex: 1, completedAt: 30, throughputPerHour: 120 },
+        { wafer: "W2", completedWaferIndex: 2, completedAt: 45, throughputPerHour: 160 },
+      ],
+      rollingByWindow: Object.fromEntries(Array.from({ length: 9 }, (_, index) => {
+        const windowSize = index + 2;
+        return [String(windowSize), [
+          { wafer: `W${windowSize + 1}`, completedWaferIndex: windowSize + 1, completedAt: 900, throughputPerHour: 480 },
+        ]];
+      })),
+    },
     cpuTimeMs: null,
     recomputeCount: 0,
     averageRecomputeTimeMs: null,
@@ -1977,7 +1991,7 @@ function visualPerformanceFixture() {
 }
 
 
-test("KPI 总览展示 CPU Time 和平均重算时间且不再渲染独立指标卡片", () => {
+test("KPI 总览按产能、重算、瓶颈和 LoadLock 效率展示，并将说明放入提示", () => {
   const performance = {
     ...visualPerformanceFixture(),
     throughputPerHour: 67.4,
@@ -1986,15 +2000,43 @@ test("KPI 总览展示 CPU Time 和平均重算时间且不再渲染独立指标
     cpuTimeMs: 900,
     recomputeCount: 4,
     averageRecomputeTimeMs: 225,
+    primaryBottleneck: { label: "PM1", name: "PM1", kind: "process", utilization: 0.876, score: 0.9 },
   };
   const markup = logic.renderSchedulePerformance(performance);
 
-  assert.match(markup, /<span>CPU Time<\/span>/);
-  assert.match(markup, /900\.0 ms/);
+  assert.match(markup, /<span>产能<\/span>[\s\S]*?<span class="performance-kpi-tooltip"/);
   assert.match(markup, /<span>平均重算时间<\/span>/);
+  // 瓶颈卡只展示利用率数值：不点名瓶颈资源、不使用警告色。
+  assert.match(markup, /<span>瓶颈利用率<\/span>/);
+  assert.match(markup, /瓶颈利用率<\/span>[\s\S]*?<strong>87\.6%<\/strong>/);
+  assert.doesNotMatch(markup, /<span>瓶颈<\/span>[\s\S]*?<strong>PM1<\/strong>/);
+  assert.doesNotMatch(markup, /performance-kpi-card[^"]*is-warning/);
+  assert.match(markup, /<span>LoadLock 利用效率<\/span>/);
   assert.match(markup, /CPU Time \/ 4 次重算/);
-  assert.match(markup, /完工片数严格大于 150/);
+  assert.doesNotMatch(markup, /<span>CPU Time<\/span>|<span>统计窗口<\/span>/);
+  assert.doesNotMatch(markup, /<article class="performance-kpi-card[^"]*">[\s\S]*?<p>/);
+  assert.match(markup, /居中 120 片稳态样本/);
+  assert.doesNotMatch(markup, /系统状态/);
+  assert.match(markup, /产能分析/);
   assert.doesNotMatch(markup, /指标导出参数设置|计算时间|单独导出 CSV/);
+});
+
+test("产能图可在从零累计和可选 2 至 10 片滑动窗口间切换", () => {
+  const chart = logic.renderThroughputChart(visualPerformanceFixture());
+  assert.match(chart, /id="throughputMetricSelect"[\s\S]*累计产能（公司口径）[\s\S]*滑动窗口/);
+  assert.match(chart, /id="throughputWindowSize"[\s\S]*2 片[\s\S]*10 片/);
+  assert.match(chart, /data-throughput-chart="cumulative"/);
+  assert.match(chart, /data-throughput-chart="rolling-2"[\s\S]*? hidden/);
+  assert.match(chart, /累计产能曲线/);
+  assert.match(chart, /2 片滑动窗口产能曲线/);
+  assert.doesNotMatch(chart, /产能（片[/]h）/);
+  assert.doesNotMatch(chart, /完成顺序（晶圆）/);
+  assert.doesNotMatch(chart, /throughput-chart-axis/);
+  assert.match(chart, /id="throughputRangeSelect"[\s\S]*最近 30 片[\s\S]*最近 10 分钟/);
+  assert.match(chart, /class="throughput-mean-line"/);
+  assert.doesNotMatch(chart, /throughput-limit-line|throughput-reference-line|throughput-chart-area/);
+  assert.doesNotMatch(chart, /throughput-chart-hit|throughput-tooltip/);
+  assert.match(chart, /class="throughput-chart-value"/);
 });
 
 test("双 Actor 回放在 Pick 结束后的原子决策边界暂停", async () => {
@@ -2038,8 +2080,9 @@ test("逐片晶圆驻留图可选择单一指标展示", () => {
   const chart = logic.renderWaferResidenceChart(performance);
   assert.match(chart, /驻留时间分析/);
   assert.match(chart, /id="residenceMetricSelect"[\s\S]*系统驻留时间[\s\S]*腔室驻留时间[\s\S]*机器手驻留时间/);
-  assert.match(chart, /系统平均 <b>27\.0 s<\/b>/);
-  assert.match(chart, /极差\/最小值 <b>75\.0%<\/b>/);
+  assert.match(chart, /data-residence-summary="system"[\s\S]*?<small>平均<\/small><b>27\.0<\/b><em>s<\/em>/);
+  assert.match(chart, /平均 27\.0 s/);
+  assert.doesNotMatch(chart, /上控制限/);
   assert.match(chart, /系统驻留时间/);
   assert.match(chart, /腔室驻留时间/);
   assert.match(chart, /机器手驻留时间/);
