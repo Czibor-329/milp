@@ -637,6 +637,7 @@ def build_workspace_batch_plan(
     *,
     hongye_check: bool = True,
     compatibility_mode: bool = True,
+    clean_validation_types: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
     """将持久化测试与设备共享库组合成可直接执行的单次请求。"""
     test_case = _apply_device_route_aliases(
@@ -687,6 +688,7 @@ def build_workspace_batch_plan(
         "roundCount": len(rounds),
         "hongYeCheck": bool(hongye_check),
         "compatibilityMode": bool(compatibility_mode),
+        "cleanValidationTypes": list(clean_validation_types) if clean_validation_types is not None else ["preclean", "postclean", "wacclean", "dummy", "dummywac"],
         "options": merged_options,
         "recipes": _batch_test_recipes(routes, cleans),
         "cleans": cleans,
@@ -840,6 +842,12 @@ def _execute_workspace_test_with_baseline(
     fingerprint = _workspace_baseline_fingerprint(
         device, test_case, options, compatibility_mode=compatibility_mode,
     )
+    selected_clean_validation_types = (
+        selected_plan.get("cleanValidationTypes")
+        if isinstance(selected_plan, Mapping)
+        and isinstance(selected_plan.get("cleanValidationTypes"), list)
+        else None
+    )
     existing = test_case.get("baseline")
     if skip_baseline:
         # 显式跳过：即使存在指纹匹配的旧基线也不读取，统一按缺失处理。
@@ -885,6 +893,7 @@ def _execute_workspace_test_with_baseline(
             device, test_case, "heuristic", options,
             hongye_check=hongye_check,
             compatibility_mode=compatibility_mode,
+            clean_validation_types=selected_clean_validation_types,
         )
         if selected_plan is not None:
             plan["compatibilityMode"] = bool(compatibility_mode)
@@ -914,6 +923,7 @@ def _execute_workspace_test_with_baseline(
                     device, test_case, "heuristic", options,
                     hongye_check=hongye_check,
                     compatibility_mode=compatibility_mode,
+                    clean_validation_types=selected_clean_validation_types,
                 ),
                 validation_limiter,
             )
@@ -929,6 +939,7 @@ def _execute_workspace_test_with_baseline(
         device, test_case, strategy, options,
         hongye_check=hongye_check,
         compatibility_mode=compatibility_mode,
+        clean_validation_types=selected_clean_validation_types,
     )
     if selected_plan is not None:
         plan["compatibilityMode"] = bool(compatibility_mode)
@@ -1078,6 +1089,7 @@ def _execute_workspace_test_batch(
     progress_callback: Optional[Any] = None,
     cancel_event: Optional[threading.Event] = None,
     compatibility_mode: bool = True,
+    clean_validation_types: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
     """执行已解析的批量测试，并通过回调报告每项状态变化。
 
@@ -1148,6 +1160,7 @@ def _execute_workspace_test_batch(
                 device, test_case, strategy, options,
                 hongye_check=hongye_check,
                 compatibility_mode=compatibility_mode,
+                clean_validation_types=clean_validation_types,
             )
             if process_executor is None:
                 result, baseline, run_error = _execute_workspace_test_with_baseline(
@@ -1335,6 +1348,7 @@ def start_workspace_test_batch(
     use_process_isolation: bool = False,
     test_ids: Optional[Sequence[str]] = None,
     compatibility_mode: bool = True,
+    clean_validation_types: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
     """创建后台批量任务；可按 ID 选择子集，结果仍按名称自然顺序排列。"""
     device = get_workspace_device(device_id)
@@ -1411,6 +1425,7 @@ def start_workspace_test_batch(
                 progress_callback=update_item,
                 cancel_event=cancel_event,
                 compatibility_mode=compatibility_mode,
+                clean_validation_types=clean_validation_types,
             )
             with _BATCH_RUNS_LOCK:
                 batch = _BATCH_RUNS.get(batch_id)

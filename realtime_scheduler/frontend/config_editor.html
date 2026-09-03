@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>调度平台</title>
   <link rel="stylesheet" href="/assets/katex.min.css?v=1.4.4">
-  <link rel="stylesheet" href="/assets/config_editor.css?v=1.5.28">
+  <link rel="stylesheet" href="/assets/config_editor.css?v=1.5.29">
 </head>
 <body>
   <a class="skip-link" href="#mainContent">跳到主要内容</a>
@@ -40,7 +40,7 @@
       <div class="sidebar-footer">
         <span class="sidebar-footer-label">系统状态</span>
         <div class="service-pill" id="serviceState">本地服务</div>
-        <span class="frontend-version">V1.5.28</span>
+        <span class="frontend-version">V1.5.29</span>
       </div>
     </aside>
 
@@ -568,6 +568,16 @@
             </label>
           </div>
         </section>
+        <section class="run-settings-section" aria-labelledby="runSettingsCleanValidationTitle">
+          <div class="run-settings-section-head"><span id="runSettingsCleanValidationTitle">Clean 触发校验</span><small>取消勾选后仅忽略该类型的触发时机和次数；动作、物料、Recipe 与设备状态仍会校验。</small></div>
+          <div class="run-settings-toggle-grid">
+            <label class="run-setting-option" for="cleanValidationPrecleanInput"><span class="run-setting-option-main"><input id="cleanValidationPrecleanInput" type="checkbox" checked><span>PreClean</span></span></label>
+            <label class="run-setting-option" for="cleanValidationPostcleanInput"><span class="run-setting-option-main"><input id="cleanValidationPostcleanInput" type="checkbox" checked><span>PostClean</span></span></label>
+            <label class="run-setting-option" for="cleanValidationWaccleanInput"><span class="run-setting-option-main"><input id="cleanValidationWaccleanInput" type="checkbox" checked><span>WAC Clean</span></span></label>
+            <label class="run-setting-option" for="cleanValidationDummyInput"><span class="run-setting-option-main"><input id="cleanValidationDummyInput" type="checkbox" checked><span>Dummy Clean</span></span></label>
+            <label class="run-setting-option" for="cleanValidationDummywacInput"><span class="run-setting-option-main"><input id="cleanValidationDummywacInput" type="checkbox" checked><span>Dummy WAC</span></span></label>
+          </div>
+        </section>
       </div>
       <div class="dialog-actions"><button class="btn primary small" id="runSettingsDialogDone" type="submit">完成</button></div>
     </form>
@@ -754,6 +764,6 @@
     </aside>
   </dialog>
 
-  <script type="module" src="/assets/config_editor.js?v=1.5.28"></script>
+  <script type="module" src="/assets/config_editor.js?v=1.5.29"></script>
 </body>
 </html>

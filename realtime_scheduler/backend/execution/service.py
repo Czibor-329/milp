@@ -28,6 +28,17 @@ def _execute_standard_algorithm(
         raise ValueError("标准算法执行必须且只能选择一种算法来源")
     use_hongye_validation = bool(plan.get("hongYeCheck", True))
     compatibility_mode = bool(plan.get("compatibilityMode", True))
+    enabled_clean_validation_types = plan.get("cleanValidationTypes")
+    supported_clean_validation_types = {"preclean", "postclean", "wacclean", "dummy", "dummywac"}
+    skipped_clean_validation_types = (
+        sorted(supported_clean_validation_types - {
+            str(value).strip().lower()
+            for value in enabled_clean_validation_types
+            if str(value).strip().lower() in supported_clean_validation_types
+        })
+        if isinstance(enabled_clean_validation_types, list)
+        else []
+    )
     round_count = len(rounds)
     if builtin_strategy is not None:
         if not BUILTIN_ALGORITHM_AVAILABLE:
@@ -134,7 +145,8 @@ def _execute_standard_algorithm(
             runtime = PlatformMoveListRuntime(
                 prepared_first_update,
                 output,
-            compatibility_mode=compatibility_mode,
+                compatibility_mode=compatibility_mode,
+                skipped_clean_validation_types=skipped_clean_validation_types,
             )
             state_source = "realtime_scheduler.backend.validation.move_validation.MachineState"
         except Exception as error:

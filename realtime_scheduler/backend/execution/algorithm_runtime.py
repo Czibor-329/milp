@@ -23,15 +23,17 @@ class PlatformMoveListRuntime:
     Machine 或动作枚举实现。
     """
 
-    def __init__(self, update_params: Mapping[str, Any], output: Mapping[str, Any], *, compatibility_mode: bool = False) -> None:
+    def __init__(self, update_params: Mapping[str, Any], output: Mapping[str, Any], *, compatibility_mode: bool = False, skipped_clean_validation_types: Optional[Sequence[str]] = None) -> None:
         """以标准 update 建立首轮物理快照，并校验算法输出。"""
         self.current_update = deepcopy(dict(update_params))
         self.compatibility_mode = bool(compatibility_mode)
+        self.skipped_clean_validation_types = tuple(skipped_clean_validation_types or ())
         initial_state = MachineState.from_sources(None, self.current_update)
+        initial_state.skipped_clean_validation_types = set(self.skipped_clean_validation_types)
         initial_moves = deepcopy(list(output.get("MoveList") or []))
         if self.compatibility_mode:
             initial_moves = materialize_module_parallel_moves(initial_moves, float(self.current_update.get("CurrentTime") or 0.0))
-        validation_issues = validate_move_list(None, initial_moves, initial_state)
+        validation_issues = validate_move_list(None, initial_moves, initial_state, skipped_clean_validation_types=self.skipped_clean_validation_types)
         if validation_issues:
             raise MoveListValidationError(
                 _state_advance_error_message(validation_issues[0]),
@@ -157,6 +159,7 @@ class PlatformMoveListRuntime:
         validation_issues = validate_move_list(
             None, next_moves, next_state,
             external_predecessors=_committed_move_index([*self._history, *committed]),
+            skipped_clean_validation_types=self.skipped_clean_validation_types,
         )
         if validation_issues:
             recompute_point = {

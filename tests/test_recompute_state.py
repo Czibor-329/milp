@@ -337,6 +337,71 @@ def test_completed_process_applies_recipe_weights_to_state_variables() -> None:
     variables = update["Stations"]["PM1"]["StateVariables"]
     assert variables["ProcessCount"]["Value"]["Value"] == 4
     assert variables["DummyCount"]["Value"]["Value"] == 6
+    assert update["Stations"]["PM1"]["MaterialCount"] == {"1": 1}
+
+
+def test_skipped_wac_runtime_still_advances_and_exports_counter_snapshot() -> None:
+    """平台跳过 WAC 阈值后，实时推进仍应落地 Clean 并导出归零后的计数。"""
+    update = {
+        "CurrentTime": 0.0,
+        "Materials": [],
+        "Robots": {},
+        "Stations": {"PM1": {
+            "Type": "ProcessChamber",
+            "Capacity": 1,
+            "StateVariables": {"ProcessCount": {"Value": {"Value": 1}}},
+        }},
+        "ProcessJobs": [{
+            "JobName": "P1",
+            "OriginRoute": {"RouteSteps": [{"Visits": [{
+                "StationName": "PM1",
+                "ProcessRecipe": "ProductRecipe",
+                "AfterOutPM": [{
+                    "CheckConditions": {"WAC": [{
+                        "TaskName": "WacClean",
+                        "UpdateStateVariables": ["ProcessCount"],
+                    }]},
+                    "ExecuteOrder": [{
+                        "StateVariableName": "ProcessCount",
+                        "ThresholdValueList": [2, 9999],
+                    }],
+                }],
+            }]}]},
+        }],
+    }
+    move = {
+        "MoveID": 1,
+        "MoveType": 9,
+        "StartTime": 0.0,
+        "EndTime": 10.0,
+        "ModuleName": "PM1",
+        "MatIDList": [],
+        "SlotList": [1],
+        "PJobName": ["P1"],
+        "CleanTaskName": "WacClean",
+        "ProcessRecipe": "WacRecipe",
+        "IsLastCleanTaskMove": True,
+    }
+    runtime = PlatformMoveListRuntime(
+        update,
+        {"MoveList": [move]},
+        skipped_clean_validation_types=["wacclean"],
+    )
+
+    advance_platform_move_list_to_update(runtime, 5.0)
+    running_snapshot = deepcopy(update)
+    apply_machine_state_to_update(running_snapshot, runtime.state, 5.0)
+    assert running_snapshot["Stations"]["PM1"]["StateVariables"]["ProcessCount"]["Value"]["Value"] == 1
+
+    runtime.update_move_state({
+        "MoveID": 1,
+        "MoveState": MoveStateReplay.DONE,
+        "EndTime": 10.0,
+    })
+    completed_snapshot = deepcopy(update)
+    apply_machine_state_to_update(completed_snapshot, runtime.state, 10.0)
+    assert completed_snapshot["Stations"]["PM1"]["StateVariables"]["ProcessCount"]["Value"]["Value"] == 0
+    assert completed_snapshot["Stations"]["PM1"]["MaterialCount"] == {"1": 0}
 
 
 def test_last_clean_move_resets_declared_state_variables() -> None:

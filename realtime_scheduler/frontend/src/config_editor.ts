@@ -3828,7 +3828,7 @@ function buildPayload() {
     // 初始执行模式随回放/步进模式走，避免 update 启动时的会话重置覆盖用户选择。
     options.scheduleAlphaGoExecutionMode = playbackMode === "step" ? "stepped" : "continuous";
   }
-  return { schemaVersion: EXPECTED_API_SCHEMA, workspaceDeviceId: state.workspaceDeviceId, workspaceTestId: state.testCaseId, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options, hongYeCheck: hongYeCheckEnabled(), compatibilityMode: compatibilityModeEnabled(), skipBaseline: skipBaselineEnabled(), recipes: collectRecipes(routes), cleans, routes, rounds: instances.rounds };
+  return { schemaVersion: EXPECTED_API_SCHEMA, workspaceDeviceId: state.workspaceDeviceId, workspaceTestId: state.testCaseId, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options, hongYeCheck: hongYeCheckEnabled(), compatibilityMode: compatibilityModeEnabled(), skipBaseline: skipBaselineEnabled(), cleanValidationTypes: cleanValidationTypes(), recipes: collectRecipes(routes), cleans, routes, rounds: instances.rounds };
 }
 
 /** 把数字输入限制在 [min, max] 并回填 DOM，防止手输越界值。 */
@@ -3852,6 +3852,13 @@ function validationParallelism() {
   return clampParallelismInput("validationParallelismInput", 1, 15, 2);
 }
 
+const CLEAN_VALIDATION_TYPES = ["preclean", "postclean", "wacclean", "dummy", "dummywac"] as const;
+
+/** 返回当前启用的 Clean 校验类型；未勾选类型不参与对应的业务规则判定。 */
+function cleanValidationTypes() {
+  return CLEAN_VALIDATION_TYPES.filter(type => document.getElementById(`cleanValidation${type[0].toUpperCase()}${type.slice(1)}Input`)?.checked === true);
+}
+
 let runSettingsPreferencesDirty = false;
 
 /** 收集运行设置弹窗的完整状态，作为本地偏好 API 的稳定载荷。 */
@@ -3862,6 +3869,7 @@ function currentRunSettingsPreferences() {
     skipBaseline: skipBaselineEnabled(),
     maximumWorkers: batchParallelism(),
     validationWorkers: validationParallelism(),
+    cleanValidationTypes: cleanValidationTypes(),
   };
 }
 
@@ -3881,6 +3889,11 @@ function applyRunSettingsPreferences(settings) {
   const validationWorkersInput = document.getElementById("validationParallelismInput");
   if (maximumWorkersInput) maximumWorkersInput.value = String(settings.maximumWorkers ?? 4);
   if (validationWorkersInput) validationWorkersInput.value = String(settings.validationWorkers ?? 2);
+  const enabledCleanTypes = new Set(Array.isArray(settings.cleanValidationTypes) ? settings.cleanValidationTypes : CLEAN_VALIDATION_TYPES);
+  CLEAN_VALIDATION_TYPES.forEach(type => {
+    const input = document.getElementById(`cleanValidation${type[0].toUpperCase()}${type.slice(1)}Input`);
+    if (input) input.checked = enabledCleanTypes.has(type);
+  });
   batchParallelism();
   validationParallelism();
   runSettingsPreferencesDirty = false;
@@ -3919,9 +3932,10 @@ function updateRunSettingsButtonLabel() {
   const skipBaseline = document.getElementById("skipBaselineInput")?.checked === true;
   const algorithmWorkers = batchParallelism();
   const validationWorkers = validationParallelism();
+  const enabledCleanTypes = cleanValidationTypes();
   const validationInput = document.getElementById("validationParallelismInput");
   if (validationInput) validationInput.disabled = !hongYe;
-  const labels = [compatibility && "兼容模式", hongYe && "HongYe Check", skipBaseline && "跳过 Baseline"].filter(Boolean);
+  const labels = [compatibility && "兼容模式", hongYe && "HongYe Check", skipBaseline && "跳过 Baseline", enabledCleanTypes.length !== CLEAN_VALIDATION_TYPES.length && `Clean 校验 ${enabledCleanTypes.length}/${CLEAN_VALIDATION_TYPES.length}`].filter(Boolean);
   const parallelism = `算法×${algorithmWorkers}${hongYe ? ` 校验×${validationWorkers}` : ""}`;
   const summary = labels.length ? `运行设置：${labels.join("、")}（${parallelism}）` : `运行设置：${parallelism}`;
   button.setAttribute("aria-label", summary);
@@ -3929,7 +3943,7 @@ function updateRunSettingsButtonLabel() {
   button.classList.toggle(
     "is-customized",
     !compatibility || !hongYe || !skipBaseline
-      || algorithmWorkers !== 4 || validationWorkers !== 2,
+      || algorithmWorkers !== 4 || validationWorkers !== 2 || enabledCleanTypes.length !== CLEAN_VALIDATION_TYPES.length,
   );
 }
 
@@ -4458,7 +4472,7 @@ async function runCurrentTestGroup(selectedTestIds = null) {
     const response = await fetch("/api/run-batch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ deviceId: state.workspaceDeviceId, group: state.activeTestGroup, testIds: tests.map(test => test.id), strategy: state.strategy, options: state.options, hongYeCheck: hongYeCheckEnabled(), compatibilityMode: compatibilityModeEnabled(), skipBaseline: skipBaselineEnabled(), maximumWorkers: batchParallelism(), validationWorkers: validationParallelism() }),
+      body: JSON.stringify({ deviceId: state.workspaceDeviceId, group: state.activeTestGroup, testIds: tests.map(test => test.id), strategy: state.strategy, options: state.options, hongYeCheck: hongYeCheckEnabled(), compatibilityMode: compatibilityModeEnabled(), skipBaseline: skipBaselineEnabled(), maximumWorkers: batchParallelism(), validationWorkers: validationParallelism(), cleanValidationTypes: cleanValidationTypes() }),
     });
     let result = await response.json();
     if (!response.ok || !result.batchId || !Array.isArray(result.items)) throw new Error(result.error || `服务返回 ${response.status}`);
@@ -5315,7 +5329,7 @@ document.getElementById("batchRunButton").addEventListener("click", runCurrentTe
 document.getElementById("openRunSettingsButton").addEventListener("click", openRunSettingsDialog);
 document.getElementById("runSettingsDialogClose").addEventListener("click", closeRunSettingsDialog);
 document.getElementById("runSettingsDialog").addEventListener("close", finishRunSettingsDialog);
-["hongYeCheckInput", "compatibilityModeInput", "skipBaselineInput", "batchParallelismInput", "validationParallelismInput"].forEach(id => {
+["hongYeCheckInput", "compatibilityModeInput", "skipBaselineInput", "batchParallelismInput", "validationParallelismInput", ...CLEAN_VALIDATION_TYPES.map(type => `cleanValidation${type[0].toUpperCase()}${type.slice(1)}Input`)].forEach(id => {
   document.getElementById(id).addEventListener("change", () => {
     runSettingsPreferencesDirty = true;
     updateRunSettingsButtonLabel();

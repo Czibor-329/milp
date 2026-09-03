@@ -156,6 +156,16 @@ def test_platform_rejects_product_process_after_wac_counter_expires() -> None:
     assert issues == [
         "[MVL-CLEAN-WAC-MISSING] MoveID=1 MoveType=9：WacClean 到期后仍开始产品工艺 count=2 PJob=P1"
     ]
+    assert validate_move_list(
+        None,
+        [_move(
+            1, 9, 0, 10, ModuleName="PM1", MatIDList=[101],
+            StepIDList=[4], SlotList=[1], PJobName=["P1"],
+            ProcessRecipe="ProductRecipe",
+        )],
+        state,
+        skipped_clean_validation_types=["wacclean"],
+    ) == []
 
 
 def test_platform_rejects_wac_clean_before_counter_threshold() -> None:
@@ -220,6 +230,169 @@ def test_platform_rejects_wac_clean_before_counter_threshold() -> None:
     ]
 
 
+def test_skipping_wac_only_ignores_counter_threshold() -> None:
+    """跳过 WAC 后只忽略次数阈值，Clean 动作仍进入完整物理校验。"""
+    update = {
+        "Stations": {"PM1": {
+            "Type": "ProcessChamber",
+            "Capacity": 1,
+            "StateVariables": {"ProcessCount": {"Value": {"Value": 1}}},
+        }},
+        "Robots": {},
+        "Materials": [],
+        "ProcessJobs": [{
+            "JobName": "P1",
+            "OriginRoute": {"RouteSteps": [{"Visits": [{
+                "StationName": "PM1",
+                "ProcessRecipe": "ProductRecipe",
+                "AfterOutPM": [{
+                    "CheckConditions": {"WAC": [{
+                        "TaskName": "WacClean",
+                        "CleanRecipe": "WacRecipe",
+                        "UpdateStateVariables": ["ProcessCount"],
+                    }]},
+                    "ExecuteOrder": [{
+                        "StateVariableName": "ProcessCount",
+                        "ThresholdValueList": [2, 9999],
+                    }],
+                }],
+            }]}]},
+        }],
+    }
+    move = _move(
+        1, 9, 0, 10,
+        ModuleName="PM1",
+        MatIDList=[],
+        SlotList=[1],
+        PJobName=["P1"],
+        CleanTaskName="WacClean",
+        ProcessRecipe="WacRecipe",
+        IsLastCleanTaskMove=True,
+    )
+
+    assert validate_move_list(
+        None,
+        [move],
+        update,
+        skipped_clean_validation_types=["wacclean"],
+    ) == []
+
+    open_door_state = MachineState.from_sources(None, update)
+    open_door_state.stations["PM1"].door = DoorState.OPEN
+    issues = validate_move_list(
+        None,
+        [move],
+        open_door_state,
+        skipped_clean_validation_types=["wacclean"],
+    )
+    assert issues and "加工或清洁时必须关门" in issues[0]
+
+    wrong_recipe_move = {**move, "ProcessRecipe": "WrongRecipe"}
+    issues = validate_move_list(
+        None,
+        [wrong_recipe_move],
+        update,
+        skipped_clean_validation_types=["wacclean"],
+    )
+    assert issues and "MVL-CLEAN-RECIPE-INVALID" in issues[0]
+
+
+def test_skipped_clean_still_requires_recipe_and_dummy_material() -> None:
+    """跳过触发义务不能放过错误 Recipe，也不能把 Dummy Clean 当空腔 Clean。"""
+    pre_update = {
+        "Stations": {"PM1": {"Type": "ProcessChamber", "Capacity": 1}},
+        "Robots": {},
+        "Materials": [],
+        "ProcessJobs": [{
+            "JobName": "P1",
+            "OriginRoute": {"PrePJob": {"PM1": [{
+                "CheckConditions": {"Pre": [{
+                    "TaskName": "PreClean",
+                    "CleanRecipe": "PreRecipe",
+                    "MaterialCount": 0,
+                }]},
+            }]}},
+        }],
+    }
+    wrong_recipe = _move(
+        1, 9, 0, 10,
+        ModuleName="PM1", MatIDList=[], SlotList=[1], PJobName=["P1"],
+        CleanTaskName="PreClean", ProcessRecipe="WrongRecipe",
+        IsLastCleanTaskMove=True,
+    )
+    issues = validate_move_list(
+        None, [wrong_recipe], pre_update,
+        skipped_clean_validation_types=["preclean"],
+    )
+    assert issues and "MVL-CLEAN-RECIPE-INVALID" in issues[0]
+
+    dummy_update = {
+        "Stations": {"PM1": {"Type": "ProcessChamber", "Capacity": 1}},
+        "Robots": {},
+        "Materials": [],
+        "ProcessJobs": [{
+            "JobName": "P1",
+            "OriginRoute": {"PrePJob": {"PM1": [{
+                "CheckConditions": {"Dummy": [{
+                    "TaskName": "PreDummyClean",
+                    "CleanRecipe": "DummyRecipe",
+                    "MaterialCount": 2,
+                }]},
+            }]}},
+        }],
+    }
+    empty_dummy_clean = _move(
+        1, 9, 0, 10,
+        ModuleName="PM1", MatIDList=[], SlotList=[1], PJobName=["P1"],
+        CleanTaskName="PreDummyClean", ProcessRecipe="DummyRecipe",
+        IsLastCleanTaskMove=True,
+    )
+    issues = validate_move_list(
+        None, [empty_dummy_clean], dummy_update,
+        skipped_clean_validation_types=["dummy"],
+    )
+    assert issues and "必须先完成足量 Dummy" in issues[0]
+
+
+def test_dummy_wac_empty_tail_requires_completed_dummy_stage() -> None:
+    """Dummy WAC 的空腔尾段仅在足量带片阶段完成后才是合法动作。"""
+    update = {
+        "Stations": {"PM1": {"Type": "ProcessChamber", "Capacity": 1}},
+        "Robots": {},
+        "Materials": [],
+        "ProcessJobs": [{
+            "JobName": "P1",
+            "OriginRoute": {"PrePJob": {"PM1": [{
+                "CheckConditions": {"DummyWac": [{
+                    "TaskName": "PreWacClean",
+                    "CleanRecipe": "DummyRecipe",
+                    "EmptyCleanRecipeAfterMaterial": "EmptyWacRecipe",
+                    "MaterialCount": 2,
+                }]},
+            }]}},
+        }],
+    }
+    move = _move(
+        1, 9, 0, 10,
+        ModuleName="PM1", MatIDList=[], SlotList=[1], PJobName=["P1"],
+        CleanTaskName="PreWacClean", ProcessRecipe="EmptyWacRecipe",
+        IsLastCleanTaskMove=True,
+    )
+    state = MachineState.from_sources(None, update)
+
+    issues = validate_move_list(
+        None, [move], state,
+        skipped_clean_validation_types=["dummywac"],
+    )
+    assert issues and "必须先完成足量 Dummy" in issues[0]
+
+    state.completed_clean_counts[("P1", "PM1", "PreWacClean")] = 2
+    assert validate_move_list(
+        None, [move], state,
+        skipped_clean_validation_types=["dummywac"],
+    ) == []
+
+
 def test_platform_requires_preclean_before_first_product_process() -> None:
     """平台必须独立拦截未完成 PreClean 的 PJob 首片加工。"""
     update = {
@@ -262,6 +435,13 @@ def test_platform_requires_preclean_before_first_product_process() -> None:
         "[MVL-CLEAN-PRE-MISSING] MoveID=1 MoveType=9：PreClean 未完成就开始产品工艺 required=1 actual=0 PJob=P1"
     ]
 
+    assert validate_move_list(
+        None,
+        [_move(1, 9, 0, 10, ModuleName="PM1", MatIDList=[101], StepIDList=[4], SlotList=[1], PJobName=["P1"], ProcessRecipe="ProductRecipe")],
+        state,
+        skipped_clean_validation_types=["preclean"],
+    ) == []
+
 
 def test_platform_requires_postclean_after_product_process() -> None:
     """产品加工已完成而当前代计划没有 PostClean 时必须报义务缺失。"""
@@ -276,6 +456,52 @@ def test_platform_requires_postclean_after_product_process() -> None:
     state.stations["PM1"].slots[1].material = MaterialState(101, "P1", 4)
     issues = validate_move_list(None, [_move(1, 9, 0, 10, ModuleName="PM1", MatIDList=[101], StepIDList=[4], SlotList=[1], PJobName=["P1"], ProcessRecipe="ProductRecipe")], state)
     assert issues == ["[MVL-CLEAN-POST-MISSING] PostClean 未完成 required=1 actual=0 PJob=P1 PM=PM1"]
+    assert validate_move_list(
+        None,
+        [_move(1, 9, 0, 10, ModuleName="PM1", MatIDList=[101], StepIDList=[4], SlotList=[1], PJobName=["P1"], ProcessRecipe="ProductRecipe")],
+        state,
+        skipped_clean_validation_types=["postclean"],
+    ) == []
+
+
+def test_skipping_preclean_does_not_skip_dummy_clean_obligation() -> None:
+    """同一 PM 有多类前置 Clean 时，只跳过被明确取消的类别。"""
+    update = {
+        "Stations": {"PM1": {"Type": "ProcessChamber", "Capacity": 1}},
+        "Robots": {},
+        "Materials": [{
+            "ID": 101, "CurrentModuleName": "PM1", "SlotID": 1,
+            "StepID": 4, "PJobName": "P1",
+        }],
+        "ProcessJobs": [{
+            "JobName": "P1",
+            "OriginRoute": {"PrePJob": {"PM1": [{
+                "CheckConditions": {
+                    "Pre": [{
+                        "TaskName": "PreClean", "CleanRecipe": "PreRecipe",
+                        "MaterialCount": 0,
+                    }],
+                    "Dummy": [{
+                        "TaskName": "PreDummyClean", "CleanRecipe": "DummyRecipe",
+                        "MaterialCount": 2,
+                    }],
+                },
+            }]}},
+        }],
+    }
+    state = MachineState.from_sources(None, update)
+    state.stations["PM1"].slots[1].phase = SlotPhase.UNPROCESSED
+    state.stations["PM1"].slots[1].material = MaterialState(101, "P1", 4)
+    product_move = _move(
+        1, 9, 0, 10, ModuleName="PM1", MatIDList=[101], StepIDList=[4],
+        SlotList=[1], PJobName=["P1"], ProcessRecipe="ProductRecipe",
+    )
+
+    issues = validate_move_list(
+        None, [product_move], state,
+        skipped_clean_validation_types=["preclean"],
+    )
+    assert issues and "MVL-CLEAN-DUMMY-MISSING" in issues[0]
 
 
 def _dual_transfer_moves() -> list[dict]:

@@ -145,15 +145,17 @@ def test_frontend_moves_run_options_into_settings_dialog() -> None:
     assert 'id="openRunSettingsButton"' in template
     assert 'id="runSettingsDialog"' in template
     assert 'id="compatibilityModeInput" type="checkbox" checked' in template
-    assert "模块并行推进；按 PreMoveID 延后动作；缺失的开关门动作自动补齐。" in template
-    assert "HongYe Check <em>（推荐）</em>" in template
-    assert "Baseline 使用 Heuristic 结果作为性能基线" in template
+    assert "模块并行推进；按 PreMoveID 延后动作，并自动补齐开关门动作。" in template
+    assert "HongYe Check <em>推荐</em>" in template
+    assert "不计算 Heuristic 性能基线" in template
     assert 'id="skipValidationInput"' not in template
     assert 'id="batchParallelismInput"' in template
     assert 'id="batchParallelismInput" class="run-setting-number" type="number" min="1" max="30"' in template
     assert 'id="validationParallelismInput"' in template
     assert 'id="validationParallelismInput" class="run-setting-number" type="number" min="1" max="15"' in template
-    assert "所有测试及自动 Baseline 共享" in template
+    assert 'id="cleanValidationWaccleanInput" type="checkbox" checked' in template
+    assert "取消勾选后仅忽略该类型的触发时机和次数" in template
+    assert "HongYe 校验共享配额" in template
     assert 'requestJson("/api/preferences/run-settings"' in (
         ROOT / "realtime_scheduler" / "frontend" / "src" / "config_editor.ts"
     ).read_text(encoding="utf-8")

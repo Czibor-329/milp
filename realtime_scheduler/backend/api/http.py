@@ -496,6 +496,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                     compatibility_mode=bool(payload.get("compatibilityMode", True)),
                     maximum_workers=int(payload.get("maximumWorkers", DEFAULT_BATCH_WORKERS)),
                     validation_workers=int(payload.get("validationWorkers", DEFAULT_VALIDATION_WORKERS)),
+                    clean_validation_types=payload.get("cleanValidationTypes") if isinstance(payload.get("cleanValidationTypes"), list) else None,
                     use_process_isolation=True,
                     test_ids=test_ids,
                 )

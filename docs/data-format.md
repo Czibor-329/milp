@@ -94,20 +94,25 @@ v5 的 `workspaces/` 与 `devices/` 首次升级时执行以下过程：
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "runSettings": {
     "compatibilityMode": true,
     "hongYeCheck": true,
     "skipBaseline": true,
     "maximumWorkers": 4,
-    "validationWorkers": 2
+    "validationWorkers": 2,
+    "cleanValidationTypes": ["preclean", "postclean", "wacclean", "dummy", "dummywac"]
   }
 }
 ```
 
 页面通过 `/api/preferences/run-settings` 读取和原子保存该文件。算法并行数范围为
-1~30，HongYe 校验并行数范围为 1~15；服务端会拒绝类型错误、越界值及高于当前
-支持版本的文件。文件不存在时使用内置默认值，并在用户首次修改后创建。
+1~30，HongYe 校验并行数范围为 1~15。`cleanValidationTypes` 是仍启用的 Clean
+校验类型；可选值为 `preclean`、`postclean`、`wacclean`、`dummy`、`dummywac`，空数组
+表示跳过全部 Clean 触发时机与次数义务校验，但不会跳过动作合法性或状态推进。该
+设置只作用于平台内置校验器，不过滤 HongYe check。服务端会拒绝类型错误、未知类型、越界值及高于当前
+支持版本的文件。文件不存在时使用内置默认值，并在用户首次修改后创建；读取版本 1
+文件时会补齐全部类型、写为版本 2，并保留同目录 `.v1.bak` 备份。
 
 ## 运行时数据
 

@@ -619,6 +619,45 @@ def _clean_obligation_specs(
                                 max(0, material_count),
                                 recipes,
                             )
+        # 周期 WAC 位于具体 Visit 的 AfterOutPM，不属于 Route 顶层 Pre/Post；
+        # 同样纳入任务元数据，供动作 Recipe 校验和类型识别使用，但不形成
+        # PJob 前后义务。
+        for step in rows(route.get("RouteSteps") or []):
+            if not isinstance(step, Mapping):
+                continue
+            for visit in rows(step.get("Visits") or []):
+                if not isinstance(visit, Mapping):
+                    continue
+                station_name = str(
+                    visit.get("StationName") or visit.get("ModuleName") or ""
+                ).strip()
+                if not station_name:
+                    continue
+                for condition in rows(visit.get("AfterOutPM") or []):
+                    if not isinstance(condition, Mapping):
+                        continue
+                    checks = condition.get("CheckConditions") or {}
+                    if not isinstance(checks, Mapping):
+                        continue
+                    for check_rows in checks.values():
+                        for check in rows(check_rows):
+                            if not isinstance(check, Mapping):
+                                continue
+                            task_name = str(check.get("TaskName") or "").strip()
+                            if not task_name:
+                                continue
+                            recipes = tuple(
+                                recipe_name
+                                for recipe_name in (
+                                    str(check.get("CleanRecipe") or "").strip(),
+                                    str(check.get("EmptyCleanRecipeAfterMaterial") or "").strip(),
+                                )
+                                if recipe_name
+                            )
+                            result.setdefault(
+                                (pjob_name, station_name, task_name),
+                                ("wac", 0, recipes),
+                            )
     return result
 
 
@@ -627,7 +666,7 @@ def _missing_pre_clean_obligation(
     pjob_name: str,
     station_name: str,
 ) -> Optional[Tuple[str, int, int, bool]]:
-    """检查产品首次进入 PM 前的空腔或带片清洁是否已经完成。"""
+    """检查未被跳过的 PJob 前空腔或带片清洁是否已经完成。"""
     for (required_pjob, required_station, task_name), (phase, required_count, _recipe) in (
         state.clean_obligations.items()
     ):
@@ -636,9 +675,32 @@ def _missing_pre_clean_obligation(
         clean_key = (required_pjob, required_station, task_name)
         actual_count = state.completed_clean_counts.get(clean_key, 0)
         expected_count = max(1, required_count)
-        if actual_count < expected_count:
+        clean_type = _clean_validation_type(
+            task_name,
+            material_count=expected_count if required_count > 0 else 0,
+        )
+        if (
+            actual_count < expected_count
+            and clean_type not in state.skipped_clean_validation_types
+        ):
             return task_name, expected_count, actual_count, required_count > 0
     return None
+
+
+def _clean_validation_type(task_name: str, *, material_count: int = 0) -> str:
+    """由标准 CleanTask 名称和带片要求还原页面中的 Clean 类型。"""
+    normalized = task_name.casefold().replace("-", "").replace("_", "")
+    if "wac" in normalized and (
+        "dummy" in normalized or normalized.startswith("prewac")
+    ):
+        return "dummywac"
+    if material_count > 0 or "dummy" in normalized:
+        return "dummy"
+    if "wac" in normalized:
+        return "wacclean"
+    if "post" in normalized:
+        return "postclean"
+    return "preclean"
 
 
 def _validate_clean_start(
@@ -648,7 +710,11 @@ def _validate_clean_start(
     material_ids: Sequence[Any],
     clean_task_name: str,
 ) -> Optional[str]:
-    """校验产品加工前义务及空腔 WAC 的正反向阈值。"""
+    """校验 Clean 动作本身，并按运行设置检查触发与次数义务。"""
+    def skipped(clean_type: str) -> bool:
+        """判断平台校验是否跳过指定 Clean 类型的触发策略。"""
+        return clean_type in state.skipped_clean_validation_types
+
     pjob_names = _values(move, "PJobName")
     pjob_name = str(pjob_names[0]) if pjob_names else ""
     if material_ids and not clean_task_name:
@@ -658,7 +724,9 @@ def _validate_clean_start(
             if rule_pjob_name and rule_pjob_name != pjob_name:
                 continue
             value = float(station.state_variables.get(variable_name, 0.0))
-            if value + TIME_TOLERANCE >= lower:
+            if value + TIME_TOLERANCE >= lower and not skipped(
+                _clean_validation_type(task_name)
+            ):
                 shown = str(int(value)) if value.is_integer() else str(value)
                 return _issue(move, ValidationErrorCode.CLEAN_WAC_MISSING, f"{task_name} 到期后仍开始产品工艺 count={shown} PJob={pjob_name}")
         if (pjob_name, station.name) not in state.product_clean_entries:
@@ -670,11 +738,19 @@ def _validate_clean_start(
         return None
     if clean_task_name:
         recipe_name = str(move.get("ProcessRecipe") or move.get("CleanRecipe") or "").strip()
-        for name in pjob_names:
-            requirement = state.clean_obligations.get((str(name), station.name, clean_task_name))
-            if requirement and requirement[2] and recipe_name not in requirement[2]:
-                return _issue(move, ValidationErrorCode.CLEAN_RECIPE_INVALID, f"{clean_task_name} Recipe={recipe_name or '<empty>'}，期望 {list(requirement[2])} PJob={name}")
-    if not clean_task_name or "wac" not in clean_task_name.casefold():
+        selected_pjobs = {str(name) for name in pjob_names}
+        for (required_pjob, required_station, task_name), requirement in state.clean_obligations.items():
+            if (
+                required_station == station.name
+                and task_name == clean_task_name
+                and (not selected_pjobs or required_pjob in selected_pjobs)
+                and requirement[2]
+                and recipe_name not in requirement[2]
+            ):
+                return _issue(move, ValidationErrorCode.CLEAN_RECIPE_INVALID, f"{clean_task_name} Recipe={recipe_name or '<empty>'}，期望 {list(requirement[2])} PJob={required_pjob}")
+    if not clean_task_name or "wac" not in clean_task_name.casefold() or skipped(
+        _clean_validation_type(clean_task_name)
+    ):
         return None
     names = {str(name).strip() for name in pjob_names if str(name).strip()}
     for _pjob, variable_name, lower, task_name in _wac_rules_for_clean_move(state, station.name, names, clean_task_name):
@@ -688,7 +764,7 @@ def _validate_clean_start(
 def _final_clean_obligation_issue(state: MachineState) -> Optional[str]:
     """在当前代计划回放完成后验证已加工 PJob 的 PostClean 义务。"""
     for (pjob_name, station_name, task_name), (phase, required_count, _recipe) in state.clean_obligations.items():
-        if phase != "post" or (pjob_name, station_name) not in state.product_clean_entries:
+        if phase != "post" or "postclean" in state.skipped_clean_validation_types or (pjob_name, station_name) not in state.product_clean_entries:
             continue
         actual_count = state.completed_clean_counts.get((pjob_name, station_name, task_name), 0)
         expected_count = max(1, required_count)

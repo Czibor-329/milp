@@ -463,11 +463,10 @@ def apply_machine_state_to_update(
                 raw_material["PJobName"] = material.pjob_name
             located_material_ids.add(material.material_id)
         # 企业接口中的 MaterialCount 是逐槽累计加工次数，不是站内当前物料数。
-        if "MaterialCount" in station:
-            station["MaterialCount"] = {
-                str(slot_id): slot_state.material_process_count
-                for slot_id, slot_state in sorted(station_state.slots.items())
-            }
+        station["MaterialCount"] = {
+            str(slot_id): slot_state.material_process_count
+            for slot_id, slot_state in sorted(station_state.slots.items())
+        }
         for variable_name, value in station_state.state_variables.items():
             variable = station.setdefault("StateVariables", {}).setdefault(
                 variable_name,

@@ -24,7 +24,7 @@ from realtime_scheduler.backend.execution.validation_limiter import (
 from realtime_scheduler.backend.workspace.repository import _write_json_atomic
 
 
-RUN_PREFERENCES_SCHEMA_VERSION = 1
+RUN_PREFERENCES_SCHEMA_VERSION = 2
 RUN_PREFERENCES_PATH = DATA_DIR / "run_preferences.json"
 _RUN_PREFERENCES_LOCK = threading.RLock()
 _BOOLEAN_FIELDS = (
@@ -32,12 +32,16 @@ _BOOLEAN_FIELDS = (
     "hongYeCheck",
     "skipBaseline",
 )
+_CLEAN_VALIDATION_TYPES = (
+    "preclean", "postclean", "wacclean", "dummy", "dummywac",
+)
 _DEFAULT_RUN_SETTINGS = {
     "compatibilityMode": True,
     "hongYeCheck": True,
     "skipBaseline": True,
     "maximumWorkers": DEFAULT_BATCH_WORKERS,
     "validationWorkers": DEFAULT_VALIDATION_WORKERS,
+    "cleanValidationTypes": list(_CLEAN_VALIDATION_TYPES),
 }
 
 
@@ -59,6 +63,31 @@ def _validate_run_settings(value: Mapping[str, Any]) -> Dict[str, Any]:
         if not minimum <= field_value <= maximum:
             raise ValueError(f"{field} 必须在 {minimum} 到 {maximum} 之间")
         normalized[field] = field_value
+    clean_validation_types = value.get("cleanValidationTypes")
+    if not isinstance(clean_validation_types, list) or not all(isinstance(item, str) for item in clean_validation_types):
+        raise ValueError("cleanValidationTypes 必须是字符串数组")
+    unknown_types = set(clean_validation_types) - set(_CLEAN_VALIDATION_TYPES)
+    if unknown_types:
+        raise ValueError(f"cleanValidationTypes 包含不支持的类型：{sorted(unknown_types)}")
+    normalized["cleanValidationTypes"] = [
+        clean_type for clean_type in _CLEAN_VALIDATION_TYPES
+        if clean_type in clean_validation_types
+    ]
+    return normalized
+
+
+def _migrate_run_preferences(payload: Mapping[str, Any], path: Path) -> Dict[str, Any]:
+    """将版本 1 偏好补齐 Clean 校验项，并保留可恢复的原始备份。"""
+    settings = payload.get("runSettings")
+    if not isinstance(settings, Mapping):
+        raise ValueError("本地运行偏好缺少 runSettings")
+    migrated = dict(settings)
+    migrated["cleanValidationTypes"] = list(_CLEAN_VALIDATION_TYPES)
+    normalized = _validate_run_settings(migrated)
+    backup_path = path.with_suffix(f"{path.suffix}.v1.bak")
+    if not backup_path.exists():
+        _write_json_atomic(backup_path, dict(payload))
+    _write_json_atomic(path, {"schemaVersion": RUN_PREFERENCES_SCHEMA_VERSION, "runSettings": normalized})
     return normalized
 
 
@@ -75,6 +104,8 @@ def read_run_preferences(path: Optional[Path] = None) -> Dict[str, Any]:
         if not isinstance(payload, Mapping):
             raise ValueError("本地运行偏好必须是 JSON 对象")
         schema_version = payload.get("schemaVersion")
+        if schema_version == 1:
+            return _migrate_run_preferences(payload, path)
         if schema_version != RUN_PREFERENCES_SCHEMA_VERSION:
             if isinstance(schema_version, int) and schema_version > RUN_PREFERENCES_SCHEMA_VERSION:
                 raise ValueError(f"本地运行偏好版本过新：{schema_version}")

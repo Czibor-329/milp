@@ -43,6 +43,11 @@ TWIN_LOAD_LOCK_PAIRS = frozenset({
     frozenset({"LA", "LB"}),
     frozenset({"LC", "LD"}),
 })
+# 运行设置和标准 Clean 定义共用的稳定类型。所有类型默认检查触发策略；调用者
+# 只能显式跳过某一类的触发时机与次数义务，动作合法性和状态推进始终生效。
+CLEAN_VALIDATION_TYPES = frozenset({
+    "preclean", "postclean", "wacclean", "dummy", "dummywac",
+})
 
 
 class ValidationErrorCode(str, Enum):
@@ -225,6 +230,8 @@ class MachineState:
     clean_task_state_variables: Dict[str, Set[str]] = field(default_factory=dict)
     clean_wac_trigger_rules: Dict[Tuple[str, str], Tuple[Tuple[str, str, float, str], ...]] = field(default_factory=dict)
     clean_obligations: Dict[Tuple[str, str, str], Tuple[str, int, Tuple[str, ...]]] = field(default_factory=dict)
+    #: 本次运行跳过的 Clean 触发/次数规则；物理状态回放与计数仍照常执行。
+    skipped_clean_validation_types: Set[str] = field(default_factory=set)
     completed_clean_counts: Dict[Tuple[str, str, str], int] = field(default_factory=dict)
     product_clean_entries: Set[Tuple[str, str]] = field(default_factory=set)
     #: 外部算法可省略的零时长产品 ProcessMove；键为（物料、Route Step、PM）。
@@ -665,6 +672,7 @@ def validate_move_list(
     *,
     check_residency: bool = True,
     external_predecessors: "Optional[Mapping[int, Mapping[str, Any]]]" = None,
+    skipped_clean_validation_types: "Optional[Iterable[str]]" = None,
 ) -> List[str]:
     """按时间线校验 MoveList；覆盖依赖 DAG、Route 时限与物理状态。
 
@@ -697,6 +705,11 @@ def validate_move_list(
         state = MachineState.from_sources(task, init_data)
     except ValueError as error:
         return [str(error)]
+    state.skipped_clean_validation_types = {
+        str(value).strip().lower()
+        for value in (skipped_clean_validation_types or ())
+        if str(value).strip().lower() in CLEAN_VALIDATION_TYPES
+    }
     scheduled: List[_ScheduledCompletion] = []
     ordered_moves = sorted(moves, key=_sort_key)
     _supplement_state_from_moves(state, ordered_moves)
@@ -1632,6 +1645,57 @@ def _start_process(state: MachineState, move: Mapping[str, Any], end_time: float
         return _issue(move, ValidationErrorCode.STATION_UNKNOWN, f"未知站点 {station_name or '<empty>'}")
     start_time = _start_time(move)
     clean_task_name = str(move.get("CleanTaskName") or "").strip()
+    matched_clean_obligations = [
+        ((pjob_name, required_station, task_name), requirement)
+        for (pjob_name, required_station, task_name), requirement in state.clean_obligations.items()
+        if required_station == station_name
+        and task_name == clean_task_name
+        and (not _values(move, "PJobName") or pjob_name in {str(value) for value in _values(move, "PJobName")})
+    ]
+    clean_material_count = max(
+        (requirement[1] for _key, requirement in matched_clean_obligations),
+        default=0,
+    )
+    clean_type = (
+        _clean_validation_type(clean_task_name, material_count=clean_material_count)
+        if clean_task_name
+        else ""
+    )
+    recipe_name = str(
+        move.get("ProcessRecipe") or move.get("CleanRecipe") or ""
+    ).strip()
+    if clean_type in {"dummy", "dummywac"}:
+        if material_ids:
+            wrong_main_recipe = next((
+                requirement[2][0]
+                for _key, requirement in matched_clean_obligations
+                if requirement[2] and recipe_name != requirement[2][0]
+            ), None)
+            if wrong_main_recipe is not None:
+                return _issue(
+                    move,
+                    ValidationErrorCode.CLEAN_RECIPE_INVALID,
+                    f"{clean_task_name} 带片阶段 Recipe={recipe_name or '<empty>'}，期望 {wrong_main_recipe}",
+                )
+        else:
+            valid_empty_tail = clean_type == "dummywac" and any(
+                len(requirement[2]) >= 2
+                and recipe_name == requirement[2][-1]
+                and state.completed_clean_counts.get(clean_key, 0) >= requirement[1]
+                for clean_key, requirement in matched_clean_obligations
+            )
+            if not valid_empty_tail:
+                return _issue(
+                    move,
+                    ValidationErrorCode.PROCESS_STATE_INVALID,
+                    f"{clean_task_name} 必须先完成足量 Dummy 带片清洁",
+                )
+    if clean_type in {"preclean", "postclean", "wacclean"} and material_ids:
+        return _issue(
+            move,
+            ValidationErrorCode.PROCESS_STATE_INVALID,
+            f"{clean_task_name} 是空腔 Clean，不能携带物料",
+        )
     clean_issue = _validate_clean_start(state, station, move, material_ids, clean_task_name)
     if clean_issue:
         return clean_issue
@@ -1702,7 +1766,7 @@ def _start_process(state: MachineState, move: Mapping[str, Any], end_time: float
                 _phase, required_count, _recipes = obligation
                 increment = (
                     len(material_ids)
-                    if required_count > 0 and material_ids
+                    if required_count > 0
                     else int(move.get("IsLastCleanTaskMove") is True)
                 )
                 if increment:

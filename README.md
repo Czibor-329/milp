@@ -12,7 +12,7 @@ python -m realtime_scheduler.backend.main --open
 
 默认地址为 `http://127.0.0.1:8765/config_editor.html`
 
-“运行设置”中的兼容、校验、Baseline 开关以及算法/HongYe 并行数会保存在本机
+“运行设置”中的兼容、校验、Baseline 开关、Clean 校验类型以及算法/HongYe 并行数会保存在本机
 `realtime_scheduler/data/run_preferences.json`，刷新页面或重启服务后自动恢复。
 
 首次打开页面后，在“设备与测试集”卡片选择“导入”：
