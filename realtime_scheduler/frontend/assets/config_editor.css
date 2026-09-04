@@ -1044,7 +1044,7 @@
     .device-config-save-state > strong.is-saving { color: var(--brand); }
     .device-config-layout { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: 12px; }
     .device-config-layout > * { min-width: 0; }
-    .device-config-nav { position: sticky; z-index: 4; top: 10px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; padding: 5px; border: 1px solid var(--line); border-radius: 13px; background: rgba(255,255,255,.94); box-shadow: 0 6px 20px rgba(32,47,81,.07); backdrop-filter: blur(10px); }
+    .device-config-nav { position: sticky; z-index: 4; top: 10px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; padding: 5px; border: 1px solid var(--line); border-radius: 13px; background: rgba(255,255,255,.94); box-shadow: 0 6px 20px rgba(32,47,81,.07); backdrop-filter: blur(10px); }
     .device-config-nav-item { display: flex; width: 100%; min-height: 46px; align-items: center; justify-content: center; gap: 8px; padding: 7px 10px; border: 1px solid transparent; border-radius: 9px; color: #53647a; background: transparent; font: inherit; text-align: left; cursor: pointer; transition: border-color .18s ease, color .18s ease, background .18s ease; }
     .device-config-nav-item:hover { color: var(--ink); background: var(--soft); }
     .device-config-nav-item.active { border-color: #c8d6f3; color: #214fb8; background: var(--brand-soft); }
@@ -1094,6 +1094,16 @@
     .device-time-input input:hover { border-color: #9fb1ca; }
     .device-time-input input.is-invalid { border-color: var(--red); background: var(--red-soft); }
     .device-time-input > span { position: absolute; right: 10px; color: var(--muted); font: 700 9px/1 "Fira Code", Consolas, monospace; pointer-events: none; }
+    .device-time-pair { display: grid; grid-template-columns: repeat(2, minmax(84px, 112px)); gap: 6px; }
+    .device-time-pair > label { display: grid; gap: 3px; }
+    .device-time-pair > label > small { color: var(--muted); font-size: 8px; font-weight: 800; }
+    .device-time-pair > label:last-child > small { color: #2f62c5; }
+    .device-time-pair input:disabled { color: #758398; background: #eef2f7; cursor: not-allowed; }
+    .execution-timing-card { display: grid; gap: 18px; }
+    .execution-timing-card header h3 { margin: 0 0 5px; }
+    .execution-timing-card header p { margin: 0; color: var(--muted); font-size: 11px; }
+    .execution-mode-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .execution-fluctuation-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding: 14px; border: 1px solid #dbe4f0; border-radius: 12px; background: #f8fafc; }
     .device-time-unavailable { display: block; width: 100%; color: #a0adbd; text-align: center; }
     .device-time-inline-empty { padding: 28px 18px; color: var(--muted); background: var(--soft); font-size: 11px; text-align: center; }
     .device-transition-list { display: grid; }
@@ -1506,7 +1516,7 @@
       .device-transfer-filters > label { min-width: 0; flex: 1 1 0; }
     }
     @media (max-width: 560px) {
-      .device-config-nav { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; }
+      .device-config-nav { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; }
       .device-config-nav-item { min-height: 66px; justify-content: center; flex-direction: column; gap: 5px; padding: 7px 4px; text-align: center; }
       .device-config-nav-item strong { font-size: 10px; white-space: nowrap; }
       .device-config-nav-item small { display: none; }
@@ -1517,6 +1527,7 @@
       .device-transition-kind { grid-column: 1; }
       .device-transition-row > strong { grid-column: 1; white-space: normal; }
       .device-transition-row .device-time-input { grid-column: 2; grid-row: 1 / span 2; }
+      .device-time-pair, .execution-mode-grid, .execution-fluctuation-fields { grid-template-columns: 1fr; }
     }
     @media (max-width: 780px) {
       .playback-inspector { grid-template-columns: 1fr; }

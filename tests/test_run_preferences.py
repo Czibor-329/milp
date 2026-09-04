@@ -19,6 +19,7 @@ def _settings(**overrides) -> dict:
         "compatibilityMode": True,
         "hongYeCheck": True,
         "skipBaseline": True,
+        "executionTimingEnabled": False,
         "maximumWorkers": 4,
         "validationWorkers": 2,
         "cleanValidationTypes": ["preclean", "postclean", "wacclean", "dummy", "dummywac"],
@@ -35,7 +36,7 @@ def test_missing_run_preferences_use_defaults_without_creating_file(tmp_path: Pa
 
 
 def test_run_preferences_are_versioned_and_persisted_atomically(tmp_path: Path) -> None:
-    """保存后应写入 schemaVersion 2，并可在服务重启语义下重新读取。"""
+    """保存后应写入 schemaVersion 3，并可在服务重启语义下重新读取。"""
     path = tmp_path / "run_preferences.json"
     expected = _settings(
         compatibilityMode=False,
@@ -45,7 +46,7 @@ def test_run_preferences_are_versioned_and_persisted_atomically(tmp_path: Path) 
     )
     assert update_run_preferences(expected, path) == expected
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload == {"schemaVersion": 2, "runSettings": expected}
+    assert payload == {"schemaVersion": 3, "runSettings": expected}
     assert read_run_preferences(path) == expected
 
 
@@ -72,10 +73,10 @@ def test_run_preferences_reject_newer_schema(tmp_path: Path) -> None:
     """较新版本偏好文件必须显式拒绝，不能按旧格式静默覆盖。"""
     path = tmp_path / "run_preferences.json"
     path.write_text(
-        json.dumps({"schemaVersion": 3, "runSettings": _settings()}),
+        json.dumps({"schemaVersion": 4, "runSettings": _settings()}),
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match="版本过新：3"):
+    with pytest.raises(ValueError, match="版本过新：4"):
         read_run_preferences(path)
 
 
@@ -88,3 +89,14 @@ def test_run_preferences_migrate_v1_and_keep_recoverable_backup(tmp_path: Path) 
 
     assert read_run_preferences(path) == _settings()
     assert json.loads((tmp_path / "run_preferences.json.v1.bak").read_text(encoding="utf-8"))["schemaVersion"] == 1
+
+
+def test_run_preferences_migrate_v2_with_execution_time_disabled(tmp_path: Path) -> None:
+    """v2 偏好升级后应默认关闭执行时间模拟并保留原始备份。"""
+    path = tmp_path / "run_preferences.json"
+    old_settings = _settings()
+    old_settings.pop("executionTimingEnabled")
+    path.write_text(json.dumps({"schemaVersion": 2, "runSettings": old_settings}), encoding="utf-8")
+
+    assert read_run_preferences(path) == _settings()
+    assert json.loads((tmp_path / "run_preferences.json.v2.bak").read_text(encoding="utf-8"))["schemaVersion"] == 2

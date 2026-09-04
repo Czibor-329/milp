@@ -494,6 +494,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                     hongye_check=bool(payload.get("hongYeCheck", True)),
                     skip_baseline=bool(payload.get("skipBaseline")),
                     compatibility_mode=bool(payload.get("compatibilityMode", True)),
+                    execution_timing_enabled=bool(payload.get("executionTimingEnabled", False)),
                     maximum_workers=int(payload.get("maximumWorkers", DEFAULT_BATCH_WORKERS)),
                     validation_workers=int(payload.get("validationWorkers", DEFAULT_VALIDATION_WORKERS)),
                     clean_validation_types=payload.get("cleanValidationTypes") if isinstance(payload.get("cleanValidationTypes"), list) else None,

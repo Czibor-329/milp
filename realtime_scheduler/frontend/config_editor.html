@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>调度平台</title>
   <link rel="stylesheet" href="/assets/katex.min.css?v=1.4.4">
-  <link rel="stylesheet" href="/assets/config_editor.css?v=1.5.31">
+  <link rel="stylesheet" href="/assets/config_editor.css?v=1.5.32">
 </head>
 <body>
   <a class="skip-link" href="#mainContent">跳到主要内容</a>
@@ -40,7 +40,7 @@
       <div class="sidebar-footer">
         <span class="sidebar-footer-label">系统状态</span>
         <div class="service-pill" id="serviceState">本地服务</div>
-        <span class="frontend-version">V1.5.31</span>
+        <span class="frontend-version">V1.5.32</span>
       </div>
     </aside>
 
@@ -346,6 +346,10 @@
                 <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="7" width="16" height="11" rx="3"/><path d="M12 3v4M8 12h.01M16 12h.01M8 18v3m8-3v3"/></svg>
                 <span><strong>机器手槽位</strong></span>
               </button>
+              <button class="device-config-nav-item" type="button" data-device-config-section="execution-time">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h3l2-6 4 12 2-6h5"/><path d="M4 20h16"/></svg>
+                <span><strong>执行时间</strong></span>
+              </button>
             </nav>
             <div class="device-config-content">
               <article class="panel device-timing-panel active" data-device-config-view="station-time">
@@ -394,6 +398,15 @@
                     <span>切换会同步更新 Capacity 与 ArmInfo；下次运行及批量测试会自动使用新配置。</span>
                   </div>
                   <div class="robot-slot-grid" id="robotSlotList"></div>
+                </div>
+              </article>
+
+              <article class="panel device-timing-panel" data-device-config-view="execution-time" hidden>
+                <div class="panel-head device-timing-panel-head">
+                  <div><h2>实际执行时间</h2><p>配置固定值，或让实际时长围绕理论值波动。</p></div>
+                </div>
+                <div class="panel-body device-timing-body">
+                  <div id="deviceExecutionTimingEditor"></div>
                 </div>
               </article>
             </div>
@@ -552,6 +565,10 @@
             <label class="run-setting-option" for="skipBaselineInput">
               <span class="run-setting-option-main"><input id="skipBaselineInput" type="checkbox" checked><span>跳过 Baseline</span></span>
               <small>不计算 Heuristic 性能基线，可更快得到本次批量结果。</small>
+            </label>
+            <label class="run-setting-option" for="executionTimingEnabledInput">
+              <span class="run-setting-option-main"><input id="executionTimingEnabledInput" type="checkbox"><span>设备执行时间模拟</span></span>
+              <small>按设备“执行时间”修正实际 Move 时刻；仅在兼容模式下生效。</small>
             </label>
           </div>
         </section>
@@ -795,6 +812,6 @@
     </aside>
   </dialog>
 
-  <script type="module" src="/assets/config_editor.js?v=1.5.31"></script>
+  <script type="module" src="/assets/config_editor.js?v=1.5.32"></script>
 </body>
 </html>

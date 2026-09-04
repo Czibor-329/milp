@@ -22,7 +22,7 @@
 设备及新增测试；未参与交换的设备和测试文件不会被解析或重写。后台任务状态只存在于
 当前服务进程，不属于持久化数据格式，服务重启后可重新发起交换。
 
-## v7 主数据结构
+## v8 主数据结构
 
 `data/datasets/` 是设备与测试集唯一事实来源，不再生成 `data/devices/` 拓扑镜像。
 
@@ -42,7 +42,7 @@ datasets/
 文件职责：
 
 - `manifest.json`：根格式标识和 `schemaVersion`。
-- `metadata.json`：设备稳定 ID、展示名称、指纹、时间戳及 `InitialMoveID` 等兼容初始化选项，不包含路径或测试内容。
+- `metadata.json`：设备稳定 ID、展示名称、指纹、时间戳及 `InitialMoveID`、平台执行时间等本地设备选项，不包含路径或测试内容。平台执行时间不会进入算法 `AlgInit`。
 - `device.json`：纯算法 init，只包含 `Stations` 和 `Robots`。
 - `routes.json`：共享路径模板、路径别名及设备级共享配置。
 - `groups.json`：测试组别和 Robot 槽位页面配置。
@@ -72,7 +72,10 @@ DummyPort 的库存投放数量；该字段与标准 Clean 条件的 `MaterialCo
 
 ## 版本和迁移
 
-当前格式为 `schemaVersion: 7`。服务开始监听前完成迁移，页面不会读取迁移到一半的数据。
+当前格式为 `schemaVersion: 8`。服务开始监听前完成迁移，页面不会读取迁移到一半的数据。
+
+v7 升级到 v8 时，服务会为每台设备补齐 `ExecutionTiming`。默认固定执行值等于原理论值，
+且运行开关默认关闭，因此升级不会改变既有排程结果；升级前仍会备份完整数据目录。
 
 v6 升级到 v7 时，服务会把测试顶层 `routeConfigs[routeRef]` 深拷贝到每一个 PJob 的
 `routeConfig`。迁移幂等执行，且升级前会把完整 `datasets/` 复制到
@@ -94,11 +97,12 @@ v5 的 `workspaces/` 与 `devices/` 首次升级时执行以下过程：
 
 ```json
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "runSettings": {
     "compatibilityMode": true,
     "hongYeCheck": true,
     "skipBaseline": true,
+    "executionTimingEnabled": false,
     "maximumWorkers": 4,
     "validationWorkers": 2,
     "cleanValidationTypes": ["preclean", "postclean", "wacclean", "dummy", "dummywac"]

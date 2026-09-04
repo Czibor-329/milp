@@ -36,6 +36,7 @@ __export(workspace_visualizer_test_entry_exports, {
   renderSchedulePerformance: () => renderSchedulePerformance,
   renderThroughputChart: () => renderThroughputChart,
   renderWaferResidenceChart: () => renderWaferResidenceChart,
+  simplifyThroughputPoints: () => simplifyThroughputPoints,
   snapshotWithFullDeviceModules: () => snapshotWithFullDeviceModules
 });
 module.exports = __toCommonJS(workspace_visualizer_test_entry_exports);
@@ -2200,6 +2201,26 @@ function filterThroughputPoints(points, range) {
   }
   return points;
 }
+var MAXIMUM_THROUGHPUT_DRAW_POINTS = 72;
+var MAXIMUM_THROUGHPUT_VALUE_LABELS = 12;
+function simplifyThroughputPoints(points) {
+  if (points.length <= MAXIMUM_THROUGHPUT_DRAW_POINTS) return points;
+  const interior = points.slice(1, -1);
+  const bucketCount = Math.max(1, Math.floor((MAXIMUM_THROUGHPUT_DRAW_POINTS - 2) / 2));
+  const selected = [points[0]];
+  for (let bucket = 0; bucket < bucketCount; bucket += 1) {
+    const start = Math.floor(bucket * interior.length / bucketCount);
+    const end = Math.max(start + 1, Math.floor((bucket + 1) * interior.length / bucketCount));
+    const rows = interior.slice(start, end).map((point, index) => ({ point, index: start + index }));
+    const minimum = rows.reduce((best, row) => row.point.throughputPerHour < best.point.throughputPerHour ? row : best);
+    const maximum = rows.reduce((best, row) => row.point.throughputPerHour > best.point.throughputPerHour ? row : best);
+    [minimum, maximum].sort((left, right) => left.index - right.index).forEach((row) => {
+      if (selected[selected.length - 1] !== row.point) selected.push(row.point);
+    });
+  }
+  selected.push(points[points.length - 1]);
+  return selected;
+}
 function renderThroughputSvg(points, title) {
   const width = 760;
   const height = 174;
@@ -2209,8 +2230,10 @@ function renderThroughputSvg(points, title) {
   const bottom = 12;
   const usableWidth = width - left - right;
   const usableHeight = height - top - bottom;
-  const values = points.map((point) => Math.max(0, Number(point.throughputPerHour) || 0));
-  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+  const allValues = points.map((point) => Math.max(0, Number(point.throughputPerHour) || 0));
+  const mean = allValues.reduce((sum, value) => sum + value, 0) / allValues.length;
+  const displayPoints = simplifyThroughputPoints(points);
+  const values = displayPoints.map((point) => Math.max(0, Number(point.throughputPerHour) || 0));
   const observedMinimum = Math.min(...values);
   const observedMaximum = Math.max(...values);
   const spread = Math.max(observedMaximum - observedMinimum, Math.max(mean * 0.04, 1));
@@ -2219,10 +2242,10 @@ function renderThroughputSvg(points, title) {
   const minimum = Math.max(0, Math.floor((observedMinimum - padding) / step) * step);
   const maximum = Math.max(minimum + step * 3, Math.ceil((observedMaximum + padding) / step) * step);
   const yRange = maximum - minimum;
-  const firstIndex = points[0].completedWaferIndex;
-  const lastIndex = points[points.length - 1].completedWaferIndex;
+  const firstIndex = displayPoints[0].completedWaferIndex;
+  const lastIndex = displayPoints[displayPoints.length - 1].completedWaferIndex;
   const indexRange = Math.max(1, lastIndex - firstIndex);
-  const coordinates = points.map((point, index) => ({
+  const coordinates = displayPoints.map((point, index) => ({
     x: left + (point.completedWaferIndex - firstIndex) / indexRange * usableWidth,
     y: top + (1 - (values[index] - minimum) / yRange) * usableHeight
   }));
@@ -2230,10 +2253,11 @@ function renderThroughputSvg(points, title) {
     if (index === 0) return `M ${point.x.toFixed(2)} ${point.y.toFixed(2)}`;
     return `${path} L ${point.x.toFixed(2)} ${point.y.toFixed(2)}`;
   }, "");
-  const latest = points[points.length - 1];
+  const latest = displayPoints[displayPoints.length - 1];
   const yForValue = (value) => top + (1 - (value - minimum) / yRange) * usableHeight;
   const meanY = yForValue(mean);
-  const pointTargets = points.map((point, index) => {
+  const labelStride = Math.max(1, Math.ceil(displayPoints.length / MAXIMUM_THROUGHPUT_VALUE_LABELS));
+  const pointTargets = displayPoints.map((point, index) => {
     const coordinate = coordinates[index];
     const value = values[index];
     const previousValue = values[index - 1] ?? value;
@@ -2241,7 +2265,8 @@ function renderThroughputSvg(points, title) {
     const isLocalMinimum = index > 0 && index < values.length - 1 && value <= previousValue && value <= nextValue;
     const labelY = isLocalMinimum ? Math.min(top + usableHeight - 4, coordinate.y + 17) : Math.max(top + 10, coordinate.y - 9);
     const labelClass = isLocalMinimum ? "throughput-chart-value is-below" : "throughput-chart-value";
-    return `<text class="${labelClass}" x="${coordinate.x.toFixed(2)}" y="${labelY.toFixed(2)}" text-anchor="middle">${value.toFixed(1)}</text><circle class="throughput-chart-point" cx="${coordinate.x.toFixed(2)}" cy="${coordinate.y.toFixed(2)}" r="2.6"/>`;
+    const showLabel = index === 0 || index === displayPoints.length - 1 || index % labelStride === 0;
+    return `${showLabel ? `<text class="${labelClass}" x="${coordinate.x.toFixed(2)}" y="${labelY.toFixed(2)}" text-anchor="middle">${value.toFixed(1)}</text>` : ""}<circle class="throughput-chart-point" cx="${coordinate.x.toFixed(2)}" cy="${coordinate.y.toFixed(2)}" r="${displayPoints.length > 36 ? "1.8" : "2.6"}"/>`;
   }).join("");
   return `
         <svg class="throughput-chart-svg" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="${title}\uFF0C\u6700\u65B0\u4E3A\u7B2C ${latest.completedWaferIndex} \u7247\uFF0C\u6BCF\u5C0F\u65F6 ${latest.throughputPerHour.toFixed(1)} \u7247">
@@ -3052,5 +3077,6 @@ function createVisualizationWorkspace(root = document) {
   renderSchedulePerformance,
   renderThroughputChart,
   renderWaferResidenceChart,
+  simplifyThroughputPoints,
   snapshotWithFullDeviceModules
 });

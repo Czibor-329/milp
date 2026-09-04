@@ -6,6 +6,7 @@ from realtime_scheduler.backend.bootstrap import *
 from realtime_scheduler.backend.execution.run_state import *
 from realtime_scheduler.backend.execution.algorithm_runtime import *
 from realtime_scheduler.backend.execution.cjob_cycle import *
+from realtime_scheduler.backend.execution.move_timing import normalize_execution_timing
 
 def _execute_standard_algorithm(
     plan: Mapping[str, Any],
@@ -147,6 +148,18 @@ def _execute_standard_algorithm(
                 output,
                 compatibility_mode=compatibility_mode,
                 skipped_clean_validation_types=skipped_clean_validation_types,
+                device=plan["device"],
+                execution_timing=(
+                    plan.get("executionTiming")
+                    if plan.get("executionTimingEnabled") and compatibility_mode
+                    else None
+                ),
+                execution_timing_seed=int(_finite_number(
+                    plan.get("options", {}).get("seed")
+                    if isinstance(plan.get("options"), Mapping)
+                    else 0,
+                    0,
+                )),
             )
             state_source = "realtime_scheduler.backend.validation.move_validation.MachineState"
         except Exception as error:
@@ -606,6 +619,10 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
     started = time.perf_counter()
     plan = deepcopy(dict(raw_plan))
     plan["device"] = extract_init_data(plan.get("device"))
+    raw_execution_timing = plan["device"].pop("ExecutionTiming", None)
+    plan["executionTiming"] = normalize_execution_timing(
+        plan["device"], raw_execution_timing,
+    )
     plan["device"] = build_task_alg_init(
         plan["device"],
         [row for row in (plan.get("routes") or []) if isinstance(row, Mapping)],

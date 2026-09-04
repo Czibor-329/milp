@@ -6,6 +6,10 @@ from realtime_scheduler.backend.bootstrap import *
 from realtime_scheduler.backend.time_utils import _workspace_timestamp
 from realtime_scheduler.backend.workspace.repository import *
 from realtime_scheduler.backend.execution.cjob_cycle import _cjob_cycle_count
+from realtime_scheduler.backend.execution.move_timing import (
+    default_execution_timing,
+    normalize_execution_timing,
+)
 from realtime_scheduler.backend.execution.batch_service import _invalidate_stale_device_baselines
 
 def delete_workspace_device(device_id: str, path: Path = WORKSPACE_STORE_PATH) -> Dict[str, Any]:
@@ -327,11 +331,16 @@ def apply_device_timing_updates(device_data: Dict[str, Any], raw_timing: Any) ->
             ROBOT_TIME_SEQUENCE_FIELDS,
         ),
     }
-    unknown_sections = sorted(str(key) for key in raw_timing if str(key) not in sections)
+    unknown_sections = sorted(
+        str(key) for key in raw_timing
+        if str(key) not in {*sections, "execution"}
+    )
     if unknown_sections:
         raise ValueError(f"设备时间配置包含未知分类：{', '.join(unknown_sections)}")
 
     for section_name, raw_items in raw_timing.items():
+        if str(section_name) == "execution":
+            continue
         topology_items, mapping_fields, sequence_fields = sections[str(section_name)]
         if not isinstance(topology_items, dict):
             raise ValueError(f"设备缺少 {section_name} 定义")
@@ -368,6 +377,11 @@ def apply_device_timing_updates(device_data: Dict[str, Any], raw_timing: Any) ->
                     if not isinstance(current_values, list):
                         raise ValueError(f"{label} 不存在或不是计时数组")
                     _apply_time_sequence_updates(current_values, raw_values, label)
+    if "execution" in raw_timing:
+        device_data["ExecutionTiming"] = normalize_execution_timing(
+            device_data,
+            raw_timing.get("execution"),
+        )
 
 
 def update_workspace_device_timing(
@@ -400,6 +414,8 @@ def import_workspace_device(
 ) -> Tuple[Dict[str, Any], bool]:
     """导入设备 init；相同拓扑通过指纹复用已有设备及其测试集。"""
     device_data = extract_init_data(raw_device)
+    if not isinstance(device_data.get("ExecutionTiming"), Mapping):
+        device_data["ExecutionTiming"] = default_execution_timing(device_data)
     fingerprint = _device_fingerprint(device_data)
     with _workspace_catalog_guard(path):
         catalog = _read_workspace_catalog_unlocked(path)

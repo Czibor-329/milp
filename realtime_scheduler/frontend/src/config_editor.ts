@@ -998,16 +998,84 @@ function buildDeviceTimingDraft(device) {
     }
     draft.robots[robotName] = timing;
   });
+  const configuredExecution = device?.ExecutionTiming && typeof device.ExecutionTiming === "object"
+    ? device.ExecutionTiming
+    : {};
+  const overlayTiming = (defaults, configured) => Object.fromEntries(Object.entries(defaults).map(([itemName, fields]) => [
+    itemName,
+    Object.fromEntries(Object.entries(fields).map(([fieldName, values]) => {
+      const configuredValues = configured?.[itemName]?.[fieldName];
+      if (Array.isArray(values)) {
+        return [fieldName, values.map((value, index) => Number.isFinite(Number(configuredValues?.[index])) ? Number(configuredValues[index]) : value)];
+      }
+      return [fieldName, Object.fromEntries(Object.entries(values).map(([key, value]) => [
+        key,
+        Number.isFinite(Number(configuredValues?.[key])) ? Number(configuredValues[key]) : value,
+      ]))];
+    })),
+  ]));
+  const rawFluctuation = configuredExecution.fluctuation || {};
+  draft.execution = {
+    mode: configuredExecution.mode === "fluctuation" ? "fluctuation" : "fixed",
+    fluctuation: {
+      kind: rawFluctuation.kind === "offset" ? "offset" : "ratio",
+      ratio: Math.max(0, Math.min(1, Number(rawFluctuation.ratio) || 0)),
+      minimumOffsetSeconds: Number.isFinite(Number(rawFluctuation.minimumOffsetSeconds)) ? Number(rawFluctuation.minimumOffsetSeconds) : 0,
+      maximumOffsetSeconds: Number.isFinite(Number(rawFluctuation.maximumOffsetSeconds)) ? Number(rawFluctuation.maximumOffsetSeconds) : 0,
+    },
+    stations: overlayTiming(draft.stations, configuredExecution.stations),
+    robots: overlayTiming(draft.robots, configuredExecution.robots),
+  };
   return draft;
 }
 
-/** 生成统一的秒数输入框，使用等宽数字并携带设备计时数据定位信息。 */
+/** 读取一个理论时间输入所对应的固定执行秒数。 */
+function configuredExecutionTime(dataset) {
+  const section = dataset["device-timing-target"]?.startsWith("station") ? "stations" : "robots";
+  const fields = state.deviceTimingDraft?.execution?.[section]?.[dataset["device-name"]];
+  if (!fields) return 0;
+  return dataset["device-timing-target"]?.endsWith("map")
+    ? fields[dataset["timing-field"]]?.[dataset["timing-key"]] ?? 0
+    : fields[dataset["timing-field"]]?.[Number(dataset["timing-index"])] ?? 0;
+}
+
+/** 生成理论/固定执行时间输入组，波动模式下固定值保留但不可编辑。 */
 function deviceTimeInput(value, label, dataset) {
   const attributes = Object.entries(dataset)
     .map(([name, item]) => `data-${name}="${escapeHtml(item)}"`)
     .join(" ");
   const numericValue = Number(value);
-  return `<label class="device-time-input"><input type="number" min="0" step="any" inputmode="decimal" required value="${Number.isFinite(numericValue) ? numericValue : 0}" aria-label="${escapeHtml(label)}" ${attributes}><span>s</span></label>`;
+  const executionValue = Number(configuredExecutionTime(dataset));
+  const executionDisabled = state.deviceTimingDraft?.execution?.mode === "fluctuation" ? " disabled" : "";
+  const executionAttributes = attributes.replaceAll("data-device-timing-target", "data-device-execution-target");
+  return `<span class="device-time-pair"><label><small>理论</small><span class="device-time-input"><input type="number" min="0" step="any" inputmode="decimal" required value="${Number.isFinite(numericValue) ? numericValue : 0}" aria-label="${escapeHtml(label)}（理论）" ${attributes}><span>s</span></span></label><label><small>执行</small><span class="device-time-input"><input type="number" min="0" step="any" inputmode="decimal" required value="${Number.isFinite(executionValue) ? executionValue : 0}" aria-label="${escapeHtml(label)}（固定执行）" ${executionAttributes}${executionDisabled}><span>s</span></span></label></span>`;
+}
+
+/** 绘制设备实际执行时间模式；固定值在各动作表中与理论值并列编辑。 */
+function renderExecutionTimingConfiguration() {
+  const container = document.getElementById("deviceExecutionTimingEditor");
+  const execution = state.deviceTimingDraft?.execution;
+  if (!container || !execution) {
+    if (container) container.innerHTML = `<div class="device-config-empty"><strong>暂无执行时间配置</strong><span>请先选择设备。</span></div>`;
+    return;
+  }
+  const fluctuating = execution.mode === "fluctuation";
+  const offset = execution.fluctuation.kind === "offset";
+  container.innerHTML = `
+    <section class="execution-timing-card">
+      <header><div><h3>实际动作时长</h3><p>算法始终使用理论时间；平台状态机只在运行设置启用后应用这里的执行时间。</p></div></header>
+      <div class="execution-mode-grid" role="radiogroup" aria-label="执行时间模式">
+        <label class="run-setting-option"><span class="run-setting-option-main"><input type="radio" name="executionTimingMode" value="fixed" ${fluctuating ? "" : "checked"}><span>固定执行值</span></span><small>使用设备时间和机器手时间表中并列的“执行”值。</small></label>
+        <label class="run-setting-option"><span class="run-setting-option-main"><input type="radio" name="executionTimingMode" value="fluctuation" ${fluctuating ? "checked" : ""}><span>理论值随机波动</span></span><small>以每个 Move 的理论时长为均值，按 seed 生成可复现样本。</small></label>
+      </div>
+      <div class="execution-fluctuation-fields" ${fluctuating ? "" : "hidden"}>
+        <label class="field"><span>波动方式</span><select id="executionFluctuationKind"><option value="ratio" ${offset ? "" : "selected"}>比例（±）</option><option value="offset" ${offset ? "selected" : ""}>最小/最大偏移</option></select></label>
+        <label class="field" ${offset ? "hidden" : ""}><span>波动比例</span><input id="executionFluctuationRatio" type="number" min="0" max="100" step="0.1" value="${(execution.fluctuation.ratio * 100).toFixed(1)}"><small>例如 10 表示理论时长的 ±10%。</small></label>
+        <label class="field" ${offset ? "" : "hidden"}><span>最小波动（秒）</span><input id="executionMinimumOffset" type="number" step="any" value="${execution.fluctuation.minimumOffsetSeconds}"></label>
+        <label class="field" ${offset ? "" : "hidden"}><span>最大波动（秒）</span><input id="executionMaximumOffset" type="number" step="any" value="${execution.fluctuation.maximumOffsetSeconds}"></label>
+      </div>
+      <div class="device-time-inline-empty">固定模式的具体执行值位于“设备时间”和“机器手时间”表格，每个理论值右侧均有对应执行值。</div>
+    </section>`;
 }
 
 /** 根据当前设备、脏状态和保存状态刷新设备配置页头部反馈与操作按钮。 */
@@ -1274,6 +1342,7 @@ function renderDeviceTimingConfiguration() {
   if (state.deviceConfigSection === "station-time") renderDeviceStationTiming();
   if (state.deviceConfigSection === "robot-time") renderDeviceRobotTiming();
   if (state.deviceConfigSection === "robot-slot") renderRobotSlots();
+  if (state.deviceConfigSection === "execution-time") renderExecutionTimingConfiguration();
 }
 
 /** 从当前设备重新建立时间草稿，既用于设备切换，也用于撤销尚未保存的修改。 */
@@ -1299,10 +1368,13 @@ function updateDeviceTimingFromControl(control) {
   const valid = control.value.trim() !== "" && Number.isFinite(value) && value >= 0;
   control.setCustomValidity(valid ? "" : "请输入大于或等于 0 的有限秒数");
   control.classList.toggle("is-invalid", !valid);
-  const section = control.dataset.deviceTimingTarget?.startsWith("station") ? "stations" : "robots";
-  const item = state.deviceTimingDraft?.[section]?.[control.dataset.deviceName];
+  const targetName = control.dataset.deviceExecutionTarget ? "deviceExecutionTarget" : "deviceTimingTarget";
+  const target = control.dataset[targetName];
+  const section = target?.startsWith("station") ? "stations" : "robots";
+  const root = targetName === "deviceExecutionTarget" ? state.deviceTimingDraft?.execution : state.deviceTimingDraft;
+  const item = root?.[section]?.[control.dataset.deviceName];
   if (!item) return;
-  if (control.dataset.deviceTimingTarget?.endsWith("map")) {
+  if (target?.endsWith("map")) {
     item[control.dataset.timingField][control.dataset.timingKey] = valid ? value : Number.NaN;
   } else {
     item[control.dataset.timingField][Number(control.dataset.timingIndex)] = valid ? value : Number.NaN;
@@ -1313,7 +1385,13 @@ function updateDeviceTimingFromControl(control) {
 /** 校验草稿中的每个秒数，确保保存请求不会包含 NaN、Infinity 或负数。 */
 function validateDeviceTimingDraft() {
   let invalidLabel = "";
-  Object.entries(state.deviceTimingDraft || {}).some(([sectionName, items]) => Object.entries(items).some(([itemName, fields]) => Object.entries(fields).some(([fieldName, values]) => {
+  const timingSections = {
+    stations: state.deviceTimingDraft?.stations || {},
+    robots: state.deviceTimingDraft?.robots || {},
+    executionStations: state.deviceTimingDraft?.execution?.stations || {},
+    executionRobots: state.deviceTimingDraft?.execution?.robots || {},
+  };
+  Object.entries(timingSections).some(([sectionName, items]) => Object.entries(items).some(([itemName, fields]) => Object.entries(fields).some(([fieldName, values]) => {
     const rows = Array.isArray(values) ? values.map((value, index) => [index, value]) : Object.entries(values || {});
     const invalid = rows.find(([, value]) => !Number.isFinite(Number(value)) || Number(value) < 0);
     if (!invalid) return false;
@@ -1321,6 +1399,8 @@ function validateDeviceTimingDraft() {
     return true;
   })));
   if (invalidLabel) throw new Error(`${invalidLabel} 必须是大于或等于 0 的有限秒数`);
+  const fluctuation = state.deviceTimingDraft?.execution?.fluctuation;
+  if (fluctuation?.minimumOffsetSeconds > fluctuation?.maximumOffsetSeconds) throw new Error("执行时间最小波动不能大于最大波动");
 }
 
 /** 保存当前设备的全部时间草稿，并用服务端返回的拓扑刷新排程与可视化数据。 */
@@ -3828,7 +3908,7 @@ function buildPayload() {
     // 初始执行模式随回放/步进模式走，避免 update 启动时的会话重置覆盖用户选择。
     options.scheduleAlphaGoExecutionMode = playbackMode === "step" ? "stepped" : "continuous";
   }
-  return { schemaVersion: EXPECTED_API_SCHEMA, workspaceDeviceId: state.workspaceDeviceId, workspaceTestId: state.testCaseId, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options, hongYeCheck: hongYeCheckEnabled(), compatibilityMode: compatibilityModeEnabled(), skipBaseline: skipBaselineEnabled(), cleanValidationTypes: cleanValidationTypes(), recipes: collectRecipes(routes), cleans, routes, rounds: instances.rounds };
+  return { schemaVersion: EXPECTED_API_SCHEMA, workspaceDeviceId: state.workspaceDeviceId, workspaceTestId: state.testCaseId, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options, hongYeCheck: hongYeCheckEnabled(), compatibilityMode: compatibilityModeEnabled(), executionTimingEnabled: executionTimingEnabled(), skipBaseline: skipBaselineEnabled(), cleanValidationTypes: cleanValidationTypes(), recipes: collectRecipes(routes), cleans, routes, rounds: instances.rounds };
 }
 
 /** 把数字输入限制在 [min, max] 并回填 DOM，防止手输越界值。 */
@@ -3867,6 +3947,7 @@ function currentRunSettingsPreferences() {
     compatibilityMode: compatibilityModeEnabled(),
     hongYeCheck: hongYeCheckEnabled(),
     skipBaseline: skipBaselineEnabled(),
+    executionTimingEnabled: executionTimingEnabled(),
     maximumWorkers: batchParallelism(),
     validationWorkers: validationParallelism(),
     cleanValidationTypes: cleanValidationTypes(),
@@ -3880,6 +3961,7 @@ function applyRunSettingsPreferences(settings) {
     compatibilityMode: "compatibilityModeInput",
     hongYeCheck: "hongYeCheckInput",
     skipBaseline: "skipBaselineInput",
+    executionTimingEnabled: "executionTimingEnabledInput",
   };
   Object.entries(checkboxFields).forEach(([field, elementId]) => {
     const input = document.getElementById(elementId);
@@ -3921,6 +4003,11 @@ function hongYeCheckEnabled() {
   return document.getElementById("hongYeCheckInput")?.checked === true;
 }
 
+/** 返回是否在兼容推进中应用设备实际执行时间。 */
+function executionTimingEnabled() {
+  return compatibilityModeEnabled() && document.getElementById("executionTimingEnabledInput")?.checked === true;
+}
+
 let runSettingsTrigger = null;
 
 /** 更新齿轮按钮的无障碍摘要，并标记是否偏离推荐默认设置。 */
@@ -3930,19 +4017,22 @@ function updateRunSettingsButtonLabel() {
   const compatibility = document.getElementById("compatibilityModeInput")?.checked === true;
   const hongYe = document.getElementById("hongYeCheckInput")?.checked === true;
   const skipBaseline = document.getElementById("skipBaselineInput")?.checked === true;
+  const executionTiming = document.getElementById("executionTimingEnabledInput")?.checked === true;
   const algorithmWorkers = batchParallelism();
   const validationWorkers = validationParallelism();
   const enabledCleanTypes = cleanValidationTypes();
   const validationInput = document.getElementById("validationParallelismInput");
   if (validationInput) validationInput.disabled = !hongYe;
-  const labels = [compatibility && "兼容模式", hongYe && "HongYe Check", skipBaseline && "跳过 Baseline", enabledCleanTypes.length !== CLEAN_VALIDATION_TYPES.length && `Clean 校验 ${enabledCleanTypes.length}/${CLEAN_VALIDATION_TYPES.length}`].filter(Boolean);
+  const executionInput = document.getElementById("executionTimingEnabledInput");
+  if (executionInput) executionInput.disabled = !compatibility;
+  const labels = [compatibility && "兼容模式", executionTiming && compatibility && "执行时间模拟", hongYe && "HongYe Check", skipBaseline && "跳过 Baseline", enabledCleanTypes.length !== CLEAN_VALIDATION_TYPES.length && `Clean 校验 ${enabledCleanTypes.length}/${CLEAN_VALIDATION_TYPES.length}`].filter(Boolean);
   const parallelism = `算法×${algorithmWorkers}${hongYe ? ` 校验×${validationWorkers}` : ""}`;
   const summary = labels.length ? `运行设置：${labels.join("、")}（${parallelism}）` : `运行设置：${parallelism}`;
   button.setAttribute("aria-label", summary);
   button.setAttribute("title", summary);
   button.classList.toggle(
     "is-customized",
-    !compatibility || !hongYe || !skipBaseline
+    !compatibility || executionTiming || !hongYe || !skipBaseline
       || algorithmWorkers !== 4 || validationWorkers !== 2 || enabledCleanTypes.length !== CLEAN_VALIDATION_TYPES.length,
   );
 }
@@ -4472,7 +4562,7 @@ async function runCurrentTestGroup(selectedTestIds = null) {
     const response = await fetch("/api/run-batch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ deviceId: state.workspaceDeviceId, group: state.activeTestGroup, testIds: tests.map(test => test.id), strategy: state.strategy, options: state.options, hongYeCheck: hongYeCheckEnabled(), compatibilityMode: compatibilityModeEnabled(), skipBaseline: skipBaselineEnabled(), maximumWorkers: batchParallelism(), validationWorkers: validationParallelism(), cleanValidationTypes: cleanValidationTypes() }),
+      body: JSON.stringify({ deviceId: state.workspaceDeviceId, group: state.activeTestGroup, testIds: tests.map(test => test.id), strategy: state.strategy, options: state.options, hongYeCheck: hongYeCheckEnabled(), compatibilityMode: compatibilityModeEnabled(), executionTimingEnabled: executionTimingEnabled(), skipBaseline: skipBaselineEnabled(), maximumWorkers: batchParallelism(), validationWorkers: validationParallelism(), cleanValidationTypes: cleanValidationTypes() }),
     });
     let result = await response.json();
     if (!response.ok || !result.batchId || !Array.isArray(result.items)) throw new Error(result.error || `服务返回 ${response.status}`);
@@ -5363,7 +5453,7 @@ document.getElementById("batchRunButton").addEventListener("click", runCurrentTe
 document.getElementById("openRunSettingsButton").addEventListener("click", openRunSettingsDialog);
 document.getElementById("runSettingsDialogClose").addEventListener("click", closeRunSettingsDialog);
 document.getElementById("runSettingsDialog").addEventListener("close", finishRunSettingsDialog);
-["hongYeCheckInput", "compatibilityModeInput", "skipBaselineInput", "batchParallelismInput", "validationParallelismInput", ...CLEAN_VALIDATION_TYPES.map(type => `cleanValidation${type[0].toUpperCase()}${type.slice(1)}Input`)].forEach(id => {
+["hongYeCheckInput", "compatibilityModeInput", "executionTimingEnabledInput", "skipBaselineInput", "batchParallelismInput", "validationParallelismInput", ...CLEAN_VALIDATION_TYPES.map(type => `cleanValidation${type[0].toUpperCase()}${type.slice(1)}Input`)].forEach(id => {
   document.getElementById(id).addEventListener("change", () => {
     runSettingsPreferencesDirty = true;
     updateRunSettingsButtonLabel();
@@ -5460,10 +5550,36 @@ document.getElementById("drawerLayer").addEventListener("click", event => { if (
 document.addEventListener("keydown", event => { if (event.key === "Escape") closeStepDrawer(); });
 document.addEventListener("keydown", event => { const card = event.target.closest?.("[data-step-card]"); if (card && event.key === "Enter") openPJobStepDrawer(Number(card.dataset.routeIndex), Number(card.dataset.stageIndex)); });
 document.addEventListener("input", event => {
-  if (event.target.matches("[data-device-timing-target]")) updateDeviceTimingFromControl(event.target);
+  if (event.target.matches("[data-device-timing-target], [data-device-execution-target]")) updateDeviceTimingFromControl(event.target);
+  const execution = state.deviceTimingDraft?.execution;
+  if (execution && event.target.id === "executionFluctuationRatio") {
+    execution.fluctuation.ratio = Math.max(0, Math.min(1, (Number(event.target.value) || 0) / 100));
+    markDeviceTimingDirty();
+  }
+  if (execution && event.target.id === "executionMinimumOffset") {
+    execution.fluctuation.minimumOffsetSeconds = Number(event.target.value);
+    markDeviceTimingDirty();
+  }
+  if (execution && event.target.id === "executionMaximumOffset") {
+    execution.fluctuation.maximumOffsetSeconds = Number(event.target.value);
+    markDeviceTimingDirty();
+  }
   if (event.target.matches("[data-scope], [data-option], [data-time-index], [data-round-time-index]")) updateStateFromControl(event.target);
 });
 document.addEventListener("change", event => {
+  const execution = state.deviceTimingDraft?.execution;
+  if (execution && event.target.name === "executionTimingMode") {
+    execution.mode = event.target.value === "fluctuation" ? "fluctuation" : "fixed";
+    markDeviceTimingDirty();
+    renderDeviceTimingConfiguration();
+    return;
+  }
+  if (execution && event.target.id === "executionFluctuationKind") {
+    execution.fluctuation.kind = event.target.value === "offset" ? "offset" : "ratio";
+    markDeviceTimingDirty();
+    renderDeviceTimingConfiguration();
+    return;
+  }
   const transferAxis = event.target.closest?.("[data-robot-transfer-axis]");
   if (transferAxis) {
     state.deviceRobotTransferAxes[transferAxis.dataset.robotTransferAxis] = transferAxis.value;

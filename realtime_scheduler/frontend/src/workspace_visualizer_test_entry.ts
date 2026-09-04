@@ -22,6 +22,7 @@ export {
   renderEquipmentTopology,
   renderSchedulePerformance,
   renderThroughputChart,
+  simplifyThroughputPoints,
   renderWaferResidenceChart,
   snapshotWithFullDeviceModules,
 } from "./workspace_visualizer";

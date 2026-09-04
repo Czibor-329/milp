@@ -2039,6 +2039,20 @@ test("产能图可在从零累计和可选 2 至 10 片滑动窗口间切换", (
   assert.match(chart, /class="throughput-chart-value"/);
 });
 
+test("大批量产能趋势精简绘图点并保留首尾和尖峰", () => {
+  const points = Array.from({ length: 300 }, (_, index) => ({
+    wafer: `W${index + 1}`,
+    completedWaferIndex: index + 1,
+    completedAt: index * 10,
+    throughputPerHour: index === 149 ? 999 : 300 + Math.sin(index / 8) * 10,
+  }));
+  const simplified = logic.simplifyThroughputPoints(points);
+  assert.ok(simplified.length <= 72);
+  assert.equal(simplified[0], points[0]);
+  assert.equal(simplified.at(-1), points.at(-1));
+  assert.ok(simplified.includes(points[149]));
+});
+
 test("双 Actor 回放在 Pick 结束后的原子决策边界暂停", async () => {
   const originalRequestAnimationFrame = global.requestAnimationFrame;
   const originalCancelAnimationFrame = global.cancelAnimationFrame;

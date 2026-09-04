@@ -2348,6 +2348,26 @@ function filterThroughputPoints(points, range) {
   }
   return points;
 }
+var MAXIMUM_THROUGHPUT_DRAW_POINTS = 72;
+var MAXIMUM_THROUGHPUT_VALUE_LABELS = 12;
+function simplifyThroughputPoints(points) {
+  if (points.length <= MAXIMUM_THROUGHPUT_DRAW_POINTS) return points;
+  const interior = points.slice(1, -1);
+  const bucketCount = Math.max(1, Math.floor((MAXIMUM_THROUGHPUT_DRAW_POINTS - 2) / 2));
+  const selected = [points[0]];
+  for (let bucket = 0; bucket < bucketCount; bucket += 1) {
+    const start = Math.floor(bucket * interior.length / bucketCount);
+    const end = Math.max(start + 1, Math.floor((bucket + 1) * interior.length / bucketCount));
+    const rows = interior.slice(start, end).map((point, index) => ({ point, index: start + index }));
+    const minimum = rows.reduce((best, row) => row.point.throughputPerHour < best.point.throughputPerHour ? row : best);
+    const maximum = rows.reduce((best, row) => row.point.throughputPerHour > best.point.throughputPerHour ? row : best);
+    [minimum, maximum].sort((left, right) => left.index - right.index).forEach((row) => {
+      if (selected[selected.length - 1] !== row.point) selected.push(row.point);
+    });
+  }
+  selected.push(points[points.length - 1]);
+  return selected;
+}
 function renderThroughputSvg(points, title) {
   const width = 760;
   const height = 174;
@@ -2357,8 +2377,10 @@ function renderThroughputSvg(points, title) {
   const bottom = 12;
   const usableWidth = width - left - right;
   const usableHeight = height - top - bottom;
-  const values = points.map((point) => Math.max(0, Number(point.throughputPerHour) || 0));
-  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+  const allValues = points.map((point) => Math.max(0, Number(point.throughputPerHour) || 0));
+  const mean = allValues.reduce((sum, value) => sum + value, 0) / allValues.length;
+  const displayPoints = simplifyThroughputPoints(points);
+  const values = displayPoints.map((point) => Math.max(0, Number(point.throughputPerHour) || 0));
   const observedMinimum = Math.min(...values);
   const observedMaximum = Math.max(...values);
   const spread = Math.max(observedMaximum - observedMinimum, Math.max(mean * 0.04, 1));
@@ -2367,10 +2389,10 @@ function renderThroughputSvg(points, title) {
   const minimum = Math.max(0, Math.floor((observedMinimum - padding) / step) * step);
   const maximum = Math.max(minimum + step * 3, Math.ceil((observedMaximum + padding) / step) * step);
   const yRange = maximum - minimum;
-  const firstIndex = points[0].completedWaferIndex;
-  const lastIndex = points[points.length - 1].completedWaferIndex;
+  const firstIndex = displayPoints[0].completedWaferIndex;
+  const lastIndex = displayPoints[displayPoints.length - 1].completedWaferIndex;
   const indexRange = Math.max(1, lastIndex - firstIndex);
-  const coordinates = points.map((point, index) => ({
+  const coordinates = displayPoints.map((point, index) => ({
     x: left + (point.completedWaferIndex - firstIndex) / indexRange * usableWidth,
     y: top + (1 - (values[index] - minimum) / yRange) * usableHeight
   }));
@@ -2378,10 +2400,11 @@ function renderThroughputSvg(points, title) {
     if (index === 0) return `M ${point.x.toFixed(2)} ${point.y.toFixed(2)}`;
     return `${path2} L ${point.x.toFixed(2)} ${point.y.toFixed(2)}`;
   }, "");
-  const latest = points[points.length - 1];
+  const latest = displayPoints[displayPoints.length - 1];
   const yForValue = (value) => top + (1 - (value - minimum) / yRange) * usableHeight;
   const meanY = yForValue(mean);
-  const pointTargets = points.map((point, index) => {
+  const labelStride = Math.max(1, Math.ceil(displayPoints.length / MAXIMUM_THROUGHPUT_VALUE_LABELS));
+  const pointTargets = displayPoints.map((point, index) => {
     const coordinate = coordinates[index];
     const value = values[index];
     const previousValue = values[index - 1] ?? value;
@@ -2389,7 +2412,8 @@ function renderThroughputSvg(points, title) {
     const isLocalMinimum = index > 0 && index < values.length - 1 && value <= previousValue && value <= nextValue;
     const labelY = isLocalMinimum ? Math.min(top + usableHeight - 4, coordinate.y + 17) : Math.max(top + 10, coordinate.y - 9);
     const labelClass = isLocalMinimum ? "throughput-chart-value is-below" : "throughput-chart-value";
-    return `<text class="${labelClass}" x="${coordinate.x.toFixed(2)}" y="${labelY.toFixed(2)}" text-anchor="middle">${value.toFixed(1)}</text><circle class="throughput-chart-point" cx="${coordinate.x.toFixed(2)}" cy="${coordinate.y.toFixed(2)}" r="2.6"/>`;
+    const showLabel = index === 0 || index === displayPoints.length - 1 || index % labelStride === 0;
+    return `${showLabel ? `<text class="${labelClass}" x="${coordinate.x.toFixed(2)}" y="${labelY.toFixed(2)}" text-anchor="middle">${value.toFixed(1)}</text>` : ""}<circle class="throughput-chart-point" cx="${coordinate.x.toFixed(2)}" cy="${coordinate.y.toFixed(2)}" r="${displayPoints.length > 36 ? "1.8" : "2.6"}"/>`;
   }).join("");
   return `
         <svg class="throughput-chart-svg" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="${title}\uFF0C\u6700\u65B0\u4E3A\u7B2C ${latest.completedWaferIndex} \u7247\uFF0C\u6BCF\u5C0F\u65F6 ${latest.throughputPerHour.toFixed(1)} \u7247">
@@ -19154,12 +19178,72 @@ function buildDeviceTimingDraft(device) {
     }
     draft.robots[robotName] = timing;
   });
+  const configuredExecution = device?.ExecutionTiming && typeof device.ExecutionTiming === "object" ? device.ExecutionTiming : {};
+  const overlayTiming = (defaults, configured) => Object.fromEntries(Object.entries(defaults).map(([itemName, fields]) => [
+    itemName,
+    Object.fromEntries(Object.entries(fields).map(([fieldName, values]) => {
+      const configuredValues = configured?.[itemName]?.[fieldName];
+      if (Array.isArray(values)) {
+        return [fieldName, values.map((value, index) => Number.isFinite(Number(configuredValues?.[index])) ? Number(configuredValues[index]) : value)];
+      }
+      return [fieldName, Object.fromEntries(Object.entries(values).map(([key, value]) => [
+        key,
+        Number.isFinite(Number(configuredValues?.[key])) ? Number(configuredValues[key]) : value
+      ]))];
+    }))
+  ]));
+  const rawFluctuation = configuredExecution.fluctuation || {};
+  draft.execution = {
+    mode: configuredExecution.mode === "fluctuation" ? "fluctuation" : "fixed",
+    fluctuation: {
+      kind: rawFluctuation.kind === "offset" ? "offset" : "ratio",
+      ratio: Math.max(0, Math.min(1, Number(rawFluctuation.ratio) || 0)),
+      minimumOffsetSeconds: Number.isFinite(Number(rawFluctuation.minimumOffsetSeconds)) ? Number(rawFluctuation.minimumOffsetSeconds) : 0,
+      maximumOffsetSeconds: Number.isFinite(Number(rawFluctuation.maximumOffsetSeconds)) ? Number(rawFluctuation.maximumOffsetSeconds) : 0
+    },
+    stations: overlayTiming(draft.stations, configuredExecution.stations),
+    robots: overlayTiming(draft.robots, configuredExecution.robots)
+  };
   return draft;
+}
+function configuredExecutionTime(dataset) {
+  const section = dataset["device-timing-target"]?.startsWith("station") ? "stations" : "robots";
+  const fields = state.deviceTimingDraft?.execution?.[section]?.[dataset["device-name"]];
+  if (!fields) return 0;
+  return dataset["device-timing-target"]?.endsWith("map") ? fields[dataset["timing-field"]]?.[dataset["timing-key"]] ?? 0 : fields[dataset["timing-field"]]?.[Number(dataset["timing-index"])] ?? 0;
 }
 function deviceTimeInput(value, label, dataset) {
   const attributes = Object.entries(dataset).map(([name, item]) => `data-${name}="${escapeHtml4(item)}"`).join(" ");
   const numericValue = Number(value);
-  return `<label class="device-time-input"><input type="number" min="0" step="any" inputmode="decimal" required value="${Number.isFinite(numericValue) ? numericValue : 0}" aria-label="${escapeHtml4(label)}" ${attributes}><span>s</span></label>`;
+  const executionValue = Number(configuredExecutionTime(dataset));
+  const executionDisabled = state.deviceTimingDraft?.execution?.mode === "fluctuation" ? " disabled" : "";
+  const executionAttributes = attributes.replaceAll("data-device-timing-target", "data-device-execution-target");
+  return `<span class="device-time-pair"><label><small>\u7406\u8BBA</small><span class="device-time-input"><input type="number" min="0" step="any" inputmode="decimal" required value="${Number.isFinite(numericValue) ? numericValue : 0}" aria-label="${escapeHtml4(label)}\uFF08\u7406\u8BBA\uFF09" ${attributes}><span>s</span></span></label><label><small>\u6267\u884C</small><span class="device-time-input"><input type="number" min="0" step="any" inputmode="decimal" required value="${Number.isFinite(executionValue) ? executionValue : 0}" aria-label="${escapeHtml4(label)}\uFF08\u56FA\u5B9A\u6267\u884C\uFF09" ${executionAttributes}${executionDisabled}><span>s</span></span></label></span>`;
+}
+function renderExecutionTimingConfiguration() {
+  const container = document.getElementById("deviceExecutionTimingEditor");
+  const execution = state.deviceTimingDraft?.execution;
+  if (!container || !execution) {
+    if (container) container.innerHTML = `<div class="device-config-empty"><strong>\u6682\u65E0\u6267\u884C\u65F6\u95F4\u914D\u7F6E</strong><span>\u8BF7\u5148\u9009\u62E9\u8BBE\u5907\u3002</span></div>`;
+    return;
+  }
+  const fluctuating = execution.mode === "fluctuation";
+  const offset = execution.fluctuation.kind === "offset";
+  container.innerHTML = `
+    <section class="execution-timing-card">
+      <header><div><h3>\u5B9E\u9645\u52A8\u4F5C\u65F6\u957F</h3><p>\u7B97\u6CD5\u59CB\u7EC8\u4F7F\u7528\u7406\u8BBA\u65F6\u95F4\uFF1B\u5E73\u53F0\u72B6\u6001\u673A\u53EA\u5728\u8FD0\u884C\u8BBE\u7F6E\u542F\u7528\u540E\u5E94\u7528\u8FD9\u91CC\u7684\u6267\u884C\u65F6\u95F4\u3002</p></div></header>
+      <div class="execution-mode-grid" role="radiogroup" aria-label="\u6267\u884C\u65F6\u95F4\u6A21\u5F0F">
+        <label class="run-setting-option"><span class="run-setting-option-main"><input type="radio" name="executionTimingMode" value="fixed" ${fluctuating ? "" : "checked"}><span>\u56FA\u5B9A\u6267\u884C\u503C</span></span><small>\u4F7F\u7528\u8BBE\u5907\u65F6\u95F4\u548C\u673A\u5668\u624B\u65F6\u95F4\u8868\u4E2D\u5E76\u5217\u7684\u201C\u6267\u884C\u201D\u503C\u3002</small></label>
+        <label class="run-setting-option"><span class="run-setting-option-main"><input type="radio" name="executionTimingMode" value="fluctuation" ${fluctuating ? "checked" : ""}><span>\u7406\u8BBA\u503C\u968F\u673A\u6CE2\u52A8</span></span><small>\u4EE5\u6BCF\u4E2A Move \u7684\u7406\u8BBA\u65F6\u957F\u4E3A\u5747\u503C\uFF0C\u6309 seed \u751F\u6210\u53EF\u590D\u73B0\u6837\u672C\u3002</small></label>
+      </div>
+      <div class="execution-fluctuation-fields" ${fluctuating ? "" : "hidden"}>
+        <label class="field"><span>\u6CE2\u52A8\u65B9\u5F0F</span><select id="executionFluctuationKind"><option value="ratio" ${offset ? "" : "selected"}>\u6BD4\u4F8B\uFF08\xB1\uFF09</option><option value="offset" ${offset ? "selected" : ""}>\u6700\u5C0F/\u6700\u5927\u504F\u79FB</option></select></label>
+        <label class="field" ${offset ? "hidden" : ""}><span>\u6CE2\u52A8\u6BD4\u4F8B</span><input id="executionFluctuationRatio" type="number" min="0" max="100" step="0.1" value="${(execution.fluctuation.ratio * 100).toFixed(1)}"><small>\u4F8B\u5982 10 \u8868\u793A\u7406\u8BBA\u65F6\u957F\u7684 \xB110%\u3002</small></label>
+        <label class="field" ${offset ? "" : "hidden"}><span>\u6700\u5C0F\u6CE2\u52A8\uFF08\u79D2\uFF09</span><input id="executionMinimumOffset" type="number" step="any" value="${execution.fluctuation.minimumOffsetSeconds}"></label>
+        <label class="field" ${offset ? "" : "hidden"}><span>\u6700\u5927\u6CE2\u52A8\uFF08\u79D2\uFF09</span><input id="executionMaximumOffset" type="number" step="any" value="${execution.fluctuation.maximumOffsetSeconds}"></label>
+      </div>
+      <div class="device-time-inline-empty">\u56FA\u5B9A\u6A21\u5F0F\u7684\u5177\u4F53\u6267\u884C\u503C\u4F4D\u4E8E\u201C\u8BBE\u5907\u65F6\u95F4\u201D\u548C\u201C\u673A\u5668\u624B\u65F6\u95F4\u201D\u8868\u683C\uFF0C\u6BCF\u4E2A\u7406\u8BBA\u503C\u53F3\u4FA7\u5747\u6709\u5BF9\u5E94\u6267\u884C\u503C\u3002</div>
+    </section>`;
 }
 function renderDeviceConfigHeader() {
   const hasDevice = Boolean(state.workspaceDeviceId && state.baseDevice);
@@ -19393,6 +19477,7 @@ function renderDeviceTimingConfiguration() {
   if (state.deviceConfigSection === "station-time") renderDeviceStationTiming();
   if (state.deviceConfigSection === "robot-time") renderDeviceRobotTiming();
   if (state.deviceConfigSection === "robot-slot") renderRobotSlots();
+  if (state.deviceConfigSection === "execution-time") renderExecutionTimingConfiguration();
 }
 function resetDeviceTimingDraft(message = "\u5F53\u524D\u8BBE\u5907\u65F6\u95F4\u53C2\u6570\u5DF2\u52A0\u8F7D") {
   state.deviceTimingDraft = state.baseDevice ? buildDeviceTimingDraft(state.baseDevice) : null;
@@ -19412,10 +19497,13 @@ function updateDeviceTimingFromControl(control) {
   const valid = control.value.trim() !== "" && Number.isFinite(value) && value >= 0;
   control.setCustomValidity(valid ? "" : "\u8BF7\u8F93\u5165\u5927\u4E8E\u6216\u7B49\u4E8E 0 \u7684\u6709\u9650\u79D2\u6570");
   control.classList.toggle("is-invalid", !valid);
-  const section = control.dataset.deviceTimingTarget?.startsWith("station") ? "stations" : "robots";
-  const item = state.deviceTimingDraft?.[section]?.[control.dataset.deviceName];
+  const targetName = control.dataset.deviceExecutionTarget ? "deviceExecutionTarget" : "deviceTimingTarget";
+  const target = control.dataset[targetName];
+  const section = target?.startsWith("station") ? "stations" : "robots";
+  const root = targetName === "deviceExecutionTarget" ? state.deviceTimingDraft?.execution : state.deviceTimingDraft;
+  const item = root?.[section]?.[control.dataset.deviceName];
   if (!item) return;
-  if (control.dataset.deviceTimingTarget?.endsWith("map")) {
+  if (target?.endsWith("map")) {
     item[control.dataset.timingField][control.dataset.timingKey] = valid ? value : Number.NaN;
   } else {
     item[control.dataset.timingField][Number(control.dataset.timingIndex)] = valid ? value : Number.NaN;
@@ -19424,7 +19512,13 @@ function updateDeviceTimingFromControl(control) {
 }
 function validateDeviceTimingDraft() {
   let invalidLabel = "";
-  Object.entries(state.deviceTimingDraft || {}).some(([sectionName, items]) => Object.entries(items).some(([itemName, fields]) => Object.entries(fields).some(([fieldName, values]) => {
+  const timingSections = {
+    stations: state.deviceTimingDraft?.stations || {},
+    robots: state.deviceTimingDraft?.robots || {},
+    executionStations: state.deviceTimingDraft?.execution?.stations || {},
+    executionRobots: state.deviceTimingDraft?.execution?.robots || {}
+  };
+  Object.entries(timingSections).some(([sectionName, items]) => Object.entries(items).some(([itemName, fields]) => Object.entries(fields).some(([fieldName, values]) => {
     const rows = Array.isArray(values) ? values.map((value, index) => [index, value]) : Object.entries(values || {});
     const invalid = rows.find(([, value]) => !Number.isFinite(Number(value)) || Number(value) < 0);
     if (!invalid) return false;
@@ -19432,6 +19526,8 @@ function validateDeviceTimingDraft() {
     return true;
   })));
   if (invalidLabel) throw new Error(`${invalidLabel} \u5FC5\u987B\u662F\u5927\u4E8E\u6216\u7B49\u4E8E 0 \u7684\u6709\u9650\u79D2\u6570`);
+  const fluctuation = state.deviceTimingDraft?.execution?.fluctuation;
+  if (fluctuation?.minimumOffsetSeconds > fluctuation?.maximumOffsetSeconds) throw new Error("\u6267\u884C\u65F6\u95F4\u6700\u5C0F\u6CE2\u52A8\u4E0D\u80FD\u5927\u4E8E\u6700\u5927\u6CE2\u52A8");
 }
 async function saveDeviceTiming() {
   if (!state.deviceTimingDirty || state.deviceTimingSaving || !state.workspaceDeviceId) return;
@@ -21754,7 +21850,7 @@ function buildPayload() {
   if (state.strategy === "schedule-alphago") {
     options.scheduleAlphaGoExecutionMode = playbackMode === "step" ? "stepped" : "continuous";
   }
-  return { schemaVersion: EXPECTED_API_SCHEMA, workspaceDeviceId: state.workspaceDeviceId, workspaceTestId: state.testCaseId, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options, hongYeCheck: hongYeCheckEnabled(), compatibilityMode: compatibilityModeEnabled(), skipBaseline: skipBaselineEnabled(), cleanValidationTypes: cleanValidationTypes(), recipes: collectRecipes(routes), cleans, routes, rounds: instances.rounds };
+  return { schemaVersion: EXPECTED_API_SCHEMA, workspaceDeviceId: state.workspaceDeviceId, workspaceTestId: state.testCaseId, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options, hongYeCheck: hongYeCheckEnabled(), compatibilityMode: compatibilityModeEnabled(), executionTimingEnabled: executionTimingEnabled(), skipBaseline: skipBaselineEnabled(), cleanValidationTypes: cleanValidationTypes(), recipes: collectRecipes(routes), cleans, routes, rounds: instances.rounds };
 }
 function clampParallelismInput(elementId, min, max, fallback) {
   const input = document.getElementById(elementId);
@@ -21781,6 +21877,7 @@ function currentRunSettingsPreferences() {
     compatibilityMode: compatibilityModeEnabled(),
     hongYeCheck: hongYeCheckEnabled(),
     skipBaseline: skipBaselineEnabled(),
+    executionTimingEnabled: executionTimingEnabled(),
     maximumWorkers: batchParallelism(),
     validationWorkers: validationParallelism(),
     cleanValidationTypes: cleanValidationTypes()
@@ -21791,7 +21888,8 @@ function applyRunSettingsPreferences(settings) {
   const checkboxFields = {
     compatibilityMode: "compatibilityModeInput",
     hongYeCheck: "hongYeCheckInput",
-    skipBaseline: "skipBaselineInput"
+    skipBaseline: "skipBaselineInput",
+    executionTimingEnabled: "executionTimingEnabledInput"
   };
   Object.entries(checkboxFields).forEach(([field, elementId]) => {
     const input = document.getElementById(elementId);
@@ -21826,6 +21924,9 @@ async function saveRunSettingsPreferences() {
 function hongYeCheckEnabled() {
   return document.getElementById("hongYeCheckInput")?.checked === true;
 }
+function executionTimingEnabled() {
+  return compatibilityModeEnabled() && document.getElementById("executionTimingEnabledInput")?.checked === true;
+}
 var runSettingsTrigger = null;
 function updateRunSettingsButtonLabel() {
   const button = document.getElementById("openRunSettingsButton");
@@ -21833,19 +21934,22 @@ function updateRunSettingsButtonLabel() {
   const compatibility = document.getElementById("compatibilityModeInput")?.checked === true;
   const hongYe = document.getElementById("hongYeCheckInput")?.checked === true;
   const skipBaseline = document.getElementById("skipBaselineInput")?.checked === true;
+  const executionTiming = document.getElementById("executionTimingEnabledInput")?.checked === true;
   const algorithmWorkers = batchParallelism();
   const validationWorkers = validationParallelism();
   const enabledCleanTypes = cleanValidationTypes();
   const validationInput = document.getElementById("validationParallelismInput");
   if (validationInput) validationInput.disabled = !hongYe;
-  const labels = [compatibility && "\u517C\u5BB9\u6A21\u5F0F", hongYe && "HongYe Check", skipBaseline && "\u8DF3\u8FC7 Baseline", enabledCleanTypes.length !== CLEAN_VALIDATION_TYPES.length && `Clean \u6821\u9A8C ${enabledCleanTypes.length}/${CLEAN_VALIDATION_TYPES.length}`].filter(Boolean);
+  const executionInput = document.getElementById("executionTimingEnabledInput");
+  if (executionInput) executionInput.disabled = !compatibility;
+  const labels = [compatibility && "\u517C\u5BB9\u6A21\u5F0F", executionTiming && compatibility && "\u6267\u884C\u65F6\u95F4\u6A21\u62DF", hongYe && "HongYe Check", skipBaseline && "\u8DF3\u8FC7 Baseline", enabledCleanTypes.length !== CLEAN_VALIDATION_TYPES.length && `Clean \u6821\u9A8C ${enabledCleanTypes.length}/${CLEAN_VALIDATION_TYPES.length}`].filter(Boolean);
   const parallelism = `\u7B97\u6CD5\xD7${algorithmWorkers}${hongYe ? ` \u6821\u9A8C\xD7${validationWorkers}` : ""}`;
   const summary = labels.length ? `\u8FD0\u884C\u8BBE\u7F6E\uFF1A${labels.join("\u3001")}\uFF08${parallelism}\uFF09` : `\u8FD0\u884C\u8BBE\u7F6E\uFF1A${parallelism}`;
   button.setAttribute("aria-label", summary);
   button.setAttribute("title", summary);
   button.classList.toggle(
     "is-customized",
-    !compatibility || !hongYe || !skipBaseline || algorithmWorkers !== 4 || validationWorkers !== 2 || enabledCleanTypes.length !== CLEAN_VALIDATION_TYPES.length
+    !compatibility || executionTiming || !hongYe || !skipBaseline || algorithmWorkers !== 4 || validationWorkers !== 2 || enabledCleanTypes.length !== CLEAN_VALIDATION_TYPES.length
   );
 }
 function openRunSettingsDialog() {
@@ -22348,7 +22452,7 @@ async function runCurrentTestGroup(selectedTestIds = null) {
     const response = await fetch("/api/run-batch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ deviceId: state.workspaceDeviceId, group: state.activeTestGroup, testIds: tests.map((test) => test.id), strategy: state.strategy, options: state.options, hongYeCheck: hongYeCheckEnabled(), compatibilityMode: compatibilityModeEnabled(), skipBaseline: skipBaselineEnabled(), maximumWorkers: batchParallelism(), validationWorkers: validationParallelism(), cleanValidationTypes: cleanValidationTypes() })
+      body: JSON.stringify({ deviceId: state.workspaceDeviceId, group: state.activeTestGroup, testIds: tests.map((test) => test.id), strategy: state.strategy, options: state.options, hongYeCheck: hongYeCheckEnabled(), compatibilityMode: compatibilityModeEnabled(), executionTimingEnabled: executionTimingEnabled(), skipBaseline: skipBaselineEnabled(), maximumWorkers: batchParallelism(), validationWorkers: validationParallelism(), cleanValidationTypes: cleanValidationTypes() })
     });
     let result = await response.json();
     if (!response.ok || !result.batchId || !Array.isArray(result.items)) throw new Error(result.error || `\u670D\u52A1\u8FD4\u56DE ${response.status}`);
@@ -23189,7 +23293,7 @@ document.getElementById("batchRunButton").addEventListener("click", runCurrentTe
 document.getElementById("openRunSettingsButton").addEventListener("click", openRunSettingsDialog);
 document.getElementById("runSettingsDialogClose").addEventListener("click", closeRunSettingsDialog);
 document.getElementById("runSettingsDialog").addEventListener("close", finishRunSettingsDialog);
-["hongYeCheckInput", "compatibilityModeInput", "skipBaselineInput", "batchParallelismInput", "validationParallelismInput", ...CLEAN_VALIDATION_TYPES.map((type) => `cleanValidation${type[0].toUpperCase()}${type.slice(1)}Input`)].forEach((id) => {
+["hongYeCheckInput", "compatibilityModeInput", "executionTimingEnabledInput", "skipBaselineInput", "batchParallelismInput", "validationParallelismInput", ...CLEAN_VALIDATION_TYPES.map((type) => `cleanValidation${type[0].toUpperCase()}${type.slice(1)}Input`)].forEach((id) => {
   document.getElementById(id).addEventListener("change", () => {
     runSettingsPreferencesDirty = true;
     updateRunSettingsButtonLabel();
@@ -23301,10 +23405,36 @@ document.addEventListener("keydown", (event) => {
   if (card && event.key === "Enter") openPJobStepDrawer(Number(card.dataset.routeIndex), Number(card.dataset.stageIndex));
 });
 document.addEventListener("input", (event) => {
-  if (event.target.matches("[data-device-timing-target]")) updateDeviceTimingFromControl(event.target);
+  if (event.target.matches("[data-device-timing-target], [data-device-execution-target]")) updateDeviceTimingFromControl(event.target);
+  const execution = state.deviceTimingDraft?.execution;
+  if (execution && event.target.id === "executionFluctuationRatio") {
+    execution.fluctuation.ratio = Math.max(0, Math.min(1, (Number(event.target.value) || 0) / 100));
+    markDeviceTimingDirty();
+  }
+  if (execution && event.target.id === "executionMinimumOffset") {
+    execution.fluctuation.minimumOffsetSeconds = Number(event.target.value);
+    markDeviceTimingDirty();
+  }
+  if (execution && event.target.id === "executionMaximumOffset") {
+    execution.fluctuation.maximumOffsetSeconds = Number(event.target.value);
+    markDeviceTimingDirty();
+  }
   if (event.target.matches("[data-scope], [data-option], [data-time-index], [data-round-time-index]")) updateStateFromControl(event.target);
 });
 document.addEventListener("change", (event) => {
+  const execution = state.deviceTimingDraft?.execution;
+  if (execution && event.target.name === "executionTimingMode") {
+    execution.mode = event.target.value === "fluctuation" ? "fluctuation" : "fixed";
+    markDeviceTimingDirty();
+    renderDeviceTimingConfiguration();
+    return;
+  }
+  if (execution && event.target.id === "executionFluctuationKind") {
+    execution.fluctuation.kind = event.target.value === "offset" ? "offset" : "ratio";
+    markDeviceTimingDirty();
+    renderDeviceTimingConfiguration();
+    return;
+  }
   const transferAxis = event.target.closest?.("[data-robot-transfer-axis]");
   if (transferAxis) {
     state.deviceRobotTransferAxes[transferAxis.dataset.robotTransferAxis] = transferAxis.value;

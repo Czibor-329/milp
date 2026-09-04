@@ -24,7 +24,7 @@
 | `realtime_scheduler/frontend/src/` | 表单交互、回放投影、HTML/CSS 呈现、API 客户端 | 指标计算、瓶颈判断、结果持久化 |
 | `realtime_scheduler/backend/api/` | HTTP 请求、静态资源和文档 API | 调度决策、文件布局 |
 | `realtime_scheduler/backend/execution/` | 计划构建、算法运行、实时重算、CJob Cycle 和批量运行 | HTTP、页面渲染 |
-| `realtime_scheduler/backend/workspace/` | v7 存储、迁移和设备/测试业务操作 | 算法决策、前端状态 |
+| `realtime_scheduler/backend/workspace/` | v8 存储、迁移和设备/测试业务操作 | 算法决策、前端状态 |
 | `realtime_scheduler/backend/workspace/catalog_service.py` | 设备、Route、测试组和测试集目录业务 | 交换包格式、后台传输任务 |
 | `realtime_scheduler/backend/workspace/exchange_service.py` | 交换包编解码和设备/测试导入导出规则 | 后台任务状态、普通 CRUD |
 | `realtime_scheduler/backend/workspace/transfer_jobs.py` | 导入导出后台任务、进度状态和制品下载 | 交换包格式、普通 CRUD |

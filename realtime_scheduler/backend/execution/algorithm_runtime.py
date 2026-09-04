@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from realtime_scheduler.backend.bootstrap import *
 from realtime_scheduler.backend.execution.run_state import *
+from realtime_scheduler.backend.execution.move_timing import execution_duration
 
 
 class PlatformMoveListRuntime:
@@ -23,16 +24,29 @@ class PlatformMoveListRuntime:
     Machine 或动作枚举实现。
     """
 
-    def __init__(self, update_params: Mapping[str, Any], output: Mapping[str, Any], *, compatibility_mode: bool = False, skipped_clean_validation_types: Optional[Sequence[str]] = None) -> None:
+    def __init__(
+        self,
+        update_params: Mapping[str, Any],
+        output: Mapping[str, Any],
+        *,
+        compatibility_mode: bool = False,
+        skipped_clean_validation_types: Optional[Sequence[str]] = None,
+        device: Optional[Mapping[str, Any]] = None,
+        execution_timing: Optional[Mapping[str, Any]] = None,
+        execution_timing_seed: int = 0,
+    ) -> None:
         """以标准 update 建立首轮物理快照，并校验算法输出。"""
         self.current_update = deepcopy(dict(update_params))
         self.compatibility_mode = bool(compatibility_mode)
         self.skipped_clean_validation_types = tuple(skipped_clean_validation_types or ())
+        self.device = deepcopy(dict(device or {}))
+        self.execution_timing = deepcopy(dict(execution_timing or {}))
+        self.execution_timing_seed = int(execution_timing_seed)
         initial_state = MachineState.from_sources(None, self.current_update)
         initial_state.skipped_clean_validation_types = set(self.skipped_clean_validation_types)
         initial_moves = deepcopy(list(output.get("MoveList") or []))
         if self.compatibility_mode:
-            initial_moves = materialize_module_parallel_moves(initial_moves, float(self.current_update.get("CurrentTime") or 0.0))
+            initial_moves = self._materialize_moves(initial_moves, float(self.current_update.get("CurrentTime") or 0.0))
         validation_issues = validate_move_list(None, initial_moves, initial_state, skipped_clean_validation_types=self.skipped_clean_validation_types)
         if validation_issues:
             raise MoveListValidationError(
@@ -52,6 +66,19 @@ class PlatformMoveListRuntime:
     def current_plan(self) -> List[dict]:
         """返回当前算法代次的 MoveList 副本。"""
         return self._tracker.materialized_plan
+
+    def _materialize_moves(self, moves: Sequence[Mapping[str, Any]], clock_floor: float) -> List[dict]:
+        """按兼容依赖顺序物化计划，并在启用时替换为设备实际时长。"""
+        resolver = None
+        if self.execution_timing:
+            resolver = lambda move: execution_duration(
+                move, self.device, self.execution_timing, self.execution_timing_seed,
+            )
+        return materialize_module_parallel_moves(
+            moves,
+            clock_floor,
+            duration_resolver=resolver,
+        )
 
     @property
     def state(self) -> MachineState:
@@ -154,7 +181,7 @@ class PlatformMoveListRuntime:
         next_state.refresh_validation_metadata(update_params)
         next_moves = deepcopy(list(output.get("MoveList") or []))
         if self.compatibility_mode:
-            next_moves = materialize_module_parallel_moves(next_moves, float(requested_time))
+            next_moves = self._materialize_moves(next_moves, float(requested_time))
         committed = deepcopy(list(committed_moves))
         validation_issues = validate_move_list(
             None, next_moves, next_state,

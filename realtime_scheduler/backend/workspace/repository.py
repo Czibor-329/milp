@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from realtime_scheduler.backend.bootstrap import *
 from realtime_scheduler.backend.execution.cjob_cycle import _cjob_cycle_count
+from realtime_scheduler.backend.execution.move_timing import default_execution_timing
 from realtime_scheduler.backend.time_utils import _workspace_timestamp
 
 @contextmanager
@@ -858,6 +859,11 @@ def _migrate_workspace_catalog(catalog: Dict[str, Any]) -> bool:
                 configs = test.get("routeConfigs")
                 if isinstance(configs, Mapping) and _migrate_workspace_pjob_route_configs(test, configs):
                     changed = True
+        if source_version < 8:
+            device_data = raw_device.get("device")
+            if isinstance(device_data, dict) and not isinstance(device_data.get("ExecutionTiming"), Mapping):
+                device_data["ExecutionTiming"] = default_execution_timing(device_data)
+                changed = True
         if raw_device.get("cleans") != cleans:
             raw_device["cleans"] = cleans
             changed = True

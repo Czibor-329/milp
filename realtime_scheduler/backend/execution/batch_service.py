@@ -637,6 +637,7 @@ def build_workspace_batch_plan(
     *,
     hongye_check: bool = True,
     compatibility_mode: bool = True,
+    execution_timing_enabled: bool = False,
     clean_validation_types: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
     """将持久化测试与设备共享库组合成可直接执行的单次请求。"""
@@ -688,6 +689,7 @@ def build_workspace_batch_plan(
         "roundCount": len(rounds),
         "hongYeCheck": bool(hongye_check),
         "compatibilityMode": bool(compatibility_mode),
+        "executionTimingEnabled": bool(execution_timing_enabled),
         "cleanValidationTypes": list(clean_validation_types) if clean_validation_types is not None else ["preclean", "postclean", "wacclean", "dummy", "dummywac"],
         "options": merged_options,
         "recipes": _batch_test_recipes(routes, cleans),
@@ -703,6 +705,7 @@ def _workspace_baseline_fingerprint(
     test_case: Mapping[str, Any],
     options: Optional[Mapping[str, Any]] = None,
     compatibility_mode: bool = True,
+    execution_timing_enabled: bool = False,
 ) -> str:
     """对实际 Heuristic 输入做稳定摘要，绑定测试及其引用的共享工艺配置。"""
     plan = build_workspace_batch_plan(
@@ -711,6 +714,7 @@ def _workspace_baseline_fingerprint(
         "heuristic",
         options if options is not None else dict(test_case.get("options") or {}),
         compatibility_mode=compatibility_mode,
+        execution_timing_enabled=execution_timing_enabled,
     )
     canonical = json.dumps(
         {
@@ -839,8 +843,16 @@ def _execute_workspace_test_with_baseline(
     ``validation_limiter`` 只约束 HongYe 校验段；自动补算的 Heuristic
     Baseline 与所选策略共享同一配额，避免绕过批量内存限制。
     """
+    selected_execution_timing_enabled = bool(
+        isinstance(selected_plan, Mapping)
+        and selected_plan.get("executionTimingEnabled")
+    )
     fingerprint = _workspace_baseline_fingerprint(
-        device, test_case, options, compatibility_mode=compatibility_mode,
+        device,
+        test_case,
+        options,
+        compatibility_mode=compatibility_mode,
+        execution_timing_enabled=selected_execution_timing_enabled,
     )
     selected_clean_validation_types = (
         selected_plan.get("cleanValidationTypes")
@@ -893,6 +905,7 @@ def _execute_workspace_test_with_baseline(
             device, test_case, "heuristic", options,
             hongye_check=hongye_check,
             compatibility_mode=compatibility_mode,
+            execution_timing_enabled=selected_execution_timing_enabled,
             clean_validation_types=selected_clean_validation_types,
         )
         if selected_plan is not None:
@@ -923,6 +936,7 @@ def _execute_workspace_test_with_baseline(
                     device, test_case, "heuristic", options,
                     hongye_check=hongye_check,
                     compatibility_mode=compatibility_mode,
+                    execution_timing_enabled=selected_execution_timing_enabled,
                     clean_validation_types=selected_clean_validation_types,
                 ),
                 validation_limiter,
@@ -939,6 +953,7 @@ def _execute_workspace_test_with_baseline(
         device, test_case, strategy, options,
         hongye_check=hongye_check,
         compatibility_mode=compatibility_mode,
+        execution_timing_enabled=selected_execution_timing_enabled,
         clean_validation_types=selected_clean_validation_types,
     )
     if selected_plan is not None:
@@ -1089,6 +1104,7 @@ def _execute_workspace_test_batch(
     progress_callback: Optional[Any] = None,
     cancel_event: Optional[threading.Event] = None,
     compatibility_mode: bool = True,
+    execution_timing_enabled: bool = False,
     clean_validation_types: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
     """执行已解析的批量测试，并通过回调报告每项状态变化。
@@ -1160,6 +1176,7 @@ def _execute_workspace_test_batch(
                 device, test_case, strategy, options,
                 hongye_check=hongye_check,
                 compatibility_mode=compatibility_mode,
+                execution_timing_enabled=execution_timing_enabled,
                 clean_validation_types=clean_validation_types,
             )
             if process_executor is None:
@@ -1276,6 +1293,7 @@ def run_workspace_test_batch(
     test_ids: Optional[Sequence[str]] = None,
     progress_callback: Optional[Any] = None,
     compatibility_mode: bool = True,
+    execution_timing_enabled: bool = False,
 ) -> Dict[str, Any]:
     """同步运行测试组或其指定子集，供测试、终端脚本和非 HTTP 调用方使用。"""
     device = get_workspace_device(device_id)
@@ -1292,6 +1310,7 @@ def run_workspace_test_batch(
         validation_workers=validation_workers,
         progress_callback=progress_callback,
         compatibility_mode=compatibility_mode,
+        execution_timing_enabled=execution_timing_enabled,
     )
     result.update({
         "deviceId": device_id,
@@ -1348,6 +1367,7 @@ def start_workspace_test_batch(
     use_process_isolation: bool = False,
     test_ids: Optional[Sequence[str]] = None,
     compatibility_mode: bool = True,
+    execution_timing_enabled: bool = False,
     clean_validation_types: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
     """创建后台批量任务；可按 ID 选择子集，结果仍按名称自然顺序排列。"""
@@ -1425,6 +1445,7 @@ def start_workspace_test_batch(
                 progress_callback=update_item,
                 cancel_event=cancel_event,
                 compatibility_mode=compatibility_mode,
+                execution_timing_enabled=execution_timing_enabled,
                 clean_validation_types=clean_validation_types,
             )
             with _BATCH_RUNS_LOCK:

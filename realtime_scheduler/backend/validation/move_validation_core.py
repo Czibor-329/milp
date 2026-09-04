@@ -582,6 +582,7 @@ class MoveStateReplay:
 def materialize_module_parallel_moves(
     moves: Sequence[Mapping[str, Any]],
     clock_floor: float = 0.0,
+    duration_resolver: Optional[Callable[[Mapping[str, Any]], float]] = None,
 ) -> List[dict]:
     """按 HongYe ``module-parallel`` 规则计算 Move 的实际时间。
 
@@ -594,6 +595,7 @@ def materialize_module_parallel_moves(
     参数:
         moves: 当前代算法输出的 MoveList。
         clock_floor: 当前代现场时刻，所有 Move 的实际开始时间不得早于该值。
+        duration_resolver: 可选的设备实际时长解析器；缺失时使用算法理论时长。
 
     返回:
         深拷贝后的 MoveList，其中 StartTime/EndTime 已替换为实际执行时间。
@@ -649,7 +651,12 @@ def materialize_module_parallel_moves(
         actual_start, module_name, move_id, move = selected
         planned_start = _number(move.get("StartTime")) or 0.0
         planned_end = _number(move.get("EndTime"))
-        duration = max(0.0, (planned_end if planned_end is not None else planned_start) - planned_start)
+        planned_duration = max(0.0, (planned_end if planned_end is not None else planned_start) - planned_start)
+        duration = (
+            max(0.0, float(duration_resolver(move)))
+            if duration_resolver is not None
+            else planned_duration
+        )
         actual_end = actual_start + duration
         move["StartTime"] = actual_start
         move["EndTime"] = actual_end
