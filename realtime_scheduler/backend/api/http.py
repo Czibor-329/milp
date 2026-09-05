@@ -361,28 +361,63 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                     raw_plan = replay_context.get("plan")
                 if not isinstance(raw_plan, Mapping):
                     raise ValueError("缺少生成该 MoveList 的完整计划，无法重建 Machine")
-                recommendation_model = str(
-                    payload.get("recommendationModel") or "e2e-ctq"
-                ).strip().lower()
-                recommendation_models = {
-                    "e2e-ctq": E2E_CTQ_MODEL_PATH,
-                    "dual-actor-e2e": DUAL_ACTOR_MODEL_PATH,
-                }
-                if recommendation_model not in recommendation_models:
-                    raise ValueError(
-                        f"拓扑回放不支持推荐模型：{recommendation_model}"
-                    )
-                decision = ReplayMachine(
+                replay_time = _finite_number(payload.get("time"), 0.0)
+                algorithm_action_diagnostics = None
+                plan_strategy = str(raw_plan.get("strategy") or "")
+                replay_updates = (
+                    replay_context.get("updates") or []
+                    if isinstance(replay_context, Mapping)
+                    else []
+                )
+                replay_machine = ReplayMachine(
                     raw_plan,
                     moves,
-                    recommendation_models[recommendation_model],
-                    (
-                        replay_context.get("updates") or []
-                        if isinstance(replay_context, Mapping)
-                        else []
-                    ),
-                    recommendation_model=recommendation_model,
-                ).evaluate(_finite_number(payload.get("time"), 0.0))
+                    replay_updates,
+                )
+                update_params = replay_machine.replay_update_at(replay_time)
+                replay_move_states = [
+                    {
+                        "MoveID": move.get("MoveID"),
+                        "MoveState": (
+                            "Done"
+                            if float(move.get("EndTime") or 0.0)
+                            <= replay_time + TIME_TOLERANCE
+                            else "Running"
+                        ),
+                    }
+                    for move in moves
+                    if float(move.get("StartTime") or 0.0)
+                    <= replay_time + TIME_TOLERANCE
+                ]
+                action_context = {
+                    "schemaVersion": 1,
+                    "CurrentTime": replay_time,
+                    "ToolTopo": raw_plan["device"],
+                    "UpdateParams": update_params,
+                    "MoveList": moves,
+                    "MoveStates": replay_move_states,
+                }
+                if plan_strategy.startswith(OTHER_ALGORITHM_STRATEGY_PREFIX):
+                    algorithm_id = plan_strategy.removeprefix(
+                        OTHER_ALGORITHM_STRATEGY_PREFIX
+                    )
+                    with algorithm_session(algorithm_id):
+                        algorithm_init(raw_plan["device"])
+                        algorithm_action_diagnostics = algorithm_get_replay_actions(
+                            action_context
+                        )
+                elif plan_strategy in builtin_supported_algorithms:
+                    algorithm_action_diagnostics = json.loads(
+                        builtin_algorithm_api.get_replay_actions(
+                            json.dumps(action_context, ensure_ascii=False)
+                        )
+                    )
+                replay_machine.algorithm_action_diagnostics = (
+                    algorithm_action_diagnostics
+                    if isinstance(algorithm_action_diagnostics, Mapping)
+                    else None
+                )
+                decision = replay_machine.evaluate_actions(replay_time)
                 self._send_json({"ok": True, "decision": decision})
             except Exception as error:  # noqa: BLE001
                 self._send_json(

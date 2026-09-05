@@ -1,8 +1,4 @@
-"""拓扑回放 Machine 与 E2E 实时评估的集成测试。
-
-测试使用普通启发式 MoveList，证明候选和模型评分不依赖调度结果预先携带
-DecisionTrace，同时覆盖生产 checkpoint 的真实前向。
-"""
+"""拓扑回放算法动作接口与返回值规范化测试。"""
 
 from __future__ import annotations
 
@@ -12,70 +8,82 @@ from types import SimpleNamespace
 import pytest
 
 from realtime_scheduler.backend.validation.replay_machine import ReplayMachine
+from realtime_scheduler.backend.algorithms import interface as algorithm_interface
 from realtime_scheduler.backend.execution.plan_builder import extract_init_data
-from realtime_scheduler.backend.application import (
-    DUAL_ACTOR_MODEL_PATH,
-    E2E_CTQ_MODEL_PATH,
-    execute_plan,
-)
 from tests.test_config_editor_server import DEVICE_PATH, _job, _route
 
 
-def test_plan_match_uses_immediately_next_complete_transaction() -> None:
-    """原计划标签不得越过紧邻 PM 换片而误匹配更晚的 LoadLock 发片。"""
-    machine = ReplayMachine.__new__(ReplayMachine)
-    machine.moves = [
-        {
-            "MoveID": 10,
-            "MoveType": 4,
-            "StartTime": 20.0,
-            "EndTime": 25.0,
-            "Robot": "VTR",
-            "MatIDList": [1, 2],
-            "StationList": ["PM2", "PM2"],
-            "RecvMatList": [1],
-            "SendMatList": [2],
-        },
-        {
-            "MoveID": 20,
-            "MoveType": 1,
-            "StartTime": 40.0,
-            "EndTime": 45.0,
-            "Robot": "ATR",
-            "MatIDList": [3],
-            "DestStationList": ["LB"],
-        },
-    ]
-    actions = [
-        SimpleNamespace(
-            action_id="feed-later",
-            move_preview=({
-                "MoveID": 0,
-                "MoveType": 1,
-                "StartTime": 12.0,
-                "EndTime": 17.0,
-                "Robot": "ATR",
-                "MatIDList": [3],
-                "DestStationList": ["LB"],
-            },),
-        ),
-        SimpleNamespace(
-            action_id="pm-swap-next",
-            move_preview=({
-                "MoveID": 0,
-                "MoveType": 4,
-                "StartTime": 12.0,
-                "EndTime": 17.0,
-                "Robot": "VTR",
-                "MatIDList": [1, 2],
-                "StationList": ["PM2", "PM2"],
-                "RecvMatList": [1],
-                "SendMatList": [2],
-            },),
-        ),
-    ]
+def test_missing_algorithm_action_interface_keeps_action_card_empty() -> None:
+    """算法未提供动作接口时不得使用平台状态机补算候选。"""
+    machine = ReplayMachine(
+        _heuristic_replay_plan(),
+        [],
+    )
 
-    assert machine._match_next_action(actions, 10.0) == "pm-swap-next"
+    decision = machine.evaluate_actions(0.0)
+
+    assert decision["actionDiagnosticsSource"] == "unavailable"
+    assert decision["actionDiagnostics"] == []
+    assert decision["actionCounts"] == {
+        "deadlock-blocked": 0,
+        "enabled": 0,
+        "physical-blocked": 0,
+    }
+
+
+def test_algorithm_action_interface_accepts_only_three_action_kinds() -> None:
+    """回放协议只保留 Pick、Place、Swap 及稳定的拦截分类。"""
+    machine = ReplayMachine(
+        _heuristic_replay_plan(),
+        [],
+        algorithm_action_diagnostics={
+            "provider": "fixture",
+            "actions": [
+                {"actionId": "p1", "kind": "pick", "status": "enabled"},
+                {
+                    "actionId": "p2",
+                    "kind": "place",
+                    "status": "physical-blocked",
+                    "reason": "目标槽已满",
+                },
+                {
+                    "actionId": "s1",
+                    "kind": "swap",
+                    "status": "deadlock-blocked",
+                    "reason": "无回程槽",
+                },
+                {"actionId": "x1", "kind": "process", "status": "enabled"},
+            ],
+        },
+    )
+
+    decision = machine.evaluate_actions(0.0)
+
+    assert decision["actionDiagnosticsSource"] == "algorithm"
+    assert decision["actionDiagnosticsProvider"] == "fixture"
+    assert [row["kind"] for row in decision["actionDiagnostics"]] == [
+        "pick",
+        "place",
+        "swap",
+    ]
+    assert decision["actionCounts"] == {
+        "deadlock-blocked": 1,
+        "enabled": 1,
+        "physical-blocked": 1,
+    }
+
+
+def test_optional_algorithm_action_function_returns_none_when_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """旧算法入口不含新函数时适配层应显式返回 None。"""
+    monkeypatch.setattr(
+        algorithm_interface,
+        "_load_entry_module",
+        lambda: SimpleNamespace(),
+    )
+
+    assert algorithm_interface.get_replay_actions({"CurrentTime": 0}) is None
 
 
 def _heuristic_replay_plan() -> dict:
@@ -104,181 +112,3 @@ def _heuristic_replay_plan() -> dict:
             }],
         }],
     }
-
-
-@pytest.mark.skipif(
-    not E2E_CTQ_MODEL_PATH.is_file(),
-    reason="生产 E2E-CTQ checkpoint 不存在",
-)
-def test_heuristic_movelist_is_evaluated_by_live_e2e_machine() -> None:
-    """非 E2E 输出也应在完整事务边界得到合法意图和真实模型分数。"""
-    plan = _heuristic_replay_plan()
-    result = execute_plan(plan)
-    assert "DecisionTrace" not in result["output"]
-    moves = result["output"]["MoveList"]
-    machine = ReplayMachine(plan, moves, E2E_CTQ_MODEL_PATH)
-
-    decision = machine.evaluate(0.0)
-
-    assert decision["replayEvaluated"] is True
-    assert decision["modelEvaluated"] is True
-    assert decision["decisionIndex"] == 0
-    assert decision["candidateCount"] == 2
-    assert decision["selectedActionId"]
-    assert decision["executedActionId"]
-    assert sum(
-        candidate["policyPreference"]
-        for candidate in decision["candidates"]
-    ) == pytest.approx(1.0)
-    assert {
-        (candidate["source"], candidate["destination"])
-        for candidate in decision["candidates"]
-    } == {("LP1", "LA"), ("LP1", "LB")}
-    assert all(
-        candidate["source"] != candidate["robot"]
-        and candidate["destination"] != candidate["robot"]
-        and candidate["destinationSlot"] > 0
-        for candidate in decision["candidates"]
-    )
-
-    first_pick = min(
-        (
-            move for move in moves
-            if int(move.get("MoveType", -1)) in {0, 2}
-        ),
-        key=lambda move: float(move.get("EndTime") or 0.0),
-    )
-    first_place = min(
-        (
-            move for move in moves
-            if int(move.get("MoveType", -1)) in {1, 3}
-        ),
-        key=lambda move: float(move.get("EndTime") or 0.0),
-    )
-    during_transaction = machine.evaluate(float(first_pick["EndTime"]))
-    next_decision = machine.evaluate(float(first_place["EndTime"]))
-
-    assert during_transaction["decisionIndex"] == 0
-    assert next_decision["decisionIndex"] == 1
-    assert next_decision["time"] == pytest.approx(first_place["EndTime"])
-    assert {
-        (candidate["source"], candidate["destination"])
-        for candidate in next_decision["candidates"]
-    } == {("LP1", "LA"), ("LB", "PM1"), ("LB", "PM2")}
-
-
-@pytest.mark.skipif(
-    not DUAL_ACTOR_MODEL_PATH.is_file(),
-    reason="未部署双 Actor checkpoint",
-)
-def test_heuristic_movelist_is_evaluated_by_separate_dual_actors() -> None:
-    """双 Actor 回放推荐必须按控制域返回两张独立原子动作榜。"""
-    plan = _heuristic_replay_plan()
-    result = execute_plan(plan)
-    moves = result["output"]["MoveList"]
-    first_pick_end = min(
-        float(move.get("EndTime") or 0.0)
-        for move in moves
-        if int(move.get("MoveType", -1)) in {0, 2}
-    )
-    first_place_end = min(
-        float(move.get("EndTime") or 0.0)
-        for move in moves
-        if int(move.get("MoveType", -1)) in {1, 3}
-    )
-    machine = ReplayMachine(
-        plan,
-        moves,
-        DUAL_ACTOR_MODEL_PATH,
-        recommendation_model="dual-actor-e2e",
-    )
-    during_transaction = machine.evaluate(first_pick_end)
-    decision = machine.evaluate(first_place_end)
-
-    assert during_transaction["model"] == "dual-actor-e2e"
-    assert during_transaction["decisionIndex"] >= 1
-    assert during_transaction["candidateCount"] >= 1
-    assert any(
-        candidate["kind"] == "place"
-        for candidate in during_transaction["candidates"]
-    )
-
-    assert decision["model"] == "dual-actor-e2e"
-    assert decision["decisionIndex"] > during_transaction["decisionIndex"]
-    groups = {group["actor"]: group for group in decision["candidateGroups"]}
-    assert set(groups) == {"atmosphere", "vacuum"}
-    for actor, group in groups.items():
-        assert group["candidateCount"] >= 1
-        assert group["selectedActionId"]
-        assert all(candidate["actor"] == actor for candidate in group["candidates"])
-        assert sum(
-            candidate["policyPreference"]
-            for candidate in group["candidates"]
-        ) == pytest.approx(1.0)
-    assert all(
-        candidate["kind"] in {"pick", "place", "swap"}
-        for candidate in decision["candidates"]
-    )
-
-
-@pytest.mark.skipif(
-    not E2E_CTQ_MODEL_PATH.is_file(),
-    reason="生产 E2E-CTQ checkpoint 不存在",
-)
-def test_live_candidates_keep_full_intents_with_distinct_place_targets() -> None:
-    """相同 Pick 但 Place 目标不同的完整事务必须保留为独立候选。"""
-    plan = _heuristic_replay_plan()
-    result = execute_plan(plan)
-    decision = ReplayMachine(
-        plan,
-        result["output"]["MoveList"],
-        E2E_CTQ_MODEL_PATH,
-    ).evaluate(0.0)
-
-    assert {
-        (candidate["source"], candidate["destination"])
-        for candidate in decision["candidates"]
-    } == {("LP1", "LA"), ("LP1", "LB")}
-    assert decision["candidateCount"] == 2
-    assert len({
-        candidate["actionId"]
-        for candidate in decision["candidates"]
-    }) == 2
-    assert all(
-        "physicalMoveType" not in candidate
-        and "intentCount" not in candidate
-        for candidate in decision["candidates"]
-    )
-    assert sum(
-        candidate["policyPreference"]
-        for candidate in decision["candidates"]
-    ) == pytest.approx(1.0)
-
-
-@pytest.mark.skipif(
-    not E2E_CTQ_MODEL_PATH.is_file(),
-    reason="生产 E2E-CTQ checkpoint 不存在",
-)
-def test_recompute_uses_saved_machine_update_as_replay_boundary() -> None:
-    """多轮结果应从第二代真实 Machine update 继续回放，而不重复首轮 Move。"""
-    plan = _heuristic_replay_plan()
-    plan["roundCount"] = 2
-    plan["rounds"].append({
-        "currentTime": 70,
-        "jobs": [{
-            **_job("ReplayJob2", "ReplayRoute", "LP2"),
-            "waferCount": 1,
-        }],
-    })
-    result = execute_plan(plan)
-    assert len(result["updates"]) == 2
-
-    decision = ReplayMachine(
-        plan,
-        result["output"]["MoveList"],
-        E2E_CTQ_MODEL_PATH,
-        result["updates"],
-    ).evaluate(float(result["updates"][1]["CurrentTime"]))
-
-    assert decision["replayEvaluated"] is True
-    assert decision["candidateCount"] >= 1

@@ -63,12 +63,11 @@ export async function requestTestGroupAnalysis(
   return result.analysis as TestGroupPerformanceSummary;
 }
 
-/** 请求 Machine 按当前 Move 回放状态实时枚举并使用所选模型评分动作。 */
+/** 请求算法按当前 Move 回放状态更新原子动作分类。 */
 export async function requestReplayDecision(input: {
   resultId?: string;
   moves?: MoveRecord[];
   plan?: Record<string, any> | null;
-  recommendationModel: "e2e-ctq" | "dual-actor-e2e";
   time: number;
 }): Promise<Record<string, any>> {
   const result = await requestJson("/api/analysis/replay-decision", {
@@ -79,7 +78,7 @@ export async function requestReplayDecision(input: {
   return result.decision as Record<string, any>;
 }
 
-/** 读取 Schedule-AlphaGo 搜索快照；版本未变化时后端只返回紧凑标记。 */
+/** 读取 Search Tree 搜索快照；版本未变化时后端只返回紧凑标记。 */
 export async function requestSearchTelemetry(
   sinceRevision: number | null = null,
 ): Promise<Record<string, any>> {

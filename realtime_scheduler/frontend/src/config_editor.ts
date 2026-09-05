@@ -48,7 +48,7 @@ const DEFAULT_SCHEDULE_OPTIONS = Object.freeze({
   maximumSystemResidenceCv: 0,
   loadLockMacroSearchSeconds: 4,
   loadLockMacroRollouts: 96,
-  scheduleAlphaGoModelPath: "",
+  searchTreeModelPath: "",
   seed: 0,
 });
 const SCHEDULE_OPTION_KEYS = new Set(Object.keys(DEFAULT_SCHEDULE_OPTIONS));
@@ -187,7 +187,7 @@ let singleRunAbortController: AbortController | null = null;
 let runStatusStartedAt = 0;
 let runStatusElapsedMs = 0;
 let runStatusTimer = 0;
-let pendingAlphaGoCheckpointFile: File | null = null;
+let pendingSearchTreeCheckpointFile: File | null = null;
 let dataTransferMode: "import" | "export" = "import";
 /**
  * 当前页面会话统一使用的运行配置。
@@ -1961,7 +1961,6 @@ function renderPlaybackModeSwitch() {
   document.getElementById("playbackModeStepButton").classList.toggle("is-active", stepMode);
   document.getElementById("playbackModeReplayButton").setAttribute("aria-pressed", String(playbackMode === "replay"));
   document.getElementById("playbackModeStepButton").setAttribute("aria-pressed", String(stepMode));
-  document.getElementById("visualRecommendationModelControl").hidden = stepMode;
   document.getElementById("visualPauseOnDecisionChangeButton").hidden = stepMode;
 }
 
@@ -2037,12 +2036,12 @@ async function controlSearchTelemetry(command) {
 /** 合并实时帧与已完成历史，并保持用户手动选择的旧决策。 */
 function renderSearchTelemetry(snapshot) {
   if (!snapshot || snapshot.unchanged) return;
-  if (snapshot.algorithm !== "schedule-alphago" && latestSearchTelemetry) return;
+  if (snapshot.algorithm !== "search-tree" && latestSearchTelemetry) return;
   latestSearchTelemetry = snapshot;
   const panel = document.getElementById("searchTelemetryPanel");
   panel.hidden = false;
   const status = document.getElementById("searchTelemetryStatus");
-  if (snapshot.algorithm !== "schedule-alphago") {
+  if (snapshot.algorithm !== "search-tree") {
     status.textContent = "正在初始化搜索器…";
     status.classList.add("is-searching");
     status.classList.remove("is-paused");
@@ -2109,7 +2108,7 @@ async function pollSearchTelemetry(token) {
   }
 }
 
-/** 开始本次 Schedule-AlphaGo 运行的实时搜索轮询。 */
+/** 开始本次 Search Tree 运行的实时搜索轮询。 */
 function startSearchTelemetryPolling() {
   resetSearchTelemetryView();
   searchTelemetryRunActive = true;
@@ -2134,7 +2133,7 @@ function stopSearchTelemetryPolling(finalSnapshot = null) {
   visualizationWorkspace.setExternalDecisionLensOwner(false);
   if (finalSnapshot) renderSearchTelemetry(finalSnapshot);
   const status = document.getElementById("searchTelemetryStatus");
-  if (!finalSnapshot && latestSearchTelemetry?.algorithm === "schedule-alphago") {
+  if (!finalSnapshot && latestSearchTelemetry?.algorithm === "search-tree") {
     status.classList.remove("is-searching");
   }
   updateSearchTelemetryControls(finalSnapshot || latestSearchTelemetry);
@@ -3555,20 +3554,20 @@ async function restoreRobotSlotDefault(robotName) {
 /** 渲染所有依赖状态的区域。 */
 function renderAll() { renderTimes(); renderRoutes(); renderRounds(); renderRobotSlots(); if (state.drawer) renderStepDrawer(); }
 
-/** 打开 AlphaGo 模型选择弹窗。 */
-function openScheduleAlphaGoOptionsDialog() {
-  pendingAlphaGoCheckpointFile = null;
-  const configuredPath = String(state.options.scheduleAlphaGoModelPath || "").trim();
-  document.getElementById("alphaGoCheckpointPath").value = configuredPath;
-  document.getElementById("alphaGoCheckpointFile").value = "";
-  document.getElementById("alphaGoCheckpointHint").textContent = configuredPath
+/** 打开 SearchTree 模型选择弹窗。 */
+function openSearchTreeOptionsDialog() {
+  pendingSearchTreeCheckpointFile = null;
+  const configuredPath = String(state.options.searchTreeModelPath || "").trim();
+  document.getElementById("searchTreeCheckpointPath").value = configuredPath;
+  document.getElementById("searchTreeCheckpointFile").value = "";
+  document.getElementById("searchTreeCheckpointHint").textContent = configuredPath
     ? "当前 checkpoint 已保存在本地服务中；重新选择文件可替换它。"
     : "选择本机 checkpoint 后将上传到本地服务，并用于后续运行。";
-  document.getElementById("scheduleAlphaGoOptionsDialog").showModal();
+  document.getElementById("searchTreeOptionsDialog").showModal();
 }
 
 /** 上传用户从文件夹选取的 checkpoint，并返回本地服务可访问的绝对路径。 */
-async function uploadAlphaGoCheckpoint(file) {
+async function uploadSearchTreeCheckpoint(file) {
   const response = await fetch("/api/model-checkpoints", {
     method: "POST",
     headers: { "X-Checkpoint-Filename": encodeURIComponent(file.name) },
@@ -3581,20 +3580,20 @@ async function uploadAlphaGoCheckpoint(file) {
   return String(result.modelPath);
 }
 
-/** 保存 AlphaGo checkpoint；搜索和深度参数由生产后端统一管理。 */
-async function saveScheduleAlphaGoOptions() {
-  const saveButton = document.getElementById("saveScheduleAlphaGoOptionsButton");
+/** 保存 Search Tree checkpoint；搜索和深度参数由生产后端统一管理。 */
+async function saveSearchTreeOptions() {
+  const saveButton = document.getElementById("saveSearchTreeOptionsButton");
   saveButton.disabled = true;
   try {
-    const modelPath = pendingAlphaGoCheckpointFile
-      ? await uploadAlphaGoCheckpoint(pendingAlphaGoCheckpointFile)
-      : String(document.getElementById("alphaGoCheckpointPath").value || "").trim();
-    state.options.scheduleAlphaGoModelPath = modelPath;
-    pendingAlphaGoCheckpointFile = null;
+    const modelPath = pendingSearchTreeCheckpointFile
+      ? await uploadSearchTreeCheckpoint(pendingSearchTreeCheckpointFile)
+      : String(document.getElementById("searchTreeCheckpointPath").value || "").trim();
+    state.options.searchTreeModelPath = modelPath;
+    pendingSearchTreeCheckpointFile = null;
     retainSessionSchedulingConfiguration();
     markTestDirty();
     renderAll();
-    document.getElementById("scheduleAlphaGoOptionsDialog").close();
+    document.getElementById("searchTreeOptionsDialog").close();
   } finally {
     saveButton.disabled = false;
   }
@@ -3904,9 +3903,9 @@ function buildPayload() {
   const routes = instances.routes.map(route => ({ ...normalizeRoute(route), stages: route.stages.map(stage => ({ ...stage, visits: stage.visits.map(visit => structuredClone(visit)) })) }));
   const cleans = state.cleans.map(runtimeClean);
   const options = { ...state.options };
-  if (state.strategy === "schedule-alphago") {
+  if (state.strategy === "search-tree") {
     // 初始执行模式随回放/步进模式走，避免 update 启动时的会话重置覆盖用户选择。
-    options.scheduleAlphaGoExecutionMode = playbackMode === "step" ? "stepped" : "continuous";
+    options.searchTreeExecutionMode = playbackMode === "step" ? "stepped" : "continuous";
   }
   return { schemaVersion: EXPECTED_API_SCHEMA, workspaceDeviceId: state.workspaceDeviceId, workspaceTestId: state.testCaseId, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options, hongYeCheck: hongYeCheckEnabled(), compatibilityMode: compatibilityModeEnabled(), executionTimingEnabled: executionTimingEnabled(), skipBaseline: skipBaselineEnabled(), cleanValidationTypes: cleanValidationTypes(), recipes: collectRecipes(routes), cleans, routes, rounds: instances.rounds };
 }
@@ -4103,7 +4102,7 @@ function updateStrategyOptionVisibility() {
   const optionGroups = new Set(algorithm?.optionGroups || []);
   document.getElementById("loadlockOptions").classList.toggle("is-hidden", !optionGroups.has("loadlock"));
   document.getElementById("heuristicObjectiveOptions").classList.toggle("is-hidden", !optionGroups.has("heuristic-objectives"));
-  document.getElementById("scheduleAlphaGoOptions").classList.toggle("is-hidden", !optionGroups.has("schedule-alphago"));
+  document.getElementById("searchTreeOptions").classList.toggle("is-hidden", !optionGroups.has("search-tree"));
 }
 
 /** 在策略列表下方显示指定算法的介绍。 */
@@ -4167,7 +4166,7 @@ async function prepareWorkspaceView(result) {
     result.deadlock = replayDeadlock
       || (DEADLOCK_TYPE_CATALOG[serverCode] ? result.deadlock : { Code: "DEADLOCK.UNCLASSIFIED" });
   }
-  if (latestSearchTelemetry?.algorithm === "schedule-alphago") {
+  if (latestSearchTelemetry?.algorithm === "search-tree") {
     renderSearchTelemetry(latestSearchTelemetry);
   }
   return visualizationWorkspace.getBottleneckUtilization();
@@ -4286,7 +4285,7 @@ async function requestSingleRunCancellation() {
     const snapshot = await response.json();
     if (!response.ok) throw new Error(snapshot.error || `服务返回 ${response.status}`);
     renderSingleRunStatus(snapshot);
-    if (state.strategy === "schedule-alphago") {
+    if (state.strategy === "search-tree") {
       try { await requestSearchControl("cancel"); } catch { /* 单测停止状态已经生效。 */ }
     }
     singleRunAbortController?.abort();
@@ -4308,7 +4307,7 @@ async function runPlan() {
     return;
   }
   let logReady = false, ganttReady = false, runResult = null, bottleneckSummary = null;
-  const telemetryEnabled = state.strategy === "schedule-alphago";
+  const telemetryEnabled = state.strategy === "search-tree";
   let telemetryStopped = false;
   // 健康检查和必要的自动保存也可能涉及磁盘；点击后先立即反馈，避免用户误以为按钮失效。
   button.disabled = true;
@@ -4439,8 +4438,8 @@ async function runModelStepped() {
     }
     return;
   }
-  if (state.strategy !== "schedule-alphago") {
-    writeTerminal("$ 运行模型步进仅支持 Schedule-AlphaGo 策略，请先在“运行策略”中选择。", true);
+  if (state.strategy !== "search-tree") {
+    writeTerminal("$ 运行模型步进仅支持 Search Tree 策略，请先在“运行策略”中选择。", true);
     return;
   }
   playbackMode = "step";
@@ -5221,21 +5220,13 @@ async function checkService() {
     if (!response.ok) throw new Error();
     const status = await response.json(), compatible = status.schemaVersion === EXPECTED_API_SCHEMA;
     state.serviceCompatible = compatible;
-    const e2eCTQAvailable = status.strategies?.["e2e-ctq"] === true, dualActorE2EAvailable = status.strategies?.["dual-actor-e2e"] === true;
     state.algorithmMetadata = status.algorithmMetadata || {};
-    const replayModelSelect = document.getElementById("visualRecommendationModel");
-    replayModelSelect.querySelector('option[value="e2e-ctq"]').disabled = !e2eCTQAvailable;
-    replayModelSelect.querySelector('option[value="dual-actor-e2e"]').disabled = !dualActorE2EAvailable;
-    if (replayModelSelect.selectedOptions[0]?.disabled) {
-      replayModelSelect.value = dualActorE2EAvailable ? "dual-actor-e2e" : "e2e-ctq";
-      replayModelSelect.dispatchEvent(new Event("change"));
-    }
     renderOtherAlgorithmOptions(status.algorithms || status.otherAlgorithms || []);
     runButton.disabled = !compatible || singleRunCancelling || state.batchRunning;
     batchRunButton.disabled = !compatible || singleRunActive || (state.batchRunning && state.batchCancelRequested);
     document.getElementById("stepRunButton").disabled = stepRunActive
       ? false
-      : !compatible || state.strategy !== "schedule-alphago";
+      : !compatible || state.strategy !== "search-tree";
     renderWorkspaceControls();
     pill.textContent = compatible ? "本地服务已连接" : "服务版本过旧";
     if (!compatible) {
@@ -5480,24 +5471,24 @@ document.getElementById("batchTestSelectionForm").addEventListener("submit", eve
   event.preventDefault();
   runBatchSelection(false);
 });
-document.getElementById("openScheduleAlphaGoOptionsDialogButton").addEventListener("click", openScheduleAlphaGoOptionsDialog);
-document.getElementById("scheduleAlphaGoOptionsDialogCancel").addEventListener("click", () => document.getElementById("scheduleAlphaGoOptionsDialog").close());
-document.getElementById("alphaGoCheckpointFile").addEventListener("change", event => {
-  pendingAlphaGoCheckpointFile = event.currentTarget.files?.[0] || null;
-  if (!pendingAlphaGoCheckpointFile) return;
-  document.getElementById("alphaGoCheckpointPath").value = pendingAlphaGoCheckpointFile.name;
-  document.getElementById("alphaGoCheckpointHint").textContent = `已选择“${pendingAlphaGoCheckpointFile.name}”；保存参数时上传。`;
+document.getElementById("openSearchTreeOptionsDialogButton").addEventListener("click", openSearchTreeOptionsDialog);
+document.getElementById("searchTreeOptionsDialogCancel").addEventListener("click", () => document.getElementById("searchTreeOptionsDialog").close());
+document.getElementById("searchTreeCheckpointFile").addEventListener("change", event => {
+  pendingSearchTreeCheckpointFile = event.currentTarget.files?.[0] || null;
+  if (!pendingSearchTreeCheckpointFile) return;
+  document.getElementById("searchTreeCheckpointPath").value = pendingSearchTreeCheckpointFile.name;
+  document.getElementById("searchTreeCheckpointHint").textContent = `已选择“${pendingSearchTreeCheckpointFile.name}”；保存参数时上传。`;
 });
-document.getElementById("clearAlphaGoCheckpointButton").addEventListener("click", () => {
-  pendingAlphaGoCheckpointFile = null;
-  document.getElementById("alphaGoCheckpointFile").value = "";
-  document.getElementById("alphaGoCheckpointPath").value = "";
-  document.getElementById("alphaGoCheckpointHint").textContent = "保存后将使用默认模型或冷启动模型。";
+document.getElementById("clearSearchTreeCheckpointButton").addEventListener("click", () => {
+  pendingSearchTreeCheckpointFile = null;
+  document.getElementById("searchTreeCheckpointFile").value = "";
+  document.getElementById("searchTreeCheckpointPath").value = "";
+  document.getElementById("searchTreeCheckpointHint").textContent = "保存后将使用默认模型或冷启动模型。";
 });
-document.getElementById("scheduleAlphaGoOptionsForm").addEventListener("submit", event => {
+document.getElementById("searchTreeOptionsForm").addEventListener("submit", event => {
   event.preventDefault();
-  saveScheduleAlphaGoOptions().catch(error => {
-    document.getElementById("alphaGoCheckpointHint").textContent = error.message || "参数保存失败";
+  saveSearchTreeOptions().catch(error => {
+    document.getElementById("searchTreeCheckpointHint").textContent = error.message || "参数保存失败";
   });
 });
 document.getElementById("clearExportsButton").addEventListener("click", clearExportedArtifacts);
@@ -5617,7 +5608,7 @@ document.addEventListener("change", event => {
     // 运行期保持“停止”入口可用；非运行期才按策略/服务状态禁用。
     document.getElementById("stepRunButton").disabled = stepRunActive
       ? false
-      : !state.serviceCompatible || state.strategy !== "schedule-alphago";
+      : !state.serviceCompatible || state.strategy !== "search-tree";
     markTestDirty(); renderAll();
   }
 });

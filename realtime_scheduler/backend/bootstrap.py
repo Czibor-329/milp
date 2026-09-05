@@ -101,8 +101,8 @@ if ALGORITHM_REPOSITORY_PRESENT:
             TIME_TOLERANCE,
         )
         SearchCancelledError = None
-        if "schedule-alphago" in builtin_supported_algorithms:
-            from src.schedule.strategies.schedule_alphago.telemetry import (
+        if "search-tree" in builtin_supported_algorithms:
+            from src.schedule.strategies.search_tree.telemetry import (
                 SearchCancelledError,
             )
     except Exception as error:  # noqa: BLE001
@@ -117,7 +117,9 @@ if not BUILTIN_ALGORITHM_AVAILABLE:
     MODELS_DIR = ALGORITHM_ROOT / "results" / "models"
     builtin_supported_algorithms = frozenset()
 from realtime_scheduler.backend.algorithms.interface import (
+    OTHER_ALGORITHM_STRATEGY_PREFIX,
     discover_other_algorithms,
+    get_replay_actions as algorithm_get_replay_actions,
     init as algorithm_init,
     session as algorithm_session,
     update as algorithm_update,

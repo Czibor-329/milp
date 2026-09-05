@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>调度平台</title>
   <link rel="stylesheet" href="/assets/katex.min.css?v=1.4.4">
-  <link rel="stylesheet" href="/assets/config_editor.css?v=1.5.32">
+  <link rel="stylesheet" href="/assets/config_editor.css?v=1.5.33">
 </head>
 <body>
   <a class="skip-link" href="#mainContent">跳到主要内容</a>
@@ -40,7 +40,7 @@
       <div class="sidebar-footer">
         <span class="sidebar-footer-label">系统状态</span>
         <div class="service-pill" id="serviceState">本地服务</div>
-        <span class="frontend-version">V1.5.32</span>
+        <span class="frontend-version">V1.5.33</span>
       </div>
     </aside>
 
@@ -254,14 +254,24 @@
                       <h2 class="petri-panel-title">合法动作空间</h2>
                       <button class="decision-auto-pause" id="visualPauseOnDecisionChangeButton" type="button" role="switch" aria-checked="false" aria-pressed="false"></button>
                     </div>
-                    <label class="decision-model-control" id="visualRecommendationModelControl" for="visualRecommendationModel">
-                      <span>推荐模型</span>
-                      <select id="visualRecommendationModel" aria-describedby="visualRecommendationModelHint">
-                        <option value="e2e-ctq">E2E-CTQ · 联合动作</option>
-                        <option value="dual-actor-e2e">双 Actor · 分域原子动作</option>
-                      </select>
-                      <small id="visualRecommendationModelHint">对完整 Pick + Place / Swap 事务统一排序。</small>
-                    </label>
+                    <div class="action-filter-controls" aria-label="动作筛选">
+                      <label>状态
+                        <select id="visualActionStatusFilter">
+                          <option value="enabled">使能动作</option>
+                          <option value="physical-blocked">物理拦截</option>
+                          <option value="deadlock-blocked">死锁规则拦截</option>
+                          <option value="all">全部状态</option>
+                        </select>
+                      </label>
+                      <label>类型
+                        <select id="visualActionKindFilter">
+                          <option value="all">Pick / Place / Swap</option>
+                          <option value="pick">Pick</option>
+                          <option value="place">Place</option>
+                          <option value="swap">Swap</option>
+                        </select>
+                      </label>
+                    </div>
                     <div class="search-telemetry-panel" id="searchTelemetryPanel" hidden aria-live="polite">
                       <div class="search-telemetry-head">
                         <p id="searchTelemetryStatus">等待搜索开始</p>
@@ -441,10 +451,10 @@
               <div class="field span-4"><label>系统停留时间 CV 上限</label><input data-option="maximumSystemResidenceCv" type="number" min="0" step="0.01" value="0"><div class="hint">CV = 标准差 ÷ 均值；例如 0.10 表示目标波动约 10%，0 表示不限制。</div></div>
               <div class="field span-12"><div class="hint">多指标模式会比较多套可执行启发式方案：优先减少驻留超限，再尽量达到持片和 CV 目标，最后比较 makespan。目标用于探索选优，不保证一定满足；运行时间也会比默认模式更长。</div></div>
             </div>
-            <div id="scheduleAlphaGoOptions" class="is-hidden" style="margin-top:14px">
-              <section class="alphago-settings-card" aria-labelledby="alphagoSettingsTitle">
-                <strong id="alphagoSettingsTitle">AlphaGo 策略价值模型</strong>
-                <button class="btn small" id="openScheduleAlphaGoOptionsDialogButton" type="button">选择模型</button>
+            <div id="searchTreeOptions" class="is-hidden" style="margin-top:14px">
+              <section class="search-tree-settings-card" aria-labelledby="search-treeSettingsTitle">
+                <strong id="search-treeSettingsTitle">Search Tree 策略价值模型</strong>
+                <button class="btn small" id="openSearchTreeOptionsDialogButton" type="button">选择模型</button>
               </section>
             </div>
           </div>
@@ -455,7 +465,7 @@
                 <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V21h-4v-.08A1.7 1.7 0 0 0 8.97 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.52-1.03H3v-4h.08A1.7 1.7 0 0 0 4.6 8.94a1.7 1.7 0 0 0-.34-1.88L4.2 7l2.83-2.83.06.06a1.7 1.7 0 0 0 1.88.34A1.7 1.7 0 0 0 10 3.05V3h4v.05a1.7 1.7 0 0 0 1.03 1.52 1.7 1.7 0 0 0 1.88-.34l.06-.06L19.8 7l-.06.06a1.7 1.7 0 0 0-.34 1.88A1.7 1.7 0 0 0 20.92 10H21v4h-.08A1.7 1.7 0 0 0 19.4 15Z"/></svg>
               </button>
             </div>
-            <div class="run-actions"><button class="btn" id="runButton">▶ 运行当前测试</button><button class="btn" id="stepRunButton" title="以步进模式运行 Schedule-AlphaGo：每次决策完成后从 3 条稳定动作链中选择一条整体提交">⟳ 运行模型步进</button><button class="btn batch" id="batchRunButton">▦ 运行当前测试组</button></div>
+            <div class="run-actions"><button class="btn" id="runButton">▶ 运行当前测试</button><button class="btn" id="stepRunButton" title="以步进模式运行 Search Tree：每次决策完成后从 3 条稳定动作链中选择一条整体提交">⟳ 运行模型步进</button><button class="btn batch" id="batchRunButton">▦ 运行当前测试组</button></div>
             <section class="run-status-card" id="runStatusCard" aria-labelledby="runStatusTitle">
               <div class="run-status-head">
                 <span class="run-status-indicator" id="runStatusIndicator" aria-hidden="true"></span>
@@ -504,29 +514,29 @@
     </section>
   </dialog>
 
-  <dialog id="scheduleAlphaGoOptionsDialog" aria-labelledby="scheduleAlphaGoOptionsDialogTitle">
-    <form class="dialog-body alphago-options-dialog-body" id="scheduleAlphaGoOptionsForm">
-      <header class="alphago-dialog-header">
+  <dialog id="searchTreeOptionsDialog" aria-labelledby="searchTreeOptionsDialogTitle">
+    <form class="dialog-body search-tree-options-dialog-body" id="searchTreeOptionsForm">
+      <header class="search-tree-dialog-header">
         <div>
-          <h3 id="scheduleAlphaGoOptionsDialogTitle">选择 AlphaGo 模型</h3>
+          <h3 id="searchTreeOptionsDialogTitle">选择 Search Tree 模型</h3>
           <p>前端只选择 checkpoint；搜索预算、动作数和 50 层稳定链上限由生产后端统一管理。</p>
         </div>
-        <span class="alphago-dialog-tag">模型</span>
+        <span class="search-tree-dialog-tag">模型</span>
       </header>
-      <div class="alphago-options-content">
-        <section class="alphago-option-group alphago-model-group" aria-labelledby="alphaGoModelGroupTitle">
-          <div class="alphago-option-group-head">
-            <h4 id="alphaGoModelGroupTitle">策略价值模型</h4>
+      <div class="search-tree-options-content">
+        <section class="search-tree-option-group search-tree-model-group" aria-labelledby="searchTreeModelGroupTitle">
+          <div class="search-tree-option-group-head">
+            <h4 id="searchTreeModelGroupTitle">策略价值模型</h4>
             <p>未选择 checkpoint 时使用默认模型或冷启动模型。</p>
           </div>
           <div class="field">
-            <label for="alphaGoCheckpointPath">Checkpoint 文件</label>
-            <div class="checkpoint-picker"><input id="alphaGoCheckpointPath" type="text" readonly placeholder="未选择，使用默认模型"><label class="btn small" for="alphaGoCheckpointFile">选择文件</label><input id="alphaGoCheckpointFile" type="file" accept=".npz,.pt,.pth,.ckpt,application/octet-stream"></div>
-            <div class="alphago-checkpoint-meta"><div class="hint" id="alphaGoCheckpointHint">选择本机 checkpoint 后将上传到本地服务，并用于后续运行。</div><button class="text-button" id="clearAlphaGoCheckpointButton" type="button">恢复默认模型</button></div>
+            <label for="searchTreeCheckpointPath">Checkpoint 文件</label>
+            <div class="checkpoint-picker"><input id="searchTreeCheckpointPath" type="text" readonly placeholder="未选择，使用默认模型"><label class="btn small" for="searchTreeCheckpointFile">选择文件</label><input id="searchTreeCheckpointFile" type="file" accept=".npz,.pt,.pth,.ckpt,application/octet-stream"></div>
+            <div class="search-tree-checkpoint-meta"><div class="hint" id="searchTreeCheckpointHint">选择本机 checkpoint 后将上传到本地服务，并用于后续运行。</div><button class="text-button" id="clearSearchTreeCheckpointButton" type="button">恢复默认模型</button></div>
           </div>
         </section>
       </div>
-      <div class="dialog-actions"><button class="btn small" type="button" id="scheduleAlphaGoOptionsDialogCancel">取消</button><button class="btn primary small" id="saveScheduleAlphaGoOptionsButton" type="submit">保存模型</button></div>
+      <div class="dialog-actions"><button class="btn small" type="button" id="searchTreeOptionsDialogCancel">取消</button><button class="btn primary small" id="saveSearchTreeOptionsButton" type="submit">保存模型</button></div>
     </form>
   </dialog>
 
@@ -812,6 +822,6 @@
     </aside>
   </dialog>
 
-  <script type="module" src="/assets/config_editor.js?v=1.5.32"></script>
+  <script type="module" src="/assets/config_editor.js?v=1.5.33"></script>
 </body>
 </html>

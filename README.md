@@ -56,3 +56,7 @@ python scripts\run_dataset_suite.py --device 12kChamber --group 公司示例集 
 目录名 `<算法名>` 同时作为稳定算法 ID。平台只扫描该目录，不支持通过前端
 直接导入策略。需要整体迁移算法仓库时设置 `CT_ALGORITHM_ROOT`，策略仍须位于
 该仓库根目录的 `other_alg/` 子目录。
+
+外部算法可选实现 `get_replay_actions(replay_json)`，供拓扑回放按 Move 状态展示
+Pick、Place、Swap 的使能、物理拦截与死锁拦截动作。旧算法无需实现；缺少该函数时
+动作卡片留空。

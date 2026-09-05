@@ -301,8 +301,8 @@ function fakeWorkspaceDocument() {
     "visualTopologyPlayback",
     "visualDeviceStage",
     "visualDecisionLens",
-    "visualRecommendationModel",
-    "visualRecommendationModelHint",
+    "visualActionStatusFilter",
+    "visualActionKindFilter",
     "visualPauseOnDecisionChangeButton",
     "visualActiveMoves",
     "visualSource",
@@ -389,10 +389,11 @@ test("合法动作空间面板保持单一候选列表与标准开关视觉契�
   assert.match(html, /<h2 class="petri-panel-title">合法动作空间<\/h2>/);
   assert.match(html, /id="visualPauseOnDecisionChangeButton"[^>]*role="switch"[^>]*aria-checked="false"/);
   assert.match(html, /id="searchTelemetryContinuousDecisionButton"[^>]*aria-pressed="false"[^>]*>持续决策<\/button>/);
-  assert.match(html, /id="visualRecommendationModelControl"/);
+  assert.match(html, /id="visualActionStatusFilter"/);
+  assert.match(html, /id="visualActionKindFilter"/);
   assert.match(css, /\.decision-lens-panel[^\n]*border-radius: 6px[^\n]*box-shadow: none/);
   assert.match(css, /\.decision-auto-pause[^\n]*min-height: 44px/);
-  assert.match(css, /\.decision-tag\.is-recommendation/);
+  assert.match(css, /\.action-filter-controls/);
   assert.doesNotMatch(css, /body\.theme-dark/);
   assert.doesNotMatch(html, /themeToggle|logoutButton|adminUsersLink/);
   assert.match(source, /SERVICE_HEALTHCHECK_INTERVAL_MILLISECONDS = 3000/);
@@ -401,7 +402,7 @@ test("合法动作空间面板保持单一候选列表与标准开关视觉契�
   assert.match(source, /window\.setInterval\(/);
   assert.match(source, /visibilitychange/);
   assert.doesNotMatch(css, /\.topology-playback\.is-instant-state-transition/);
-  assert.match(source, /visualRecommendationModelControl"\)\.hidden = stepMode/);
+  assert.doesNotMatch(source, /visualRecommendationModelControl|visualRecommendationModel/);
   assert.match(source, /visualPauseOnDecisionChangeButton"\)\.hidden = stepMode/);
   assert.match(source, /function maybeContinueModelDecision\(snapshot\)/);
   assert.match(source, /searchId === continuousDecisionSubmittedSearchId/);
@@ -412,69 +413,6 @@ test("合法动作空间面板保持单一候选列表与标准开关视觉契�
   assert.match(source, /animateLatestStep/);
   assert.doesNotMatch(source, /根节点全部合法动作|物料 \$\{action\.materialIds/);
   assert.doesNotMatch(css, /decision-selected-summary|decision-preference-track|decision-auto-pause:hover|decision-candidate:hover/);
-});
-
-test("E2E 决策轨迹保留候选偏好、Makespan 增量和未来决策时刻", () => {
-  const trace = logic.normalizeDecisionTrace({
-    DecisionTrace: [
-      {
-        decisionIndex: 2,
-        time: 8,
-        candidateCount: 2,
-        modelEvaluated: true,
-        selectedActionId: "move-b",
-        candidates: [
-          {
-            actionId: "move-b", rank: 1, selected: true, source: "LA",
-            destination: "PM2", policyPreference: 0.72,
-            expectedRemainingMakespan: 90, makespanDelta: 0,
-          },
-          {
-            actionId: "move-a", rank: 2, source: "LA",
-            destination: "PM1", policyPreference: 0.28,
-            expectedRemainingMakespan: 96, makespanDelta: 6,
-          },
-        ],
-      },
-      { decisionIndex: 1, time: 3, candidateCount: 1, candidates: [] },
-    ],
-  });
-
-  assert.equal(trace.length, 2);
-  assert.equal(trace[1].candidates[0].destination, "PM2");
-  assert.equal(trace[1].candidates[1].makespanDelta, 6);
-  assert.equal(logic.decisionAtTime(trace, 7).decisionIndex, 1);
-  assert.equal(logic.decisionAtTime(trace, 8).decisionIndex, 2);
-});
-
-test("决策空间签名忽略排序和分数，仅关注候选集合变化", () => {
-  const [first] = logic.normalizeDecisionTrace({
-    DecisionTrace: [{
-      candidateCount: 2,
-      candidates: [
-        { actionId: "move-a", rank: 1, policyPreference: 0.8 },
-        { actionId: "move-b", rank: 2, policyPreference: 0.2 },
-      ],
-    }],
-  });
-  const [reranked] = logic.normalizeDecisionTrace({
-    DecisionTrace: [{
-      candidateCount: 2,
-      candidates: [
-        { actionId: "move-b", rank: 1, policyPreference: 0.9 },
-        { actionId: "move-a", rank: 2, policyPreference: 0.1 },
-      ],
-    }],
-  });
-  const [changed] = logic.normalizeDecisionTrace({
-    DecisionTrace: [{
-      candidateCount: 1,
-      candidates: [{ actionId: "move-a", rank: 1, policyPreference: 1 }],
-    }],
-  });
-
-  assert.equal(logic.decisionSpaceSignature(first), logic.decisionSpaceSignature(reranked));
-  assert.notEqual(logic.decisionSpaceSignature(first), logic.decisionSpaceSignature(changed));
 });
 
 test("完整 Pick + Place 只在 Place 结束时形成下一决策边界", () => {
@@ -524,12 +462,9 @@ test("结果分析与拓扑回放使用独立界面并共享当前 MoveList", as
   assert.equal(root.elements.get("visualPlaybackEmpty").hidden, true);
   assert.equal(root.elements.get("visualSource").title, "t1.json");
   const lens = root.elements.get("visualDecisionLens").innerHTML;
-  assert.match(lens, /决策 #0/);
-  assert.match(lens, /可行动作/);
-  assert.match(lens, /E2E推荐/);
-  assert.match(lens, /Δ 基准/);
-  assert.doesNotMatch(lens, /实时推荐|物理约束结果|decision-selected-summary|其它可行动作|decision-preference-track/);
-  assert.match(root.elements.get("visualDeviceStage").innerHTML, /PM2/);
+  assert.match(lens, /当前动作卡片为空/);
+  assert.doesNotMatch(lens, /E2E推荐|Δ 基准|模型偏好|剩余工期/);
+  assert.doesNotMatch(root.elements.get("visualDeviceStage").innerHTML, /PM2/);
 
   const pauseOnChange = root.elements.get("visualPauseOnDecisionChangeButton");
   assert.equal(pauseOnChange.getAttribute("aria-pressed"), "false");
@@ -549,51 +484,28 @@ test("结果分析与拓扑回放使用独立界面并共享当前 MoveList", as
   assert.equal(root.workspaceTab.clicked, true);
 });
 
-test("合法动作空间按偏好排序并格式化低偏好和工期差值", async () => {
-  const root = fakeWorkspaceDocument();
-  const workspace = logic.createVisualizationWorkspace(root);
-  await workspace.loadFile({
-    name: "decision-panel.json",
-    async text() {
-      return JSON.stringify({
-        MoveList: moves,
-        DecisionTrace: [{
-          decisionIndex: 65,
-          time: 0,
-          candidateCount: 3,
-          candidates: [
-            {
-              actionId: "second", rank: 1, source: "VTR", destination: "PM1",
-              robot: "VTR", flowKind: "internal", policyPreference: 0.004,
-              expectedRemainingMakespan: 19.5, makespanDelta: 10.3,
-            },
-            {
-              actionId: "recommended", rank: 2, source: "LP1", destination: "ATR",
-              robot: "ATR", flowKind: "internal", policyPreference: 0.996,
-              expectedRemainingMakespan: 2.5, makespanDelta: 0, executed: true,
-            },
-            {
-              actionId: "third", rank: 3, source: "ATR", destination: "LA",
-              robot: "ATR", flowKind: "feed", policyPreference: 0,
-              expectedRemainingMakespan: 20, makespanDelta: 11.2,
-            },
-          ],
-        }],
-      });
-    },
-  });
+test("动作空间按状态和 Pick Place Swap 类型筛选", () => {
+  const decision = logic.normalizeDecisionTrace({ DecisionTrace: [{
+    model: "actions",
+    time: 10,
+    actionDiagnosticsSource: "algorithm",
+    actionDiagnosticsProvider: "fixture",
+    actionCounts: { enabled: 1, "physical-blocked": 1, "deadlock-blocked": 1 },
+    actionDiagnostics: [
+      { actionId: "p1", kind: "pick", status: "enabled", robot: "ATR", source: "LP1", destination: "Robot hand", materialIds: ["1"] },
+      { actionId: "p2", kind: "place", status: "physical-blocked", robot: "ATR", source: "ATR", destination: "LA", reason: "目标槽已满" },
+      { actionId: "s1", kind: "swap", status: "deadlock-blocked", robot: "VTR", source: "PM1", destination: "PM2", reason: "无回程槽" },
+    ],
+  }] })[0];
 
-  const lens = root.elements.get("visualDecisionLens").innerHTML;
-  assert.match(lens, /决策 #65[\s\S]*3 个可行动作 · E2E 排序/);
-  assert.ok(lens.indexOf("LP1 → ATR") < lens.indexOf("VTR → PM1"), "动作应按 E2E 偏好降序排列");
-  assert.match(lens, /LP1 → ATR[\s\S]*E2E推荐[\s\S]*与计划一致[\s\S]*99\.6%|LP1 → ATR[\s\S]*E2E推荐[\s\S]*与计划一致[\s\S]*100%/);
-  assert.match(lens, /VTR → PM1[\s\S]*VTR · internal[\s\S]*剩余工期 <strong>19\.5s<\/strong>[\s\S]*Δ \+10\.3s[\s\S]*<1%/);
-  assert.match(lens, /Δ 基准/);
-  assert.equal((lens.match(/class="decision-candidate"/g) || []).length, 3);
-  assert.doesNotMatch(lens, /为什么推荐|候选对比|动作证据|已观察切片|Top-2|上一决策|下一决策|导出决策样本|剩余 Makespan|预测区间|lowerRemainingMakespan|upperRemainingMakespan/);
+  const enabled = logic.renderDecisionLens(decision, "idle", "", "enabled", "all");
+  assert.match(enabled, /Pick[\s\S]*LP1 → Robot hand[\s\S]*使能/);
+  assert.doesNotMatch(enabled, /目标槽已满|无回程槽|E2E|推荐|剩余工期/);
+  const blockedSwap = logic.renderDecisionLens(decision, "idle", "", "deadlock-blocked", "swap");
+  assert.match(blockedSwap, /Swap[\s\S]*PM1 → PM2[\s\S]*无回程槽[\s\S]*死锁规则拦截/);
 });
 
-test("双 Actor 推荐按大气端和真空端分开显示且不跨域混排", async () => {
+test("旧模型推荐轨迹不再进入动作状态卡片", async () => {
   const root = fakeWorkspaceDocument();
   const workspace = logic.createVisualizationWorkspace(root);
   await workspace.loadFile({
@@ -635,15 +547,9 @@ test("双 Actor 推荐按大气端和真空端分开显示且不跨域混排", a
     },
   });
 
-  const modelSelect = root.elements.get("visualRecommendationModel");
-  modelSelect.value = "dual-actor-e2e";
-  modelSelect.listeners.get("change")();
   const lens = root.elements.get("visualDecisionLens").innerHTML;
-  assert.match(lens, /决策 #12[\s\S]*双 Actor · 原始模型决策/);
-  assert.match(lens, /大气端 Actor[\s\S]*大气端推荐[\s\S]*真空端 Actor[\s\S]*真空端推荐/);
-  assert.ok(lens.indexOf("LP1 → ATR 手上") < lens.indexOf("ATR 手上 → LA"), "大气端应在自己的榜单内排序");
-  assert.equal((lens.match(/data-recommendation-actor=/g) || []).length, 2);
-  assert.match(root.elements.get("visualRecommendationModelHint").textContent, /原始提案/);
+  assert.match(lens, /当前动作卡片为空/);
+  assert.doesNotMatch(lens, /Actor|推荐|policyPreference/);
 });
 
 test("双 Actor 原始决策按最终定时 MoveList 的物理动作时刻对齐", () => {
@@ -706,7 +612,7 @@ test("双 Actor 原始决策按最终定时 MoveList 的物理动作时刻对齐
   assert.ok(aligned.every(step => step.candidates.some(candidate => candidate.executed)));
 });
 
-test("重入让位候选按最终调度优先级展示且计划标签指向紧邻事务", async () => {
+test("旧联合动作推荐不再进入动作状态卡片", async () => {
   const root = fakeWorkspaceDocument();
   const workspace = logic.createVisualizationWorkspace(root);
   await workspace.loadFile({
@@ -738,12 +644,11 @@ test("重入让位候选按最终调度优先级展示且计划标签指向紧�
   });
 
   const lens = root.elements.get("visualDecisionLens").innerHTML;
-  assert.ok(lens.indexOf("PM3 → PM2") < lens.indexOf("LP1 → LB"));
-  assert.match(lens, /PM3 → PM2[\s\S]*E2E推荐[\s\S]*与计划一致/);
-  assert.doesNotMatch(lens, /LP1 → LB[\s\S]*E2E推荐/);
+  assert.match(lens, /当前动作卡片为空/);
+  assert.doesNotMatch(lens, /E2E推荐|与计划一致/);
 });
 
-test("开启保护后，回放越过完整事务边界时精确暂停在下一决策", async () => {
+test("开启保护后，回放在下一个原子动作边界暂停", async () => {
   const originalRequestAnimationFrame = global.requestAnimationFrame;
   const originalCancelAnimationFrame = global.cancelAnimationFrame;
   let scheduledFrame = null;
@@ -791,9 +696,9 @@ test("开启保护后，回放越过完整事务边界时精确暂停在下一�
     scheduledFrame(performance.now() + 800);
     assert.match(root.elements.get("visualPlayButton").innerHTML, /播放/);
     assert.match(autoPause.innerHTML, /已暂停/);
-    assert.equal(root.elements.get("visualCurrentTime").textContent, "3.0");
+    assert.equal(root.elements.get("visualCurrentTime").textContent, "2.0");
     assert.equal(autoPause.getAttribute("aria-checked"), "true");
-    assert.equal(autoPause.getAttribute("aria-label"), "已到达下一个完整事务决策，回放已暂停");
+    assert.equal(autoPause.getAttribute("aria-label"), "已到达下一个原子动作决策，回放已暂停");
   } finally {
     global.requestAnimationFrame = originalRequestAnimationFrame;
     global.cancelAnimationFrame = originalCancelAnimationFrame;
@@ -2053,7 +1958,7 @@ test("大批量产能趋势精简绘图点并保留首尾和尖峰", () => {
   assert.ok(simplified.includes(points[149]));
 });
 
-test("双 Actor 回放在 Pick 结束后的原子决策边界暂停", async () => {
+test("动作接口回放在 Pick 结束后的原子决策边界暂停", async () => {
   const originalRequestAnimationFrame = global.requestAnimationFrame;
   const originalCancelAnimationFrame = global.cancelAnimationFrame;
   let scheduledFrame = null;
@@ -2072,10 +1977,6 @@ test("双 Actor 回放在 Pick 结束后的原子决策边界暂停", async () =
         return JSON.stringify({ MoveList: moves });
       },
     });
-    const modelSelect = root.elements.get("visualRecommendationModel");
-    modelSelect.value = "dual-actor-e2e";
-    modelSelect.listeners.get("change")();
-
     const autoPause = root.elements.get("visualPauseOnDecisionChangeButton");
     autoPause.click();
     root.elements.get("visualPlayButton").click();

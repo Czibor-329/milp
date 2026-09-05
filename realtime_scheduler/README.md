@@ -39,6 +39,10 @@
 `StateVariables`、清洗计数和在机物料属于持续运行状态，必须原样保留，不能被新
 一代初始化数据覆盖。
 
+拓扑回放可调用算法入口的可选 `get_replay_actions` 函数，在每个 Pick、Place、Swap
+边界展示使能、物理拦截和死锁规则拦截动作。算法未实现该函数时动作卡片保持空白；
+回放页面不运行或展示推荐模型。
+
 完整开发环境启动：
 
 `alg\.venv\Scripts\python.exe -m realtime_scheduler.backend.main --port 8765 --open`

@@ -1,9 +1,10 @@
-"""``other_alg`` 标准算法包的发现与 ``init/update`` 调用边界。
+"""``other_alg`` 标准算法包的发现及调度、回放动作接口调用边界。
 
 外部策略只能由服务扫描 ``alg/other_alg`` 下的目录包获得。算法包既可以
 保留交付目录中的 ``CT/infer`` 层，也可以把 ``infer``、``ropn_sa`` 和
 ``config`` 直接放在算法目录下。所有调用都在独占会话中执行，切换算法时
-会清理上一算法的同名 Python 模块。
+会清理上一算法的同名 Python 模块。``get_replay_actions`` 是可选接口，缺失
+时明确返回 ``None``。
 """
 
 from __future__ import annotations
@@ -321,3 +322,36 @@ def update(update_data: Union[str, Mapping[str, Any]]) -> JsonObject:
     if isinstance(output.get("Info"), dict):
         output = dict(output["Info"])
     return dict(output)
+
+
+def get_replay_actions(
+    replay_context: Union[str, Mapping[str, Any]],
+) -> Optional[JsonObject]:
+    """调用算法可选的拓扑回放动作诊断接口。
+
+    算法入口可以实现 ``get_replay_actions(json_text)``，按当前回放状态返回
+    ``actions``。每个动作只能是 ``pick``、``place`` 或 ``swap``，并可用
+    ``status`` 区分 ``enabled``、``physical-blocked`` 与
+    ``deadlock-blocked``。未实现该函数时返回 ``None``，调用方保持动作卡片
+    为空；这使旧算法包无需升级即可继续回放。
+
+    参数:
+        replay_context: 包含设备、计划、MoveList、MoveStates 与 CurrentTime 的
+            JSON 对象或 JSON 文本。
+
+    返回:
+        算法动作诊断对象；算法未提供接口时为 ``None``。
+    """
+    callback = getattr(_load_entry_module(), "get_replay_actions", None)
+    if not callable(callback):
+        return None
+    raw_output = callback(_json_text(replay_context))
+    if isinstance(raw_output, Mapping):
+        output = dict(raw_output)
+    else:
+        output = json.loads(raw_output)
+    if not isinstance(output, dict):
+        raise RuntimeError("标准算法 get_replay_actions 返回值不是 JSON 对象")
+    if isinstance(output.get("Info"), dict):
+        output = dict(output["Info"])
+    return output

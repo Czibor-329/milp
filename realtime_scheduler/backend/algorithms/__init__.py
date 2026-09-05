@@ -4,6 +4,12 @@
 依赖算法包的目录结构。
 """
 
-from .interface import discover_other_algorithms, init, session, update
+from .interface import discover_other_algorithms, get_replay_actions, init, session, update
 
-__all__ = ["discover_other_algorithms", "init", "session", "update"]
+__all__ = [
+    "discover_other_algorithms",
+    "get_replay_actions",
+    "init",
+    "session",
+    "update",
+]

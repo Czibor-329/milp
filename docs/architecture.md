@@ -90,10 +90,12 @@ HTTP 请求。批量运行会输出测试 ID、校验状态、Move 数量和 mak
 2. 调度运行由 `/api/run`、`/api/run-batch` 触发，结果由服务端写入 `exports/results/`。
 3. 前端读取结果只使用 `/api/results/*`；分析只使用 `/api/analysis/*`。
 4. 新增指标必须先补后端分析函数和 API 回归测试，再增加前端展示。
-5. 算法仓库只位于策略 `init/update` 调用边界；输出返回后，MoveList 校验、
+5. 算法仓库只位于策略 `init/update` 与可选 `get_replay_actions` 调用边界；输出返回后，MoveList 校验、
    状态回放、重算快照、资源占用投影和 CJob 卸载必须只使用
    `backend/validation/` 与 `backend/execution/` 的平台实现，不能调用 alg 的
-   `compile_problem`、`Machine`、`MoveStateReplay` 或动作枚举。
+   `compile_problem`、`Machine` 或 `MoveStateReplay`。拓扑回放仅把当前代 update、
+   MoveList 和 MoveStates 交给原算法的可选动作接口，不参与动作判断；接口缺失时
+   动作卡片留空。
    跨代时须刷新 Route、Recipe 与 WAC 规则等静态校验元数据，同时保留 PM
    `StateVariables`、清洗计数与在机物料等持续运行状态。
 6. 共享路径模板只保存 Step 和候选腔室；每个 PJob 的 `routeConfig` 保存自己的
