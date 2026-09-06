@@ -236,6 +236,7 @@ DATA_DIR = Path(
 EXPORT_DIR = REALTIME_APP_DIR / "exports"
 EDITOR_PATH = FRONTEND_DIR / "config_editor.html"
 VIEWER_PATH = FRONTEND_DIR / "movelist_gantt_viewer.html"
+DOCUMENTATION_PAGE_PATH = FRONTEND_DIR / "documentation.html"
 ROUTE_EDITOR_LOGIC_PATH = FRONTEND_DIR / "route_editor_logic.js"
 FRONTEND_ASSET_DIR = FRONTEND_DIR / "assets"
 DOCUMENTATION_DIR = DATA_DIR / "documentation"

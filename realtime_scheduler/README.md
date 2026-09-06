@@ -17,7 +17,8 @@
   参数决定算法。
 - `backend/execution/batch_service.py`：批量运行、Heuristic Baseline、并发进度与取消状态。
 - `backend/execution/plan_builder.py`：设备归一化、Route/Recipe 和各轮 CJob/PJob 请求建模。
-- `frontend/config_editor.html`：只保存调度平台的页面骨架。
+- `frontend/config_editor.html`：只保存调度平台主控制台的页面骨架。
+- `frontend/documentation.html`：独立的本地 Markdown 使用文档页面。
 - `frontend/src/`：TypeScript 前端源码，按 API、数据模型、Route 逻辑和页面入口拆分。
 - `frontend/src/workspace_visualizer.ts`：MoveList 回放、腔室门状态与设备工作台；性能指标通过 `/api/analysis/*` 获取。
 - `frontend/assets/`：可由 Python 服务直接托管的构建产物与样式。
@@ -59,7 +60,7 @@ npm run build
 ```
 
 `npm run check` 检查独立 TypeScript 业务模块，`npm run build` 更新
-`assets/config_editor.js`，并生成供 Node 单元测试使用的 `route_editor_logic.js`
+`assets/config_editor.js` 和 `assets/documentation_page.js`，并生成供 Node 单元测试使用的 `route_editor_logic.js`
 与 `workspace_visualizer_logic.js`。
 
 每次修改前端都必须递增 `frontend/package.json` 和 `package-lock.json` 中的版本号，

@@ -43,8 +43,10 @@ ALGORITHM_ROOT = ROOT / "alg"
 DEVICE_PATH = ALGORITHM_ROOT / "dataset" / "input_data" / "s1-1c2p-reschedule.json"
 PSE300_PATH = ALGORITHM_ROOT / "dataset" / "input_data" / "PSE300.json"
 EDITOR_PATH = ROOT / "realtime_scheduler" / "frontend" / "config_editor.html"
+DOCUMENTATION_PAGE_PATH = ROOT / "realtime_scheduler" / "frontend" / "documentation.html"
 EDITOR_STYLE_PATH = ROOT / "realtime_scheduler" / "frontend" / "assets" / "config_editor.css"
 EDITOR_SCRIPT_PATH = ROOT / "realtime_scheduler" / "frontend" / "src" / "config_editor.ts"
+DOCUMENTATION_SCRIPT_PATH = ROOT / "realtime_scheduler" / "frontend" / "src" / "documentation_page.ts"
 
 
 def _editor_source() -> str:
@@ -100,6 +102,22 @@ def _job(name: str, route: str, load_port: str) -> dict:
 
 class FrontendTemplateTests(unittest.TestCase):
     """验证不依赖算法数据夹具的前端模板与样式约束。"""
+
+    def test_documentation_uses_a_standalone_page(self) -> None:
+        """使用文档应从主控制台页签迁移为可直接打开的独立页面。"""
+        editor_template = EDITOR_PATH.read_text(encoding="utf-8")
+        documentation_template = DOCUMENTATION_PAGE_PATH.read_text(encoding="utf-8")
+        editor_source = EDITOR_SCRIPT_PATH.read_text(encoding="utf-8")
+        documentation_source = DOCUMENTATION_SCRIPT_PATH.read_text(encoding="utf-8")
+
+        self.assertIn('href="/documentation.html"', editor_template)
+        self.assertIn('target="_blank"', editor_template)
+        self.assertNotIn('data-tab-target="documentation"', editor_template)
+        self.assertNotIn('data-tab-view="documentation"', editor_template)
+        self.assertNotIn("createDocumentationView", editor_source)
+        self.assertIn('id="documentationRoot"', documentation_template)
+        self.assertIn('src="/assets/documentation_page.js?v=1.5.34"', documentation_template)
+        self.assertIn('createDocumentationView(documentationRoot).load()', documentation_source)
 
     def test_workspace_switches_do_not_enter_global_pending_lock(self) -> None:
         """设备和测试组切换不得用全局等待锁重绘并禁用自身选择器。"""
@@ -548,19 +566,19 @@ class RecomputeFailureOutputTests(unittest.TestCase):
         self.assertIn("!rec.removedByRecompute", viewer)
         self.assertIn('fillOpacity = bar.rec.removedByRecompute ? "0.24" : "1"', viewer)
 
-    def test_frontend_version_and_cache_keys_are_1_5_33(self) -> None:
+    def test_frontend_version_and_cache_keys_are_1_5_34(self) -> None:
         """前端显示版本、包版本和主资源缓存键必须同步。"""
         frontend_root = ROOT / "realtime_scheduler" / "frontend"
         template = (frontend_root / "config_editor.html").read_text(encoding="utf-8")
         package = json.loads((frontend_root / "package.json").read_text(encoding="utf-8"))
         package_lock = json.loads((frontend_root / "package-lock.json").read_text(encoding="utf-8"))
 
-        self.assertEqual("1.5.33", package["version"])
-        self.assertEqual("1.5.33", package_lock["version"])
-        self.assertEqual("1.5.33", package_lock["packages"][""]["version"])
-        self.assertIn('class="frontend-version">V1.5.33</span>', template)
-        self.assertIn('/assets/config_editor.css?v=1.5.33', template)
-        self.assertIn('/assets/config_editor.js?v=1.5.33', template)
+        self.assertEqual("1.5.34", package["version"])
+        self.assertEqual("1.5.34", package_lock["version"])
+        self.assertEqual("1.5.34", package_lock["packages"][""]["version"])
+        self.assertIn('class="frontend-version">V1.5.34</span>', template)
+        self.assertIn('/assets/config_editor.css?v=1.5.34', template)
+        self.assertIn('/assets/config_editor.js?v=1.5.34', template)
 
     def test_single_run_failure_card_does_not_duplicate_validation_issue(self) -> None:
         """状态推进校验失败只展示一条完整错误，不再重复渲染问题列表。"""
@@ -2299,7 +2317,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("<span>结果分析</span>", html)
         self.assertIn("<span>路径配置</span>", html)
         self.assertNotIn('data-tab-view="clean"', html)
-        self.assertIn('class="frontend-version">V1.5.33</span>', html)
+        self.assertIn('class="frontend-version">V1.5.34</span>', html)
         self.assertIn('data-option="residencyGuardSeconds"', html)
         self.assertIn('data-option="maximumRobotHoldingSeconds"', html)
         self.assertIn('data-option="maximumSystemResidenceCv"', html)

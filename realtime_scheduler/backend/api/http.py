@@ -35,6 +35,9 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
         if path == "/movelist_gantt_viewer.html":
             self._send_file(VIEWER_PATH, "text/html; charset=utf-8")
             return
+        if path == "/documentation.html":
+            self._send_file(DOCUMENTATION_PAGE_PATH, "text/html; charset=utf-8")
+            return
         if path == "/route_editor_logic.js":
             self._send_file(ROUTE_EDITOR_LOGIC_PATH, "text/javascript; charset=utf-8")
             return
