@@ -1655,22 +1655,10 @@
     .petri-panel-title { margin: 0; color: var(--ink); font: 700 var(--decision-text-lg)/1.3 "Fira Sans", "Microsoft YaHei", "Segoe UI", sans-serif; letter-spacing: -.01em; }
     .petri-section-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
     .petri-section-heading > span { color: var(--muted); font: 800 var(--decision-text-sm)/1.3 "Fira Code", Consolas, monospace; letter-spacing: .06em; }
-    .decision-panel-toolbar { display: flex; min-height: 52px; align-items: center; justify-content: space-between; gap: 10px; }
-    .action-filter-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 10px 11px; border: 1px solid var(--line); border-radius: 6px; background: var(--soft); }
-    .action-filter-controls label { display: grid; gap: 4px; color: var(--muted); font-size: 10px; font-weight: 800; }
-    .action-filter-controls select { width: 100%; min-width: 0; min-height: 36px; padding: 0 28px 0 8px; border: 1px solid #b9c6d6; border-radius: 5px; color: var(--ink); background-color: var(--surface); font-size: 11px; font-weight: 700; }
-    .action-filter-controls select:focus-visible { outline: 3px solid rgba(36,87,214,.24); outline-offset: 2px; }
-    .decision-auto-pause { display: flex; min-width: 0; min-height: 44px; align-items: center; gap: 8px; padding: 3px 0; border: 0; border-radius: 6px; color: var(--ink); background: transparent; font: 600 var(--decision-text-sm)/1.25 "Fira Sans", "Microsoft YaHei", "Segoe UI", sans-serif; text-align: right; cursor: pointer; touch-action: manipulation; }
-    .decision-switch-copy { display: grid; justify-items: end; gap: 1px; }
-    .decision-switch-copy > span { color: var(--ink); white-space: nowrap; }
-    .decision-switch-copy > strong { color: var(--muted); font-size: 11px; font-weight: 600; white-space: nowrap; }
-    .decision-switch-track { position: relative; flex: 0 0 auto; width: 34px; height: 20px; border: 1px solid #aeb8c5; border-radius: 999px; background: #c8ced6; }
-    .decision-switch-track i { position: absolute; top: 3px; left: 3px; width: 12px; height: 12px; border-radius: 50%; background: #fff; }
-    .decision-auto-pause.is-active .decision-switch-track { border-color: #4d73b9; background: #5279c5; }
-    .decision-auto-pause.is-active .decision-switch-track i { transform: translateX(14px); }
-    .decision-auto-pause.is-active .decision-switch-copy > strong { color: #4569aa; }
-    .decision-auto-pause.is-triggered .decision-switch-track { border-color: #ad741b; background: #c78a2d; }
-    .decision-auto-pause.is-triggered .decision-switch-copy > strong { color: #8b5c15; }
+    .action-filter-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 6px; background: var(--soft); }
+    .action-filter-label { color: var(--muted); font-size: 10px; font-weight: 800; }
+    .action-filter-controls .action-filter-check { display: inline-flex; align-items: center; gap: 5px; color: var(--ink); font-size: 11px; font-weight: 700; cursor: pointer; }
+    .action-filter-check input { width: 14px; height: 14px; margin: 0; accent-color: var(--brand); }
     .petri-control-panel .decision-lens-panel, .petri-control-panel .active-moves-panel { border: 1px solid var(--line); border-radius: 6px; background: var(--surface); box-shadow: none; }
     .petri-control-panel .decision-candidate-section ul { max-height: 360px; margin: 0; padding: 0; overflow: auto; list-style: none; }
     .action-count-summary { margin: 0; padding: 7px 12px; border-block: 1px solid var(--line); color: var(--muted); font-size: 11px; }
@@ -1679,6 +1667,10 @@
     .decision-candidate.action-status-deadlock-blocked { background: #fff2f1; }
     .decision-tag.action-kind { justify-self: start; }
     .decision-tag.action-status { justify-self: end; white-space: nowrap; }
+    .petri-control-panel .decision-candidate-section > ul .action-card { min-height: 0; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 7px; padding: 8px 10px; }
+    .petri-control-panel .action-card .decision-candidate-title > strong { font-size: 12px; line-height: 1.25; }
+    .petri-control-panel .action-card .decision-candidate-main > small { margin-top: 2px; font-size: 10px; line-height: 1.25; }
+    .petri-control-panel .action-card .action-block-reason { margin-top: 3px; font-size: 10px; line-height: 1.3; }
     .dual-actor-decision { display: grid; min-width: 0; }
     .dual-actor-decision-head { display: grid; gap: 2px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
     .dual-actor-decision-head strong { color: var(--ink); font-size: 13px; }

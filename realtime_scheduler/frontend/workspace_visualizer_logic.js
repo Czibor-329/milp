@@ -1145,9 +1145,7 @@ function collectElements(root) {
     topologyPlayback: required("visualTopologyPlayback"),
     stage: required("visualDeviceStage"),
     decisionLens: required("visualDecisionLens"),
-    actionStatusFilter: optionalSelect("visualActionStatusFilter", "enabled"),
-    actionKindFilter: optionalSelect("visualActionKindFilter", "all"),
-    pauseOnDecisionChangeButton: required("visualPauseOnDecisionChangeButton"),
+    actionStatusFilters: Array.from(root.querySelectorAll("[data-action-status-filter]")),
     activeMoves: required("visualActiveMoves"),
     source: required("visualSource"),
     currentTime: required("visualCurrentTime"),
@@ -1918,7 +1916,7 @@ function primitiveDecisionBoundaryTimes(moves) {
     moves.filter((move) => PRIMITIVE_DECISION_COMPLETION_MOVE_TYPES.has(finiteNumber(move.MoveType, -1))).map((move) => finiteNumber(move.EndTime)).filter((time) => time >= 0)
   )].sort((left, right) => left - right);
 }
-function renderDecisionLens(decision, requestState = "idle", requestError = "", statusFilter = "enabled", kindFilter = "all") {
+function renderDecisionLens(decision, requestState = "idle", requestError = "", statusFilters = ["enabled"]) {
   if (!decision) {
     if (requestState === "loading") {
       return `
@@ -1947,12 +1945,12 @@ function renderDecisionLens(decision, requestState = "idle", requestError = "", 
     "deadlock-blocked": "\u6B7B\u9501\u89C4\u5219\u62E6\u622A"
   };
   const kindLabels = { pick: "Pick", place: "Place", swap: "Swap" };
-  const visibleActions = decision.actionDiagnostics.filter((action) => (statusFilter === "all" || action.status === statusFilter) && (kindFilter === "all" || action.kind === kindFilter));
+  const visibleActions = decision.actionDiagnostics.filter((action) => statusFilters.includes(action.status));
   const cards = visibleActions.map((action) => {
     const source = action.sourceSlot > 0 ? `${action.source} #${action.sourceSlot}` : action.source;
     const destination = action.destinationSlot > 0 ? `${action.destination} #${action.destinationSlot}` : action.destination;
     return `
-      <li class="decision-candidate action-status-${action.status}">
+      <li class="decision-candidate action-card action-status-${action.status}">
         <span class="decision-tag action-kind">${kindLabels[action.kind]}</span>
         <div class="decision-candidate-main">
           <div class="decision-candidate-title"><strong>${escapeHtml(source || action.robot)} \u2192 ${escapeHtml(destination || "Robot hand")}</strong></div>
@@ -2352,13 +2350,10 @@ var VisualizationWorkspace = class {
   analysisRounds = [];
   moves = [];
   replayPlan = null;
-  actionStatusFilter = "enabled";
-  actionKindFilter = "all";
+  actionStatusFilters = ["enabled"];
   liveDecision = null;
   liveDecisionKey = "";
   primitiveDecisionBoundaries = [];
-  pauseOnDecisionChange = false;
-  pauseTriggeredByDecisionChange = false;
   replayDecisionCache = /* @__PURE__ */ new Map();
   pendingReplayDecisionKeys = /* @__PURE__ */ new Set();
   replayDecisionErrorKey = "";
@@ -2375,8 +2370,6 @@ var VisualizationWorkspace = class {
   time = 0;
   playing = false;
   liveSolving = false;
-  /** 外部（Search Tree 搜索面板）接管右侧决策镜头时跳过本类每帧覆盖。 */
-  externalDecisionLensOwner = false;
   playbackSpeed = DEFAULT_PLAYBACK_SPEED;
   performanceWindowMode = "steady";
   animationFrame = 0;
@@ -2388,7 +2381,6 @@ var VisualizationWorkspace = class {
     this.elements = collectElements(root);
     this.bindEvents();
     this.updatePlayButton();
-    this.updatePauseOnDecisionChangeButton();
     this.setTopologyVisible(false);
   }
   /** 更新当前设备拓扑；已有 MoveList 会立即按新拓扑重绘。 */
@@ -2470,10 +2462,6 @@ var VisualizationWorkspace = class {
     this.primitiveDecisionBoundaries = primitiveDecisionBoundaryTimes(this.moves);
     this.replayDecisionRequestVersion += 1;
     if (this.moves.length) this.render();
-  }
-  /** 让 Search Tree 搜索面板接管右侧“合法动作空间”的渲染。 */
-  setExternalDecisionLensOwner(owner) {
-    this.externalDecisionLensOwner = owner;
   }
   /** 在完整 MoveList 返回前显示初始拓扑，并进入增量求解状态。 */
   beginLiveSolve(plan, sourceName = "Search Tree \u5B9E\u65F6\u6C42\u89E3") {
@@ -2667,21 +2655,10 @@ var VisualizationWorkspace = class {
       if (this.playing) this.pause();
       else this.play();
     });
-    this.elements.pauseOnDecisionChangeButton.addEventListener("click", () => {
-      this.pauseOnDecisionChange = !this.pauseOnDecisionChange;
-      this.pauseTriggeredByDecisionChange = false;
-      this.updatePauseOnDecisionChangeButton();
-    });
-    this.elements.actionStatusFilter.addEventListener("change", () => {
-      const status = this.elements.actionStatusFilter.value;
-      this.actionStatusFilter = ["enabled", "physical-blocked", "deadlock-blocked"].includes(status) ? status : "all";
+    this.elements.actionStatusFilters.forEach((filter) => filter.addEventListener("change", () => {
+      this.actionStatusFilters = this.elements.actionStatusFilters.filter((item) => item.checked).map((item) => item.value);
       this.render();
-    });
-    this.elements.actionKindFilter.addEventListener("change", () => {
-      const kind = this.elements.actionKindFilter.value;
-      this.actionKindFilter = ["pick", "place", "swap"].includes(kind) ? kind : "all";
-      this.render();
-    });
+    }));
     this.elements.speed.addEventListener("change", () => {
       this.playbackSpeed = Math.max(0.25, finiteNumber(this.elements.speed.value, DEFAULT_PLAYBACK_SPEED));
     });
@@ -2703,20 +2680,17 @@ var VisualizationWorkspace = class {
       this.elements.range.value = "0";
     }
     this.playing = true;
-    this.pauseTriggeredByDecisionChange = false;
     this.previousFrameTime = performance.now();
     this.previousRenderTime = 0;
     this.updatePlayButton();
     this.animationFrame = requestAnimationFrame((timestamp) => this.tick(timestamp));
   }
   /** 暂停回放并保留当前时间。 */
-  pause(triggeredByDecisionChange = false) {
+  pause() {
     this.playing = false;
-    this.pauseTriggeredByDecisionChange = triggeredByDecisionChange;
     if (this.animationFrame) cancelAnimationFrame(this.animationFrame);
     this.animationFrame = 0;
     this.updatePlayButton();
-    this.updatePauseOnDecisionChangeButton();
   }
   /** 推进播放时钟，并按固定上限刷新 DOM。 */
   tick(timestamp) {
@@ -2724,17 +2698,9 @@ var VisualizationWorkspace = class {
     const elapsedSeconds = Math.max(0, timestamp - this.previousFrameTime) / 1e3;
     this.previousFrameTime = timestamp;
     const endTime = finiteNumber(this.elements.range.max);
-    const previousTime = this.time;
-    const advancedTime = Math.min(endTime, previousTime + elapsedSeconds * this.playbackSpeed);
-    const nextDecisionBoundary = this.pauseOnDecisionChange ? this.currentDecisionBoundaries().find((boundary) => boundary > previousTime + PERFORMANCE_DISPLAY_TOLERANCE && boundary <= advancedTime + PERFORMANCE_DISPLAY_TOLERANCE) : void 0;
-    this.time = nextDecisionBoundary ?? advancedTime;
+    const advancedTime = Math.min(endTime, this.time + elapsedSeconds * this.playbackSpeed);
+    this.time = advancedTime;
     this.elements.range.value = String(this.time);
-    if (nextDecisionBoundary !== void 0) {
-      this.previousRenderTime = timestamp;
-      this.render();
-      this.pause(true);
-      return;
-    }
     if (timestamp - this.previousRenderTime >= PLAYBACK_FRAME_INTERVAL_MS || this.time >= endTime) {
       this.previousRenderTime = timestamp;
       this.render();
@@ -2751,22 +2717,6 @@ var VisualizationWorkspace = class {
     this.elements.playButton.innerHTML = this.playing ? `${icon("pause")}<span>\u6682\u505C</span>` : `${icon("play")}<span>\u64AD\u653E</span>`;
     this.elements.playButton.setAttribute("aria-label", this.playing ? "\u6682\u505C\u56DE\u653E" : "\u64AD\u653E\u56DE\u653E");
     this.elements.playButton.classList.toggle("is-playing", this.playing);
-  }
-  /** 同步决策空间自动暂停按钮的开关、触发状态和无障碍文本。 */
-  updatePauseOnDecisionChangeButton() {
-    const state = this.pauseTriggeredByDecisionChange ? "\u5DF2\u6682\u505C" : this.pauseOnDecisionChange ? "\u5DF2\u5F00\u542F" : "\u5DF2\u5173\u95ED";
-    const decisionKind = "\u539F\u5B50\u52A8\u4F5C\u51B3\u7B56";
-    this.elements.pauseOnDecisionChangeButton.innerHTML = `
-      <span class="decision-switch-copy"><span>\u4E0B\u4E00\u51B3\u7B56\u65F6\u6682\u505C</span><strong>${state}</strong></span>
-      <span class="decision-switch-track" aria-hidden="true"><i></i></span>`;
-    this.elements.pauseOnDecisionChangeButton.setAttribute("aria-pressed", String(this.pauseOnDecisionChange));
-    this.elements.pauseOnDecisionChangeButton.setAttribute("aria-checked", String(this.pauseOnDecisionChange));
-    this.elements.pauseOnDecisionChangeButton.setAttribute(
-      "aria-label",
-      this.pauseTriggeredByDecisionChange ? `\u5DF2\u5230\u8FBE\u4E0B\u4E00\u4E2A${decisionKind}\uFF0C\u56DE\u653E\u5DF2\u6682\u505C` : `\u5230\u4E0B\u4E00\u4E2A${decisionKind}\u65F6\u81EA\u52A8\u6682\u505C\uFF1A${this.pauseOnDecisionChange ? "\u5DF2\u5F00\u542F" : "\u5DF2\u5173\u95ED"}`
-    );
-    this.elements.pauseOnDecisionChangeButton.classList.toggle("is-active", this.pauseOnDecisionChange);
-    this.elements.pauseOnDecisionChangeButton.classList.toggle("is-triggered", this.pauseTriggeredByDecisionChange);
   }
   /** 切换单例分析模式，测试组统计与单例诊断不会同时出现。 */
   showSingleResult() {
@@ -2816,16 +2766,13 @@ var VisualizationWorkspace = class {
       void 0,
       this.device
     );
-    if (!this.externalDecisionLensOwner) {
-      const requestState = this.pendingReplayDecisionKeys.has(replayKey) ? "loading" : this.replayDecisionErrorKey === replayKey ? "error" : "idle";
-      this.elements.decisionLens.innerHTML = renderDecisionLens(
-        currentDecision,
-        requestState,
-        this.replayDecisionErrorMessage,
-        this.actionStatusFilter,
-        this.actionKindFilter
-      );
-    }
+    const requestState = this.pendingReplayDecisionKeys.has(replayKey) ? "loading" : this.replayDecisionErrorKey === replayKey ? "error" : "idle";
+    this.elements.decisionLens.innerHTML = renderDecisionLens(
+      currentDecision,
+      requestState,
+      this.replayDecisionErrorMessage,
+      this.actionStatusFilters
+    );
     this.elements.activeMoves.innerHTML = snapshot.activeMoves.length ? snapshot.activeMoves.map((move) => `
         <li>
           <span class="active-move-id">#${finiteNumber(move.MoveID)}</span>

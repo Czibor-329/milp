@@ -206,13 +206,6 @@ async function requestReplayDecision(input) {
   });
   return result.decision;
 }
-async function requestSearchTelemetry(sinceRevision = null) {
-  const query = sinceRevision === null ? "" : `?since=${encodeURIComponent(String(sinceRevision))}`;
-  const result = await requestJson(`/api/search-telemetry${query}`, {
-    cache: "no-store"
-  });
-  return result.telemetry;
-}
 async function requestSearchControl(command, actionKey = null) {
   return requestJson("/api/search-control", {
     method: "POST",
@@ -1211,9 +1204,7 @@ function collectElements(root) {
     topologyPlayback: required("visualTopologyPlayback"),
     stage: required("visualDeviceStage"),
     decisionLens: required("visualDecisionLens"),
-    actionStatusFilter: optionalSelect("visualActionStatusFilter", "enabled"),
-    actionKindFilter: optionalSelect("visualActionKindFilter", "all"),
-    pauseOnDecisionChangeButton: required("visualPauseOnDecisionChangeButton"),
+    actionStatusFilters: Array.from(root.querySelectorAll("[data-action-status-filter]")),
     activeMoves: required("visualActiveMoves"),
     source: required("visualSource"),
     currentTime: required("visualCurrentTime"),
@@ -1975,7 +1966,7 @@ function primitiveDecisionBoundaryTimes(moves) {
     moves.filter((move) => PRIMITIVE_DECISION_COMPLETION_MOVE_TYPES.has(finiteNumber(move.MoveType, -1))).map((move) => finiteNumber(move.EndTime)).filter((time) => time >= 0)
   )].sort((left, right) => left - right);
 }
-function renderDecisionLens(decision, requestState = "idle", requestError = "", statusFilter = "enabled", kindFilter = "all") {
+function renderDecisionLens(decision, requestState = "idle", requestError = "", statusFilters = ["enabled"]) {
   if (!decision) {
     if (requestState === "loading") {
       return `
@@ -2004,12 +1995,12 @@ function renderDecisionLens(decision, requestState = "idle", requestError = "", 
     "deadlock-blocked": "\u6B7B\u9501\u89C4\u5219\u62E6\u622A"
   };
   const kindLabels = { pick: "Pick", place: "Place", swap: "Swap" };
-  const visibleActions = decision.actionDiagnostics.filter((action) => (statusFilter === "all" || action.status === statusFilter) && (kindFilter === "all" || action.kind === kindFilter));
+  const visibleActions = decision.actionDiagnostics.filter((action) => statusFilters.includes(action.status));
   const cards = visibleActions.map((action) => {
     const source = action.sourceSlot > 0 ? `${action.source} #${action.sourceSlot}` : action.source;
     const destination = action.destinationSlot > 0 ? `${action.destination} #${action.destinationSlot}` : action.destination;
     return `
-      <li class="decision-candidate action-status-${action.status}">
+      <li class="decision-candidate action-card action-status-${action.status}">
         <span class="decision-tag action-kind">${kindLabels[action.kind]}</span>
         <div class="decision-candidate-main">
           <div class="decision-candidate-title"><strong>${escapeHtml(source || action.robot)} \u2192 ${escapeHtml(destination || "Robot hand")}</strong></div>
@@ -2419,13 +2410,10 @@ var VisualizationWorkspace = class {
   analysisRounds = [];
   moves = [];
   replayPlan = null;
-  actionStatusFilter = "enabled";
-  actionKindFilter = "all";
+  actionStatusFilters = ["enabled"];
   liveDecision = null;
   liveDecisionKey = "";
   primitiveDecisionBoundaries = [];
-  pauseOnDecisionChange = false;
-  pauseTriggeredByDecisionChange = false;
   replayDecisionCache = /* @__PURE__ */ new Map();
   pendingReplayDecisionKeys = /* @__PURE__ */ new Set();
   replayDecisionErrorKey = "";
@@ -2442,8 +2430,6 @@ var VisualizationWorkspace = class {
   time = 0;
   playing = false;
   liveSolving = false;
-  /** 外部（Search Tree 搜索面板）接管右侧决策镜头时跳过本类每帧覆盖。 */
-  externalDecisionLensOwner = false;
   playbackSpeed = DEFAULT_PLAYBACK_SPEED;
   performanceWindowMode = "steady";
   animationFrame = 0;
@@ -2455,7 +2441,6 @@ var VisualizationWorkspace = class {
     this.elements = collectElements(root);
     this.bindEvents();
     this.updatePlayButton();
-    this.updatePauseOnDecisionChangeButton();
     this.setTopologyVisible(false);
   }
   /** 更新当前设备拓扑；已有 MoveList 会立即按新拓扑重绘。 */
@@ -2537,10 +2522,6 @@ var VisualizationWorkspace = class {
     this.primitiveDecisionBoundaries = primitiveDecisionBoundaryTimes(this.moves);
     this.replayDecisionRequestVersion += 1;
     if (this.moves.length) this.render();
-  }
-  /** 让 Search Tree 搜索面板接管右侧“合法动作空间”的渲染。 */
-  setExternalDecisionLensOwner(owner) {
-    this.externalDecisionLensOwner = owner;
   }
   /** 在完整 MoveList 返回前显示初始拓扑，并进入增量求解状态。 */
   beginLiveSolve(plan, sourceName = "Search Tree \u5B9E\u65F6\u6C42\u89E3") {
@@ -2734,21 +2715,10 @@ var VisualizationWorkspace = class {
       if (this.playing) this.pause();
       else this.play();
     });
-    this.elements.pauseOnDecisionChangeButton.addEventListener("click", () => {
-      this.pauseOnDecisionChange = !this.pauseOnDecisionChange;
-      this.pauseTriggeredByDecisionChange = false;
-      this.updatePauseOnDecisionChangeButton();
-    });
-    this.elements.actionStatusFilter.addEventListener("change", () => {
-      const status = this.elements.actionStatusFilter.value;
-      this.actionStatusFilter = ["enabled", "physical-blocked", "deadlock-blocked"].includes(status) ? status : "all";
+    this.elements.actionStatusFilters.forEach((filter) => filter.addEventListener("change", () => {
+      this.actionStatusFilters = this.elements.actionStatusFilters.filter((item) => item.checked).map((item) => item.value);
       this.render();
-    });
-    this.elements.actionKindFilter.addEventListener("change", () => {
-      const kind = this.elements.actionKindFilter.value;
-      this.actionKindFilter = ["pick", "place", "swap"].includes(kind) ? kind : "all";
-      this.render();
-    });
+    }));
     this.elements.speed.addEventListener("change", () => {
       this.playbackSpeed = Math.max(0.25, finiteNumber(this.elements.speed.value, DEFAULT_PLAYBACK_SPEED));
     });
@@ -2770,20 +2740,17 @@ var VisualizationWorkspace = class {
       this.elements.range.value = "0";
     }
     this.playing = true;
-    this.pauseTriggeredByDecisionChange = false;
     this.previousFrameTime = performance.now();
     this.previousRenderTime = 0;
     this.updatePlayButton();
     this.animationFrame = requestAnimationFrame((timestamp) => this.tick(timestamp));
   }
   /** 暂停回放并保留当前时间。 */
-  pause(triggeredByDecisionChange = false) {
+  pause() {
     this.playing = false;
-    this.pauseTriggeredByDecisionChange = triggeredByDecisionChange;
     if (this.animationFrame) cancelAnimationFrame(this.animationFrame);
     this.animationFrame = 0;
     this.updatePlayButton();
-    this.updatePauseOnDecisionChangeButton();
   }
   /** 推进播放时钟，并按固定上限刷新 DOM。 */
   tick(timestamp) {
@@ -2791,17 +2758,9 @@ var VisualizationWorkspace = class {
     const elapsedSeconds = Math.max(0, timestamp - this.previousFrameTime) / 1e3;
     this.previousFrameTime = timestamp;
     const endTime = finiteNumber(this.elements.range.max);
-    const previousTime = this.time;
-    const advancedTime = Math.min(endTime, previousTime + elapsedSeconds * this.playbackSpeed);
-    const nextDecisionBoundary = this.pauseOnDecisionChange ? this.currentDecisionBoundaries().find((boundary) => boundary > previousTime + PERFORMANCE_DISPLAY_TOLERANCE && boundary <= advancedTime + PERFORMANCE_DISPLAY_TOLERANCE) : void 0;
-    this.time = nextDecisionBoundary ?? advancedTime;
+    const advancedTime = Math.min(endTime, this.time + elapsedSeconds * this.playbackSpeed);
+    this.time = advancedTime;
     this.elements.range.value = String(this.time);
-    if (nextDecisionBoundary !== void 0) {
-      this.previousRenderTime = timestamp;
-      this.render();
-      this.pause(true);
-      return;
-    }
     if (timestamp - this.previousRenderTime >= PLAYBACK_FRAME_INTERVAL_MS || this.time >= endTime) {
       this.previousRenderTime = timestamp;
       this.render();
@@ -2818,22 +2777,6 @@ var VisualizationWorkspace = class {
     this.elements.playButton.innerHTML = this.playing ? `${icon("pause")}<span>\u6682\u505C</span>` : `${icon("play")}<span>\u64AD\u653E</span>`;
     this.elements.playButton.setAttribute("aria-label", this.playing ? "\u6682\u505C\u56DE\u653E" : "\u64AD\u653E\u56DE\u653E");
     this.elements.playButton.classList.toggle("is-playing", this.playing);
-  }
-  /** 同步决策空间自动暂停按钮的开关、触发状态和无障碍文本。 */
-  updatePauseOnDecisionChangeButton() {
-    const state2 = this.pauseTriggeredByDecisionChange ? "\u5DF2\u6682\u505C" : this.pauseOnDecisionChange ? "\u5DF2\u5F00\u542F" : "\u5DF2\u5173\u95ED";
-    const decisionKind = "\u539F\u5B50\u52A8\u4F5C\u51B3\u7B56";
-    this.elements.pauseOnDecisionChangeButton.innerHTML = `
-      <span class="decision-switch-copy"><span>\u4E0B\u4E00\u51B3\u7B56\u65F6\u6682\u505C</span><strong>${state2}</strong></span>
-      <span class="decision-switch-track" aria-hidden="true"><i></i></span>`;
-    this.elements.pauseOnDecisionChangeButton.setAttribute("aria-pressed", String(this.pauseOnDecisionChange));
-    this.elements.pauseOnDecisionChangeButton.setAttribute("aria-checked", String(this.pauseOnDecisionChange));
-    this.elements.pauseOnDecisionChangeButton.setAttribute(
-      "aria-label",
-      this.pauseTriggeredByDecisionChange ? `\u5DF2\u5230\u8FBE\u4E0B\u4E00\u4E2A${decisionKind}\uFF0C\u56DE\u653E\u5DF2\u6682\u505C` : `\u5230\u4E0B\u4E00\u4E2A${decisionKind}\u65F6\u81EA\u52A8\u6682\u505C\uFF1A${this.pauseOnDecisionChange ? "\u5DF2\u5F00\u542F" : "\u5DF2\u5173\u95ED"}`
-    );
-    this.elements.pauseOnDecisionChangeButton.classList.toggle("is-active", this.pauseOnDecisionChange);
-    this.elements.pauseOnDecisionChangeButton.classList.toggle("is-triggered", this.pauseTriggeredByDecisionChange);
   }
   /** 切换单例分析模式，测试组统计与单例诊断不会同时出现。 */
   showSingleResult() {
@@ -2883,16 +2826,13 @@ var VisualizationWorkspace = class {
       void 0,
       this.device
     );
-    if (!this.externalDecisionLensOwner) {
-      const requestState = this.pendingReplayDecisionKeys.has(replayKey) ? "loading" : this.replayDecisionErrorKey === replayKey ? "error" : "idle";
-      this.elements.decisionLens.innerHTML = renderDecisionLens(
-        currentDecision,
-        requestState,
-        this.replayDecisionErrorMessage,
-        this.actionStatusFilter,
-        this.actionKindFilter
-      );
-    }
+    const requestState = this.pendingReplayDecisionKeys.has(replayKey) ? "loading" : this.replayDecisionErrorKey === replayKey ? "error" : "idle";
+    this.elements.decisionLens.innerHTML = renderDecisionLens(
+      currentDecision,
+      requestState,
+      this.replayDecisionErrorMessage,
+      this.actionStatusFilters
+    );
     this.elements.activeMoves.innerHTML = snapshot.activeMoves.length ? snapshot.activeMoves.map((move) => `
         <li>
           <span class="active-move-id">#${finiteNumber(move.MoveID)}</span>
@@ -3493,7 +3433,6 @@ var PROCESSING_STATION_TYPES = /* @__PURE__ */ new Set([
 ]);
 var FIRST_ROBOT_SLOT_ID = 1;
 var DUAL_ARM_SLOT_COUNT = 2;
-var SEARCH_TELEMETRY_POLL_MILLISECONDS = 75;
 var BATCH_STATUS_POLL_MILLISECONDS = 1e3;
 var WORKSPACE_TRANSFER_POLL_MILLISECONDS = 500;
 var TEST_ORDER_COLLATOR = new Intl.Collator("zh-CN", { numeric: true, sensitivity: "base" });
@@ -3584,8 +3523,6 @@ var playbackMode = "replay";
 var userChosenActionKey = "";
 var userChosenSearchId = "";
 var pendingModeSync = "";
-var stepRunActive = false;
-var stepRunCancelling = false;
 var singleRunActive = false;
 var singleRunCancelling = false;
 var activeSingleRunId = "";
@@ -4927,22 +4864,6 @@ function resetSearchTelemetryView() {
   continuousDecisionSubmittedSearchId = "";
   userChosenActionKey = "";
   userChosenSearchId = "";
-  const panel = document.getElementById("searchTelemetryPanel");
-  panel.hidden = true;
-  document.getElementById("searchTelemetryVariationPanel").hidden = true;
-  document.getElementById("searchTelemetryDecisionSelect").innerHTML = "";
-  document.getElementById("searchTelemetryVariation").innerHTML = "";
-  for (const id of [
-    "searchTelemetryPauseButton",
-    "searchTelemetryStepButton",
-    "searchTelemetryContinueButton",
-    "searchTelemetryFollowRecommendationButton",
-    "searchTelemetryContinuousDecisionButton"
-  ]) {
-    const button = document.getElementById(id);
-    button.disabled = true;
-    button.classList.remove("is-active");
-  }
 }
 function formatSearchTelemetryNumber(value, digits = 2) {
   const number = Number(value);
@@ -5084,11 +5005,6 @@ async function chooseSearchAction(actionKey, automatic = false) {
     maybeContinueModelDecision(latestSearchTelemetry);
   }
 }
-function followSearchRecommendation() {
-  const key = String(latestSearchTelemetry?.selectedActionKey || "");
-  if (!key) return;
-  void chooseSearchAction(key);
-}
 async function flushPendingModeSync() {
   const mode = pendingModeSync;
   if (!mode) return;
@@ -5112,15 +5028,6 @@ function maybeContinueModelDecision(snapshot) {
   continuousDecisionSubmittedSearchId = searchId;
   void chooseSearchAction(actionKey, true);
 }
-function toggleContinuousDecision() {
-  if (!searchTelemetryRunActive || playbackMode !== "step") return;
-  continuousDecisionEnabled = !continuousDecisionEnabled;
-  continuousDecisionSubmittedSearchId = "";
-  followLatestSearchTelemetry = true;
-  selectedSearchTelemetryId = "";
-  if (latestSearchTelemetry) renderSearchTelemetry(latestSearchTelemetry);
-  else updateSearchTelemetryControls(null);
-}
 async function setPlaybackMode(mode) {
   if (mode !== "step" && mode !== "replay") return;
   playbackMode = mode;
@@ -5142,27 +5049,6 @@ async function setPlaybackMode(mode) {
     pendingModeSync = mode;
   }
   if (latestSearchTelemetry) renderSearchTelemetry(latestSearchTelemetry);
-}
-async function controlSearchTelemetry(command) {
-  if (!searchTelemetryRunActive || searchTelemetryControlPending) return;
-  searchTelemetryControlPending = true;
-  if (command !== "pause") {
-    followLatestSearchTelemetry = true;
-    selectedSearchTelemetryId = "";
-  }
-  updateSearchTelemetryControls(latestSearchTelemetry);
-  try {
-    const result = await requestSearchControl(command);
-    if (result?.telemetry) renderSearchTelemetry(result.telemetry);
-  } catch (error) {
-    const status = document.getElementById("searchTelemetryStatus");
-    status.textContent = `\u6C42\u89E3\u63A7\u5236\u5931\u8D25\uFF1A${error.message || "\u672A\u77E5\u9519\u8BEF"}`;
-    status.classList.remove("is-searching", "is-paused");
-  } finally {
-    searchTelemetryControlPending = false;
-    flushPendingModeSync();
-    updateSearchTelemetryControls(latestSearchTelemetry);
-  }
 }
 function renderSearchTelemetry(snapshot) {
   if (!snapshot || snapshot.unchanged) return;
@@ -5202,50 +5088,6 @@ function renderSearchTelemetry(snapshot) {
   renderSearchTelemetryDecision(selected);
   syncSearchTelemetryPlayback(snapshot, selected);
   maybeContinueModelDecision(snapshot);
-}
-async function pollSearchTelemetry(token) {
-  let revision = null;
-  while (token === searchTelemetryPollToken) {
-    try {
-      const snapshot = await requestSearchTelemetry(revision);
-      if (token !== searchTelemetryPollToken) break;
-      if (Number.isFinite(Number(snapshot?.revision))) revision = Number(snapshot.revision);
-      renderSearchTelemetry(snapshot);
-    } catch (error) {
-      if (!latestSearchTelemetry && token === searchTelemetryPollToken) {
-        const status = document.getElementById("searchTelemetryStatus");
-        status.textContent = `\u9065\u6D4B\u6682\u4E0D\u53EF\u7528\uFF1A${error.message || "\u672A\u77E5\u9519\u8BEF"}`;
-        status.classList.remove("is-searching");
-      }
-    }
-    await new Promise((resolve) => window.setTimeout(resolve, SEARCH_TELEMETRY_POLL_MILLISECONDS));
-  }
-}
-function startSearchTelemetryPolling() {
-  resetSearchTelemetryView();
-  searchTelemetryRunActive = true;
-  visualizationWorkspace.setExternalDecisionLensOwner(true);
-  const panel = document.getElementById("searchTelemetryPanel");
-  panel.hidden = false;
-  const status = document.getElementById("searchTelemetryStatus");
-  status.textContent = "\u6B63\u5728\u521D\u59CB\u5316\u641C\u7D22\u5668\u2026";
-  status.classList.add("is-searching");
-  updateSearchTelemetryControls({ executionMode: playbackMode === "step" ? "paused" : "continuous" });
-  const token = ++searchTelemetryPollToken;
-  void pollSearchTelemetry(token);
-}
-function stopSearchTelemetryPolling(finalSnapshot = null) {
-  searchTelemetryPollToken += 1;
-  searchTelemetryRunActive = false;
-  continuousDecisionEnabled = false;
-  continuousDecisionSubmittedSearchId = "";
-  visualizationWorkspace.setExternalDecisionLensOwner(false);
-  if (finalSnapshot) renderSearchTelemetry(finalSnapshot);
-  const status = document.getElementById("searchTelemetryStatus");
-  if (!finalSnapshot && latestSearchTelemetry?.algorithm === "search-tree") {
-    status.classList.remove("is-searching");
-  }
-  updateSearchTelemetryControls(finalSnapshot || latestSearchTelemetry);
 }
 function applyTestCase(testCase) {
   const value = structuredClone(testCase);
@@ -7143,9 +6985,6 @@ async function prepareWorkspaceView(result) {
     const serverCode = String(result.deadlock.Code || "").toUpperCase();
     result.deadlock = replayDeadlock || (DEADLOCK_TYPE_CATALOG[serverCode] ? result.deadlock : { Code: "DEADLOCK.UNCLASSIFIED" });
   }
-  if (latestSearchTelemetry?.algorithm === "search-tree") {
-    renderSearchTelemetry(latestSearchTelemetry);
-  }
   return visualizationWorkspace.getBottleneckUtilization();
 }
 function formatRunElapsed(milliseconds) {
@@ -7259,7 +7098,6 @@ async function requestSingleRunCancellation() {
 }
 async function runPlan() {
   const button = document.getElementById("runButton");
-  const stepRunButton = document.getElementById("stepRunButton");
   const batchButton = document.getElementById("batchRunButton");
   if (singleRunActive) {
     try {
@@ -7271,8 +7109,6 @@ async function runPlan() {
     return;
   }
   let logReady = false, ganttReady = false, runResult = null, bottleneckSummary = null;
-  const telemetryEnabled = state.strategy === "search-tree";
-  let telemetryStopped = false;
   button.disabled = true;
   batchButton.disabled = true;
   button.classList.add("running");
@@ -7304,23 +7140,8 @@ async function runPlan() {
     button.textContent = "\u25A0 \u505C\u6B62\u5F53\u524D\u6D4B\u8BD5";
     startRunStatus(`\u6B63\u5728\u8FD0\u884C \xB7 ${payload.testCaseName}`, "\u63D0\u4EA4\u8FD0\u884C\u8BF7\u6C42");
     void pollSingleRunStatus(runId);
-    if (telemetryEnabled) {
-      stepRunActive = true;
-      stepRunCancelling = false;
-      stepRunButton.classList.add("cancel");
-      stepRunButton.disabled = false;
-      stepRunButton.textContent = "\u25A0 \u505C\u6B62\u6A21\u578B\u6B65\u8FDB";
-    }
     resetRunResult();
     visualizationWorkspace.setAnalysisConfiguration(state.routes, state.rounds);
-    if (telemetryEnabled) {
-      visualizationWorkspace.beginLiveSolve(
-        payload,
-        `${displayStrategyName(state.strategy)} \xB7 \u5B9E\u65F6\u6C42\u89E3`
-      );
-      visualizationWorkspace.showPlayback();
-      startSearchTelemetryPolling();
-    }
     writeTerminal(`$ \u5F00\u59CB\u8FD0\u884C ${state.strategy}
   \u603B\u8F6E\u6570: ${state.roundCount}
   \u91CD\u7B97\u65F6\u95F4: ${state.rounds.map((round) => round.currentTime).join(", ")} s`);
@@ -7335,10 +7156,6 @@ async function runPlan() {
       runResult = JSON.parse(responseText);
     } catch {
       throw new Error(responseText.trim().slice(0, 240) || `\u670D\u52A1\u8FD4\u56DE ${response.status}`);
-    }
-    if (telemetryEnabled) {
-      stopSearchTelemetryPolling(runResult?.searchTelemetry || null);
-      telemetryStopped = true;
     }
     logReady = prepareLogDownload(runResult);
     ganttReady = prepareGanttView(runResult);
@@ -7377,15 +7194,6 @@ async function runPlan() {
     document.getElementById("metricValidation").textContent = runResult?.metricsAvailable ? runResult.validation === "failed" ? "\u672A\u901A\u8FC7" : validationDisplay(runResult.validation) || "\u5931\u8D25" : "\u5931\u8D25";
     finishRunStatus(cancelled ? "cancelled" : "failed", cancelled ? "\u5F53\u524D\u6D4B\u8BD5\u5DF2\u505C\u6B62" : "\u5F53\u524D\u6D4B\u8BD5\u8FD0\u884C\u5931\u8D25");
   } finally {
-    if (telemetryEnabled && !telemetryStopped) {
-      stopSearchTelemetryPolling(runResult?.searchTelemetry || null);
-    }
-    if (stepRunActive) {
-      stepRunActive = false;
-      stepRunCancelling = false;
-      stepRunButton.classList.remove("cancel");
-      stepRunButton.textContent = "\u27F3 \u8FD0\u884C\u6A21\u578B\u6B65\u8FDB";
-    }
     singleRunActive = false;
     singleRunCancelling = false;
     activeSingleRunId = "";
@@ -7395,35 +7203,6 @@ async function runPlan() {
     button.textContent = "\u25B6 \u8FD0\u884C\u5F53\u524D\u6D4B\u8BD5";
     renderWorkspaceControls();
   }
-}
-async function runModelStepped() {
-  const stepButton = document.getElementById("stepRunButton");
-  if (stepButton.disabled) return;
-  if (stepRunActive) {
-    if (stepRunCancelling) return;
-    stepRunCancelling = true;
-    stepButton.disabled = true;
-    stepButton.textContent = "\u6B63\u5728\u505C\u6B62\u2026";
-    writeTerminal("$ \u6B63\u5728\u505C\u6B62\u6A21\u578B\u6B65\u8FDB\u8FD0\u884C\u2026");
-    try {
-      await requestSearchControl("cancel");
-    } catch (error) {
-      stepRunCancelling = false;
-      stepButton.disabled = false;
-      stepButton.classList.add("cancel");
-      stepButton.textContent = "\u25A0 \u505C\u6B62";
-      writeTerminal(`$ \u505C\u6B62\u8BF7\u6C42\u5931\u8D25\uFF1A${error.message || "\u672A\u77E5\u9519\u8BEF"}
-  \u53EF\u518D\u6B21\u70B9\u51FB\u201C\u25A0 \u505C\u6B62\u201D\u91CD\u8BD5\u3002`, true);
-    }
-    return;
-  }
-  if (state.strategy !== "search-tree") {
-    writeTerminal("$ \u8FD0\u884C\u6A21\u578B\u6B65\u8FDB\u4EC5\u652F\u6301 Search Tree \u7B56\u7565\uFF0C\u8BF7\u5148\u5728\u201C\u8FD0\u884C\u7B56\u7565\u201D\u4E2D\u9009\u62E9\u3002", true);
-    return;
-  }
-  playbackMode = "step";
-  renderPlaybackModeSwitch();
-  await runPlan();
 }
 function currentBatchGroupTests() {
   return (state.workspaceDevice?.tests || []).map((test, workspaceIndex) => ({ test, workspaceIndex })).filter(({ test }) => String(test.group || "").trim() === state.activeTestGroup).sort((left, right) => {
@@ -8125,7 +7904,6 @@ async function checkService() {
     renderOtherAlgorithmOptions(status.algorithms || status.otherAlgorithms || []);
     runButton.disabled = !compatible || singleRunCancelling || state.batchRunning;
     batchRunButton.disabled = !compatible || singleRunActive || state.batchRunning && state.batchCancelRequested;
-    document.getElementById("stepRunButton").disabled = stepRunActive ? false : !compatible || state.strategy !== "search-tree";
     renderWorkspaceControls();
     pill.textContent = compatible ? "\u672C\u5730\u670D\u52A1\u5DF2\u8FDE\u63A5" : "\u670D\u52A1\u7248\u672C\u8FC7\u65E7";
     if (!compatible) {
@@ -8137,7 +7915,6 @@ async function checkService() {
     state.serviceCompatible = false;
     runButton.disabled = true;
     batchRunButton.disabled = true;
-    document.getElementById("stepRunButton").disabled = true;
     renderWorkspaceControls();
     pill.textContent = "\u672C\u5730\u670D\u52A1\u672A\u8FDE\u63A5";
     pill.style.color = "var(--red)";
@@ -8366,7 +8143,6 @@ document.getElementById("roundCount").addEventListener("input", (event) => {
   markTestDirty();
 });
 document.getElementById("runButton").addEventListener("click", runPlan);
-document.getElementById("stepRunButton").addEventListener("click", runModelStepped);
 document.getElementById("batchRunButton").addEventListener("click", runCurrentTestGroup);
 document.getElementById("openRunSettingsButton").addEventListener("click", openRunSettingsDialog);
 document.getElementById("runSettingsDialogClose").addEventListener("click", closeRunSettingsDialog);
@@ -8437,22 +8213,6 @@ document.getElementById("batchLogButton").addEventListener("click", (event) => {
 document.getElementById("batchGanttButton").addEventListener("click", (event) => {
   if (event.currentTarget.getAttribute("aria-disabled") === "true") event.preventDefault();
 });
-document.getElementById("searchTelemetryDecisionSelect").addEventListener("change", (event) => {
-  selectedSearchTelemetryId = String(event.currentTarget.value || "");
-  followLatestSearchTelemetry = selectedSearchTelemetryId === String(latestSearchTelemetry?.searchId || "");
-  if (latestSearchTelemetry) renderSearchTelemetry(latestSearchTelemetry);
-});
-document.getElementById("searchTelemetryPauseButton").addEventListener("click", () => {
-  void controlSearchTelemetry("pause");
-});
-document.getElementById("searchTelemetryStepButton").addEventListener("click", () => {
-  void controlSearchTelemetry("step");
-});
-document.getElementById("searchTelemetryContinueButton").addEventListener("click", () => {
-  void controlSearchTelemetry("continue");
-});
-document.getElementById("searchTelemetryFollowRecommendationButton").addEventListener("click", followSearchRecommendation);
-document.getElementById("searchTelemetryContinuousDecisionButton").addEventListener("click", toggleContinuousDecision);
 document.getElementById("playbackModeReplayButton").addEventListener("click", () => {
   void setPlaybackMode("replay");
 });
@@ -8549,7 +8309,6 @@ document.addEventListener("change", (event) => {
     document.getElementById("roundCount").disabled = false;
     updateStrategyOptionVisibility();
     showAlgorithmDetails(state.strategy);
-    document.getElementById("stepRunButton").disabled = stepRunActive ? false : !state.serviceCompatible || state.strategy !== "search-tree";
     markTestDirty();
     renderAll();
   }

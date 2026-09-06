@@ -1729,22 +1729,6 @@ function resetSearchTelemetryView() {
   continuousDecisionSubmittedSearchId = "";
   userChosenActionKey = "";
   userChosenSearchId = "";
-  const panel = document.getElementById("searchTelemetryPanel");
-  panel.hidden = true;
-  document.getElementById("searchTelemetryVariationPanel").hidden = true;
-  document.getElementById("searchTelemetryDecisionSelect").innerHTML = "";
-  document.getElementById("searchTelemetryVariation").innerHTML = "";
-  for (const id of [
-    "searchTelemetryPauseButton",
-    "searchTelemetryStepButton",
-    "searchTelemetryContinueButton",
-    "searchTelemetryFollowRecommendationButton",
-    "searchTelemetryContinuousDecisionButton",
-  ]) {
-    const button = document.getElementById(id);
-    button.disabled = true;
-    button.classList.remove("is-active");
-  }
 }
 
 /** 把搜索数值格式化为稳定的有限小数。 */
@@ -4161,9 +4145,6 @@ async function prepareWorkspaceView(result) {
     result.deadlock = replayDeadlock
       || (DEADLOCK_TYPE_CATALOG[serverCode] ? result.deadlock : { Code: "DEADLOCK.UNCLASSIFIED" });
   }
-  if (latestSearchTelemetry?.algorithm === "search-tree") {
-    renderSearchTelemetry(latestSearchTelemetry);
-  }
   return visualizationWorkspace.getBottleneckUtilization();
 }
 
@@ -4294,7 +4275,6 @@ async function requestSingleRunCancellation() {
 /** 调用本地服务运行排程。 */
 async function runPlan() {
   const button = document.getElementById("runButton");
-  const stepRunButton = document.getElementById("stepRunButton");
   const batchButton = document.getElementById("batchRunButton");
   if (singleRunActive) {
     try { await requestSingleRunCancellation(); }
@@ -4302,8 +4282,6 @@ async function runPlan() {
     return;
   }
   let logReady = false, ganttReady = false, runResult = null, bottleneckSummary = null;
-  const telemetryEnabled = state.strategy === "search-tree";
-  let telemetryStopped = false;
   // 健康检查和必要的自动保存也可能涉及磁盘；点击后先立即反馈，避免用户误以为按钮失效。
   button.disabled = true;
   batchButton.disabled = true;
@@ -4331,20 +4309,8 @@ async function runPlan() {
     button.classList.remove("running"); button.classList.add("cancel"); button.textContent = "■ 停止当前测试";
     startRunStatus(`正在运行 · ${payload.testCaseName}`, "提交运行请求");
     void pollSingleRunStatus(runId);
-    if (telemetryEnabled) {
-      stepRunActive = true; stepRunCancelling = false;
-      stepRunButton.classList.add("cancel"); stepRunButton.disabled = false; stepRunButton.textContent = "■ 停止模型步进";
-    }
     resetRunResult();
     visualizationWorkspace.setAnalysisConfiguration(state.routes, state.rounds);
-    if (telemetryEnabled) {
-      visualizationWorkspace.beginLiveSolve(
-        payload,
-        `${displayStrategyName(state.strategy)} · 实时求解`,
-      );
-      visualizationWorkspace.showPlayback();
-      startSearchTelemetryPolling();
-    }
     writeTerminal(`$ 开始运行 ${state.strategy}\n  总轮数: ${state.roundCount}\n  重算时间: ${state.rounds.map(round => round.currentTime).join(", ")} s`);
     const response = await fetch("/api/run", {
       method: "POST",
@@ -4355,10 +4321,6 @@ async function runPlan() {
     const responseText = await response.text();
     try { runResult = JSON.parse(responseText); }
     catch { throw new Error(responseText.trim().slice(0, 240) || `服务返回 ${response.status}`); }
-    if (telemetryEnabled) {
-      stopSearchTelemetryPolling(runResult?.searchTelemetry || null);
-      telemetryStopped = true;
-    }
     logReady = prepareLogDownload(runResult);
     ganttReady = prepareGanttView(runResult);
     if (runResult?.resultId) {
@@ -4400,13 +4362,6 @@ async function runPlan() {
     finishRunStatus(cancelled ? "cancelled" : "failed", cancelled ? "当前测试已停止" : "当前测试运行失败");
   }
   finally {
-    if (telemetryEnabled && !telemetryStopped) {
-      stopSearchTelemetryPolling(runResult?.searchTelemetry || null);
-    }
-    if (stepRunActive) {
-      stepRunActive = false; stepRunCancelling = false;
-      stepRunButton.classList.remove("cancel"); stepRunButton.textContent = "⟳ 运行模型步进";
-    }
     singleRunActive = false; singleRunCancelling = false; activeSingleRunId = ""; singleRunAbortController = null;
     button.disabled = false; button.classList.remove("running", "cancel"); button.textContent = "▶ 运行当前测试"; renderWorkspaceControls();
   }
@@ -5219,9 +5174,6 @@ async function checkService() {
     renderOtherAlgorithmOptions(status.algorithms || status.otherAlgorithms || []);
     runButton.disabled = !compatible || singleRunCancelling || state.batchRunning;
     batchRunButton.disabled = !compatible || singleRunActive || (state.batchRunning && state.batchCancelRequested);
-    document.getElementById("stepRunButton").disabled = stepRunActive
-      ? false
-      : !compatible || state.strategy !== "search-tree";
     renderWorkspaceControls();
     pill.textContent = compatible ? "本地服务已连接" : "服务版本过旧";
     if (!compatible) {
@@ -5233,7 +5185,6 @@ async function checkService() {
     state.serviceCompatible = false;
     runButton.disabled = true;
     batchRunButton.disabled = true;
-    document.getElementById("stepRunButton").disabled = true;
     renderWorkspaceControls();
     pill.textContent = "本地服务未连接";
     pill.style.color = "var(--red)";
@@ -5434,7 +5385,6 @@ document.getElementById("saveTestButton").addEventListener("click", () => saveCu
 document.getElementById("deleteTestButton").addEventListener("click", () => deleteCurrentTest().catch(error => writeTerminal(`$ 删除测试集失败\n  ${error.message}`, true)));
 document.getElementById("roundCount").addEventListener("input", event => { resizeRounds(event.target.value); markTestDirty(); });
 document.getElementById("runButton").addEventListener("click", runPlan);
-document.getElementById("stepRunButton").addEventListener("click", runModelStepped);
 document.getElementById("batchRunButton").addEventListener("click", runCurrentTestGroup);
 document.getElementById("openRunSettingsButton").addEventListener("click", openRunSettingsDialog);
 document.getElementById("runSettingsDialogClose").addEventListener("click", closeRunSettingsDialog);
@@ -5495,22 +5445,6 @@ document.getElementById("logButton").addEventListener("click", event => { if (ev
 document.getElementById("ganttButton").addEventListener("click", event => { if (event.currentTarget.getAttribute("aria-disabled") === "true") event.preventDefault(); });
 document.getElementById("batchLogButton").addEventListener("click", event => { if (event.currentTarget.getAttribute("aria-disabled") === "true") event.preventDefault(); });
 document.getElementById("batchGanttButton").addEventListener("click", event => { if (event.currentTarget.getAttribute("aria-disabled") === "true") event.preventDefault(); });
-document.getElementById("searchTelemetryDecisionSelect").addEventListener("change", event => {
-  selectedSearchTelemetryId = String(event.currentTarget.value || "");
-  followLatestSearchTelemetry = selectedSearchTelemetryId === String(latestSearchTelemetry?.searchId || "");
-  if (latestSearchTelemetry) renderSearchTelemetry(latestSearchTelemetry);
-});
-document.getElementById("searchTelemetryPauseButton").addEventListener("click", () => {
-  void controlSearchTelemetry("pause");
-});
-document.getElementById("searchTelemetryStepButton").addEventListener("click", () => {
-  void controlSearchTelemetry("step");
-});
-document.getElementById("searchTelemetryContinueButton").addEventListener("click", () => {
-  void controlSearchTelemetry("continue");
-});
-document.getElementById("searchTelemetryFollowRecommendationButton").addEventListener("click", followSearchRecommendation);
-document.getElementById("searchTelemetryContinuousDecisionButton").addEventListener("click", toggleContinuousDecision);
 document.getElementById("playbackModeReplayButton").addEventListener("click", () => {
   void setPlaybackMode("replay");
 });
@@ -5600,10 +5534,6 @@ document.addEventListener("change", event => {
     document.getElementById("roundCount").disabled = false;
     updateStrategyOptionVisibility();
     showAlgorithmDetails(state.strategy);
-    // 运行期保持“停止”入口可用；非运行期才按策略/服务状态禁用。
-    document.getElementById("stepRunButton").disabled = stepRunActive
-      ? false
-      : !state.serviceCompatible || state.strategy !== "search-tree";
     markTestDirty(); renderAll();
   }
 });

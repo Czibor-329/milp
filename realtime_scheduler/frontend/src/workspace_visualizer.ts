@@ -194,9 +194,7 @@ interface WorkspaceElements {
   topologyPlayback: HTMLElement;
   stage: HTMLElement;
   decisionLens: HTMLElement;
-  actionStatusFilter: HTMLSelectElement;
-  actionKindFilter: HTMLSelectElement;
-  pauseOnDecisionChangeButton: HTMLButtonElement;
+  actionStatusFilters: HTMLInputElement[];
   activeMoves: HTMLElement;
   source: HTMLElement;
   currentTime: HTMLElement;
@@ -1667,9 +1665,7 @@ function collectElements(root: Document): WorkspaceElements {
     topologyPlayback: required("visualTopologyPlayback"),
     stage: required("visualDeviceStage"),
     decisionLens: required("visualDecisionLens"),
-    actionStatusFilter: optionalSelect("visualActionStatusFilter", "enabled"),
-    actionKindFilter: optionalSelect("visualActionKindFilter", "all"),
-    pauseOnDecisionChangeButton: required<HTMLButtonElement>("visualPauseOnDecisionChangeButton"),
+    actionStatusFilters: Array.from(root.querySelectorAll<HTMLInputElement>("[data-action-status-filter]")),
     activeMoves: required("visualActiveMoves"),
     source: required("visualSource"),
     currentTime: required("visualCurrentTime"),
@@ -2837,8 +2833,7 @@ export function renderDecisionLens(
   decision: DecisionTraceStep | null,
   requestState: "idle" | "loading" | "error" = "idle",
   requestError = "",
-  statusFilter: ActionDiagnosticStatus | "all" = "enabled",
-  kindFilter: ReplayActionDiagnostic["kind"] | "all" = "all",
+  statusFilters: ActionDiagnosticStatus[] = ["enabled"],
 ): string {
   if (!decision) {
     if (requestState === "loading") {
@@ -2868,17 +2863,14 @@ export function renderDecisionLens(
     "deadlock-blocked": "死锁规则拦截",
   };
   const kindLabels = { pick: "Pick", place: "Place", swap: "Swap" };
-  const visibleActions = decision.actionDiagnostics.filter(action => (
-    (statusFilter === "all" || action.status === statusFilter)
-    && (kindFilter === "all" || action.kind === kindFilter)
-  ));
+  const visibleActions = decision.actionDiagnostics.filter(action => statusFilters.includes(action.status));
   const cards = visibleActions.map(action => {
     const source = action.sourceSlot > 0 ? `${action.source} #${action.sourceSlot}` : action.source;
     const destination = action.destinationSlot > 0
       ? `${action.destination} #${action.destinationSlot}`
       : action.destination;
     return `
-      <li class="decision-candidate action-status-${action.status}">
+      <li class="decision-candidate action-card action-status-${action.status}">
         <span class="decision-tag action-kind">${kindLabels[action.kind]}</span>
         <div class="decision-candidate-main">
           <div class="decision-candidate-title"><strong>${escapeHtml(source || action.robot)} → ${escapeHtml(destination || "Robot hand")}</strong></div>
@@ -3407,13 +3399,10 @@ export class VisualizationWorkspace {
   private analysisRounds: Array<Record<string, any>> = [];
   private moves: MoveRecord[] = [];
   private replayPlan: Record<string, any> | null = null;
-  private actionStatusFilter: ActionDiagnosticStatus | "all" = "enabled";
-  private actionKindFilter: ReplayActionDiagnostic["kind"] | "all" = "all";
+  private actionStatusFilters: ActionDiagnosticStatus[] = ["enabled"];
   private liveDecision: DecisionTraceStep | null = null;
   private liveDecisionKey = "";
   private primitiveDecisionBoundaries: number[] = [];
-  private pauseOnDecisionChange = false;
-  private pauseTriggeredByDecisionChange = false;
   private readonly replayDecisionCache = new Map<string, DecisionTraceStep>();
   private readonly pendingReplayDecisionKeys = new Set<string>();
   private replayDecisionErrorKey = "";
@@ -3430,8 +3419,6 @@ export class VisualizationWorkspace {
   private time = 0;
   private playing = false;
   private liveSolving = false;
-  /** 外部（Search Tree 搜索面板）接管右侧决策镜头时跳过本类每帧覆盖。 */
-  private externalDecisionLensOwner = false;
   private playbackSpeed = DEFAULT_PLAYBACK_SPEED;
   private performanceWindowMode: PerformanceWindowMode = "steady";
   private animationFrame = 0;
@@ -3443,7 +3430,6 @@ export class VisualizationWorkspace {
     this.elements = collectElements(root);
     this.bindEvents();
     this.updatePlayButton();
-    this.updatePauseOnDecisionChangeButton();
     this.setTopologyVisible(false);
   }
 
@@ -3552,11 +3538,6 @@ export class VisualizationWorkspace {
     this.primitiveDecisionBoundaries = primitiveDecisionBoundaryTimes(this.moves);
     this.replayDecisionRequestVersion += 1;
     if (this.moves.length) this.render();
-  }
-
-  /** 让 Search Tree 搜索面板接管右侧“合法动作空间”的渲染。 */
-  setExternalDecisionLensOwner(owner: boolean): void {
-    this.externalDecisionLensOwner = owner;
   }
 
   /** 在完整 MoveList 返回前显示初始拓扑，并进入增量求解状态。 */
@@ -3785,25 +3766,12 @@ export class VisualizationWorkspace {
       if (this.playing) this.pause();
       else this.play();
     });
-    this.elements.pauseOnDecisionChangeButton.addEventListener("click", () => {
-      this.pauseOnDecisionChange = !this.pauseOnDecisionChange;
-      this.pauseTriggeredByDecisionChange = false;
-      this.updatePauseOnDecisionChangeButton();
-    });
-    this.elements.actionStatusFilter.addEventListener("change", () => {
-      const status = this.elements.actionStatusFilter.value;
-      this.actionStatusFilter = (["enabled", "physical-blocked", "deadlock-blocked"] as string[]).includes(status)
-        ? status as ActionDiagnosticStatus
-        : "all";
+    this.elements.actionStatusFilters.forEach(filter => filter.addEventListener("change", () => {
+      this.actionStatusFilters = this.elements.actionStatusFilters
+        .filter(item => item.checked)
+        .map(item => item.value as ActionDiagnosticStatus);
       this.render();
-    });
-    this.elements.actionKindFilter.addEventListener("change", () => {
-      const kind = this.elements.actionKindFilter.value;
-      this.actionKindFilter = (["pick", "place", "swap"] as string[]).includes(kind)
-        ? kind as ReplayActionDiagnostic["kind"]
-        : "all";
-      this.render();
-    });
+    }));
     this.elements.speed.addEventListener("change", () => {
       this.playbackSpeed = Math.max(0.25, finiteNumber(this.elements.speed.value, DEFAULT_PLAYBACK_SPEED));
     });
@@ -3826,7 +3794,6 @@ export class VisualizationWorkspace {
       this.elements.range.value = "0";
     }
     this.playing = true;
-    this.pauseTriggeredByDecisionChange = false;
     this.previousFrameTime = performance.now();
     this.previousRenderTime = 0;
     this.updatePlayButton();
@@ -3834,13 +3801,11 @@ export class VisualizationWorkspace {
   }
 
   /** 暂停回放并保留当前时间。 */
-  private pause(triggeredByDecisionChange = false): void {
+  private pause(): void {
     this.playing = false;
-    this.pauseTriggeredByDecisionChange = triggeredByDecisionChange;
     if (this.animationFrame) cancelAnimationFrame(this.animationFrame);
     this.animationFrame = 0;
     this.updatePlayButton();
-    this.updatePauseOnDecisionChangeButton();
   }
 
   /** 推进播放时钟，并按固定上限刷新 DOM。 */
@@ -3849,22 +3814,9 @@ export class VisualizationWorkspace {
     const elapsedSeconds = Math.max(0, timestamp - this.previousFrameTime) / 1000;
     this.previousFrameTime = timestamp;
     const endTime = finiteNumber(this.elements.range.max);
-    const previousTime = this.time;
-    const advancedTime = Math.min(endTime, previousTime + elapsedSeconds * this.playbackSpeed);
-    const nextDecisionBoundary = this.pauseOnDecisionChange
-      ? this.currentDecisionBoundaries().find(boundary => (
-          boundary > previousTime + PERFORMANCE_DISPLAY_TOLERANCE
-          && boundary <= advancedTime + PERFORMANCE_DISPLAY_TOLERANCE
-        ))
-      : undefined;
-    this.time = nextDecisionBoundary ?? advancedTime;
+    const advancedTime = Math.min(endTime, this.time + elapsedSeconds * this.playbackSpeed);
+    this.time = advancedTime;
     this.elements.range.value = String(this.time);
-    if (nextDecisionBoundary !== undefined) {
-      this.previousRenderTime = timestamp;
-      this.render();
-      this.pause(true);
-      return;
-    }
     if (timestamp - this.previousRenderTime >= PLAYBACK_FRAME_INTERVAL_MS || this.time >= endTime) {
       this.previousRenderTime = timestamp;
       this.render();
@@ -3884,27 +3836,6 @@ export class VisualizationWorkspace {
       : `${icon("play")}<span>播放</span>`;
     this.elements.playButton.setAttribute("aria-label", this.playing ? "暂停回放" : "播放回放");
     this.elements.playButton.classList.toggle("is-playing", this.playing);
-  }
-
-  /** 同步决策空间自动暂停按钮的开关、触发状态和无障碍文本。 */
-  private updatePauseOnDecisionChangeButton(): void {
-    const state = this.pauseTriggeredByDecisionChange
-      ? "已暂停"
-      : this.pauseOnDecisionChange ? "已开启" : "已关闭";
-    const decisionKind = "原子动作决策";
-    this.elements.pauseOnDecisionChangeButton.innerHTML = `
-      <span class="decision-switch-copy"><span>下一决策时暂停</span><strong>${state}</strong></span>
-      <span class="decision-switch-track" aria-hidden="true"><i></i></span>`;
-    this.elements.pauseOnDecisionChangeButton.setAttribute("aria-pressed", String(this.pauseOnDecisionChange));
-    this.elements.pauseOnDecisionChangeButton.setAttribute("aria-checked", String(this.pauseOnDecisionChange));
-    this.elements.pauseOnDecisionChangeButton.setAttribute(
-      "aria-label",
-      this.pauseTriggeredByDecisionChange
-        ? `已到达下一个${decisionKind}，回放已暂停`
-        : `到下一个${decisionKind}时自动暂停：${this.pauseOnDecisionChange ? "已开启" : "已关闭"}`,
-    );
-    this.elements.pauseOnDecisionChangeButton.classList.toggle("is-active", this.pauseOnDecisionChange);
-    this.elements.pauseOnDecisionChangeButton.classList.toggle("is-triggered", this.pauseTriggeredByDecisionChange);
   }
 
   /** 切换单例分析模式，测试组统计与单例诊断不会同时出现。 */
@@ -3968,18 +3899,15 @@ export class VisualizationWorkspace {
       undefined,
       this.device,
     );
-    if (!this.externalDecisionLensOwner) {
-      const requestState = this.pendingReplayDecisionKeys.has(replayKey)
-        ? "loading"
-        : this.replayDecisionErrorKey === replayKey ? "error" : "idle";
-      this.elements.decisionLens.innerHTML = renderDecisionLens(
-        currentDecision,
-        requestState,
-        this.replayDecisionErrorMessage,
-        this.actionStatusFilter,
-        this.actionKindFilter,
-      );
-    }
+    const requestState = this.pendingReplayDecisionKeys.has(replayKey)
+      ? "loading"
+      : this.replayDecisionErrorKey === replayKey ? "error" : "idle";
+    this.elements.decisionLens.innerHTML = renderDecisionLens(
+      currentDecision,
+      requestState,
+      this.replayDecisionErrorMessage,
+      this.actionStatusFilters,
+    );
 
     this.elements.activeMoves.innerHTML = snapshot.activeMoves.length
       ? snapshot.activeMoves.map(move => `

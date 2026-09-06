@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>调度平台</title>
   <link rel="stylesheet" href="/assets/katex.min.css?v=1.4.4">
-  <link rel="stylesheet" href="/assets/config_editor.css?v=1.5.34">
+  <link rel="stylesheet" href="/assets/config_editor.css?v=1.5.35">
 </head>
 <body>
   <a class="skip-link" href="#mainContent">跳到主要内容</a>
@@ -40,7 +40,7 @@
       <div class="sidebar-footer">
         <span class="sidebar-footer-label">系统状态</span>
         <div class="service-pill" id="serviceState">本地服务</div>
-        <span class="frontend-version">V1.5.34</span>
+        <span class="frontend-version">V1.5.35</span>
       </div>
     </aside>
 
@@ -250,46 +250,14 @@
 
                 <aside class="petri-control-panel" aria-label="拓扑回放控制面板">
                   <section class="petri-control-section model-evaluation-section">
-                    <div class="decision-panel-toolbar">
-                      <h2 class="petri-panel-title">合法动作空间</h2>
-                      <button class="decision-auto-pause" id="visualPauseOnDecisionChangeButton" type="button" role="switch" aria-checked="false" aria-pressed="false"></button>
-                    </div>
+                    <h2 class="petri-panel-title">合法动作空间</h2>
                     <div class="action-filter-controls" aria-label="动作筛选">
-                      <label>状态
-                        <select id="visualActionStatusFilter">
-                          <option value="enabled">使能动作</option>
-                          <option value="physical-blocked">物理拦截</option>
-                          <option value="deadlock-blocked">死锁规则拦截</option>
-                          <option value="all">全部状态</option>
-                        </select>
-                      </label>
-                      <label>类型
-                        <select id="visualActionKindFilter">
-                          <option value="all">Pick / Place / Swap</option>
-                          <option value="pick">Pick</option>
-                          <option value="place">Place</option>
-                          <option value="swap">Swap</option>
-                        </select>
-                      </label>
-                    </div>
-                    <div class="search-telemetry-panel" id="searchTelemetryPanel" hidden aria-live="polite">
-                      <div class="search-telemetry-head">
-                        <p id="searchTelemetryStatus">等待搜索开始</p>
-                        <div class="search-telemetry-controls">
-                          <button class="btn small" id="searchTelemetryPauseButton" type="button">暂停</button>
-                          <button class="btn small" id="searchTelemetryStepButton" type="button">单步求解</button>
-                          <button class="btn primary small" id="searchTelemetryContinueButton" type="button">连续求解</button>
-                          <button class="btn primary small is-recommendation" id="searchTelemetryFollowRecommendationButton" type="button" hidden>执行模型推荐</button>
-                          <button class="btn small is-continuous-decision" id="searchTelemetryContinuousDecisionButton" type="button" aria-pressed="false" title="持续执行每一轮搜索的模型推荐动作" hidden>持续决策</button>
-                          <label>根决策<select id="searchTelemetryDecisionSelect" aria-label="选择要查看的根决策"></select></label>
-                        </div>
-                      </div>
+                      <span class="action-filter-label">显示</span>
+                      <label class="action-filter-check"><input type="checkbox" data-action-status-filter value="enabled" checked>使能动作</label>
+                      <label class="action-filter-check"><input type="checkbox" data-action-status-filter value="physical-blocked">物理拦截</label>
+                      <label class="action-filter-check"><input type="checkbox" data-action-status-filter value="deadlock-blocked">死锁规则拦截</label>
                     </div>
                     <div class="decision-lens-panel" id="visualDecisionLens" aria-live="polite"></div>
-                    <details class="search-variation-panel" id="searchTelemetryVariationPanel" hidden>
-                      <summary>当前主变化</summary>
-                      <div class="search-principal-variation" id="searchTelemetryVariation"></div>
-                    </details>
                     <ul id="visualActiveMoves" hidden></ul>
                   </section>
                 </aside>
@@ -456,7 +424,7 @@
                 <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V21h-4v-.08A1.7 1.7 0 0 0 8.97 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.52-1.03H3v-4h.08A1.7 1.7 0 0 0 4.6 8.94a1.7 1.7 0 0 0-.34-1.88L4.2 7l2.83-2.83.06.06a1.7 1.7 0 0 0 1.88.34A1.7 1.7 0 0 0 10 3.05V3h4v.05a1.7 1.7 0 0 0 1.03 1.52 1.7 1.7 0 0 0 1.88-.34l.06-.06L19.8 7l-.06.06a1.7 1.7 0 0 0-.34 1.88A1.7 1.7 0 0 0 20.92 10H21v4h-.08A1.7 1.7 0 0 0 19.4 15Z"/></svg>
               </button>
             </div>
-            <div class="run-actions"><button class="btn" id="runButton">▶ 运行当前测试</button><button class="btn" id="stepRunButton" title="以步进模式运行 Search Tree：每次决策完成后从 3 条稳定动作链中选择一条整体提交">⟳ 运行模型步进</button><button class="btn batch" id="batchRunButton">▦ 运行当前测试组</button></div>
+            <div class="run-actions"><button class="btn" id="runButton">▶ 运行当前测试</button><button class="btn batch" id="batchRunButton">▦ 运行当前测试组</button></div>
             <section class="run-status-card" id="runStatusCard" aria-labelledby="runStatusTitle">
               <div class="run-status-head">
                 <span class="run-status-indicator" id="runStatusIndicator" aria-hidden="true"></span>
@@ -813,6 +781,6 @@
     </aside>
   </dialog>
 
-  <script type="module" src="/assets/config_editor.js?v=1.5.34"></script>
+  <script type="module" src="/assets/config_editor.js?v=1.5.35"></script>
 </body>
 </html>
