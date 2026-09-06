@@ -271,7 +271,7 @@ class OptionalAlgorithmRepositoryTests(unittest.TestCase):
         """平台已加载内置 src 包时，src 布局算法仍可加载且互不干扰。
 
         真实平台启动即 ``from src.compiler import …`` 占用顶层 ``src`` 包名
-        （alg/src）；算法目录的 src/ 通过追加 ``src.__path__`` 参与解析，
+        （alg/src）；算法目录的 src/ 通过调整 ``src.__path__`` 参与解析，
         不能替换或删除平台 src 包对象。
         """
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -315,13 +315,22 @@ class OptionalAlgorithmRepositoryTests(unittest.TestCase):
                 # 模拟平台内置算法：启动即占用顶层 src 包（alg/src）。
                 with tempfile.TemporaryDirectory() as fake_alg_text:
                     fake_src = Path(fake_alg_text) / "src"
-                    fake_src.mkdir()
+                    fake_infer = fake_src / "infer"
+                    fake_infer.mkdir(parents=True)
                     (fake_src / "__init__.py").write_text("", encoding="utf-8")
+                    (fake_infer / "__init__.py").write_text("", encoding="utf-8")
+                    (fake_infer / "scheduler.py").write_text(
+                        "def init(payload):\\n    return None\\n"
+                        "def update(payload):\\n    return '{\\\"source\\\": \\\"platform\\\"}'\\n",
+                        encoding="utf-8",
+                    )
                     platform_src = types.ModuleType("src")
                     platform_src.__package__ = "src"
                     platform_src.__file__ = str(fake_src / "__init__.py")
                     platform_src.__path__ = [str(fake_src)]
                     sys.modules["src"] = platform_src
+                    import importlib
+                    stale_scheduler = importlib.import_module("src.infer.scheduler")
 
                     from realtime_scheduler.backend.algorithms.interface import (
                         init,
@@ -332,14 +341,21 @@ class OptionalAlgorithmRepositoryTests(unittest.TestCase):
                     with session("srcalgo"):
                         init({})
                         output = update({})
-                    assert output["MoveList"] == []
+                        assert output["MoveList"] == []
+                        loaded_scheduler = sys.modules["src.infer.scheduler"]
+                        assert loaded_scheduler is not stale_scheduler
+                        assert Path(loaded_scheduler.__file__).resolve().is_relative_to(
+                            Path(os.environ["CT_ALGORITHM_ROOT"])
+                            / "other_alg" / "SrcAlgo"
+                        )
                     # 平台 src 包对象与原始路径条目必须保留。
                     assert sys.modules["src"] is platform_src
+                    assert sys.modules["src.infer.scheduler"] is stale_scheduler
                     algorithm_src_text = str(
                         Path(os.environ["CT_ALGORITHM_ROOT"])
                         / "other_alg" / "SrcAlgo" / "src"
                     )
-                    assert algorithm_src_text in sys.modules["src"].__path__
+                    assert algorithm_src_text not in sys.modules["src"].__path__
                     assert str(fake_src) in sys.modules["src"].__path__
 
                     # 切换算法后，算法 src 目录条目被移除且平台包不受影响。
@@ -401,7 +417,8 @@ class OptionalAlgorithmRepositoryTests(unittest.TestCase):
                 with session("srcalgo"):
                     init({})
                     update({})
-                assert "src" in sys.modules and "src.infer" in sys.modules
+                assert "src" not in sys.modules
+                assert "src.infer" not in sys.modules
                 with session("plain"):
                     init({})
                     update({})
