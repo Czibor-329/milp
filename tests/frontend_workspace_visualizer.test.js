@@ -5,6 +5,10 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const logic = require("../realtime_scheduler/frontend/workspace_visualizer_logic.js");
+const frontendCss = fs.readFileSync(
+  path.join(__dirname, "../realtime_scheduler/frontend/assets/config_editor.css"),
+  "utf8",
+);
 
 const device = {
   Stations: {
@@ -789,7 +793,7 @@ test("拓扑回放补全设备配置中未被 MoveList 引用的腔室", () => {
 
 function positionsFromTopology(topology) {
   const positions = [];
-  const pattern = /class="reference-(module|robot)-position" style="--(?:module|robot)-left:([\d.]+)%;--(?:module|robot)-top:(\d+)px">([\s\S]*?)(?=<div class="reference-|\s*<svg class="topology-target-arrows)/g;
+  const pattern = /class="reference-(module|robot)-position" style="--(?:module|robot)-left:([\d.]+)%;--(?:module|robot)-top:(\d+)px[^\"]*">([\s\S]*?)(?=<div class="reference-|\s*<svg class="topology-target-arrows)/g;
   let match;
   while ((match = pattern.exec(topology)) !== null) {
     const isRobot = match[1] === "robot";
@@ -802,8 +806,8 @@ function positionsFromTopology(topology) {
     positions.push({
       x: Number(match[2]) / 100 * 1000,
       y: Number(match[3]),
-      width: isRobot ? 132 : isLoadLock ? 120 : isLoadPort ? 112 : isBuffer ? 104 : isCooler || isAligner ? 76 : isProcess ? 112 : 96,
-      height: isRobot ? 132 : isLoadLock ? 72 : isLoadPort ? 104 : isBuffer || isCooler ? 56 : isAligner ? 54 : isProcess ? 122 : 96,
+      width: isRobot ? 96 : isLoadLock ? 82 : isLoadPort ? 112 : isBuffer ? 104 : isCooler || isAligner ? 76 : isProcess ? 82 : 96,
+      height: isRobot ? 96 : isLoadLock ? 82 : isLoadPort ? 104 : isBuffer || isCooler ? 56 : isAligner ? 54 : isProcess ? 82 : 96,
     });
   }
   return positions;
@@ -826,26 +830,22 @@ function assertTopologyComplete(topology, requiredNames) {
   }
 }
 
-test("单真空机械手拓扑固定显示全部 LP、Dummy Port 与大气侧辅助设备且不重叠", () => {
+test("单真空机械手拓扑以方框架固定四个 PM、Heater 与两把 LoadLock", () => {
   const fullDevice = {
     Stations: {
       LP1: { Type: "LoadPort" }, LP2: { Type: "LoadPort" },
-      LP3: { Type: "LoadPort" }, LP4: { Type: "LoadPort" },
+      LP3: { Type: "LoadPort" },
       LA: { Type: "LoadLock" }, LB: { Type: "LoadLock" },
-      LC: { Type: "LoadLock" }, LD: { Type: "LoadLock" },
       PM1: { Type: "ProcessChamber" }, PM2: { Type: "ProcessChamber" },
       PM3: { Type: "ProcessChamber" }, PM4: { Type: "ProcessChamber" },
-      PM5: { Type: "ProcessChamber" }, PM6: { Type: "ProcessChamber" },
-      Buffer1: { Type: "Buffer" }, Buffer2: { Type: "Buffer" },
-      Buffer3: { Type: "Buffer" }, Buffer4: { Type: "Buffer" },
       Aligner: { Type: "Aligner" }, heater: { Type: "Heater" },
       Cooler: { Type: "Cooler" }, DummyPort: { Type: "LoadPort" },
     },
     Robots: { ATR: { Type: "ATMRobot" }, VTR: { Type: "VTMRobot" } },
   };
   const required = [
-    "LP1", "LP2", "LP3", "LP4", "DummyPort", "Aligner", "Buffer1", "Buffer2", "Buffer3", "Buffer4", "Cooler",
-    "LA", "LB", "PM1", "PM2", "PM3", "PM4", "PM5", "PM6",
+    "LP1", "LP2", "LP3", "DummyPort", "Aligner", "Cooler",
+    "LA", "LB", "heater", "PM1", "PM2", "PM3", "PM4",
   ];
   const snapshot = logic.buildWorkspaceSnapshot(moves, fullDevice, 0);
   const topology = logic.renderEquipmentTopology(
@@ -855,35 +855,28 @@ test("单真空机械手拓扑固定显示全部 LP、Dummy Port 与大气侧辅
   assertTopologyComplete(topology, required);
   assert.match(topology, />LP2</);
   assert.match(topology, />LP3</);
-  assert.match(topology, />LP4</);
-  assert.match(topology, /class="load-port-assembly is-dummy-port door-closed"/);
+  assert.match(topology, /class="equipment-card equipment-port-top-view[^\"]*is-dummy-port/);
   assert.doesNotMatch(topology, /class="load-port-kind"|>DUMMY</);
-  assert.match(topology, /class="load-port-shared-base"/);
-  assert.match(topology, /class="equipment-utility equipment-buffer/);
   assert.match(topology, /class="equipment-utility equipment-cooler/);
-  assert.doesNotMatch(topology, />heater</i);
+  assert.match(topology, />heater</i);
+  assert.match(topology, /class="topology-machine-frame topology-machine-frame-square"/);
   assert.doesNotMatch(topology, /DEVICE TOPOLOGY|设备配置全量模块/);
-  assert.match(topology, /--module-left:26%;/);
+  assert.match(topology, /data-attachment-id="atmosphere-port-1@bottom"/);
   assert.match(topology, /--topology-canvas-height:\d+px/);
-  assert.match(topology, /class="topology-zone topology-zone-vacuum"/);
-  assert.doesNotMatch(topology, /VACUUM PROCESS AREA/);
-  assert.match(topology, /<small>真空加工区<\/small>/);
-  assert.match(topology, /class="topology-interface-bay"/);
-  assert.match(topology, /VACUUM \/ ATM INTERFACE/);
-  assert.match(topology, /class="topology-zone topology-zone-atmosphere"/);
-  assert.doesNotMatch(topology, /ATM TRANSFER AREA/);
-  assert.match(topology, /<small>大气传输区<\/small>/);
+  assert.doesNotMatch(topology, /topology-zone|真空加工区|大气传输区/);
+  assert.doesNotMatch(topology, /topology-interface-bay|VACUUM \/ ATM INTERFACE/);
+  assert.match(topology, /data-frame-id="atmosphere-main"/);
 
   const modulePosition = name => {
     const match = new RegExp(
-      `class="reference-module-position" style="--module-left:([\\d.]+)%;--module-top:(\\d+)px">(?:(?!class="reference-module-position")[\\s\\S])*?<strong[^>]*>${name}</strong>`,
+      `class="reference-module-position" style="--module-left:([\\d.]+)%;--module-top:(\\d+)px[^\"]*">(?:(?!class="reference-module-position")[\\s\\S])*?<strong[^>]*>${name}</strong>`,
     ).exec(topology);
     assert.ok(match, `应找到 ${name} 的坐标`);
     return { x: Number(match[1]), y: Number(match[2]) };
   };
   const robotPosition = name => {
     const match = new RegExp(
-      `class="reference-robot-position" style="--robot-left:([\\d.]+)%;--robot-top:(\\d+)px">(?:(?!class="reference-robot-position")[\\s\\S])*?aria-label="${name}，`,
+      `class="reference-robot-position" style="--robot-left:([\\d.]+)%;--robot-top:(\\d+)px[^\"]*">(?:(?!class="reference-robot-position")[\\s\\S])*?aria-label="${name}，`,
     ).exec(topology);
     assert.ok(match, `应找到 ${name} 的坐标`);
     return { x: Number(match[1]), y: Number(match[2]) };
@@ -891,55 +884,34 @@ test("单真空机械手拓扑固定显示全部 LP、Dummy Port 与大气侧辅
   const lp1 = modulePosition("LP1");
   const dummyPort = modulePosition("DummyPort");
   assert.deepEqual(
-    ["LP1", "LP2", "LP3", "LP4", "DummyPort"].map(name => modulePosition(name).x),
-    [26, 38, 50, 62, 74],
-    "五个 LoadPort 应使用紧凑的居中列阵",
+    ["LP1", "LP2", "LP3"].map(name => modulePosition(name).x),
+    [35.125, 45.04875, 54.95125],
+    "三个实际 LoadPort 应附着在大气框架底边",
   );
-  assert.equal(dummyPort.y, lp1.y, "Dummy Port 应与普通 LoadPort 共用同一排底座");
-  assert.ok(lp1.x < dummyPort.x, "Dummy Port 应排在普通 LoadPort 之后");
+  assert.equal(modulePosition("DummyPort").x, 64.875, "DummyPort 应附着在大气框架底边最右侧");
+  assert.equal(dummyPort.y, lp1.y, "DummyPort 应与实际 LoadPort 共用大气框架底边");
+  assert.ok(lp1.x < dummyPort.x, "DummyPort 应排在实际 LoadPort 之后");
   const atr = robotPosition("ATR");
-  assert.equal(lp1.y - atr.y, 140, "LoadPort 整排应在 ATR 下方保留更大的垂直间距");
-  for (const name of ["Buffer1", "Buffer2", "Buffer3", "Buffer4"]) {
-    assert.equal(modulePosition(name).x, 90, `${name} 应位于大气传输区右侧`);
-  }
-  assert.equal(modulePosition("Aligner").x, 10, "Aligner 应位于大气传输区左侧");
-  assert.equal(modulePosition("Cooler").x, 10, "Cooler 应位于大气传输区左侧");
-  assert.equal(modulePosition("Cooler").y - modulePosition("Aligner").y, 80, "Cooler 应下移并避开 Aligner 名称");
-  const atmosphereZone = /class="topology-zone topology-zone-atmosphere" style="--zone-top:([\d.]+)px;--zone-height:([\d.]+)px"/.exec(topology);
-  assert.ok(atmosphereZone, "应找到大气传输区边界");
-  const atmosphereTop = Number(atmosphereZone[1]);
-  assert.ok(modulePosition("Cooler").y - 27 >= atmosphereTop, "Cooler 应完整位于大气传输区内");
-  assert.ok(modulePosition("Buffer1").y - 28 >= atmosphereTop, "首个 Buffer 应完整位于大气传输区内");
+  assert.equal(lp1.y - atr.y, 116, "LoadPort 整排应由大气框架下边固定");
+  assert.equal(modulePosition("Aligner").x, 33.95, "Aligner 应位于大气框架内左上角");
+  assert.equal(modulePosition("Cooler").x, 66.05, "Cooler 应位于大气框架内右上角");
+  assert.equal(modulePosition("Cooler").y - modulePosition("Aligner").y, 9, "Aligner 与 Cooler 应使用紧凑的顶部纵向间距");
   const pm2 = modulePosition("PM2");
   const pm3 = modulePosition("PM3");
   const pm4 = modulePosition("PM4");
   const pm1 = modulePosition("PM1");
   const vtr = robotPosition("VTR");
+  const singleFrame = /data-frame-id="vacuum-main" style="--frame-left:[\d.]+%;--frame-top:(\d+)px;--frame-width:240px;--frame-height:240px"/.exec(topology);
+  assert.ok(singleFrame, "应找到 240px 单腔真空框架");
   assert.equal(vtr.x, 50);
-  assert.equal(vtr.y, (pm1.y + pm2.y) / 2);
-  assert.equal(pm3.y + 52, pm2.y - 52, "PM3 底边应与 PM2 顶边水平");
-  assert.equal(pm4.y + 52, pm2.y - 52, "PM4 底边应与 PM2 顶边水平");
-  const vacuumZone = /class="topology-zone topology-zone-vacuum" style="--zone-top:([\d.]+)px;--zone-height:([\d.]+)px"/.exec(topology);
-  assert.ok(vacuumZone, "应找到真空加工区边界");
-  const vacuumTop = Number(vacuumZone[1]);
-  const vacuumBottom = vacuumTop + Number(vacuumZone[2]);
-  for (const name of ["PM1", "PM2", "PM3", "PM4", "PM5", "PM6"]) {
-    const position = modulePosition(name);
-    assert.ok(position.y - 52 >= vacuumTop && position.y + 52 <= vacuumBottom, `${name} 应完整位于真空加工区内`);
-  }
-  assert.ok(vtr.y - 66 >= vacuumTop && vtr.y + 66 <= vacuumBottom, "VTR 应完整位于真空加工区内");
-
+  assert.equal(vtr.y, Number(singleFrame[1]), "VTR 应位于单腔框架中心");
+  assert.ok(pm1.x < vtr.x && pm2.x < vtr.x, "PM1/PM2 应附着在框架左边");
+  assert.ok(pm3.x > vtr.x && pm4.x > vtr.x, "PM3/PM4 应附着在框架右边");
   const la = modulePosition("LA");
   const lb = modulePosition("LB");
-  const lc = modulePosition("LC");
-  const ld = modulePosition("LD");
-  assert.deepEqual([la.x, lb.x], [40, 60], "第一行应为 LA / LB，并在中等画布保持清晰间距");
-  assert.deepEqual([lc.x, ld.x], [40, 60], "第二行应为 LC / LD，并在中等画布保持清晰间距");
+  assert.deepEqual([la.x, lb.x], [45.8, 54.2], "LA / LB 应以极小间隔并排附着在大气框架上边");
   assert.equal(la.y, lb.y);
-  assert.equal(lc.y, ld.y);
-  assert.equal(lc.y - la.y, 76, "上下两排 LoadLock 应保留 4px 腔体间隙");
-  assert.match(topology, /class="loadlock-layers"/);
-  assert.equal((topology.match(/class="loadlock-layer /g) || []).length, 8, "四个 LoadLock 各显示两层");
+  assert.equal((topology.match(/class="loadlock-top-chamber"/g) || []).length, 2, "两把 LoadLock 均显示俯视腔体");
 });
 
 test("LP2 与 Dummy Port 之间固定预留 LP3 列位", () => {
@@ -968,7 +940,7 @@ test("LP2 与 Dummy Port 之间固定预留 LP3 列位", () => {
     assert.ok(match, `应找到 ${name} 的列位`);
     return Number(match[1]);
   };
-  assert.deepEqual([xFor("LP1"), xFor("LP2"), xFor("DummyPort")], [26, 42, 74]);
+  assert.deepEqual([xFor("LP1"), xFor("LP2"), xFor("DummyPort")], [37.25, 50, 62.75]);
 });
 
 test("画布模块筛选：勾选 Aligner/Cooler 后对应模块不在拓扑中显示", () => {
@@ -1025,19 +997,17 @@ test("双真空机械手级联拓扑固定显示全部 LP，并完整显示腔�
   const fullDevice = {
     Stations: {
       LP1: { Type: "LoadPort" }, LP2: { Type: "LoadPort" },
-      LP3: { Type: "LoadPort" }, LP4: { Type: "LoadPort" },
+      LP3: { Type: "LoadPort" },
       LA: { Type: "LoadLock" }, LB: { Type: "LoadLock" },
       UBR: { Type: "LoadLock" }, DBR: { Type: "LoadLock" },
       PM1: { Type: "ProcessChamber" }, PM2: { Type: "ProcessChamber" },
       PM3: { Type: "ProcessChamber" }, PM4: { Type: "ProcessChamber" },
-      PM5: { Type: "ProcessChamber" }, PM6: { Type: "ProcessChamber" },
-      Buffer1: { Type: "Buffer" }, Buffer2: { Type: "Buffer" },
-      Buffer3: { Type: "Buffer" }, Buffer4: { Type: "Buffer" },
+      PM5: { Type: "ProcessChamber" },
       Aligner: { Type: "Aligner" },
     },
     Robots: { ATR: { Type: "ATMRobot" }, VTR_1: { Type: "VTMRobot" }, VTR_2: { Type: "HighVTMRobot" } },
   };
-  const required = ["LP1", "LP2", "LP3", "LP4", "LA", "LB", "UBR", "DBR", "PM1", "PM2", "PM3", "PM4", "PM5", "PM6"];
+  const required = ["LP1", "LP2", "LP3", "LA", "LB", "UBR", "DBR", "PM1", "PM2", "PM3", "PM4", "PM5"];
   const snapshot = logic.buildWorkspaceSnapshot(moves, fullDevice, 0);
   const topology = logic.renderEquipmentTopology(
     logic.snapshotWithFullDeviceModules(snapshot, fullDevice),
@@ -1046,14 +1016,15 @@ test("双真空机械手级联拓扑固定显示全部 LP，并完整显示腔�
   assertTopologyComplete(topology, required);
   assert.match(topology, />LP2</);
   assert.match(topology, />LP3</);
-  assert.match(topology, />LP4</);
+  assert.match(topology, /data-frame-id="vacuum-vtr-1"/);
+  assert.match(topology, /data-frame-id="vacuum-vtr-2"/);
   const yOf = name => {
     const module = new RegExp(
-      `class="reference-module-position" style="--module-left:[\\d.]+%;--module-top:(\\d+)px">\\s*<strong class="equipment-external-name[^"]*">${name}</strong>`
+      `class="reference-module-position" style="--module-left:[\\d.]+%;--module-top:(\\d+)px[^\"]*">\\s*<strong class="equipment-external-name[^"]*">${name}</strong>`
     ).exec(topology);
     if (module) return Number(module[1]);
     const robot = new RegExp(
-      `class="reference-robot-position" style="--robot-left:[\\d.]+%;--robot-top:(\\d+)px">\\s*<article class="robot-hub[^"]*"[^>]*aria-label="${name}`
+      `class="reference-robot-position" style="--robot-left:[\\d.]+%;--robot-top:(\\d+)px[^\"]*">\\s*<article class="robot-hub[^"]*"[^>]*aria-label="${name}`
     ).exec(topology);
     assert.ok(robot, `拓扑应包含 ${name}`);
     return Number(robot[1]);
@@ -1095,37 +1066,33 @@ test("级联与非级联拓扑的大气侧布局和区域高度保持一致", ()
     undefined,
     device,
   );
-  const zoneHeight = topology => {
-    const match = /class="topology-zone topology-zone-atmosphere" style="--zone-top:[\d.]+px;--zone-height:([\d.]+)px"/.exec(topology);
-    assert.ok(match, "应找到大气传输区高度");
-    return Number(match[1]);
-  };
-  const zoneBounds = (topology, className) => {
-    const match = new RegExp(`class="${className}" style="--zone-top:([\\d.]+)px;--zone-height:([\\d.]+)px"`).exec(topology);
-    assert.ok(match, `应找到 ${className} 边界`);
-    const top = Number(match[1]);
-    return { top, bottom: top + Number(match[2]) };
+  const atmosphereFrame = topology => {
+    const match = /data-frame-id="atmosphere-main" style="--frame-left:[\d.]+%;--frame-top:([\d.]+)px;--frame-width:([\d.]+)px;--frame-height:([\d.]+)px"/.exec(topology);
+    assert.ok(match, "应找到大气框架");
+    return { top: Number(match[1]), width: Number(match[2]), height: Number(match[3]) };
   };
   const verticalPosition = (topology, kind, name) => {
     const prefix = kind === "robot"
       ? 'class="reference-robot-position" style="--robot-left:[\\d.]+%;--robot-top:'
       : 'class="reference-module-position" style="--module-left:[\\d.]+%;--module-top:';
-    const match = new RegExp(`${prefix}(\\d+)px">(?:(?!class="reference-(?:robot|module)-position")[\\s\\S])*?${name}`).exec(topology);
+    const match = new RegExp(`${prefix}(\\d+)px[^\"]*">(?:(?!class="reference-(?:robot|module)-position")[\\s\\S])*?${name}`).exec(topology);
     assert.ok(match, `应找到 ${name} 的纵向坐标`);
     return Number(match[1]);
   };
   const singleTopology = render(singleDevice);
   const cascadeTopology = render(cascadeDevice);
 
-  assert.equal(zoneHeight(cascadeTopology), zoneHeight(singleTopology), "两类拓扑的大气传输区应等高");
+  assert.deepEqual(
+    [atmosphereFrame(cascadeTopology).width, atmosphereFrame(cascadeTopology).height],
+    [atmosphereFrame(singleTopology).width, atmosphereFrame(singleTopology).height],
+    "两类拓扑的大气框架应使用同一尺寸",
+  );
   for (const topology of [singleTopology, cascadeTopology]) {
-    const interfaceBay = zoneBounds(topology, "topology-interface-bay");
-    const atmosphereZone = zoneBounds(topology, "topology-zone topology-zone-atmosphere");
-    assert.equal(atmosphereZone.top - interfaceBay.bottom, 12, "大气传输区应紧接 LA/LB 接口带");
+    assert.doesNotMatch(topology, /topology-interface-bay|VACUUM \/ ATM INTERFACE/, "LoadLock 后方不应绘制接口框");
     assert.equal(
       verticalPosition(topology, "module", "LP1") - verticalPosition(topology, "robot", "ATR"),
-      140,
-      "ATR 到 LoadPort 的垂直间距应统一",
+      116,
+      "ATR 到 LoadPort 的垂直间距应由大气框架固定",
     );
   }
 });
@@ -1172,13 +1139,192 @@ test("拓扑布局按多腔类型和机器手数量识别，与自定义命名�
   }
 });
 
+test("三类设备以机器框架和不可见附着点固定真空腔室位置", () => {
+  const render = device => logic.renderEquipmentTopology(
+    logic.snapshotWithFullDeviceModules(logic.buildWorkspaceSnapshot([], device, 0), device),
+    null,
+    undefined,
+    device,
+  );
+  const positionOf = (topology, kind, name) => {
+    const className = kind === "robot" ? "reference-robot-position" : "reference-module-position";
+    const variable = kind === "robot" ? "robot" : "module";
+    const marker = kind === "robot" ? `aria-label="${name}，` : `>${name}</strong>`;
+    const match = new RegExp(
+      `class="${className}" style="--${variable}-left:([\\d.]+)%;--${variable}-top:(\\d+)px[^\"]*">(?:(?!class="reference-(?:robot|module)-position")[\\s\\S])*?${marker}`,
+    ).exec(topology);
+    assert.ok(match, `应找到 ${name} 的框架坐标`);
+    return { x: Number(match[1]) * 10, y: Number(match[2]) };
+  };
+  const frameOf = (topology, id) => {
+    const match = new RegExp(
+      `data-frame-id="${id}" style="--frame-left:([\\d.]+)%;--frame-top:(\\d+)px;--frame-width:([\\d.]+)px;--frame-height:(\\d+)px"`,
+    ).exec(topology);
+    assert.ok(match, `应找到 ${id} 机器框架`);
+    return { x: Number(match[1]) * 10, y: Number(match[2]), width: Number(match[3]), height: Number(match[4]) };
+  };
+
+  const single = {
+    Stations: {
+      PM1: { Type: "ProcessChamber" }, PM2: { Type: "ProcessChamber" },
+      PM3: { Type: "ProcessChamber" }, PM4: { Type: "ProcessChamber" },
+      Heater: { Type: "Heater" }, LA: { Type: "LoadLock" }, LB: { Type: "LoadLock" },
+    },
+    Robots: { ATR: { Type: "ATMRobot" }, VTR: { Type: "VTMRobot" } },
+  };
+  const singleTopology = render(single);
+  const singleFrame = frameOf(singleTopology, "vacuum-main");
+  assert.equal(singleFrame.width, singleFrame.height, "单腔真空框架应为正方形");
+  assert.equal(singleFrame.width, 240, "单腔真空框架边长应统一为 240px");
+  assert.deepEqual(positionOf(singleTopology, "robot", "VTR"), { x: singleFrame.x, y: singleFrame.y });
+  assert.deepEqual(
+    ["PM1", "PM2", "PM3", "PM4"].map(name => positionOf(singleTopology, "module", name).x < singleFrame.x),
+    [true, true, false, false],
+    "四个 PM 应分别附着在框架左右两边",
+  );
+  assert.ok(positionOf(singleTopology, "module", "Heater").y < singleFrame.y, "Heater 应附着在框架左上方");
+  assert.match(singleTopology, />Heater<\/strong>[\s\S]*?class="equipment-card equipment-process/);
+  assert.ok(positionOf(singleTopology, "module", "LA").y > singleFrame.y);
+  assert.ok(positionOf(singleTopology, "module", "LB").y > singleFrame.y);
+  const singleAtmosphereFrame = frameOf(singleTopology, "atmosphere-main");
+  for (const name of ["LA", "LB"]) {
+    const lock = positionOf(singleTopology, "module", name);
+    assert.equal(lock.y, singleFrame.y + singleFrame.height / 2 + 41, `${name} 应贴合真空框架下边`);
+    assert.equal(lock.y, singleAtmosphereFrame.y - singleAtmosphereFrame.height / 2 - 41, `${name} 应贴合大气框架上边`);
+  }
+  assert.equal(
+    positionOf(singleTopology, "module", "LA").x + positionOf(singleTopology, "module", "LB").x,
+    singleFrame.x * 2,
+    "单腔 LA/LB 应围绕真空框架中轴对称",
+  );
+  assert.ok(
+    Math.abs(positionOf(singleTopology, "module", "LB").x - positionOf(singleTopology, "module", "LA").x) - 82 <= 2.01,
+    "单腔 LA/LB 外框之间只应保留极小间隔",
+  );
+
+  const dual = {
+    Stations: {
+      PM1: { Type: "MultiProcessChamber", Capacity: 2 },
+      PM2: { Type: "MultiProcessChamber", Capacity: 2 },
+      PM3: { Type: "MultiProcessChamber", Capacity: 2 },
+      LA: { Type: "LoadLock" }, LB: { Type: "LoadLock" },
+      LC: { Type: "LoadLock" }, LD: { Type: "LoadLock" },
+    },
+    Robots: { ATR: { Type: "ATMRobot" }, VTR: { Type: "VTMRobot" } },
+  };
+  const dualTopology = render(dual);
+  const dualFrame = frameOf(dualTopology, "vacuum-main");
+  assert.equal(dualFrame.width, dualFrame.height, "双腔真空框架应为正方形");
+  assert.equal(dualFrame.width, 240, "双腔真空框架边长应统一为 240px");
+  assert.deepEqual(positionOf(dualTopology, "robot", "VTR"), { x: dualFrame.x, y: dualFrame.y });
+  assert.doesNotMatch(dualTopology, /VACUUM FRAME/, "双腔真空框架不应显示提示词");
+  const dualAtmosphereFrame = frameOf(dualTopology, "atmosphere-main");
+  for (const name of ["LA", "LB", "LC", "LD"]) {
+    const lock = positionOf(dualTopology, "module", name);
+    assert.equal(lock.y, dualFrame.y + dualFrame.height / 2 + 41, `${name} 应贴合双腔真空框架下边`);
+    assert.equal(lock.y, dualAtmosphereFrame.y - dualAtmosphereFrame.height / 2 - 41, `${name} 应贴合双腔大气框架上边`);
+  }
+  const dualLockPositions = ["LC", "LA", "LB", "LD"].map(name => positionOf(dualTopology, "module", name));
+  for (let index = 1; index < dualLockPositions.length; index += 1) {
+    assert.ok(
+      dualLockPositions[index].x - dualLockPositions[index - 1].x - 82 <= 2.01,
+      "双腔 LoadLock 链相邻外框之间只应保留极小间隔",
+    );
+  }
+  assert.ok(positionOf(dualTopology, "module", "PM1-1").x < dualFrame.x);
+  assert.ok(positionOf(dualTopology, "module", "PM2-1").y < dualFrame.y);
+  assert.ok(positionOf(dualTopology, "module", "PM3-1").x > dualFrame.x);
+
+  const atmospheric = {
+    Stations: {
+      LP1: { Type: "LoadPort" }, LP2: { Type: "LoadPort" }, LP3: { Type: "LoadPort" }, DummyPort: { Type: "DummyPort" },
+      LA: { Type: "LoadLock" }, LB: { Type: "LoadLock" },
+      Aligner: { Type: "Aligner" }, Cooler: { Type: "Cooler" },
+    },
+    Robots: { ATR: { Type: "ATMRobot" }, VTR: { Type: "VTMRobot" } },
+  };
+  const atmosphericTopology = render(atmospheric);
+  const atmosphereFrame = frameOf(atmosphericTopology, "atmosphere-main");
+  assert.deepEqual(
+    { width: atmosphereFrame.width, height: atmosphereFrame.height },
+    { width: 425, height: 150 },
+    "大气框架应为 425×150px",
+  );
+  assert.doesNotMatch(atmosphericTopology, /ATMOSPHERE FRAME/, "大气框架内不应显示区域提示");
+  assert.doesNotMatch(atmosphericTopology, /topology-zone|真空加工区|大气传输区/);
+  for (const name of ["LA", "LB"]) {
+    assert.ok(positionOf(atmosphericTopology, "module", name).y < atmosphereFrame.y, `${name} 应附着在大气框架上边`);
+  }
+  for (const name of ["LP1", "LP2", "LP3", "DummyPort"]) {
+    assert.ok(positionOf(atmosphericTopology, "module", name).y > atmosphereFrame.y, `${name} 应附着在大气框架下边`);
+  }
+  assert.ok(positionOf(atmosphericTopology, "module", "Aligner").x < atmosphereFrame.x && positionOf(atmosphericTopology, "module", "Aligner").y < atmosphereFrame.y);
+  assert.ok(positionOf(atmosphericTopology, "module", "Cooler").x > atmosphereFrame.x && positionOf(atmosphericTopology, "module", "Cooler").y < atmosphereFrame.y);
+  assert.deepEqual(positionOf(atmosphericTopology, "robot", "ATR"), { x: atmosphereFrame.x, y: atmosphereFrame.y });
+
+  const cascade = {
+    Stations: {
+      PM1: { Type: "ProcessChamber" }, PM2: { Type: "ProcessChamber" },
+      PM3: { Type: "ProcessChamber" }, PM4: { Type: "ProcessChamber" }, PM5: { Type: "ProcessChamber" },
+      LA: { Type: "LoadLock" }, LB: { Type: "LoadLock" },
+      UBR: { Type: "LoadLock" }, DBR: { Type: "LoadLock" },
+    },
+    Robots: { ATR: { Type: "ATMRobot" }, VTR_1: { Type: "VTMRobot" }, VTR_2: { Type: "HighVTMRobot" } },
+  };
+  const cascadeTopology = render(cascade);
+  const upperFrame = frameOf(cascadeTopology, "vacuum-vtr-2");
+  const lowerFrame = frameOf(cascadeTopology, "vacuum-vtr-1");
+  assert.equal(upperFrame.width, upperFrame.height, "VTR_2 框架应为正方形");
+  assert.equal(upperFrame.width, lowerFrame.width, "VTR_1 与 VTR_2 框架应使用相同宽度");
+  assert.ok(lowerFrame.width > lowerFrame.height, "VTR_1 框架应为偏扁的横向框架");
+  assert.equal(lowerFrame.height, 128, "VTR_1 框架应加高以容纳更清晰的级联层次");
+  assert.doesNotMatch(cascadeTopology, /VACUUM FRAME/, "级联真空框架不应显示提示词");
+  for (const edge of ["top", "right", "bottom", "left"]) {
+    assert.equal(
+      (cascadeTopology.match(new RegExp(`data-anchor-id="vacuum-vtr-2-${edge}-[12]"`, "g")) ?? []).length,
+      2,
+      `VTR_2 的 ${edge} 边应有两个对称锚点`,
+    );
+  }
+  assert.deepEqual(positionOf(cascadeTopology, "robot", "VTR_1"), { x: lowerFrame.x, y: lowerFrame.y });
+  assert.deepEqual(positionOf(cascadeTopology, "robot", "VTR_2"), { x: upperFrame.x, y: upperFrame.y });
+  assert.ok(positionOf(cascadeTopology, "module", "PM3").x < upperFrame.x && positionOf(cascadeTopology, "module", "PM3").y > upperFrame.y);
+  assert.ok(positionOf(cascadeTopology, "module", "PM4").x < upperFrame.x && positionOf(cascadeTopology, "module", "PM4").y < upperFrame.y);
+  assert.ok(positionOf(cascadeTopology, "module", "PM5").x > upperFrame.x && positionOf(cascadeTopology, "module", "PM5").y < upperFrame.y);
+  for (const name of ["UBR", "DBR"]) {
+    const position = positionOf(cascadeTopology, "module", name);
+    assert.ok(position.y > upperFrame.y && position.y < lowerFrame.y, `${name} 应附着在两个框架之间`);
+  }
+  for (const [leftName, rightName] of [["UBR", "DBR"]]) {
+    const left = positionOf(cascadeTopology, "module", leftName);
+    const right = positionOf(cascadeTopology, "module", rightName);
+    assert.equal(left.y, right.y, `${leftName}/${rightName} 应在同一附着边`);
+    assert.ok(
+      Math.abs(right.x - left.x) <= 83.1,
+      `${leftName}/${rightName} 应紧贴排列，不保留额外横向空白`,
+    );
+  }
+  const cascadeAtmosphereFrame = frameOf(cascadeTopology, "atmosphere-main");
+  const cascadeLA = positionOf(cascadeTopology, "module", "LA");
+  const cascadeLB = positionOf(cascadeTopology, "module", "LB");
+  for (const [name, position] of [["LA", cascadeLA], ["LB", cascadeLB]]) {
+    assert.equal(position.y, lowerFrame.y + lowerFrame.height / 2 + 41, `${name} 应贴合 VTR_1 下边`);
+    assert.equal(position.y, cascadeAtmosphereFrame.y - cascadeAtmosphereFrame.height / 2 - 41, `${name} 应贴合大气框架上边`);
+  }
+  assert.equal(cascadeLA.x + cascadeLB.x, lowerFrame.x * 2, "级联 LA/LB 应严格围绕 VTR_1 中轴对称");
+  assert.ok(cascadeLB.x - cascadeLA.x - 82 <= 2.01, "级联 LA/LB 外框之间只应保留极小间隔");
+  assert.match(cascadeTopology, /data-attachment-id="vacuum-vtr-1-loadlock-1@bottom\|atmosphere-main-loadlock-1@top"/);
+  assert.match(cascadeTopology, /class="topology-attachment-point"/);
+  assert.match(frontendCss, /\.topology-attachment-point[^{]*\{[^}]*opacity:\s*0/);
+  assert.match(frontendCss, /\.topology-frame-anchor[^{]*\{[^}]*opacity:\s*0/);
+});
+
 test("三级机器手设备按结构使用级联布局，不依赖设备名称", () => {
   const twelveKDevice = {
     Stations: {
       LP1: { Type: "LoadPort" }, LP2: { Type: "LoadPort" },
       LP3: { Type: "LoadPort" }, LP4: { Type: "LoadPort" },
       LA: { Type: "LoadLock" }, LB: { Type: "LoadLock" },
-      LC: { Type: "LoadLock" }, LD: { Type: "LoadLock" },
       UBR: { Type: "LoadLock" }, DBR: { Type: "LoadLock" },
       PM1: { Type: "ProcessChamber" }, PM2: { Type: "ProcessChamber" },
       PM3: { Type: "ProcessChamber" }, PM4: { Type: "ProcessChamber" },
@@ -1194,14 +1340,14 @@ test("三级机器手设备按结构使用级联布局，不依赖设备名称",
     twelveKDevice,
   );
   assert.match(topology, /data-topology-layout="cascade"/);
-  assertTopologyComplete(topology, ["LA", "LB", "LC", "LD", "UBR", "DBR", "PM1", "PM2", "PM3", "PM4", "PM5"]);
+  assertTopologyComplete(topology, ["LA", "LB", "UBR", "DBR", "PM1", "PM2", "PM3", "PM4", "PM5"]);
   const positionOf = name => {
     const module = new RegExp(
-      `class="reference-module-position" style="--module-left:([\\d.]+)%;--module-top:(\\d+)px">\\s*<strong class="equipment-external-name[^"]*">${name}</strong>`
+      `class="reference-module-position" style="--module-left:([\\d.]+)%;--module-top:(\\d+)px[^\"]*">\\s*<strong class="equipment-external-name[^"]*">${name}</strong>`
     ).exec(topology);
     if (module) return { x: Number(module[1]) / 100 * 1000, y: Number(module[2]) };
     const robot = new RegExp(
-      `class="reference-robot-position" style="--robot-left:([\\d.]+)%;--robot-top:(\\d+)px">\\s*<article class="robot-hub[^"]*"[^>]*aria-label="${name}`
+      `class="reference-robot-position" style="--robot-left:([\\d.]+)%;--robot-top:(\\d+)px[^\"]*">\\s*<article class="robot-hub[^"]*"[^>]*aria-label="${name}`
     ).exec(topology);
     assert.ok(robot, `拓扑应包含 ${name}`);
     return { x: Number(robot[1]) / 100 * 1000, y: Number(robot[2]) };
@@ -1218,40 +1364,14 @@ test("三级机器手设备按结构使用级联布局，不依赖设备名称",
   assert.ok(ubr.y < vtr1.y && ubr.y > vtr2.y, "UBR/DBR 应位于 VTR_1 上方、VTR_2 下方");
   assert.ok(ubr.x < dbr.x, "UBR 应在 DBR 左侧");
   const pm3 = positionOf("PM3"), pm4 = positionOf("PM4"), pm5 = positionOf("PM5");
-  assert.equal(pm3.x, vtr2.x, "PM3 应在 VTR_2 正上方");
-  assert.ok(pm3.y < vtr2.y, "PM3 应位于 VTR_2 上方");
-  assert.equal(pm4.y, vtr2.y, "PM4 应与 VTR_2 同排");
-  assert.equal(pm5.y, vtr2.y, "PM5 应与 VTR_2 同排");
-  assert.ok(pm4.x < vtr2.x && pm5.x > vtr2.x, "PM4/PM5 应分列 VTR_2 左右");
-  const la = positionOf("LA"), lb = positionOf("LB"), lc = positionOf("LC"), ld = positionOf("LD");
-  assert.equal(la.y, lb.y, "LA/LB 应同排（田字格上排）");
-  assert.equal(lc.y, ld.y, "LC/LD 应同排（田字格下排）");
-  assert.ok(lc.y > la.y, "LC/LD 应在 LA/LB 下方");
-  assert.ok(la.x < lb.x && lc.x < ld.x, "田字格左右分布");
-  assert.equal(la.x, lc.x, "LA/LC 同列");
-  assert.equal(lb.x, ld.x, "LB/LD 同列");
-  const vacuumZone = /class="topology-zone topology-zone-vacuum" style="--zone-top:([\d.]+)px;--zone-height:([\d.]+)px"/.exec(topology);
-  assert.ok(vacuumZone, "应绘制真空加工区");
-  const vacuumTop = Number(vacuumZone[1]);
-  const vacuumBottom = vacuumTop + Number(vacuumZone[2]);
-  for (const name of ["UBR", "DBR", "PM1", "PM2", "PM3", "PM4", "PM5", "VTR_1", "VTR_2"]) {
-    const y = positionOf(name).y;
-    assert.ok(
-      y >= vacuumTop && y <= vacuumBottom,
-      `${name} 应位于真空加工区内（y=${y}，真空区 ${vacuumTop}~${vacuumBottom}）`,
-    );
-  }
-  const interfaceBay = /class="topology-interface-bay" style="--zone-top:([\d.]+)px;--zone-height:([\d.]+)px"/.exec(topology);
-  assert.ok(interfaceBay, "应绘制大气/真空接口带");
-  const interfaceTop = Number(interfaceBay[1]);
-  const interfaceBottom = interfaceTop + Number(interfaceBay[2]);
-  for (const name of ["UBR", "DBR"]) {
-    const y = positionOf(name).y;
-    assert.ok(
-      y < interfaceTop || y > interfaceBottom,
-      `${name} 不应落入大气/真空接口带（y=${y}，接口带 ${interfaceTop}~${interfaceBottom}）`,
-    );
-  }
+  assert.ok(pm3.x < vtr2.x && pm3.y > vtr2.y, "PM3 应附着在 VTR_2 框架左下侧");
+  assert.ok(pm4.x < vtr2.x && pm4.y < vtr2.y, "PM4 应附着在 VTR_2 框架左上侧");
+  assert.ok(pm5.x > vtr2.x && pm5.y < vtr2.y, "PM5 应附着在 VTR_2 框架右上侧");
+  const la = positionOf("LA"), lb = positionOf("LB");
+  assert.equal(la.y, lb.y, "LA/LB 应同排附着在 VTR_1 框架底部");
+  assert.ok(la.x < lb.x, "LA/LB 应按左右顺序排列");
+  assert.doesNotMatch(topology, /topology-zone|真空加工区|大气传输区/, "不应绘制真空或大气背景框");
+  assert.doesNotMatch(topology, /topology-interface-bay|VACUUM \/ ATM INTERFACE/, "LoadLock 后方不应绘制接口框");
   const renamedDeviceTopology = logic.renderEquipmentTopology(
     logic.snapshotWithFullDeviceModules(snapshot, twelveKDevice),
     null,
@@ -1553,7 +1673,7 @@ test("机械手清除旧坐标偏移，并按 PRE_TRANS 进度连续旋转", () 
   assert.match(css, /\.robot-held-wafer-0[^}]*translate\(-2px, -2px\)/);
   assert.match(css, /\.robot-held-wafer-1[^}]*translate\(2px, 2px\)/);
   assert.doesNotMatch(css, /robot-capacity-badge|robot-holding-count|robot-external-name|loadlock-pressure-state/);
-  assert.match(css, /\.topology-interface-bay[^}]*right:\s*30%;\s*left:\s*30%;/);
+  assert.doesNotMatch(css, /\.topology-interface-bay/);
   assert.doesNotMatch(css, /\.robot-reach-sector/);
   assert.doesNotMatch(css, /\.robot-effector-palm/);
   assert.doesNotMatch(css, /\.robot-end-effector::after/);

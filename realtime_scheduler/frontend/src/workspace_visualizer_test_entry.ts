@@ -20,6 +20,7 @@ export {
   normalizeMovePayload,
   primitiveDecisionBoundaryTimes,
   renderEquipmentTopology,
+  renderFrontSlotOverview,
   renderDecisionLens,
   renderSchedulePerformance,
   renderThroughputChart,

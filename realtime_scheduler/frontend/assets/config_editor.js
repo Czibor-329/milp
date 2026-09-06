@@ -487,10 +487,13 @@ function isCoolerModule(name, type = "") {
 function isAlignerModule(name, type = "") {
   return type.trim().toLowerCase() === "aligner" || /^(AL|ALIGNER)$/i.test(name.trim());
 }
+function isHeaterModule(name, type = "") {
+  return type.trim().toLowerCase() === "heater" || /^HEATER$/i.test(name.trim());
+}
 function isTopologyHiddenModule(module) {
   const name = module.name.trim();
   const type = module.type.trim().toLowerCase();
-  return /^HEATER$/i.test(name) || type === "heater";
+  return isBufferModule(name, type) || /^LP4$/i.test(name);
 }
 function isLoadPortName(name, type = "") {
   const normalizedType = type.trim().toLowerCase();
@@ -1203,6 +1206,8 @@ function collectElements(root) {
     content: required("visualContent"),
     topologyPlayback: required("visualTopologyPlayback"),
     stage: required("visualDeviceStage"),
+    /* 独立逻辑测试可使用精简页面夹具；真实页面始终提供该节点。 */
+    frontSlotOverview: root.getElementById("visualFrontSlotOverview") ?? { innerHTML: "" },
     decisionLens: required("visualDecisionLens"),
     actionStatusFilters: Array.from(root.querySelectorAll("[data-action-status-filter]")),
     activeMoves: required("visualActiveMoves"),
@@ -1319,7 +1324,7 @@ function snapshotWithFullDeviceModules(snapshot, device) {
 function topologyGroups(modules) {
   const loadLocks = modules.filter((module) => isLoadLockName(module.name, module.type));
   const loadPorts = modules.filter((module) => isLoadPortName(module.name, module.type));
-  const processModules = modules.filter((module) => isProcessModule(module.name, module.type));
+  const processModules = modules.filter((module) => isProcessModule(module.name, module.type) || isHeaterModule(module.name, module.type));
   const assignedNames = new Set([...loadLocks, ...loadPorts, ...processModules].map((module) => module.name));
   return {
     processModules,
@@ -1357,11 +1362,17 @@ function renderWaferToken(wafer, origin, progress, processed = false) {
   const originLabel = origin || "\u6765\u6E90\u672A\u77E5";
   return `<span class="wafer-token wafer-${state2}" style="--wafer-progress:${normalizedProgress * 360}deg" title="\u6676\u5706 ${escapeHtml(wafer)}\uFF0C\u6765\u6E90 ${escapeHtml(originLabel)}\uFF0C${processed ? "\u5DF2\u52A0\u5DE5" : "\u672A\u52A0\u5DE5"}"><span><b class="wafer-origin-label">${escapeHtml(originLabel)}</b></span></span>`;
 }
-function moduleDoorSides(module, role, layout = "single", roleIndex = 0) {
+function moduleDoorSides(module, role, layout = "single", roleIndex = 0, attachmentId = "") {
   if (module.door === "doorless") return [];
   if (role === "lock") return [];
   if (role === "port") return ["top"];
   const name = module.name.trim().toUpperCase();
+  if (role === "process" && attachmentId) {
+    if (attachmentId.endsWith("@left")) return ["right"];
+    if (attachmentId.endsWith("@right")) return ["left"];
+    if (attachmentId.endsWith("@top")) return ["bottom"];
+    if (attachmentId.endsWith("@bottom")) return ["top"];
+  }
   if (layout === "cascade" && role === "process") {
     const cascadeDoorSides = [
       ["right"],
@@ -1373,10 +1384,21 @@ function moduleDoorSides(module, role, layout = "single", roleIndex = 0) {
     ];
     return cascadeDoorSides[roleIndex] ?? ["top"];
   }
+  if (layout === "dual" && role === "process") {
+    const dualDoorSides = [
+      ["right"],
+      ["right"],
+      ["bottom"],
+      ["bottom"],
+      ["left"],
+      ["left"]
+    ];
+    return dualDoorSides[roleIndex] ?? ["top"];
+  }
   if (role === "process") {
     const standardDoorSides = [
       ["right"],
-      ["right"],
+      ["left"],
       ["bottom"],
       ["bottom"],
       ["left"],
@@ -1389,79 +1411,121 @@ function moduleDoorSides(module, role, layout = "single", roleIndex = 0) {
   if (["CL", "COOLER"].includes(name)) return ["left"];
   return ["top"];
 }
-function renderLoadPortCassette(module) {
-  const slots = module.loadPortSlots.length ? module.loadPortSlots : module.wafers.map((wafer, index) => ({
+function visibleModuleSlots(module, kind) {
+  const recordedSlots = kind === "port" ? module.loadPortSlots : kind === "lock" ? module.loadLockSlots : [];
+  if (recordedSlots.length) return recordedSlots;
+  const slotCount = Math.max(kind === "lock" ? 2 : 1, module.slotCapacity, module.wafers.length);
+  return Array.from({ length: slotCount }, (_, index) => ({
     slot: index + 1,
-    wafer,
-    processed: module.processedWafers.includes(wafer)
+    wafer: module.wafers[index] ?? "",
+    processed: module.processedWafers.includes(module.wafers[index] ?? "")
   }));
+}
+function renderFrontSlotOverview(modules) {
+  const visibleModules = modules.filter((module) => !isTopologyHiddenModule(module));
+  const moduleNameOrder = (left, right) => {
+    const leftName = left.module.name.trim();
+    const rightName = right.module.name.trim();
+    const leftPort = /^LP(\d+)$/i.exec(leftName);
+    const rightPort = /^LP(\d+)$/i.exec(rightName);
+    if (leftPort && rightPort) return Number(leftPort[1]) - Number(rightPort[1]);
+    if (leftPort) return -1;
+    if (rightPort) return 1;
+    return leftName.localeCompare(rightName, void 0, { numeric: true });
+  };
+  const loadPorts = visibleModules.filter((module) => isLoadPortName(module.name, module.type)).map((module) => ({ module, kind: "port" })).sort(moduleNameOrder);
+  const coolers = visibleModules.filter((module) => isCoolerModule(module.name, module.type)).map((module) => ({ module, kind: "cooler" })).sort(moduleNameOrder);
+  const loadLocks = visibleModules.filter((module) => isLoadLockName(module.name, module.type)).map((module) => ({ module, kind: "lock" })).sort(moduleNameOrder);
+  const splitRows = (items, columns) => Array.from({ length: Math.ceil(items.length / columns) }, (_, index) => items.slice(index * columns, (index + 1) * columns));
+  const slotRows = [
+    ...splitRows(loadPorts, 2),
+    ...splitRows(coolers, 2),
+    ...splitRows(loadLocks, 2)
+  ].filter((row) => row.length);
+  const renderSlots = (slots, module) => slots.map((slot) => {
+    const state2 = !slot.wafer ? "empty" : slot.processed ? "processed" : "unprocessed";
+    const identity = `${module.name}.${slot.slot}`;
+    const detail = slot.wafer ? `${identity} \xB7 \u6676\u5706 ${slot.wafer}\uFF0C${slot.processed ? "\u5DF2\u52A0\u5DE5" : "\u672A\u52A0\u5DE5"}` : `${identity} \xB7 \u7A7A\u69FD`;
+    return `<span class="front-slot is-${state2}" tabindex="0" title="${escapeHtml(detail)}" aria-label="${escapeHtml(detail)}"></span>`;
+  }).join("");
+  if (!slotRows.length) return "";
+  const renderModule2 = ({ module, kind }) => {
+    const slots = visibleModuleSlots(module, kind);
+    return `<div class="front-module">
+      <strong title="${escapeHtml(module.name)}">${escapeHtml(module.name)}</strong>
+      <div class="front-slot-board" style="--front-slot-count:${slots.length}" role="group" aria-label="${escapeHtml(`${module.name} \u6B63\u89C6\u69FD\u4F4D`)}">${renderSlots(slots, module)}</div>
+    </div>`;
+  };
+  const content = slotRows.map((row) => `<div class="front-slot-row front-slot-row-${row[0].kind}" style="--front-row-module-count:${row.length}">${row.map(renderModule2).join("")}</div>`).join("");
+  return `<div class="topology-front-content" role="group" aria-label="\u8BBE\u5907\u6B63\u89C6\u69FD\u4F4D">${content}</div>`;
+}
+function renderLoadPortTopView(module, wafers, accessibleStatus, candidate) {
+  const slots = visibleModuleSlots(module, "port");
   const processed = slots.filter((slot) => slot.wafer && slot.processed).length;
   const unprocessed = slots.filter((slot) => slot.wafer && !slot.processed).length;
-  const slotMarkup = slots.map((slot) => {
-    const state2 = !slot.wafer ? "empty" : slot.processed ? "processed" : "unprocessed";
-    const label = slot.wafer ? `\u69FD\u4F4D ${slot.slot}\uFF0C\u6676\u5706 ${slot.wafer}\uFF0C${slot.processed ? "\u5DF2\u52A0\u5DE5" : "\u672A\u52A0\u5DE5"}` : `\u69FD\u4F4D ${slot.slot}\uFF0C\u7A7A`;
-    return `<span class="load-port-slot is-${state2}" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}"></span>`;
-  }).join("");
-  return `<div class="load-port-cassette" role="group" aria-label="${escapeHtml(`${module.name} \u6B63\u89C6\u6676\u5706\u76D2\uFF0C\u5171 ${slots.length} \u4E2A\u69FD\u4F4D\uFF0C\u672A\u52A0\u5DE5 ${unprocessed}\uFF0C\u5DF2\u52A0\u5DE5 ${processed}`)}">
-    <span class="load-port-cassette-handle" aria-hidden="true"></span>
-    <div class="load-port-slot-bank" style="--load-port-slot-count:${slots.length}">${slotMarkup}</div>
-  </div>`;
+  const candidateLabel = candidate ? `\uFF0C${candidate.count} \u4E2A\u53EF\u884C\u52A8\u4F5C` : "";
+  const isDummy = isDummyPortName(module.name) || module.type.trim().toLowerCase() === "dummyport";
+  return `<strong class="equipment-external-name equipment-external-name-port">${escapeHtml(module.name)}</strong>
+    <article class="equipment-card equipment-port-top-view status-${module.status} door-${module.door} ${isDummy ? "is-dummy-port" : ""} ${module.isRobotTarget ? "is-target" : ""} ${candidate ? "is-candidate-destination" : ""}" aria-label="${escapeHtml(`${accessibleStatus}\uFF0C\u4FEF\u89C6\u88C5\u8F7D\u53F0\uFF0C\u5171 ${slots.length} \u4E2A\u69FD\u4F4D\uFF0C\u672A\u52A0\u5DE5 ${unprocessed}\uFF0C\u5DF2\u52A0\u5DE5 ${processed}${candidateLabel}`)}">
+      <span class="port-top-gate" aria-hidden="true"></span>
+      <span class="port-top-cassette ${wafers ? "is-occupied" : "is-empty"}">${wafers || "<i></i>"}</span>
+    </article>`;
 }
-function renderModule(module, waferOrigins, role, candidate, layout = "single", roleIndex = 0) {
+function renderModule(module, waferOrigins, role, candidate, layout = "single", roleIndex = 0, attachmentId = "") {
   const waferProgress = module.status === "processing" ? module.progress : 0;
   const visibleWaferCount = role === "lock" ? 2 : 1;
   const processedWafers = new Set(module.processedWafers ?? []);
   const wafers = module.wafers.slice(0, visibleWaferCount).map((wafer) => renderWaferToken(wafer, waferOrigins[wafer] ?? "", waferProgress, processedWafers.has(wafer))).join("");
   const layerCount = role === "lock" && module.loadLockSlots.length ? module.loadLockSlots.filter((slot) => slot.wafer).length : module.wafers.length;
   const overflow = layerCount > visibleWaferCount ? `<span class="wafer-more">+ ${layerCount - visibleWaferCount}</span>` : "";
-  const doors = moduleDoorSides(module, role, layout, roleIndex).map((side) => `<i class="chamber-door chamber-door-${side}"></i>`).join("");
+  const doors = moduleDoorSides(module, role, layout, roleIndex, attachmentId).map((side) => `<i class="chamber-door chamber-door-${side}"></i>`).join("");
   const accessibleStatus = `${module.name}\uFF0C${STATUS_LABELS[module.status]}\uFF0C${DOOR_LABELS[module.door]}`;
   const candidateLabel = candidate ? `${candidate.count} \u4E2A\u53EF\u884C\u52A8\u4F5C\uFF0C\u6700\u9AD8\u6A21\u578B\u504F\u597D ${(candidate.preference * 100).toFixed(0)}%` : "";
+  if (role === "port") return renderLoadPortTopView(module, wafers, accessibleStatus, candidate);
   if (role === "auxiliary" && isAlignerModule(module.name, module.type)) {
     return `<strong class="equipment-external-name equipment-external-name-aligner">${escapeHtml(module.name)}</strong>
       <article class="equipment-utility equipment-aligner status-${module.status} ${module.isRobotTarget ? "is-target" : ""} ${candidate ? "is-candidate-destination" : ""} ${candidate?.selected ? "is-model-selected" : ""}" aria-label="${escapeHtml(`${accessibleStatus}${candidateLabel ? `\uFF0C${candidateLabel}` : ""}`)}">
         <div class="aligner-cross ${wafers ? "is-occupied" : "is-empty"}" aria-hidden="true"><i></i><i></i>${wafers}</div>
       </article>`;
   }
-  if (role === "auxiliary" && (isBufferModule(module.name, module.type) || isCoolerModule(module.name, module.type))) {
-    const utilityKind = isBufferModule(module.name, module.type) ? "buffer" : "cooler";
-    const coolerSlotCount = Math.max(2, Math.min(8, module.slotCapacity || module.wafers.length || 3));
-    const coolerSlots = Array.from({ length: coolerSlotCount }, (_, index) => {
-      const wafer = module.wafers[index] ?? "";
-      const processed = wafer && processedWafers.has(wafer);
-      const label = wafer ? `\u69FD\u4F4D ${index + 1}\uFF0C\u6676\u5706 ${wafer}\uFF0C${processed ? "\u5DF2\u52A0\u5DE5" : "\u672A\u52A0\u5DE5"}` : `\u69FD\u4F4D ${index + 1}\uFF0C\u7A7A`;
-      return `<span class="cooler-slot ${wafer ? `is-occupied wafer-${processed ? "processed" : "unprocessed"}` : "is-empty"}" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}"></span>`;
-    }).join("");
-    const utilityBody = utilityKind === "buffer" ? `<div class="buffer-tray ${wafers ? "is-occupied" : "is-empty"}" aria-hidden="true"><span></span><span></span><span></span>${wafers}</div>` : `<div class="cooler-slot-bank ${wafers ? "is-occupied" : "is-empty"}" role="group" aria-label="${escapeHtml(`${module.name} \u6B63\u89C6\u51B7\u5374\u69FD\uFF0C\u5171 ${coolerSlotCount} \u4E2A\u69FD\u4F4D`)}">${coolerSlots}</div>`;
-    return `<strong class="equipment-external-name equipment-external-name-${utilityKind}">${escapeHtml(module.name)}</strong>
-      <article class="equipment-utility equipment-${utilityKind} status-${module.status} ${module.isRobotTarget ? "is-target" : ""} ${candidate ? "is-candidate-destination" : ""} ${candidate?.selected ? "is-model-selected" : ""}" aria-label="${escapeHtml(`${accessibleStatus}${candidateLabel ? `\uFF0C${candidateLabel}` : ""}`)}">
-        ${utilityBody}
+  if (role === "auxiliary" && isCoolerModule(module.name, module.type)) {
+    const coolerSlots = visibleModuleSlots(module, "cooler");
+    const visibleSlot = coolerSlots.find((slot) => slot.wafer) ?? coolerSlots[0];
+    const state2 = !visibleSlot?.wafer ? "empty" : visibleSlot.processed ? "processed" : "unprocessed";
+    const label = visibleSlot?.wafer ? `${module.name}.${visibleSlot.slot}\uFF0C\u6676\u5706 ${visibleSlot.wafer}\uFF0C${visibleSlot.processed ? "\u5DF2\u52A0\u5DE5" : "\u672A\u52A0\u5DE5"}` : `${module.name}.${visibleSlot?.slot ?? 1}\uFF0C\u7A7A\u69FD`;
+    const visibleWafer = visibleSlot?.wafer ? renderWaferToken(
+      visibleSlot.wafer,
+      waferOrigins[visibleSlot.wafer] ?? "",
+      waferProgress,
+      visibleSlot.processed
+    ) : "";
+    return `<strong class="equipment-external-name equipment-external-name-cooler">${escapeHtml(module.name)}</strong>
+      <article class="equipment-utility equipment-cooler-top-view status-${module.status} ${module.isRobotTarget ? "is-target" : ""} ${candidate ? "is-candidate-destination" : ""} ${candidate?.selected ? "is-model-selected" : ""}" aria-label="${escapeHtml(`${accessibleStatus}\uFF0C\u4FEF\u89C6\u51B7\u5374\u76D8${candidateLabel ? `\uFF0C${candidateLabel}` : ""}`)}">
+        <div class="cooler-top-plate" role="group" aria-label="${escapeHtml(`${module.name} \u4FEF\u89C6\u51B7\u5374\u76D8`)}"><span class="cooler-top-pocket is-${state2}" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}">${visibleWafer}</span></div>
       </article>`;
   }
   const atmosphereLevel = role === "lock" ? module.loadLockPhase === "pumping" ? 100 - module.progress * 100 : module.loadLockPhase === "venting" ? module.progress * 100 : /大气|ATM|ATR/i.test(module.environment) ? 100 : 0 : 0;
-  const loadLockLayers = role === "lock" ? `<div class="loadlock-layers" aria-hidden="true">${[0, 1].map((index) => {
-    const layer = module.loadLockSlots[index];
-    const wafer = layer ? layer.wafer : module.wafers[index];
-    const processed = layer ? layer.processed : wafer ? processedWafers.has(wafer) : false;
-    const waferState = processed ? "processed" : "unprocessed";
-    return `<div class="loadlock-layer ${wafer ? "is-occupied" : "is-empty"}">${wafer ? `<span class="loadlock-wafer-line wafer-${waferState}" title="\u6676\u5706 ${escapeHtml(wafer)}\uFF08${processed ? "\u5DF2\u52A0\u5DE5" : "\u672A\u52A0\u5DE5"}\uFF09"></span>` : ""}</div>`;
-  }).join("")}${overflow}</div>` : role === "process" ? `<div class="process-wafer-slot ${wafers ? "is-occupied" : "is-empty"}">${wafers}</div>` : role === "port" ? `` : role === "auxiliary" ? `<div class="auxiliary-wafer-slot ${wafers ? "is-occupied" : "is-empty"}">${wafers}</div>` : `<div class="wafer-stack">${wafers}${overflow}</div>`;
+  const loadLockLayers = role === "lock" ? (() => {
+    const slots = visibleModuleSlots(module, "lock");
+    const visibleSlot = slots.find((slot) => slot.wafer) ?? slots[0];
+    const state2 = !visibleSlot?.wafer ? "empty" : visibleSlot.processed ? "processed" : "unprocessed";
+    const label = visibleSlot?.wafer ? `${module.name}.${visibleSlot.slot}\uFF0C\u6676\u5706 ${visibleSlot.wafer}\uFF0C${visibleSlot.processed ? "\u5DF2\u52A0\u5DE5" : "\u672A\u52A0\u5DE5"}` : `${module.name}.${visibleSlot?.slot ?? 1}\uFF0C\u7A7A\u69FD`;
+    const visibleWafer = visibleSlot?.wafer ? renderWaferToken(
+      visibleSlot.wafer,
+      waferOrigins[visibleSlot.wafer] ?? "",
+      waferProgress,
+      visibleSlot.processed
+    ) : "";
+    return `<div class="loadlock-top-chamber" role="group" aria-label="${escapeHtml(`${module.name} \u4FEF\u89C6 LoadLock`)}"><span class="loadlock-top-seat is-${state2}" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}">${visibleWafer}</span></div>`;
+  })() : role === "process" ? `<div class="process-wafer-slot ${wafers ? "is-occupied" : "is-empty"}">${wafers}</div>` : role === "auxiliary" ? `<div class="auxiliary-wafer-slot ${wafers ? "is-occupied" : "is-empty"}">${wafers}</div>` : `<div class="wafer-stack">${wafers}${overflow}</div>`;
   const bodyMarkup = role === "process" ? `<div class="equipment-process-shell"><div class="equipment-body">${loadLockLayers}</div></div>` : `<div class="equipment-body">${loadLockLayers}</div>`;
   const article = `
     <article class="equipment-card equipment-${role} status-${module.status} door-${module.door} ${module.loadLockPhase ? `loadlock-${module.loadLockPhase}` : ""} ${module.isRobotTarget ? "is-target" : ""} ${candidate ? "is-candidate-destination" : ""} ${candidate?.selected ? "is-model-selected" : ""}" style="--module-progress:${Math.round(module.progress * 100)}%;--loadlock-atmosphere:${Math.max(0, Math.min(100, atmosphereLevel)).toFixed(1)}%;--loadlock-atmosphere-ratio:${Math.max(0, Math.min(1, atmosphereLevel / 100)).toFixed(3)}" aria-label="${escapeHtml(`${accessibleStatus}${candidateLabel ? `\uFF0C${candidateLabel}` : ""}`)}">
        ${bodyMarkup}
-      <div class="chamber-doors" aria-hidden="true">${role === "lock" ? '<i class="loadlock-door loadlock-door-vacuum"></i><i class="loadlock-door loadlock-door-atmosphere"></i>' : doors}</div>
+      <div class="chamber-doors" aria-hidden="true">${role === "lock" ? '<i class="loadlock-top-gate loadlock-top-gate-vacuum"></i><i class="loadlock-top-gate loadlock-top-gate-atmosphere"></i>' : doors}</div>
     </article>`;
   if (role === "process" || role === "auxiliary" || role === "lock") {
     return `<strong class="equipment-external-name">${escapeHtml(module.name)}</strong>${article}`;
-  }
-  if (role === "port") {
-    const isDummy = isDummyPortName(module.name) || module.type.trim().toLowerCase() === "dummyport";
-    const portDoors = moduleDoorSides(module, role, layout, roleIndex).map((side) => `<i class="chamber-door chamber-door-${side}"></i>`).join("");
-    return `<strong class="equipment-external-name ${isDummy ? "equipment-external-name-dummy" : "equipment-external-name-port"}">${escapeHtml(module.name)}</strong><div class="load-port-assembly ${isDummy ? "is-dummy-port" : "is-load-port"} door-${module.door}" role="group" aria-label="${escapeHtml(`${accessibleStatus}${isDummy ? "\uFF0CDummy Port" : ""}${candidateLabel ? `\uFF0C${candidateLabel}` : ""}`)}">
-      <div class="chamber-doors" aria-hidden="true">${portDoors}</div>
-      ${renderLoadPortCassette(module)}
-    </div>`;
   }
   return article;
 }
@@ -1492,36 +1556,182 @@ var TOPOLOGY_COLUMN_PERCENTAGES = [26, 42, 58, 74];
 var TOPOLOGY_ROW_TOP_PIXELS = [52, 154, 256, 358, 460, 562, 664, 786, 929, 1031, 1133];
 var TOPOLOGY_VIEWBOX_WIDTH = 1e3;
 var TOPOLOGY_ITEM_SIZE = 96;
-var TOPOLOGY_PROCESS_WIDTH = 104;
-var TOPOLOGY_PROCESS_HEIGHT = 104;
+var TOPOLOGY_PROCESS_WIDTH = 82;
+var TOPOLOGY_PROCESS_HEIGHT = 82;
 var TOPOLOGY_ROBOT_SIZE = 132;
-var TOPOLOGY_LOADLOCK_WIDTH = 120;
-var TOPOLOGY_LOADLOCK_HEIGHT = 72;
-var TOPOLOGY_LOADPORT_WIDTH = 112;
-var TOPOLOGY_LOADPORT_HEIGHT = 104;
-var TOPOLOGY_LOADPORT_BASE_HEIGHT = 22;
-var TOPOLOGY_LOADPORT_BASE_OVERHANG = 16;
+var TOPOLOGY_LOADLOCK_WIDTH = 82;
+var TOPOLOGY_LOADLOCK_HEIGHT = 82;
+var TOPOLOGY_LOADLOCK_BRIDGE_GAP = 2;
+var TOPOLOGY_CASCADE_FRAME_WIDTH = 240;
+var TOPOLOGY_CASCADE_VTR1_HEIGHT = 128;
+var TOPOLOGY_TIGHT_LOADLOCK_ATTACHMENT_OFFSET = (TOPOLOGY_LOADLOCK_WIDTH + 1) / TOPOLOGY_CASCADE_FRAME_WIDTH;
+var TOPOLOGY_LOADPORT_WIDTH = 82;
+var TOPOLOGY_LOADPORT_HEIGHT = 82;
+var TOPOLOGY_ATMOSPHERE_INTERIOR_INSET = 14;
 var TOPOLOGY_BUFFER_WIDTH = 104;
 var TOPOLOGY_BUFFER_HEIGHT = 56;
 var TOPOLOGY_COOLER_WIDTH = 76;
-var TOPOLOGY_COOLER_HEIGHT = 56;
+var TOPOLOGY_COOLER_HEIGHT = 72;
 var TOPOLOGY_ALIGNER_WIDTH = 76;
 var TOPOLOGY_ALIGNER_HEIGHT = 54;
 var TOPOLOGY_LOADLOCK_ROW_TOP_PIXELS = [664, 740];
 var TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS = 866;
 var TOPOLOGY_LOADPORT_ROW_TOP_PIXELS = 1006;
 var TOPOLOGY_CANVAS_PADDING = 28;
-var TOPOLOGY_SINGLE_PROCESS_MIDDLE_TOP = TOPOLOGY_ROW_TOP_PIXELS[4] - 32;
-var TOPOLOGY_SINGLE_PROCESS_LOWER_TOP = TOPOLOGY_ROW_TOP_PIXELS[5] - 10;
-var TOPOLOGY_CASCADE_PM_TOP = 60;
-var TOPOLOGY_CASCADE_UPPER_ROBOT_TOP = 190;
-var TOPOLOGY_CASCADE_BRIDGE_TOP = 310;
-var TOPOLOGY_CASCADE_LOWER_ROBOT_TOP = 430;
-var TOPOLOGY_CASCADE_LOCK_ROW_TOP = 548;
+var TOPOLOGY_MACHINE_FRAMES = {
+  single: [{
+    id: "vacuum-main",
+    label: "VTR VACUUM FRAME",
+    centerLeftPercent: 50,
+    centerTopPixels: 270,
+    widthPixels: 240,
+    heightPixels: 240,
+    shape: "square"
+  }],
+  dual: [{
+    id: "vacuum-main",
+    label: "",
+    centerLeftPercent: 50,
+    centerTopPixels: 270,
+    widthPixels: 240,
+    heightPixels: 240,
+    shape: "square"
+  }],
+  cascade: [
+    {
+      id: "vacuum-vtr-2",
+      label: "",
+      centerLeftPercent: 50,
+      centerTopPixels: 230,
+      widthPixels: TOPOLOGY_CASCADE_FRAME_WIDTH,
+      heightPixels: TOPOLOGY_CASCADE_FRAME_WIDTH,
+      shape: "square"
+    },
+    {
+      id: "vacuum-vtr-1",
+      label: "",
+      centerLeftPercent: 50,
+      /* 上移 8px，使 UBR/DBR 同时贴合 VTR_2 底边与 VTR_1 顶边。 */
+      centerTopPixels: 496,
+      widthPixels: TOPOLOGY_CASCADE_FRAME_WIDTH,
+      heightPixels: TOPOLOGY_CASCADE_VTR1_HEIGHT,
+      shape: "flat"
+    }
+  ]
+};
+var TOPOLOGY_ATMOSPHERE_FRAMES = {
+  single: {
+    id: "atmosphere-main",
+    /* 大气框架仅表达附着边界，不在框内重复显示区域名称。 */
+    label: "",
+    centerLeftPercent: 50,
+    /* LoadLock 作为真空与大气框架之间的桥接腔。 */
+    centerTopPixels: 547,
+    widthPixels: 425,
+    heightPixels: 150,
+    shape: "atmosphere"
+  },
+  dual: {
+    id: "atmosphere-main",
+    label: "",
+    centerLeftPercent: 50,
+    centerTopPixels: 547,
+    widthPixels: 425,
+    heightPixels: 150,
+    shape: "atmosphere"
+  },
+  cascade: {
+    id: "atmosphere-main",
+    label: "",
+    centerLeftPercent: 50,
+    centerTopPixels: 717,
+    widthPixels: 425,
+    heightPixels: 150,
+    shape: "atmosphere"
+  }
+};
+var TOPOLOGY_CASCADE_LOCK_ROW_TOP = 597;
 var TOPOLOGY_CASCADE_LOCK_ROW_GAP = 80;
-var TOPOLOGY_CASCADE_ATM_TOP = 742;
+var TOPOLOGY_CASCADE_ATM_TOP = 720;
 var TOPOLOGY_ATMOSPHERE_LOADPORT_OFFSET = 140;
 var TOPOLOGY_CASCADE_LOADPORT_TOP = TOPOLOGY_CASCADE_ATM_TOP + TOPOLOGY_ATMOSPHERE_LOADPORT_OFFSET;
+function topologyMachineFrame(layout, index = 0) {
+  return TOPOLOGY_MACHINE_FRAMES[layout][index] ?? TOPOLOGY_MACHINE_FRAMES[layout][0];
+}
+function topologyAtmosphereFrame(layout) {
+  return TOPOLOGY_ATMOSPHERE_FRAMES[layout];
+}
+function topologyFrameAttachment(frame, attachmentId, side, offset, widthPixels, heightPixels) {
+  const halfWidthPercent = widthPixels / TOPOLOGY_VIEWBOX_WIDTH * 50;
+  const frameWidthPercent = frame.widthPixels / TOPOLOGY_VIEWBOX_WIDTH * 100;
+  if (side === "center") {
+    return {
+      leftPercent: frame.centerLeftPercent,
+      topPixels: frame.centerTopPixels,
+      widthPixels,
+      heightPixels,
+      attachmentId,
+      fixedLeftOffsetPixels: 0
+    };
+  }
+  const horizontalOffset = offset * frameWidthPercent / 2;
+  const verticalOffset = offset * frame.heightPixels / 2;
+  return {
+    leftPercent: side === "left" ? frame.centerLeftPercent - frameWidthPercent / 2 - halfWidthPercent : side === "right" ? frame.centerLeftPercent + frameWidthPercent / 2 + halfWidthPercent : frame.centerLeftPercent + horizontalOffset,
+    topPixels: Math.round(side === "top" ? frame.centerTopPixels - frame.heightPixels / 2 - heightPixels / 2 : side === "bottom" ? frame.centerTopPixels + frame.heightPixels / 2 + heightPixels / 2 : frame.centerTopPixels + verticalOffset),
+    widthPixels,
+    heightPixels,
+    attachmentId,
+    fixedLeftOffsetPixels: side === "left" ? -frame.widthPixels / 2 - widthPixels / 2 : side === "right" ? frame.widthPixels / 2 + widthPixels / 2 : horizontalOffset / 100 * TOPOLOGY_VIEWBOX_WIDTH
+  };
+}
+function topologyVacuumAtmosphereLoadLockBridge(layout, lockIndex, atmosphereOffset) {
+  const vacuumFrame = layout === "cascade" ? topologyMachineFrame("cascade", 1) : topologyMachineFrame(layout);
+  const atmosphereFrame = topologyAtmosphereFrame(layout);
+  const vacuumOffset = atmosphereOffset * atmosphereFrame.widthPixels / vacuumFrame.widthPixels;
+  const vacuumAttachment = topologyFrameAttachment(
+    vacuumFrame,
+    `${vacuumFrame.id}-loadlock-${lockIndex + 1}@bottom`,
+    "bottom",
+    vacuumOffset,
+    TOPOLOGY_LOADLOCK_WIDTH,
+    TOPOLOGY_LOADLOCK_HEIGHT
+  );
+  const atmosphereAttachment = topologyFrameAttachment(
+    atmosphereFrame,
+    `${atmosphereFrame.id}-loadlock-${lockIndex + 1}@top`,
+    "top",
+    atmosphereOffset,
+    TOPOLOGY_LOADLOCK_WIDTH,
+    TOPOLOGY_LOADLOCK_HEIGHT
+  );
+  return {
+    ...vacuumAttachment,
+    /* 两端框架的中心距由常量固定；保留大气锚点的纵坐标以表达两侧同时相切。 */
+    topPixels: atmosphereAttachment.topPixels,
+    attachmentId: `${vacuumAttachment.attachmentId}|${atmosphereAttachment.attachmentId}`
+  };
+}
+function topologyTightLoadLockOffsets(count, frameWidthPixels) {
+  if (count <= 1) return [0];
+  const centerSpacing = TOPOLOGY_LOADLOCK_WIDTH + TOPOLOGY_LOADLOCK_BRIDGE_GAP;
+  const offsetStep = centerSpacing / (frameWidthPixels / 2);
+  return Array.from(
+    { length: count },
+    (_, index) => (index - (count - 1) / 2) * offsetStep
+  );
+}
+function topologyFrameInteriorCorner(frame, attachmentId, horizontal, widthPixels, heightPixels) {
+  const horizontalOffset = frame.widthPixels / 2 - TOPOLOGY_ATMOSPHERE_INTERIOR_INSET - widthPixels / 2;
+  return {
+    leftPercent: frame.centerLeftPercent + (horizontal === "left" ? -horizontalOffset : horizontalOffset) / TOPOLOGY_VIEWBOX_WIDTH * 100,
+    topPixels: frame.centerTopPixels - frame.heightPixels / 2 + TOPOLOGY_ATMOSPHERE_INTERIOR_INSET + heightPixels / 2,
+    widthPixels,
+    heightPixels,
+    attachmentId,
+    fixedLeftOffsetPixels: horizontal === "left" ? -horizontalOffset : horizontalOffset
+  };
+}
 function distributedTopologyColumns(count) {
   if (count <= 1) return [50];
   if (count === 2) return [40, 60];
@@ -1571,15 +1781,16 @@ function moduleTopologyPosition(module, role, index, roleModules, layout, bridge
   const column = TOPOLOGY_COLUMN_PERCENTAGES;
   const row = TOPOLOGY_ROW_TOP_PIXELS;
   if (layout === "cascade" && role === "process") {
-    const ordered = [...roleModules].sort((left, right) => naturalCompare(left.name, right.name));
+    const ordered = [...roleModules].filter((item) => !isHeaterModule(item.name, item.type)).sort((left, right) => naturalCompare(left.name, right.name));
     const layoutIndex = Math.max(0, ordered.findIndex((item) => item.name === module.name));
+    const upperFrame = topologyMachineFrame("cascade", 0);
+    const lowerFrame = topologyMachineFrame("cascade", 1);
     const positions = [
-      { leftPercent: column[0], topPixels: TOPOLOGY_CASCADE_LOWER_ROBOT_TOP },
-      { leftPercent: column[3], topPixels: TOPOLOGY_CASCADE_LOWER_ROBOT_TOP },
-      { leftPercent: 50, topPixels: TOPOLOGY_CASCADE_PM_TOP },
-      { leftPercent: column[0], topPixels: TOPOLOGY_CASCADE_UPPER_ROBOT_TOP },
-      { leftPercent: column[3], topPixels: TOPOLOGY_CASCADE_UPPER_ROBOT_TOP },
-      { leftPercent: column[3], topPixels: TOPOLOGY_CASCADE_PM_TOP }
+      topologyFrameAttachment(lowerFrame, "vtr-1-process-left@left", "left", 0, TOPOLOGY_PROCESS_WIDTH, TOPOLOGY_PROCESS_HEIGHT),
+      topologyFrameAttachment(lowerFrame, "vtr-1-process-right@right", "right", 0, TOPOLOGY_PROCESS_WIDTH, TOPOLOGY_PROCESS_HEIGHT),
+      topologyFrameAttachment(upperFrame, "vtr-2-process-left-lower@left", "left", 0.55, TOPOLOGY_PROCESS_WIDTH, TOPOLOGY_PROCESS_HEIGHT),
+      topologyFrameAttachment(upperFrame, "vtr-2-process-top-left@top", "top", -0.45, TOPOLOGY_PROCESS_WIDTH, TOPOLOGY_PROCESS_HEIGHT),
+      topologyFrameAttachment(upperFrame, "vtr-2-process-right-upper@right", "right", -0.45, TOPOLOGY_PROCESS_WIDTH, TOPOLOGY_PROCESS_HEIGHT)
     ];
     const position = positions[layoutIndex] ?? {
       leftPercent: distributedTopologyColumns(roleCount)[layoutIndex] ?? 50,
@@ -1587,16 +1798,51 @@ function moduleTopologyPosition(module, role, index, roleModules, layout, bridge
     };
     return { ...position, widthPixels: TOPOLOGY_PROCESS_WIDTH, heightPixels: TOPOLOGY_PROCESS_HEIGHT };
   }
+  if (layout === "dual" && role === "process") {
+    const dualBaseName = module.name.replace(/-\d+$/, "");
+    const dualSlotIndex = Math.max(0, Number(/-(\d+)$/.exec(module.name)?.[1] ?? "1") - 1);
+    const dualBaseNames = [...new Set(roleModules.map((item) => item.name.replace(/-\d+$/, "")))].sort(naturalCompare);
+    const dualBaseIndex = Math.max(0, dualBaseNames.indexOf(dualBaseName));
+    const frame = topologyMachineFrame("dual");
+    const dualLayout = [
+      [
+        topologyFrameAttachment(frame, "dual-pm1-upper@left", "left", -0.38, TOPOLOGY_PROCESS_WIDTH, TOPOLOGY_PROCESS_HEIGHT),
+        topologyFrameAttachment(frame, "dual-pm1-lower@left", "left", 0.38, TOPOLOGY_PROCESS_WIDTH, TOPOLOGY_PROCESS_HEIGHT)
+      ],
+      [
+        topologyFrameAttachment(frame, "dual-pm2-left@top", "top", -0.5, TOPOLOGY_PROCESS_WIDTH, TOPOLOGY_PROCESS_HEIGHT),
+        topologyFrameAttachment(frame, "dual-pm2-right@top", "top", 0.5, TOPOLOGY_PROCESS_WIDTH, TOPOLOGY_PROCESS_HEIGHT)
+      ],
+      [
+        topologyFrameAttachment(frame, "dual-pm3-upper@right", "right", -0.38, TOPOLOGY_PROCESS_WIDTH, TOPOLOGY_PROCESS_HEIGHT),
+        topologyFrameAttachment(frame, "dual-pm3-lower@right", "right", 0.38, TOPOLOGY_PROCESS_WIDTH, TOPOLOGY_PROCESS_HEIGHT)
+      ]
+    ];
+    const position = dualLayout[dualBaseIndex]?.[dualSlotIndex] ?? {
+      leftPercent: distributedTopologyColumns(roleCount)[dualBaseIndex] ?? 50,
+      topPixels: TOPOLOGY_ROW_TOP_PIXELS[3]
+    };
+    return { ...position, widthPixels: TOPOLOGY_PROCESS_WIDTH, heightPixels: TOPOLOGY_PROCESS_HEIGHT };
+  }
   if (role === "process") {
-    const ordered = [...roleModules].sort((left, right) => naturalCompare(left.name, right.name));
+    const frame = topologyMachineFrame("single");
+    if (isHeaterModule(module.name, module.type)) {
+      return topologyFrameAttachment(
+        frame,
+        "single-heater-top-left@top",
+        "top",
+        -0.5,
+        TOPOLOGY_PROCESS_WIDTH,
+        TOPOLOGY_PROCESS_HEIGHT
+      );
+    }
+    const ordered = [...roleModules].filter((item) => !isHeaterModule(item.name, item.type)).sort((left, right) => naturalCompare(left.name, right.name));
     const layoutIndex = Math.max(0, ordered.findIndex((item) => item.name === module.name));
     const positions = [
-      { leftPercent: column[0], topPixels: TOPOLOGY_SINGLE_PROCESS_LOWER_TOP },
-      { leftPercent: column[0], topPixels: TOPOLOGY_SINGLE_PROCESS_MIDDLE_TOP },
-      { leftPercent: column[1], topPixels: TOPOLOGY_SINGLE_PROCESS_MIDDLE_TOP - TOPOLOGY_PROCESS_HEIGHT },
-      { leftPercent: column[2], topPixels: TOPOLOGY_SINGLE_PROCESS_MIDDLE_TOP - TOPOLOGY_PROCESS_HEIGHT },
-      { leftPercent: column[3], topPixels: TOPOLOGY_SINGLE_PROCESS_MIDDLE_TOP },
-      { leftPercent: column[3], topPixels: TOPOLOGY_SINGLE_PROCESS_LOWER_TOP }
+      topologyFrameAttachment(frame, "single-process-left-upper@left", "left", -0.32, TOPOLOGY_PROCESS_WIDTH, TOPOLOGY_PROCESS_HEIGHT),
+      topologyFrameAttachment(frame, "single-process-left-lower@left", "left", 0.48, TOPOLOGY_PROCESS_WIDTH, TOPOLOGY_PROCESS_HEIGHT),
+      topologyFrameAttachment(frame, "single-process-right-upper@right", "right", -0.32, TOPOLOGY_PROCESS_WIDTH, TOPOLOGY_PROCESS_HEIGHT),
+      topologyFrameAttachment(frame, "single-process-right-lower@right", "right", 0.48, TOPOLOGY_PROCESS_WIDTH, TOPOLOGY_PROCESS_HEIGHT)
     ];
     const position = positions[layoutIndex] ?? {
       leftPercent: distributedTopologyColumns(roleCount)[layoutIndex] ?? 50,
@@ -1605,17 +1851,21 @@ function moduleTopologyPosition(module, role, index, roleModules, layout, bridge
     return { ...position, widthPixels: TOPOLOGY_PROCESS_WIDTH, heightPixels: TOPOLOGY_PROCESS_HEIGHT };
   }
   if (layout === "cascade" && role === "lock" && bridgeLoadLockNames.has(module.name)) {
-    const bridgeIndex = [...bridgeLoadLockNames].indexOf(module.name);
-    return {
-      leftPercent: bridgeIndex % 2 === 0 ? column[1] : column[2],
-      topPixels: TOPOLOGY_CASCADE_BRIDGE_TOP,
-      widthPixels: TOPOLOGY_LOADLOCK_WIDTH,
-      heightPixels: TOPOLOGY_LOADLOCK_HEIGHT
-    };
+    const orderedBridges = [...bridgeLoadLockNames];
+    const bridgeIndex = Math.max(0, orderedBridges.indexOf(module.name));
+    return topologyFrameAttachment(
+      topologyMachineFrame("cascade", 0),
+      bridgeIndex % 2 === 0 ? "cascade-bridge-left" : "cascade-bridge-right",
+      "bottom",
+      bridgeIndex % 2 === 0 ? -TOPOLOGY_TIGHT_LOADLOCK_ATTACHMENT_OFFSET : TOPOLOGY_TIGHT_LOADLOCK_ATTACHMENT_OFFSET,
+      TOPOLOGY_LOADLOCK_WIDTH,
+      TOPOLOGY_LOADLOCK_HEIGHT
+    );
   }
   if (role === "lock") {
-    const canonicalOrder = { LA: 0, LB: 1, LC: 2, LD: 3 };
-    const orderedLoadLocks = [...roleModules].sort((left, right) => {
+    const canonicalOrder = layout === "dual" ? { LC: 0, LA: 1, LB: 2, LD: 3 } : { LA: 0, LB: 1, LC: 2, LD: 3 };
+    const atmosphereLoadLocks = layout === "cascade" ? roleModules.filter((item) => !bridgeLoadLockNames.has(item.name)) : roleModules;
+    const orderedLoadLocks = [...atmosphereLoadLocks].sort((left, right) => {
       const leftName = left.name.trim().toUpperCase();
       const rightName = right.name.trim().toUpperCase();
       const leftRank = canonicalOrder[leftName] ?? 100;
@@ -1623,6 +1873,18 @@ function moduleTopologyPosition(module, role, index, roleModules, layout, bridge
       return leftRank - rightRank || naturalCompare(left.name, right.name);
     });
     const gridIndex = Math.max(0, orderedLoadLocks.findIndex((item) => item.name === module.name));
+    if ((layout === "single" || layout === "dual" || layout === "cascade") && gridIndex < 4) {
+      const atmosphereLockCount = orderedLoadLocks.length;
+      const offsets = topologyTightLoadLockOffsets(
+        atmosphereLockCount,
+        topologyAtmosphereFrame(layout).widthPixels
+      );
+      return topologyVacuumAtmosphereLoadLockBridge(
+        layout,
+        gridIndex,
+        offsets[gridIndex] ?? 0
+      );
+    }
     const loadLockRowTop = layout === "cascade" ? TOPOLOGY_CASCADE_LOCK_ROW_TOP : TOPOLOGY_LOADLOCK_ROW_TOP_PIXELS[0];
     const loadLockRowGap = layout === "cascade" ? TOPOLOGY_CASCADE_LOCK_ROW_GAP : TOPOLOGY_LOADLOCK_ROW_TOP_PIXELS[1] - TOPOLOGY_LOADLOCK_ROW_TOP_PIXELS[0];
     return {
@@ -1643,36 +1905,43 @@ function moduleTopologyPosition(module, role, index, roleModules, layout, bridge
       return leftRank - rightRank || naturalCompare(left.name, right.name);
     });
     const portIndex = Math.max(0, orderedPorts.findIndex((item) => item.name === module.name));
-    const currentIsDummy = isDummyPortName(module.name) || module.type.trim().toLowerCase() === "dummyport";
+    if (portIndex < 4) {
+      const offsets = orderedPorts.length <= 1 ? [0] : orderedPorts.length === 2 ? [-0.3, 0.3] : orderedPorts.length === 3 ? [-0.6, 0, 0.6] : [-0.7, -0.233, 0.233, 0.7];
+      return topologyFrameAttachment(
+        topologyAtmosphereFrame(layout),
+        `atmosphere-port-${portIndex + 1}@bottom`,
+        "bottom",
+        offsets[portIndex] ?? 0,
+        TOPOLOGY_LOADPORT_WIDTH,
+        TOPOLOGY_LOADPORT_HEIGHT
+      );
+    }
     const portColumns = roleCount === 5 ? [26, 38, 50, 62, 74] : roleCount <= column.length ? column : Array.from({ length: roleCount }, (_, current) => 20 + current * 60 / (roleCount - 1));
     const loadPortTop = layout === "cascade" ? TOPOLOGY_CASCADE_LOADPORT_TOP : TOPOLOGY_LOADPORT_ROW_TOP_PIXELS;
     return {
-      /* 四列语义固定为 LP1 / LP2 / LP3 / Dummy Port；缺少 LP3 时保留空位。 */
-      leftPercent: currentIsDummy && roleCount <= column.length ? column[3] : portColumns[portIndex] ?? column[0],
+      leftPercent: portColumns[portIndex] ?? column[0],
       topPixels: loadPortTop,
       widthPixels: TOPOLOGY_LOADPORT_WIDTH,
       heightPixels: TOPOLOGY_LOADPORT_HEIGHT
     };
   }
   if (isAlignerModule(module.name, module.type)) {
-    return {
-      leftPercent: 10,
-      topPixels: layout === "cascade" ? TOPOLOGY_CASCADE_ATM_TOP : TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS,
-      widthPixels: TOPOLOGY_ALIGNER_WIDTH,
-      heightPixels: TOPOLOGY_ALIGNER_HEIGHT
-    };
+    return topologyFrameInteriorCorner(
+      topologyAtmosphereFrame(layout),
+      "atmosphere-aligner-top-left@inside",
+      "left",
+      TOPOLOGY_ALIGNER_WIDTH,
+      TOPOLOGY_ALIGNER_HEIGHT
+    );
   }
   if (role === "auxiliary" && isCoolerModule(module.name, module.type)) {
-    const atmosphereTop = layout === "cascade" ? TOPOLOGY_CASCADE_ATM_TOP : TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS;
-    const leftUtilities = roleModules.filter((item) => isCoolerModule(item.name, item.type)).sort((left, right) => naturalCompare(left.name, right.name));
-    const coolerIndex = Math.max(0, leftUtilities.findIndex((item) => item.name === module.name));
-    const hasAligner = roleModules.some((item) => isAlignerModule(item.name, item.type));
-    return {
-      leftPercent: 10,
-      topPixels: atmosphereTop + (hasAligner ? 80 : 0) + coolerIndex * 80,
-      widthPixels: TOPOLOGY_COOLER_WIDTH,
-      heightPixels: TOPOLOGY_COOLER_HEIGHT
-    };
+    return topologyFrameInteriorCorner(
+      topologyAtmosphereFrame(layout),
+      "atmosphere-cooler-top-right@inside",
+      "right",
+      TOPOLOGY_COOLER_WIDTH,
+      TOPOLOGY_COOLER_HEIGHT
+    );
   }
   if (role === "auxiliary" && isBufferModule(module.name, module.type)) {
     const atmosphereTop = layout === "cascade" ? TOPOLOGY_CASCADE_ATM_TOP : TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS;
@@ -1706,44 +1975,53 @@ function moduleTopologyPosition(module, role, index, roleModules, layout, bridge
 }
 function robotTopologyPosition(robotIndex, robotCount, environment, layout) {
   if (environment === "atmosphere") {
-    const atmosphereTop = layout === "cascade" ? TOPOLOGY_CASCADE_ATM_TOP : TOPOLOGY_ATMOSPHERE_ROW_TOP_PIXELS;
+    const atmosphereFrame = topologyAtmosphereFrame(layout);
     if (robotCount > 1) {
       return {
         leftPercent: distributedTopologyColumns(robotCount)[robotIndex] ?? 50,
-        topPixels: atmosphereTop,
+        topPixels: atmosphereFrame.centerTopPixels,
         widthPixels: TOPOLOGY_ROBOT_SIZE,
         heightPixels: TOPOLOGY_ROBOT_SIZE
       };
     }
-    return {
-      leftPercent: 50,
-      topPixels: atmosphereTop,
-      widthPixels: TOPOLOGY_ROBOT_SIZE,
-      heightPixels: TOPOLOGY_ROBOT_SIZE
-    };
+    return topologyFrameAttachment(
+      atmosphereFrame,
+      "atr-center",
+      "center",
+      0,
+      TOPOLOGY_ROBOT_SIZE,
+      TOPOLOGY_ROBOT_SIZE
+    );
   }
   if (layout === "cascade") {
-    const upperCount = Math.max(1, robotCount - 1);
-    return {
-      leftPercent: robotIndex === 0 ? 50 : distributedTopologyColumns(upperCount)[robotIndex - 1] ?? 50,
-      topPixels: robotIndex === 0 ? TOPOLOGY_CASCADE_LOWER_ROBOT_TOP : TOPOLOGY_CASCADE_UPPER_ROBOT_TOP,
-      widthPixels: TOPOLOGY_ROBOT_SIZE,
-      heightPixels: TOPOLOGY_ROBOT_SIZE
-    };
+    const frame = topologyMachineFrame("cascade", robotIndex === 0 ? 1 : 0);
+    return topologyFrameAttachment(
+      frame,
+      robotIndex === 0 ? "vtr-1-center" : `vtr-2-center-${robotIndex}`,
+      "center",
+      0,
+      TOPOLOGY_ROBOT_SIZE,
+      TOPOLOGY_ROBOT_SIZE
+    );
   }
-  return {
-    leftPercent: 50,
-    topPixels: (TOPOLOGY_SINGLE_PROCESS_MIDDLE_TOP + TOPOLOGY_SINGLE_PROCESS_LOWER_TOP) / 2,
-    widthPixels: TOPOLOGY_ROBOT_SIZE,
-    heightPixels: TOPOLOGY_ROBOT_SIZE
-  };
-}
-function topologyVerticalExtent(positions) {
-  if (!positions.length) return null;
-  return {
-    top: Math.min(...positions.map((position) => position.topPixels - (position.heightPixels ?? TOPOLOGY_ITEM_SIZE) / 2)),
-    bottom: Math.max(...positions.map((position) => position.topPixels + (position.heightPixels ?? TOPOLOGY_ITEM_SIZE) / 2))
-  };
+  if (layout === "dual") {
+    return topologyFrameAttachment(
+      topologyMachineFrame("dual"),
+      "dual-robot-center",
+      "center",
+      0,
+      TOPOLOGY_ROBOT_SIZE,
+      TOPOLOGY_ROBOT_SIZE
+    );
+  }
+  return topologyFrameAttachment(
+    topologyMachineFrame("single"),
+    "single-robot-center",
+    "center",
+    0,
+    TOPOLOGY_ROBOT_SIZE,
+    TOPOLOGY_ROBOT_SIZE
+  );
 }
 function interpolatedRobotAngle(start, end, progress) {
   let delta = (end - start) % (Math.PI * 2);
@@ -1801,6 +2079,7 @@ function renderEquipmentTopology(snapshot, decision, hiddenFilters, device) {
   const atmosphereNames = new Set(atmosphereRobots.map((robot) => robot.name));
   const vacuumRobots = snapshot.robots.filter((robot) => !atmosphereNames.has(robot.name));
   const layout = device ? detectDeviceTopologyLayout(device) : detectTopologyLayout(visibleModules, snapshot.robots.length);
+  const machineFrames = TOPOLOGY_MACHINE_FRAMES[layout].map((frame) => ({ ...frame }));
   const processChamberViews = layout === "dual" ? expandDualProcessChambers(groups.processModules) : groups.processModules.map((module) => ({ view: module, sourceName: module.name }));
   const processSourceNames = new Map(processChamberViews.map((item) => [item.view.name, item.sourceName]));
   const loadLockNameSet = new Set(groups.loadLocks.map((module) => module.name));
@@ -1842,9 +2121,22 @@ function renderEquipmentTopology(snapshot, decision, hiddenFilters, device) {
   });
   positionRobotGroup(vacuumRobots, "vacuum");
   positionRobotGroup(atmosphereRobots, "atmosphere");
+  const atmosphereFrame = { ...topologyAtmosphereFrame(layout) };
   const allPositions = [
     ...modulePositions.values(),
-    ...robotPositions.values()
+    ...robotPositions.values(),
+    ...machineFrames.map((frame) => ({
+      leftPercent: frame.centerLeftPercent,
+      topPixels: frame.centerTopPixels,
+      widthPixels: frame.widthPixels,
+      heightPixels: frame.heightPixels
+    })),
+    {
+      leftPercent: atmosphereFrame.centerLeftPercent,
+      topPixels: atmosphereFrame.centerTopPixels,
+      widthPixels: atmosphereFrame.widthPixels,
+      heightPixels: atmosphereFrame.heightPixels
+    }
   ];
   const minimumTop = allPositions.length ? Math.min(...allPositions.map((position) => position.topPixels - (position.heightPixels ?? TOPOLOGY_ITEM_SIZE) / 2)) : 0;
   const maximumBottom = allPositions.length ? Math.max(...allPositions.map((position) => position.topPixels + (position.heightPixels ?? TOPOLOGY_ITEM_SIZE) / 2)) : TOPOLOGY_ITEM_SIZE;
@@ -1859,67 +2151,27 @@ function renderEquipmentTopology(snapshot, decision, hiddenFilters, device) {
   for (const [name, position] of robotPositions) {
     robotPositions.set(name, { ...position, topPixels: position.topPixels + verticalOffset });
   }
-  const positionedModules = (modules) => modules.map((module) => modulePositions.get(module.name)).filter((position) => Boolean(position));
-  const positionedRobots = (robots) => robots.map((robot) => robotPositions.get(robot.name)).filter((position) => Boolean(position));
-  const interfaceLoadLocks = groups.loadLocks.filter((module) => !bridgeLoadLockNames.has(module.name));
-  const vacuumExtent = topologyVerticalExtent([
-    ...positionedModules(processChamberViews.map((item) => item.view)),
-    ...positionedRobots(vacuumRobots),
-    ...positionedModules(groups.loadLocks.filter((module) => bridgeLoadLockNames.has(module.name)))
-  ]);
-  const interfaceExtent = topologyVerticalExtent(positionedModules(interfaceLoadLocks));
-  let atmosphereExtent = topologyVerticalExtent([
-    ...positionedModules(groups.auxiliaryModules),
-    ...positionedModules(groups.loadPorts),
-    ...positionedRobots(atmosphereRobots)
-  ]);
-  if (interfaceExtent && atmosphereExtent) {
-    const atmosphereOffset = interfaceExtent.bottom + 24 - atmosphereExtent.top;
-    const shiftPosition = (position) => {
-      if (position) position.topPixels += atmosphereOffset;
-    };
-    groups.auxiliaryModules.forEach((module) => shiftPosition(modulePositions.get(module.name)));
-    groups.loadPorts.forEach((module) => shiftPosition(modulePositions.get(module.name)));
-    atmosphereRobots.forEach((robot) => shiftPosition(robotPositions.get(robot.name)));
-    atmosphereExtent = topologyVerticalExtent([
-      ...positionedModules(groups.auxiliaryModules),
-      ...positionedModules(groups.loadPorts),
-      ...positionedRobots(atmosphereRobots)
-    ]);
-    const finalMaximumBottom = Math.max(
-      ...[...modulePositions.values()].map((position) => position.topPixels + (position.heightPixels ?? TOPOLOGY_ITEM_SIZE) / 2),
-      ...[...robotPositions.values()].map((position) => position.topPixels + (position.heightPixels ?? TOPOLOGY_ITEM_SIZE) / 2)
-    );
-    canvasHeight = Math.max(520, Math.ceil(finalMaximumBottom + TOPOLOGY_CANVAS_PADDING));
-  }
-  const interfaceTop = interfaceExtent ? Math.max(12, interfaceExtent.top - 12) : Math.round(canvasHeight * 0.48);
-  const interfaceBottom = interfaceExtent ? Math.min(canvasHeight - 12, interfaceExtent.bottom + 12) : interfaceTop;
-  const vacuumTop = vacuumExtent ? Math.max(12, vacuumExtent.top - 24) : 12;
-  const vacuumBottom = Math.max(vacuumTop + 120, interfaceTop - 12);
-  const atmosphereTop = atmosphereExtent ? interfaceExtent ? interfaceBottom + 12 : Math.max(12, atmosphereExtent.top) : interfaceExtent ? interfaceBottom + 12 : Math.round(canvasHeight * 0.52);
-  const atmosphereBottom = atmosphereExtent ? Math.min(canvasHeight - 12, atmosphereExtent.bottom + 24) : canvasHeight - 12;
-  const machineAreaMarkup = `
-    <div class="topology-zone topology-zone-vacuum" style="--zone-top:${vacuumTop}px;--zone-height:${Math.max(120, vacuumBottom - vacuumTop)}px" aria-hidden="true">
-      <span><small>\u771F\u7A7A\u52A0\u5DE5\u533A</small></span>
-    </div>
-    ${interfaceExtent ? `<div class="topology-interface-bay" style="--zone-top:${interfaceTop}px;--zone-height:${Math.max(96, interfaceBottom - interfaceTop)}px" aria-hidden="true"><span>VACUUM / ATM INTERFACE</span></div>` : ""}
-    <div class="topology-zone topology-zone-atmosphere" style="--zone-top:${atmosphereTop}px;--zone-height:${Math.max(120, atmosphereBottom - atmosphereTop)}px" aria-hidden="true">
-      <span><small>\u5927\u6C14\u4F20\u8F93\u533A</small></span>
+  machineFrames.forEach((frame) => {
+    frame.centerTopPixels += verticalOffset;
+  });
+  atmosphereFrame.centerTopPixels += verticalOffset;
+  const machineAreaMarkup = "";
+  const machineFrameMarkup = [...machineFrames, atmosphereFrame].map((frame) => {
+    const frameAnchors = ["top", "right", "bottom", "left"].flatMap((edge) => [1, 2].map((index) => `<i class="topology-frame-anchor topology-frame-anchor-${edge} topology-frame-anchor-${index}" data-anchor-id="${escapeHtml(frame.id)}-${edge}-${index}" data-anchor-edge="${edge}" aria-hidden="true"></i>`)).join("");
+    return `
+    <div class="topology-machine-frame topology-machine-frame-${frame.shape}" data-frame-id="${escapeHtml(frame.id)}" style="--frame-left:${frame.centerLeftPercent}%;--frame-top:${frame.centerTopPixels}px;--frame-width:${frame.widthPixels}px;--frame-height:${frame.heightPixels}px" aria-hidden="true">
+      ${frame.label ? `<span>${escapeHtml(frame.label)}</span>` : ""}
+      ${frameAnchors}
     </div>`;
+  }).join("");
+  const attachmentPointMarkup = [...modulePositions.values(), ...robotPositions.values()].filter((position) => position.attachmentId).map((position) => `<i class="topology-attachment-point" data-attachment-id="${escapeHtml(position.attachmentId ?? "")}" style="--attachment-left:${position.leftPercent}%;--attachment-top:${position.topPixels}px" aria-hidden="true"></i>`).join("");
   const renderModuleGroup = (modules, role) => modules.map((module, roleIndex) => {
     const position = modulePositions.get(module.name);
     if (!position) return "";
     const candidateSource = processSourceNames.get(module.name) ?? module.name;
-    return `<div class="reference-module-position" style="--module-left:${position.leftPercent}%;--module-top:${position.topPixels}px">${renderModule(module, snapshot.waferOrigins, role, destinations.get(candidateSource), layout, roleIndex)}</div>`;
+    const fixedLeft = position.fixedLeftOffsetPixels === void 0 ? "" : `;--fixed-left:calc(50% ${position.fixedLeftOffsetPixels < 0 ? "-" : "+"} ${Math.abs(position.fixedLeftOffsetPixels)}px)`;
+    return `<div class="reference-module-position" style="--module-left:${position.leftPercent}%;--module-top:${position.topPixels}px${fixedLeft}">${renderModule(module, snapshot.waferOrigins, role, destinations.get(candidateSource), layout, roleIndex, position.attachmentId)}</div>`;
   }).join("");
-  const positionedLoadPorts = positionedModules(groups.loadPorts);
-  const loadPortBaseMarkup = positionedLoadPorts.length ? (() => {
-    const lefts = positionedLoadPorts.map((position) => position.leftPercent);
-    const baseCenter = (Math.min(...lefts) + Math.max(...lefts)) / 2;
-    const baseWidth = Math.max(...lefts) - Math.min(...lefts) + TOPOLOGY_LOADPORT_WIDTH / TOPOLOGY_VIEWBOX_WIDTH * 100;
-    const baseTop = positionedLoadPorts[0].topPixels + TOPOLOGY_LOADPORT_HEIGHT / 2 + TOPOLOGY_LOADPORT_BASE_OVERHANG - TOPOLOGY_LOADPORT_BASE_HEIGHT / 2;
-    return `<div class="load-port-shared-base" style="--base-left:${baseCenter.toFixed(2)}%;--base-width:${baseWidth.toFixed(2)}%;--base-top:${baseTop.toFixed(1)}px" aria-hidden="true"></div>`;
-  })() : "";
   const moduleMarkup = [
     renderModuleGroup(processChamberViews.map((item) => item.view), "process"),
     renderModuleGroup(groups.loadLocks, "lock"),
@@ -1948,14 +2200,16 @@ function renderEquipmentTopology(snapshot, decision, hiddenFilters, device) {
       }
     }
     const angleDegrees = armAngle * 180 / Math.PI;
-    return `<div class="reference-robot-position" style="--robot-left:${position.leftPercent}%;--robot-top:${position.topPixels}px">${renderRobotHub(robot, snapshot.waferOrigins, environment, angleDegrees)}</div>`;
+    const fixedLeft = position.fixedLeftOffsetPixels === void 0 ? "" : `;--fixed-left:calc(50% ${position.fixedLeftOffsetPixels < 0 ? "-" : "+"} ${Math.abs(position.fixedLeftOffsetPixels)}px)`;
+    return `<div class="reference-robot-position" style="--robot-left:${position.leftPercent}%;--robot-top:${position.topPixels}px${fixedLeft}">${renderRobotHub(robot, snapshot.waferOrigins, environment, angleDegrees)}</div>`;
   }).join("");
   const robotMarkup = renderRobotGroup(vacuumRobots, "vacuum") + renderRobotGroup(atmosphereRobots, "atmosphere");
   return `
     <section class="equipment-schematic" data-topology-layout="${layout}" aria-label="\u5B8C\u6574\u8BBE\u5907\u62D3\u6251\u56DE\u653E">
       <div class="schematic-canvas reference-grid-canvas" style="--topology-canvas-height:${canvasHeight}px">
         ${machineAreaMarkup}
-        ${loadPortBaseMarkup}
+        ${machineFrameMarkup}
+        ${attachmentPointMarkup}
         ${moduleMarkup}
         ${robotMarkup}
       </div>
@@ -2826,6 +3080,7 @@ var VisualizationWorkspace = class {
       void 0,
       this.device
     );
+    this.elements.frontSlotOverview.innerHTML = renderFrontSlotOverview(topologySnapshot.modules);
     const requestState = this.pendingReplayDecisionKeys.has(replayKey) ? "loading" : this.replayDecisionErrorKey === replayKey ? "error" : "idle";
     this.elements.decisionLens.innerHTML = renderDecisionLens(
       currentDecision,
