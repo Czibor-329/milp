@@ -13,6 +13,10 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
+from realtime_scheduler.backend.execution.runtime_snapshot import (
+    compact_runtime_snapshots,
+)
+
 
 FIRST_SLOT_ID = 1
 MAX_WAFERS_PER_JOB = 25
@@ -1281,7 +1285,7 @@ def build_round_update(
         ):
             materials.append(_dummy_material(slot_id, dummy_port, dummy_accessible_pms))
         build_state.dummy_material_count = dummy_material_count
-    return {
+    update = {
         "Scenario": 0,
         "ProcessRecipes": build_process_recipes(recipes, routes, cleans),
         "Materials": materials, "ProcessJobs": process_jobs, "ControlJobs": control_jobs,
@@ -1292,3 +1296,5 @@ def build_round_update(
         "Stations": deepcopy(dict(tool_topo.get("Stations") or {})),
         "InitialMoveID": int(tool_topo.get("InitialMoveID") or 0),
     }
+    compact_runtime_snapshots(update)
+    return update

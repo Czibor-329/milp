@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from realtime_scheduler.backend.bootstrap import *
+from realtime_scheduler.backend.execution.runtime_snapshot import (
+    compact_runtime_snapshots,
+)
 from realtime_scheduler.backend.time_utils import _workspace_timestamp
 
 @dataclass
@@ -708,6 +711,7 @@ def _build_platform_recompute_update(
         # 与完整平台运行时保持同一协议边界：只在所有现场字段投影完成后消费
         # 算法返回的 Dummy 信息，确保发出的 AlgSchedule 保留恢复结果。
         restore_dummy_routes_from_algorithm_output(update, previous_output)
+    compact_runtime_snapshots(update)
     return update
 
 
