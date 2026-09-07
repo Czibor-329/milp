@@ -38,6 +38,7 @@ COMPLETED_ON_PLACE_STATION_TYPES = frozenset({
     DUMMY_PORT_TYPE,
     BUFFER_TYPE,
 })
+MULTI_PROCESS_CHAMBER_TYPE = "multiprocesschamber"
 DOORLESS_STATION_NAMES = frozenset({"Cooler", "Cool"})
 TWIN_LOAD_LOCK_PAIRS = frozenset({
     frozenset({"LA", "LB"}),
@@ -240,6 +241,11 @@ class MachineState:
     product_clean_entries: Set[Tuple[str, str]] = field(default_factory=set)
     #: 外部算法可省略的零时长产品 ProcessMove；键为（物料、Route Step、PM）。
     zero_duration_process_steps: Set[Tuple[str, str, str]] = field(default_factory=set)
+    #: 产品在各 PM 上全部 NeedProcess Step；用于区分“该站只有 0s 工序”
+    #: 与重入混合工时，避免仅凭站点名误补非零加工。
+    process_steps_by_material_station: Dict[Tuple[str, str], Set[str]] = field(
+        default_factory=dict
+    )
 
     @classmethod
     def from_sources(
@@ -331,10 +337,10 @@ class MachineState:
             for recipe in payload.get("ProcessRecipes", []) or []
             if isinstance(recipe, Mapping)
         }
-        state.zero_duration_process_steps = _zero_duration_product_process_steps(
-            payload,
-            recipe_durations,
-        )
+        (
+            state.zero_duration_process_steps,
+            state.process_steps_by_material_station,
+        ) = _product_process_step_indexes(payload, recipe_durations)
         for wafer in getattr(task, "wafers", ()) or ():
             material_id = str(getattr(wafer, "mat_id", ""))
             for stage in getattr(wafer, "stages", ()) or ():
@@ -371,6 +377,10 @@ class MachineState:
                         )
                     except (TypeError, ValueError):
                         continue
+                    state.process_steps_by_material_station.setdefault(
+                        (material_id, candidate),
+                        set(),
+                    ).add(step_id)
                     if math.isfinite(duration) and abs(duration) <= TIME_TOLERANCE:
                         state.zero_duration_process_steps.add(
                             (material_id, step_id, candidate)
@@ -425,7 +435,10 @@ class MachineState:
         self.clean_task_state_variables = _clean_task_state_variables(payload)
         self.clean_wac_trigger_rules = _clean_wac_trigger_rules(payload)
         self.clean_obligations = _clean_obligation_specs(payload)
-        self.zero_duration_process_steps = _zero_duration_product_process_steps(
+        (
+            self.zero_duration_process_steps,
+            self.process_steps_by_material_station,
+        ) = _product_process_step_indexes(
             payload,
             {
                 (str(recipe.get("Name") or ""), str(recipe.get("ModuleName") or "")): recipe.get("Time")
@@ -444,37 +457,134 @@ class MachineState:
                 station.state_variables.setdefault(variable_name, value)
 
 
+def _route_need_process_visits(
+    route: Mapping[str, Any],
+    recipe_durations: Mapping[Tuple[str, str], Any],
+) -> Tuple[Set[Tuple[str, str]], Set[Tuple[str, str]]]:
+    """从一条 Route 提取 NeedProcess 访问，以及其中可证明的零时长访问。
+
+    返回值为 ``((step_id, module_name) 全部加工访问, 零时长子集)``。空
+    ``ProcessRecipe`` 按运行计划表示即时加工；有名称时以 ProcessRecipes 时长为准。
+    """
+    process_visits: Set[Tuple[str, str]] = set()
+    zero_visits: Set[Tuple[str, str]] = set()
+    for route_step in route.get("RouteSteps", []) or []:
+        if not isinstance(route_step, Mapping) or not route_step.get("NeedProcess"):
+            continue
+        step_id = str(route_step.get("StepID", ""))
+        for visit in route_step.get("Visits", []) or []:
+            if not isinstance(visit, Mapping):
+                continue
+            module_name = str(visit.get("StationName") or "")
+            if not module_name:
+                continue
+            process_visits.add((step_id, module_name))
+            recipe_name = str(visit.get("ProcessRecipe") or "")
+            if not recipe_name:
+                # 运行计划约定：产品 NeedProcess Visit 的 Recipe 为空即表示
+                # 零时长即时加工。清洗使用独立 CleanTaskName，不走本分支。
+                zero_visits.add((step_id, module_name))
+                continue
+            try:
+                duration = float(recipe_durations[(recipe_name, module_name)])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if math.isfinite(duration) and abs(duration) <= TIME_TOLERANCE:
+                zero_visits.add((step_id, module_name))
+    return process_visits, zero_visits
+
+
+def _record_material_process_visits(
+    material_id: str,
+    process_visits: Set[Tuple[str, str]],
+    zero_visits: Set[Tuple[str, str]],
+    process_steps_by_material_station: Dict[Tuple[str, str], Set[str]],
+    zero_duration_steps: Set[Tuple[str, str, str]],
+) -> None:
+    """把一条物料的加工访问写入校验索引。"""
+    if not material_id:
+        return
+    for step_id, module_name in process_visits:
+        process_steps_by_material_station.setdefault(
+            (material_id, module_name),
+            set(),
+        ).add(step_id)
+    for step_id, module_name in zero_visits:
+        zero_duration_steps.add((material_id, step_id, module_name))
+
+
+def _product_process_step_indexes(
+    payload: Mapping[str, Any],
+    recipe_durations: Mapping[Tuple[str, str], Any],
+) -> Tuple[Set[Tuple[str, str, str]], Dict[Tuple[str, str], Set[str]]]:
+    """从 AlgSchedule 提取零时长产品工艺及各物料在各 PM 的加工 Step。
+
+    同时扫描 ``Materials[].Route`` 与 ``ProcessJobs[].OriginRoute``，并把
+    OriginRoute 上的零时长工序复制到该 PJob ``MatList`` 的每一片。双腔成对
+    建模可能只在计划里留下 pair 头片，物理 MoveList 仍携带两片 ID；校验必须
+    能证明两片都可以省略 ProcessMove。
+    """
+    zero_duration_steps: Set[Tuple[str, str, str]] = set()
+    process_steps_by_material_station: Dict[Tuple[str, str], Set[str]] = {}
+    materials_by_pjob: Dict[str, List[str]] = {}
+    for material in payload.get("Materials", []) or []:
+        if not isinstance(material, Mapping):
+            continue
+        material_id = str(material.get("ID", material.get("MatID", "")))
+        pjob_name = str(material.get("PJobName") or "")
+        if pjob_name:
+            materials_by_pjob.setdefault(pjob_name, []).append(material_id)
+        process_visits, zero_visits = _route_need_process_visits(
+            material.get("Route") or {},
+            recipe_durations,
+        )
+        _record_material_process_visits(
+            material_id,
+            process_visits,
+            zero_visits,
+            process_steps_by_material_station,
+            zero_duration_steps,
+        )
+    for process_job in payload.get("ProcessJobs", []) or []:
+        if not isinstance(process_job, Mapping):
+            continue
+        process_visits, zero_visits = _route_need_process_visits(
+            process_job.get("OriginRoute") or {},
+            recipe_durations,
+        )
+        if not process_visits and not zero_visits:
+            continue
+        job_name = str(process_job.get("JobName") or "")
+        material_ids = [
+            str(item)
+            for item in (process_job.get("MatList") or [])
+        ]
+        if job_name:
+            material_ids.extend(materials_by_pjob.get(job_name, []))
+        seen_ids: Set[str] = set()
+        for material_id in material_ids:
+            if not material_id or material_id in seen_ids:
+                continue
+            seen_ids.add(material_id)
+            _record_material_process_visits(
+                material_id,
+                process_visits,
+                zero_visits,
+                process_steps_by_material_station,
+                zero_duration_steps,
+            )
+    return zero_duration_steps, process_steps_by_material_station
+
+
 def _zero_duration_product_process_steps(
     payload: Mapping[str, Any],
     recipe_durations: Mapping[Tuple[str, str], Any],
 ) -> Set[Tuple[str, str, str]]:
     """从当前 AlgSchedule 精确提取可省略 ProcessMove 的零时长产品工艺。"""
-    zero_duration_steps: Set[Tuple[str, str, str]] = set()
-    for material in payload.get("Materials", []) or []:
-        if not isinstance(material, Mapping):
-            continue
-        material_id = str(material.get("ID", material.get("MatID", "")))
-        route = material.get("Route") or {}
-        for route_step in route.get("RouteSteps", []) or []:
-            if not isinstance(route_step, Mapping) or not route_step.get("NeedProcess"):
-                continue
-            step_id = str(route_step.get("StepID", ""))
-            for visit in route_step.get("Visits", []) or []:
-                if not isinstance(visit, Mapping):
-                    continue
-                module_name = str(visit.get("StationName") or "")
-                recipe_name = str(visit.get("ProcessRecipe") or "")
-                if not recipe_name and module_name:
-                    # 运行计划约定：产品 NeedProcess Visit 的 Recipe 为空即表示
-                    # 零时长即时加工。清洗使用独立 CleanTaskName，不走本分支。
-                    zero_duration_steps.add((material_id, step_id, module_name))
-                    continue
-                try:
-                    duration = float(recipe_durations[(recipe_name, module_name)])
-                except (KeyError, TypeError, ValueError):
-                    continue
-                if math.isfinite(duration) and abs(duration) <= TIME_TOLERANCE:
-                    zero_duration_steps.add((material_id, step_id, module_name))
+    zero_duration_steps, _process_steps = _product_process_step_indexes(
+        payload,
+        recipe_durations,
+    )
     return zero_duration_steps
 
 
@@ -1342,6 +1452,16 @@ def _supplement_state_from_moves(
                 robot.can_swap = True
 
 
+def _is_paired_process_chamber(station: StationState) -> bool:
+    """判断站点是否按双腔/多槽同步加工语义处理驻片。"""
+    station_type = station.station_type.lower()
+    return station_type == MULTI_PROCESS_CHAMBER_TYPE or (
+        "process" in station_type
+        and station_type != LOAD_LOCK_TYPE
+        and len(station.slots) > 1
+    )
+
+
 def _is_omitted_zero_duration_process(
     state: MachineState,
     station_name: str,
@@ -1349,16 +1469,74 @@ def _is_omitted_zero_duration_process(
 ) -> bool:
     """判断未输出 ProcessMove 的 PM 物料能否按零时长工艺完成。
 
-    仅接受由当前任务 Route 明确声明的产品工艺、物料、Step 和 PM 三者完全匹配
-    的零时长记录，避免把任何缺失 ProcessMove 的普通加工误判为已完成。
+    优先匹配物料当前 Step 与 PM 的零时长三元组。双腔取放可能未回写 StepID，
+    此时仅当该物料在本 PM 的全部 NeedProcess 访问都是零时长才允许补齐，避免
+    把同腔重入的非零工序误判为已完成。
     """
     if material is None:
         return False
-    return (
-        str(material.material_id),
-        str(material.step_id),
-        station_name,
-    ) in state.zero_duration_process_steps
+    material_id = str(material.material_id)
+    step_id = str(material.step_id) if material.step_id is not None else ""
+    if (material_id, step_id, station_name) in state.zero_duration_process_steps:
+        return True
+    process_steps = state.process_steps_by_material_station.get(
+        (material_id, station_name),
+        set(),
+    )
+    if not process_steps:
+        return False
+    if step_id in process_steps:
+        return (material_id, step_id, station_name) in state.zero_duration_process_steps
+    return all(
+        (material_id, process_step, station_name) in state.zero_duration_process_steps
+        for process_step in process_steps
+    )
+
+
+def _finish_omitted_zero_duration_slot(
+    state: MachineState,
+    station_name: str,
+    slot: SlotState,
+) -> None:
+    """把已证明的零时长产品工序补齐为完成态，并登记产品进腔。"""
+    _set_slot(slot, SlotPhase.COMPLETED, slot.material)
+    slot.material_process_count += 1
+    if slot.material is not None and slot.material.pjob_name:
+        state.product_clean_entries.add(
+            (str(slot.material.pjob_name), station_name)
+        )
+
+
+def _apply_omitted_zero_duration_process(
+    state: MachineState,
+    station: StationState,
+) -> None:
+    """为当前腔室内可证明的零时长驻片补齐已加工状态。
+
+    双腔必须两槽同时完成：只有全部未加工驻片都能证明为零时长，才一起补齐。
+    单腔仍按片补齐。库存站和 LoadLock 不走产品 Process 语义。
+    """
+    if station.is_load_lock or station.completes_material_on_place:
+        return
+    unprocessed = [
+        slot
+        for slot in station.slots.values()
+        if slot.material is not None and slot.phase is SlotPhase.UNPROCESSED
+    ]
+    if not unprocessed:
+        return
+    if _is_paired_process_chamber(station):
+        if not all(
+            _is_omitted_zero_duration_process(state, station.name, slot.material)
+            for slot in unprocessed
+        ):
+            return
+        for slot in unprocessed:
+            _finish_omitted_zero_duration_slot(state, station.name, slot)
+        return
+    for slot in unprocessed:
+        if _is_omitted_zero_duration_process(state, station.name, slot.material):
+            _finish_omitted_zero_duration_slot(state, station.name, slot)
 
 
 def _zero_duration_environment_transitions(
@@ -1490,22 +1668,7 @@ def _start_pick(state: MachineState, move: Mapping[str, Any], end_time: float, _
             return _issue(move, ValidationErrorCode.ROBOT_HAND_STATE_INVALID, f"{robot.name}#{robot_slot_id} 不是空手")
         if not _available(slot.busy_until, start_time):
             return _issue(move, ValidationErrorCode.STATION_SLOT_BUSY, f"{station_name}#{station_slot_id} 正在{slot.busy_action}")
-        if (
-            slot.phase is SlotPhase.UNPROCESSED
-            and _is_omitted_zero_duration_process(
-                state,
-                station_name,
-                slot.material,
-            )
-        ):
-            # 算法已在内部完成零时长工艺，但标准输出不会带对应 ProcessMove。
-            # 此处只按任务中可证明为零时长的 PM 工序补齐状态，不能放宽一般 Pick。
-            _set_slot(slot, SlotPhase.COMPLETED, slot.material)
-            slot.material_process_count += 1
-            if slot.material is not None and slot.material.pjob_name:
-                state.product_clean_entries.add(
-                    (str(slot.material.pjob_name), station_name)
-                )
+        _apply_omitted_zero_duration_process(state, station)
         if slot.phase is not SlotPhase.COMPLETED or not _material_matches(slot.material, material_id):
             return _issue(move, ValidationErrorCode.PICK_SOURCE_INVALID, f"{station_name}#{station_slot_id} 没有匹配的已完成物料")
         transfers.append((station, slot, station_slot_id, robot_slot_id, _material_with_metadata(slot.material, move, index)))
@@ -1723,6 +1886,9 @@ def _start_prepare(state: MachineState, move: Mapping[str, Any], end_time: float
             )
         station.last_environment_transition_was_empty = False
         _complete_ready_loadlock_outbound_slots(station, move, related)
+    else:
+        # 双腔 0s 产品工艺省略 ProcessMove 后，开门取片前把两槽一起补成完成态。
+        _apply_omitted_zero_duration_process(state, station)
     station.door_busy_until = end_time
     _schedule(scheduled, move, end_time, lambda: setattr(station, "door", DoorState.OPEN))
     return None
@@ -1741,7 +1907,13 @@ def _start_complete(state: MachineState, move: Mapping[str, Any], end_time: floa
     if not _available(station.door_busy_until, start_time) or not _available(station.transfer_busy_until, start_time):
         return _issue(move, ValidationErrorCode.STATION_TRANSFER_BUSY, f"{station.name} 门机构或取放资源正在忙")
     station.door_busy_until = end_time
-    _schedule(scheduled, move, end_time, lambda: setattr(station, "door", DoorState.CLOSED))
+
+    def complete() -> None:
+        """关门完成后，为双腔零时长驻片补齐成对加工结束态。"""
+        station.door = DoorState.CLOSED
+        _apply_omitted_zero_duration_process(state, station)
+
+    _schedule(scheduled, move, end_time, complete)
     return None
 
 
@@ -2219,6 +2391,7 @@ def _start_swap(state: MachineState, move: Mapping[str, Any], end_time: float, _
         return _issue(move, ValidationErrorCode.SWAP_INPUT_INVALID, "SwapMove 的站槽位不能重复使用")
     # Recv 组校验：站槽位有匹配的已完成物料、目标手槽为空。
     for station, material_id, robot_slot_id, station_slot_id, _ in recv_rows:
+        _apply_omitted_zero_duration_process(state, station)
         slot = station.slots.get(station_slot_id)
         if slot is None:
             return _issue(move, ValidationErrorCode.STATION_SLOT_UNKNOWN, f"{station.name} 不存在槽位 {station_slot_id}")
