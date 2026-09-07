@@ -13,6 +13,7 @@ from pathlib import Path
 from realtime_scheduler.backend.validation.move_validation import (
     ATMOSPHERE,
     MachineState,
+    MaterialState,
     MoveStateReplay,
     SlotPhase,
     VACUUM,
@@ -122,8 +123,8 @@ def _wac_update(
     }
 
 
-def test_recompute_refreshes_wac_rules_without_resetting_pm_counter() -> None:
-    """跨代切换必须更新新 PJob 的 WAC 规则，同时保留 PM 已累计的计数。"""
+def test_recompute_refreshes_wac_rules_without_mixing_single_chamber_pjob_counter() -> None:
+    """单腔跨代更新规则时，新 PJob 不得继承旧 PJob 的 WAC 计数。"""
     runtime = PlatformMoveListRuntime(
         _wac_update("old-pjob", "old-recipe", 7.0),
         {"MoveList": [], "Feedback": []},
@@ -145,6 +146,17 @@ def test_recompute_refreshes_wac_rules_without_resetting_pm_counter() -> None:
     assert state.clean_wac_trigger_rules[("PM1", "new-recipe")] == (
         ("new-pjob", "WacCount", 3.0, "WacClean"),
     )
+    assert state.wac_counter_value(
+        state.stations["PM1"],
+        "new-pjob",
+        "WacCount",
+    ) == 0.0
+    state.stations["PM1"].slots[1].phase = SlotPhase.UNPROCESSED
+    state.stations["PM1"].slots[1].material = MaterialState(
+        1,
+        "new-pjob",
+        0,
+    )
     issues = validate_move_list(
         None,
         [{
@@ -160,7 +172,7 @@ def test_recompute_refreshes_wac_rules_without_resetting_pm_counter() -> None:
         }],
         state,
     )
-    assert "[MVL-CLEAN-WAC-MISSING]" in issues[0]
+    assert issues == []
 
 
 def _loadlock(last_item: str, current_item: str) -> dict:

@@ -230,6 +230,123 @@ def test_platform_rejects_wac_clean_before_counter_threshold() -> None:
     ]
 
 
+def test_single_chamber_wac_counter_isolated_by_pjob() -> None:
+    """单腔 PM 的一个 PJob 到期不得阻止另一个 PJob 的产品加工。"""
+    update = {
+        "Stations": {"PM1": {
+            "Type": "ProcessChamber",
+            "Capacity": 1,
+            "StateVariables": {"ProcessCount": {"Value": {"Value": 0}}},
+        }},
+        "Robots": {},
+        "Materials": [{
+            "ID": 102,
+            "CurrentModuleName": "PM1",
+            "SlotID": 1,
+            "StepID": 4,
+            "PJobName": "P2",
+        }],
+        "ProcessRecipes": [{
+            "ModuleName": "PM1",
+            "Name": "ProductRecipe",
+            "Weight": {"ProcessCount": 1},
+        }],
+        "ProcessJobs": [
+            {
+                "JobName": pjob_name,
+                "OriginRoute": {"RouteSteps": [{"Visits": [{
+                    "StationName": "PM1",
+                    "ProcessRecipe": "ProductRecipe",
+                    "AfterOutPM": [{
+                        "CheckConditions": {"WAC": [{
+                            "TaskName": "WacClean",
+                            "UpdateStateVariables": ["ProcessCount"],
+                        }]},
+                        "ExecuteOrder": [{
+                            "StateVariableName": "ProcessCount",
+                            "ThresholdValueList": [2, 9999],
+                        }],
+                    }],
+                }]}]},
+            }
+            for pjob_name in ("P1", "P2")
+        ],
+    }
+    state = MachineState.from_sources(None, update)
+    station = state.stations["PM1"]
+    state.add_wac_counter(station, "P1", "ProcessCount", 2)
+    station.slots[1].phase = SlotPhase.UNPROCESSED
+
+    assert state.wac_counter_value(station, "P1", "ProcessCount") == 2
+    assert state.wac_counter_value(station, "P2", "ProcessCount") == 0
+    assert validate_move_list(
+        None,
+        [_move(
+            1, 9, 0, 10,
+            ModuleName="PM1", MatIDList=[102], StepIDList=[4], SlotList=[1],
+            PJobName=["P2"], ProcessRecipe="ProductRecipe",
+        )],
+        state,
+    ) == []
+    state.add_wac_counter(station, "P2", "ProcessCount", 1)
+    state.reset_wac_counter(station, ["P1"], "ProcessCount")
+    assert state.wac_counter_value(station, "P1", "ProcessCount") == 0
+    assert state.wac_counter_value(station, "P2", "ProcessCount") == 1
+
+
+def test_dual_chamber_wac_counter_remains_global() -> None:
+    """双腔 PM 的不同 PJob 仍必须共用腔室 WAC 计数。"""
+    update = {
+        "Stations": {"PM1": {
+            "Type": "MultiProcessChamber",
+            "Capacity": 2,
+            "StateVariables": {"ProcessCount": {"Value": {"Value": 2}}},
+        }},
+        "Robots": {},
+        "Materials": [{
+            "ID": 102,
+            "CurrentModuleName": "PM1",
+            "SlotID": 1,
+            "StepID": 4,
+            "PJobName": "P2",
+        }],
+        "ProcessJobs": [
+            {
+                "JobName": pjob_name,
+                "OriginRoute": {"RouteSteps": [{"Visits": [{
+                    "StationName": "PM1",
+                    "ProcessRecipe": "ProductRecipe",
+                    "AfterOutPM": [{
+                        "CheckConditions": {"WAC": [{
+                            "TaskName": "WacClean",
+                            "UpdateStateVariables": ["ProcessCount"],
+                        }]},
+                        "ExecuteOrder": [{
+                            "StateVariableName": "ProcessCount",
+                            "ThresholdValueList": [2, 9999],
+                        }],
+                    }],
+                }]}]},
+            }
+            for pjob_name in ("P1", "P2")
+        ],
+    }
+
+    issues = validate_move_list(
+        None,
+        [_move(
+            1, 9, 0, 10,
+            ModuleName="PM1", MatIDList=[102], StepIDList=[4], SlotList=[1],
+            PJobName=["P2"], ProcessRecipe="ProductRecipe",
+        )],
+        update,
+    )
+
+    assert issues == [
+        "[MVL-CLEAN-WAC-MISSING] MoveID=1 MoveType=9：WacClean 到期后仍开始产品工艺 count=2 PJob=P2"
+    ]
+
+
 def test_skipping_wac_only_ignores_counter_threshold() -> None:
     """跳过 WAC 后只忽略次数阈值，Clean 动作仍进入完整物理校验。"""
     update = {

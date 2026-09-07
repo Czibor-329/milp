@@ -723,7 +723,7 @@ def _validate_clean_start(
         for rule_pjob_name, variable_name, lower, task_name in rules:
             if rule_pjob_name and rule_pjob_name != pjob_name:
                 continue
-            value = float(station.state_variables.get(variable_name, 0.0))
+            value = state.wac_counter_value(station, pjob_name, variable_name)
             if value + TIME_TOLERANCE >= lower and not skipped(
                 _clean_validation_type(task_name)
             ):
@@ -754,7 +754,12 @@ def _validate_clean_start(
         return None
     names = {str(name).strip() for name in pjob_names if str(name).strip()}
     for _pjob, variable_name, lower, task_name in _wac_rules_for_clean_move(state, station.name, names, clean_task_name):
-        value = float(station.state_variables.get(variable_name, 0.0))
+        rule_pjob_name = _pjob or next(iter(sorted(names)), "")
+        value = state.wac_counter_value(
+            station,
+            rule_pjob_name,
+            variable_name,
+        )
         if value + TIME_TOLERANCE < lower:
             shown = str(int(value)) if value.is_integer() else str(value)
             return _issue(move, ValidationErrorCode.CLEAN_WAC_EARLY, f"{task_name} 未达到 Wac 阈值就执行 count={shown} PJob={next(iter(sorted(names)), '')}")

@@ -234,6 +234,9 @@ class MachineState:
     process_recipe_weights: Dict[Tuple[str, str], Dict[str, float]] = field(default_factory=dict)
     clean_task_state_variables: Dict[str, Set[str]] = field(default_factory=dict)
     clean_wac_trigger_rules: Dict[Tuple[str, str], Tuple[Tuple[str, str, float, str], ...]] = field(default_factory=dict)
+    #: 单腔 PM 的 WAC 计数按 ``(PM, PJob, 状态变量)`` 隔离。双腔仍使用
+    #: ``StationState.state_variables`` 的腔室全局计数，以保持双片同步加工语义。
+    pjob_wac_counters: Dict[Tuple[str, str, str], float] = field(default_factory=dict)
     clean_obligations: Dict[Tuple[str, str, str], Tuple[str, int, Tuple[str, ...]]] = field(default_factory=dict)
     #: 本次运行跳过的 Clean 触发/次数规则；物理状态回放与计数仍照常执行。
     skipped_clean_validation_types: Set[str] = field(default_factory=set)
@@ -304,6 +307,8 @@ class MachineState:
                     slots,
                     state_variables=_station_state_variables(config),
                 )
+
+        state.seed_initial_single_chamber_wac_counters(station_configs)
 
         for name, task_station in task_stations.items():
             station_name = str(name)
@@ -418,6 +423,125 @@ class MachineState:
     def clone(self) -> "MachineState":
         """返回不共享可变状态的整机快照。"""
         return deepcopy(self)
+
+    def seed_initial_single_chamber_wac_counters(
+        self,
+        station_configs: Mapping[str, Mapping[str, Any]],
+    ) -> None:
+        """把标准快照中可明确归属的单腔初始 WAC 值写入 PJob 账本。
+
+        标准 ``StateVariables`` 本身不携带 PJob 维度。站点声明 ``PJobName`` 时按
+        声明归属；未声明但某个变量只被一个 PJob 的 WAC 规则引用时也可无歧义
+        继承。多个 PJob 共用且未声明归属时从零开始，避免旧全局值再次混入任一
+        PJob 的独立周期。
+        """
+        for station_name, station in self.stations.items():
+            if not self.uses_pjob_scoped_wac(station):
+                continue
+            config = station_configs.get(station_name, {})
+            raw_names = config.get("PJobName") if isinstance(config, Mapping) else None
+            if isinstance(raw_names, str):
+                declared_pjobs = {raw_names.strip()} - {""}
+            elif isinstance(raw_names, Sequence) and not isinstance(raw_names, (str, bytes)):
+                declared_pjobs = {str(name).strip() for name in raw_names} - {""}
+            else:
+                declared_pjobs = set()
+            pjobs_by_variable: Dict[str, Set[str]] = {}
+            for (rule_station_name, _recipe_name), rules in self.clean_wac_trigger_rules.items():
+                if rule_station_name != station_name:
+                    continue
+                for pjob_name, variable_name, _lower, _task_name in rules:
+                    if pjob_name:
+                        pjobs_by_variable.setdefault(variable_name, set()).add(pjob_name)
+            for variable_name, pjob_names in pjobs_by_variable.items():
+                target_pjobs = declared_pjobs & pjob_names
+                if not target_pjobs and len(pjob_names) == 1:
+                    target_pjobs = set(pjob_names)
+                for pjob_name in target_pjobs:
+                    self.pjob_wac_counters[(station_name, pjob_name, variable_name)] = float(
+                        station.state_variables.get(variable_name, 0.0)
+                    )
+
+    def uses_pjob_scoped_wac(self, station: StationState) -> bool:
+        """判断 PM 的 WAC 是否应按 PJob 独立累计。
+
+        单腔 ``Process`` / ``ProcessChamber`` 的产品依次进入同一物理槽位，WAC
+        周期属于各 PJob；双腔/多槽 PM 的两片工艺共享同一次腔室周期，继续使用
+        原有的腔室全局计数。
+        """
+        station_type = station.station_type.casefold()
+        return (
+            "process" in station_type
+            and station_type != LOAD_LOCK_TYPE
+            and not _is_paired_process_chamber(station)
+        )
+
+    def is_wac_counter_variable(self, station_name: str, variable_name: str) -> bool:
+        """返回状态变量是否被当前代任一 WAC 规则引用。"""
+        return any(
+            rule_variable_name == variable_name
+            for (rule_station_name, _recipe_name), rules in self.clean_wac_trigger_rules.items()
+            if rule_station_name == station_name
+            for _pjob_name, rule_variable_name, _lower, _task_name in rules
+        )
+
+    def wac_counter_value(
+        self,
+        station: StationState,
+        pjob_name: str,
+        variable_name: str,
+    ) -> float:
+        """读取当前 PJob 或腔室全局的 WAC 计数。"""
+        if not (
+            pjob_name
+            and self.uses_pjob_scoped_wac(station)
+            and self.is_wac_counter_variable(station.name, variable_name)
+        ):
+            return float(station.state_variables.get(variable_name, 0.0))
+        return self.pjob_wac_counters.get((station.name, pjob_name, variable_name), 0.0)
+
+    def add_wac_counter(
+        self,
+        station: StationState,
+        pjob_name: str,
+        variable_name: str,
+        increment: float,
+    ) -> None:
+        """增加 WAC 计数，并把单腔最近 PJob 值投影到兼容状态变量。"""
+        if not (
+            pjob_name
+            and self.uses_pjob_scoped_wac(station)
+            and self.is_wac_counter_variable(station.name, variable_name)
+        ):
+            station.state_variables[variable_name] = (
+                station.state_variables.get(variable_name, 0.0) + increment
+            )
+            return
+        key = (station.name, pjob_name, variable_name)
+        value = self.pjob_wac_counters.get(key, 0.0) + increment
+        self.pjob_wac_counters[key] = value
+        # 标准实时快照没有按 PJob 表达 Counter 的字段，保留最近使用 PJob 的值，
+        # 同时由独立账本保证平台校验和跨代回放不混计。
+        station.state_variables[variable_name] = value
+
+    def reset_wac_counter(
+        self,
+        station: StationState,
+        pjob_names: Sequence[str],
+        variable_name: str,
+    ) -> None:
+        """归零 WAC 清洁关联的 PJob 计数或双腔全局计数。"""
+        names = [name for name in pjob_names if name]
+        if (
+            names
+            and self.uses_pjob_scoped_wac(station)
+            and self.is_wac_counter_variable(station.name, variable_name)
+        ):
+            for pjob_name in names:
+                self.pjob_wac_counters[(station.name, pjob_name, variable_name)] = 0.0
+            station.state_variables[variable_name] = 0.0
+            return
+        station.state_variables[variable_name] = 0.0
 
     def refresh_validation_metadata(
         self,
@@ -2035,13 +2159,35 @@ def _start_process(state: MachineState, move: Mapping[str, Any], end_time: float
             or move.get("CleanRecipe")
             or ""
         )
+        product_pjob_names = {
+            str(material.pjob_name or "").strip()
+            for _slot, material, _slot_id in targets
+            if material is not None and str(material.pjob_name or "").strip()
+        }
+        if not product_pjob_names:
+            product_pjob_names = {
+                str(pjob_name).strip()
+                for pjob_name in _values(move, "PJobName")
+                if str(pjob_name).strip()
+            }
         for variable_name, increment in state.process_recipe_weights.get(
             (station.name, recipe_name),
             {},
         ).items():
-            station.state_variables[variable_name] = (
-                station.state_variables.get(variable_name, 0.0) + increment
-            )
+            if (
+                state.uses_pjob_scoped_wac(station)
+                and state.is_wac_counter_variable(station.name, variable_name)
+                and product_pjob_names
+            ):
+                for pjob_name in sorted(product_pjob_names):
+                    state.add_wac_counter(
+                        station,
+                        pjob_name,
+                        variable_name,
+                        increment,
+                    )
+            else:
+                state.add_wac_counter(station, "", variable_name, increment)
         clean_task_name = str(move.get("CleanTaskName") or "")
         if clean_task_name:
             for pjob_name in _values(move, "PJobName"):
@@ -2064,7 +2210,11 @@ def _start_process(state: MachineState, move: Mapping[str, Any], end_time: float
                 clean_task_name,
                 set(),
             ):
-                station.state_variables[variable_name] = 0.0
+                state.reset_wac_counter(
+                    station,
+                    [str(name).strip() for name in _values(move, "PJobName")],
+                    variable_name,
+                )
 
     _schedule(scheduled, move, end_time, complete)
     return None
