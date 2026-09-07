@@ -1912,6 +1912,23 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertEqual(12, process_visit["QTimeLimit"])
         self.assertEqual(34, process_visit["ResidencyConstraint"])
 
+    def test_aligner_route_step_always_requires_process(self) -> None:
+        """AlgSchedule 中包含 Aligner 的 Step 必须下发 NeedProcess。"""
+        route = {
+            "name": "AlignRoute",
+            "stages": [
+                {"needProcess": False, "visits": [{"stationName": "LP1", "slotIds": "1"}]},
+                {"needProcess": False, "visits": [{"stationName": "ATR", "slotIds": "1"}]},
+                {"needProcess": False, "visits": [{"stationName": "Aligner1", "slotIds": "1"}]},
+                {"needProcess": False, "visits": [{"stationName": "ATR", "slotIds": "1"}]},
+                {"needProcess": False, "visits": [{"stationName": "LP1", "slotIds": "1"}]},
+            ],
+        }
+
+        built = build_route(route, {}, {}, {"ATR"})
+
+        self.assertTrue(built["RouteSteps"][2]["NeedProcess"])
+
     def test_route_default_slot_expands_for_dual_chamber_and_multi_slot_robot(self) -> None:
         """手动 Route 的默认槽位应按 PM 容量和 Arm 手槽容量一并展开。"""
         route = {
