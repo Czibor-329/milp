@@ -685,6 +685,48 @@ function isDummyPortName(name: string): boolean {
   return /DUMMY/i.test(name) && /PORT/i.test(name);
 }
 
+/**
+ * 拆分 ``DummyPort.3`` / ``LP1.1`` 这类来源标识。
+ *
+ * 最后一个点号后的片段视为槽位；没有槽位时只返回模块名。
+ */
+function splitWaferOrigin(origin: string): { moduleName: string; slotLabel: string } {
+  const trimmed = origin.trim();
+  const separator = trimmed.lastIndexOf(".");
+  if (separator <= 0 || separator === trimmed.length - 1) {
+    return { moduleName: trimmed, slotLabel: "" };
+  }
+  return {
+    moduleName: trimmed.slice(0, separator),
+    slotLabel: trimmed.slice(separator + 1),
+  };
+}
+
+/** 根据首次来源判断晶圆是否来自 Dummy Port。 */
+function isDummyWaferOrigin(origin: string): boolean {
+  const { moduleName } = splitWaferOrigin(origin);
+  return Boolean(moduleName) && isDummyPortName(moduleName);
+}
+
+/** 与计划构建一致：Dummy 物料 ID 从 100000 起编号。 */
+const DUMMY_MATERIAL_ID_START = 100000;
+
+/** 根据首次来源或物料编号判断是否是 Dummy 晶圆。 */
+function isDummyWafer(wafer: string, origin: string): boolean {
+  if (isDummyWaferOrigin(origin)) return true;
+  const materialId = Number(wafer);
+  return Number.isInteger(materialId) && materialId >= DUMMY_MATERIAL_ID_START;
+}
+
+/**
+ * 晶圆表面展示文案：生产片保留 ``LP1.1``，Dummy 显示原始物料 ID，避免 ``DummyPort.xx``。
+ */
+function waferSurfaceLabel(wafer: string, origin: string): string {
+  if (isDummyWafer(wafer, origin) && wafer) return wafer;
+  if (!origin) return "来源未知";
+  return origin;
+}
+
 /** 判断站点是否是大气侧的简易缓存。 */
 function isBufferModule(name: string, type = ""): boolean {
   return type.trim().toLowerCase() === "buffer" || /^BUF(?:FER)?(?:[_-]?\w+)?$/i.test(name.trim());
@@ -1886,7 +1928,7 @@ function expandDualProcessChambers(modules: ModuleSnapshot[]): DualChamberView[]
   return expanded;
 }
 
-/** 绘制晶圆来源位置；外圈由当前腔室加工进度驱动，标签只显示 LPi.i 等位置标识。 */
+/** 绘制晶圆来源位置；外圈由当前腔室加工进度驱动。生产片显示 LPi.i，Dummy 显示原始物料 ID。 */
 function renderWaferToken(
   wafer: string,
   origin: string,
@@ -1896,7 +1938,9 @@ function renderWaferToken(
   const normalizedProgress = Math.max(0, Math.min(1, progress));
   const state = processed ? "processed" : "unprocessed";
   const originLabel = origin || "来源未知";
-  return `<span class="wafer-token wafer-${state}" style="--wafer-progress:${normalizedProgress * 360}deg" title="晶圆 ${escapeHtml(wafer)}，来源 ${escapeHtml(originLabel)}，${processed ? "已加工" : "未加工"}"><span><b class="wafer-origin-label">${escapeHtml(originLabel)}</b></span></span>`;
+  const surfaceLabel = waferSurfaceLabel(wafer, origin);
+  const dummyClass = isDummyWafer(wafer, origin) ? " wafer-dummy" : "";
+  return `<span class="wafer-token wafer-${state}${dummyClass}" style="--wafer-progress:${normalizedProgress * 360}deg" title="晶圆 ${escapeHtml(wafer)}，来源 ${escapeHtml(originLabel)}，${processed ? "已加工" : "未加工"}"><span><b class="wafer-origin-label">${escapeHtml(surfaceLabel)}</b></span></span>`;
 }
 
 /** 门始终朝向对应机械手；LoadLock 的上下门由俯视结构单独表达。 */
@@ -1960,7 +2004,10 @@ function visibleModuleSlots(module: ModuleSnapshot, kind: "port" | "lock" | "coo
 }
 
 /** 绘制左侧独立的正视槽位区；模块按类型分行，槽位高度随数量自然延展。 */
-export function renderFrontSlotOverview(modules: ModuleSnapshot[]): string {
+export function renderFrontSlotOverview(
+  modules: ModuleSnapshot[],
+  waferOrigins: Readonly<Record<string, string>> = {},
+): string {
   const visibleModules = modules.filter(module => !isTopologyHiddenModule(module));
   type FrontSlotModule = { module: ModuleSnapshot; kind: "port" | "lock" | "cooler" };
   const moduleNameOrder = (left: FrontSlotModule, right: FrontSlotModule): number => {
@@ -1997,11 +2044,15 @@ export function renderFrontSlotOverview(modules: ModuleSnapshot[]): string {
   const renderSlots = (slots: LoadPortSlotSnapshot[], module: ModuleSnapshot): string => (
     slots.map(slot => {
       const state = !slot.wafer ? "empty" : slot.processed ? "processed" : "unprocessed";
+      const dummy = Boolean(slot.wafer) && isDummyWafer(
+        slot.wafer,
+        waferOrigins[slot.wafer] ?? `${module.name}.${slot.slot}`,
+      );
       const identity = `${module.name}.${slot.slot}`;
       const detail = slot.wafer
         ? `${identity} · 晶圆 ${slot.wafer}，${slot.processed ? "已加工" : "未加工"}`
         : `${identity} · 空槽`;
-      return `<span class="front-slot is-${state}" tabindex="0" title="${escapeHtml(detail)}" aria-label="${escapeHtml(detail)}"></span>`;
+      return `<span class="front-slot is-${state}${dummy ? " is-dummy" : ""}" tabindex="0" title="${escapeHtml(detail)}" aria-label="${escapeHtml(detail)}"></span>`;
     }).join("")
   );
   if (!slotRows.length) return "";
@@ -4289,7 +4340,10 @@ export class VisualizationWorkspace {
     const topologyCanvas = this.elements.stage.querySelector<HTMLElement>(".reference-grid-canvas");
     const canvasHeight = topologyCanvas?.style.getPropertyValue("--topology-canvas-height") ?? "";
     this.elements.frontSlotOverview.style.setProperty("--topology-canvas-height", canvasHeight);
-    this.elements.frontSlotOverview.innerHTML = renderFrontSlotOverview(topologySnapshot.modules);
+    this.elements.frontSlotOverview.innerHTML = renderFrontSlotOverview(
+      topologySnapshot.modules,
+      topologySnapshot.waferOrigins,
+    );
     const requestState = this.pendingReplayDecisionKeys.has(replayKey)
       ? "loading"
       : this.replayDecisionErrorKey === replayKey ? "error" : "idle";

@@ -73,7 +73,47 @@ test("拓扑晶圆标签保留 ID 并显示首次来源模块和槽位", () => {
 
   assert.equal(snapshot.waferOrigins.W1, "LP1.1");
   const markup = logic.renderEquipmentTopology(snapshot, null, new Set(), device);
-  assert.match(markup, /<b>W1<\/b><small>LP1\.1<\/small>/);
+  assert.match(markup, /class="wafer-origin-label">LP1\.1</);
+  assert.doesNotMatch(markup, /wafer-dummy/);
+});
+
+test("Dummy 晶圆使用独立颜色，表面显示原始物料 ID", () => {
+  const dummyDevice = {
+    ...device,
+    Stations: {
+      ...device.Stations,
+      DummyPort: { Type: "DummyPort" },
+    },
+  };
+  const snapshot = logic.buildWorkspaceSnapshot([
+    {
+      MoveID: 1, MoveType: 0, ModuleName: "ATR", SrcStationList: ["DummyPort"],
+      SrcSlotList: [1], MatIDList: ["100000"], StartTime: 0, EndTime: 1,
+    },
+    {
+      MoveID: 2, MoveType: 1, ModuleName: "ATR", DestStationList: ["PM1"],
+      DestSlotList: [1], MatIDList: ["100000"], StartTime: 1, EndTime: 2,
+    },
+  ], dummyDevice, 2);
+
+  assert.equal(snapshot.waferOrigins["100000"], "DummyPort.1");
+  const markup = logic.renderEquipmentTopology(snapshot, null, new Set(), dummyDevice);
+  assert.match(markup, /class="wafer-token wafer-unprocessed wafer-dummy"/);
+  assert.match(markup, /class="wafer-origin-label">100000</);
+  assert.doesNotMatch(markup, /class="wafer-origin-label">DummyPort\.1</);
+  assert.match(markup, /title="晶圆 100000，来源 DummyPort\.1/);
+  assert.match(frontendCss, /--sim-dummy:\s*#6d28d9/);
+  assert.match(frontendCss, /\.wafer-token\.wafer-dummy/);
+  assert.match(frontendCss, /\.front-slot\.is-dummy\.is-unprocessed::after \{ background: #6d28d9; \}/);
+
+  const parked = logic.buildWorkspaceSnapshot([
+    {
+      MoveID: 1, MoveType: 0, ModuleName: "ATR", SrcStationList: ["DummyPort"],
+      SrcSlotList: [1], MatIDList: ["100000"], StartTime: 1, EndTime: 2,
+    },
+  ], dummyDevice, 0);
+  const frontSlots = logic.renderFrontSlotOverview(parked.modules, parked.waferOrigins);
+  assert.match(frontSlots, /front-slot is-unprocessed is-dummy/);
 });
 
 const deadlockStage = (stepId, stationName, postStepIds = []) => ({

@@ -426,6 +426,32 @@ function robotCapacity(definition, holdingCount = 0) {
 function isDummyPortName(name) {
   return /DUMMY/i.test(name) && /PORT/i.test(name);
 }
+function splitWaferOrigin(origin) {
+  const trimmed = origin.trim();
+  const separator = trimmed.lastIndexOf(".");
+  if (separator <= 0 || separator === trimmed.length - 1) {
+    return { moduleName: trimmed, slotLabel: "" };
+  }
+  return {
+    moduleName: trimmed.slice(0, separator),
+    slotLabel: trimmed.slice(separator + 1)
+  };
+}
+function isDummyWaferOrigin(origin) {
+  const { moduleName } = splitWaferOrigin(origin);
+  return Boolean(moduleName) && isDummyPortName(moduleName);
+}
+var DUMMY_MATERIAL_ID_START = 1e5;
+function isDummyWafer(wafer, origin) {
+  if (isDummyWaferOrigin(origin)) return true;
+  const materialId = Number(wafer);
+  return Number.isInteger(materialId) && materialId >= DUMMY_MATERIAL_ID_START;
+}
+function waferSurfaceLabel(wafer, origin) {
+  if (isDummyWafer(wafer, origin) && wafer) return wafer;
+  if (!origin) return "\u6765\u6E90\u672A\u77E5";
+  return origin;
+}
 function isBufferModule(name, type = "") {
   return type.trim().toLowerCase() === "buffer" || /^BUF(?:FER)?(?:[_-]?\w+)?$/i.test(name.trim());
 }
@@ -1309,7 +1335,9 @@ function renderWaferToken(wafer, origin, progress, processed = false) {
   const normalizedProgress = Math.max(0, Math.min(1, progress));
   const state = processed ? "processed" : "unprocessed";
   const originLabel = origin || "\u6765\u6E90\u672A\u77E5";
-  return `<span class="wafer-token wafer-${state}" style="--wafer-progress:${normalizedProgress * 360}deg" title="\u6676\u5706 ${escapeHtml(wafer)}\uFF0C\u6765\u6E90 ${escapeHtml(originLabel)}\uFF0C${processed ? "\u5DF2\u52A0\u5DE5" : "\u672A\u52A0\u5DE5"}"><span><b class="wafer-origin-label">${escapeHtml(originLabel)}</b></span></span>`;
+  const surfaceLabel = waferSurfaceLabel(wafer, origin);
+  const dummyClass = isDummyWafer(wafer, origin) ? " wafer-dummy" : "";
+  return `<span class="wafer-token wafer-${state}${dummyClass}" style="--wafer-progress:${normalizedProgress * 360}deg" title="\u6676\u5706 ${escapeHtml(wafer)}\uFF0C\u6765\u6E90 ${escapeHtml(originLabel)}\uFF0C${processed ? "\u5DF2\u52A0\u5DE5" : "\u672A\u52A0\u5DE5"}"><span><b class="wafer-origin-label">${escapeHtml(surfaceLabel)}</b></span></span>`;
 }
 function moduleDoorSides(module2, role, layout = "single", roleIndex = 0, attachmentId = "") {
   if (module2.door === "doorless") return [];
@@ -1370,7 +1398,7 @@ function visibleModuleSlots(module2, kind) {
     processed: module2.processedWafers.includes(module2.wafers[index] ?? "")
   }));
 }
-function renderFrontSlotOverview(modules) {
+function renderFrontSlotOverview(modules, waferOrigins = {}) {
   const visibleModules = modules.filter((module2) => !isTopologyHiddenModule(module2));
   const moduleNameOrder = (left, right) => {
     const leftName = left.module.name.trim();
@@ -1393,9 +1421,13 @@ function renderFrontSlotOverview(modules) {
   ].filter((row) => row.length);
   const renderSlots = (slots, module2) => slots.map((slot) => {
     const state = !slot.wafer ? "empty" : slot.processed ? "processed" : "unprocessed";
+    const dummy = Boolean(slot.wafer) && isDummyWafer(
+      slot.wafer,
+      waferOrigins[slot.wafer] ?? `${module2.name}.${slot.slot}`
+    );
     const identity = `${module2.name}.${slot.slot}`;
     const detail = slot.wafer ? `${identity} \xB7 \u6676\u5706 ${slot.wafer}\uFF0C${slot.processed ? "\u5DF2\u52A0\u5DE5" : "\u672A\u52A0\u5DE5"}` : `${identity} \xB7 \u7A7A\u69FD`;
-    return `<span class="front-slot is-${state}" tabindex="0" title="${escapeHtml(detail)}" aria-label="${escapeHtml(detail)}"></span>`;
+    return `<span class="front-slot is-${state}${dummy ? " is-dummy" : ""}" tabindex="0" title="${escapeHtml(detail)}" aria-label="${escapeHtml(detail)}"></span>`;
   }).join("");
   if (!slotRows.length) return "";
   const renderModule2 = ({ module: module2, kind }) => {
@@ -3047,7 +3079,10 @@ var VisualizationWorkspace = class {
     const topologyCanvas = this.elements.stage.querySelector(".reference-grid-canvas");
     const canvasHeight = topologyCanvas?.style.getPropertyValue("--topology-canvas-height") ?? "";
     this.elements.frontSlotOverview.style.setProperty("--topology-canvas-height", canvasHeight);
-    this.elements.frontSlotOverview.innerHTML = renderFrontSlotOverview(topologySnapshot.modules);
+    this.elements.frontSlotOverview.innerHTML = renderFrontSlotOverview(
+      topologySnapshot.modules,
+      topologySnapshot.waferOrigins
+    );
     const requestState = this.pendingReplayDecisionKeys.has(replayKey) ? "loading" : this.replayDecisionErrorKey === replayKey ? "error" : "idle";
     this.elements.decisionLens.innerHTML = renderDecisionLens(
       currentDecision,
