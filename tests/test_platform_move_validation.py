@@ -1985,6 +1985,60 @@ def test_cascade_dbr_open_pressure_uses_preprepare_side_mapping() -> None:
     assert replay.state.stations["DBR"].environment == VACUUM
 
 
+def test_cascade_loadlock_omits_zero_duration_preprepare() -> None:
+    """DBR/UBR 零时长抽充气省略 Move 后仍应切换压力态并允许 Pick。
+
+    标准算法会省略零时长 ``PrePrepareMove``。级联 LoadLock 不能因此保留
+    旧压力态，否则 VTR_2 随后的开门和 Pick 会被错误拒绝。
+    """
+    update = _cascade_dbr_update()
+    transitions = update["Stations"]["DBR"]["PrePrepareTime"]
+    transitions[0]["Time"] = 0.0
+    transitions[1]["Time"] = 0.0
+    moves = [
+        # 初态为 VTR_1 侧；省略 VTR_1→VTR_2 的零时长 Pump。
+        _move(1, 6, 0, 1, ModuleName="DBR", RelatedRobotType=2),
+        _move(
+            2,
+            0,
+            1,
+            2,
+            ModuleName="VTR_2",
+            MatIDList=[1],
+            SrcStationList=["DBR"],
+            SrcSlotList=[1],
+            RobotSlotList=[1],
+            StepIDList=[5],
+        ),
+        _move(3, 7, 2, 3, ModuleName="DBR"),
+        # 省略 VTR_2→VTR_1 的零时长 Vent；下一条 Pump 应先补齐该状态。
+        _move(
+            4,
+            10,
+            3,
+            3,
+            ModuleName="DBR",
+            LastState="VTR_1",
+            CurState="VTR_2",
+            MatIDList=[],
+        ),
+    ]
+
+    assert validate_move_list(None, moves, update) == []
+
+    replay = MoveStateReplay(None, moves, update)
+    for move in moves:
+        replay.update_move_state(
+            {"MoveID": move["MoveID"], "MoveState": MoveStateReplay.RUNNING},
+            snapshot=False,
+        )
+        replay.update_move_state(
+            {"MoveID": move["MoveID"], "MoveState": MoveStateReplay.DONE},
+            snapshot=False,
+        )
+    assert replay.state.stations["DBR"].environment == VACUUM
+
+
 def test_platform_rejects_slot_list_on_pick_move() -> None:
     """平台校验器应拒绝 PickMove 上错误的通用 SlotList 字段。"""
     move = _move(

@@ -179,6 +179,10 @@ class LoadLockState(StationState):
     #: 可与其初始压力态不符（如初始大气却先发 VentTime，或级联 LL 从 ATR_1 起始），
     #: 豁免放行并照常执行、落地到 CurState；后续违例照常报错。
     environment_exemption_used: bool = False
+    #: 设备明确声明、允许由算法省略 Move 的零时长压力转换（标准 ATM/VAC 态对）。
+    zero_duration_environment_transitions: Set[Tuple[str, str]] = field(
+        default_factory=set
+    )
 
 
 @dataclass
@@ -282,6 +286,9 @@ class MachineState:
                     environment=_environment_from_last_item(str(config.get("LastItem") or ""), aliases),
                     environment_aliases=aliases,
                     environment_state_space=_environment_state_space(config),
+                    zero_duration_environment_transitions=(
+                        _zero_duration_environment_transitions(config)
+                    ),
                     state_variables=_station_state_variables(config),
                 )
             else:
@@ -1354,6 +1361,103 @@ def _is_omitted_zero_duration_process(
     ) in state.zero_duration_process_steps
 
 
+def _zero_duration_environment_transitions(
+    station_config: Mapping[str, Any],
+) -> Set[Tuple[str, str]]:
+    """提取设备明确配置为零时长、可省略的 LoadLock 压力转换。
+
+    算法协议允许省略没有实际时长的 ``PrePrepareMove``。这里只接受
+    ``PumpTime``、``VentTime`` 或 ``PrePrepareTime[].Time`` 的显式零值，
+    缺失时长绝不推断为零，避免放宽普通的压力态转换校验。
+    """
+    transitions: Set[Tuple[str, str]] = set()
+
+    def add_if_zero(
+        raw_duration: Any,
+        source: str,
+        target: str,
+    ) -> None:
+        """在时长是有限零值时登记一条标准压力态转换。"""
+        try:
+            duration = float(raw_duration)
+        except (TypeError, ValueError):
+            return
+        if math.isfinite(duration) and abs(duration) <= TIME_TOLERANCE:
+            transitions.add((source, target))
+
+    if station_config.get("PumpTime") is not None:
+        add_if_zero(station_config.get("PumpTime"), ATMOSPHERE, VACUUM)
+    if station_config.get("VentTime") is not None:
+        add_if_zero(station_config.get("VentTime"), VACUUM, ATMOSPHERE)
+    for item in station_config.get("PrePrepareTime") or ():
+        if not isinstance(item, Mapping):
+            continue
+        transition_type = str(item.get("PrePrepareType") or "").strip().lower()
+        if transition_type.startswith("pump"):
+            add_if_zero(item.get("Time"), ATMOSPHERE, VACUUM)
+        elif transition_type.startswith("vent"):
+            add_if_zero(item.get("Time"), VACUUM, ATMOSPHERE)
+    return transitions
+
+
+def _complete_omitted_zero_duration_preprepare(
+    station: LoadLockState,
+    target_environment: str,
+) -> bool:
+    """在可证明的零时长转换被省略时同步压力态和待加工晶圆。
+
+    返回 ``True`` 表示已经补齐一次省略的转换。真实 PrePrepare 的完成语义会
+    把当前 LoadLock 内的 ``UNPROCESSED`` 晶圆更新为可 Pick；省略时必须保留
+    相同效果，否则级联 DBR/UBR 会留下无法取出的晶圆。
+    """
+    transition = (station.environment, target_environment)
+    if transition not in station.zero_duration_environment_transitions:
+        return False
+    station.environment = target_environment
+    station.last_environment_transition_was_empty = not any(
+        slot.material is not None for slot in station.slots.values()
+    )
+    for slot in station.slots.values():
+        if slot.material is not None and slot.phase is SlotPhase.UNPROCESSED:
+            _set_slot(slot, SlotPhase.COMPLETED, slot.material)
+    return True
+
+
+def _complete_ready_loadlock_outbound_slots(
+    station: LoadLockState,
+    prepare_move: Mapping[str, Any],
+    related_move: Optional[Mapping[str, Any]],
+) -> None:
+    """在已处于出片压力侧时完成无需 Pump/Vent 的 LoadLock 出片槽位。
+
+    LoadLock 没有独立产品加工。晶圆放入后若该锁已经处于后续出片所需
+    压力侧，算法会省略零时长 Process/PrePrepare；本函数只在 Prepare 已完成
+    压力态校验且关联动作为 Pick/Swap 时补齐同一状态语义，绝不放宽非
+    LoadLock 或压力不匹配的访问。
+    """
+    related_action = prepare_move.get("RelatedActionType")
+    is_pick = related_action == 1 or (
+        related_move is not None
+        and related_move.get("MoveType") in {PICK_MOVE, MULTI_PICK_MOVE}
+    )
+    is_swap = related_action == 2 or (
+        related_move is not None and related_move.get("MoveType") == SWAP_MOVE
+    )
+    if not is_pick and not is_swap:
+        return
+    slot_ids = (
+        _integer_values(related_move, "StnSendSlotList")
+        if is_swap and related_move is not None
+        else _integer_values(prepare_move, "SlotList")
+    )
+    if is_pick and not slot_ids and related_move is not None:
+        slot_ids = _integer_values(related_move, "SrcSlotList")
+    for slot_id in slot_ids:
+        slot = station.slots.get(slot_id)
+        if slot is not None and slot.phase is SlotPhase.UNPROCESSED:
+            _set_slot(slot, SlotPhase.COMPLETED, slot.material)
+
+
 def _start_pick(state: MachineState, move: Mapping[str, Any], end_time: float, _all_moves: Sequence[Mapping[str, Any]], scheduled: List[_ScheduledCompletion]) -> Optional[str]:
     """校验并执行可包含多片晶圆的原子 Pick。"""
     robot = _robot(state, move)
@@ -1610,12 +1714,15 @@ def _start_prepare(state: MachineState, move: Mapping[str, Any], end_time: float
         related = _related_move(move, all_moves)
         expected = _required_environment(state, station, move, related)
         if expected is not None and station.environment != expected:
+            _complete_omitted_zero_duration_preprepare(station, expected)
+        if expected is not None and station.environment != expected:
             return _issue(
                 move,
                 ValidationErrorCode.LOADLOCK_ENVIRONMENT_INVALID,
                 f"{station.name}.CurState为{_environment_label(station, expected)}，不是{_environment_label(station, station.environment)}",
             )
         station.last_environment_transition_was_empty = False
+        _complete_ready_loadlock_outbound_slots(station, move, related)
     station.door_busy_until = end_time
     _schedule(scheduled, move, end_time, lambda: setattr(station, "door", DoorState.OPEN))
     return None
@@ -1904,6 +2011,11 @@ def _start_preprepare(state: MachineState, move: Mapping[str, Any], end_time: fl
         return _issue(move, ValidationErrorCode.STATION_ENVIRONMENT_BUSY, f"{station.name} 正在切换环境")
     last_state = _environment_state(station, move.get("LastState"))
     current_state = _environment_state(station, move.get("CurState"))
+    if (
+        last_state in {ATMOSPHERE, VACUUM}
+        and station.environment != last_state
+    ):
+        _complete_omitted_zero_duration_preprepare(station, last_state)
     raw_last = str(move.get("LastState") or "").strip().upper()
     raw_current = str(move.get("CurState") or "").strip().upper()
     # 严格状态空间：配置了 PrePrepareTime 时，LastState/CurState 原始标签必须在该 LoadLock 声明内。
