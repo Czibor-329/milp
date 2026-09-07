@@ -10,6 +10,9 @@ from __future__ import annotations
 from realtime_scheduler.backend.bootstrap import *
 from realtime_scheduler.backend.execution.run_state import *
 from realtime_scheduler.backend.execution.move_timing import execution_duration
+from realtime_scheduler.backend.execution.runtime_snapshot import (
+    expand_runtime_snapshots_for_validation,
+)
 
 
 class PlatformMoveListRuntime:
@@ -42,7 +45,10 @@ class PlatformMoveListRuntime:
         self.device = deepcopy(dict(device or {}))
         self.execution_timing = deepcopy(dict(execution_timing or {}))
         self.execution_timing_seed = int(execution_timing_seed)
-        initial_state = MachineState.from_sources(None, self.current_update)
+        initial_state = MachineState.from_sources(
+            None,
+            expand_runtime_snapshots_for_validation(self.device, self.current_update),
+        )
         initial_state.skipped_clean_validation_types = set(self.skipped_clean_validation_types)
         initial_moves = deepcopy(list(output.get("MoveList") or []))
         if self.compatibility_mode:
