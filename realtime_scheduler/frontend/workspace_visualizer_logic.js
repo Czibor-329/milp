@@ -1380,9 +1380,9 @@ function renderFrontSlotOverview(modules) {
   const loadLocks = visibleModules.filter((module2) => isLoadLockName(module2.name, module2.type)).map((module2) => ({ module: module2, kind: "lock" })).sort(moduleNameOrder);
   const splitRows = (items, columns) => Array.from({ length: Math.ceil(items.length / columns) }, (_, index) => items.slice(index * columns, (index + 1) * columns));
   const slotRows = [
+    ...splitRows(loadLocks, 2),
     ...splitRows(loadPorts, 2),
-    ...splitRows(coolers, 2),
-    ...splitRows(loadLocks, 2)
+    ...splitRows(coolers, 2)
   ].filter((row) => row.length);
   const renderSlots = (slots, module2) => slots.map((slot) => {
     const state = !slot.wafer ? "empty" : slot.processed ? "processed" : "unprocessed";
@@ -2149,6 +2149,14 @@ function renderEquipmentTopology(snapshot, decision, hiddenFilters, device) {
   return `
     <section class="equipment-schematic" data-topology-layout="${layout}" aria-label="\u5B8C\u6574\u8BBE\u5907\u62D3\u6251\u56DE\u653E">
       <div class="schematic-canvas reference-grid-canvas" style="--topology-canvas-height:${canvasHeight}px">
+        <div class="topology-status-legend" role="group" aria-label="\u56DE\u653E\u72B6\u6001\u56FE\u4F8B">
+          <span><i class="topology-status-legend-processing"></i>\u52A0\u5DE5</span>
+          <span><i class="topology-status-legend-pumping"></i>\u62BD\u6C14</span>
+          <span><i class="topology-status-legend-venting"></i>\u5145\u6C14</span>
+          <span><i class="topology-status-legend-cleaning"></i>\u6E05\u6D01</span>
+          <span><i class="topology-status-legend-transfer"></i>\u4F20\u8F93</span>
+          <span><i class="topology-status-legend-door"></i>\u95E8\u52A8\u4F5C</span>
+        </div>
         ${machineAreaMarkup}
         ${machineFrameMarkup}
         ${attachmentPointMarkup}
@@ -2218,11 +2226,7 @@ function renderDecisionLens(decision, requestState = "idle", requestError = "", 
   const counts = decision.actionCounts;
   const provider = decision.actionDiagnosticsSource === "algorithm" ? `\u7B97\u6CD5\u63A5\u53E3 \xB7 ${decision.actionDiagnosticsProvider || "\u672A\u547D\u540D\u5B9E\u73B0"}` : "\u7B97\u6CD5\u672A\u63D0\u4F9B\u52A8\u4F5C\u63A5\u53E3";
   return `
-    <section class="decision-candidate-section" aria-labelledby="decisionCandidatesTitle">
-      <header>
-        <strong id="decisionCandidatesTitle">\u52A8\u4F5C\u72B6\u6001 <small>@ ${formatSeconds(decision.time)}s</small></strong>
-        <span>${escapeHtml(provider)}</span>
-      </header>
+    <section class="decision-candidate-section" aria-label="\u5F53\u524D\u5408\u6CD5\u52A8\u4F5C">
       <p class="action-count-summary">\u4F7F\u80FD ${counts.enabled} \xB7 \u7269\u7406\u62E6\u622A ${counts["physical-blocked"]} \xB7 \u6B7B\u9501\u62E6\u622A ${counts["deadlock-blocked"]}</p>
       ${cards ? `<ul>${cards}</ul>` : '<p class="decision-alternative-empty">\u5F53\u524D\u7B5B\u9009\u6761\u4EF6\u4E0B\u6CA1\u6709\u52A8\u4F5C</p>'}
     </section>`;
@@ -3021,6 +3025,9 @@ var VisualizationWorkspace = class {
       void 0,
       this.device
     );
+    const topologyCanvas = this.elements.stage.querySelector(".reference-grid-canvas");
+    const canvasHeight = topologyCanvas?.style.getPropertyValue("--topology-canvas-height") ?? "";
+    this.elements.frontSlotOverview.style.setProperty("--topology-canvas-height", canvasHeight);
     this.elements.frontSlotOverview.innerHTML = renderFrontSlotOverview(topologySnapshot.modules);
     const requestState = this.pendingReplayDecisionKeys.has(replayKey) ? "loading" : this.replayDecisionErrorKey === replayKey ? "error" : "idle";
     this.elements.decisionLens.innerHTML = renderDecisionLens(

@@ -1981,11 +1981,11 @@ export function renderFrontSlotOverview(modules: ModuleSnapshot[]): string {
   const splitRows = (items: FrontSlotModule[], columns: number): FrontSlotModule[][] => (
     Array.from({ length: Math.ceil(items.length / columns) }, (_, index) => items.slice(index * columns, (index + 1) * columns))
   );
-  /* LoadPort 两列换行，Cooler 与 LoadLock 分别保持为独立的设备类型行。 */
+  /* LoadLock 优先展示；LoadPort 两列换行，Cooler 与 LoadLock 分别保持为独立的设备类型行。 */
   const slotRows = [
+    ...splitRows(loadLocks, 2),
     ...splitRows(loadPorts, 2),
     ...splitRows(coolers, 2),
-    ...splitRows(loadLocks, 2),
   ].filter(row => row.length);
   const renderSlots = (slots: LoadPortSlotSnapshot[], module: ModuleSnapshot): string => (
     slots.map(slot => {
@@ -3148,6 +3148,14 @@ export function renderEquipmentTopology(
   return `
     <section class="equipment-schematic" data-topology-layout="${layout}" aria-label="完整设备拓扑回放">
       <div class="schematic-canvas reference-grid-canvas" style="--topology-canvas-height:${canvasHeight}px">
+        <div class="topology-status-legend" role="group" aria-label="回放状态图例">
+          <span><i class="topology-status-legend-processing"></i>加工</span>
+          <span><i class="topology-status-legend-pumping"></i>抽气</span>
+          <span><i class="topology-status-legend-venting"></i>充气</span>
+          <span><i class="topology-status-legend-cleaning"></i>清洁</span>
+          <span><i class="topology-status-legend-transfer"></i>传输</span>
+          <span><i class="topology-status-legend-door"></i>门动作</span>
+        </div>
         ${machineAreaMarkup}
         ${machineFrameMarkup}
         ${attachmentPointMarkup}
@@ -3243,11 +3251,7 @@ export function renderDecisionLens(
     ? `算法接口 · ${decision.actionDiagnosticsProvider || "未命名实现"}`
     : "算法未提供动作接口";
   return `
-    <section class="decision-candidate-section" aria-labelledby="decisionCandidatesTitle">
-      <header>
-        <strong id="decisionCandidatesTitle">动作状态 <small>@ ${formatSeconds(decision.time)}s</small></strong>
-        <span>${escapeHtml(provider)}</span>
-      </header>
+    <section class="decision-candidate-section" aria-label="当前合法动作">
       <p class="action-count-summary">使能 ${counts.enabled} · 物理拦截 ${counts["physical-blocked"]} · 死锁拦截 ${counts["deadlock-blocked"]}</p>
       ${cards ? `<ul>${cards}</ul>` : '<p class="decision-alternative-empty">当前筛选条件下没有动作</p>'}
     </section>`;
@@ -4257,6 +4261,9 @@ export class VisualizationWorkspace {
       undefined,
       this.device,
     );
+    const topologyCanvas = this.elements.stage.querySelector<HTMLElement>(".reference-grid-canvas");
+    const canvasHeight = topologyCanvas?.style.getPropertyValue("--topology-canvas-height") ?? "";
+    this.elements.frontSlotOverview.style.setProperty("--topology-canvas-height", canvasHeight);
     this.elements.frontSlotOverview.innerHTML = renderFrontSlotOverview(topologySnapshot.modules);
     const requestState = this.pendingReplayDecisionKeys.has(replayKey)
       ? "loading"

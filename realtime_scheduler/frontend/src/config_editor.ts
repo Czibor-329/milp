@@ -161,22 +161,12 @@ let searchTelemetryRunActive = false;
 let searchTelemetryControlPending = false;
 let lastSearchTelemetryMoveCount = 0;
 let lastBatchItemsRenderSignature = "";
-/** 是否在步进模式下持续提交每一轮搜索的模型推荐动作。 */
 let continuousDecisionEnabled = false;
-/** 已由持续决策提交的 searchId；防止同一遥测帧被轮询重复提交。 */
 let continuousDecisionSubmittedSearchId = "";
-/** 拓扑回放页面的求解模式：回放模式连续求解，步进模式等待用户选择根动作。 */
 let playbackMode = "replay";
-/** 用户最近一次 choose 的根动作键；用于回放历史时高亮实际执行的动作。 */
 let userChosenActionKey = "";
-/** 用户最近一次 choose 对应的根决策 searchId；跨决策后不再沿用旧高亮。 */
 let userChosenSearchId = "";
-/** 控制请求在途时待补发的模式切换命令；避免前后端执行模式失步。 */
 let pendingModeSync = "";
-/** “运行模型步进”是否正在运行；运行中按钮变为停止入口。 */
-let stepRunActive = false;
-/** 停止请求是否已在途；避免重复发送。 */
-let stepRunCancelling = false;
 /** 普通单测通过 clientRunId 轮询真实 init/update/output 阶段。 */
 let singleRunActive = false;
 let singleRunCancelling = false;
@@ -1747,14 +1737,7 @@ function searchTelemetryStopReason(reason) {
 }
 
 /** 把一次 Alpha 决策的稳定动作链渲染成三张可展开候选卡片。 */
-function renderSearchActionChains(
-  chains,
-  decisionIndex,
-  recommendedKey,
-  selectedKey,
-  maximumVisits,
-  interactive,
-) {
+function renderSearchActionChains(chains, decisionIndex, recommendedKey, maximumVisits) {
   return `<section class="decision-candidate-section search-action-section" aria-labelledby="searchCandidatesTitle">
     <header>
       <strong id="searchCandidatesTitle">决策 #${decisionIndex}</strong>
@@ -1765,11 +1748,10 @@ function renderSearchActionChains(
         const visits = Number(chain?.visits) || 0;
         const visitPercent = Math.max(0, Math.min(100, visits / maximumVisits * 100));
         const isRecommended = String(chain?.actionKey || "") === recommendedKey;
-        const isSelected = String(chain?.actionKey || "") === selectedKey;
-        const tags = `${isRecommended ? '<span class="decision-tag is-recommendation">推荐</span>' : ""}${isSelected && !isRecommended ? '<span class="decision-tag is-user-chosen">你的选择</span>' : ""}`;
+        const tags = isRecommended ? '<span class="decision-tag is-recommendation">推荐</span>' : "";
         const description = String(chain?.description || "稳定动作链");
         const steps = Array.isArray(chain?.steps) ? chain.steps : [];
-        return `<li class="decision-candidate search-action-candidate search-action-chain ${isSelected ? "is-selected" : ""} ${interactive ? "is-interactive" : ""}" data-action-key="${escapeHtml(String(chain?.actionKey || ""))}" ${interactive ? `role="button" tabindex="0" aria-label="执行 ${escapeHtml(description)}"` : ""}>
+        return `<li class="decision-candidate search-action-candidate search-action-chain ${isRecommended ? "is-selected" : ""}">
           <div class="decision-candidate-rank" aria-label="第 ${index + 1} 名">${index + 1}</div>
           <div class="decision-candidate-main">
             <div class="decision-candidate-title"><strong title="${escapeHtml(description)}">${escapeHtml(description)}</strong>${tags}</div>
@@ -1793,23 +1775,14 @@ function renderSearchActionChains(
 function renderSearchTelemetryDecision(snapshot) {
   const chains = Array.isArray(snapshot?.actionChains) ? snapshot.actionChains.slice(0, 3) : [];
   const recommendedKey = String(snapshot?.selectedActionKey || "");
-  // 用户选择只作用于其提交时的那个根决策；跨决策或回看其他历史时沿用模型推荐。
-  const selectedKey = String(snapshot?.searchId || "") === userChosenSearchId
-    ? userChosenActionKey
-    : recommendedKey;
   const decisionIndex = Number(snapshot?.decisionIndex || 0) + 1;
-  const interactive = playbackMode === "step"
-    && latestSearchTelemetry?.status === "waiting-choice"
-    && String(snapshot?.searchId || "") === String(latestSearchTelemetry?.searchId || "");
   const maximumVisits = Math.max(1, ...chains.map(chain => Number(chain?.visits) || 0));
   document.getElementById("visualDecisionLens").innerHTML = chains.length
     ? renderSearchActionChains(
       chains,
       decisionIndex,
       recommendedKey,
-      selectedKey,
       maximumVisits,
-      interactive,
     )
     : `<div class="decision-empty"><strong>正在构造稳定动作链…</strong><p>只有在 50 层内回到 Robot 全部空手状态的链才会出现。</p></div>`;
 
@@ -1935,16 +1908,8 @@ async function flushPendingModeSync() {
   await setPlaybackMode(mode);
 }
 
-/** 切换回放/步进模式；运行中会同步后端执行模式。 */
-/** 同步回放/步进模式切换按钮的选中状态（不向后端发命令）。 */
-function renderPlaybackModeSwitch() {
-  const stepMode = playbackMode === "step";
-  document.getElementById("playbackModeReplayButton").classList.toggle("is-active", playbackMode === "replay");
-  document.getElementById("playbackModeStepButton").classList.toggle("is-active", stepMode);
-  document.getElementById("playbackModeReplayButton").setAttribute("aria-pressed", String(playbackMode === "replay"));
-  document.getElementById("playbackModeStepButton").setAttribute("aria-pressed", String(stepMode));
-  document.getElementById("visualPauseOnDecisionChangeButton").hidden = stepMode;
-}
+/** 已移除模式切换控件；搜索始终以连续模式启动。 */
+function renderPlaybackModeSwitch() {}
 
 /** 当持续决策开启时，为当前根决策恰好提交一次模型推荐动作。 */
 function maybeContinueModelDecision(snapshot) {
@@ -3883,8 +3848,8 @@ function buildPayload() {
   const cleans = state.cleans.map(runtimeClean);
   const options = { ...state.options };
   if (state.strategy === "search-tree") {
-    // 初始执行模式随回放/步进模式走，避免 update 启动时的会话重置覆盖用户选择。
-    options.searchTreeExecutionMode = playbackMode === "step" ? "stepped" : "continuous";
+    // 拓扑回放固定为连续求解，不再提供步进求解分支。
+    options.searchTreeExecutionMode = "continuous";
   }
   return { schemaVersion: EXPECTED_API_SCHEMA, workspaceDeviceId: state.workspaceDeviceId, workspaceTestId: state.testCaseId, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options, hongYeCheck: hongYeCheckEnabled(), compatibilityMode: compatibilityModeEnabled(), executionTimingEnabled: executionTimingEnabled(), skipBaseline: skipBaselineEnabled(), cleanValidationTypes: cleanValidationTypes(), recipes: collectRecipes(routes), cleans, routes, rounds: instances.rounds };
 }
@@ -4365,36 +4330,6 @@ async function runPlan() {
     singleRunActive = false; singleRunCancelling = false; activeSingleRunId = ""; singleRunAbortController = null;
     button.disabled = false; button.classList.remove("running", "cancel"); button.textContent = "▶ 运行当前测试"; renderWorkspaceControls();
   }
-}
-
-/** 以步进模式运行当前测试：运行中按钮变为停止入口，可随时终止耗时较长的搜索。 */
-async function runModelStepped() {
-  const stepButton = document.getElementById("stepRunButton");
-  if (stepButton.disabled) return;
-  if (stepRunActive) {
-    if (stepRunCancelling) return;
-    stepRunCancelling = true;
-    stepButton.disabled = true;
-    stepButton.textContent = "正在停止…";
-    writeTerminal("$ 正在停止模型步进运行…");
-    try {
-      await requestSearchControl("cancel");
-    } catch (error) {
-      stepRunCancelling = false;
-      stepButton.disabled = false;
-      stepButton.classList.add("cancel");
-      stepButton.textContent = "■ 停止";
-      writeTerminal(`$ 停止请求失败：${error.message || "未知错误"}\n  可再次点击“■ 停止”重试。`, true);
-    }
-    return;
-  }
-  if (state.strategy !== "search-tree") {
-    writeTerminal("$ 运行模型步进仅支持 Search Tree 策略，请先在“运行策略”中选择。", true);
-    return;
-  }
-  playbackMode = "step";
-  renderPlaybackModeSwitch();
-  await runPlan();
 }
 
 /** 返回当前测试组按名称数字自然顺序排列的测试。 */
@@ -5445,26 +5380,6 @@ document.getElementById("logButton").addEventListener("click", event => { if (ev
 document.getElementById("ganttButton").addEventListener("click", event => { if (event.currentTarget.getAttribute("aria-disabled") === "true") event.preventDefault(); });
 document.getElementById("batchLogButton").addEventListener("click", event => { if (event.currentTarget.getAttribute("aria-disabled") === "true") event.preventDefault(); });
 document.getElementById("batchGanttButton").addEventListener("click", event => { if (event.currentTarget.getAttribute("aria-disabled") === "true") event.preventDefault(); });
-document.getElementById("playbackModeReplayButton").addEventListener("click", () => {
-  void setPlaybackMode("replay");
-});
-document.getElementById("playbackModeStepButton").addEventListener("click", () => {
-  void setPlaybackMode("step");
-});
-// 步进模式下点击候选行提交该动作；事件委托在容器上，避免每次重渲染重复绑定。
-// 只响应可交互（role="button"）的候选行，防止搜索中的误点被静默预选。
-document.getElementById("visualDecisionLens").addEventListener("click", event => {
-  const candidate = event.target.closest?.("[data-action-key][role='button']");
-  if (!candidate) return;
-  void chooseSearchAction(candidate.dataset.actionKey);
-});
-document.getElementById("visualDecisionLens").addEventListener("keydown", event => {
-  if (event.key !== "Enter" && event.key !== " ") return;
-  const candidate = event.target.closest?.("[data-action-key][role='button']");
-  if (!candidate) return;
-  event.preventDefault();
-  void chooseSearchAction(candidate.dataset.actionKey);
-});
 document.getElementById("closeDrawer").addEventListener("click", closeStepDrawer);
 document.getElementById("drawerLayer").addEventListener("click", event => { if (event.target.id === "drawerLayer") closeStepDrawer(); });
 document.addEventListener("keydown", event => { if (event.key === "Escape") closeStepDrawer(); });

@@ -1438,9 +1438,9 @@ function renderFrontSlotOverview(modules) {
   const loadLocks = visibleModules.filter((module) => isLoadLockName(module.name, module.type)).map((module) => ({ module, kind: "lock" })).sort(moduleNameOrder);
   const splitRows = (items, columns) => Array.from({ length: Math.ceil(items.length / columns) }, (_, index) => items.slice(index * columns, (index + 1) * columns));
   const slotRows = [
+    ...splitRows(loadLocks, 2),
     ...splitRows(loadPorts, 2),
-    ...splitRows(coolers, 2),
-    ...splitRows(loadLocks, 2)
+    ...splitRows(coolers, 2)
   ].filter((row) => row.length);
   const renderSlots = (slots, module) => slots.map((slot) => {
     const state2 = !slot.wafer ? "empty" : slot.processed ? "processed" : "unprocessed";
@@ -2207,6 +2207,14 @@ function renderEquipmentTopology(snapshot, decision, hiddenFilters, device) {
   return `
     <section class="equipment-schematic" data-topology-layout="${layout}" aria-label="\u5B8C\u6574\u8BBE\u5907\u62D3\u6251\u56DE\u653E">
       <div class="schematic-canvas reference-grid-canvas" style="--topology-canvas-height:${canvasHeight}px">
+        <div class="topology-status-legend" role="group" aria-label="\u56DE\u653E\u72B6\u6001\u56FE\u4F8B">
+          <span><i class="topology-status-legend-processing"></i>\u52A0\u5DE5</span>
+          <span><i class="topology-status-legend-pumping"></i>\u62BD\u6C14</span>
+          <span><i class="topology-status-legend-venting"></i>\u5145\u6C14</span>
+          <span><i class="topology-status-legend-cleaning"></i>\u6E05\u6D01</span>
+          <span><i class="topology-status-legend-transfer"></i>\u4F20\u8F93</span>
+          <span><i class="topology-status-legend-door"></i>\u95E8\u52A8\u4F5C</span>
+        </div>
         ${machineAreaMarkup}
         ${machineFrameMarkup}
         ${attachmentPointMarkup}
@@ -2267,11 +2275,7 @@ function renderDecisionLens(decision, requestState = "idle", requestError = "", 
   const counts = decision.actionCounts;
   const provider = decision.actionDiagnosticsSource === "algorithm" ? `\u7B97\u6CD5\u63A5\u53E3 \xB7 ${decision.actionDiagnosticsProvider || "\u672A\u547D\u540D\u5B9E\u73B0"}` : "\u7B97\u6CD5\u672A\u63D0\u4F9B\u52A8\u4F5C\u63A5\u53E3";
   return `
-    <section class="decision-candidate-section" aria-labelledby="decisionCandidatesTitle">
-      <header>
-        <strong id="decisionCandidatesTitle">\u52A8\u4F5C\u72B6\u6001 <small>@ ${formatSeconds2(decision.time)}s</small></strong>
-        <span>${escapeHtml(provider)}</span>
-      </header>
+    <section class="decision-candidate-section" aria-label="\u5F53\u524D\u5408\u6CD5\u52A8\u4F5C">
       <p class="action-count-summary">\u4F7F\u80FD ${counts.enabled} \xB7 \u7269\u7406\u62E6\u622A ${counts["physical-blocked"]} \xB7 \u6B7B\u9501\u62E6\u622A ${counts["deadlock-blocked"]}</p>
       ${cards ? `<ul>${cards}</ul>` : '<p class="decision-alternative-empty">\u5F53\u524D\u7B5B\u9009\u6761\u4EF6\u4E0B\u6CA1\u6709\u52A8\u4F5C</p>'}
     </section>`;
@@ -3080,6 +3084,9 @@ var VisualizationWorkspace = class {
       void 0,
       this.device
     );
+    const topologyCanvas = this.elements.stage.querySelector(".reference-grid-canvas");
+    const canvasHeight = topologyCanvas?.style.getPropertyValue("--topology-canvas-height") ?? "";
+    this.elements.frontSlotOverview.style.setProperty("--topology-canvas-height", canvasHeight);
     this.elements.frontSlotOverview.innerHTML = renderFrontSlotOverview(topologySnapshot.modules);
     const requestState = this.pendingReplayDecisionKeys.has(replayKey) ? "loading" : this.replayDecisionErrorKey === replayKey ? "error" : "idle";
     this.elements.decisionLens.innerHTML = renderDecisionLens(
@@ -3774,10 +3781,8 @@ var lastSearchTelemetryMoveCount = 0;
 var lastBatchItemsRenderSignature = "";
 var continuousDecisionEnabled = false;
 var continuousDecisionSubmittedSearchId = "";
-var playbackMode = "replay";
 var userChosenActionKey = "";
 var userChosenSearchId = "";
-var pendingModeSync = "";
 var singleRunActive = false;
 var singleRunCancelling = false;
 var activeSingleRunId = "";
@@ -5119,230 +5124,6 @@ function resetSearchTelemetryView() {
   continuousDecisionSubmittedSearchId = "";
   userChosenActionKey = "";
   userChosenSearchId = "";
-}
-function formatSearchTelemetryNumber(value, digits = 2) {
-  const number = Number(value);
-  return Number.isFinite(number) ? number.toFixed(digits) : "\u2014";
-}
-function searchTelemetryStopReason(reason) {
-  return {
-    time_budget: "\u65F6\u95F4\u9884\u7B97",
-    simulation_budget: "\u6A21\u62DF\u6B21\u6570\u9884\u7B97",
-    node_budget: "\u8282\u70B9\u9884\u7B97"
-  }[String(reason || "")] || "\u641C\u7D22\u4E2D";
-}
-function renderSearchActionChains(chains, decisionIndex, recommendedKey, selectedKey, maximumVisits, interactive) {
-  return `<section class="decision-candidate-section search-action-section" aria-labelledby="searchCandidatesTitle">
-    <header>
-      <strong id="searchCandidatesTitle">\u51B3\u7B56 #${decisionIndex}</strong>
-      <span>${chains.length} \u6761\u53EF\u9009\u7A33\u5B9A\u52A8\u4F5C\u94FE</span>
-    </header>
-    <ol>
-      ${chains.map((chain, index) => {
-    const visits = Number(chain?.visits) || 0;
-    const visitPercent = Math.max(0, Math.min(100, visits / maximumVisits * 100));
-    const isRecommended = String(chain?.actionKey || "") === recommendedKey;
-    const isSelected = String(chain?.actionKey || "") === selectedKey;
-    const tags = `${isRecommended ? '<span class="decision-tag is-recommendation">\u63A8\u8350</span>' : ""}${isSelected && !isRecommended ? '<span class="decision-tag is-user-chosen">\u4F60\u7684\u9009\u62E9</span>' : ""}`;
-    const description = String(chain?.description || "\u7A33\u5B9A\u52A8\u4F5C\u94FE");
-    const steps = Array.isArray(chain?.steps) ? chain.steps : [];
-    return `<li class="decision-candidate search-action-candidate search-action-chain ${isSelected ? "is-selected" : ""} ${interactive ? "is-interactive" : ""}" data-action-key="${escapeHtml3(String(chain?.actionKey || ""))}" ${interactive ? `role="button" tabindex="0" aria-label="\u6267\u884C ${escapeHtml3(description)}"` : ""}>
-          <div class="decision-candidate-rank" aria-label="\u7B2C ${index + 1} \u540D">${index + 1}</div>
-          <div class="decision-candidate-main">
-            <div class="decision-candidate-title"><strong title="${escapeHtml3(description)}">${escapeHtml3(description)}</strong>${tags}</div>
-            <div class="decision-candidate-detail search-pnq" aria-label="\u641C\u7D22\u8BC4\u4F30\u6307\u6807">
-              <span title="\u7B56\u7565\u5148\u9A8C P"><small>P \u5148\u9A8C</small><strong>${formatSearchTelemetryNumber(chain?.prior, 4)}</strong></span>
-              <span title="\u8BBF\u95EE\u6B21\u6570 N"><small>N \u8BBF\u95EE</small><strong>${visits}</strong></span>
-              <span title="\u5E73\u5747\u4EF7\u503C Q"><small>Q \u4EF7\u503C</small><strong>${formatSearchTelemetryNumber(chain?.value, 4)}</strong></span>
-            </div>
-            <ol class="search-chain-steps" aria-label="\u52A8\u4F5C\u94FE\u6B65\u9AA4">
-              ${steps.map((step, stepIndex) => `<li><b>${stepIndex + 1}</b><span title="${escapeHtml3(step?.description || "\u52A8\u4F5C")}">${escapeHtml3(step?.description || "\u52A8\u4F5C")}</span><small>${Number(step?.primitiveCount) || 1} \u6B65</small></li>`).join("")}
-            </ol>
-          </div>
-          <div class="decision-candidate-preference" aria-label="\u63A8\u8350\u6BD4\u4F8B ${visitPercent.toFixed(0)}%"><small>\u63A8\u8350\u6BD4\u4F8B</small><strong>${visitPercent.toFixed(0)}%</strong></div>
-        </li>`;
-  }).join("")}
-    </ol>
-  </section>`;
-}
-function renderSearchTelemetryDecision(snapshot) {
-  const chains = Array.isArray(snapshot?.actionChains) ? snapshot.actionChains.slice(0, 3) : [];
-  const recommendedKey = String(snapshot?.selectedActionKey || "");
-  const selectedKey = String(snapshot?.searchId || "") === userChosenSearchId ? userChosenActionKey : recommendedKey;
-  const decisionIndex = Number(snapshot?.decisionIndex || 0) + 1;
-  const interactive = playbackMode === "step" && latestSearchTelemetry?.status === "waiting-choice" && String(snapshot?.searchId || "") === String(latestSearchTelemetry?.searchId || "");
-  const maximumVisits = Math.max(1, ...chains.map((chain) => Number(chain?.visits) || 0));
-  document.getElementById("visualDecisionLens").innerHTML = chains.length ? renderSearchActionChains(
-    chains,
-    decisionIndex,
-    recommendedKey,
-    selectedKey,
-    maximumVisits,
-    interactive
-  ) : `<div class="decision-empty"><strong>\u6B63\u5728\u6784\u9020\u7A33\u5B9A\u52A8\u4F5C\u94FE\u2026</strong><p>\u53EA\u6709\u5728 50 \u5C42\u5185\u56DE\u5230 Robot \u5168\u90E8\u7A7A\u624B\u72B6\u6001\u7684\u94FE\u624D\u4F1A\u51FA\u73B0\u3002</p></div>`;
-  const variationPanel = document.getElementById("searchTelemetryVariationPanel");
-  variationPanel.hidden = true;
-  document.getElementById("searchTelemetryVariation").innerHTML = "";
-}
-function updateSearchTelemetryControls(snapshot) {
-  const executionMode = String(snapshot?.executionMode || "continuous");
-  const stepMode = playbackMode === "step";
-  const disabled = !searchTelemetryRunActive || searchTelemetryControlPending;
-  const pauseButton = document.getElementById("searchTelemetryPauseButton");
-  const stepButton = document.getElementById("searchTelemetryStepButton");
-  const continueButton = document.getElementById("searchTelemetryContinueButton");
-  const followButton = document.getElementById("searchTelemetryFollowRecommendationButton");
-  const continuousButton = document.getElementById("searchTelemetryContinuousDecisionButton");
-  const continuousActive = continuousDecisionEnabled && searchTelemetryRunActive && stepMode;
-  pauseButton.hidden = stepMode;
-  stepButton.hidden = stepMode;
-  continueButton.hidden = stepMode;
-  followButton.hidden = !stepMode;
-  continuousButton.hidden = !stepMode;
-  pauseButton.disabled = disabled;
-  stepButton.disabled = disabled;
-  continueButton.disabled = disabled;
-  const canFollowRecommendation = !disabled && stepMode && executionMode === "paused" && snapshot?.status === "waiting-choice" && Boolean(snapshot?.selectedActionKey);
-  followButton.disabled = !canFollowRecommendation || continuousActive;
-  continuousButton.disabled = !stepMode || !searchTelemetryRunActive || !continuousActive && !canFollowRecommendation;
-  continuousButton.textContent = continuousActive ? "\u505C\u6B62\u6301\u7EED\u51B3\u7B56" : "\u6301\u7EED\u51B3\u7B56";
-  continuousButton.title = continuousActive ? "\u5B8C\u6210\u5F53\u524D\u5728\u9014\u9009\u62E9\u540E\u505C\u6B62\uFF0C\u4E0D\u518D\u81EA\u52A8\u6267\u884C\u4E0B\u4E00\u8F6E\u63A8\u8350" : "\u6301\u7EED\u6267\u884C\u6BCF\u4E00\u8F6E\u641C\u7D22\u7684\u6A21\u578B\u63A8\u8350\u52A8\u4F5C";
-  continuousButton.setAttribute("aria-pressed", String(continuousActive));
-  continuousButton.classList.toggle("is-active", continuousActive);
-  pauseButton.classList.toggle("is-active", !disabled && !stepMode && executionMode === "paused");
-  continueButton.classList.toggle("is-active", !disabled && !stepMode && executionMode === "continuous");
-}
-function syncSearchTelemetryPlayback(snapshot, selectedDecision) {
-  const committedMoves = Array.isArray(snapshot?.committedMoves) ? snapshot.committedMoves : [];
-  const movesChanged = Boolean(
-    committedMoves.length && committedMoves.length !== lastSearchTelemetryMoveCount
-  );
-  const animateLatestStep = movesChanged && playbackMode === "step" && followLatestSearchTelemetry;
-  if (movesChanged) {
-    visualizationWorkspace.updateLiveMoves(
-      committedMoves,
-      followLatestSearchTelemetry,
-      animateLatestStep
-    );
-    lastSearchTelemetryMoveCount = committedMoves.length;
-  }
-  const replayTime = Number(selectedDecision?.replayTime);
-  if (!animateLatestStep && Number.isFinite(replayTime) && replayTime >= 0) {
-    visualizationWorkspace.seekTo(replayTime);
-  }
-}
-async function chooseSearchAction(actionKey, automatic = false) {
-  if (!searchTelemetryRunActive || playbackMode !== "step") return;
-  if (searchTelemetryControlPending) return;
-  if (latestSearchTelemetry?.status !== "waiting-choice") return;
-  const key = String(actionKey || "");
-  if (!key) return;
-  searchTelemetryControlPending = true;
-  userChosenActionKey = key;
-  userChosenSearchId = String(latestSearchTelemetry?.searchId || "");
-  if (latestSearchTelemetry) renderSearchTelemetry(latestSearchTelemetry);
-  updateSearchTelemetryControls(latestSearchTelemetry);
-  try {
-    const result = await requestSearchControl("choose", key);
-    if (result?.telemetry) renderSearchTelemetry(result.telemetry);
-  } catch (error) {
-    if (automatic) {
-      continuousDecisionEnabled = false;
-      continuousDecisionSubmittedSearchId = "";
-    }
-    const status = document.getElementById("searchTelemetryStatus");
-    status.textContent = automatic ? `\u6301\u7EED\u51B3\u7B56\u5DF2\u505C\u6B62\uFF1A${error.message || "\u63D0\u4EA4\u63A8\u8350\u5931\u8D25"}` : `\u63D0\u4EA4\u9009\u62E9\u5931\u8D25\uFF1A${error.message || "\u672A\u77E5\u9519\u8BEF"}`;
-    status.classList.remove("is-searching", "is-paused");
-  } finally {
-    searchTelemetryControlPending = false;
-    flushPendingModeSync();
-    updateSearchTelemetryControls(latestSearchTelemetry);
-    maybeContinueModelDecision(latestSearchTelemetry);
-  }
-}
-async function flushPendingModeSync() {
-  const mode = pendingModeSync;
-  if (!mode) return;
-  pendingModeSync = "";
-  await setPlaybackMode(mode);
-}
-function renderPlaybackModeSwitch() {
-  const stepMode = playbackMode === "step";
-  document.getElementById("playbackModeReplayButton").classList.toggle("is-active", playbackMode === "replay");
-  document.getElementById("playbackModeStepButton").classList.toggle("is-active", stepMode);
-  document.getElementById("playbackModeReplayButton").setAttribute("aria-pressed", String(playbackMode === "replay"));
-  document.getElementById("playbackModeStepButton").setAttribute("aria-pressed", String(stepMode));
-  document.getElementById("visualPauseOnDecisionChangeButton").hidden = stepMode;
-}
-function maybeContinueModelDecision(snapshot) {
-  if (!continuousDecisionEnabled || !searchTelemetryRunActive || playbackMode !== "step") return;
-  if (searchTelemetryControlPending || snapshot?.status !== "waiting-choice") return;
-  const searchId = String(snapshot?.searchId || "");
-  const actionKey = String(snapshot?.selectedActionKey || "");
-  if (!searchId || !actionKey || searchId === continuousDecisionSubmittedSearchId) return;
-  continuousDecisionSubmittedSearchId = searchId;
-  void chooseSearchAction(actionKey, true);
-}
-async function setPlaybackMode(mode) {
-  if (mode !== "step" && mode !== "replay") return;
-  playbackMode = mode;
-  if (mode !== "step") {
-    continuousDecisionEnabled = false;
-    continuousDecisionSubmittedSearchId = "";
-  }
-  renderPlaybackModeSwitch();
-  if (searchTelemetryRunActive && !searchTelemetryControlPending) {
-    try {
-      const result = await requestSearchControl(mode === "step" ? "step-mode" : "replay-mode");
-      if (result?.telemetry) renderSearchTelemetry(result.telemetry);
-    } catch (error) {
-      const status = document.getElementById("searchTelemetryStatus");
-      status.textContent = `\u5207\u6362\u6A21\u5F0F\u5931\u8D25\uFF1A${error.message || "\u672A\u77E5\u9519\u8BEF"}`;
-      status.classList.remove("is-searching", "is-paused");
-    }
-  } else if (searchTelemetryRunActive) {
-    pendingModeSync = mode;
-  }
-  if (latestSearchTelemetry) renderSearchTelemetry(latestSearchTelemetry);
-}
-function renderSearchTelemetry(snapshot) {
-  if (!snapshot || snapshot.unchanged) return;
-  if (snapshot.algorithm !== "search-tree" && latestSearchTelemetry) return;
-  latestSearchTelemetry = snapshot;
-  const panel = document.getElementById("searchTelemetryPanel");
-  panel.hidden = false;
-  const status = document.getElementById("searchTelemetryStatus");
-  if (snapshot.algorithm !== "search-tree") {
-    status.textContent = "\u6B63\u5728\u521D\u59CB\u5316\u641C\u7D22\u5668\u2026";
-    status.classList.add("is-searching");
-    status.classList.remove("is-paused");
-    updateSearchTelemetryControls(snapshot);
-    return;
-  }
-  const decisions = Array.isArray(snapshot.history) ? [...snapshot.history] : [];
-  if (snapshot.searchId && decisions.at(-1)?.searchId !== snapshot.searchId) decisions.push(snapshot);
-  const latestDecision = decisions.at(-1) || snapshot;
-  if (followLatestSearchTelemetry || !decisions.some((item) => item.searchId === selectedSearchTelemetryId)) {
-    selectedSearchTelemetryId = String(latestDecision.searchId || "");
-  }
-  const selector = document.getElementById("searchTelemetryDecisionSelect");
-  selector.innerHTML = decisions.map((item) => {
-    const suffix = item.status === "searching" ? "\u641C\u7D22\u4E2D" : `${Number(item.simulations) || 0} \u6B21`;
-    return `<option value="${escapeHtml3(item.searchId || "")}">#${Number(item.decisionIndex || 0) + 1} \xB7 ${suffix}</option>`;
-  }).join("");
-  selector.value = selectedSearchTelemetryId;
-  const selected = decisions.find((item) => item.searchId === selectedSearchTelemetryId) || latestDecision;
-  const searching = snapshot?.status === "searching";
-  const waiting = snapshot?.status === "waiting-step";
-  const waitingChoice = snapshot?.status === "waiting-choice";
-  const cancelled = snapshot?.status === "cancelled";
-  status.textContent = cancelled ? "\u8FD0\u884C\u5DF2\u53D6\u6D88" : waitingChoice ? playbackMode === "step" ? continuousDecisionEnabled ? "\u6301\u7EED\u51B3\u7B56\u4E2D \xB7 \u6B63\u5728\u6267\u884C\u6A21\u578B\u63A8\u8350" : "\u641C\u7D22\u5B8C\u6210 \xB7 \u8BF7\u9009\u62E9\u8981\u6267\u884C\u7684\u52A8\u4F5C" : "\u6C42\u89E3\u5DF2\u6682\u505C \xB7 \u7B49\u5F85\u653E\u884C" : waiting ? "\u6C42\u89E3\u5DF2\u6682\u505C \xB7 \u53EF\u5355\u6B65\u653E\u884C\u4E00\u4E2A\u6839\u51B3\u7B56\uFF0C\u6216\u7EE7\u7EED\u8FDE\u7EED\u6C42\u89E3" : searching ? `${continuousDecisionEnabled && playbackMode === "step" ? "\u6301\u7EED\u51B3\u7B56\u4E2D \xB7 " : ""}\u6B63\u5728\u8FDB\u884C\u975E\u5BF9\u79F0\u6811\u641C\u7D22 \xB7 ${Number(snapshot?.simulations) || 0} \u6B21\u6A21\u62DF` : snapshot?.status === "action-applied" ? `\u6839\u52A8\u4F5C #${Number(snapshot?.decisionIndex || 0) + 1} \u5DF2\u63D0\u4EA4 \xB7 \u62D3\u6251\u5DF2\u63A8\u8FDB` : `\u51B3\u7B56\u5B8C\u6210 \xB7 \u7531${searchTelemetryStopReason(selected?.stopReason)}\u7EC8\u6B62`;
-  status.classList.toggle("is-searching", searching);
-  status.classList.toggle("is-paused", waiting || waitingChoice);
-  updateSearchTelemetryControls(snapshot);
-  renderSearchTelemetryDecision(selected);
-  syncSearchTelemetryPlayback(snapshot, selected);
-  maybeContinueModelDecision(snapshot);
 }
 function applyTestCase(testCase) {
   const value = structuredClone(testCase);
@@ -7031,7 +6812,7 @@ function buildPayload() {
   const cleans = state.cleans.map(runtimeClean);
   const options = { ...state.options };
   if (state.strategy === "search-tree") {
-    options.searchTreeExecutionMode = playbackMode === "step" ? "stepped" : "continuous";
+    options.searchTreeExecutionMode = "continuous";
   }
   return { schemaVersion: EXPECTED_API_SCHEMA, workspaceDeviceId: state.workspaceDeviceId, workspaceTestId: state.testCaseId, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options, hongYeCheck: hongYeCheckEnabled(), compatibilityMode: compatibilityModeEnabled(), executionTimingEnabled: executionTimingEnabled(), skipBaseline: skipBaselineEnabled(), cleanValidationTypes: cleanValidationTypes(), recipes: collectRecipes(routes), cleans, routes, rounds: instances.rounds };
 }
@@ -8467,24 +8248,6 @@ document.getElementById("batchLogButton").addEventListener("click", (event) => {
 });
 document.getElementById("batchGanttButton").addEventListener("click", (event) => {
   if (event.currentTarget.getAttribute("aria-disabled") === "true") event.preventDefault();
-});
-document.getElementById("playbackModeReplayButton").addEventListener("click", () => {
-  void setPlaybackMode("replay");
-});
-document.getElementById("playbackModeStepButton").addEventListener("click", () => {
-  void setPlaybackMode("step");
-});
-document.getElementById("visualDecisionLens").addEventListener("click", (event) => {
-  const candidate = event.target.closest?.("[data-action-key][role='button']");
-  if (!candidate) return;
-  void chooseSearchAction(candidate.dataset.actionKey);
-});
-document.getElementById("visualDecisionLens").addEventListener("keydown", (event) => {
-  if (event.key !== "Enter" && event.key !== " ") return;
-  const candidate = event.target.closest?.("[data-action-key][role='button']");
-  if (!candidate) return;
-  event.preventDefault();
-  void chooseSearchAction(candidate.dataset.actionKey);
 });
 document.getElementById("closeDrawer").addEventListener("click", closeStepDrawer);
 document.getElementById("drawerLayer").addEventListener("click", (event) => {
