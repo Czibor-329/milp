@@ -1897,16 +1897,17 @@
     .cooler-top-pocket { position: relative; z-index: 1; display: grid; width: 40px; height: 40px; place-items: center; border-radius: 50%; }
     .cooler-top-pocket.is-empty::after { width: 7px; height: 7px; border: 1px solid #75949b; border-radius: 50%; background: #d5e1e3; content: ""; }
     .cooler-top-pocket .wafer-token { width: 38px; min-width: 38px; height: 38px; padding: 2px; font-size: 7px; }
-    .topology-front-slot-card { position: sticky; top: 18px; display: grid; width: 100%; height: var(--topology-canvas-height, 640px); min-width: 0; box-sizing: border-box; padding: 10px; overflow: auto; border: 1px solid #d8e3ee; border-radius: 9px; background: #fbfdff; box-shadow: 0 2px 8px rgba(43,63,88,.05); scrollbar-width: thin; }
+    /* 正视槽位区最多与画布同高并滚动；卡片本身按内容收缩，避免把少量槽位拉成整列。 */
+    .topology-front-slot-card { position: sticky; top: 18px; display: grid; width: 100%; height: auto; max-height: var(--topology-canvas-height, 640px); min-width: 0; align-content: start; align-items: stretch; box-sizing: border-box; padding: 10px; overflow: auto; border: 1px solid #d8e3ee; border-radius: 9px; background: #fbfdff; box-shadow: 0 2px 8px rgba(43,63,88,.05); scrollbar-width: thin; }
     .topology-front-slot-card:empty { display: none; }
-    .topology-front-content { display: grid; gap: 10px; }
-    .front-slot-row { display: grid; grid-template-columns: repeat(var(--front-row-module-count), minmax(0, 1fr)); gap: 8px; }
+    .topology-front-content { display: grid; gap: 10px; align-content: start; }
+    .front-slot-row { display: grid; grid-template-columns: repeat(var(--front-row-module-count), minmax(0, 1fr)); gap: 8px; align-items: start; }
     /* LoadPort 固定使用两列轨道；不足两个模块的末行仍保留单模块的统一宽度。 */
     .front-slot-row-port { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .front-slot-row-cooler { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .front-module { display: grid; min-width: 0; grid-template-rows: 16px auto; gap: 4px; }
+    .front-module { display: grid; min-width: 0; height: fit-content; grid-template-rows: 16px auto; gap: 4px; align-content: start; }
     .front-module > strong { overflow: hidden; padding: 0 2px; color: #334a67; font: 800 9px/16px "Fira Code", Consolas, monospace; text-align: center; text-overflow: ellipsis; white-space: nowrap; }
-    .front-slot-board { display: grid; width: 100%; min-width: 0; grid-template-rows: repeat(var(--front-slot-count), 7px); gap: 1px; padding: 4px; overflow: hidden; box-sizing: border-box; border: 1px solid #c7d6e5; border-radius: 7px; background: #edf3f8; box-shadow: inset 0 1px 0 rgba(255,255,255,.78); }
+    .front-slot-board { display: grid; width: 100%; height: auto; min-width: 0; align-self: start; grid-template-rows: repeat(var(--front-slot-count), 7px); gap: 1px; padding: 4px; overflow: hidden; box-sizing: border-box; border: 1px solid #c7d6e5; border-radius: 7px; background: #edf3f8; box-shadow: inset 0 1px 0 rgba(255,255,255,.78); }
     .front-slot { position: relative; display: block; min-height: 0; box-sizing: border-box; border: 1px solid rgba(188,204,220,.56); border-radius: 2px; background: rgba(251,253,255,.92); cursor: help; transition: background-color .15s ease, border-color .15s ease, box-shadow .15s ease; }
     .front-slot.is-unprocessed { border-color: #ead6aa; background: #fff8e9; }
     .front-slot.is-processed { border-color: #b9ddcd; background: #eff9f3; }

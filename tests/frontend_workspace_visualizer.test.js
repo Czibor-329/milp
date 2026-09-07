@@ -376,6 +376,17 @@ test("回放进度、MoveList 与中文工具入口合并在顶部紧凑工具�
   assert.doesNotMatch(html, /id="visualTransitionButtons"|MODEL EVALUATION/);
 });
 
+test("正视槽位卡片按内容收缩，不以画布高度拉长模块槽位", () => {
+  const css = fs.readFileSync(
+    path.join(__dirname, "../realtime_scheduler/frontend/assets/config_editor.css"),
+    "utf8",
+  );
+  assert.match(css, /\.topology-front-slot-card \{[^}]*height:\s*auto;[^}]*max-height:\s*var\(--topology-canvas-height, 640px\);/);
+  assert.match(css, /\.topology-front-slot-card \{[^}]*align-content:\s*start;/);
+  assert.match(css, /\.front-slot-row \{[^}]*align-items:\s*start;/);
+  assert.match(css, /\.front-slot-board \{[^}]*height:\s*auto;[^}]*align-self:\s*start;/);
+});
+
 test("合法动作空间面板保持单一候选列表与标准开关视觉契约", () => {
   const html = fs.readFileSync(
     path.join(__dirname, "../realtime_scheduler/frontend/config_editor.html"),
