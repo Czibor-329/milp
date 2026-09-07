@@ -135,6 +135,11 @@ export interface DecisionCandidateGroup {
 }
 
 type ActionDiagnosticStatus = "enabled" | "physical-blocked" | "deadlock-blocked";
+const ALL_ACTION_DIAGNOSTIC_STATUSES: ActionDiagnosticStatus[] = [
+  "enabled",
+  "physical-blocked",
+  "deadlock-blocked",
+];
 
 export interface ReplayActionDiagnostic {
   actionId: string;
@@ -148,6 +153,7 @@ export interface ReplayActionDiagnostic {
   sourceSlot: number;
   destination: string;
   destinationSlot: number;
+  duplicateCount: number;
   earliestStart: number;
   finishTime: number;
 }
@@ -367,6 +373,7 @@ function normalizeReplayActionDiagnostic(value: UnknownRecord): ReplayActionDiag
     sourceSlot: finiteNumber(value.sourceSlot),
     destination: String(value.destination ?? ""),
     destinationSlot: finiteNumber(value.destinationSlot),
+    duplicateCount: Math.max(0, Math.round(finiteNumber(value.duplicateCount))),
     earliestStart: finiteNumber(value.earliestStart),
     finishTime: finiteNumber(value.finishTime),
   };
@@ -1672,7 +1679,7 @@ function collectElements(root: Document): WorkspaceElements {
     stage: required("visualDeviceStage"),
     /* 独立逻辑测试可使用精简页面夹具；真实页面始终提供该节点。 */
     frontSlotOverview: (root.getElementById("visualFrontSlotOverview") as HTMLElement | null)
-      ?? { innerHTML: "" } as HTMLElement,
+      ?? ({ innerHTML: "", style: { setProperty() { /* 测试夹具无 CSS 自定义属性 */ } } } as unknown as HTMLElement),
     decisionLens: required("visualDecisionLens"),
     actionStatusFilters: Array.from(root.querySelectorAll<HTMLInputElement>("[data-action-status-filter]")),
     activeMoves: required("visualActiveMoves"),
@@ -3194,12 +3201,31 @@ export function primitiveDecisionBoundaryTimes(moves: MoveRecord[]): number[] {
   )].sort((left, right) => left - right);
 }
 
+/** 把站点或 Robot 与槽位格式化为 LP1#1。 */
+function formatActionEndpoint(name: string, slot: number): string {
+  const trimmed = name.trim();
+  if (!trimmed) return "";
+  return slot > 0 ? `${trimmed}#${slot}` : trimmed;
+}
+
+/** 生成 Pick(1) LP1#1 → ATR#1 形式的动作路径。 */
+function formatActionPath(action: ReplayActionDiagnostic): string {
+  const kindLabels = { pick: "Pick", place: "Place", swap: "Swap" };
+  const materialId = action.materialIds[0] || "";
+  const kindLabel = kindLabels[action.kind];
+  const prefix = materialId ? `${kindLabel}(${materialId})` : kindLabel;
+  const source = formatActionEndpoint(action.source, action.sourceSlot);
+  const destination = formatActionEndpoint(action.destination, action.destinationSlot);
+  const path = [source, destination].filter(Boolean).join(" → ");
+  return path ? `${prefix} ${path}` : prefix;
+}
+
 /** 绘制算法动作接口返回的原子动作分类。 */
 export function renderDecisionLens(
   decision: DecisionTraceStep | null,
   requestState: "idle" | "loading" | "error" = "idle",
   requestError = "",
-  statusFilters: ActionDiagnosticStatus[] = ["enabled"],
+  statusFilters: ActionDiagnosticStatus[] = ALL_ACTION_DIAGNOSTIC_STATUSES,
 ): string {
   if (!decision) {
     if (requestState === "loading") {
@@ -3228,22 +3254,17 @@ export function renderDecisionLens(
     "physical-blocked": "物理拦截",
     "deadlock-blocked": "死锁规则拦截",
   };
-  const kindLabels = { pick: "Pick", place: "Place", swap: "Swap" };
   const visibleActions = decision.actionDiagnostics.filter(action => statusFilters.includes(action.status));
   const cards = visibleActions.map(action => {
-    const source = action.sourceSlot > 0 ? `${action.source} #${action.sourceSlot}` : action.source;
-    const destination = action.destinationSlot > 0
-      ? `${action.destination} #${action.destinationSlot}`
-      : action.destination;
+    const reason = action.reason || statusLabels[action.status];
+    const duplicate = action.duplicateCount > 0
+      ? `<small>另 ${action.duplicateCount} 片相同</small>`
+      : "";
     return `
-      <li class="decision-candidate action-card action-status-${action.status}">
-        <span class="decision-tag action-kind">${kindLabels[action.kind]}</span>
-        <div class="decision-candidate-main">
-          <div class="decision-candidate-title"><strong>${escapeHtml(source || action.robot)} → ${escapeHtml(destination || "Robot hand")}</strong></div>
-          <small>${escapeHtml(action.robot || "Robot")} · ${action.materialIds.length ? `Material ${escapeHtml(action.materialIds.join(", "))}` : "无物料标识"}</small>
-          ${action.reason ? `<p class="action-block-reason">${escapeHtml(action.reason)}</p>` : ""}
-        </div>
-        <span class="decision-tag action-status">${statusLabels[action.status]}</span>
+      <li class="decision-candidate action-card action-status-${action.status}" tabindex="0" aria-label="${escapeHtml(`${formatActionPath(action)}，${statusLabels[action.status]}`)}">
+        <strong class="action-card-path">${escapeHtml(formatActionPath(action))}</strong>
+        ${duplicate}
+        <span class="action-status-tooltip" role="tooltip">${escapeHtml(reason)}</span>
       </li>`;
   }).join("");
   const counts = decision.actionCounts;
@@ -3761,7 +3782,7 @@ export class VisualizationWorkspace {
   private analysisRounds: Array<Record<string, any>> = [];
   private moves: MoveRecord[] = [];
   private replayPlan: Record<string, any> | null = null;
-  private actionStatusFilters: ActionDiagnosticStatus[] = ["enabled"];
+  private actionStatusFilters: ActionDiagnosticStatus[] = [...ALL_ACTION_DIAGNOSTIC_STATUSES];
   private liveDecision: DecisionTraceStep | null = null;
   private liveDecisionKey = "";
   private primitiveDecisionBoundaries: number[] = [];
@@ -3790,6 +3811,10 @@ export class VisualizationWorkspace {
   constructor(root: Document) {
     this.root = root;
     this.elements = collectElements(root);
+    const selectedFilters = this.elements.actionStatusFilters
+      .filter(item => item.checked)
+      .map(item => item.value as ActionDiagnosticStatus);
+    if (selectedFilters.length) this.actionStatusFilters = selectedFilters;
     this.bindEvents();
     this.updatePlayButton();
     this.setTopologyVisible(false);

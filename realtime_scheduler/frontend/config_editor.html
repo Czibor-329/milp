@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>调度平台</title>
   <link rel="stylesheet" href="/assets/katex.min.css?v=1.4.4">
-  <link rel="stylesheet" href="/assets/config_editor.css?v=1.5.40">
+  <link rel="stylesheet" href="/assets/config_editor.css?v=1.5.41">
 </head>
 <body>
   <a class="skip-link" href="#mainContent">跳到主要内容</a>
@@ -40,7 +40,7 @@
       <div class="sidebar-footer">
         <span class="sidebar-footer-label">系统状态</span>
         <div class="service-pill" id="serviceState">本地服务</div>
-        <span class="frontend-version">V1.5.40</span>
+        <span class="frontend-version">V1.5.41</span>
       </div>
     </aside>
 
@@ -251,8 +251,8 @@
                     <div class="action-filter-controls" aria-label="动作筛选">
                       <span class="action-filter-label">显示</span>
                       <label class="action-filter-check"><input type="checkbox" data-action-status-filter value="enabled" checked>使能动作</label>
-                      <label class="action-filter-check"><input type="checkbox" data-action-status-filter value="physical-blocked">物理拦截</label>
-                      <label class="action-filter-check"><input type="checkbox" data-action-status-filter value="deadlock-blocked">死锁规则拦截</label>
+                      <label class="action-filter-check"><input type="checkbox" data-action-status-filter value="physical-blocked" checked>物理拦截</label>
+                      <label class="action-filter-check"><input type="checkbox" data-action-status-filter value="deadlock-blocked" checked>死锁规则拦截</label>
                     </div>
                     <div class="decision-lens-panel" id="visualDecisionLens" aria-live="polite"></div>
                     <ul id="visualActiveMoves" hidden></ul>
@@ -778,6 +778,6 @@
     </aside>
   </dialog>
 
-  <script type="module" src="/assets/config_editor.js?v=1.5.40"></script>
+  <script type="module" src="/assets/config_editor.js?v=1.5.41"></script>
 </body>
 </html>

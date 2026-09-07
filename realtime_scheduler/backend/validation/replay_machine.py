@@ -184,6 +184,7 @@ class ReplayMachine:
                 "sourceSlot": int(raw_action.get("sourceSlot") or 0),
                 "destination": str(raw_action.get("destination") or ""),
                 "destinationSlot": int(raw_action.get("destinationSlot") or 0),
+                "duplicateCount": max(0, int(raw_action.get("duplicateCount") or 0)),
                 "earliestStart": float(raw_action.get("earliestStart") or 0.0),
                 "finishTime": float(raw_action.get("finishTime") or 0.0),
             })

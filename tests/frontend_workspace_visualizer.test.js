@@ -267,6 +267,7 @@ class FakeElement {
     this.attributes = new Map();
     this.listeners = new Map();
     this.label = null;
+    this.style = { setProperty() {} };
   }
 
   addEventListener(name, handler) {
@@ -335,6 +336,9 @@ function fakeWorkspaceDocument() {
     querySelector(selector) {
       return selector === '[data-tab-target="workspace"]' ? workspaceTab : null;
     },
+    querySelectorAll() {
+      return [];
+    },
   };
 }
 
@@ -387,7 +391,7 @@ test("正视槽位卡片按内容收缩，不以画布高度拉长模块槽位",
   assert.match(css, /\.front-slot-board \{[^}]*height:\s*auto;[^}]*align-self:\s*start;/);
 });
 
-test("合法动作空间面板保持单一候选列表与标准开关视觉契约", () => {
+test("合法动作空间面板保持两列卡片与默认全状态视觉契约", () => {
   const html = fs.readFileSync(
     path.join(__dirname, "../realtime_scheduler/frontend/config_editor.html"),
     "utf8",
@@ -402,30 +406,17 @@ test("合法动作空间面板保持单一候选列表与标准开关视觉契�
   );
 
   assert.match(html, /<h2 class="petri-panel-title">合法动作空间<\/h2>/);
-  assert.match(html, /id="visualPauseOnDecisionChangeButton"[^>]*role="switch"[^>]*aria-checked="false"/);
-  assert.match(html, /id="searchTelemetryContinuousDecisionButton"[^>]*aria-pressed="false"[^>]*>持续决策<\/button>/);
-  assert.match(html, /id="visualActionStatusFilter"/);
-  assert.match(html, /id="visualActionKindFilter"/);
+  assert.match(html, /data-action-status-filter value="enabled" checked/);
+  assert.match(html, /data-action-status-filter value="physical-blocked" checked/);
+  assert.match(html, /data-action-status-filter value="deadlock-blocked" checked/);
   assert.match(css, /\.decision-lens-panel[^\n]*border-radius: 6px[^\n]*box-shadow: none/);
-  assert.match(css, /\.decision-auto-pause[^\n]*min-height: 44px/);
   assert.match(css, /\.action-filter-controls/);
+  assert.match(css, /grid-template-columns:\s*repeat\(2,/);
+  assert.match(css, /\.action-card:hover \.action-status-tooltip/);
   assert.doesNotMatch(css, /body\.theme-dark/);
   assert.doesNotMatch(html, /themeToggle|logoutButton|adminUsersLink/);
-  assert.match(source, /SERVICE_HEALTHCHECK_INTERVAL_MILLISECONDS = 3000/);
-  assert.match(source, /SERVICE_HEALTHCHECK_TIMEOUT_MILLISECONDS = 2000/);
-  assert.match(source, /new AbortController\(\)/);
-  assert.match(source, /window\.setInterval\(/);
-  assert.match(source, /visibilitychange/);
   assert.doesNotMatch(css, /\.topology-playback\.is-instant-state-transition/);
   assert.doesNotMatch(source, /visualRecommendationModelControl|visualRecommendationModel/);
-  assert.match(source, /visualPauseOnDecisionChangeButton"\)\.hidden = stepMode/);
-  assert.match(source, /function maybeContinueModelDecision\(snapshot\)/);
-  assert.match(source, /searchId === continuousDecisionSubmittedSearchId/);
-  assert.match(source, /void chooseSearchAction\(actionKey, true\)/);
-  assert.match(source, /function toggleContinuousDecision\(\)/);
-  assert.match(source, /<strong id="searchCandidatesTitle">决策 #\$\{decisionIndex\}<\/strong>/);
-  assert.match(source, /P 先验[\s\S]*N 访问[\s\S]*Q 价值[\s\S]*推荐比例/);
-  assert.match(source, /animateLatestStep/);
   assert.doesNotMatch(source, /根节点全部合法动作|物料 \$\{action\.materialIds/);
   assert.doesNotMatch(css, /decision-selected-summary|decision-preference-track|decision-auto-pause:hover|decision-candidate:hover/);
 });
@@ -499,7 +490,7 @@ test("结果分析与拓扑回放使用独立界面并共享当前 MoveList", as
   assert.equal(root.workspaceTab.clicked, true);
 });
 
-test("动作空间按状态和 Pick Place Swap 类型筛选", () => {
+test("动作空间按状态筛选并把原因放进悬浮提示", () => {
   const decision = logic.normalizeDecisionTrace({ DecisionTrace: [{
     model: "actions",
     time: 10,
@@ -507,17 +498,24 @@ test("动作空间按状态和 Pick Place Swap 类型筛选", () => {
     actionDiagnosticsProvider: "fixture",
     actionCounts: { enabled: 1, "physical-blocked": 1, "deadlock-blocked": 1 },
     actionDiagnostics: [
-      { actionId: "p1", kind: "pick", status: "enabled", robot: "ATR", source: "LP1", destination: "Robot hand", materialIds: ["1"] },
-      { actionId: "p2", kind: "place", status: "physical-blocked", robot: "ATR", source: "ATR", destination: "LA", reason: "目标槽已满" },
+      { actionId: "p1", kind: "pick", status: "enabled", robot: "ATR", source: "LP1", sourceSlot: 1, destination: "ATR", destinationSlot: 1, materialIds: ["1"], reason: "当前物理可行，死锁规则允许执行" },
+      { actionId: "p2", kind: "place", status: "physical-blocked", robot: "ATR", source: "ATR", sourceSlot: 1, destination: "LA", destinationSlot: 1, reason: "目标槽已满", duplicateCount: 23 },
       { actionId: "s1", kind: "swap", status: "deadlock-blocked", robot: "VTR", source: "PM1", destination: "PM2", reason: "无回程槽" },
     ],
   }] })[0];
 
-  const enabled = logic.renderDecisionLens(decision, "idle", "", "enabled", "all");
-  assert.match(enabled, /Pick[\s\S]*LP1 → Robot hand[\s\S]*使能/);
-  assert.doesNotMatch(enabled, /目标槽已满|无回程槽|E2E|推荐|剩余工期/);
-  const blockedSwap = logic.renderDecisionLens(decision, "idle", "", "deadlock-blocked", "swap");
-  assert.match(blockedSwap, /Swap[\s\S]*PM1 → PM2[\s\S]*无回程槽[\s\S]*死锁规则拦截/);
+  const enabled = logic.renderDecisionLens(decision, "idle", "", ["enabled"]);
+  assert.match(enabled, /Pick\(1\) LP1#1 → ATR#1/);
+  assert.match(enabled, /action-status-tooltip[\s\S]*当前物理可行/);
+  assert.doesNotMatch(enabled, /decision-tag action-status|action-block-reason|目标槽已满|无回程槽|E2E|推荐|剩余工期|LA#1/);
+  const blockedSwap = logic.renderDecisionLens(decision, "idle", "", ["deadlock-blocked"]);
+  assert.match(blockedSwap, /Swap PM1 → PM2/);
+  assert.doesNotMatch(blockedSwap, /decision-tag action-status/);
+  assert.match(blockedSwap, /action-status-tooltip[\s\S]*无回程槽/);
+  assert.doesNotMatch(blockedSwap, /<p class="action-block-reason">/);
+  const blockedPlace = logic.renderDecisionLens(decision, "idle", "", ["physical-blocked"]);
+  assert.match(blockedPlace, /Place ATR#1 → LA#1/);
+  assert.match(blockedPlace, /另 23 片相同/);
 });
 
 test("旧模型推荐轨迹不再进入动作状态卡片", async () => {

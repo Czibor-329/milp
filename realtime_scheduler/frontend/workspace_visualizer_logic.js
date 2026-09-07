@@ -73,6 +73,11 @@ async function requestReplayDecision(input) {
 }
 
 // src/workspace_visualizer.ts
+var ALL_ACTION_DIAGNOSTIC_STATUSES = [
+  "enabled",
+  "physical-blocked",
+  "deadlock-blocked"
+];
 var PICK_MOVE_TYPES = /* @__PURE__ */ new Set([0, 2]);
 var PLACE_MOVE_TYPES = /* @__PURE__ */ new Set([1, 3]);
 var SWAP_MOVE = 4;
@@ -209,6 +214,7 @@ function normalizeReplayActionDiagnostic(value) {
     sourceSlot: finiteNumber(value.sourceSlot),
     destination: String(value.destination ?? ""),
     destinationSlot: finiteNumber(value.destinationSlot),
+    duplicateCount: Math.max(0, Math.round(finiteNumber(value.duplicateCount))),
     earliestStart: finiteNumber(value.earliestStart),
     finishTime: finiteNumber(value.finishTime)
   };
@@ -1149,7 +1155,8 @@ function collectElements(root) {
     topologyPlayback: required("visualTopologyPlayback"),
     stage: required("visualDeviceStage"),
     /* 独立逻辑测试可使用精简页面夹具；真实页面始终提供该节点。 */
-    frontSlotOverview: root.getElementById("visualFrontSlotOverview") ?? { innerHTML: "" },
+    frontSlotOverview: root.getElementById("visualFrontSlotOverview") ?? { innerHTML: "", style: { setProperty() {
+    } } },
     decisionLens: required("visualDecisionLens"),
     actionStatusFilters: Array.from(root.querySelectorAll("[data-action-status-filter]")),
     activeMoves: required("visualActiveMoves"),
@@ -2179,7 +2186,22 @@ function primitiveDecisionBoundaryTimes(moves) {
     moves.filter((move) => PRIMITIVE_DECISION_COMPLETION_MOVE_TYPES.has(finiteNumber(move.MoveType, -1))).map((move) => finiteNumber(move.EndTime)).filter((time) => time >= 0)
   )].sort((left, right) => left - right);
 }
-function renderDecisionLens(decision, requestState = "idle", requestError = "", statusFilters = ["enabled"]) {
+function formatActionEndpoint(name, slot) {
+  const trimmed = name.trim();
+  if (!trimmed) return "";
+  return slot > 0 ? `${trimmed}#${slot}` : trimmed;
+}
+function formatActionPath(action) {
+  const kindLabels = { pick: "Pick", place: "Place", swap: "Swap" };
+  const materialId = action.materialIds[0] || "";
+  const kindLabel = kindLabels[action.kind];
+  const prefix = materialId ? `${kindLabel}(${materialId})` : kindLabel;
+  const source = formatActionEndpoint(action.source, action.sourceSlot);
+  const destination = formatActionEndpoint(action.destination, action.destinationSlot);
+  const path = [source, destination].filter(Boolean).join(" \u2192 ");
+  return path ? `${prefix} ${path}` : prefix;
+}
+function renderDecisionLens(decision, requestState = "idle", requestError = "", statusFilters = ALL_ACTION_DIAGNOSTIC_STATUSES) {
   if (!decision) {
     if (requestState === "loading") {
       return `
@@ -2207,20 +2229,15 @@ function renderDecisionLens(decision, requestState = "idle", requestError = "", 
     "physical-blocked": "\u7269\u7406\u62E6\u622A",
     "deadlock-blocked": "\u6B7B\u9501\u89C4\u5219\u62E6\u622A"
   };
-  const kindLabels = { pick: "Pick", place: "Place", swap: "Swap" };
   const visibleActions = decision.actionDiagnostics.filter((action) => statusFilters.includes(action.status));
   const cards = visibleActions.map((action) => {
-    const source = action.sourceSlot > 0 ? `${action.source} #${action.sourceSlot}` : action.source;
-    const destination = action.destinationSlot > 0 ? `${action.destination} #${action.destinationSlot}` : action.destination;
+    const reason = action.reason || statusLabels[action.status];
+    const duplicate = action.duplicateCount > 0 ? `<small>\u53E6 ${action.duplicateCount} \u7247\u76F8\u540C</small>` : "";
     return `
-      <li class="decision-candidate action-card action-status-${action.status}">
-        <span class="decision-tag action-kind">${kindLabels[action.kind]}</span>
-        <div class="decision-candidate-main">
-          <div class="decision-candidate-title"><strong>${escapeHtml(source || action.robot)} \u2192 ${escapeHtml(destination || "Robot hand")}</strong></div>
-          <small>${escapeHtml(action.robot || "Robot")} \xB7 ${action.materialIds.length ? `Material ${escapeHtml(action.materialIds.join(", "))}` : "\u65E0\u7269\u6599\u6807\u8BC6"}</small>
-          ${action.reason ? `<p class="action-block-reason">${escapeHtml(action.reason)}</p>` : ""}
-        </div>
-        <span class="decision-tag action-status">${statusLabels[action.status]}</span>
+      <li class="decision-candidate action-card action-status-${action.status}" tabindex="0" aria-label="${escapeHtml(`${formatActionPath(action)}\uFF0C${statusLabels[action.status]}`)}">
+        <strong class="action-card-path">${escapeHtml(formatActionPath(action))}</strong>
+        ${duplicate}
+        <span class="action-status-tooltip" role="tooltip">${escapeHtml(reason)}</span>
       </li>`;
   }).join("");
   const counts = decision.actionCounts;
@@ -2609,7 +2626,7 @@ var VisualizationWorkspace = class {
   analysisRounds = [];
   moves = [];
   replayPlan = null;
-  actionStatusFilters = ["enabled"];
+  actionStatusFilters = [...ALL_ACTION_DIAGNOSTIC_STATUSES];
   liveDecision = null;
   liveDecisionKey = "";
   primitiveDecisionBoundaries = [];
@@ -2638,6 +2655,8 @@ var VisualizationWorkspace = class {
   constructor(root) {
     this.root = root;
     this.elements = collectElements(root);
+    const selectedFilters = this.elements.actionStatusFilters.filter((item) => item.checked).map((item) => item.value);
+    if (selectedFilters.length) this.actionStatusFilters = selectedFilters;
     this.bindEvents();
     this.updatePlayButton();
     this.setTopologyVisible(false);
