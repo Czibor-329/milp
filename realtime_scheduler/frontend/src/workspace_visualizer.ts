@@ -3431,9 +3431,9 @@ function formatActionEndpoint(name: string, slot: number): string {
 /** 生成 Pick(1) LP1#1 → ATR#1 形式的动作路径。 */
 function formatActionPath(action: ReplayActionDiagnostic): string {
   const kindLabels = { pick: "Pick", place: "Place", swap: "Swap" };
-  const materialId = action.materialIds[0] || "";
+  const materialIds = action.materialIds.filter(Boolean).join(",");
   const kindLabel = kindLabels[action.kind];
-  const prefix = materialId ? `${kindLabel}(${materialId})` : kindLabel;
+  const prefix = materialIds ? `${kindLabel}(${materialIds})` : kindLabel;
   const source = formatActionEndpoint(action.source, action.sourceSlot);
   const destination = formatActionEndpoint(action.destination, action.destinationSlot);
   const path = [source, destination].filter(Boolean).join(" → ");

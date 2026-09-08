@@ -2346,9 +2346,9 @@ function formatActionEndpoint(name, slot) {
 }
 function formatActionPath(action) {
   const kindLabels = { pick: "Pick", place: "Place", swap: "Swap" };
-  const materialId = action.materialIds[0] || "";
+  const materialIds2 = action.materialIds.filter(Boolean).join(",");
   const kindLabel = kindLabels[action.kind];
-  const prefix = materialId ? `${kindLabel}(${materialId})` : kindLabel;
+  const prefix = materialIds2 ? `${kindLabel}(${materialIds2})` : kindLabel;
   const source = formatActionEndpoint(action.source, action.sourceSlot);
   const destination = formatActionEndpoint(action.destination, action.destinationSlot);
   const path = [source, destination].filter(Boolean).join(" \u2192 ");

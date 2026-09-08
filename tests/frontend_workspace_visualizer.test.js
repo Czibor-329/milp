@@ -540,7 +540,7 @@ test("动作空间按状态筛选并把原因放进悬浮提示", () => {
     actionDiagnostics: [
       { actionId: "p1", kind: "pick", status: "enabled", robot: "ATR", source: "LP1", sourceSlot: 1, destination: "ATR", destinationSlot: 1, materialIds: ["1"], reason: "当前物理可行，死锁规则允许执行" },
       { actionId: "p2", kind: "place", status: "physical-blocked", robot: "ATR", source: "ATR", sourceSlot: 1, destination: "LA", destinationSlot: 1, reason: "目标槽已满", duplicateCount: 23 },
-      { actionId: "s1", kind: "swap", status: "deadlock-blocked", robot: "VTR", source: "PM1", destination: "PM2", reason: "无回程槽" },
+      { actionId: "s1", kind: "swap", status: "deadlock-blocked", robot: "VTR", source: "VTR", sourceSlot: 1, destination: "PM2", destinationSlot: 1, materialIds: ["1", "2"], reason: "无回程槽" },
     ],
   }] })[0];
 
@@ -549,7 +549,7 @@ test("动作空间按状态筛选并把原因放进悬浮提示", () => {
   assert.match(enabled, /action-status-tooltip[\s\S]*当前物理可行/);
   assert.doesNotMatch(enabled, /decision-tag action-status|action-block-reason|目标槽已满|无回程槽|E2E|推荐|剩余工期|LA#1/);
   const blockedSwap = logic.renderDecisionLens(decision, "idle", "", ["deadlock-blocked"]);
-  assert.match(blockedSwap, /Swap PM1 → PM2/);
+  assert.match(blockedSwap, /Swap\(1,2\) VTR#1 → PM2#1/);
   assert.doesNotMatch(blockedSwap, /decision-tag action-status/);
   assert.match(blockedSwap, /action-status-tooltip[\s\S]*无回程槽/);
   assert.doesNotMatch(blockedSwap, /<p class="action-block-reason">/);
