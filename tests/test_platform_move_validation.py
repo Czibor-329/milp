@@ -2278,6 +2278,139 @@ def test_cascade_loadlock_omits_zero_duration_preprepare() -> None:
     assert replay.state.stations["DBR"].environment == VACUUM
 
 
+def test_cascade_loadlock_prepare_resolves_dependent_transport_after_pretrans() -> None:
+    """Prepare 应通过 PreMoveID 找到经 PreTrans 延后的 VTR_1 运输动作。
+
+    复现公司示例集-Post test7：DBR 完成零时长 VTR_2→VTR_1 后，Prepare
+    与 PreTrans 同时开始，实际 Place 稍后执行。此时 RelatedRobotType 仍是全局
+    真空分类，不能覆盖 DBR 配置声明的 VTR_1 局部访问侧。
+    """
+    update = _cascade_dbr_update()
+    update["Stations"]["DBR"]["LastItem"] = "VTR_2"
+    update["Stations"]["DBR"]["PrePrepareTime"][0]["Time"] = 0.4
+    update["Stations"]["DBR"]["PrePrepareTime"][1]["Time"] = 0.0
+    update["Materials"] = [
+        {"ID": 1, "CurrentModuleName": "PM1", "SlotID": 1, "StepID": 4},
+    ]
+    moves = [
+        _move(1, 6, 0, 1, ModuleName="PM1", RelatedRobotType=1),
+        _move(
+            2,
+            0,
+            1,
+            2,
+            ModuleName="VTR_1",
+            MatIDList=[1],
+            SrcStationList=["PM1"],
+            SrcSlotList=[1],
+            RobotSlotList=[1],
+            StepIDList=[5],
+        ),
+        _move(3, 7, 2, 2.5, ModuleName="PM1"),
+        _move(
+            4,
+            10,
+            2.5,
+            2.5,
+            ModuleName="DBR",
+            LastState="VTR_2",
+            CurState="VTR_1",
+            MatIDList=[],
+        ),
+        _move(
+            5,
+            6,
+            3,
+            3.1,
+            ModuleName="DBR",
+            RelatedRobotType=1,
+            RelatedActionType=0,
+            MatIDList=[1],
+            SlotList=[1],
+            PreMoveID=[4],
+        ),
+        _move(
+            6,
+            5,
+            3,
+            5,
+            ModuleName="VTR_1",
+            MatIDList=[1],
+            SrcStationList=["PM1"],
+            SrcSlotList=[1],
+            DestStationList=["DBR"],
+            DestSlotList=[1],
+            RobotSlotList=[1],
+            PreMoveID=[2, 4],
+        ),
+        _move(
+            7,
+            1,
+            5,
+            6,
+            ModuleName="VTR_1",
+            MatIDList=[1],
+            SrcStationList=[],
+            SrcSlotList=[],
+            DestStationList=["DBR"],
+            DestSlotList=[1],
+            RobotSlotList=[1],
+            StepIDList=[6],
+            PreMoveID=[5, 6],
+        ),
+    ]
+
+    assert validate_move_list(None, moves, update) == []
+
+
+def test_cascade_loadlock_prepare_does_not_guess_ambiguous_dependency() -> None:
+    """同一 Prepare 关联多个运输动作时保持严格校验，不任意选择机器人侧。"""
+    update = _cascade_dbr_update()
+    moves = [
+        _move(
+            1,
+            6,
+            0,
+            1,
+            ModuleName="DBR",
+            RelatedRobotType=1,
+            RelatedActionType=1,
+            MatIDList=[],
+        ),
+        _move(
+            2,
+            0,
+            2,
+            3,
+            ModuleName="VTR_1",
+            MatIDList=[1],
+            SrcStationList=["DBR"],
+            SrcSlotList=[1],
+            RobotSlotList=[1],
+            StepIDList=[5],
+            PreMoveID=[1],
+        ),
+        _move(
+            3,
+            0,
+            2,
+            3,
+            ModuleName="VTR_2",
+            MatIDList=[2],
+            SrcStationList=["DBR"],
+            SrcSlotList=[2],
+            RobotSlotList=[1],
+            StepIDList=[5],
+            PreMoveID=[1],
+        ),
+    ]
+
+    issues = validate_move_list(None, moves, update)
+
+    assert len(issues) == 1
+    assert "MVL-LL-002" in issues[0]
+
+
 def test_platform_rejects_slot_list_on_pick_move() -> None:
     """平台校验器应拒绝 PickMove 上错误的通用 SlotList 字段。"""
     move = _move(

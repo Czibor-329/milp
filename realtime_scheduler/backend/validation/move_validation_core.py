@@ -1691,8 +1691,14 @@ def _zero_duration_environment_transitions(
         add_if_zero(station_config.get("PumpTime"), ATMOSPHERE, VACUUM)
     if station_config.get("VentTime") is not None:
         add_if_zero(station_config.get("VentTime"), VACUUM, ATMOSPHERE)
+    aliases = _environment_aliases(station_config)
     for item in station_config.get("PrePrepareTime") or ():
         if not isinstance(item, Mapping):
+            continue
+        source = aliases.get(str(item.get("LastItem") or "").strip().upper())
+        target = aliases.get(str(item.get("CurrentItem") or "").strip().upper())
+        if source in {ATMOSPHERE, VACUUM} and target in {ATMOSPHERE, VACUUM}:
+            add_if_zero(item.get("Time"), source, target)
             continue
         transition_type = str(item.get("PrePrepareType") or "").strip().lower()
         if transition_type.startswith("pump"):
@@ -2006,7 +2012,7 @@ def _start_prepare(state: MachineState, move: Mapping[str, Any], end_time: float
             return _issue(
                 move,
                 ValidationErrorCode.LOADLOCK_ENVIRONMENT_INVALID,
-                f"{station.name}.CurState为{_environment_label(station, expected)}，不是{_environment_label(station, station.environment)}",
+                f"{station.name}.CurState为{_environment_label(station, station.environment)}，不是期望的{_environment_label(station, expected)}",
             )
         station.last_environment_transition_was_empty = False
         _complete_ready_loadlock_outbound_slots(station, move, related)
@@ -2361,7 +2367,7 @@ def _start_preprepare(state: MachineState, move: Mapping[str, Any], end_time: fl
         violation = _issue(
             move,
             ValidationErrorCode.LOADLOCK_ENVIRONMENT_INVALID,
-            f"{station.name}.CurState为{_environment_label(station, last_state)}，不是{_environment_label(station, station.environment)}",
+            f"{station.name}.CurState为{_environment_label(station, station.environment)}，不是动作声明的{_environment_label(station, last_state)}",
         )
     if violation is not None:
         if not station.environment_exemption_used:
