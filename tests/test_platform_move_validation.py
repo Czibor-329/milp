@@ -471,8 +471,8 @@ def test_skipped_clean_still_requires_recipe_and_dummy_material() -> None:
     assert issues and "必须先完成足量 Dummy" in issues[0]
 
 
-def test_dummy_wac_empty_tail_requires_completed_dummy_stage() -> None:
-    """Dummy WAC 的空腔尾段仅在足量带片阶段完成后才是合法动作。"""
+def test_dummy_wac_empty_tail_follows_each_completed_dummy_stage() -> None:
+    """每片 Dummy 带片清洁后都应立即允许且只允许一次空腔 WAC。"""
     update = {
         "Stations": {"PM1": {"Type": "ProcessChamber", "Capacity": 1}},
         "Robots": {},
@@ -492,22 +492,77 @@ def test_dummy_wac_empty_tail_requires_completed_dummy_stage() -> None:
     move = _move(
         1, 9, 0, 10,
         ModuleName="PM1", MatIDList=[], SlotList=[1], PJobName=["P1"],
-        CleanTaskName="PreWacClean", ProcessRecipe="EmptyWacRecipe",
+        CleanTaskName="WacClean", ProcessRecipe="EmptyWacRecipe",
         IsLastCleanTaskMove=True,
     )
     state = MachineState.from_sources(None, update)
 
-    issues = validate_move_list(
-        None, [move], state,
-        skipped_clean_validation_types=["dummywac"],
-    )
-    assert issues and "必须先完成足量 Dummy" in issues[0]
+    issues = validate_move_list(None, [move], state)
+    assert issues and "必须紧跟一片" in issues[0]
 
-    state.completed_clean_counts[("P1", "PM1", "PreWacClean")] = 2
-    assert validate_move_list(
-        None, [move], state,
-        skipped_clean_validation_types=["dummywac"],
-    ) == []
+    clean_key = ("P1", "PM1", "PreWacClean")
+    state.completed_clean_counts[clean_key] = 1
+    assert validate_move_list(None, [move], state) == []
+
+    state.completed_dummy_wac_counts[clean_key] = 1
+    issues = validate_move_list(None, [move], state)
+    assert issues and "必须紧跟一片" in issues[0]
+
+    state.completed_clean_counts[clean_key] = 2
+    assert validate_move_list(None, [move], state) == []
+
+
+def test_dummy_wac_blocks_next_dummy_and_product_until_tail_completed() -> None:
+    """未完成上一片尾随 WAC 时，不得继续下一片 Dummy 或开始产品工艺。"""
+    update = {
+        "Stations": {"PM1": {"Type": "ProcessChamber", "Capacity": 1}},
+        "Robots": {},
+        "Materials": [],
+        "ProcessJobs": [{
+            "JobName": "P1",
+            "OriginRoute": {"PrePJob": {"PM1": [{
+                "CheckConditions": {"DummyWac": [{
+                    "TaskName": "PreWacClean",
+                    "CleanRecipe": "DummyRecipe",
+                    "EmptyCleanRecipeAfterMaterial": "EmptyWacRecipe",
+                    "MaterialCount": 2,
+                }]},
+            }]}},
+        }],
+    }
+    state = MachineState.from_sources(None, update)
+    clean_key = ("P1", "PM1", "PreWacClean")
+    state.completed_clean_counts[clean_key] = 1
+    state.stations["PM1"].slots[1] = SlotState(
+        phase=SlotPhase.UNPROCESSED,
+        material=MaterialState(101, pjob_name="dummy_P1"),
+    )
+    next_dummy = _move(
+        1, 9, 0, 10,
+        ModuleName="PM1", MatIDList=[101], SlotList=[1], PJobName=["P1"],
+        CleanTaskName="PreWacClean", ProcessRecipe="DummyRecipe",
+        IsLastCleanTaskMove=True,
+    )
+    issues = validate_move_list(None, [next_dummy], state)
+    assert issues and "上一片 Dummy 离腔后必须先完成空腔 WAC" in issues[0]
+
+    state.completed_clean_counts[clean_key] = 2
+    state.completed_dummy_wac_counts[clean_key] = 1
+    state.stations["PM1"].slots[1] = SlotState(
+        phase=SlotPhase.UNPROCESSED,
+        material=MaterialState(201, pjob_name="P1"),
+    )
+    product_process = _move(
+        2, 9, 10, 20,
+        ModuleName="PM1", MatIDList=[201], SlotList=[1], PJobName=["P1"],
+        ProcessRecipe="ProductRecipe",
+    )
+    issues = validate_move_list(None, [product_process], state)
+    assert issues and "MVL-CLEAN-DUMMY-MISSING" in issues[0]
+    assert "required=2 actual=1" in issues[0]
+
+    state.completed_dummy_wac_counts[clean_key] = 2
+    assert validate_move_list(None, [product_process], state) == []
 
 
 def test_platform_requires_preclean_before_first_product_process() -> None:

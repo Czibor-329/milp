@@ -240,6 +240,9 @@ class MachineState:
     clean_obligations: Dict[Tuple[str, str, str], Tuple[str, int, Tuple[str, ...]]] = field(default_factory=dict)
     #: 本次运行跳过的 Clean 触发/次数规则；物理状态回放与计数仍照常执行。
     skipped_clean_validation_types: Set[str] = field(default_factory=set)
+    #: Dummy WAC 中已经完成尾随空腔 WAC 的片数。该计数与带片清洁数分离，
+    #: 用于强制每片 Dummy 按“带片清洁 → 出片 → 空腔 WAC”成对完成。
+    completed_dummy_wac_counts: Dict[Tuple[str, str, str], int] = field(default_factory=dict)
     completed_clean_counts: Dict[Tuple[str, str, str], int] = field(default_factory=dict)
     product_clean_entries: Set[Tuple[str, str]] = field(default_factory=set)
     #: 外部算法可省略的零时长产品 ProcessMove；键为（物料、Route Step、PM）。
@@ -2061,12 +2064,26 @@ def _start_process(state: MachineState, move: Mapping[str, Any], end_time: float
         return _issue(move, ValidationErrorCode.STATION_UNKNOWN, f"未知站点 {station_name or '<empty>'}")
     start_time = _start_time(move)
     clean_task_name = str(move.get("CleanTaskName") or "").strip()
-    matched_clean_obligations = [
+    recipe_name = str(
+        move.get("ProcessRecipe") or move.get("CleanRecipe") or ""
+    ).strip()
+    station_clean_obligations = [
         ((pjob_name, required_station, task_name), requirement)
         for (pjob_name, required_station, task_name), requirement in state.clean_obligations.items()
         if required_station == station_name
-        and task_name == clean_task_name
         and (not _values(move, "PJobName") or pjob_name in {str(value) for value in _values(move, "PJobName")})
+    ]
+    matched_clean_obligations = [
+        (clean_key, requirement)
+        for clean_key, requirement in station_clean_obligations
+        if clean_key[2] == clean_task_name
+    ]
+    # 调度器为 Dummy WAC 空腔尾段使用通用 ``WacClean`` 任务名；其所属
+    # PreWacClean 必须按 EmptyCleanRecipeAfterMaterial 反向识别。
+    dummy_wac_tail_obligations = [
+        (clean_key, requirement)
+        for clean_key, requirement in station_clean_obligations
+        if len(requirement[2]) >= 2 and recipe_name == requirement[2][-1]
     ]
     clean_material_count = max(
         (requirement[1] for _key, requirement in matched_clean_obligations),
@@ -2077,9 +2094,10 @@ def _start_process(state: MachineState, move: Mapping[str, Any], end_time: float
         if clean_task_name
         else ""
     )
-    recipe_name = str(
-        move.get("ProcessRecipe") or move.get("CleanRecipe") or ""
-    ).strip()
+    if not material_ids and dummy_wac_tail_obligations:
+        clean_type = "dummywac"
+        matched_clean_obligations = dummy_wac_tail_obligations
+    dummy_wac_tail_key: Optional[Tuple[str, str, str]] = None
     if clean_type in {"dummy", "dummywac"}:
         if material_ids:
             wrong_main_recipe = next((
@@ -2093,18 +2111,40 @@ def _start_process(state: MachineState, move: Mapping[str, Any], end_time: float
                     ValidationErrorCode.CLEAN_RECIPE_INVALID,
                     f"{clean_task_name} 带片阶段 Recipe={recipe_name or '<empty>'}，期望 {wrong_main_recipe}",
                 )
+            pending_wac_key = next((
+                clean_key
+                for clean_key, _requirement in matched_clean_obligations
+                if clean_type == "dummywac"
+                and state.completed_clean_counts.get(clean_key, 0)
+                > state.completed_dummy_wac_counts.get(clean_key, 0)
+            ), None)
+            if pending_wac_key is not None:
+                return _issue(
+                    move,
+                    ValidationErrorCode.PROCESS_STATE_INVALID,
+                    f"{clean_task_name} 上一片 Dummy 离腔后必须先完成空腔 WAC",
+                )
         else:
-            valid_empty_tail = clean_type == "dummywac" and any(
-                len(requirement[2]) >= 2
-                and recipe_name == requirement[2][-1]
-                and state.completed_clean_counts.get(clean_key, 0) >= requirement[1]
-                for clean_key, requirement in matched_clean_obligations
-            )
-            if not valid_empty_tail:
+            if clean_type == "dummy":
                 return _issue(
                     move,
                     ValidationErrorCode.PROCESS_STATE_INVALID,
                     f"{clean_task_name} 必须先完成足量 Dummy 带片清洁",
+                )
+            dummy_wac_tail_key = next((
+                clean_key
+                for clean_key, requirement in matched_clean_obligations
+                if clean_type == "dummywac"
+                and len(requirement[2]) >= 2
+                and recipe_name == requirement[2][-1]
+                and state.completed_clean_counts.get(clean_key, 0)
+                > state.completed_dummy_wac_counts.get(clean_key, 0)
+            ), None)
+            if dummy_wac_tail_key is None:
+                return _issue(
+                    move,
+                    ValidationErrorCode.PROCESS_STATE_INVALID,
+                    f"{clean_task_name} 空腔 WAC 必须紧跟一片尚未完成尾段的 Dummy 清洁",
                 )
     if clean_type in {"preclean", "postclean", "wacclean"} and material_ids:
         return _issue(
@@ -2211,6 +2251,10 @@ def _start_process(state: MachineState, move: Mapping[str, Any], end_time: float
                     state.completed_clean_counts[clean_key] = (
                         state.completed_clean_counts.get(clean_key, 0) + increment
                     )
+        if dummy_wac_tail_key is not None:
+            state.completed_dummy_wac_counts[dummy_wac_tail_key] = (
+                state.completed_dummy_wac_counts.get(dummy_wac_tail_key, 0) + 1
+            )
         if clean_task_name and move.get("IsLastCleanTaskMove") is True:
             for variable_name in state.clean_task_state_variables.get(
                 clean_task_name,

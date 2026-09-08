@@ -718,6 +718,13 @@ def _missing_pre_clean_obligation(
             task_name,
             material_count=expected_count if required_count > 0 else 0,
         )
+        if clean_type == "dummywac":
+            # 产品准入要求每一片 Dummy 的带片段和尾随空腔 WAC 都已成对完成；
+            # 仅达到带片数量仍不能视为 PreWacClean 完成。
+            actual_count = min(
+                actual_count,
+                state.completed_dummy_wac_counts.get(clean_key, 0),
+            )
         if (
             actual_count < expected_count
             and clean_type not in state.skipped_clean_validation_types
