@@ -17,6 +17,7 @@ export {
   detectTopologyLayout,
   groupedBottleneckResources,
   normalizeDecisionTrace,
+  normalizeLoadPortReplenishments,
   normalizeMovePayload,
   primitiveDecisionBoundaryTimes,
   renderEquipmentTopology,

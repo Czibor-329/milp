@@ -93,6 +93,12 @@ export interface LoadPortSlotSnapshot {
   processed: boolean;
 }
 
+interface LoadPortReplenishment {
+  time: number;
+  moduleName: string;
+  materials: Array<{ wafer: string; slot: number; taskId: string }>;
+}
+
 /** 旧结果文件中的模型候选，仅用于忽略历史 DecisionTrace 时保持解析兼容。 */
 export interface DecisionCandidate {
   actionId: string;
@@ -638,6 +644,75 @@ function materialIds(move: MoveRecord, field = "MatIDList"): string[] {
 }
 
 /**
+ * 从结果内嵌的各代 AlgSchedule 快照提取 LoadPort 补片边界。
+ *
+ * 补片发生在重算时刻，不等到新一盒首片真正开始 Pick。后续 MoveList 只能证明
+ * 新盒存在，无法单独还原它何时装入，因此回放必须使用 ReplayContext.updates 的
+ * CurrentTime 与新增 TaskID。
+ */
+export function normalizeLoadPortReplenishments(payload: unknown): LoadPortReplenishment[] {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return [];
+  const replayContext = (payload as UnknownRecord).ReplayContext;
+  if (!replayContext || typeof replayContext !== "object" || Array.isArray(replayContext)) return [];
+  const updates = listValue((replayContext as UnknownRecord).updates)
+    .filter((update): update is UnknownRecord => Boolean(update) && typeof update === "object" && !Array.isArray(update))
+    .sort((left, right) => finiteNumber(left.CurrentTime) - finiteNumber(right.CurrentTime));
+  const knownTaskIdsByPort = new Map<string, Set<string>>();
+  const replenishments: LoadPortReplenishment[] = [];
+
+  updates.forEach((update, updateIndex) => {
+    const materials = listValue(update.Materials)
+      .filter((material): material is UnknownRecord => Boolean(material) && typeof material === "object" && !Array.isArray(material));
+    const currentByPortAndTask = new Map<string, Map<string, Array<{ wafer: string; slot: number; taskId: string }>>>();
+    for (const material of materials) {
+      const port = String(material.SrcPortName ?? "").trim();
+      const currentModule = String(material.CurrentModuleName ?? "").trim();
+      const taskId = String(material.TaskID ?? "").trim();
+      const wafer = String(material.ID ?? material.Name ?? "").trim();
+      const slot = Math.trunc(finiteNumber(material.SlotID));
+      if (!port || currentModule !== port || !taskId || !wafer || slot < 1) continue;
+      const byTask = currentByPortAndTask.get(port) ?? new Map<string, Array<{ wafer: string; slot: number; taskId: string }>>();
+      const taskMaterials = byTask.get(taskId) ?? [];
+      taskMaterials.push({ wafer, slot, taskId });
+      byTask.set(taskId, taskMaterials);
+      currentByPortAndTask.set(port, byTask);
+    }
+
+    for (const [port, byTask] of currentByPortAndTask) {
+      const knownTaskIds = knownTaskIdsByPort.get(port) ?? new Set<string>();
+      for (const [taskId, taskMaterials] of byTask) {
+        if (updateIndex > 0 && !knownTaskIds.has(taskId)) {
+          replenishments.push({
+            time: finiteNumber(update.CurrentTime),
+            moduleName: port,
+            materials: taskMaterials.sort((left, right) => left.slot - right.slot),
+          });
+        }
+        knownTaskIds.add(taskId);
+      }
+      knownTaskIdsByPort.set(port, knownTaskIds);
+    }
+  });
+  return replenishments;
+}
+
+/**
+ * 返回回放中一片晶圆的批次内身份。
+ *
+ * CJobCycle 补片会在后续计划代次重新从 1 分配 MatID，因此 MatID 本身不能作为
+ * 全程唯一键。PJobName 随该批产品传递，可将同号的不同补片批次区分开；旧版
+ * MoveList 缺少 PJobName 时退回 MatID，维持兼容。
+ */
+function materialInstanceId(move: MoveRecord, material: string, index: number): string {
+  const taskIds = listValue(move.TaskID).map(String).filter(Boolean);
+  const taskId = taskIds[index] ?? taskIds[0] ?? "";
+  if (taskId) return `${material}\u0000${taskId}`;
+  const processJobs = listValue(move.PJobName).map(String).filter(Boolean);
+  const processJob = processJobs[index] ?? processJobs[0] ?? "";
+  return processJob ? `${material}\u0000${processJob}` : material;
+}
+
+/**
  * 判断算法是否以 ProcessMove 形式记录清洁。
  *
  * 部分算法包不会输出 MoveType=14，而是用没有产品晶圆的 ProcessMove 或附带
@@ -1011,6 +1086,7 @@ function buildLoadPortSlots(
   time: number,
   initialLocations: Map<string, string>,
   processedMaterials: Set<string>,
+  replenishments: LoadPortReplenishment[],
 ): Map<string, LoadPortSlotSnapshot[]> {
   const names = new Set<string>();
   for (const [name, definition] of Object.entries(device?.Stations ?? {})) {
@@ -1042,7 +1118,7 @@ function buildLoadPortSlots(
      * 同一片 Dummy 多次回库再取出仍属于同一盒次，不会被误判为补片。
      */
     const slotMaterialHistory = new Map<number, string[]>();
-    const generationSlots = new Map<number, Map<number, string>>();
+    const generationSlots = new Map<number, Map<number, { wafer: string; instanceId: string }>>();
     const generationStartTimes = new Map<number, number>([[0, 0]]);
     const materialGenerations = new Map<string, number>();
     for (const move of records) {
@@ -1051,17 +1127,18 @@ function buildLoadPortSlots(
         if (indexedStation(move, "SrcStationList", index) !== name) return;
         const slot = indexedSlot(move, "SrcSlotList", index);
         if (!slot) return;
+        const instanceId = materialInstanceId(move, material, index);
         const history = slotMaterialHistory.get(slot) ?? [];
-        let generation = history.indexOf(material);
+        let generation = history.indexOf(instanceId);
         if (generation < 0) {
           generation = history.length;
-          history.push(material);
+          history.push(instanceId);
           slotMaterialHistory.set(slot, history);
         }
-        const slots = generationSlots.get(generation) ?? new Map<number, string>();
-        if (!slots.has(slot)) slots.set(slot, material);
+        const slots = generationSlots.get(generation) ?? new Map<number, { wafer: string; instanceId: string }>();
+        if (!slots.has(slot)) slots.set(slot, { wafer: material, instanceId });
         generationSlots.set(generation, slots);
-        materialGenerations.set(material, generation);
+        materialGenerations.set(instanceId, generation);
         if (generation > 0) {
           generationStartTimes.set(
             generation,
@@ -1070,17 +1147,47 @@ function buildLoadPortSlots(
         }
       });
     }
+    /* 重算快照给出的补片时刻优先于新盒首片的 Pick 开始时刻。 */
+    for (const replenishment of replenishments.filter(item => item.moduleName === name)) {
+      const generations = replenishment.materials
+        .map(material => materialGenerations.get(`${material.wafer}\u0000${material.taskId}`)
+          ?? materialGenerations.get(material.wafer)
+          ?? [...materialGenerations.entries()].find(([instanceId]) => (
+            instanceId === material.wafer || instanceId.startsWith(`${material.wafer}\u0000`)
+        ))?.[1])
+        .filter((generation): generation is number => generation !== undefined);
+      const generation = generations.length
+        ? Math.max(...generations)
+        : Math.max(...generationSlots.keys(), -1) + 1;
+      const replenishedSlots = generationSlots.get(generation) ?? new Map<number, { wafer: string; instanceId: string }>();
+      for (const material of replenishment.materials) {
+        const declaredInstanceId = `${material.wafer}\u0000${material.taskId}`;
+        const instanceId = materialGenerations.has(declaredInstanceId)
+          ? declaredInstanceId
+          : [...materialGenerations.keys()].find(candidate => (
+          candidate === material.wafer || candidate.startsWith(`${material.wafer}\u0000`)
+          )) ?? declaredInstanceId;
+        replenishedSlots.set(material.slot, { wafer: material.wafer, instanceId });
+        materialGenerations.set(instanceId, generation);
+        observedMaximum.set(name, Math.max(observedMaximum.get(name) ?? 0, material.slot));
+      }
+      generationSlots.set(generation, replenishedSlots);
+      generationStartTimes.set(
+        generation,
+        Math.min(generationStartTimes.get(generation) ?? Number.POSITIVE_INFINITY, replenishment.time),
+      );
+    }
     const activeGeneration = [...generationSlots.keys()]
       .filter(generation => generation === 0 || (generationStartTimes.get(generation) ?? Number.POSITIVE_INFINITY) <= time)
       .reduce((latest, generation) => Math.max(latest, generation), 0);
-    const occupancy = new Map(generationSlots.get(activeGeneration) ?? []);
+    const occupancy = new Map<number, { wafer: string; instanceId: string }>(generationSlots.get(activeGeneration) ?? []);
     /* 没有槽位字段的旧 MoveList 仍按初始位置顺序回退，但不与盒次推断混用。 */
     if (!occupancy.size && !generationSlots.size) {
       const legacyInitialMaterials = [...initialLocations.entries()]
         .filter(([, location]) => location === name)
         .map(([material]) => material)
         .sort(naturalCompare);
-      legacyInitialMaterials.forEach((material, index) => occupancy.set(index + 1, material));
+      legacyInitialMaterials.forEach((material, index) => occupancy.set(index + 1, { wafer: material, instanceId: material }));
     }
 
     for (const move of records) {
@@ -1089,24 +1196,26 @@ function buildLoadPortSlots(
         if (move.EndTime > time) continue;
         materials.forEach((material, index) => {
           if (indexedStation(move, "SrcStationList", index) !== name) return;
-          if ((materialGenerations.get(material) ?? 0) !== activeGeneration) return;
+          const instanceId = materialInstanceId(move, material, index);
+          if ((materialGenerations.get(instanceId) ?? 0) !== activeGeneration) return;
           const slot = indexedSlot(move, "SrcSlotList", index);
           if (slot) occupancy.delete(slot);
           else {
-            const current = [...occupancy.entries()].find(([, wafer]) => wafer === material);
+            const current = [...occupancy.entries()].find(([, wafer]) => wafer.instanceId === instanceId);
             if (current) occupancy.delete(current[0]);
           }
         });
       } else if (PLACE_MOVE_TYPES.has(move.MoveType) && move.EndTime <= time) {
         materials.forEach((material, index) => {
           if (indexedStation(move, "DestStationList", index) !== name) return;
-          if ((materialGenerations.get(material) ?? 0) !== activeGeneration) return;
+          const instanceId = materialInstanceId(move, material, index);
+          if ((materialGenerations.get(instanceId) ?? 0) !== activeGeneration) return;
           let slot = indexedSlot(move, "DestSlotList", index);
           if (!slot) {
             slot = 1;
             while (occupancy.has(slot)) slot += 1;
           }
-          occupancy.set(slot, material);
+          occupancy.set(slot, { wafer: material, instanceId });
           observedMaximum.set(name, Math.max(observedMaximum.get(name) ?? 0, slot));
         });
       }
@@ -1119,8 +1228,12 @@ function buildLoadPortSlots(
       Math.max(observedMaximum.get(name) ?? 0, occupiedMaximum, occupancy.size),
     );
     result.set(name, Array.from({ length: capacity }, (_, index) => {
-      const wafer = occupancy.get(index + 1) ?? "";
-      return { slot: index + 1, wafer, processed: Boolean(wafer && processedMaterials.has(wafer)) };
+      const occupied = occupancy.get(index + 1);
+      return {
+        slot: index + 1,
+        wafer: occupied?.wafer ?? "",
+        processed: Boolean(occupied && processedMaterials.has(occupied.instanceId)),
+      };
     }));
   }
   return result;
@@ -1142,6 +1255,7 @@ function buildLoadLockSlots(
   time: number,
   initialLocations: Map<string, string>,
   processedMaterials: Set<string>,
+  currentMaterialInstances: ReadonlyMap<string, string>,
 ): Map<string, LoadPortSlotSnapshot[]> {
   const names = new Set<string>();
   for (const [name, definition] of Object.entries(device?.Stations ?? {})) {
@@ -1250,7 +1364,8 @@ function buildLoadLockSlots(
     );
     result.set(name, Array.from({ length: capacity }, (_, index) => {
       const wafer = occupancy.get(index + 1) ?? "";
-      return { slot: index + 1, wafer, processed: Boolean(wafer && processedMaterials.has(wafer)) };
+      const instanceId = currentMaterialInstances.get(wafer) ?? wafer;
+      return { slot: index + 1, wafer, processed: Boolean(wafer && processedMaterials.has(instanceId)) };
     }));
   }
   return result;
@@ -1276,6 +1391,7 @@ export function buildWorkspaceSnapshot(
   moves: MoveRecord[],
   device: DeviceDefinition | null,
   requestedTime: number,
+  replenishments: LoadPortReplenishment[] = [],
 ): WorkspaceSnapshot {
   const records = normalizeMoves(moves);
   const endTime = records.reduce((maximum, move) => Math.max(maximum, move.EndTime), 0);
@@ -1295,12 +1411,23 @@ export function buildWorkspaceSnapshot(
   const requiredProcesses = new Map<string, number>();
   for (const move of records) {
     if (move.MoveType !== PROCESS_MOVE) continue;
-    for (const material of materialIds(move)) {
-      requiredProcesses.set(material, (requiredProcesses.get(material) ?? 0) + 1);
-    }
+    materialIds(move).forEach((material, index) => {
+      const instanceId = materialInstanceId(move, material, index);
+      requiredProcesses.set(instanceId, (requiredProcesses.get(instanceId) ?? 0) + 1);
+    });
   }
   const completedProcesses = new Map<string, number>();
+  /** 已完成加工的“晶圆 ID + PJob”实例，避免补片复用 ID 时继承旧批次状态。 */
   const processedMaterials = new Set<string>();
+  /** 当前时间点每个显示 ID 对应的批次实例，供所有设备位置统一判断颜色。 */
+  const currentMaterialInstances = new Map<string, string>();
+  for (const move of records) {
+    materialIds(move).forEach((material, index) => {
+      if (!currentMaterialInstances.has(material)) {
+        currentMaterialInstances.set(material, materialInstanceId(move, material, index));
+      }
+    });
+  }
   const activeMoves: NormalizedMove[] = [];
   let completedMoves = 0;
 
@@ -1314,18 +1441,24 @@ export function buildWorkspaceSnapshot(
   for (const move of records) {
     const active = move.StartTime <= time && time < move.EndTime;
     const completed = move.EndTime <= time;
+    if (move.StartTime <= time) {
+      materialIds(move).forEach((material, index) => {
+        currentMaterialInstances.set(material, materialInstanceId(move, material, index));
+      });
+    }
     if (active) activeMoves.push(move);
     if (completed) {
       completedMoves += 1;
       applyCompletedTransfer(move, locations);
       if (move.MoveType === PROCESS_MOVE) {
-        for (const material of materialIds(move)) {
-          const completed = (completedProcesses.get(material) ?? 0) + 1;
-          completedProcesses.set(material, completed);
-          if (completed >= (requiredProcesses.get(material) ?? 1)) {
-            processedMaterials.add(material);
+        materialIds(move).forEach((material, index) => {
+          const instanceId = materialInstanceId(move, material, index);
+          const completed = (completedProcesses.get(instanceId) ?? 0) + 1;
+          completedProcesses.set(instanceId, completed);
+          if (completed >= (requiredProcesses.get(instanceId) ?? 1)) {
+            processedMaterials.add(instanceId);
           }
-        }
+        });
       }
     }
 
@@ -1347,6 +1480,15 @@ export function buildWorkspaceSnapshot(
       if (environment) environments.set(move.ModuleName, active ? `${environment}切换中` : environment);
     }
   }
+  for (const replenishment of replenishments) {
+    if (replenishment.time > time) continue;
+    for (const material of replenishment.materials) {
+      currentMaterialInstances.set(material.wafer, `${material.wafer}\u0000${material.taskId}`);
+    }
+  }
+  const isProcessed = (material: string): boolean => processedMaterials.has(
+    currentMaterialInstances.get(material) ?? material,
+  );
 
   const robotTargets = new Map<string, string>();
   for (const move of activeMoves) {
@@ -1367,8 +1509,22 @@ export function buildWorkspaceSnapshot(
     wafersByLocation.set(location, wafers);
   }
   for (const wafers of wafersByLocation.values()) wafers.sort(naturalCompare);
-  const loadPortSlots = buildLoadPortSlots(records, device, time, initialLocations, processedMaterials);
-  const loadLockSlots = buildLoadLockSlots(records, device, time, initialLocations, processedMaterials);
+  const loadPortSlots = buildLoadPortSlots(
+    records,
+    device,
+    time,
+    initialLocations,
+    processedMaterials,
+    replenishments,
+  );
+  const loadLockSlots = buildLoadLockSlots(
+    records,
+    device,
+    time,
+    initialLocations,
+    processedMaterials,
+    currentMaterialInstances,
+  );
 
   const modules = [...definitions.entries()].map(([name, definition]): ModuleSnapshot => {
     const moduleMoves = activeMoves.filter(move => (
@@ -1403,7 +1559,7 @@ export function buildWorkspaceSnapshot(
       status,
       door: doorStates.get(name) ?? "closed",
       wafers: wafersByLocation.get(name) ?? [],
-      processedWafers: (wafersByLocation.get(name) ?? []).filter(wafer => processedMaterials.has(wafer)),
+      processedWafers: (wafersByLocation.get(name) ?? []).filter(isProcessed),
       loadPortSlots: loadPortSlots.get(name) ?? [],
       loadLockSlots: loadLockSlots.get(name) ?? [],
       slotCapacity: stationSlotCapacity(device, name, isCoolerModule(name, definition.type) ? 3 : 1),
@@ -1425,7 +1581,7 @@ export function buildWorkspaceSnapshot(
       capacity: robotCapacity(definition, wafers.length),
       environment: robotEnvironment(name, definition),
       wafers,
-      processedWafers: wafers.filter(wafer => processedMaterials.has(wafer)),
+      processedWafers: wafers.filter(isProcessed),
       busy: Boolean(move),
       source: move ? firstStation(move, "SrcStationList") : "",
       target: robotTargets.get(name) ?? lastRobotTargets.get(name) ?? "",
@@ -2115,7 +2271,20 @@ function renderModule(
   const candidateLabel = candidate
     ? `${candidate.count} 个可行动作，最高模型偏好 ${(candidate.preference * 100).toFixed(0)}%`
     : "";
-  if (role === "port") return renderLoadPortTopView(module, wafers, accessibleStatus, candidate);
+  if (role === "port") {
+    // LoadPort 的盒次可能复用 MatID；俯视图必须复用物理槽位的批次状态，不能
+    // 使用模块级 MatID 集合，否则补片后的新片会被旧片染成“已加工”。
+    const visibleSlot = visibleModuleSlots(module, "port").find(slot => slot.wafer);
+    const portWafers = visibleSlot
+      ? renderWaferToken(
+        visibleSlot.wafer,
+        waferOrigins[visibleSlot.wafer] ?? "",
+        waferProgress,
+        visibleSlot.processed,
+      )
+      : "";
+    return renderLoadPortTopView(module, portWafers, accessibleStatus, candidate);
+  }
   if (role === "auxiliary" && isAlignerModule(module.name, module.type)) {
     return `<strong class="equipment-external-name equipment-external-name-aligner">${escapeHtml(module.name)}</strong>
       <article class="equipment-utility equipment-aligner status-${module.status} ${module.isRobotTarget ? "is-target" : ""} ${candidate ? "is-candidate-destination" : ""} ${candidate?.selected ? "is-model-selected" : ""}" aria-label="${escapeHtml(`${accessibleStatus}${candidateLabel ? `，${candidateLabel}` : ""}`)}">
@@ -3832,6 +4001,7 @@ export class VisualizationWorkspace {
   private analysisRoutes: Array<Record<string, any>> = [];
   private analysisRounds: Array<Record<string, any>> = [];
   private moves: MoveRecord[] = [];
+  private loadPortReplenishments: LoadPortReplenishment[] = [];
   private replayPlan: Record<string, any> | null = null;
   private actionStatusFilters: ActionDiagnosticStatus[] = [...ALL_ACTION_DIAGNOSTIC_STATUSES];
   private liveDecision: DecisionTraceStep | null = null;
@@ -3904,6 +4074,7 @@ export class VisualizationWorkspace {
     await this.loadMoves(
       normalizeMovePayload(payload),
       normalizeDecisionTrace(payload),
+      normalizeLoadPortReplenishments(payload),
       file.name,
       "",
       "",
@@ -3942,6 +4113,7 @@ export class VisualizationWorkspace {
       await this.loadMoves(
         normalizeMovePayload(payload),
         normalizeDecisionTrace(payload),
+        normalizeLoadPortReplenishments(payload),
         sourceName,
         resultUrl,
         resultId,
@@ -3986,6 +4158,8 @@ export class VisualizationWorkspace {
     this.pause();
     this.liveSolving = true;
     this.moves = [];
+    this.loadPortReplenishments = [];
+    this.loadPortReplenishments = [];
     this.sourceName = sourceName;
     this.resultUrl = "";
     this.analysisResultId = "";
@@ -4142,6 +4316,7 @@ export class VisualizationWorkspace {
   private async loadMoves(
     moves: MoveRecord[],
     _decisionTrace: DecisionTraceStep[],
+    loadPortReplenishments: LoadPortReplenishment[],
     sourceName: string,
     resultUrl: string,
     analysisResultId: string,
@@ -4152,6 +4327,7 @@ export class VisualizationWorkspace {
     this.pause();
     this.liveSolving = false;
     this.moves = moves;
+    this.loadPortReplenishments = loadPortReplenishments;
     this.primitiveDecisionBoundaries = primitiveDecisionBoundaryTimes(moves);
     this.liveDecision = null;
     this.liveDecisionKey = "";
@@ -4167,7 +4343,7 @@ export class VisualizationWorkspace {
     this.cpuTimeMs = cpuTimeMs;
     this.recomputeCount = recomputeCount;
     this.bottleneckSummary = null;
-    const snapshot = buildWorkspaceSnapshot(this.moves, this.device, 0);
+    const snapshot = buildWorkspaceSnapshot(this.moves, this.device, 0, this.loadPortReplenishments);
     this.time = 0;
     this.elements.range.min = "0";
     this.elements.range.max = String(snapshot.endTime);
@@ -4295,7 +4471,12 @@ export class VisualizationWorkspace {
   /** 绘制当前时间对应的设备快照。 */
   private render(prebuiltSnapshot?: WorkspaceSnapshot): void {
     if (!this.moves.length && !this.liveSolving) return;
-    const snapshot = prebuiltSnapshot ?? buildWorkspaceSnapshot(this.moves, this.device, this.time);
+    const snapshot = prebuiltSnapshot ?? buildWorkspaceSnapshot(
+      this.moves,
+      this.device,
+      this.time,
+      this.loadPortReplenishments,
+    );
     this.time = snapshot.time;
     this.elements.source.textContent = this.sourceName;
     this.elements.source.title = this.sourceName;

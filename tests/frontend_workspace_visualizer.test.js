@@ -1624,6 +1624,73 @@ test("CJobCycle 补片开始时替换 LoadPort 旧成品盒", () => {
   assert.deepEqual(atPatch.loadPortSlots.map(slot => slot.wafer), Array.from({ length: 10 }, (_, index) => `NEW${index + 1}`));
 });
 
+test("CJobCycle 补片复用 MatID 时不继承上一盒的已加工颜色", () => {
+  const cycleDevice = {
+    Stations: { LP1: { Type: "LoadPort", Capacity: 1, Slots: [1] }, PM1: { Type: "Process" } },
+    Robots: { ATR: {} },
+  };
+  const cycleMoves = [
+    { MoveID: 1, MoveType: 0, ModuleName: "ATR", SrcStationList: ["LP1"], SrcSlotList: [1], MatIDList: [1], PJobName: ["P1"], StartTime: 0, EndTime: 1 },
+    { MoveID: 2, MoveType: 9, ModuleName: "PM1", MatIDList: [1], PJobName: ["P1"], StartTime: 2, EndTime: 3 },
+    { MoveID: 3, MoveType: 1, ModuleName: "ATR", DestStationList: ["LP1"], DestSlotList: [1], MatIDList: [1], PJobName: ["P1"], StartTime: 4, EndTime: 5 },
+    { MoveID: 4, MoveType: 0, ModuleName: "ATR", SrcStationList: ["LP1"], SrcSlotList: [1], MatIDList: [1], PJobName: ["P1-CYCLE-2"], StartTime: 10, EndTime: 11 },
+  ];
+
+  const beforePatch = moduleAt(logic.buildWorkspaceSnapshot(cycleMoves, cycleDevice, 5), "LP1");
+  assert.deepEqual(beforePatch.loadPortSlots[0], { slot: 1, wafer: "1", processed: true });
+  const afterPatch = moduleAt(logic.buildWorkspaceSnapshot(cycleMoves, cycleDevice, 10), "LP1");
+  assert.deepEqual(afterPatch.loadPortSlots[0], { slot: 1, wafer: "1", processed: false });
+  assert.match(
+    logic.renderEquipmentTopology(logic.buildWorkspaceSnapshot(cycleMoves, cycleDevice, 10), cycleDevice),
+    /equipment-port-top-view[\s\S]*wafer-unprocessed/,
+  );
+});
+
+test("CJobCycle 在重算边界立即显示整盒补片，不等待新片首次 Pick", () => {
+  const cycleDevice = {
+    Stations: { LP1: { Type: "LoadPort", Capacity: 2, Slots: [1, 2] }, PM1: { Type: "Process" } },
+    Robots: { ATR: {} },
+  };
+  const cycleMoves = [
+    { MoveID: 1, MoveType: 0, ModuleName: "ATR", SrcStationList: ["LP1"], SrcSlotList: [1], MatIDList: [1], StartTime: 0, EndTime: 1 },
+    { MoveID: 2, MoveType: 9, ModuleName: "PM1", MatIDList: [1], StartTime: 2, EndTime: 3 },
+    { MoveID: 3, MoveType: 1, ModuleName: "ATR", DestStationList: ["LP1"], DestSlotList: [1], MatIDList: [1], StartTime: 4, EndTime: 5 },
+    { MoveID: 4, MoveType: 0, ModuleName: "ATR", SrcStationList: ["LP1"], SrcSlotList: [1], MatIDList: [3], StartTime: 100, EndTime: 101 },
+    { MoveID: 5, MoveType: 0, ModuleName: "ATR", SrcStationList: ["LP1"], SrcSlotList: [2], MatIDList: [4], StartTime: 110, EndTime: 111 },
+  ];
+  const payload = {
+    ReplayContext: {
+      updates: [
+        { CurrentTime: 0, Materials: [
+          { ID: 1, TaskID: "C1", SrcPortName: "LP1", CurrentModuleName: "LP1", SlotID: 1 },
+          { ID: 2, TaskID: "C1", SrcPortName: "LP1", CurrentModuleName: "LP1", SlotID: 2 },
+        ] },
+        { CurrentTime: 50, Materials: [
+          { ID: 3, TaskID: "C1-CYCLE-2", SrcPortName: "LP1", CurrentModuleName: "LP1", SlotID: 1 },
+          { ID: 4, TaskID: "C1-CYCLE-2", SrcPortName: "LP1", CurrentModuleName: "LP1", SlotID: 2 },
+        ] },
+      ],
+    },
+  };
+  const replenishments = logic.normalizeLoadPortReplenishments(payload);
+  assert.deepEqual(replenishments, [{
+    time: 50,
+    moduleName: "LP1",
+    materials: [
+      { wafer: "3", slot: 1, taskId: "C1-CYCLE-2" },
+      { wafer: "4", slot: 2, taskId: "C1-CYCLE-2" },
+    ],
+  }]);
+  const beforeRecompute = moduleAt(logic.buildWorkspaceSnapshot(cycleMoves, cycleDevice, 49.9, replenishments), "LP1");
+  assert.equal(beforeRecompute.loadPortSlots[0].wafer, "1");
+  assert.equal(beforeRecompute.loadPortSlots[0].processed, true);
+  const atRecompute = moduleAt(logic.buildWorkspaceSnapshot(cycleMoves, cycleDevice, 50, replenishments), "LP1");
+  assert.deepEqual(atRecompute.loadPortSlots, [
+    { slot: 1, wafer: "3", processed: false },
+    { slot: 2, wafer: "4", processed: false },
+  ]);
+});
+
 test("Aligner 使用紧凑叉形，Cooler 使用多槽前视图", () => {
   const auxiliaryDevice = {
     Stations: {
@@ -2257,6 +2324,11 @@ test("晶圆必须完成全部加工工序后才标记为已加工", () => {
     { MoveID: 6, MoveType: 9, ModuleName: "PM2", MatIDList: ["W1"], StartTime: 6, EndTime: 8 },
     { MoveID: 7, MoveType: 0, ModuleName: "ATR", SrcStationList: ["PM2"], MatIDList: ["W1"], StartTime: 8, EndTime: 9 },
   ];
+
+  const beforeLastProcessDone = logic.buildWorkspaceSnapshot(multiProcessMoves, multiProcessDevice, 7.999);
+  assert.deepEqual(moduleAt(beforeLastProcessDone, "PM2").processedWafers, []);
+  const atLastProcessDone = logic.buildWorkspaceSnapshot(multiProcessMoves, multiProcessDevice, 8);
+  assert.deepEqual(moduleAt(atLastProcessDone, "PM2").processedWafers, ["W1"]);
 
   // 第一道工序（PM1）已完成的时刻，W1 尚未完成全部工序，必须保持未加工。
   const firstDone = logic.buildWorkspaceSnapshot(multiProcessMoves, multiProcessDevice, 5);

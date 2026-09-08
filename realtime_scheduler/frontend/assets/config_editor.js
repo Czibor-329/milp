@@ -454,6 +454,54 @@ function formatSeconds2(value) {
 function materialIds(move, field = "MatIDList") {
   return listValue(move[field]).map(String).filter(Boolean);
 }
+function normalizeLoadPortReplenishments(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return [];
+  const replayContext = payload.ReplayContext;
+  if (!replayContext || typeof replayContext !== "object" || Array.isArray(replayContext)) return [];
+  const updates = listValue(replayContext.updates).filter((update) => Boolean(update) && typeof update === "object" && !Array.isArray(update)).sort((left, right) => finiteNumber(left.CurrentTime) - finiteNumber(right.CurrentTime));
+  const knownTaskIdsByPort = /* @__PURE__ */ new Map();
+  const replenishments = [];
+  updates.forEach((update, updateIndex) => {
+    const materials = listValue(update.Materials).filter((material) => Boolean(material) && typeof material === "object" && !Array.isArray(material));
+    const currentByPortAndTask = /* @__PURE__ */ new Map();
+    for (const material of materials) {
+      const port = String(material.SrcPortName ?? "").trim();
+      const currentModule = String(material.CurrentModuleName ?? "").trim();
+      const taskId = String(material.TaskID ?? "").trim();
+      const wafer = String(material.ID ?? material.Name ?? "").trim();
+      const slot = Math.trunc(finiteNumber(material.SlotID));
+      if (!port || currentModule !== port || !taskId || !wafer || slot < 1) continue;
+      const byTask = currentByPortAndTask.get(port) ?? /* @__PURE__ */ new Map();
+      const taskMaterials = byTask.get(taskId) ?? [];
+      taskMaterials.push({ wafer, slot, taskId });
+      byTask.set(taskId, taskMaterials);
+      currentByPortAndTask.set(port, byTask);
+    }
+    for (const [port, byTask] of currentByPortAndTask) {
+      const knownTaskIds = knownTaskIdsByPort.get(port) ?? /* @__PURE__ */ new Set();
+      for (const [taskId, taskMaterials] of byTask) {
+        if (updateIndex > 0 && !knownTaskIds.has(taskId)) {
+          replenishments.push({
+            time: finiteNumber(update.CurrentTime),
+            moduleName: port,
+            materials: taskMaterials.sort((left, right) => left.slot - right.slot)
+          });
+        }
+        knownTaskIds.add(taskId);
+      }
+      knownTaskIdsByPort.set(port, knownTaskIds);
+    }
+  });
+  return replenishments;
+}
+function materialInstanceId(move, material, index) {
+  const taskIds = listValue(move.TaskID).map(String).filter(Boolean);
+  const taskId = taskIds[index] ?? taskIds[0] ?? "";
+  if (taskId) return `${material}\0${taskId}`;
+  const processJobs = listValue(move.PJobName).map(String).filter(Boolean);
+  const processJob = processJobs[index] ?? processJobs[0] ?? "";
+  return processJob ? `${material}\0${processJob}` : material;
+}
 function isCleaningMove(move) {
   if (move.MoveType === CLEAN_MOVE) return true;
   if (move.MoveType !== PROCESS_MOVE) return false;
@@ -695,7 +743,7 @@ function stationSlotCapacity(device, name, defaultCapacity = 1) {
     ...declaredSlots
   );
 }
-function buildLoadPortSlots(records, device, time, initialLocations, processedMaterials) {
+function buildLoadPortSlots(records, device, time, initialLocations, processedMaterials, replenishments) {
   const names = /* @__PURE__ */ new Set();
   for (const [name, definition] of Object.entries(device?.Stations ?? {})) {
     if (isLoadPortName(name, String(definition?.Type ?? ""))) names.add(name);
@@ -728,17 +776,18 @@ function buildLoadPortSlots(records, device, time, initialLocations, processedMa
         if (indexedStation(move, "SrcStationList", index) !== name) return;
         const slot = indexedSlot(move, "SrcSlotList", index);
         if (!slot) return;
+        const instanceId = materialInstanceId(move, material, index);
         const history = slotMaterialHistory.get(slot) ?? [];
-        let generation = history.indexOf(material);
+        let generation = history.indexOf(instanceId);
         if (generation < 0) {
           generation = history.length;
-          history.push(material);
+          history.push(instanceId);
           slotMaterialHistory.set(slot, history);
         }
         const slots = generationSlots.get(generation) ?? /* @__PURE__ */ new Map();
-        if (!slots.has(slot)) slots.set(slot, material);
+        if (!slots.has(slot)) slots.set(slot, { wafer: material, instanceId });
         generationSlots.set(generation, slots);
-        materialGenerations.set(material, generation);
+        materialGenerations.set(instanceId, generation);
         if (generation > 0) {
           generationStartTimes.set(
             generation,
@@ -747,11 +796,28 @@ function buildLoadPortSlots(records, device, time, initialLocations, processedMa
         }
       });
     }
+    for (const replenishment of replenishments.filter((item) => item.moduleName === name)) {
+      const generations = replenishment.materials.map((material) => materialGenerations.get(`${material.wafer}\0${material.taskId}`) ?? materialGenerations.get(material.wafer) ?? [...materialGenerations.entries()].find(([instanceId]) => instanceId === material.wafer || instanceId.startsWith(`${material.wafer}\0`))?.[1]).filter((generation2) => generation2 !== void 0);
+      const generation = generations.length ? Math.max(...generations) : Math.max(...generationSlots.keys(), -1) + 1;
+      const replenishedSlots = generationSlots.get(generation) ?? /* @__PURE__ */ new Map();
+      for (const material of replenishment.materials) {
+        const declaredInstanceId = `${material.wafer}\0${material.taskId}`;
+        const instanceId = materialGenerations.has(declaredInstanceId) ? declaredInstanceId : [...materialGenerations.keys()].find((candidate) => candidate === material.wafer || candidate.startsWith(`${material.wafer}\0`)) ?? declaredInstanceId;
+        replenishedSlots.set(material.slot, { wafer: material.wafer, instanceId });
+        materialGenerations.set(instanceId, generation);
+        observedMaximum.set(name, Math.max(observedMaximum.get(name) ?? 0, material.slot));
+      }
+      generationSlots.set(generation, replenishedSlots);
+      generationStartTimes.set(
+        generation,
+        Math.min(generationStartTimes.get(generation) ?? Number.POSITIVE_INFINITY, replenishment.time)
+      );
+    }
     const activeGeneration = [...generationSlots.keys()].filter((generation) => generation === 0 || (generationStartTimes.get(generation) ?? Number.POSITIVE_INFINITY) <= time).reduce((latest, generation) => Math.max(latest, generation), 0);
     const occupancy = new Map(generationSlots.get(activeGeneration) ?? []);
     if (!occupancy.size && !generationSlots.size) {
       const legacyInitialMaterials = [...initialLocations.entries()].filter(([, location]) => location === name).map(([material]) => material).sort(naturalCompare);
-      legacyInitialMaterials.forEach((material, index) => occupancy.set(index + 1, material));
+      legacyInitialMaterials.forEach((material, index) => occupancy.set(index + 1, { wafer: material, instanceId: material }));
     }
     for (const move of records) {
       const materials = materialIds(move);
@@ -759,24 +825,26 @@ function buildLoadPortSlots(records, device, time, initialLocations, processedMa
         if (move.EndTime > time) continue;
         materials.forEach((material, index) => {
           if (indexedStation(move, "SrcStationList", index) !== name) return;
-          if ((materialGenerations.get(material) ?? 0) !== activeGeneration) return;
+          const instanceId = materialInstanceId(move, material, index);
+          if ((materialGenerations.get(instanceId) ?? 0) !== activeGeneration) return;
           const slot = indexedSlot(move, "SrcSlotList", index);
           if (slot) occupancy.delete(slot);
           else {
-            const current = [...occupancy.entries()].find(([, wafer]) => wafer === material);
+            const current = [...occupancy.entries()].find(([, wafer]) => wafer.instanceId === instanceId);
             if (current) occupancy.delete(current[0]);
           }
         });
       } else if (PLACE_MOVE_TYPES.has(move.MoveType) && move.EndTime <= time) {
         materials.forEach((material, index) => {
           if (indexedStation(move, "DestStationList", index) !== name) return;
-          if ((materialGenerations.get(material) ?? 0) !== activeGeneration) return;
+          const instanceId = materialInstanceId(move, material, index);
+          if ((materialGenerations.get(instanceId) ?? 0) !== activeGeneration) return;
           let slot = indexedSlot(move, "DestSlotList", index);
           if (!slot) {
             slot = 1;
             while (occupancy.has(slot)) slot += 1;
           }
-          occupancy.set(slot, material);
+          occupancy.set(slot, { wafer: material, instanceId });
           observedMaximum.set(name, Math.max(observedMaximum.get(name) ?? 0, slot));
         });
       }
@@ -788,13 +856,17 @@ function buildLoadPortSlots(records, device, time, initialLocations, processedMa
       Math.max(observedMaximum.get(name) ?? 0, occupiedMaximum, occupancy.size)
     );
     result.set(name, Array.from({ length: capacity }, (_, index) => {
-      const wafer = occupancy.get(index + 1) ?? "";
-      return { slot: index + 1, wafer, processed: Boolean(wafer && processedMaterials.has(wafer)) };
+      const occupied = occupancy.get(index + 1);
+      return {
+        slot: index + 1,
+        wafer: occupied?.wafer ?? "",
+        processed: Boolean(occupied && processedMaterials.has(occupied.instanceId))
+      };
     }));
   }
   return result;
 }
-function buildLoadLockSlots(records, device, time, initialLocations, processedMaterials) {
+function buildLoadLockSlots(records, device, time, initialLocations, processedMaterials, currentMaterialInstances) {
   const names = /* @__PURE__ */ new Set();
   for (const [name, definition] of Object.entries(device?.Stations ?? {})) {
     if (isLoadLockName(name, String(definition?.Type ?? ""))) names.add(name);
@@ -893,7 +965,8 @@ function buildLoadLockSlots(records, device, time, initialLocations, processedMa
     );
     result.set(name, Array.from({ length: capacity }, (_, index) => {
       const wafer = occupancy.get(index + 1) ?? "";
-      return { slot: index + 1, wafer, processed: Boolean(wafer && processedMaterials.has(wafer)) };
+      const instanceId = currentMaterialInstances.get(wafer) ?? wafer;
+      return { slot: index + 1, wafer, processed: Boolean(wafer && processedMaterials.has(instanceId)) };
     }));
   }
   return result;
@@ -906,7 +979,7 @@ function moveProgress(move, time) {
 function activeTarget(move) {
   return firstStation(move, "DestStationList") || firstStation(move, "SrcStationList") || String(listValue(move.StationList)[0] ?? "") || (!isRobotName(move.ModuleName) ? move.ModuleName : "");
 }
-function buildWorkspaceSnapshot(moves, device, requestedTime) {
+function buildWorkspaceSnapshot(moves, device, requestedTime, replenishments = []) {
   const records = normalizeMoves(moves);
   const endTime = records.reduce((maximum, move) => Math.max(maximum, move.EndTime), 0);
   const normalizedRequestedTime = requestedTime === Number.POSITIVE_INFINITY ? endTime : finiteNumber(requestedTime);
@@ -922,12 +995,21 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
   const requiredProcesses = /* @__PURE__ */ new Map();
   for (const move of records) {
     if (move.MoveType !== PROCESS_MOVE) continue;
-    for (const material of materialIds(move)) {
-      requiredProcesses.set(material, (requiredProcesses.get(material) ?? 0) + 1);
-    }
+    materialIds(move).forEach((material, index) => {
+      const instanceId = materialInstanceId(move, material, index);
+      requiredProcesses.set(instanceId, (requiredProcesses.get(instanceId) ?? 0) + 1);
+    });
   }
   const completedProcesses = /* @__PURE__ */ new Map();
   const processedMaterials = /* @__PURE__ */ new Set();
+  const currentMaterialInstances = /* @__PURE__ */ new Map();
+  for (const move of records) {
+    materialIds(move).forEach((material, index) => {
+      if (!currentMaterialInstances.has(material)) {
+        currentMaterialInstances.set(material, materialInstanceId(move, material, index));
+      }
+    });
+  }
   const activeMoves = [];
   let completedMoves = 0;
   for (const [name, definition] of definitions) {
@@ -939,18 +1021,24 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
   for (const move of records) {
     const active = move.StartTime <= time && time < move.EndTime;
     const completed = move.EndTime <= time;
+    if (move.StartTime <= time) {
+      materialIds(move).forEach((material, index) => {
+        currentMaterialInstances.set(material, materialInstanceId(move, material, index));
+      });
+    }
     if (active) activeMoves.push(move);
     if (completed) {
       completedMoves += 1;
       applyCompletedTransfer(move, locations);
       if (move.MoveType === PROCESS_MOVE) {
-        for (const material of materialIds(move)) {
-          const completed2 = (completedProcesses.get(material) ?? 0) + 1;
-          completedProcesses.set(material, completed2);
-          if (completed2 >= (requiredProcesses.get(material) ?? 1)) {
-            processedMaterials.add(material);
+        materialIds(move).forEach((material, index) => {
+          const instanceId = materialInstanceId(move, material, index);
+          const completed2 = (completedProcesses.get(instanceId) ?? 0) + 1;
+          completedProcesses.set(instanceId, completed2);
+          if (completed2 >= (requiredProcesses.get(instanceId) ?? 1)) {
+            processedMaterials.add(instanceId);
           }
-        }
+        });
       }
     }
     const doorVisualActive = move.StartTime <= time && time < Math.max(move.EndTime, move.StartTime + DOOR_VISUAL_MIN_SECONDS);
@@ -966,6 +1054,15 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
       if (environment) environments.set(move.ModuleName, active ? `${environment}\u5207\u6362\u4E2D` : environment);
     }
   }
+  for (const replenishment of replenishments) {
+    if (replenishment.time > time) continue;
+    for (const material of replenishment.materials) {
+      currentMaterialInstances.set(material.wafer, `${material.wafer}\0${material.taskId}`);
+    }
+  }
+  const isProcessed = (material) => processedMaterials.has(
+    currentMaterialInstances.get(material) ?? material
+  );
   const robotTargets = /* @__PURE__ */ new Map();
   for (const move of activeMoves) {
     if (isRobotName(move.ModuleName, robotNameSet)) robotTargets.set(move.ModuleName, activeTarget(move));
@@ -984,8 +1081,22 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
     wafersByLocation.set(location, wafers);
   }
   for (const wafers of wafersByLocation.values()) wafers.sort(naturalCompare);
-  const loadPortSlots = buildLoadPortSlots(records, device, time, initialLocations, processedMaterials);
-  const loadLockSlots = buildLoadLockSlots(records, device, time, initialLocations, processedMaterials);
+  const loadPortSlots = buildLoadPortSlots(
+    records,
+    device,
+    time,
+    initialLocations,
+    processedMaterials,
+    replenishments
+  );
+  const loadLockSlots = buildLoadLockSlots(
+    records,
+    device,
+    time,
+    initialLocations,
+    processedMaterials,
+    currentMaterialInstances
+  );
   const modules = [...definitions.entries()].map(([name, definition]) => {
     const moduleMoves = activeMoves.filter((move) => move.ModuleName === name || firstStation(move, "SrcStationList") === name || firstStation(move, "DestStationList") === name || listValue(move.StationList).map(String).includes(name));
     const primaryMove = moduleMoves.find(isCleaningMove) ?? moduleMoves.find((move) => move.MoveType === PROCESS_MOVE) ?? moduleMoves.find((move) => LOADLOCK_ENVIRONMENT_MOVE_TYPES.has(move.MoveType)) ?? moduleMoves.find((move) => [PREPARE_MOVE, COMPLETE_MOVE].includes(move.MoveType)) ?? moduleMoves[0];
@@ -1004,7 +1115,7 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
       status,
       door: doorStates.get(name) ?? "closed",
       wafers: wafersByLocation.get(name) ?? [],
-      processedWafers: (wafersByLocation.get(name) ?? []).filter((wafer) => processedMaterials.has(wafer)),
+      processedWafers: (wafersByLocation.get(name) ?? []).filter(isProcessed),
       loadPortSlots: loadPortSlots.get(name) ?? [],
       loadLockSlots: loadLockSlots.get(name) ?? [],
       slotCapacity: stationSlotCapacity(device, name, isCoolerModule(name, definition.type) ? 3 : 1),
@@ -1025,7 +1136,7 @@ function buildWorkspaceSnapshot(moves, device, requestedTime) {
       capacity: robotCapacity(definition, wafers.length),
       environment: robotEnvironment(name, definition),
       wafers,
-      processedWafers: wafers.filter((wafer) => processedMaterials.has(wafer)),
+      processedWafers: wafers.filter(isProcessed),
       busy: Boolean(move),
       source: move ? firstStation(move, "SrcStationList") : "",
       target: robotTargets.get(name) ?? lastRobotTargets.get(name) ?? "",
@@ -1520,7 +1631,16 @@ function renderModule(module, waferOrigins, role, candidate, layout = "single", 
   const doors = moduleDoorSides(module, role, layout, roleIndex, attachmentId).map((side) => `<i class="chamber-door chamber-door-${side}"></i>`).join("");
   const accessibleStatus = `${module.name}\uFF0C${STATUS_LABELS[module.status]}\uFF0C${DOOR_LABELS[module.door]}`;
   const candidateLabel = candidate ? `${candidate.count} \u4E2A\u53EF\u884C\u52A8\u4F5C\uFF0C\u6700\u9AD8\u6A21\u578B\u504F\u597D ${(candidate.preference * 100).toFixed(0)}%` : "";
-  if (role === "port") return renderLoadPortTopView(module, wafers, accessibleStatus, candidate);
+  if (role === "port") {
+    const visibleSlot = visibleModuleSlots(module, "port").find((slot) => slot.wafer);
+    const portWafers = visibleSlot ? renderWaferToken(
+      visibleSlot.wafer,
+      waferOrigins[visibleSlot.wafer] ?? "",
+      waferProgress,
+      visibleSlot.processed
+    ) : "";
+    return renderLoadPortTopView(module, portWafers, accessibleStatus, candidate);
+  }
   if (role === "auxiliary" && isAlignerModule(module.name, module.type)) {
     return `<strong class="equipment-external-name equipment-external-name-aligner">${escapeHtml(module.name)}</strong>
       <article class="equipment-utility equipment-aligner status-${module.status} ${module.isRobotTarget ? "is-target" : ""} ${candidate ? "is-candidate-destination" : ""} ${candidate?.selected ? "is-model-selected" : ""}" aria-label="${escapeHtml(`${accessibleStatus}${candidateLabel ? `\uFF0C${candidateLabel}` : ""}`)}">
@@ -2716,6 +2836,7 @@ var VisualizationWorkspace = class {
   analysisRoutes = [];
   analysisRounds = [];
   moves = [];
+  loadPortReplenishments = [];
   replayPlan = null;
   actionStatusFilters = [...ALL_ACTION_DIAGNOSTIC_STATUSES];
   liveDecision = null;
@@ -2771,6 +2892,7 @@ var VisualizationWorkspace = class {
     await this.loadMoves(
       normalizeMovePayload(payload),
       normalizeDecisionTrace(payload),
+      normalizeLoadPortReplenishments(payload),
       file.name,
       "",
       "",
@@ -2802,6 +2924,7 @@ var VisualizationWorkspace = class {
       await this.loadMoves(
         normalizeMovePayload(payload),
         normalizeDecisionTrace(payload),
+        normalizeLoadPortReplenishments(payload),
         sourceName,
         resultUrl,
         resultId,
@@ -2837,6 +2960,8 @@ var VisualizationWorkspace = class {
     this.pause();
     this.liveSolving = true;
     this.moves = [];
+    this.loadPortReplenishments = [];
+    this.loadPortReplenishments = [];
     this.sourceName = sourceName;
     this.resultUrl = "";
     this.analysisResultId = "";
@@ -2970,11 +3095,12 @@ var VisualizationWorkspace = class {
       <span>\u8FD0\u884C\u4E00\u6B21\u8BA1\u5212\uFF0C\u6216\u5BFC\u5165\u5DF2\u6709\u7684 MoveList JSON \u6587\u4EF6\u540E\u67E5\u770B\u8BBE\u5907\u62D3\u6251\u5E76\u5F00\u59CB\u56DE\u653E\u3002</span>`;
   }
   /** 接收规范化后的 MoveList 并重置时间轴。 */
-  async loadMoves(moves, _decisionTrace, sourceName, resultUrl, analysisResultId, cpuTimeMs = null, recomputeCount = 0) {
+  async loadMoves(moves, _decisionTrace, loadPortReplenishments, sourceName, resultUrl, analysisResultId, cpuTimeMs = null, recomputeCount = 0) {
     if (!moves.length) throw new Error("MoveList \u4E3A\u7A7A\uFF0C\u65E0\u6CD5\u5EFA\u7ACB\u53EF\u89C6\u5316\u56DE\u653E");
     this.pause();
     this.liveSolving = false;
     this.moves = moves;
+    this.loadPortReplenishments = loadPortReplenishments;
     this.primitiveDecisionBoundaries = primitiveDecisionBoundaryTimes(moves);
     this.liveDecision = null;
     this.liveDecisionKey = "";
@@ -2990,7 +3116,7 @@ var VisualizationWorkspace = class {
     this.cpuTimeMs = cpuTimeMs;
     this.recomputeCount = recomputeCount;
     this.bottleneckSummary = null;
-    const snapshot = buildWorkspaceSnapshot(this.moves, this.device, 0);
+    const snapshot = buildWorkspaceSnapshot(this.moves, this.device, 0, this.loadPortReplenishments);
     this.time = 0;
     this.elements.range.min = "0";
     this.elements.range.max = String(snapshot.endTime);
@@ -3104,7 +3230,12 @@ var VisualizationWorkspace = class {
   /** 绘制当前时间对应的设备快照。 */
   render(prebuiltSnapshot) {
     if (!this.moves.length && !this.liveSolving) return;
-    const snapshot = prebuiltSnapshot ?? buildWorkspaceSnapshot(this.moves, this.device, this.time);
+    const snapshot = prebuiltSnapshot ?? buildWorkspaceSnapshot(
+      this.moves,
+      this.device,
+      this.time,
+      this.loadPortReplenishments
+    );
     this.time = snapshot.time;
     this.elements.source.textContent = this.sourceName;
     this.elements.source.title = this.sourceName;
