@@ -152,6 +152,11 @@ export interface TestGroupPerformanceSummary {
   succeededCount: number;
   failedCount: number;
   metricsCount: number;
+  referenceCaseId?: string;
+  selectedMetricGroups?: string[];
+  selectedMetricIds?: string[];
+  cacheHitCount?: number;
+  timedOut?: boolean;
   validationPassedCount: number;
   validationPassRate: number;
   comparableCount: number;
@@ -162,6 +167,7 @@ export interface TestGroupPerformanceSummary {
   medianImprovementPercent: number | null;
   worstRegressionPercent: number | null;
   medianCpuTimeMs: number | null;
+  medianAverageRecomputeTimeMs?: number | null;
   p90CpuTimeMs: number | null;
   totalCpuTimeMs: number;
   medianBottleneckUtilization: number | null;
@@ -172,6 +178,9 @@ export interface TestGroupPerformanceSummary {
   medianRobotWaferDwellMeanSeconds: number | null;
   medianWaferSystemResidenceMeanSeconds: number | null;
   medianWaferSystemResidenceCv: number | null;
+  medianLoadLockWafersPerCycle?: number | null;
+  medianLoadLockFullCycleRatio?: number | null;
+  medianLoadLockEmptyCycleRatio?: number | null;
   bottleneckFrequencies: Array<{
     resourceName: string;
     count: number;

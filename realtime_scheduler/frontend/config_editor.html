@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>调度平台</title>
   <link rel="stylesheet" href="/assets/katex.min.css?v=1.4.4">
-  <link rel="stylesheet" href="/assets/config_editor.css?v=1.5.48">
+  <link rel="stylesheet" href="/assets/config_editor.css?v=1.5.49">
 </head>
 <body>
   <a class="skip-link" href="#mainContent">跳到主要内容</a>
@@ -40,7 +40,7 @@
       <div class="sidebar-footer">
         <span class="sidebar-footer-label">系统状态</span>
         <div class="service-pill" id="serviceState">本地服务</div>
-        <span class="frontend-version">V1.5.48</span>
+        <span class="frontend-version">V1.5.49</span>
       </div>
     </aside>
 
@@ -446,6 +446,56 @@
   <input id="deviceFile" type="file" accept=".json,.zip,.ctdata,application/json,application/zip" hidden>
   <input id="testExchangeFile" type="file" accept=".zip,.ctdata,application/zip" hidden>
 
+  <dialog class="analysis-options-dialog" id="analysisOptionsDialog" aria-labelledby="analysisOptionsDialogTitle">
+    <form class="dialog-body analysis-options-dialog-body" id="analysisOptionsForm" method="dialog">
+      <header class="analysis-options-head">
+        <div><h3 id="analysisOptionsDialogTitle">测试组结果分析</h3><p id="analysisOptionsDescription">选择本次需要实际计算的指标。</p></div>
+        <button class="btn workspace-icon-button" id="analysisOptionsClose" type="button" aria-label="关闭结果分析设置">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+        </button>
+      </header>
+      <ol class="analysis-flow" aria-label="结果分析流程">
+        <li class="active" data-analysis-flow-step="1"><span>1</span><strong>选择指标</strong></li>
+        <li data-analysis-flow-step="2"><span>2</span><strong>选择测试</strong></li>
+        <li data-analysis-flow-step="3"><span>3</span><strong>开始计算</strong></li>
+      </ol>
+      <section class="analysis-options-page active" data-analysis-page="1">
+        <div class="analysis-options-section-head"><strong>计算指标</strong><small>设置会保存为个人偏好</small></div>
+        <div class="analysis-metric-options">
+          <label><input type="checkbox" checked value="validation" data-analysis-metric>校验结果</label>
+          <label><input type="checkbox" checked value="makespan" data-analysis-metric>Makespan</label>
+          <label><input type="checkbox" checked value="baseline_improvement" data-analysis-metric>相对 Baseline 改善</label>
+          <label><input type="checkbox" checked value="cpu_time" data-analysis-metric>CPU Time</label>
+          <label><input type="checkbox" checked value="average_recompute_time" data-analysis-metric>平均重算时间</label>
+          <label><input type="checkbox" checked value="throughput" data-analysis-metric>产能</label>
+          <label><input type="checkbox" checked value="departure_interval_cv" data-analysis-metric>出站间隔 CV</label>
+          <label><input type="checkbox" checked value="process_chamber_dwell" data-analysis-metric>加工腔驻留均值</label>
+          <label><input type="checkbox" checked value="robot_wafer_dwell" data-analysis-metric>机器手驻留均值</label>
+          <label><input type="checkbox" checked value="system_residence" data-analysis-metric>系统停留均值</label>
+          <label><input type="checkbox" checked value="system_residence_cv" data-analysis-metric>系统停留 CV</label>
+          <label><input type="checkbox" checked value="resource_utilization" data-analysis-metric>资源利用率</label>
+          <label><input type="checkbox" checked value="bottleneck_candidates" data-analysis-metric>瓶颈候选</label>
+          <label><input type="checkbox" checked value="loadlock_wafers_per_cycle" data-analysis-metric>LoadLock 每周期晶圆</label>
+          <label><input type="checkbox" checked value="loadlock_full_cycle_ratio" data-analysis-metric>LoadLock 满载周期率</label>
+          <label><input type="checkbox" checked value="loadlock_empty_cycle_ratio" data-analysis-metric>LoadLock 空载周期率</label>
+        </div>
+      </section>
+      <section class="analysis-options-page" data-analysis-page="2" hidden>
+        <div class="analysis-options-section-head"><strong>参与对比的测试</strong><button class="text-button" id="analysisToggleAllTests" type="button">取消全选</button></div>
+        <div class="analysis-test-options" id="analysisTestOptions"></div>
+        <div class="analysis-options-controls">
+          <label>参考测试<select id="analysisReferenceTest"></select></label>
+          <label>统计窗口<select id="analysisWindowMode"><option value="steady">稳态窗口</option><option value="full">完整周期</option></select></label>
+          <label>时间预算<select id="analysisTimeBudget"><option value="30">快速 · 30 秒</option><option value="120" selected>标准 · 2 分钟</option><option value="300">完整 · 5 分钟</option></select></label>
+        </div>
+      </section>
+      <section class="analysis-options-page analysis-progress-page" data-analysis-page="3" hidden>
+        <div id="analysisDialogProgress"></div>
+      </section>
+      <div class="dialog-actions"><button class="btn small" type="button" id="analysisOptionsCancel">取消</button><button class="btn small" type="button" id="analysisPreviousButton" hidden>上一步</button><button class="btn primary small" type="button" id="analysisNextButton">下一步</button><button class="btn primary small" id="startGroupAnalysisButton" type="submit" hidden>开始分析</button></div>
+    </form>
+  </dialog>
+
   <dialog class="data-transfer-dialog" id="dataTransferDialog" aria-labelledby="dataTransferDialogTitle">
     <section class="data-transfer-dialog-body">
       <header>
@@ -782,6 +832,6 @@
     </aside>
   </dialog>
 
-  <script type="module" src="/assets/config_editor.js?v=1.5.48"></script>
+  <script type="module" src="/assets/config_editor.js?v=1.5.49"></script>
 </body>
 </html>

@@ -12,6 +12,7 @@
 - `backend/artifacts/`：运行结果、复现日志与 Baseline。
 - `backend/validation/`：平台 MoveList 回放与 HongYe 进程会话。
 - `backend/analysis.py`：服务端唯一的 MoveList 性能、瓶颈和测试组分析实现。
+- `backend/analysis_jobs.py`：测试组分析任务的进度、取消、时间预算和单测指标缓存。
 - 内置 `heuristic/loadlock-macro/e2e-ctq/dual-actor-e2e`：统一调用独立算法仓库
   `alg/src/api.py` 的 `init/update`，`update` 的可选 `algorithm`
   参数决定算法。
@@ -132,15 +133,17 @@ PJob 继续复用。
 并把 HongYe 校验并行数配置为 1~15；所有测试及自动补算的 Heuristic Baseline 共享
 同一校验配额，避免 MoveStateSim 的高内存占用随算法 worker 数一起增长。8 项及以上
 使用配置数量的隔离进程，避免算法全局会话状态把并发退化为串行。页面每秒更新总体进度，
-运行设置的执行开关、校验开关与两个并发数会原子保存到本地 `data/run_preferences.json`，刷新页面
-或重启服务后自动恢复；该文件不属于设备/测试集交换包。
-结果卡片按名称中的数字自然排序（如 test1、test2、test10）并固定展示；数量较多时在
-结果区域内滚动，并只在项目状态变化时重绘。
+运行设置的执行开关、校验开关与两个并发数，以及结果分析逐项选择的指标、统计窗口和时间预算，
+会原子保存到本地 `data/run_preferences.json`，刷新页面或重启服务后自动恢复；该文件不属于
+设备/测试集交换包。
+结果卡片按名称中的数字自然排序（如 test1、test2、test10）并固定展示；每张卡片优先
+显示稳态产能，产能样本不足时显示 Makespan，同时显示平均重算时间。数量较多时在结果
+区域内滚动，并只在项目状态或轻量卡片指标变化时重绘。
 每项保留独立拓扑回放、甘特图和复现日志入口；点击结果卡片中的“回放”会直接载入
 该测试并切换到拓扑回放界面。“全部甘特图”会在同一个查看器中一次加载所有成功结果，
 每个测试对应一个标签页。
 
 每个测试会保存一份与实际 Heuristic 输入配置绑定的 Baseline（makespan 与 CPU Time）。
-首次运行、测试或共享 Route/Clean 变化时会自动计算或刷新；其他策略的结果卡片会显示
-当前值、Baseline 和 makespan 改善比例。Baseline 计算失败会保存失败原因并清除旧指标，
+首次运行、测试或共享 Route/Clean 变化时会自动计算或刷新；Baseline 对比保留在结果详情
+和按需分析中，不占用批量结果小卡片。Baseline 计算失败会保存失败原因并清除旧指标，
 避免继续使用已失效的数据。

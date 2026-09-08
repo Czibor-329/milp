@@ -37,85 +37,6 @@ function caseLabel(item: TestGroupCasePerformance, index: number): string {
   return item.name || `t${index + 1}`;
 }
 
-function improvementChart(summary: TestGroupPerformanceSummary): string {
-  const cases = summary.cases.filter(item => item.improvementPercent !== null);
-  const scale = Math.max(
-    1,
-    ...cases.map(item => Math.abs(item.improvementPercent ?? 0)),
-  );
-  return cases.map((item, index) => {
-    const value = item.improvementPercent ?? 0;
-    const width = Math.min(Math.abs(value) / scale * 50, 50);
-    const status = value < 0 ? "loss" : value > 0 ? "gain" : "tie";
-    return `<div class="group-chart-row">
-      <span class="group-chart-label" title="${escapeHtml(item.name)}">${escapeHtml(caseLabel(item, index))}</span>
-      <div class="group-diverging-track" role="img" aria-label="${escapeHtml(caseLabel(item, index))} 相对基线 ${value >= 0 ? "提升" : "退化"} ${Math.abs(value).toFixed(2)}%">
-        <i class="${status}" style="--bar-width:${width}%"></i>
-      </div>
-      <strong class="${status}">${value > 0 ? "+" : ""}${value.toFixed(2)}%</strong>
-    </div>`;
-  }).join("") || '<p class="group-analysis-empty">没有可比较的 Baseline。</p>';
-}
-
-function utilizationChart(summary: TestGroupPerformanceSummary): string {
-  const rows = summary.cases.flatMap((item, caseIndex) => (
-    item.bottleneckCandidates.map((candidate, candidateIndex) => ({
-      item,
-      caseIndex,
-      candidate,
-      candidateIndex,
-    }))
-  ));
-  return rows.map(({ item, caseIndex, candidate, candidateIndex }) => {
-    const utilization = Math.max(0, Math.min(candidate.utilization, 1));
-    const label = candidateIndex === 0
-      ? caseLabel(item, caseIndex)
-      : `↳ 候选 ${candidateIndex + 1}`;
-    return `<div class="group-chart-row ${candidateIndex ? "is-secondary-candidate" : ""}">
-      <span class="group-chart-label" title="${escapeHtml(item.name)}">${escapeHtml(label)}</span>
-      <div class="group-linear-track" role="img" aria-label="${escapeHtml(caseLabel(item, caseIndex))} 瓶颈候选 ${escapeHtml(candidate.resourceName)}，利用率 ${(utilization * 100).toFixed(1)}%">
-        <i class="utilization" style="width:${(utilization * 100).toFixed(2)}%"></i>
-      </div>
-      <strong>${(utilization * 100).toFixed(1)}%</strong>
-      <small title="${escapeHtml(candidate.resourceName)}">${escapeHtml(candidate.resourceName || "—")}</small>
-    </div>`;
-  }).join("") || '<p class="group-analysis-empty">没有可分析的瓶颈资源。</p>';
-}
-
-function cpuChart(summary: TestGroupPerformanceSummary): string {
-  const cases = summary.cases.filter(item => item.cpuTimeMs !== null);
-  const scale = Math.max(1, ...cases.map(item => item.cpuTimeMs ?? 0));
-  return cases.map((item, index) => {
-    const cpu = Math.max(item.cpuTimeMs ?? 0, 0);
-    return `<div class="group-chart-row">
-      <span class="group-chart-label" title="${escapeHtml(item.name)}">${escapeHtml(caseLabel(item, index))}</span>
-      <div class="group-linear-track" role="img" aria-label="${escapeHtml(caseLabel(item, index))} CPU Time ${durationText(cpu)}">
-        <i class="cpu" style="width:${Math.min(cpu / scale * 100, 100).toFixed(2)}%"></i>
-      </div>
-      <strong>${escapeHtml(durationText(cpu))}</strong>
-    </div>`;
-  }).join("") || '<p class="group-analysis-empty">没有 CPU Time 数据。</p>';
-}
-
-function throughputChart(summary: TestGroupPerformanceSummary): string {
-  const rows = summary.cases
-    .map((item, index) => ({ item, index }))
-    .filter(({ item }) => item.throughputPerHour !== null && item.throughputPerHour > 0);
-  const scale = Math.max(1, ...rows.map(({ item }) => item.throughputPerHour ?? 0));
-  return rows.map(({ item, index }) => {
-    const throughput = Math.max(item.throughputPerHour ?? 0, 0);
-    const sampleCount = Number(item.throughputSampleCount) || 0;
-    return `<div class="group-chart-row">
-      <span class="group-chart-label" title="${escapeHtml(item.name)}">${escapeHtml(caseLabel(item, index))}</span>
-      <div class="group-linear-track" role="img" aria-label="${escapeHtml(caseLabel(item, index))} 产能 ${throughput.toFixed(1)} 片/h">
-        <i class="throughput" style="width:${Math.min(throughput / scale * 100, 100).toFixed(2)}%"></i>
-      </div>
-      <strong>${throughput.toFixed(1)} 片/h</strong>
-      <small>${sampleCount ? `居中 ${sampleCount} 片` : "稳态样本"}</small>
-    </div>`;
-  }).join("") || '<p class="group-analysis-empty">没有可按居中 120 片稳态样本计算的产能。</p>';
-}
-
 function csvEscape(value: string): string {
   return /[",\r\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
 }
@@ -148,24 +69,45 @@ export function testGroupSummaryCsv(summary: TestGroupPerformanceSummary): strin
   return [headers.map(csvEscape).join(","), ...rows.map(row => row.join(","))].join("\r\n");
 }
 
-function resultTable(summary: TestGroupPerformanceSummary): string {
-  return summary.cases.map((item, index) => `
-    <tr>
-      <th scope="row">${escapeHtml(caseLabel(item, index))}</th>
-      <td>${finiteText(item.makespan, 2, " s")}</td>
-      <td>${finiteText(item.baselineMakespan, 2, " s")}</td>
-      <td class="${(item.improvementPercent ?? 0) < 0 ? "loss" : "gain"}">${item.improvementPercent === null ? "—" : `${item.improvementPercent > 0 ? "+" : ""}${item.improvementPercent.toFixed(2)}%`}</td>
-      <td>${escapeHtml(item.bottleneckResource || "—")}${item.bottleneckCandidateCount > 1 ? ` <small>+${item.bottleneckCandidateCount - 1} 个候选</small>` : ""}</td>
-      <td>${percentText(item.bottleneckUtilization, true)}</td>
-      <td>${durationText(item.cpuTimeMs)}</td>
-      <td>${finiteText(item.throughputPerHour, 1, " 片/h")}</td>
-      <td>${finiteText(item.departureIntervalCv, 2)}</td>
-      <td>${finiteText(item.processChamberDwellMeanSeconds, 2, " s")}</td>
-      <td>${finiteText(item.robotWaferDwellMeanSeconds, 2, " s")}</td>
-      <td>${finiteText(item.waferSystemResidenceMeanSeconds, 2, " s")}</td>
-      <td>${finiteText(item.waferSystemResidenceCv, 2)}</td>
-      <td>${item.validationPassed ? '<span class="group-pass">通过</span>' : `<span class="group-fail">${escapeHtml(item.validation || item.status)}</span>`}</td>
-    </tr>`).join("");
+function resultTable(summary: TestGroupPerformanceSummary, selected: Set<string>): string {
+  return summary.cases.map((item, index) => {
+    const cells = [`<th scope="row">${escapeHtml(caseLabel(item, index))}</th>`];
+    if (selected.has("makespan")) {
+      cells.push(`<td>${finiteText(item.makespan, 2, " s")}</td>`);
+      cells.push(`<td>${item.id === summary.referenceCaseId
+        ? '<span class="group-reference">参考</span>'
+        : item.referenceDeltas?.makespan?.percent === undefined
+          ? "—"
+          : item.referenceComparable
+            ? `${item.referenceDeltas.makespan.percent > 0 ? "+" : ""}${item.referenceDeltas.makespan.percent.toFixed(2)}%`
+            : '<span title="运行配置不同，只并列展示数值">仅观察</span>'}</td>`);
+    }
+    if (selected.has("baseline_improvement")) {
+      cells.push(`<td>${finiteText(item.baselineMakespan, 2, " s")}</td>`);
+      cells.push(`<td class="${(item.improvementPercent ?? 0) < 0 ? "loss" : "gain"}">${item.improvementPercent === null ? "—" : `${item.improvementPercent > 0 ? "+" : ""}${item.improvementPercent.toFixed(2)}%`}</td>`);
+    }
+    if (selected.has("bottleneck_candidates")) cells.push(`<td>${escapeHtml(item.bottleneckResource || "—")}${item.bottleneckCandidateCount > 1 ? ` <small>+${item.bottleneckCandidateCount - 1} 个候选</small>` : ""}</td>`);
+    if (selected.has("resource_utilization")) cells.push(`<td>${percentText(item.bottleneckUtilization, true)}</td>`);
+    if (selected.has("cpu_time")) cells.push(`<td>${durationText(item.cpuTimeMs)}</td>`);
+    if (selected.has("average_recompute_time")) cells.push(`<td>${durationText(item.averageRecomputeTimeMs ?? null)}</td>`);
+    if (selected.has("throughput")) cells.push(`<td>${finiteText(item.throughputPerHour, 1, " 片/h")}</td>`);
+    if (selected.has("departure_interval_cv")) cells.push(`<td>${finiteText(item.departureIntervalCv, 2)}</td>`);
+    if (selected.has("process_chamber_dwell")) cells.push(`<td>${finiteText(item.processChamberDwellMeanSeconds, 2, " s")}</td>`);
+    if (selected.has("robot_wafer_dwell")) cells.push(`<td>${finiteText(item.robotWaferDwellMeanSeconds, 2, " s")}</td>`);
+    if (selected.has("system_residence")) cells.push(`<td>${finiteText(item.waferSystemResidenceMeanSeconds, 2, " s")}</td>`);
+    if (selected.has("system_residence_cv")) cells.push(`<td>${finiteText(item.waferSystemResidenceCv, 2)}</td>`);
+    if (selected.has("loadlock_wafers_per_cycle")) cells.push(`<td>${finiteText(item.loadLockWafersPerCycle, 2, " 片")}</td>`);
+    if (selected.has("loadlock_full_cycle_ratio")) cells.push(`<td>${percentText(item.loadLockFullCycleRatio, true)}</td>`);
+    if (selected.has("loadlock_empty_cycle_ratio")) cells.push(`<td>${percentText(item.loadLockEmptyCycleRatio, true)}</td>`);
+    if (selected.has("validation")) cells.push(`<td>${item.analysisStatus && item.analysisStatus !== "completed"
+      ? `<span class="group-fail">${escapeHtml(item.error || item.analysisStatus)}</span>`
+      : item.validationPassed ? '<span class="group-pass">通过</span>' : `<span class="group-fail">${escapeHtml(item.validation || item.status)}</span>`}</td>`);
+    const rowClasses = [
+      item.id === summary.referenceCaseId ? "is-reference" : "",
+      item.analysisStatus && item.analysisStatus !== "completed" ? "is-incomplete" : "",
+    ].filter(Boolean).join(" ");
+    return `<tr${rowClasses ? ` class="${rowClasses}"` : ""}>${cells.join("")}</tr>`;
+  }).join("");
 }
 
 /** 绘制测试组的多维结果分析，不生成跨量纲综合分数。 */
@@ -173,48 +115,53 @@ export function renderTestGroupAnalysis(
   summary: TestGroupPerformanceSummary,
   groupName: string,
 ): string {
-  const weighted = summary.weightedImprovementPercent;
-  const medianImprovement = summary.medianImprovementPercent;
+  const selected = new Set(summary.selectedMetricIds ?? [
+    "validation", "makespan", "baseline_improvement", "cpu_time", "throughput",
+    "departure_interval_cv", "process_chamber_dwell", "robot_wafer_dwell",
+    "system_residence", "system_residence_cv", "resource_utilization", "bottleneck_candidates",
+  ]);
+  const reference = summary.cases.find(item => item.id === summary.referenceCaseId);
+  const selectedLabels: Record<string, string> = {
+    validation: "校验结果", makespan: "Makespan", baseline_improvement: "Baseline 改善",
+    cpu_time: "CPU Time", average_recompute_time: "平均重算时间", throughput: "产能",
+    departure_interval_cv: "出站间隔 CV", process_chamber_dwell: "加工腔驻留",
+    robot_wafer_dwell: "机器手驻留", system_residence: "系统停留",
+    system_residence_cv: "系统停留 CV", resource_utilization: "资源利用率",
+    bottleneck_candidates: "瓶颈候选", loadlock_wafers_per_cycle: "LoadLock 每周期晶圆",
+    loadlock_full_cycle_ratio: "LoadLock 满载周期率", loadlock_empty_cycle_ratio: "LoadLock 空载周期率",
+  };
+  const tableHeaders = ["<th>测试</th>"];
+  if (selected.has("makespan")) tableHeaders.push("<th>Makespan</th>", "<th>相对参考</th>");
+  if (selected.has("baseline_improvement")) tableHeaders.push("<th>Baseline</th>", "<th>改善</th>");
+  if (selected.has("bottleneck_candidates")) tableHeaders.push("<th>瓶颈</th>");
+  if (selected.has("resource_utilization")) tableHeaders.push("<th>利用率</th>");
+  if (selected.has("cpu_time")) tableHeaders.push("<th>CPU Time</th>");
+  if (selected.has("average_recompute_time")) tableHeaders.push("<th>平均重算时间</th>");
+  if (selected.has("throughput")) tableHeaders.push("<th>产能</th>");
+  if (selected.has("departure_interval_cv")) tableHeaders.push("<th>出站 CV</th>");
+  if (selected.has("process_chamber_dwell")) tableHeaders.push("<th>加工腔驻留均值</th>");
+  if (selected.has("robot_wafer_dwell")) tableHeaders.push("<th>机器手驻留均值</th>");
+  if (selected.has("system_residence")) tableHeaders.push("<th>系统停留均值</th>");
+  if (selected.has("system_residence_cv")) tableHeaders.push("<th>系统停留 CV</th>");
+  if (selected.has("loadlock_wafers_per_cycle")) tableHeaders.push("<th>LoadLock 每周期晶圆</th>");
+  if (selected.has("loadlock_full_cycle_ratio")) tableHeaders.push("<th>LoadLock 满载周期率</th>");
+  if (selected.has("loadlock_empty_cycle_ratio")) tableHeaders.push("<th>LoadLock 空载周期率</th>");
+  if (selected.has("validation")) tableHeaders.push("<th>校验</th>");
   return `
     <div class="group-analysis-head">
-      <h2>${escapeHtml(groupName || "当前测试组")}</h2>
+      <div><h2>${escapeHtml(groupName || "当前测试组")}</h2><p>参考测试：${escapeHtml(reference?.name || "首个测试")} · ${summary.cacheHitCount ?? 0} 项命中缓存</p></div>
+      <button class="btn small" type="button" data-reconfigure-analysis>重新选择指标与测试</button>
     </div>
-    <div class="group-kpi-grid">
-      <article><span>校验通过率</span><strong>${(summary.validationPassRate * 100).toFixed(1)}%</strong><small>${summary.validationPassedCount}/${summary.metricsCount} 个有指标结果</small></article>
-      <article><span>加权总体改善</span><strong class="${(weighted ?? 0) < 0 ? "loss" : "gain"}">${weighted === null ? "—" : `${weighted > 0 ? "+" : ""}${weighted.toFixed(2)}%`}</strong><small>按各测试 Baseline makespan 加权</small></article>
-      <article><span>逐例中位改善</span><strong class="${(medianImprovement ?? 0) < 0 ? "loss" : "gain"}">${medianImprovement === null ? "—" : `${medianImprovement > 0 ? "+" : ""}${medianImprovement.toFixed(2)}%`}</strong><small>${summary.winCount} 胜 · ${summary.tieCount} 平 · ${summary.regressionCount} 退化</small></article>
-      <article><span>CPU Time</span><strong>${durationText(summary.medianCpuTimeMs)}</strong><small>P90 ${durationText(summary.p90CpuTimeMs)} · 总计 ${durationText(summary.totalCpuTimeMs)}</small></article>
-      <article><span>主要候选利用率中位数</span><strong>${percentText(summary.medianBottleneckUtilization, true)}</strong><small>工序组、机器人或 LoadLock 容量</small></article>
-      <article><span>产能中位数</span><strong>${finiteText(summary.medianThroughputPerHour, 1, " 片/h")}</strong><small>${summary.throughputEligibleCount ?? 0}/${summary.succeededCount} 个测试有居中 120 片稳态样本 · 出站 CV ${finiteText(summary.medianDepartureIntervalCv, 2)}</small></article>
-      <article><span>加工腔驻留均值中位数</span><strong>${finiteText(summary.medianProcessChamberDwellMeanSeconds, 2, " s")}</strong><small>各测试“加工结束 → 完全离腔”均值的中位数</small></article>
-      <article><span>机器手驻留均值中位数</span><strong>${finiteText(summary.medianRobotWaferDwellMeanSeconds, 2, " s")}</strong><small>已剔除显式 PreTrans 运输区间</small></article>
-      <article><span>系统停留均值中位数</span><strong>${finiteText(summary.medianWaferSystemResidenceMeanSeconds, 2, " s")}</strong><small>离开 LP → 返回 LP · CV 中位 ${finiteText(summary.medianWaferSystemResidenceCv, 2)}</small></article>
-    </div>
-    <div class="group-chart-grid">
-      <article class="group-chart-card">
-        <header><div><h3>相对 Baseline</h3><p>正值为 makespan 改善，负值为退化</p></div></header>
-        <div class="group-chart-body">${improvementChart(summary)}</div>
-      </article>
-      <article class="group-chart-card">
-        <header><div><h3>产能</h3><p>各测试居中 120 片稳态样本产能，按组内最大值缩放</p></div></header>
-        <div class="group-chart-body">${throughputChart(summary)}</div>
-      </article>
-      <article class="group-chart-card">
-        <header><div><h3>所有瓶颈候选利用率</h3><p>每个测试按可能性依次显示所有接近候选</p></div></header>
-        <div class="group-chart-body">${utilizationChart(summary)}</div>
-      </article>
-      <article class="group-chart-card">
-        <header><div><h3>计算时间</h3><p>各测试算法 CPU Time，按组内最大值缩放</p></div></header>
-        <div class="group-chart-body">${cpuChart(summary)}</div>
-      </article>
-    </div>
-    <details class="group-analysis-table-wrap">
-      <summary><span>查看逐测试完整指标</span><button type="button" class="btn small group-analysis-export" data-group-export-csv>导出 CSV</button></summary>
+    <div class="group-analysis-selection">${[...selected].map(metric => `<span>${escapeHtml(selectedLabels[metric] || metric)}</span>`).join("")}</div>
+    ${summary.timedOut ? '<div class="group-analysis-warning">已达到时间预算，以下报告保留完成部分；可减少指标或提高时间预算后继续。</div>' : ""}
+    <section class="group-analysis-table-wrap">
+      <div class="group-analysis-table-head"><div><strong>逐测试指标对比</strong><small>${summary.cases.length} 个测试 · ${selected.size} 项指标 · 参考项已高亮</small></div><button type="button" class="btn small group-analysis-export" data-group-export-csv>导出 CSV</button></div>
       <div class="group-analysis-table-scroll">
         <table class="group-analysis-table">
-          <thead><tr><th>测试</th><th>Makespan</th><th>Baseline</th><th>改善</th><th>瓶颈</th><th>利用率</th><th>CPU Time</th><th>产能</th><th>出站 CV</th><th>加工腔驻留均值</th><th>机器手驻留均值</th><th>系统停留均值</th><th>系统停留 CV</th><th>校验</th></tr></thead>
-          <tbody>${resultTable(summary)}</tbody>
+          <caption class="sr-only">${escapeHtml(groupName || "当前测试组")}逐测试指标对比</caption>
+          <thead><tr>${tableHeaders.join("")}</tr></thead>
+          <tbody>${resultTable(summary, selected)}</tbody>
         </table>
       </div>
-    </details>`;
+    </section>`;
 }

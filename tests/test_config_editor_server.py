@@ -567,19 +567,19 @@ class RecomputeFailureOutputTests(unittest.TestCase):
         self.assertIn("!rec.removedByRecompute", viewer)
         self.assertIn('fillOpacity = bar.rec.removedByRecompute ? "0.24" : "1"', viewer)
 
-    def test_frontend_version_and_cache_keys_are_1_5_48(self) -> None:
+    def test_frontend_version_and_cache_keys_are_1_5_49(self) -> None:
         """前端显示版本、包版本和主资源缓存键必须同步。"""
         frontend_root = ROOT / "realtime_scheduler" / "frontend"
         template = (frontend_root / "config_editor.html").read_text(encoding="utf-8")
         package = json.loads((frontend_root / "package.json").read_text(encoding="utf-8"))
         package_lock = json.loads((frontend_root / "package-lock.json").read_text(encoding="utf-8"))
 
-        self.assertEqual("1.5.48", package["version"])
-        self.assertEqual("1.5.48", package_lock["version"])
-        self.assertEqual("1.5.48", package_lock["packages"][""]["version"])
-        self.assertIn('class="frontend-version">V1.5.48</span>', template)
-        self.assertIn('/assets/config_editor.css?v=1.5.48', template)
-        self.assertIn('/assets/config_editor.js?v=1.5.48', template)
+        self.assertEqual("1.5.49", package["version"])
+        self.assertEqual("1.5.49", package_lock["version"])
+        self.assertEqual("1.5.49", package_lock["packages"][""]["version"])
+        self.assertIn('class="frontend-version">V1.5.49</span>', template)
+        self.assertIn('/assets/config_editor.css?v=1.5.49', template)
+        self.assertIn('/assets/config_editor.js?v=1.5.49', template)
 
     def test_single_run_failure_card_does_not_duplicate_validation_issue(self) -> None:
         """状态推进校验失败只展示一条完整错误，不再重复渲染问题列表。"""
@@ -2586,10 +2586,13 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn("只有错误才显示", html)
         self.assertIn('class="batch-result-summary"', html)
         self.assertIn('class="batch-metric-tags"', html)
-        self.assertIn("batch-metric-tag cpu", html)
+        self.assertIn("batch-metric-tag production", html)
+        self.assertIn("batch-metric-tag recompute", html)
         self.assertNotIn('class="batch-result-metrics"', html)
         self.assertIn('const displayId = `t${index + 1}`', html)
-        self.assertIn("CPU Time ${hasMetrics && Number.isFinite(cpuTime)", html)
+        self.assertIn("产能 ${throughput.toFixed(1)} 片/h", html)
+        self.assertIn("平均重算 ${hasMetrics && hasAverageRecomputeTime", html)
+        self.assertNotIn("已跳过基线", html)
         self.assertIn('id="batchOverviewButton"', html)
         self.assertIn('id="testGroupAnalysisButton"', html)
         self.assertIn('id="testGroupAnalysisPanel"', html)
@@ -2673,8 +2676,11 @@ class ConfigEditorServerTests(unittest.TestCase):
             '<span class="eyebrow">测试组结果分析</span>',
         ):
             self.assertNotIn(removed_content, group_view_source)
-        self.assertIn("产能中位数", group_view_source)
-        self.assertIn("function throughputChart", group_view_source)
+        self.assertIn('class="group-analysis-table-head"', group_view_source)
+        self.assertNotIn('<div class="group-kpi-grid">', group_view_source)
+        self.assertNotIn('<details class="group-analysis-table-wrap">', group_view_source)
+        self.assertIn("逐测试指标对比", group_view_source)
+        self.assertNotIn("function throughputChart", group_view_source)
         self.assertIn("<th>产能</th>", group_view_source)
         self.assertNotIn("<th>吞吐</th>", group_view_source)
         self.assertNotIn("出站表现中位数", group_view_source)
@@ -3883,13 +3889,17 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertIn('payload.get("validationWorkers", DEFAULT_VALIDATION_WORKERS)', post_source)
 
     def test_run_settings_preferences_have_get_and_put_routes(self) -> None:
-        """页面运行习惯必须通过独立偏好 API 读取并保存到本地数据。"""
+        """运行与分析习惯必须通过各自偏好 API 读写同一本地数据。"""
         get_source = inspect.getsource(config_server.ConfigEditorHandler.do_GET)
         put_source = inspect.getsource(config_server.ConfigEditorHandler.do_PUT)
         self.assertIn('path == "/api/preferences/run-settings"', get_source)
         self.assertIn("read_run_preferences()", get_source)
         self.assertIn('path == "/api/preferences/run-settings"', put_source)
         self.assertIn("update_run_preferences", put_source)
+        self.assertIn('path == "/api/preferences/analysis-settings"', get_source)
+        self.assertIn("read_analysis_preferences()", get_source)
+        self.assertIn('path == "/api/preferences/analysis-settings"', put_source)
+        self.assertIn("update_analysis_preferences", put_source)
 
     def test_single_external_failure_keeps_elapsed_time_and_baseline_visible(self) -> None:
         """单次外部算法失败也应返回并绘制耗时及 Baseline 对比。"""

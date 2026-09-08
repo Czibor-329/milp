@@ -17,6 +17,21 @@ from realtime_scheduler.backend.analysis import (
 class BackendAnalysisTests(unittest.TestCase):
     """验证服务端单结果、工序上下文和测试组统计。"""
 
+    def test_schedule_analysis_skips_unselected_metric_groups(self) -> None:
+        """后台快速分析只应计算所选指标组，并保留稳定的空值契约。"""
+        result = analyze_schedule_performance(
+            [{"MoveType": 9, "ModuleName": "PM1", "StartTime": 0, "EndTime": 10}],
+            {"Stations": {"PM1": {"Type": "ProcessChamber"}}, "Robots": {}},
+            mode="full",
+            metric_groups=["basic"],
+        )
+
+        self.assertEqual(["basic"], result["computedMetricGroups"])
+        self.assertEqual([], result["resources"])
+        self.assertEqual([], result["bottleneckCandidates"])
+        self.assertEqual(0, result["throughputSampleCount"])
+        self.assertEqual(0, result["waferSystemResidenceTime"]["sampleCount"])
+
     def test_schedule_analysis_returns_structured_server_result(self) -> None:
         """服务端应从 MoveList 生成窗口、资源和瓶颈字段。"""
         moves = [

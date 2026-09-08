@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 3,
+  "runSettings": {
+    "compatibilityMode": true,
+    "hongYeCheck": true,
+    "skipBaseline": true,
+    "executionTimingEnabled": false,
+    "maximumWorkers": 4,
+    "validationWorkers": 2,
+    "cleanValidationTypes": [
+      "preclean",
+      "postclean",
+      "wacclean",
+      "dummy",
+      "dummywac"
+    ]
+  }
+}

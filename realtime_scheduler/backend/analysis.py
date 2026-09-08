@@ -10,7 +10,7 @@ from __future__ import annotations
 import math
 import re
 from collections import defaultdict
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 PERFORMANCE_TIME_TOLERANCE = 1e-6
 MIDDLE_WINDOW_TRIM_RATIO = 0.1
@@ -1125,6 +1125,9 @@ def analyze_schedule_performance(
     mode: str = "steady",
     context: Optional[Mapping[str, Any]] = None,
     run_metrics: Optional[Mapping[str, Any]] = None,
+    metric_groups: Optional[Sequence[str]] = None,
+    progress_callback: Optional[Callable[[str], None]] = None,
+    should_stop: Optional[Callable[[], bool]] = None,
 ) -> Dict[str, Any]:
     """计算服务端 MoveList 性能、瓶颈候选和驻留时间。
 
@@ -1133,37 +1136,64 @@ def analyze_schedule_performance(
         device: 包含 Stations/Robots 的设备定义，可为空。
         mode: ``steady`` 或 ``full`` 统计窗口。
         context: 由 Route 和测试轮次生成的工序容量上下文。
+        metric_groups: 需要计算的指标组；为空时保持兼容并计算全部指标。
+        progress_callback: 可选的阶段回调，供后台任务报告进度。
+        should_stop: 可选的协作式停止检查；返回真时终止当前分析。
 
     返回:
-        可直接通过 JSON API 返回的完整性能分析。
+        可直接通过 JSON API 返回的性能分析；未选指标保持稳定空值。
     """
     if mode not in {"steady", "full"}:
         raise ValueError("分析窗口只支持 steady 或 full")
+    selected_groups = set(metric_groups or {
+        "basic", "throughput", "residence", "resources", "bottleneck", "loadlock",
+    })
+    supported_groups = {
+        "basic", "throughput", "residence", "resources", "bottleneck", "loadlock",
+    }
+    unknown_groups = selected_groups - supported_groups
+    if unknown_groups:
+        raise ValueError(f"不支持的分析指标组：{', '.join(sorted(unknown_groups))}")
+    selected_groups.add("basic")
+
+    def report(stage: str) -> None:
+        """报告计算阶段，并在阶段边界响应取消或超时。"""
+        if should_stop is not None and should_stop():
+            raise TimeoutError("分析已取消或超过时间预算")
+        if progress_callback is not None:
+            progress_callback(stage)
+
+    report("prepare")
     records = _normalize_moves(moves)
     window = _performance_window(records, device, mode)
-    definitions = _performance_resource_definitions(records, device)
-    intervals_by_resource = _resource_activity_intervals(records, device)
     resources: List[Dict[str, Any]] = []
-    for name, definition in definitions.items():
-        summary = _summarize_intervals(
-            intervals_by_resource.get(name, []),
-            window["start"],
-            window["end"],
-        )
-        resources.append({
-            "name": name,
-            "type": definition["type"],
-            "kind": definition["kind"],
-            "utilization": (
-                summary["busyTime"] / window["duration"]
-                if window["duration"] > PERFORMANCE_TIME_TOLERANCE
-                else 0.0
-            ),
-            **summary,
-            "isBottleneck": False,
-            "bottleneckCandidateRank": None,
-        })
-    candidates = _rank_bottleneck_candidates(records, resources, window, context)
+    if selected_groups & {"resources", "bottleneck"}:
+        report("resources")
+        definitions = _performance_resource_definitions(records, device)
+        intervals_by_resource = _resource_activity_intervals(records, device)
+        for name, definition in definitions.items():
+            summary = _summarize_intervals(
+                intervals_by_resource.get(name, []),
+                window["start"],
+                window["end"],
+            )
+            resources.append({
+                "name": name,
+                "type": definition["type"],
+                "kind": definition["kind"],
+                "utilization": (
+                    summary["busyTime"] / window["duration"]
+                    if window["duration"] > PERFORMANCE_TIME_TOLERANCE
+                    else 0.0
+                ),
+                **summary,
+                "isBottleneck": False,
+                "bottleneckCandidateRank": None,
+            })
+    candidates: List[Dict[str, Any]] = []
+    if "bottleneck" in selected_groups:
+        report("bottleneck")
+        candidates = _rank_bottleneck_candidates(records, resources, window, context)
     primary = candidates[0] if candidates else None
     for candidate_index, candidate in enumerate(candidates):
         for resource_name in candidate["resourceNames"]:
@@ -1214,10 +1244,49 @@ def analyze_schedule_performance(
         if departure_intervals
         else 0.0
     )
-    wafer_system_residence_times = _wafer_system_residence_times(
-        records, device,
-    )
-    production_throughput = _production_throughput(records, device, context)
+    production_throughput = {
+        "throughputPerHour": 0.0,
+        "throughputSampleCount": 0,
+        "throughputReason": "本次分析未选择产能指标",
+    }
+    throughput_timeline: Dict[str, Any] = {
+        "rollingWindowMinimum": THROUGHPUT_ROLLING_WINDOW_MIN_WAFERS,
+        "rollingWindowMaximum": THROUGHPUT_ROLLING_WINDOW_MAX_WAFERS,
+        "cumulative": [],
+        "rollingByWindow": {},
+    }
+    if "throughput" in selected_groups:
+        report("throughput")
+        production_throughput = _production_throughput(records, device, context)
+        throughput_timeline = _throughput_timeline(completions)
+
+    wafer_system_residence_times: List[Dict[str, Any]] = []
+    process_chamber_dwell = _summarize_durations([])
+    robot_wafer_dwell = _summarize_durations([])
+    wafer_system_residence = _summarize_durations([])
+    if "residence" in selected_groups:
+        report("residence")
+        wafer_system_residence_times = _wafer_system_residence_times(records, device)
+        process_chamber_dwell = _process_chamber_dwell_time(records, device, window)
+        robot_wafer_dwell = _robot_wafer_dwell_time(records, window)
+        wafer_system_residence = _summarize_durations(
+            sample["duration"]
+            for sample in wafer_system_residence_times
+            if _completion_inside_window(sample["completedAt"], window)
+        )
+
+    load_lock_efficiency = {
+        "cycleCount": 0,
+        "waferCycleCount": 0,
+        "wafersPerCycle": 0.0,
+        "fullLoadCycleCount": 0,
+        "emptyLoadCycleCount": 0,
+        "fullLoadCycleRatio": 0.0,
+        "emptyLoadCycleRatio": 0.0,
+    }
+    if "loadlock" in selected_groups:
+        report("loadlock")
+        load_lock_efficiency = _build_load_lock_efficiency(records, device)
     cpu_time_ms = _finite_or_none(
         run_metrics.get("cpuTimeMs") if isinstance(run_metrics, Mapping) else None,
     )
@@ -1233,7 +1302,7 @@ def analyze_schedule_performance(
         "primaryBottleneck": primary,
         "bottleneck": bottleneck,
         "completedWaferCount": len(completion_times),
-        "throughputTimeline": _throughput_timeline(completions),
+        "throughputTimeline": throughput_timeline,
         **production_throughput,
         "cpuTimeMs": cpu_time_ms,
         "recomputeCount": recompute_count,
@@ -1244,18 +1313,14 @@ def analyze_schedule_performance(
         ),
         "meanDepartureInterval": mean_departure_interval,
         "departureIntervalCv": _coefficient_of_variation(departure_intervals),
-        "processChamberDwellTime": _process_chamber_dwell_time(
-            records, device, window,
-        ),
-        "robotWaferDwellTime": _robot_wafer_dwell_time(records, window),
-        "waferSystemResidenceTime": _summarize_durations(
-            sample["duration"]
-            for sample in wafer_system_residence_times
-            if _completion_inside_window(sample["completedAt"], window)
-        ),
+        "processChamberDwellTime": process_chamber_dwell,
+        "robotWaferDwellTime": robot_wafer_dwell,
+        "waferSystemResidenceTime": wafer_system_residence,
         "waferSystemResidenceTimes": wafer_system_residence_times,
-        "loadLockEfficiency": _build_load_lock_efficiency(records, device),
+        "loadLockEfficiency": load_lock_efficiency,
+        "computedMetricGroups": sorted(selected_groups),
     }
+    report("complete")
     return performance
 
 
@@ -1412,6 +1477,7 @@ def _normalize_group_case(input_case: Mapping[str, Any]) -> Dict[str, Any]:
         )
 
     window = performance.get("window") if isinstance(performance, Mapping) else None
+    load_lock = performance.get("loadLockEfficiency") if isinstance(performance, Mapping) else None
     return {
         "id": str(input_case.get("id") or ""),
         "name": str(input_case.get("name") or ""),
@@ -1428,6 +1494,11 @@ def _normalize_group_case(input_case: Mapping[str, Any]) -> Dict[str, Any]:
             else None
         ),
         "cpuTimeMs": _finite_or_none(input_case.get("cpuTimeMs")),
+        "averageRecomputeTimeMs": (
+            _finite_or_none(performance.get("averageRecomputeTimeMs"))
+            if isinstance(performance, Mapping)
+            else None
+        ),
         "elapsedTimeMs": _finite_or_none(input_case.get("elapsedTimeMs")),
         "bottleneckResource": str(
             (primary or {}).get("label") or (legacy or {}).get("name") or ""
@@ -1466,15 +1537,69 @@ def _normalize_group_case(input_case: Mapping[str, Any]) -> Dict[str, Any]:
             "waferSystemResidenceTime", "coefficientOfVariation",
         ),
         "windowMethod": str(window.get("method") or "") if isinstance(window, Mapping) else "",
+        "loadLockWafersPerCycle": (
+            _finite_or_none(load_lock.get("wafersPerCycle"))
+            if isinstance(load_lock, Mapping) and load_lock.get("cycleCount")
+            else None
+        ),
+        "loadLockFullCycleRatio": (
+            _finite_or_none(load_lock.get("fullLoadCycleRatio"))
+            if isinstance(load_lock, Mapping) and load_lock.get("cycleCount")
+            else None
+        ),
+        "loadLockEmptyCycleRatio": (
+            _finite_or_none(load_lock.get("emptyLoadCycleRatio"))
+            if isinstance(load_lock, Mapping) and load_lock.get("cycleCount")
+            else None
+        ),
+        "analysisStatus": str(input_case.get("analysisStatus") or ""),
+        "comparisonKey": str(input_case.get("comparisonKey") or ""),
         "error": str(input_case.get("error") or ""),
     }
 
 
 def analyze_test_group_performance(
     inputs: Sequence[Mapping[str, Any]],
+    reference_case_id: str = "",
 ) -> Dict[str, Any]:
-    """生成完整测试组统计，不将不同量纲压成单一综合分数。"""
+    """生成测试组统计和相对参考测试差异，不压缩为跨量纲综合分数。"""
     cases = [_normalize_group_case(input_case) for input_case in inputs]
+    reference = next(
+        (item for item in cases if item["id"] == reference_case_id),
+        cases[0] if cases else None,
+    )
+    comparison_fields = (
+        "makespan", "cpuTimeMs", "averageRecomputeTimeMs", "throughputPerHour",
+        "departureIntervalCv",
+        "processChamberDwellMeanSeconds", "robotWaferDwellMeanSeconds",
+        "waferSystemResidenceMeanSeconds", "waferSystemResidenceCv",
+        "bottleneckUtilization",
+    )
+    for item in cases:
+        same_configuration = bool(
+            reference
+            and (
+                item["id"] == reference["id"]
+                or item["comparisonKey"]
+                and item["comparisonKey"] == reference["comparisonKey"]
+            )
+        )
+        item["referenceComparable"] = same_configuration
+        item["referenceDeltas"] = {}
+        for field in comparison_fields:
+            value = item.get(field)
+            reference_value = reference.get(field) if reference else None
+            if value is None or reference_value is None:
+                continue
+            difference = float(value) - float(reference_value)
+            item["referenceDeltas"][field] = {
+                "absolute": difference,
+                "percent": (
+                    difference / float(reference_value) * 100
+                    if abs(float(reference_value)) > PERFORMANCE_TIME_TOLERANCE
+                    else None
+                ),
+            }
     succeeded = [item for item in cases if item["status"] == "succeeded"]
     comparable = [item for item in cases if item["comparable"]]
     improvements = [
@@ -1533,6 +1658,8 @@ def analyze_test_group_performance(
         "totalCount": len(cases),
         "succeededCount": len(succeeded),
         "failedCount": len(cases) - len(succeeded),
+        "metricsCount": sum(bool(item.get("performance")) for item in inputs),
+        "referenceCaseId": reference["id"] if reference else "",
         "validationPassedCount": validation_passed_count,
         "validationPassRate": (
             validation_passed_count / len(succeeded) if succeeded else 0.0
@@ -1560,6 +1687,9 @@ def analyze_test_group_performance(
             min(improvements) if any(value < 0 for value in improvements) else None
         ),
         "medianCpuTimeMs": _percentile(cpu_times, 0.5),
+        "medianAverageRecomputeTimeMs": _percentile(
+            succeeded_values("averageRecomputeTimeMs"), 0.5,
+        ),
         "p90CpuTimeMs": _percentile(cpu_times, 0.9),
         "totalCpuTimeMs": sum(cpu_times),
         "medianBottleneckUtilization": _percentile(
@@ -1585,6 +1715,15 @@ def analyze_test_group_performance(
         ),
         "medianWaferSystemResidenceCv": _percentile(
             succeeded_values("waferSystemResidenceCv"), 0.5,
+        ),
+        "medianLoadLockWafersPerCycle": _percentile(
+            succeeded_values("loadLockWafersPerCycle"), 0.5,
+        ),
+        "medianLoadLockFullCycleRatio": _percentile(
+            succeeded_values("loadLockFullCycleRatio"), 0.5,
+        ),
+        "medianLoadLockEmptyCycleRatio": _percentile(
+            succeeded_values("loadLockEmptyCycleRatio"), 0.5,
         ),
         "bottleneckFrequencies": frequencies,
         "windowMethodCounts": dict(window_method_counts),

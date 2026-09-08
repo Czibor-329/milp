@@ -112,6 +112,7 @@ class BatchResultAssembler:
             "cpuTimeMs": max(0.0, float(result.get("cpuTimeMs", result.get("totalElapsedMs", 0.0)))),
             "recomputeCount": len(list(result.get("updates") or [])),
         }
+        run_metrics = artifact["RunMetricsMetadata"]
         artifact["ReplayContext"] = {
             "schema": "machine-replay-context-v1",
             "plan": deepcopy(selected_plan),
@@ -125,6 +126,12 @@ class BatchResultAssembler:
             "status": "succeeded",
             "totalElapsedMs": result["totalElapsedMs"],
             "cpuTimeMs": result.get("cpuTimeMs", result["totalElapsedMs"]),
+            "recomputeCount": run_metrics["recomputeCount"],
+            "averageRecomputeTimeMs": (
+                run_metrics["cpuTimeMs"] / run_metrics["recomputeCount"]
+                if run_metrics["recomputeCount"] > 0
+                else None
+            ),
             "makespan": result["makespan"],
             "moveCount": result["moveCount"],
             "validation": result["validation"],

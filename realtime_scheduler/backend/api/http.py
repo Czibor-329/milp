@@ -16,6 +16,11 @@ from realtime_scheduler.backend.workspace.exchange_service import *
 from realtime_scheduler.backend.workspace.transfer_jobs import *
 from realtime_scheduler.backend.artifacts.repository import *
 from realtime_scheduler.backend.artifacts.deadlock_diagnostic import *
+from realtime_scheduler.backend.analysis_jobs import (
+    cancel_test_group_analysis_job,
+    create_test_group_analysis_job,
+    read_test_group_analysis_job,
+)
 from realtime_scheduler.backend.wiring import *
 
 
@@ -232,6 +237,29 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                 else:
                     self._send_json({"ok": True, "transfer": transfer})
                 return
+        analysis_job_parts = [part for part in path.split("/") if part]
+        if (
+            len(analysis_job_parts) == 3
+            and analysis_job_parts[:2] == ["api", "analysis-jobs"]
+        ):
+            job = read_test_group_analysis_job(analysis_job_parts[2])
+            if job is None:
+                self._send_json(
+                    {"ok": False, "error": "分析任务不存在或已过期"},
+                    HTTPStatus.NOT_FOUND,
+                )
+            else:
+                self._send_json({"ok": True, "job": job})
+            return
+        if path == "/api/preferences/analysis-settings":
+            try:
+                self._send_json({"ok": True, "analysisSettings": read_analysis_preferences()})
+            except Exception as error:  # noqa: BLE001
+                self._send_json(
+                    {"ok": False, "error": str(error)},
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
+            return
         if path == "/api/search-telemetry":
             if not BUILTIN_ALGORITHM_AVAILABLE:
                 self._send_json(
@@ -345,6 +373,25 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         """接收控制台配置并同步运行后端策略。"""
         path = unquote(urlparse(self.path).path)
+        if path == "/api/analysis-jobs":
+            try:
+                job = create_test_group_analysis_job(self._read_json_object())
+                self._send_json({"ok": True, "job": job}, HTTPStatus.ACCEPTED)
+            except Exception as error:  # noqa: BLE001
+                self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
+            return
+        analysis_job_parts = [part for part in path.split("/") if part]
+        if (
+            len(analysis_job_parts) == 4
+            and analysis_job_parts[:2] == ["api", "analysis-jobs"]
+            and analysis_job_parts[3] == "cancel"
+        ):
+            try:
+                job = cancel_test_group_analysis_job(analysis_job_parts[2])
+                self._send_json({"ok": True, "job": job}, HTTPStatus.ACCEPTED)
+            except LookupError as error:
+                self._send_json({"ok": False, "error": str(error)}, HTTPStatus.NOT_FOUND)
+            return
         if path == "/api/workspace-transfers":
             try:
                 payload = self._read_json_object()
@@ -542,6 +589,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                     str(payload.get("windowMode") or "steady"),
                     context,
                     run_metrics,
+                    metric_groups=payload.get("metricGroups"),
                 )
                 self._send_json({
                     "ok": True,
@@ -795,6 +843,14 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                 payload = self._read_json_object()
                 settings = update_run_preferences(payload.get("runSettings"))
                 self._send_json({"ok": True, "runSettings": settings})
+            except Exception as error:  # noqa: BLE001
+                self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
+            return
+        if path == "/api/preferences/analysis-settings":
+            try:
+                payload = self._read_json_object()
+                settings = update_analysis_preferences(payload.get("analysisSettings"))
+                self._send_json({"ok": True, "analysisSettings": settings})
             except Exception as error:  # noqa: BLE001
                 self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
             return

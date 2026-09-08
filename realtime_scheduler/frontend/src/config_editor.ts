@@ -9,11 +9,13 @@
 // @ts-nocheck
 import * as RouteEditorLogic from "./route_editor_logic";
 import {
+  cancelTestGroupAnalysisJob,
+  createTestGroupAnalysisJob,
+  readTestGroupAnalysisJob,
   requestJson,
   requestScheduleAnalysis,
   requestSearchControl,
   requestSearchTelemetry,
-  requestTestGroupAnalysis,
 } from "./api_client";
 import { createVisualizationWorkspace, detectDeviceTopologyLayout, updateThroughputChartRange } from "./workspace_visualizer";
 import { renderTestGroupAnalysis, testGroupSummaryCsv } from "./group_analysis_view";
@@ -37,6 +39,11 @@ const batchPerformanceAnalyses = new Map();
 const batchBottleneckSummaries = new Map();
 const batchBottleneckRequests = new Map();
 const batchBottleneckErrors = new Map();
+const batchCardAnalyses = new Map();
+const batchCardAnalysisRequests = new Map();
+let activeGroupAnalysisJobId = "";
+let analysisWizardStep = 1;
+let analysisSettingsPreferencesDirty = false;
 
 const EXPECTED_API_SCHEMA = "cjob-pjob-v3";
 const DEFAULT_SCHEDULE_OPTIONS = Object.freeze({
@@ -1685,6 +1692,8 @@ function resetRunResult() {
   batchBottleneckSummaries.clear();
   batchBottleneckRequests.clear();
   batchBottleneckErrors.clear();
+  batchCardAnalyses.clear();
+  batchCardAnalysisRequests.clear();
   ["metricTime", "metricMakespan", "metricMoves", "metricValidation"].forEach(id => { document.getElementById(id).textContent = "—"; });
   ["metricTimeDetail", "metricMakespanDetail", "metricMovesDetail", "metricValidationDetail"].forEach(id => { document.getElementById(id).textContent = ""; });
   document.getElementById("metricContext").textContent = "运行总览";
@@ -3941,6 +3950,49 @@ async function saveRunSettingsPreferences() {
   applyRunSettingsPreferences(result.runSettings);
 }
 
+/** 返回结果分析向导中可跨测试组复用的个人设置。 */
+function currentAnalysisSettingsPreferences() {
+  return {
+    metricIds: [...document.querySelectorAll("[data-analysis-metric]:checked")].map(input => String(input.value)),
+    windowMode: String(document.getElementById("analysisWindowMode")?.value || "steady"),
+    timeBudgetSeconds: Number(document.getElementById("analysisTimeBudget")?.value || 120),
+  };
+}
+
+/** 将本地个人分析偏好应用到逐指标勾选项和计算口径。 */
+function applyAnalysisSettingsPreferences(settings) {
+  if (!settings || typeof settings !== "object") return;
+  const selectedIds = new Set(Array.isArray(settings.metricIds) ? settings.metricIds : []);
+  document.querySelectorAll("[data-analysis-metric]").forEach(input => {
+    input.checked = selectedIds.has(String(input.value));
+  });
+  const windowInput = document.getElementById("analysisWindowMode");
+  const budgetInput = document.getElementById("analysisTimeBudget");
+  if (windowInput && ["steady", "full"].includes(String(settings.windowMode))) {
+    windowInput.value = String(settings.windowMode);
+  }
+  if (budgetInput && [30, 120, 300].includes(Number(settings.timeBudgetSeconds))) {
+    budgetInput.value = String(settings.timeBudgetSeconds);
+  }
+  analysisSettingsPreferencesDirty = false;
+}
+
+/** 从服务端本地偏好文件恢复结果分析习惯。 */
+async function loadAnalysisSettingsPreferences() {
+  const result = await requestJson("/api/preferences/analysis-settings", { cache: "no-store" });
+  if (!analysisSettingsPreferencesDirty) applyAnalysisSettingsPreferences(result.analysisSettings);
+}
+
+/** 原子保存结果分析指标、窗口和时间预算。 */
+async function saveAnalysisSettingsPreferences() {
+  const result = await requestJson("/api/preferences/analysis-settings", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ analysisSettings: currentAnalysisSettingsPreferences() }),
+  });
+  applyAnalysisSettingsPreferences(result.analysisSettings);
+}
+
 /** 返回是否选择 HongYe SchStateLib 输出校验器。 */
 function hongYeCheckEnabled() {
   return document.getElementById("hongYeCheckInput")?.checked === true;
@@ -4438,6 +4490,8 @@ async function runCurrentTestGroup(selectedTestIds = null) {
     batchBottleneckSummaries.clear();
     batchBottleneckRequests.clear();
     batchBottleneckErrors.clear();
+    batchCardAnalyses.clear();
+    batchCardAnalysisRequests.clear();
     lastBatchItemsRenderSignature = "";
     document.getElementById("testGroupAnalysisButton").hidden = true;
     document.getElementById("testGroupAnalysisPanel").hidden = true;
@@ -4662,57 +4716,148 @@ function showCurrentBatchOverview() {
   showBatchOverviewMetrics(state.batchResult);
 }
 
-/** 请求后端评估当前测试组，并把服务端返回的多维统计绘制到结果分析工作台。 */
+/** 使用测试任务配置生成严格可比性键；名称不同但运行配置相同时仍可直接比较。 */
+function groupAnalysisComparisonKey(testCase) {
+  return JSON.stringify({ rounds: testCase?.rounds || [] });
+}
+
+/** 切换分析向导页面，并同步步骤图示、说明和底部操作。 */
+function showAnalysisWizardStep(step) {
+  analysisWizardStep = Math.max(1, Math.min(3, Number(step) || 1));
+  document.querySelectorAll("[data-analysis-page]").forEach(page => {
+    const active = Number(page.dataset.analysisPage) === analysisWizardStep;
+    page.hidden = !active;
+    page.classList.toggle("active", active);
+  });
+  document.querySelectorAll("[data-analysis-flow-step]").forEach(item => {
+    const itemStep = Number(item.dataset.analysisFlowStep);
+    item.classList.toggle("active", itemStep === analysisWizardStep);
+    item.classList.toggle("complete", itemStep < analysisWizardStep);
+  });
+  const descriptions = {
+    1: "逐项选择本次需要实际计算的指标，选择会保存为个人设置。",
+    2: "选择参与对比的测试，并确认参考测试、统计窗口和时间预算。",
+    3: "正在按所选指标计算，达到时间预算时会保留已完成结果。",
+  };
+  document.getElementById("analysisOptionsDescription").textContent = descriptions[analysisWizardStep];
+  document.getElementById("analysisPreviousButton").hidden = analysisWizardStep !== 2;
+  document.getElementById("analysisNextButton").hidden = analysisWizardStep !== 1;
+  document.getElementById("startGroupAnalysisButton").hidden = analysisWizardStep !== 2;
+  const cancelButton = document.getElementById("analysisOptionsCancel");
+  cancelButton.textContent = analysisWizardStep === 3 ? "取消分析" : "取消";
+}
+
+/** 打开以计算指标为第一页的结果分析向导。 */
+function openGroupAnalysisOptions() {
+  const result = state.batchResult;
+  if (!result?.items?.length) return;
+  const testsById = new Map((state.workspaceDevice?.tests || []).map(test => [String(test.id), test]));
+  const analyzable = result.items.filter(item => hasBatchResultMetrics(item) && item.resultUrl);
+  const options = document.getElementById("analysisTestOptions");
+  options.innerHTML = analyzable.map((item, index) => `
+    <label><input type="checkbox" checked value="${escapeHtml(String(item.testId || `index-${index}`))}" data-analysis-test>
+      <span><strong>${escapeHtml(item.testName || `测试 ${index + 1}`)}</strong><small>${escapeHtml(validationDisplay(item.validation))}</small></span>
+    </label>`).join("");
+  const reference = document.getElementById("analysisReferenceTest");
+  reference.innerHTML = analyzable.map((item, index) => `
+    <option value="${escapeHtml(String(item.testId || `index-${index}`))}">${escapeHtml(item.testName || `测试 ${index + 1}`)}</option>`).join("");
+  reference.dataset.testsById = String(testsById.size);
+  document.getElementById("analysisToggleAllTests").textContent = "取消全选";
+  document.getElementById("analysisDialogProgress").innerHTML = "";
+  document.getElementById("analysisOptionsCancel").disabled = false;
+  document.getElementById("analysisOptionsClose").disabled = false;
+  document.getElementById("startGroupAnalysisButton").disabled = false;
+  showAnalysisWizardStep(1);
+  (document.getElementById("analysisOptionsDialog") as HTMLDialogElement).showModal();
+  window.setTimeout(() => document.querySelector("[data-analysis-metric]")?.focus(), 0);
+}
+
+/** 把服务端真实阶段和完成数量绘制在向导第三页。 */
+function renderGroupAnalysisProgress(job) {
+  const percent = Math.max(0, Math.min(100, Number(job.progress) || 0));
+  const elapsed = Number(job.elapsedSeconds) || 0;
+  document.getElementById("analysisDialogProgress").innerHTML = `
+    <section class="group-analysis-progress" aria-live="polite">
+      <header><div><small>测试组结果分析</small><strong>${escapeHtml(job.message || "正在分析")}</strong></div><b>${percent}%</b></header>
+      <div class="group-analysis-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}"><i style="width:${percent}%"></i></div>
+      <p>${escapeHtml(job.currentCaseName || "正在准备")} · 已完成 ${Number(job.completedCases) || 0}/${Number(job.totalCases) || 0} 个测试 · 已用 ${elapsed.toFixed(1)} 秒 / ${Number(job.timeBudgetSeconds) || 0} 秒</p>
+    </section>`;
+  showAnalysisWizardStep(3);
+}
+
+/** 创建后台分析任务、轮询真实进度，并展示完整或部分比较报告。 */
 async function showTestGroupAnalysis() {
   const result = state.batchResult;
   if (!result?.items?.length) return;
-  const button = document.getElementById("testGroupAnalysisButton");
-  const originalText = button.textContent;
-  button.disabled = true;
-  button.textContent = "正在分析…";
-  try {
-  const analyzable = result.items
+  const selectedIds = new Set(
+    [...document.querySelectorAll("[data-analysis-test]:checked")].map(input => String(input.value)),
+  );
+  if (!selectedIds.size) throw new Error("请至少选择一个测试");
+  const metricIds = [...document.querySelectorAll("[data-analysis-metric]:checked")].map(input => String(input.value));
+  if (!metricIds.length) throw new Error("请至少选择一个计算指标");
+  const testsById = new Map((state.workspaceDevice?.tests || []).map(test => [String(test.id), test]));
+  const cases = result.items
     .map((item, index) => ({ item, index }))
-    .filter(entry => hasBatchResultMetrics(entry.item) && entry.item.resultUrl);
-  let cursor = 0;
-  const workerCount = Math.min(4, analyzable.length);
-  await Promise.all(Array.from({ length: workerCount }, async () => {
-    while (cursor < analyzable.length) {
-      const current = analyzable[cursor];
-      cursor += 1;
-      await loadBatchItemPerformance(current.item, current.index);
-    }
-  }));
-  const summary = await requestTestGroupAnalysis(result.items.map((item, index) => ({
-    id: String(item.testId || `index-${index}`),
-    name: item.testName || `t${index + 1}`,
-    status: String(item.status || "unknown"),
-    validation: String(item.validation || "unknown"),
-    metricsAvailable: hasBatchResultMetrics(item),
-    makespan: item.makespan,
-    baselineMakespan: item.baseline?.status === "succeeded"
-      ? item.baseline.makespan
-      : null,
-    cpuTimeMs: item.cpuTimeMs ?? item.totalElapsedMs,
-    elapsedTimeMs: item.totalElapsedMs,
-    error: item.error || item.baseline?.error || "",
-    performance: item.resultUrl
-      ? batchPerformanceAnalyses.get(String(item.resultUrl)) ?? null
-      : null,
-  })));
+    .filter(({ item, index }) => selectedIds.has(String(item.testId || `index-${index}`)))
+    .map(({ item, index }) => {
+      const testId = String(item.testId || `index-${index}`);
+      const testCase = testsById.get(testId);
+      const resultId = String(item.resultUrl || "").startsWith("/api/results/")
+        ? decodeURIComponent(String(item.resultUrl).slice("/api/results/".length))
+        : "";
+      return {
+        id: testId,
+        name: item.testName || `t${index + 1}`,
+        status: String(item.status || "unknown"),
+        validation: String(item.validation || "unknown"),
+        makespan: item.makespan,
+        baselineMakespan: item.baseline?.status === "succeeded" ? item.baseline.makespan : null,
+        cpuTimeMs: item.cpuTimeMs ?? item.totalElapsedMs,
+        elapsedTimeMs: item.totalElapsedMs,
+        error: item.error || item.baseline?.error || "",
+        resultId,
+        rounds: testCase?.rounds || [],
+        comparisonKey: groupAnalysisComparisonKey(testCase),
+      };
+    });
+  const referenceSelect = document.getElementById("analysisReferenceTest");
+  const referenceCaseId = selectedIds.has(String(referenceSelect.value))
+    ? String(referenceSelect.value)
+    : cases[0].id;
+  await saveAnalysisSettingsPreferences();
+  const job = await createTestGroupAnalysisJob({
+    cases,
+    device: state.device,
+    routes: state.workspaceDevice?.routes || state.routes,
+    metricIds,
+    referenceCaseId,
+    windowMode: document.getElementById("analysisWindowMode").value,
+    timeBudgetSeconds: Number(document.getElementById("analysisTimeBudget").value),
+  });
+  activeGroupAnalysisJobId = String(job.id || "");
+  let snapshot = job;
+  renderGroupAnalysisProgress(snapshot);
+  while (["queued", "running"].includes(String(snapshot.status))) {
+    await new Promise(resolve => window.setTimeout(resolve, 500));
+    snapshot = await readTestGroupAnalysisJob(activeGroupAnalysisJobId);
+    renderGroupAnalysisProgress(snapshot);
+  }
+  activeGroupAnalysisJobId = "";
+  if (!snapshot.result) throw new Error(snapshot.message || "结果分析失败");
+  const summary = snapshot.result;
   const panelMarkup = renderTestGroupAnalysis(
     summary,
     result.group || state.activeTestGroup || "当前测试组",
   );
   visualizationWorkspace.showGroupAnalysis(panelMarkup);
+  document.getElementById("analysisOptionsCancel").disabled = false;
+  document.getElementById("analysisOptionsClose").disabled = false;
+  (document.getElementById("analysisOptionsDialog") as HTMLDialogElement).close();
   switchTab("workspace");
   const panel = document.getElementById("testGroupAnalysisPanel");
   bindTestGroupExport(panel, summary, result.group || state.activeTestGroup || "当前测试组");
+  panel.querySelector("[data-reconfigure-analysis]")?.addEventListener("click", openGroupAnalysisOptions);
   panel.scrollIntoView({ behavior: "smooth", block: "start" });
-  } finally {
-    button.disabled = false;
-    button.textContent = originalText;
-  }
 }
 
 /** 绑定测试组逐测试指标面板的“导出 CSV”按钮，生成 CSV 并触发浏览器下载。 */
@@ -4781,6 +4926,9 @@ function showBatchProgress(result) {
     showBatchItemOverview(result.items[selectedIndex], selectedIndex);
     void loadBatchItemBottleneck(result.items[selectedIndex], selectedIndex);
   }
+  if (["completed", "cancelled"].includes(String(result.status))) {
+    void hydrateBatchCardAnalyses(items);
+  }
   writeTerminal([
     "$ 批量运行当前测试组",
     `  组别: ${result.group || "未分组"} · 策略: ${displayStrategyName(result.strategy)}`,
@@ -4802,17 +4950,73 @@ function batchItemErrorText(item) {
   return "";
 }
 
+/** 只计算批量小卡片需要的产能和平均重算时间，避免触发完整结果分析。 */
+async function loadBatchCardAnalysis(item) {
+  const resultUrl = String(item?.resultUrl || "");
+  if (!resultUrl || !hasBatchResultMetrics(item)) return null;
+  if (batchCardAnalyses.has(resultUrl)) return batchCardAnalyses.get(resultUrl);
+  if (batchCardAnalysisRequests.has(resultUrl)) return batchCardAnalysisRequests.get(resultUrl);
+  const request = (async () => {
+    const testCase = (state.workspaceDevice?.tests || []).find(
+      test => String(test.id) === String(item.testId),
+    );
+    const resultId = resultUrl.startsWith("/api/results/")
+      ? decodeURIComponent(resultUrl.slice("/api/results/".length))
+      : "";
+    if (!resultId) return null;
+    try {
+      const response = await requestScheduleAnalysis({
+        resultId,
+        device: state.device,
+        windowMode: "steady",
+        routes: state.workspaceDevice?.routes || state.routes,
+        rounds: testCase?.rounds || [],
+        metricGroups: ["basic", "throughput"],
+      });
+      batchCardAnalyses.set(resultUrl, response.analysis);
+      return response.analysis;
+    } catch {
+      batchCardAnalyses.set(resultUrl, null);
+      return null;
+    } finally {
+      batchCardAnalysisRequests.delete(resultUrl);
+    }
+  })();
+  batchCardAnalysisRequests.set(resultUrl, request);
+  return request;
+}
+
+/** 以两路并发补齐已完成测试的小卡片指标，并在每项完成后更新显示。 */
+async function hydrateBatchCardAnalyses(items) {
+  const pending = orderedBatchItems(items).filter(item => {
+    const resultUrl = String(item?.resultUrl || "");
+    return resultUrl && !batchCardAnalyses.has(resultUrl) && !batchCardAnalysisRequests.has(resultUrl);
+  });
+  let nextIndex = 0;
+  const worker = async () => {
+    while (nextIndex < pending.length) {
+      const item = pending[nextIndex++];
+      await loadBatchCardAnalysis(item);
+      if (state.batchResult) renderBatchItems(state.batchResult.items || []);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(2, pending.length) }, worker));
+}
+
 function renderBatchItems(items) {
   items = orderedBatchItems(items);
   const statusLabels = { queued: "等待中", running: "运行中", succeeded: "成功", failed: "失败", cancelled: "已终止" };
   document.getElementById("batchResults").innerHTML = items.map((item, index) => {
     const hasMetrics = hasBatchResultMetrics(item);
-    const baseline = item.baseline || {}, baselineReady = baseline.status === "succeeded";
-    const cpuTime = Number(item.cpuTimeMs);
-    const improvement = Number(item.improvementPercent);
-    const improvementText = hasMetrics && baselineReady && Number.isFinite(improvement)
-      ? `${improvement >= 0 ? "提升" : "退化"} ${Math.abs(improvement).toFixed(2)}%`
-      : baseline.status === "skipped" ? "已跳过基线" : baseline.status && baseline.status !== "succeeded" ? "无有效基线" : "提升 —";
+    const resultUrl = String(item.resultUrl || "");
+    const cardAnalysis = batchCardAnalyses.get(resultUrl);
+    const throughput = Number(cardAnalysis?.throughputPerHour);
+    const rawAverageRecomputeTime = cardAnalysis?.averageRecomputeTimeMs ?? item.averageRecomputeTimeMs;
+    const averageRecomputeTime = Number(rawAverageRecomputeTime);
+    const hasThroughput = Number.isFinite(throughput) && throughput > 0;
+    const hasAverageRecomputeTime = rawAverageRecomputeTime !== null
+      && rawAverageRecomputeTime !== undefined
+      && Number.isFinite(averageRecomputeTime);
     const summaryError = batchItemErrorText(item);
     const failed = Boolean(summaryError);
     const summaryNote = item.status === "cancelled" ? "调度已终止" : failed ? "" : summaryError;
@@ -4833,9 +5037,8 @@ function renderBatchItems(items) {
         </div>
         <div class="batch-result-summary">
           <div class="batch-metric-tags" aria-label="主要指标">
-            <span class="batch-metric-tag makespan" title="Makespan${baselineReady ? `；Baseline ${Number(baseline.makespan).toFixed(2)} s` : ""}">${hasMetrics ? `${Number(item.makespan).toFixed(2)} s` : "— s"}</span>
-            <span class="batch-metric-tag ${improvement < 0 ? "loss" : "gain"}">${escapeHtml(improvementText)}</span>
-            <span class="batch-metric-tag cpu">CPU Time ${hasMetrics && Number.isFinite(cpuTime) ? `${cpuTime.toFixed(1)} ms` : "—"}</span>
+            <span class="batch-metric-tag production">${hasThroughput ? `产能 ${throughput.toFixed(1)} 片/h` : `Makespan ${hasMetrics && Number.isFinite(Number(item.makespan)) ? `${Number(item.makespan).toFixed(2)} s` : "—"}`}</span>
+            <span class="batch-metric-tag recompute">平均重算 ${hasMetrics && hasAverageRecomputeTime ? `${averageRecomputeTime.toFixed(1)} ms` : "—"}</span>
           </div>
           ${summaryNote ? `<span class="summary-error" title="${escapeHtml(summaryNote)}">${escapeHtml(summaryNote)}</span>` : ""}
         </div>
@@ -5362,8 +5565,68 @@ document.getElementById("searchTreeOptionsForm").addEventListener("submit", even
   });
 });
 document.getElementById("batchOverviewButton").addEventListener("click", showCurrentBatchOverview);
-document.getElementById("testGroupAnalysisButton").addEventListener("click", () => {
-  showTestGroupAnalysis().catch(error => writeTerminal(`$ 测试组结果分析失败\n  ${error.message || "未知错误"}`, true));
+document.getElementById("testGroupAnalysisButton").addEventListener("click", openGroupAnalysisOptions);
+const cancelOrCloseAnalysisWizard = async () => {
+  if (activeGroupAnalysisJobId) {
+    document.getElementById("analysisOptionsCancel").disabled = true;
+    document.getElementById("analysisOptionsClose").disabled = true;
+    await cancelTestGroupAnalysisJob(activeGroupAnalysisJobId);
+    return;
+  }
+  (document.getElementById("analysisOptionsDialog") as HTMLDialogElement).close();
+};
+document.getElementById("analysisOptionsClose").addEventListener("click", () => void cancelOrCloseAnalysisWizard());
+document.getElementById("analysisOptionsCancel").addEventListener("click", () => void cancelOrCloseAnalysisWizard());
+document.getElementById("analysisOptionsDialog").addEventListener("cancel", event => {
+  if (!activeGroupAnalysisJobId) return;
+  event.preventDefault();
+  void cancelOrCloseAnalysisWizard();
+});
+document.getElementById("analysisOptionsDialog").addEventListener("close", () => {
+  if (analysisSettingsPreferencesDirty) {
+    saveAnalysisSettingsPreferences().catch(error => writeTerminal(`$ 分析设置保存失败\n  ${error.message || "未知错误"}`, true));
+  }
+});
+document.getElementById("analysisNextButton").addEventListener("click", () => {
+  if (!document.querySelector("[data-analysis-metric]:checked")) {
+    writeTerminal("$ 请至少选择一个计算指标", true);
+    return;
+  }
+  showAnalysisWizardStep(2);
+});
+document.getElementById("analysisPreviousButton").addEventListener("click", () => showAnalysisWizardStep(1));
+document.querySelectorAll("[data-analysis-metric], #analysisWindowMode, #analysisTimeBudget").forEach(input => {
+  input.addEventListener("change", () => { analysisSettingsPreferencesDirty = true; });
+});
+document.getElementById("analysisToggleAllTests").addEventListener("click", event => {
+  const checkboxes = [...document.querySelectorAll("[data-analysis-test]")];
+  const selectAll = checkboxes.some(checkbox => !checkbox.checked);
+  checkboxes.forEach(checkbox => { checkbox.checked = selectAll; });
+  event.currentTarget.textContent = selectAll ? "取消全选" : "全选";
+});
+document.getElementById("analysisOptionsForm").addEventListener("submit", event => {
+  event.preventDefault();
+  if (analysisWizardStep === 1) {
+    if (document.querySelector("[data-analysis-metric]:checked")) showAnalysisWizardStep(2);
+    else writeTerminal("$ 请至少选择一个计算指标", true);
+    return;
+  }
+  if (analysisWizardStep !== 2) return;
+  document.getElementById("startGroupAnalysisButton").disabled = true;
+  showTestGroupAnalysis().catch(error => {
+    activeGroupAnalysisJobId = "";
+    document.getElementById("startGroupAnalysisButton").disabled = false;
+    document.getElementById("analysisOptionsCancel").disabled = false;
+    document.getElementById("analysisOptionsClose").disabled = false;
+    document.getElementById("analysisOptionsCancel").textContent = "关闭";
+    document.getElementById("analysisDialogProgress").innerHTML = `<section class="group-analysis-warning"><strong>结果分析失败</strong><br>${escapeHtml(error.message || "未知错误")}</section>`;
+    if (analysisWizardStep !== 3) {
+      document.getElementById("analysisOptionsCancel").textContent = "取消";
+    } else {
+      visualizationWorkspace.showGroupAnalysis(`<section class="group-analysis-warning"><strong>结果分析失败</strong><br>${escapeHtml(error.message || "未知错误")}</section>`);
+    }
+    writeTerminal(`$ 测试组结果分析失败\n  ${error.message || "未知错误"}`, true);
+  });
 });
 document.getElementById("logButton").addEventListener("click", event => { if (event.currentTarget.getAttribute("aria-disabled") === "true") event.preventDefault(); });
 document.getElementById("ganttButton").addEventListener("click", event => { if (event.currentTarget.getAttribute("aria-disabled") === "true") event.preventDefault(); });
@@ -5496,6 +5759,12 @@ window.addEventListener("pagehide", () => {
       body: JSON.stringify({ runSettings: currentRunSettingsPreferences() }), keepalive: true,
     }).catch(() => {});
   }
+  if (analysisSettingsPreferencesDirty) {
+    fetch("/api/preferences/analysis-settings", {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ analysisSettings: currentAnalysisSettingsPreferences() }), keepalive: true,
+    }).catch(() => {});
+  }
   if (state.deviceTimingDirty && state.workspaceDeviceId && state.deviceTimingDraft) {
     fetch(`/api/workspaces/${state.workspaceDeviceId}/device-timing`, {
       method: "PUT", headers: { "Content-Type": "application/json" },
@@ -5513,4 +5782,5 @@ window.addEventListener("pagehide", () => {
 initializeCompactSelects();
 renderAll(); renderWorkspaceControls(); renderDeviceTimingConfiguration(); checkService();
 loadRunSettingsPreferences().catch(error => writeTerminal(`$ 运行设置读取失败\n  ${error.message || "未知错误"}`, true));
+loadAnalysisSettingsPreferences().catch(error => writeTerminal(`$ 分析设置读取失败\n  ${error.message || "未知错误"}`, true));
 loadWorkspaceCatalog().catch(error => setWorkspaceStatus(`测试集读取失败：${error.message}`, "dirty"));

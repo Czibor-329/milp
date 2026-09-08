@@ -190,14 +190,6 @@ async function requestScheduleAnalysis(input) {
     bottleneck: result.bottleneck ?? null
   };
 }
-async function requestTestGroupAnalysis(cases) {
-  const result = await requestJson("/api/analysis/test-group", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ cases })
-  });
-  return result.analysis;
-}
 async function requestReplayDecision(input) {
   const result = await requestJson("/api/analysis/replay-decision", {
     method: "POST",
@@ -205,6 +197,26 @@ async function requestReplayDecision(input) {
     body: JSON.stringify(input)
   });
   return result.decision;
+}
+async function createTestGroupAnalysisJob(input) {
+  const result = await requestJson("/api/analysis-jobs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input)
+  });
+  return result.job;
+}
+async function readTestGroupAnalysisJob(jobId) {
+  const result = await requestJson(`/api/analysis-jobs/${encodeURIComponent(jobId)}`, {
+    cache: "no-store"
+  });
+  return result.job;
+}
+async function cancelTestGroupAnalysisJob(jobId) {
+  const result = await requestJson(`/api/analysis-jobs/${encodeURIComponent(jobId)}/cancel`, {
+    method: "POST"
+  });
+  return result.job;
 }
 async function requestDeadlockDiagnostic(input) {
   const response = await fetch("/api/analysis/deadlock-diagnostic", {
@@ -3522,75 +3534,6 @@ function durationText(value) {
 function caseLabel(item, index) {
   return item.name || `t${index + 1}`;
 }
-function improvementChart(summary) {
-  const cases = summary.cases.filter((item) => item.improvementPercent !== null);
-  const scale = Math.max(
-    1,
-    ...cases.map((item) => Math.abs(item.improvementPercent ?? 0))
-  );
-  return cases.map((item, index) => {
-    const value = item.improvementPercent ?? 0;
-    const width = Math.min(Math.abs(value) / scale * 50, 50);
-    const status = value < 0 ? "loss" : value > 0 ? "gain" : "tie";
-    return `<div class="group-chart-row">
-      <span class="group-chart-label" title="${escapeHtml2(item.name)}">${escapeHtml2(caseLabel(item, index))}</span>
-      <div class="group-diverging-track" role="img" aria-label="${escapeHtml2(caseLabel(item, index))} \u76F8\u5BF9\u57FA\u7EBF ${value >= 0 ? "\u63D0\u5347" : "\u9000\u5316"} ${Math.abs(value).toFixed(2)}%">
-        <i class="${status}" style="--bar-width:${width}%"></i>
-      </div>
-      <strong class="${status}">${value > 0 ? "+" : ""}${value.toFixed(2)}%</strong>
-    </div>`;
-  }).join("") || '<p class="group-analysis-empty">\u6CA1\u6709\u53EF\u6BD4\u8F83\u7684 Baseline\u3002</p>';
-}
-function utilizationChart(summary) {
-  const rows = summary.cases.flatMap((item, caseIndex) => item.bottleneckCandidates.map((candidate, candidateIndex) => ({
-    item,
-    caseIndex,
-    candidate,
-    candidateIndex
-  })));
-  return rows.map(({ item, caseIndex, candidate, candidateIndex }) => {
-    const utilization = Math.max(0, Math.min(candidate.utilization, 1));
-    const label = candidateIndex === 0 ? caseLabel(item, caseIndex) : `\u21B3 \u5019\u9009 ${candidateIndex + 1}`;
-    return `<div class="group-chart-row ${candidateIndex ? "is-secondary-candidate" : ""}">
-      <span class="group-chart-label" title="${escapeHtml2(item.name)}">${escapeHtml2(label)}</span>
-      <div class="group-linear-track" role="img" aria-label="${escapeHtml2(caseLabel(item, caseIndex))} \u74F6\u9888\u5019\u9009 ${escapeHtml2(candidate.resourceName)}\uFF0C\u5229\u7528\u7387 ${(utilization * 100).toFixed(1)}%">
-        <i class="utilization" style="width:${(utilization * 100).toFixed(2)}%"></i>
-      </div>
-      <strong>${(utilization * 100).toFixed(1)}%</strong>
-      <small title="${escapeHtml2(candidate.resourceName)}">${escapeHtml2(candidate.resourceName || "\u2014")}</small>
-    </div>`;
-  }).join("") || '<p class="group-analysis-empty">\u6CA1\u6709\u53EF\u5206\u6790\u7684\u74F6\u9888\u8D44\u6E90\u3002</p>';
-}
-function cpuChart(summary) {
-  const cases = summary.cases.filter((item) => item.cpuTimeMs !== null);
-  const scale = Math.max(1, ...cases.map((item) => item.cpuTimeMs ?? 0));
-  return cases.map((item, index) => {
-    const cpu = Math.max(item.cpuTimeMs ?? 0, 0);
-    return `<div class="group-chart-row">
-      <span class="group-chart-label" title="${escapeHtml2(item.name)}">${escapeHtml2(caseLabel(item, index))}</span>
-      <div class="group-linear-track" role="img" aria-label="${escapeHtml2(caseLabel(item, index))} CPU Time ${durationText(cpu)}">
-        <i class="cpu" style="width:${Math.min(cpu / scale * 100, 100).toFixed(2)}%"></i>
-      </div>
-      <strong>${escapeHtml2(durationText(cpu))}</strong>
-    </div>`;
-  }).join("") || '<p class="group-analysis-empty">\u6CA1\u6709 CPU Time \u6570\u636E\u3002</p>';
-}
-function throughputChart(summary) {
-  const rows = summary.cases.map((item, index) => ({ item, index })).filter(({ item }) => item.throughputPerHour !== null && item.throughputPerHour > 0);
-  const scale = Math.max(1, ...rows.map(({ item }) => item.throughputPerHour ?? 0));
-  return rows.map(({ item, index }) => {
-    const throughput = Math.max(item.throughputPerHour ?? 0, 0);
-    const sampleCount = Number(item.throughputSampleCount) || 0;
-    return `<div class="group-chart-row">
-      <span class="group-chart-label" title="${escapeHtml2(item.name)}">${escapeHtml2(caseLabel(item, index))}</span>
-      <div class="group-linear-track" role="img" aria-label="${escapeHtml2(caseLabel(item, index))} \u4EA7\u80FD ${throughput.toFixed(1)} \u7247/h">
-        <i class="throughput" style="width:${Math.min(throughput / scale * 100, 100).toFixed(2)}%"></i>
-      </div>
-      <strong>${throughput.toFixed(1)} \u7247/h</strong>
-      <small>${sampleCount ? `\u5C45\u4E2D ${sampleCount} \u7247` : "\u7A33\u6001\u6837\u672C"}</small>
-    </div>`;
-  }).join("") || '<p class="group-analysis-empty">\u6CA1\u6709\u53EF\u6309\u5C45\u4E2D 120 \u7247\u7A33\u6001\u6837\u672C\u8BA1\u7B97\u7684\u4EA7\u80FD\u3002</p>';
-}
 function csvEscape(value) {
   return /[",\r\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
 }
@@ -3629,70 +3572,106 @@ function testGroupSummaryCsv(summary) {
   ].map(csvEscape));
   return [headers.map(csvEscape).join(","), ...rows.map((row) => row.join(","))].join("\r\n");
 }
-function resultTable(summary) {
-  return summary.cases.map((item, index) => `
-    <tr>
-      <th scope="row">${escapeHtml2(caseLabel(item, index))}</th>
-      <td>${finiteText(item.makespan, 2, " s")}</td>
-      <td>${finiteText(item.baselineMakespan, 2, " s")}</td>
-      <td class="${(item.improvementPercent ?? 0) < 0 ? "loss" : "gain"}">${item.improvementPercent === null ? "\u2014" : `${item.improvementPercent > 0 ? "+" : ""}${item.improvementPercent.toFixed(2)}%`}</td>
-      <td>${escapeHtml2(item.bottleneckResource || "\u2014")}${item.bottleneckCandidateCount > 1 ? ` <small>+${item.bottleneckCandidateCount - 1} \u4E2A\u5019\u9009</small>` : ""}</td>
-      <td>${percentText(item.bottleneckUtilization, true)}</td>
-      <td>${durationText(item.cpuTimeMs)}</td>
-      <td>${finiteText(item.throughputPerHour, 1, " \u7247/h")}</td>
-      <td>${finiteText(item.departureIntervalCv, 2)}</td>
-      <td>${finiteText(item.processChamberDwellMeanSeconds, 2, " s")}</td>
-      <td>${finiteText(item.robotWaferDwellMeanSeconds, 2, " s")}</td>
-      <td>${finiteText(item.waferSystemResidenceMeanSeconds, 2, " s")}</td>
-      <td>${finiteText(item.waferSystemResidenceCv, 2)}</td>
-      <td>${item.validationPassed ? '<span class="group-pass">\u901A\u8FC7</span>' : `<span class="group-fail">${escapeHtml2(item.validation || item.status)}</span>`}</td>
-    </tr>`).join("");
+function resultTable(summary, selected) {
+  return summary.cases.map((item, index) => {
+    const cells = [`<th scope="row">${escapeHtml2(caseLabel(item, index))}</th>`];
+    if (selected.has("makespan")) {
+      cells.push(`<td>${finiteText(item.makespan, 2, " s")}</td>`);
+      cells.push(`<td>${item.id === summary.referenceCaseId ? '<span class="group-reference">\u53C2\u8003</span>' : item.referenceDeltas?.makespan?.percent === void 0 ? "\u2014" : item.referenceComparable ? `${item.referenceDeltas.makespan.percent > 0 ? "+" : ""}${item.referenceDeltas.makespan.percent.toFixed(2)}%` : '<span title="\u8FD0\u884C\u914D\u7F6E\u4E0D\u540C\uFF0C\u53EA\u5E76\u5217\u5C55\u793A\u6570\u503C">\u4EC5\u89C2\u5BDF</span>'}</td>`);
+    }
+    if (selected.has("baseline_improvement")) {
+      cells.push(`<td>${finiteText(item.baselineMakespan, 2, " s")}</td>`);
+      cells.push(`<td class="${(item.improvementPercent ?? 0) < 0 ? "loss" : "gain"}">${item.improvementPercent === null ? "\u2014" : `${item.improvementPercent > 0 ? "+" : ""}${item.improvementPercent.toFixed(2)}%`}</td>`);
+    }
+    if (selected.has("bottleneck_candidates")) cells.push(`<td>${escapeHtml2(item.bottleneckResource || "\u2014")}${item.bottleneckCandidateCount > 1 ? ` <small>+${item.bottleneckCandidateCount - 1} \u4E2A\u5019\u9009</small>` : ""}</td>`);
+    if (selected.has("resource_utilization")) cells.push(`<td>${percentText(item.bottleneckUtilization, true)}</td>`);
+    if (selected.has("cpu_time")) cells.push(`<td>${durationText(item.cpuTimeMs)}</td>`);
+    if (selected.has("average_recompute_time")) cells.push(`<td>${durationText(item.averageRecomputeTimeMs ?? null)}</td>`);
+    if (selected.has("throughput")) cells.push(`<td>${finiteText(item.throughputPerHour, 1, " \u7247/h")}</td>`);
+    if (selected.has("departure_interval_cv")) cells.push(`<td>${finiteText(item.departureIntervalCv, 2)}</td>`);
+    if (selected.has("process_chamber_dwell")) cells.push(`<td>${finiteText(item.processChamberDwellMeanSeconds, 2, " s")}</td>`);
+    if (selected.has("robot_wafer_dwell")) cells.push(`<td>${finiteText(item.robotWaferDwellMeanSeconds, 2, " s")}</td>`);
+    if (selected.has("system_residence")) cells.push(`<td>${finiteText(item.waferSystemResidenceMeanSeconds, 2, " s")}</td>`);
+    if (selected.has("system_residence_cv")) cells.push(`<td>${finiteText(item.waferSystemResidenceCv, 2)}</td>`);
+    if (selected.has("loadlock_wafers_per_cycle")) cells.push(`<td>${finiteText(item.loadLockWafersPerCycle, 2, " \u7247")}</td>`);
+    if (selected.has("loadlock_full_cycle_ratio")) cells.push(`<td>${percentText(item.loadLockFullCycleRatio, true)}</td>`);
+    if (selected.has("loadlock_empty_cycle_ratio")) cells.push(`<td>${percentText(item.loadLockEmptyCycleRatio, true)}</td>`);
+    if (selected.has("validation")) cells.push(`<td>${item.analysisStatus && item.analysisStatus !== "completed" ? `<span class="group-fail">${escapeHtml2(item.error || item.analysisStatus)}</span>` : item.validationPassed ? '<span class="group-pass">\u901A\u8FC7</span>' : `<span class="group-fail">${escapeHtml2(item.validation || item.status)}</span>`}</td>`);
+    const rowClasses = [
+      item.id === summary.referenceCaseId ? "is-reference" : "",
+      item.analysisStatus && item.analysisStatus !== "completed" ? "is-incomplete" : ""
+    ].filter(Boolean).join(" ");
+    return `<tr${rowClasses ? ` class="${rowClasses}"` : ""}>${cells.join("")}</tr>`;
+  }).join("");
 }
 function renderTestGroupAnalysis(summary, groupName) {
-  const weighted = summary.weightedImprovementPercent;
-  const medianImprovement = summary.medianImprovementPercent;
+  const selected = new Set(summary.selectedMetricIds ?? [
+    "validation",
+    "makespan",
+    "baseline_improvement",
+    "cpu_time",
+    "throughput",
+    "departure_interval_cv",
+    "process_chamber_dwell",
+    "robot_wafer_dwell",
+    "system_residence",
+    "system_residence_cv",
+    "resource_utilization",
+    "bottleneck_candidates"
+  ]);
+  const reference = summary.cases.find((item) => item.id === summary.referenceCaseId);
+  const selectedLabels = {
+    validation: "\u6821\u9A8C\u7ED3\u679C",
+    makespan: "Makespan",
+    baseline_improvement: "Baseline \u6539\u5584",
+    cpu_time: "CPU Time",
+    average_recompute_time: "\u5E73\u5747\u91CD\u7B97\u65F6\u95F4",
+    throughput: "\u4EA7\u80FD",
+    departure_interval_cv: "\u51FA\u7AD9\u95F4\u9694 CV",
+    process_chamber_dwell: "\u52A0\u5DE5\u8154\u9A7B\u7559",
+    robot_wafer_dwell: "\u673A\u5668\u624B\u9A7B\u7559",
+    system_residence: "\u7CFB\u7EDF\u505C\u7559",
+    system_residence_cv: "\u7CFB\u7EDF\u505C\u7559 CV",
+    resource_utilization: "\u8D44\u6E90\u5229\u7528\u7387",
+    bottleneck_candidates: "\u74F6\u9888\u5019\u9009",
+    loadlock_wafers_per_cycle: "LoadLock \u6BCF\u5468\u671F\u6676\u5706",
+    loadlock_full_cycle_ratio: "LoadLock \u6EE1\u8F7D\u5468\u671F\u7387",
+    loadlock_empty_cycle_ratio: "LoadLock \u7A7A\u8F7D\u5468\u671F\u7387"
+  };
+  const tableHeaders = ["<th>\u6D4B\u8BD5</th>"];
+  if (selected.has("makespan")) tableHeaders.push("<th>Makespan</th>", "<th>\u76F8\u5BF9\u53C2\u8003</th>");
+  if (selected.has("baseline_improvement")) tableHeaders.push("<th>Baseline</th>", "<th>\u6539\u5584</th>");
+  if (selected.has("bottleneck_candidates")) tableHeaders.push("<th>\u74F6\u9888</th>");
+  if (selected.has("resource_utilization")) tableHeaders.push("<th>\u5229\u7528\u7387</th>");
+  if (selected.has("cpu_time")) tableHeaders.push("<th>CPU Time</th>");
+  if (selected.has("average_recompute_time")) tableHeaders.push("<th>\u5E73\u5747\u91CD\u7B97\u65F6\u95F4</th>");
+  if (selected.has("throughput")) tableHeaders.push("<th>\u4EA7\u80FD</th>");
+  if (selected.has("departure_interval_cv")) tableHeaders.push("<th>\u51FA\u7AD9 CV</th>");
+  if (selected.has("process_chamber_dwell")) tableHeaders.push("<th>\u52A0\u5DE5\u8154\u9A7B\u7559\u5747\u503C</th>");
+  if (selected.has("robot_wafer_dwell")) tableHeaders.push("<th>\u673A\u5668\u624B\u9A7B\u7559\u5747\u503C</th>");
+  if (selected.has("system_residence")) tableHeaders.push("<th>\u7CFB\u7EDF\u505C\u7559\u5747\u503C</th>");
+  if (selected.has("system_residence_cv")) tableHeaders.push("<th>\u7CFB\u7EDF\u505C\u7559 CV</th>");
+  if (selected.has("loadlock_wafers_per_cycle")) tableHeaders.push("<th>LoadLock \u6BCF\u5468\u671F\u6676\u5706</th>");
+  if (selected.has("loadlock_full_cycle_ratio")) tableHeaders.push("<th>LoadLock \u6EE1\u8F7D\u5468\u671F\u7387</th>");
+  if (selected.has("loadlock_empty_cycle_ratio")) tableHeaders.push("<th>LoadLock \u7A7A\u8F7D\u5468\u671F\u7387</th>");
+  if (selected.has("validation")) tableHeaders.push("<th>\u6821\u9A8C</th>");
   return `
     <div class="group-analysis-head">
-      <h2>${escapeHtml2(groupName || "\u5F53\u524D\u6D4B\u8BD5\u7EC4")}</h2>
+      <div><h2>${escapeHtml2(groupName || "\u5F53\u524D\u6D4B\u8BD5\u7EC4")}</h2><p>\u53C2\u8003\u6D4B\u8BD5\uFF1A${escapeHtml2(reference?.name || "\u9996\u4E2A\u6D4B\u8BD5")} \xB7 ${summary.cacheHitCount ?? 0} \u9879\u547D\u4E2D\u7F13\u5B58</p></div>
+      <button class="btn small" type="button" data-reconfigure-analysis>\u91CD\u65B0\u9009\u62E9\u6307\u6807\u4E0E\u6D4B\u8BD5</button>
     </div>
-    <div class="group-kpi-grid">
-      <article><span>\u6821\u9A8C\u901A\u8FC7\u7387</span><strong>${(summary.validationPassRate * 100).toFixed(1)}%</strong><small>${summary.validationPassedCount}/${summary.metricsCount} \u4E2A\u6709\u6307\u6807\u7ED3\u679C</small></article>
-      <article><span>\u52A0\u6743\u603B\u4F53\u6539\u5584</span><strong class="${(weighted ?? 0) < 0 ? "loss" : "gain"}">${weighted === null ? "\u2014" : `${weighted > 0 ? "+" : ""}${weighted.toFixed(2)}%`}</strong><small>\u6309\u5404\u6D4B\u8BD5 Baseline makespan \u52A0\u6743</small></article>
-      <article><span>\u9010\u4F8B\u4E2D\u4F4D\u6539\u5584</span><strong class="${(medianImprovement ?? 0) < 0 ? "loss" : "gain"}">${medianImprovement === null ? "\u2014" : `${medianImprovement > 0 ? "+" : ""}${medianImprovement.toFixed(2)}%`}</strong><small>${summary.winCount} \u80DC \xB7 ${summary.tieCount} \u5E73 \xB7 ${summary.regressionCount} \u9000\u5316</small></article>
-      <article><span>CPU Time</span><strong>${durationText(summary.medianCpuTimeMs)}</strong><small>P90 ${durationText(summary.p90CpuTimeMs)} \xB7 \u603B\u8BA1 ${durationText(summary.totalCpuTimeMs)}</small></article>
-      <article><span>\u4E3B\u8981\u5019\u9009\u5229\u7528\u7387\u4E2D\u4F4D\u6570</span><strong>${percentText(summary.medianBottleneckUtilization, true)}</strong><small>\u5DE5\u5E8F\u7EC4\u3001\u673A\u5668\u4EBA\u6216 LoadLock \u5BB9\u91CF</small></article>
-      <article><span>\u4EA7\u80FD\u4E2D\u4F4D\u6570</span><strong>${finiteText(summary.medianThroughputPerHour, 1, " \u7247/h")}</strong><small>${summary.throughputEligibleCount ?? 0}/${summary.succeededCount} \u4E2A\u6D4B\u8BD5\u6709\u5C45\u4E2D 120 \u7247\u7A33\u6001\u6837\u672C \xB7 \u51FA\u7AD9 CV ${finiteText(summary.medianDepartureIntervalCv, 2)}</small></article>
-      <article><span>\u52A0\u5DE5\u8154\u9A7B\u7559\u5747\u503C\u4E2D\u4F4D\u6570</span><strong>${finiteText(summary.medianProcessChamberDwellMeanSeconds, 2, " s")}</strong><small>\u5404\u6D4B\u8BD5\u201C\u52A0\u5DE5\u7ED3\u675F \u2192 \u5B8C\u5168\u79BB\u8154\u201D\u5747\u503C\u7684\u4E2D\u4F4D\u6570</small></article>
-      <article><span>\u673A\u5668\u624B\u9A7B\u7559\u5747\u503C\u4E2D\u4F4D\u6570</span><strong>${finiteText(summary.medianRobotWaferDwellMeanSeconds, 2, " s")}</strong><small>\u5DF2\u5254\u9664\u663E\u5F0F PreTrans \u8FD0\u8F93\u533A\u95F4</small></article>
-      <article><span>\u7CFB\u7EDF\u505C\u7559\u5747\u503C\u4E2D\u4F4D\u6570</span><strong>${finiteText(summary.medianWaferSystemResidenceMeanSeconds, 2, " s")}</strong><small>\u79BB\u5F00 LP \u2192 \u8FD4\u56DE LP \xB7 CV \u4E2D\u4F4D ${finiteText(summary.medianWaferSystemResidenceCv, 2)}</small></article>
-    </div>
-    <div class="group-chart-grid">
-      <article class="group-chart-card">
-        <header><div><h3>\u76F8\u5BF9 Baseline</h3><p>\u6B63\u503C\u4E3A makespan \u6539\u5584\uFF0C\u8D1F\u503C\u4E3A\u9000\u5316</p></div></header>
-        <div class="group-chart-body">${improvementChart(summary)}</div>
-      </article>
-      <article class="group-chart-card">
-        <header><div><h3>\u4EA7\u80FD</h3><p>\u5404\u6D4B\u8BD5\u5C45\u4E2D 120 \u7247\u7A33\u6001\u6837\u672C\u4EA7\u80FD\uFF0C\u6309\u7EC4\u5185\u6700\u5927\u503C\u7F29\u653E</p></div></header>
-        <div class="group-chart-body">${throughputChart(summary)}</div>
-      </article>
-      <article class="group-chart-card">
-        <header><div><h3>\u6240\u6709\u74F6\u9888\u5019\u9009\u5229\u7528\u7387</h3><p>\u6BCF\u4E2A\u6D4B\u8BD5\u6309\u53EF\u80FD\u6027\u4F9D\u6B21\u663E\u793A\u6240\u6709\u63A5\u8FD1\u5019\u9009</p></div></header>
-        <div class="group-chart-body">${utilizationChart(summary)}</div>
-      </article>
-      <article class="group-chart-card">
-        <header><div><h3>\u8BA1\u7B97\u65F6\u95F4</h3><p>\u5404\u6D4B\u8BD5\u7B97\u6CD5 CPU Time\uFF0C\u6309\u7EC4\u5185\u6700\u5927\u503C\u7F29\u653E</p></div></header>
-        <div class="group-chart-body">${cpuChart(summary)}</div>
-      </article>
-    </div>
-    <details class="group-analysis-table-wrap">
-      <summary><span>\u67E5\u770B\u9010\u6D4B\u8BD5\u5B8C\u6574\u6307\u6807</span><button type="button" class="btn small group-analysis-export" data-group-export-csv>\u5BFC\u51FA CSV</button></summary>
+    <div class="group-analysis-selection">${[...selected].map((metric) => `<span>${escapeHtml2(selectedLabels[metric] || metric)}</span>`).join("")}</div>
+    ${summary.timedOut ? '<div class="group-analysis-warning">\u5DF2\u8FBE\u5230\u65F6\u95F4\u9884\u7B97\uFF0C\u4EE5\u4E0B\u62A5\u544A\u4FDD\u7559\u5B8C\u6210\u90E8\u5206\uFF1B\u53EF\u51CF\u5C11\u6307\u6807\u6216\u63D0\u9AD8\u65F6\u95F4\u9884\u7B97\u540E\u7EE7\u7EED\u3002</div>' : ""}
+    <section class="group-analysis-table-wrap">
+      <div class="group-analysis-table-head"><div><strong>\u9010\u6D4B\u8BD5\u6307\u6807\u5BF9\u6BD4</strong><small>${summary.cases.length} \u4E2A\u6D4B\u8BD5 \xB7 ${selected.size} \u9879\u6307\u6807 \xB7 \u53C2\u8003\u9879\u5DF2\u9AD8\u4EAE</small></div><button type="button" class="btn small group-analysis-export" data-group-export-csv>\u5BFC\u51FA CSV</button></div>
       <div class="group-analysis-table-scroll">
         <table class="group-analysis-table">
-          <thead><tr><th>\u6D4B\u8BD5</th><th>Makespan</th><th>Baseline</th><th>\u6539\u5584</th><th>\u74F6\u9888</th><th>\u5229\u7528\u7387</th><th>CPU Time</th><th>\u4EA7\u80FD</th><th>\u51FA\u7AD9 CV</th><th>\u52A0\u5DE5\u8154\u9A7B\u7559\u5747\u503C</th><th>\u673A\u5668\u624B\u9A7B\u7559\u5747\u503C</th><th>\u7CFB\u7EDF\u505C\u7559\u5747\u503C</th><th>\u7CFB\u7EDF\u505C\u7559 CV</th><th>\u6821\u9A8C</th></tr></thead>
-          <tbody>${resultTable(summary)}</tbody>
+          <caption class="sr-only">${escapeHtml2(groupName || "\u5F53\u524D\u6D4B\u8BD5\u7EC4")}\u9010\u6D4B\u8BD5\u6307\u6807\u5BF9\u6BD4</caption>
+          <thead><tr>${tableHeaders.join("")}</tr></thead>
+          <tbody>${resultTable(summary, selected)}</tbody>
         </table>
       </div>
-    </details>`;
+    </section>`;
 }
 
 // src/editor_models.ts
@@ -3868,6 +3847,11 @@ var batchPerformanceAnalyses = /* @__PURE__ */ new Map();
 var batchBottleneckSummaries = /* @__PURE__ */ new Map();
 var batchBottleneckRequests = /* @__PURE__ */ new Map();
 var batchBottleneckErrors = /* @__PURE__ */ new Map();
+var batchCardAnalyses = /* @__PURE__ */ new Map();
+var batchCardAnalysisRequests = /* @__PURE__ */ new Map();
+var activeGroupAnalysisJobId = "";
+var analysisWizardStep = 1;
+var analysisSettingsPreferencesDirty = false;
 var EXPECTED_API_SCHEMA = "cjob-pjob-v3";
 var DEFAULT_SCHEDULE_OPTIONS = Object.freeze({
   loadLockManager: "petri-look",
@@ -5337,6 +5321,8 @@ function resetRunResult() {
   batchBottleneckSummaries.clear();
   batchBottleneckRequests.clear();
   batchBottleneckErrors.clear();
+  batchCardAnalyses.clear();
+  batchCardAnalysisRequests.clear();
   ["metricTime", "metricMakespan", "metricMoves", "metricValidation"].forEach((id) => {
     document.getElementById(id).textContent = "\u2014";
   });
@@ -7136,6 +7122,41 @@ async function saveRunSettingsPreferences() {
   });
   applyRunSettingsPreferences(result.runSettings);
 }
+function currentAnalysisSettingsPreferences() {
+  return {
+    metricIds: [...document.querySelectorAll("[data-analysis-metric]:checked")].map((input) => String(input.value)),
+    windowMode: String(document.getElementById("analysisWindowMode")?.value || "steady"),
+    timeBudgetSeconds: Number(document.getElementById("analysisTimeBudget")?.value || 120)
+  };
+}
+function applyAnalysisSettingsPreferences(settings) {
+  if (!settings || typeof settings !== "object") return;
+  const selectedIds = new Set(Array.isArray(settings.metricIds) ? settings.metricIds : []);
+  document.querySelectorAll("[data-analysis-metric]").forEach((input) => {
+    input.checked = selectedIds.has(String(input.value));
+  });
+  const windowInput = document.getElementById("analysisWindowMode");
+  const budgetInput = document.getElementById("analysisTimeBudget");
+  if (windowInput && ["steady", "full"].includes(String(settings.windowMode))) {
+    windowInput.value = String(settings.windowMode);
+  }
+  if (budgetInput && [30, 120, 300].includes(Number(settings.timeBudgetSeconds))) {
+    budgetInput.value = String(settings.timeBudgetSeconds);
+  }
+  analysisSettingsPreferencesDirty = false;
+}
+async function loadAnalysisSettingsPreferences() {
+  const result = await requestJson("/api/preferences/analysis-settings", { cache: "no-store" });
+  if (!analysisSettingsPreferencesDirty) applyAnalysisSettingsPreferences(result.analysisSettings);
+}
+async function saveAnalysisSettingsPreferences() {
+  const result = await requestJson("/api/preferences/analysis-settings", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ analysisSettings: currentAnalysisSettingsPreferences() })
+  });
+  applyAnalysisSettingsPreferences(result.analysisSettings);
+}
 function hongYeCheckEnabled() {
   return document.getElementById("hongYeCheckInput")?.checked === true;
 }
@@ -7589,6 +7610,8 @@ async function runCurrentTestGroup(selectedTestIds = null) {
     batchBottleneckSummaries.clear();
     batchBottleneckRequests.clear();
     batchBottleneckErrors.clear();
+    batchCardAnalyses.clear();
+    batchCardAnalysisRequests.clear();
     lastBatchItemsRenderSignature = "";
     document.getElementById("testGroupAnalysisButton").hidden = true;
     document.getElementById("testGroupAnalysisPanel").hidden = true;
@@ -7790,50 +7813,132 @@ function showCurrentBatchOverview() {
   renderBatchItems(state.batchResult.items || []);
   showBatchOverviewMetrics(state.batchResult);
 }
+function groupAnalysisComparisonKey(testCase) {
+  return JSON.stringify({ rounds: testCase?.rounds || [] });
+}
+function showAnalysisWizardStep(step) {
+  analysisWizardStep = Math.max(1, Math.min(3, Number(step) || 1));
+  document.querySelectorAll("[data-analysis-page]").forEach((page) => {
+    const active = Number(page.dataset.analysisPage) === analysisWizardStep;
+    page.hidden = !active;
+    page.classList.toggle("active", active);
+  });
+  document.querySelectorAll("[data-analysis-flow-step]").forEach((item) => {
+    const itemStep = Number(item.dataset.analysisFlowStep);
+    item.classList.toggle("active", itemStep === analysisWizardStep);
+    item.classList.toggle("complete", itemStep < analysisWizardStep);
+  });
+  const descriptions = {
+    1: "\u9010\u9879\u9009\u62E9\u672C\u6B21\u9700\u8981\u5B9E\u9645\u8BA1\u7B97\u7684\u6307\u6807\uFF0C\u9009\u62E9\u4F1A\u4FDD\u5B58\u4E3A\u4E2A\u4EBA\u8BBE\u7F6E\u3002",
+    2: "\u9009\u62E9\u53C2\u4E0E\u5BF9\u6BD4\u7684\u6D4B\u8BD5\uFF0C\u5E76\u786E\u8BA4\u53C2\u8003\u6D4B\u8BD5\u3001\u7EDF\u8BA1\u7A97\u53E3\u548C\u65F6\u95F4\u9884\u7B97\u3002",
+    3: "\u6B63\u5728\u6309\u6240\u9009\u6307\u6807\u8BA1\u7B97\uFF0C\u8FBE\u5230\u65F6\u95F4\u9884\u7B97\u65F6\u4F1A\u4FDD\u7559\u5DF2\u5B8C\u6210\u7ED3\u679C\u3002"
+  };
+  document.getElementById("analysisOptionsDescription").textContent = descriptions[analysisWizardStep];
+  document.getElementById("analysisPreviousButton").hidden = analysisWizardStep !== 2;
+  document.getElementById("analysisNextButton").hidden = analysisWizardStep !== 1;
+  document.getElementById("startGroupAnalysisButton").hidden = analysisWizardStep !== 2;
+  const cancelButton = document.getElementById("analysisOptionsCancel");
+  cancelButton.textContent = analysisWizardStep === 3 ? "\u53D6\u6D88\u5206\u6790" : "\u53D6\u6D88";
+}
+function openGroupAnalysisOptions() {
+  const result = state.batchResult;
+  if (!result?.items?.length) return;
+  const testsById = new Map((state.workspaceDevice?.tests || []).map((test) => [String(test.id), test]));
+  const analyzable = result.items.filter((item) => hasBatchResultMetrics(item) && item.resultUrl);
+  const options = document.getElementById("analysisTestOptions");
+  options.innerHTML = analyzable.map((item, index) => `
+    <label><input type="checkbox" checked value="${escapeHtml3(String(item.testId || `index-${index}`))}" data-analysis-test>
+      <span><strong>${escapeHtml3(item.testName || `\u6D4B\u8BD5 ${index + 1}`)}</strong><small>${escapeHtml3(validationDisplay(item.validation))}</small></span>
+    </label>`).join("");
+  const reference = document.getElementById("analysisReferenceTest");
+  reference.innerHTML = analyzable.map((item, index) => `
+    <option value="${escapeHtml3(String(item.testId || `index-${index}`))}">${escapeHtml3(item.testName || `\u6D4B\u8BD5 ${index + 1}`)}</option>`).join("");
+  reference.dataset.testsById = String(testsById.size);
+  document.getElementById("analysisToggleAllTests").textContent = "\u53D6\u6D88\u5168\u9009";
+  document.getElementById("analysisDialogProgress").innerHTML = "";
+  document.getElementById("analysisOptionsCancel").disabled = false;
+  document.getElementById("analysisOptionsClose").disabled = false;
+  document.getElementById("startGroupAnalysisButton").disabled = false;
+  showAnalysisWizardStep(1);
+  document.getElementById("analysisOptionsDialog").showModal();
+  window.setTimeout(() => document.querySelector("[data-analysis-metric]")?.focus(), 0);
+}
+function renderGroupAnalysisProgress(job) {
+  const percent = Math.max(0, Math.min(100, Number(job.progress) || 0));
+  const elapsed = Number(job.elapsedSeconds) || 0;
+  document.getElementById("analysisDialogProgress").innerHTML = `
+    <section class="group-analysis-progress" aria-live="polite">
+      <header><div><small>\u6D4B\u8BD5\u7EC4\u7ED3\u679C\u5206\u6790</small><strong>${escapeHtml3(job.message || "\u6B63\u5728\u5206\u6790")}</strong></div><b>${percent}%</b></header>
+      <div class="group-analysis-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}"><i style="width:${percent}%"></i></div>
+      <p>${escapeHtml3(job.currentCaseName || "\u6B63\u5728\u51C6\u5907")} \xB7 \u5DF2\u5B8C\u6210 ${Number(job.completedCases) || 0}/${Number(job.totalCases) || 0} \u4E2A\u6D4B\u8BD5 \xB7 \u5DF2\u7528 ${elapsed.toFixed(1)} \u79D2 / ${Number(job.timeBudgetSeconds) || 0} \u79D2</p>
+    </section>`;
+  showAnalysisWizardStep(3);
+}
 async function showTestGroupAnalysis() {
   const result = state.batchResult;
   if (!result?.items?.length) return;
-  const button = document.getElementById("testGroupAnalysisButton");
-  const originalText = button.textContent;
-  button.disabled = true;
-  button.textContent = "\u6B63\u5728\u5206\u6790\u2026";
-  try {
-    const analyzable = result.items.map((item, index) => ({ item, index })).filter((entry) => hasBatchResultMetrics(entry.item) && entry.item.resultUrl);
-    let cursor = 0;
-    const workerCount = Math.min(4, analyzable.length);
-    await Promise.all(Array.from({ length: workerCount }, async () => {
-      while (cursor < analyzable.length) {
-        const current = analyzable[cursor];
-        cursor += 1;
-        await loadBatchItemPerformance(current.item, current.index);
-      }
-    }));
-    const summary = await requestTestGroupAnalysis(result.items.map((item, index) => ({
-      id: String(item.testId || `index-${index}`),
+  const selectedIds = new Set(
+    [...document.querySelectorAll("[data-analysis-test]:checked")].map((input) => String(input.value))
+  );
+  if (!selectedIds.size) throw new Error("\u8BF7\u81F3\u5C11\u9009\u62E9\u4E00\u4E2A\u6D4B\u8BD5");
+  const metricIds = [...document.querySelectorAll("[data-analysis-metric]:checked")].map((input) => String(input.value));
+  if (!metricIds.length) throw new Error("\u8BF7\u81F3\u5C11\u9009\u62E9\u4E00\u4E2A\u8BA1\u7B97\u6307\u6807");
+  const testsById = new Map((state.workspaceDevice?.tests || []).map((test) => [String(test.id), test]));
+  const cases = result.items.map((item, index) => ({ item, index })).filter(({ item, index }) => selectedIds.has(String(item.testId || `index-${index}`))).map(({ item, index }) => {
+    const testId = String(item.testId || `index-${index}`);
+    const testCase = testsById.get(testId);
+    const resultId = String(item.resultUrl || "").startsWith("/api/results/") ? decodeURIComponent(String(item.resultUrl).slice("/api/results/".length)) : "";
+    return {
+      id: testId,
       name: item.testName || `t${index + 1}`,
       status: String(item.status || "unknown"),
       validation: String(item.validation || "unknown"),
-      metricsAvailable: hasBatchResultMetrics(item),
       makespan: item.makespan,
       baselineMakespan: item.baseline?.status === "succeeded" ? item.baseline.makespan : null,
       cpuTimeMs: item.cpuTimeMs ?? item.totalElapsedMs,
       elapsedTimeMs: item.totalElapsedMs,
       error: item.error || item.baseline?.error || "",
-      performance: item.resultUrl ? batchPerformanceAnalyses.get(String(item.resultUrl)) ?? null : null
-    })));
-    const panelMarkup = renderTestGroupAnalysis(
-      summary,
-      result.group || state.activeTestGroup || "\u5F53\u524D\u6D4B\u8BD5\u7EC4"
-    );
-    visualizationWorkspace.showGroupAnalysis(panelMarkup);
-    switchTab("workspace");
-    const panel = document.getElementById("testGroupAnalysisPanel");
-    bindTestGroupExport(panel, summary, result.group || state.activeTestGroup || "\u5F53\u524D\u6D4B\u8BD5\u7EC4");
-    panel.scrollIntoView({ behavior: "smooth", block: "start" });
-  } finally {
-    button.disabled = false;
-    button.textContent = originalText;
+      resultId,
+      rounds: testCase?.rounds || [],
+      comparisonKey: groupAnalysisComparisonKey(testCase)
+    };
+  });
+  const referenceSelect = document.getElementById("analysisReferenceTest");
+  const referenceCaseId = selectedIds.has(String(referenceSelect.value)) ? String(referenceSelect.value) : cases[0].id;
+  await saveAnalysisSettingsPreferences();
+  const job = await createTestGroupAnalysisJob({
+    cases,
+    device: state.device,
+    routes: state.workspaceDevice?.routes || state.routes,
+    metricIds,
+    referenceCaseId,
+    windowMode: document.getElementById("analysisWindowMode").value,
+    timeBudgetSeconds: Number(document.getElementById("analysisTimeBudget").value)
+  });
+  activeGroupAnalysisJobId = String(job.id || "");
+  let snapshot = job;
+  renderGroupAnalysisProgress(snapshot);
+  while (["queued", "running"].includes(String(snapshot.status))) {
+    await new Promise((resolve) => window.setTimeout(resolve, 500));
+    snapshot = await readTestGroupAnalysisJob(activeGroupAnalysisJobId);
+    renderGroupAnalysisProgress(snapshot);
   }
+  activeGroupAnalysisJobId = "";
+  if (!snapshot.result) throw new Error(snapshot.message || "\u7ED3\u679C\u5206\u6790\u5931\u8D25");
+  const summary = snapshot.result;
+  const panelMarkup = renderTestGroupAnalysis(
+    summary,
+    result.group || state.activeTestGroup || "\u5F53\u524D\u6D4B\u8BD5\u7EC4"
+  );
+  visualizationWorkspace.showGroupAnalysis(panelMarkup);
+  document.getElementById("analysisOptionsCancel").disabled = false;
+  document.getElementById("analysisOptionsClose").disabled = false;
+  document.getElementById("analysisOptionsDialog").close();
+  switchTab("workspace");
+  const panel = document.getElementById("testGroupAnalysisPanel");
+  bindTestGroupExport(panel, summary, result.group || state.activeTestGroup || "\u5F53\u524D\u6D4B\u8BD5\u7EC4");
+  panel.querySelector("[data-reconfigure-analysis]")?.addEventListener("click", openGroupAnalysisOptions);
+  panel.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 function bindTestGroupExport(panel, summary, groupName) {
   const button = panel?.querySelector("[data-group-export-csv]");
@@ -7893,6 +7998,9 @@ function showBatchProgress(result) {
     showBatchItemOverview(result.items[selectedIndex], selectedIndex);
     void loadBatchItemBottleneck(result.items[selectedIndex], selectedIndex);
   }
+  if (["completed", "cancelled"].includes(String(result.status))) {
+    void hydrateBatchCardAnalyses(items);
+  }
   writeTerminal([
     "$ \u6279\u91CF\u8FD0\u884C\u5F53\u524D\u6D4B\u8BD5\u7EC4",
     `  \u7EC4\u522B: ${result.group || "\u672A\u5206\u7EC4"} \xB7 \u7B56\u7565: ${displayStrategyName(result.strategy)}`,
@@ -7911,15 +8019,65 @@ function batchItemErrorText(item) {
   if (baseline.status && baseline.status !== "succeeded" && baseline.status !== "skipped") return `Baseline \u5931\u6548\uFF1A${baseline.error || "\u7B49\u5F85\u91CD\u65B0\u8BA1\u7B97"}`;
   return "";
 }
+async function loadBatchCardAnalysis(item) {
+  const resultUrl = String(item?.resultUrl || "");
+  if (!resultUrl || !hasBatchResultMetrics(item)) return null;
+  if (batchCardAnalyses.has(resultUrl)) return batchCardAnalyses.get(resultUrl);
+  if (batchCardAnalysisRequests.has(resultUrl)) return batchCardAnalysisRequests.get(resultUrl);
+  const request = (async () => {
+    const testCase = (state.workspaceDevice?.tests || []).find(
+      (test) => String(test.id) === String(item.testId)
+    );
+    const resultId = resultUrl.startsWith("/api/results/") ? decodeURIComponent(resultUrl.slice("/api/results/".length)) : "";
+    if (!resultId) return null;
+    try {
+      const response = await requestScheduleAnalysis({
+        resultId,
+        device: state.device,
+        windowMode: "steady",
+        routes: state.workspaceDevice?.routes || state.routes,
+        rounds: testCase?.rounds || [],
+        metricGroups: ["basic", "throughput"]
+      });
+      batchCardAnalyses.set(resultUrl, response.analysis);
+      return response.analysis;
+    } catch {
+      batchCardAnalyses.set(resultUrl, null);
+      return null;
+    } finally {
+      batchCardAnalysisRequests.delete(resultUrl);
+    }
+  })();
+  batchCardAnalysisRequests.set(resultUrl, request);
+  return request;
+}
+async function hydrateBatchCardAnalyses(items) {
+  const pending = orderedBatchItems(items).filter((item) => {
+    const resultUrl = String(item?.resultUrl || "");
+    return resultUrl && !batchCardAnalyses.has(resultUrl) && !batchCardAnalysisRequests.has(resultUrl);
+  });
+  let nextIndex = 0;
+  const worker = async () => {
+    while (nextIndex < pending.length) {
+      const item = pending[nextIndex++];
+      await loadBatchCardAnalysis(item);
+      if (state.batchResult) renderBatchItems(state.batchResult.items || []);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(2, pending.length) }, worker));
+}
 function renderBatchItems(items) {
   items = orderedBatchItems(items);
   const statusLabels = { queued: "\u7B49\u5F85\u4E2D", running: "\u8FD0\u884C\u4E2D", succeeded: "\u6210\u529F", failed: "\u5931\u8D25", cancelled: "\u5DF2\u7EC8\u6B62" };
   document.getElementById("batchResults").innerHTML = items.map((item, index) => {
     const hasMetrics = hasBatchResultMetrics(item);
-    const baseline = item.baseline || {}, baselineReady = baseline.status === "succeeded";
-    const cpuTime = Number(item.cpuTimeMs);
-    const improvement = Number(item.improvementPercent);
-    const improvementText = hasMetrics && baselineReady && Number.isFinite(improvement) ? `${improvement >= 0 ? "\u63D0\u5347" : "\u9000\u5316"} ${Math.abs(improvement).toFixed(2)}%` : baseline.status === "skipped" ? "\u5DF2\u8DF3\u8FC7\u57FA\u7EBF" : baseline.status && baseline.status !== "succeeded" ? "\u65E0\u6709\u6548\u57FA\u7EBF" : "\u63D0\u5347 \u2014";
+    const resultUrl = String(item.resultUrl || "");
+    const cardAnalysis = batchCardAnalyses.get(resultUrl);
+    const throughput = Number(cardAnalysis?.throughputPerHour);
+    const rawAverageRecomputeTime = cardAnalysis?.averageRecomputeTimeMs ?? item.averageRecomputeTimeMs;
+    const averageRecomputeTime = Number(rawAverageRecomputeTime);
+    const hasThroughput = Number.isFinite(throughput) && throughput > 0;
+    const hasAverageRecomputeTime = rawAverageRecomputeTime !== null && rawAverageRecomputeTime !== void 0 && Number.isFinite(averageRecomputeTime);
     const summaryError = batchItemErrorText(item);
     const failed = Boolean(summaryError);
     const summaryNote = item.status === "cancelled" ? "\u8C03\u5EA6\u5DF2\u7EC8\u6B62" : failed ? "" : summaryError;
@@ -7940,9 +8098,8 @@ function renderBatchItems(items) {
         </div>
         <div class="batch-result-summary">
           <div class="batch-metric-tags" aria-label="\u4E3B\u8981\u6307\u6807">
-            <span class="batch-metric-tag makespan" title="Makespan${baselineReady ? `\uFF1BBaseline ${Number(baseline.makespan).toFixed(2)} s` : ""}">${hasMetrics ? `${Number(item.makespan).toFixed(2)} s` : "\u2014 s"}</span>
-            <span class="batch-metric-tag ${improvement < 0 ? "loss" : "gain"}">${escapeHtml3(improvementText)}</span>
-            <span class="batch-metric-tag cpu">CPU Time ${hasMetrics && Number.isFinite(cpuTime) ? `${cpuTime.toFixed(1)} ms` : "\u2014"}</span>
+            <span class="batch-metric-tag production">${hasThroughput ? `\u4EA7\u80FD ${throughput.toFixed(1)} \u7247/h` : `Makespan ${hasMetrics && Number.isFinite(Number(item.makespan)) ? `${Number(item.makespan).toFixed(2)} s` : "\u2014"}`}</span>
+            <span class="batch-metric-tag recompute">\u5E73\u5747\u91CD\u7B97 ${hasMetrics && hasAverageRecomputeTime ? `${averageRecomputeTime.toFixed(1)} ms` : "\u2014"}</span>
           </div>
           ${summaryNote ? `<span class="summary-error" title="${escapeHtml3(summaryNote)}">${escapeHtml3(summaryNote)}</span>` : ""}
         </div>
@@ -8470,9 +8627,74 @@ document.getElementById("searchTreeOptionsForm").addEventListener("submit", (eve
   });
 });
 document.getElementById("batchOverviewButton").addEventListener("click", showCurrentBatchOverview);
-document.getElementById("testGroupAnalysisButton").addEventListener("click", () => {
-  showTestGroupAnalysis().catch((error) => writeTerminal(`$ \u6D4B\u8BD5\u7EC4\u7ED3\u679C\u5206\u6790\u5931\u8D25
+document.getElementById("testGroupAnalysisButton").addEventListener("click", openGroupAnalysisOptions);
+var cancelOrCloseAnalysisWizard = async () => {
+  if (activeGroupAnalysisJobId) {
+    document.getElementById("analysisOptionsCancel").disabled = true;
+    document.getElementById("analysisOptionsClose").disabled = true;
+    await cancelTestGroupAnalysisJob(activeGroupAnalysisJobId);
+    return;
+  }
+  document.getElementById("analysisOptionsDialog").close();
+};
+document.getElementById("analysisOptionsClose").addEventListener("click", () => void cancelOrCloseAnalysisWizard());
+document.getElementById("analysisOptionsCancel").addEventListener("click", () => void cancelOrCloseAnalysisWizard());
+document.getElementById("analysisOptionsDialog").addEventListener("cancel", (event) => {
+  if (!activeGroupAnalysisJobId) return;
+  event.preventDefault();
+  void cancelOrCloseAnalysisWizard();
+});
+document.getElementById("analysisOptionsDialog").addEventListener("close", () => {
+  if (analysisSettingsPreferencesDirty) {
+    saveAnalysisSettingsPreferences().catch((error) => writeTerminal(`$ \u5206\u6790\u8BBE\u7F6E\u4FDD\u5B58\u5931\u8D25
   ${error.message || "\u672A\u77E5\u9519\u8BEF"}`, true));
+  }
+});
+document.getElementById("analysisNextButton").addEventListener("click", () => {
+  if (!document.querySelector("[data-analysis-metric]:checked")) {
+    writeTerminal("$ \u8BF7\u81F3\u5C11\u9009\u62E9\u4E00\u4E2A\u8BA1\u7B97\u6307\u6807", true);
+    return;
+  }
+  showAnalysisWizardStep(2);
+});
+document.getElementById("analysisPreviousButton").addEventListener("click", () => showAnalysisWizardStep(1));
+document.querySelectorAll("[data-analysis-metric], #analysisWindowMode, #analysisTimeBudget").forEach((input) => {
+  input.addEventListener("change", () => {
+    analysisSettingsPreferencesDirty = true;
+  });
+});
+document.getElementById("analysisToggleAllTests").addEventListener("click", (event) => {
+  const checkboxes = [...document.querySelectorAll("[data-analysis-test]")];
+  const selectAll = checkboxes.some((checkbox) => !checkbox.checked);
+  checkboxes.forEach((checkbox) => {
+    checkbox.checked = selectAll;
+  });
+  event.currentTarget.textContent = selectAll ? "\u53D6\u6D88\u5168\u9009" : "\u5168\u9009";
+});
+document.getElementById("analysisOptionsForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (analysisWizardStep === 1) {
+    if (document.querySelector("[data-analysis-metric]:checked")) showAnalysisWizardStep(2);
+    else writeTerminal("$ \u8BF7\u81F3\u5C11\u9009\u62E9\u4E00\u4E2A\u8BA1\u7B97\u6307\u6807", true);
+    return;
+  }
+  if (analysisWizardStep !== 2) return;
+  document.getElementById("startGroupAnalysisButton").disabled = true;
+  showTestGroupAnalysis().catch((error) => {
+    activeGroupAnalysisJobId = "";
+    document.getElementById("startGroupAnalysisButton").disabled = false;
+    document.getElementById("analysisOptionsCancel").disabled = false;
+    document.getElementById("analysisOptionsClose").disabled = false;
+    document.getElementById("analysisOptionsCancel").textContent = "\u5173\u95ED";
+    document.getElementById("analysisDialogProgress").innerHTML = `<section class="group-analysis-warning"><strong>\u7ED3\u679C\u5206\u6790\u5931\u8D25</strong><br>${escapeHtml3(error.message || "\u672A\u77E5\u9519\u8BEF")}</section>`;
+    if (analysisWizardStep !== 3) {
+      document.getElementById("analysisOptionsCancel").textContent = "\u53D6\u6D88";
+    } else {
+      visualizationWorkspace.showGroupAnalysis(`<section class="group-analysis-warning"><strong>\u7ED3\u679C\u5206\u6790\u5931\u8D25</strong><br>${escapeHtml3(error.message || "\u672A\u77E5\u9519\u8BEF")}</section>`);
+    }
+    writeTerminal(`$ \u6D4B\u8BD5\u7EC4\u7ED3\u679C\u5206\u6790\u5931\u8D25
+  ${error.message || "\u672A\u77E5\u9519\u8BEF"}`, true);
+  });
 });
 document.getElementById("logButton").addEventListener("click", (event) => {
   if (event.currentTarget.getAttribute("aria-disabled") === "true") event.preventDefault();
@@ -8630,6 +8852,15 @@ window.addEventListener("pagehide", () => {
     }).catch(() => {
     });
   }
+  if (analysisSettingsPreferencesDirty) {
+    fetch("/api/preferences/analysis-settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ analysisSettings: currentAnalysisSettingsPreferences() }),
+      keepalive: true
+    }).catch(() => {
+    });
+  }
   if (state.deviceTimingDirty && state.workspaceDeviceId && state.deviceTimingDraft) {
     fetch(`/api/workspaces/${state.workspaceDeviceId}/device-timing`, {
       method: "PUT",
@@ -8655,5 +8886,7 @@ renderWorkspaceControls();
 renderDeviceTimingConfiguration();
 checkService();
 loadRunSettingsPreferences().catch((error) => writeTerminal(`$ \u8FD0\u884C\u8BBE\u7F6E\u8BFB\u53D6\u5931\u8D25
+  ${error.message || "\u672A\u77E5\u9519\u8BEF"}`, true));
+loadAnalysisSettingsPreferences().catch((error) => writeTerminal(`$ \u5206\u6790\u8BBE\u7F6E\u8BFB\u53D6\u5931\u8D25
   ${error.message || "\u672A\u77E5\u9519\u8BEF"}`, true));
 loadWorkspaceCatalog().catch((error) => setWorkspaceStatus(`\u6D4B\u8BD5\u96C6\u8BFB\u53D6\u5931\u8D25\uFF1A${error.message}`, "dirty"));
