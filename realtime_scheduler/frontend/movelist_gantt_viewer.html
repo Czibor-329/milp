@@ -1487,6 +1487,96 @@
       };
     }
 
+    /**
+     * 从 input_data 复现日志恢复完整甘特图数据。
+     *
+     * 每次 AlgOutput 仅代表当代计划。下一次 AlgSchedule 发起重算后，旧代中
+     * 尚未开始的未来动作已被替换，只有开始时刻早于下一代排程时刻的动作应保留。
+     * 因此不能只显示最后一个 AlgOutput，否则重算前的时间轴会直接丢失。
+     *
+     * @param {unknown[]} entries input_data 顶层日志条目。
+     * @returns {{records: unknown[], recomputePoints: unknown[]}|null} 可绘制数据；不是复现日志时返回 null。
+     */
+    function reconstructInputLogMoveList(entries) {
+      if (!entries.some((entry) => entry && typeof entry === "object" && "Describe" in entry)) return null;
+
+      const generations = [];
+      const recomputePoints = [];
+      let scheduleTime = 0;
+      for (const entry of entries) {
+        if (!entry || typeof entry !== "object") continue;
+        const describe = String(entry.Describe ?? "");
+        if (describe === "AlgSchedule") {
+          const time = Number(entry.SimTime);
+          scheduleTime = Number.isFinite(time) ? time : 0;
+          continue;
+        }
+        if (describe === "RecomputeControl") {
+          const info = entry.Info && typeof entry.Info === "object" ? entry.Info : {};
+          const recompute = info.RecomputeInfo && typeof info.RecomputeInfo === "object"
+            ? info.RecomputeInfo
+            : {};
+          const pointTime = Number(recompute.CurrentTime ?? entry.SimTime);
+          if (Number.isFinite(pointTime)) {
+            recomputePoints.push({
+              Time: pointTime,
+              EffectiveTime: Number(recompute.EffectiveTime ?? pointTime),
+              ScheduleStartTime: pointTime,
+              RecoveryEndTime: Number(recompute.RecoveryEndTime ?? recompute.EffectiveTime ?? pointTime),
+              Index: recomputePoints.length + 1,
+              Reason: String(recompute.Reason ?? "重算")
+            });
+          }
+          continue;
+        }
+        if (describe !== "AlgOutput") continue;
+        const info = entry.Info;
+        if (!info || typeof info !== "object" || !Array.isArray(info.MoveList)) continue;
+        generations.push({ scheduleTime, moves: info.MoveList });
+      }
+      if (!generations.length) return null;
+
+      const records = [];
+      for (let index = 0; index < generations.length; index += 1) {
+        const generation = generations[index];
+        const nextGeneration = generations[index + 1];
+        const cutoff = nextGeneration ? nextGeneration.scheduleTime : Infinity;
+        for (const move of generation.moves) {
+          if (!move || typeof move !== "object") continue;
+          const start = Number(move.StartTime);
+          if (Number.isFinite(cutoff) && !(start < cutoff - 1e-9)) continue;
+          records.push(move);
+        }
+      }
+      records.sort((left, right) => (
+        Number(left.StartTime) - Number(right.StartTime)
+        || Number(left.MoveID) - Number(right.MoveID)
+      ));
+      return { records, recomputePoints };
+    }
+
+    /**
+     * 统一提取普通 MoveList 与带多轮重算的 input_data 复现日志。
+     *
+     * @param {unknown} payload 上传 JSON 的已解析内容。
+     * @returns {{records: unknown[], recomputePoints: unknown[], validation: unknown}|null} 可绘制数据。
+     */
+    function extractGanttPayload(payload) {
+      if (Array.isArray(payload)) {
+        const reconstructed = reconstructInputLogMoveList(payload);
+        if (reconstructed) return { ...reconstructed, validation: null };
+        return { records: payload, recomputePoints: [], validation: null };
+      }
+      if (payload && typeof payload === "object" && Array.isArray(payload.MoveList)) {
+        return {
+          records: payload.MoveList,
+          recomputePoints: Array.isArray(payload.RecomputePoints) ? payload.RecomputePoints : [],
+          validation: payload.Validation ?? null
+        };
+      }
+      return null;
+    }
+
     function findMultiSlotModules(records, lockModules) {
       const moduleSlots = new Map();
       for (const rec of records) {
@@ -1745,15 +1835,11 @@
       try {
         const text = await dataset.file.text();
         const payload = JSON.parse(text);
-        const rawRecords = Array.isArray(payload) ? payload : payload && Array.isArray(payload.MoveList) ? payload.MoveList : null;
-        if (!rawRecords) throw new Error("Expected a MoveList array or a top-level array.");
-        dataset.records = rawRecords.map(normalizeRecord);
-        dataset.validation = payload && !Array.isArray(payload) && payload.Validation
-          ? payload.Validation
-          : null;
-        const rawRecomputePoints = payload && !Array.isArray(payload) && Array.isArray(payload.RecomputePoints)
-          ? payload.RecomputePoints
-          : [];
+        const ganttPayload = extractGanttPayload(payload);
+        if (!ganttPayload) throw new Error("Expected a MoveList result or an input_data reproduction log.");
+        dataset.records = ganttPayload.records.map(normalizeRecord);
+        dataset.validation = ganttPayload.validation;
+        const rawRecomputePoints = ganttPayload.recomputePoints;
         dataset.recomputePoints = rawRecomputePoints
           .map(normalizeRecomputePoint)
           .filter((point) => Number.isFinite(point.time));

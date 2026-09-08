@@ -2544,6 +2544,18 @@ class ConfigEditorServerTests(unittest.TestCase):
         )
         self.assertIn("markerCenter - w / 2", viewer)
 
+    def test_gantt_reconstructs_recompute_log_prefix(self) -> None:
+        """甘特图导入 input_data 日志时应拼回重算前已开始的动作。"""
+        viewer = (
+            ROOT / "realtime_scheduler" / "frontend" / "movelist_gantt_viewer.html"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("function reconstructInputLogMoveList(entries)", viewer)
+        self.assertIn('describe === "AlgSchedule"', viewer)
+        self.assertIn('describe === "RecomputeControl"', viewer)
+        self.assertIn("start < cutoff - 1e-9", viewer)
+        self.assertIn("function extractGanttPayload(payload)", viewer)
+
     def test_result_preview_and_group_analysis_use_main_area(self) -> None:
         """结果预览应保持简洁，并提供独立的测试组分析入口。"""
         html = _editor_source()
