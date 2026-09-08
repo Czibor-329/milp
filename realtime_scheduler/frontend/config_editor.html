@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>调度平台</title>
   <link rel="stylesheet" href="/assets/katex.min.css?v=1.4.4">
-  <link rel="stylesheet" href="/assets/config_editor.css?v=1.5.47">
+  <link rel="stylesheet" href="/assets/config_editor.css?v=1.5.48">
 </head>
 <body>
   <a class="skip-link" href="#mainContent">跳到主要内容</a>
@@ -40,7 +40,7 @@
       <div class="sidebar-footer">
         <span class="sidebar-footer-label">系统状态</span>
         <div class="service-pill" id="serviceState">本地服务</div>
-        <span class="frontend-version">V1.5.47</span>
+        <span class="frontend-version">V1.5.48</span>
       </div>
     </aside>
 
@@ -230,6 +230,10 @@
                     <button class="btn toolbar-import" id="visualImportButton" type="button" aria-label="导入 MoveList">
                       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L7 9m5-5 5 5M5 15v5h14v-5"/></svg>
                       <span class="toolbar-label-full">导入 MoveList</span><span class="toolbar-label-compact">导入</span>
+                    </button>
+                    <button class="btn" id="visualExportDeadlockDiagnostic" type="button" aria-label="导出死锁诊断包" disabled>
+                      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v12m0 0-5-5m5 5 5-5M5 19h14"/></svg>
+                      <span class="toolbar-label-full">导出诊断包</span><span class="toolbar-label-compact">诊断</span>
                     </button>
                     <a class="btn toolbar-gantt" id="visualOpenGantt" href="#" target="_blank" aria-label="打开甘特图" aria-disabled="true">
                       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5v14h16M8 15v-3m4 3V8m4 7v-5"/></svg>
@@ -778,6 +782,6 @@
     </aside>
   </dialog>
 
-  <script type="module" src="/assets/config_editor.js?v=1.5.47"></script>
+  <script type="module" src="/assets/config_editor.js?v=1.5.48"></script>
 </body>
 </html>

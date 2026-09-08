@@ -60,3 +60,5 @@ python scripts\run_dataset_suite.py --device 12kChamber --group 公司示例集 
 外部算法可选实现 `get_replay_actions(replay_json)`，供拓扑回放展示 Pick、Place、
 Swap 的使能、物理拦截与死锁拦截动作及原因。Pick 路径写到 Robot 手槽，例如
 `Pick(1) LP1#1 → ATR#1`。旧算法无需实现；缺少该函数时动作卡片留空。
+拓扑回放还可按当前时间轴位置导出死锁诊断 JSON，汇总当前代输入、槽位快照、
+MoveStates、最近动作和全部候选动作，便于直接复现具体晶圆、模块、槽位与规则。

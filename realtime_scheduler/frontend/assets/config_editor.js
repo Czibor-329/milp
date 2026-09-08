@@ -206,6 +206,24 @@ async function requestReplayDecision(input) {
   });
   return result.decision;
 }
+async function requestDeadlockDiagnostic(input) {
+  const response = await fetch("/api/analysis/deadlock-diagnostic", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input)
+  });
+  if (!response.ok) {
+    const result = await response.json().catch(() => ({}));
+    throw new Error(result?.error || `\u670D\u52A1\u8FD4\u56DE ${response.status}`);
+  }
+  const disposition = response.headers.get("Content-Disposition") ?? "";
+  const encodedName = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+  const fallbackName = disposition.match(/filename="([^"]+)"/i)?.[1];
+  return {
+    blob: await response.blob(),
+    fileName: encodedName ? decodeURIComponent(encodedName) : fallbackName || "deadlock-diagnostic.json"
+  };
+}
 async function requestSearchControl(command, actionKey = null) {
   return requestJson("/api/search-control", {
     method: "POST",
@@ -1366,6 +1384,7 @@ function collectElements(root) {
     speed: required("visualSpeed"),
     fileInput: required("visualFileInput"),
     importButton: root.getElementById("visualImportButton"),
+    exportDiagnosticButton: root.getElementById("visualExportDeadlockDiagnostic"),
     openGantt: required("visualOpenGantt"),
     resultButton: required("workspaceResultButton"),
     performance: required("visualPerformance"),
@@ -2953,6 +2972,9 @@ var VisualizationWorkspace = class {
     this.liveDecisionKey = "";
     this.primitiveDecisionBoundaries = primitiveDecisionBoundaryTimes(this.moves);
     this.replayDecisionRequestVersion += 1;
+    if (this.elements.exportDiagnosticButton) {
+      this.elements.exportDiagnosticButton.disabled = !this.replayPlan || !this.moves.length;
+    }
     if (this.moves.length) this.render();
   }
   /** 在完整 MoveList 返回前显示初始拓扑，并进入增量求解状态。 */
@@ -2978,6 +3000,7 @@ var VisualizationWorkspace = class {
     this.elements.playButton.disabled = true;
     this.elements.openGantt.href = "#";
     this.elements.openGantt.setAttribute("aria-disabled", "true");
+    if (this.elements.exportDiagnosticButton) this.elements.exportDiagnosticButton.disabled = true;
     this.showSingleResult();
     this.setTopologyVisible(true);
     this.render(buildWorkspaceSnapshot([], this.device, 0));
@@ -2988,6 +3011,9 @@ var VisualizationWorkspace = class {
     const previousTime = this.time;
     this.pause();
     this.moves = normalizeMovePayload({ MoveList: rawMoves });
+    if (this.elements.exportDiagnosticButton) {
+      this.elements.exportDiagnosticButton.disabled = !this.replayPlan;
+    }
     this.primitiveDecisionBoundaries = primitiveDecisionBoundaryTimes(this.moves);
     const latestSnapshot = buildWorkspaceSnapshot(
       this.moves,
@@ -3126,6 +3152,9 @@ var VisualizationWorkspace = class {
     this.elements.playButton.disabled = false;
     this.elements.openGantt.href = resultUrl ? `/movelist_gantt_viewer.html?src=${encodeURIComponent(resultUrl)}` : "#";
     this.elements.openGantt.setAttribute("aria-disabled", resultUrl ? "false" : "true");
+    if (this.elements.exportDiagnosticButton) {
+      this.elements.exportDiagnosticButton.disabled = !this.replayPlan;
+    }
     this.elements.resultButton.disabled = false;
     this.showSingleResult();
     this.setTopologyVisible(true);
@@ -3135,6 +3164,9 @@ var VisualizationWorkspace = class {
   /** 绑定文件、时间轴、播放和快捷控制事件。 */
   bindEvents() {
     this.elements.importButton?.addEventListener("click", () => this.elements.fileInput.click());
+    this.elements.exportDiagnosticButton?.addEventListener("click", () => {
+      void this.exportDeadlockDiagnostic();
+    });
     this.elements.fileInput.addEventListener("change", () => {
       const file = this.elements.fileInput.files?.item(0);
       if (!file) return;
@@ -3165,6 +3197,40 @@ var VisualizationWorkspace = class {
     this.elements.openGantt.addEventListener("click", (event) => {
       if (this.elements.openGantt.getAttribute("aria-disabled") === "true") event.preventDefault();
     });
+  }
+  /** 导出当前回放帧及算法候选动作，供离线复现死锁。 */
+  async exportDeadlockDiagnostic() {
+    if (!this.moves.length || !this.replayPlan) {
+      this.showError("\u5F53\u524D MoveList \u7F3A\u5C11\u5B8C\u6574\u8BA1\u5212\uFF0C\u65E0\u6CD5\u91CD\u5EFA Machine \u8BCA\u65AD\u4E0A\u4E0B\u6587");
+      return;
+    }
+    const button = this.elements.exportDiagnosticButton;
+    if (button) button.disabled = true;
+    try {
+      const snapshot = buildWorkspaceSnapshot(
+        this.moves,
+        this.device,
+        this.time,
+        this.loadPortReplenishments
+      );
+      const result = await requestDeadlockDiagnostic({
+        resultId: this.analysisResultId || void 0,
+        moves: this.analysisResultId ? void 0 : this.moves,
+        plan: this.analysisResultId ? void 0 : this.replayPlan,
+        time: this.time,
+        snapshot
+      });
+      const downloadUrl = URL.createObjectURL(result.blob);
+      const link = this.root.createElement("a");
+      link.href = downloadUrl;
+      link.download = result.fileName;
+      link.click();
+      URL.revokeObjectURL(downloadUrl);
+    } catch (error) {
+      this.showError(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (button) button.disabled = false;
+    }
   }
   /** 从当前时间开始播放；到达末尾时自动回到起点。 */
   play() {

@@ -6,7 +6,11 @@
  * 本文件不实现分析规则，也不持久化业务数据。
  */
 
-import { requestReplayDecision, requestScheduleAnalysis } from "./api_client";
+import {
+  requestDeadlockDiagnostic,
+  requestReplayDecision,
+  requestScheduleAnalysis,
+} from "./api_client";
 import type {
   ActivityCategory,
   BottleneckUtilizationSummary,
@@ -220,6 +224,7 @@ interface WorkspaceElements {
   speed: HTMLSelectElement;
   fileInput: HTMLInputElement;
   importButton: HTMLButtonElement | null;
+  exportDiagnosticButton: HTMLButtonElement | null;
   openGantt: HTMLAnchorElement;
   resultButton: HTMLButtonElement;
   performance: HTMLElement;
@@ -1892,6 +1897,7 @@ function collectElements(root: Document): WorkspaceElements {
     speed: required<HTMLSelectElement>("visualSpeed"),
     fileInput: required<HTMLInputElement>("visualFileInput"),
     importButton: root.getElementById("visualImportButton") as HTMLButtonElement | null,
+    exportDiagnosticButton: root.getElementById("visualExportDeadlockDiagnostic") as HTMLButtonElement | null,
     openGantt: required<HTMLAnchorElement>("visualOpenGantt"),
     resultButton: required<HTMLButtonElement>("workspaceResultButton"),
     performance: required("visualPerformance"),
@@ -4147,6 +4153,9 @@ export class VisualizationWorkspace {
     this.liveDecisionKey = "";
     this.primitiveDecisionBoundaries = primitiveDecisionBoundaryTimes(this.moves);
     this.replayDecisionRequestVersion += 1;
+    if (this.elements.exportDiagnosticButton) {
+      this.elements.exportDiagnosticButton.disabled = !this.replayPlan || !this.moves.length;
+    }
     if (this.moves.length) this.render();
   }
 
@@ -4176,6 +4185,7 @@ export class VisualizationWorkspace {
     this.elements.playButton.disabled = true;
     this.elements.openGantt.href = "#";
     this.elements.openGantt.setAttribute("aria-disabled", "true");
+    if (this.elements.exportDiagnosticButton) this.elements.exportDiagnosticButton.disabled = true;
     this.showSingleResult();
     this.setTopologyVisible(true);
     this.render(buildWorkspaceSnapshot([], this.device, 0));
@@ -4191,6 +4201,9 @@ export class VisualizationWorkspace {
     const previousTime = this.time;
     this.pause();
     this.moves = normalizeMovePayload({ MoveList: rawMoves });
+    if (this.elements.exportDiagnosticButton) {
+      this.elements.exportDiagnosticButton.disabled = !this.replayPlan;
+    }
     this.primitiveDecisionBoundaries = primitiveDecisionBoundaryTimes(this.moves);
     const latestSnapshot = buildWorkspaceSnapshot(
       this.moves,
@@ -4355,6 +4368,9 @@ export class VisualizationWorkspace {
       ? `/movelist_gantt_viewer.html?src=${encodeURIComponent(resultUrl)}`
       : "#";
     this.elements.openGantt.setAttribute("aria-disabled", resultUrl ? "false" : "true");
+    if (this.elements.exportDiagnosticButton) {
+      this.elements.exportDiagnosticButton.disabled = !this.replayPlan;
+    }
     this.elements.resultButton.disabled = false;
     this.showSingleResult();
     this.setTopologyVisible(true);
@@ -4365,6 +4381,9 @@ export class VisualizationWorkspace {
   /** 绑定文件、时间轴、播放和快捷控制事件。 */
   private bindEvents(): void {
     this.elements.importButton?.addEventListener("click", () => this.elements.fileInput.click());
+    this.elements.exportDiagnosticButton?.addEventListener("click", () => {
+      void this.exportDeadlockDiagnostic();
+    });
     this.elements.fileInput.addEventListener("change", () => {
       const file = this.elements.fileInput.files?.item(0);
       if (!file) return;
@@ -4397,6 +4416,41 @@ export class VisualizationWorkspace {
     this.elements.openGantt.addEventListener("click", event => {
       if (this.elements.openGantt.getAttribute("aria-disabled") === "true") event.preventDefault();
     });
+  }
+
+  /** 导出当前回放帧及算法候选动作，供离线复现死锁。 */
+  private async exportDeadlockDiagnostic(): Promise<void> {
+    if (!this.moves.length || !this.replayPlan) {
+      this.showError("当前 MoveList 缺少完整计划，无法重建 Machine 诊断上下文");
+      return;
+    }
+    const button = this.elements.exportDiagnosticButton;
+    if (button) button.disabled = true;
+    try {
+      const snapshot = buildWorkspaceSnapshot(
+        this.moves,
+        this.device,
+        this.time,
+        this.loadPortReplenishments,
+      );
+      const result = await requestDeadlockDiagnostic({
+        resultId: this.analysisResultId || undefined,
+        moves: this.analysisResultId ? undefined : this.moves,
+        plan: this.analysisResultId ? undefined : this.replayPlan,
+        time: this.time,
+        snapshot: snapshot as unknown as Record<string, any>,
+      });
+      const downloadUrl = URL.createObjectURL(result.blob);
+      const link = this.root.createElement("a");
+      link.href = downloadUrl;
+      link.download = result.fileName;
+      link.click();
+      URL.revokeObjectURL(downloadUrl);
+    } catch (error) {
+      this.showError(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (button) button.disabled = false;
+    }
   }
 
   /** 从当前时间开始播放；到达末尾时自动回到起点。 */

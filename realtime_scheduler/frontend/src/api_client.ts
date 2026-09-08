@@ -78,6 +78,34 @@ export async function requestReplayDecision(input: {
   return result.decision as Record<string, any>;
 }
 
+/** 请求服务端生成死锁诊断 JSON；返回文件内容与响应头中的下载名。 */
+export async function requestDeadlockDiagnostic(input: {
+  resultId?: string;
+  moves?: MoveRecord[];
+  plan?: Record<string, any> | null;
+  time: number;
+  snapshot: Record<string, any>;
+}): Promise<{ blob: Blob; fileName: string }> {
+  const response = await fetch("/api/analysis/deadlock-diagnostic", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) {
+    const result = await response.json().catch(() => ({}));
+    throw new Error(result?.error || `服务返回 ${response.status}`);
+  }
+  const disposition = response.headers.get("Content-Disposition") ?? "";
+  const encodedName = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+  const fallbackName = disposition.match(/filename="([^"]+)"/i)?.[1];
+  return {
+    blob: await response.blob(),
+    fileName: encodedName
+      ? decodeURIComponent(encodedName)
+      : fallbackName || "deadlock-diagnostic.json",
+  };
+}
+
 /** 读取 Search Tree 搜索快照；版本未变化时后端只返回紧凑标记。 */
 export async function requestSearchTelemetry(
   sinceRevision: number | null = null,

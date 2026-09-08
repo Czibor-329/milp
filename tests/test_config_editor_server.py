@@ -567,19 +567,19 @@ class RecomputeFailureOutputTests(unittest.TestCase):
         self.assertIn("!rec.removedByRecompute", viewer)
         self.assertIn('fillOpacity = bar.rec.removedByRecompute ? "0.24" : "1"', viewer)
 
-    def test_frontend_version_and_cache_keys_are_1_5_46(self) -> None:
+    def test_frontend_version_and_cache_keys_are_1_5_48(self) -> None:
         """前端显示版本、包版本和主资源缓存键必须同步。"""
         frontend_root = ROOT / "realtime_scheduler" / "frontend"
         template = (frontend_root / "config_editor.html").read_text(encoding="utf-8")
         package = json.loads((frontend_root / "package.json").read_text(encoding="utf-8"))
         package_lock = json.loads((frontend_root / "package-lock.json").read_text(encoding="utf-8"))
 
-        self.assertEqual("1.5.47", package["version"])
-        self.assertEqual("1.5.47", package_lock["version"])
-        self.assertEqual("1.5.47", package_lock["packages"][""]["version"])
-        self.assertIn('class="frontend-version">V1.5.47</span>', template)
-        self.assertIn('/assets/config_editor.css?v=1.5.47', template)
-        self.assertIn('/assets/config_editor.js?v=1.5.47', template)
+        self.assertEqual("1.5.48", package["version"])
+        self.assertEqual("1.5.48", package_lock["version"])
+        self.assertEqual("1.5.48", package_lock["packages"][""]["version"])
+        self.assertIn('class="frontend-version">V1.5.48</span>', template)
+        self.assertIn('/assets/config_editor.css?v=1.5.48', template)
+        self.assertIn('/assets/config_editor.js?v=1.5.48', template)
 
     def test_single_run_failure_card_does_not_duplicate_validation_issue(self) -> None:
         """状态推进校验失败只展示一条完整错误，不再重复渲染问题列表。"""
