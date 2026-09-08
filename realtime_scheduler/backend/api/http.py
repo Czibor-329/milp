@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from urllib.parse import quote
+
 from realtime_scheduler.backend.bootstrap import *
 from realtime_scheduler.backend.execution.run_state import *
 from realtime_scheduler.backend.execution.service import *
@@ -14,6 +16,16 @@ from realtime_scheduler.backend.workspace.exchange_service import *
 from realtime_scheduler.backend.workspace.transfer_jobs import *
 from realtime_scheduler.backend.artifacts.repository import *
 from realtime_scheduler.backend.wiring import *
+
+
+def _download_content_disposition(download_name: str) -> str:
+    """生成兼容旧客户端且支持中文文件名的下载响应头。"""
+    name_path = Path(download_name)
+    suffix = re.sub(r"[^A-Za-z0-9.]", "", name_path.suffix)
+    fallback_stem = re.sub(r"[^A-Za-z0-9._-]+", "-", name_path.stem).strip("-.") or "download"
+    fallback = f"{fallback_stem}{suffix}"
+    encoded_name = quote(download_name, safe="")
+    return f'attachment; filename="{fallback}"; filename*=UTF-8\'\'{encoded_name}'
 
 class ConfigEditorHandler(BaseHTTPRequestHandler):
     """暴露调度控制台、设备测试集、甘特图和运行 API 的本地 HTTP 处理器。"""
@@ -209,7 +221,6 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             else:
                 self._send_json(
                     reproduction_log,
-                    download_name=f"ct-input-log-{log_id[:8]}.json",
                     top_level_item_per_line=True,
                 )
             return
@@ -861,7 +872,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(content)))
         self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Disposition", f'attachment; filename="{download_name}"')
+        self.send_header("Content-Disposition", _download_content_disposition(download_name))
         self._send_performance_headers(len(content))
         self.end_headers()
         self.wfile.write(content)
@@ -926,7 +937,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self._send_performance_headers(len(content))
         if download_name:
-            self.send_header("Content-Disposition", f'attachment; filename="{download_name}"')
+            self.send_header("Content-Disposition", _download_content_disposition(download_name))
         self.end_headers()
         self.wfile.write(content)
 

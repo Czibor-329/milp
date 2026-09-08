@@ -6,6 +6,7 @@ import copy
 from concurrent.futures import Future
 import inspect
 import json
+import os
 import tempfile
 import threading
 import time
@@ -3417,7 +3418,7 @@ class ConfigEditorServerTests(unittest.TestCase):
         finally:
             config_server._BATCH_RUNS.pop(batch_id, None)
 
-        self.assertEqual(f"ct-batch-logs-{batch_id[:8]}.zip", filename)
+        self.assertRegex(filename, r"^批量复现日志-fixture-回归-\d{8}-\d{6}\.zip$")
         with zipfile.ZipFile(BytesIO(content)) as archive:
             self.assertEqual(["t01_案例_A.json", "t03_案例 C.json", "manifest.json"], archive.namelist())
             manifest = json.loads(archive.read("manifest.json"))
@@ -4485,6 +4486,66 @@ class ConfigEditorServerTests(unittest.TestCase):
                 self.assertIsNone(config_server.read_reproduction_log(log_id))
                 self.assertFalse((export_root / "results" / f"{result_id}.json").exists())
                 self.assertFalse((export_root / "logs" / f"{log_id}.json").exists())
+
+    def test_expired_artifacts_are_removed_without_touching_recent_files(self) -> None:
+        """自动清理只移除超过保留期的结果和日志，并同步淘汰对应缓存。"""
+        with tempfile.TemporaryDirectory() as directory:
+            export_root = Path(directory)
+            with (
+                patch.object(config_server, "RESULT_EXPORT_DIR", export_root / "results"),
+                patch.object(config_server, "LOG_EXPORT_DIR", export_root / "logs"),
+            ):
+                old_result_id = config_server.save_result({"MoveList": [{"old": True}]})
+                old_log_id = config_server.save_reproduction_log([{"Describe": "Input", "Info": {"old": True}}])
+                recent_result_id = config_server.save_result({"MoveList": [{"recent": True}]})
+                recent_log_id = config_server.save_reproduction_log([{"Describe": "Input", "Info": {"recent": True}}])
+                current_time = time.time()
+                expired_time = current_time - config_server.ARTIFACT_RETENTION_SECONDS - 1
+                os.utime(export_root / "results" / f"{old_result_id}.json", (expired_time, expired_time))
+                os.utime(export_root / "logs" / f"{old_log_id}.json", (expired_time, expired_time))
+
+                deleted = config_server.remove_expired_artifacts(current_time=current_time)
+
+                self.assertEqual({"results": 1, "logs": 1}, deleted)
+                self.assertIsNone(config_server.read_result(old_result_id))
+                self.assertIsNone(config_server.read_reproduction_log(old_log_id))
+                self.assertIsNotNone(config_server.read_result(recent_result_id))
+                self.assertIsNotNone(config_server.read_reproduction_log(recent_log_id))
+                config_server.clear_exported_artifacts()
+
+    def test_saving_new_artifact_automatically_removes_expired_files(self) -> None:
+        """写入新结果时应自动执行过期制品清理，无需用户触发。"""
+        with tempfile.TemporaryDirectory() as directory:
+            export_root = Path(directory)
+            with (
+                patch.object(config_server, "RESULT_EXPORT_DIR", export_root / "results"),
+                patch.object(config_server, "LOG_EXPORT_DIR", export_root / "logs"),
+            ):
+                old_result_id = config_server.save_result({"MoveList": [{"old": True}]})
+                old_path = export_root / "results" / f"{old_result_id}.json"
+                expired_time = time.time() - config_server.ARTIFACT_RETENTION_SECONDS - 1
+                os.utime(old_path, (expired_time, expired_time))
+
+                recent_result_id = config_server.save_result({"MoveList": [{"recent": True}]})
+
+                self.assertFalse(old_path.exists())
+                self.assertIsNone(config_server.read_result(old_result_id))
+                self.assertIsNotNone(config_server.read_result(recent_result_id))
+                config_server.clear_exported_artifacts()
+
+    def test_frontend_uses_automatic_artifact_cleanup_and_readable_log_names(self) -> None:
+        """结果区不再要求手动清理，复现日志下载名应包含测试名称。"""
+        source = _editor_source()
+        self.assertNotIn('id="clearExportsButton"', source)
+        self.assertNotIn("function clearExportedArtifacts", source)
+        self.assertIn("function readableLogFileName", source)
+        self.assertIn("复现日志-${readableTestName}.json", source)
+
+    def test_download_header_supports_readable_chinese_filename(self) -> None:
+        """下载响应头应兼顾 ASCII 后备名称与 UTF-8 中文展示名称。"""
+        disposition = config_server._download_content_disposition("批量复现日志-设备-回归.zip")
+        self.assertIn('filename="download.zip"', disposition)
+        self.assertIn("filename*=UTF-8''%E6%89%B9%E9%87%8F", disposition)
 
     def test_two_recomputes_merge_movelist_and_markers(self) -> None:
         """首次排程加两次重算应合并 MoveList，并保留两条重算线。"""

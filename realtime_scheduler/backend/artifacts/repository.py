@@ -9,10 +9,58 @@ from realtime_scheduler.backend.execution.service import execute_plan
 from realtime_scheduler.backend.workspace.repository import *
 from realtime_scheduler.backend.workspace.catalog_service import *
 
+
+def remove_expired_artifacts(
+    *,
+    maximum_age_seconds: Optional[float] = None,
+    current_time: Optional[float] = None,
+) -> Dict[str, int]:
+    """删除超过保留期的临时结果和复现日志。
+
+    ``maximum_age_seconds`` 默认使用平台的制品保留期，``current_time`` 仅用于
+    测试时固定当前时间。返回结果和日志各自删除的文件数量；仍在保留期内的文件
+    及其内存缓存不受影响。
+    """
+    retention_seconds = (
+        ARTIFACT_RETENTION_SECONDS
+        if maximum_age_seconds is None
+        else max(0.0, float(maximum_age_seconds))
+    )
+    expiry_timestamp = (
+        time.time() if current_time is None else float(current_time)
+    ) - retention_seconds
+    deleted_counts = {"results": 0, "logs": 0}
+    caches = {"results": _RESULTS, "logs": _REPRODUCTION_LOGS}
+    cache_locks = {
+        "results": _RESULTS_LOCK,
+        "logs": _REPRODUCTION_LOGS_LOCK,
+    }
+    with _EXPORTS_LOCK:
+        for name, directory in (("results", RESULT_EXPORT_DIR), ("logs", LOG_EXPORT_DIR)):
+            if not directory.is_dir():
+                continue
+            for path in directory.glob("*.json"):
+                try:
+                    expired = path.is_file() and path.stat().st_mtime <= expiry_timestamp
+                except OSError:
+                    continue
+                if not expired:
+                    continue
+                try:
+                    path.unlink()
+                except OSError:
+                    continue
+                deleted_counts[name] += 1
+                with cache_locks[name]:
+                    caches[name].pop(path.stem, None)
+    return deleted_counts
+
+
 def save_result(output: Dict[str, Any]) -> str:
-    """把甘特图数据写入专用导出目录并放入有界内存缓存。"""
+    """暂存甘特图数据，写入前自动清除超过保留期的旧制品。"""
     result_id = uuid.uuid4().hex
     with _EXPORTS_LOCK:
+        remove_expired_artifacts()
         _write_json_atomic(RESULT_EXPORT_DIR / f"{result_id}.json", output)
         with _RESULTS_LOCK:
             _RESULTS[result_id] = output
@@ -37,10 +85,11 @@ def read_result(result_id: str) -> Optional[Dict[str, Any]]:
 
 
 def save_reproduction_log(entries: Sequence[Mapping[str, Any]]) -> str:
-    """把 input_data 格式日志写入专用导出目录并放入有界内存缓存。"""
+    """暂存 input_data 格式日志，写入前自动清除超过保留期的旧制品。"""
     log_id = uuid.uuid4().hex
     payload = deepcopy(list(entries))
     with _EXPORTS_LOCK:
+        remove_expired_artifacts()
         _write_text_atomic(LOG_EXPORT_DIR / f"{log_id}.json", format_reproduction_log(payload))
         with _REPRODUCTION_LOGS_LOCK:
             _REPRODUCTION_LOGS[log_id] = payload
@@ -117,7 +166,14 @@ def build_workspace_batch_log_archive(batch_id: str) -> Tuple[bytes, str]:
                 "items": manifest_items,
             }, ensure_ascii=False, indent=2),
         )
-    return archive_buffer.getvalue(), f"ct-batch-logs-{batch_id[:8]}.zip"
+    def readable_segment(value: Any, fallback: str) -> str:
+        """把展示名称转换为可安全用于下载文件名的片段。"""
+        return re.sub(r'[\\/:*?"<>|\x00-\x1f]+', "_", str(value or "")).strip(" ._") or fallback
+
+    device_name = readable_segment(Path(str(batch.get("deviceName") or "")).stem, "设备")
+    group_name = readable_segment(batch.get("group"), "测试组")
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return archive_buffer.getvalue(), f"批量复现日志-{device_name}-{group_name}-{timestamp}.zip"
 
 
 def clear_exported_artifacts() -> Dict[str, int]:

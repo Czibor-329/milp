@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from realtime_scheduler.backend.bootstrap import *
+from realtime_scheduler.backend.artifacts.repository import remove_expired_artifacts
 from realtime_scheduler.backend.workspace.repository import *
 from realtime_scheduler.backend.api.http import ConfigEditorHandler
 
@@ -40,6 +41,10 @@ def main() -> None:
     if legacy_directory_present:
         log_startup(f"已自动迁移旧版目录：workspaces/ + devices/ → {WORKSPACE_STORE_PATH.name}/ v{WORKSPACE_STORE_VERSION}")
         log_startup("原目录已移入 data/migration-backups/，确认新版数据正常后可清理")
+    removed_artifacts = remove_expired_artifacts()
+    removed_artifact_count = sum(removed_artifacts.values())
+    if removed_artifact_count:
+        log_startup(f"已自动清理 {removed_artifact_count} 个过期运行制品")
     log_startup("正在预热算法缓存…")
     discover_other_algorithms()
     log_startup("算法缓存预热完成")

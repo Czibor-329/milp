@@ -34,7 +34,7 @@
 | `realtime_scheduler/backend/analysis.py` | MoveList 性能、瓶颈、诊断、测试组汇总 | HTTP、DOM、文件读写 |
 | `realtime_scheduler/backend/main.py` | 命令行参数、启动检查和 HTTP 服务生命周期 | 业务实现、存储、调度和校验 |
 | `realtime_scheduler/data/datasets/` | 设备 init、共享路径模板、测试独有的 Route 参数/Clean 与任务的唯一主数据 | 浏览器缓存、设备镜像 |
-| `realtime_scheduler/exports/` | MoveList 结果和复现日志 | 前端临时状态 |
+| `realtime_scheduler/exports/` | 最多保留 24 小时的 MoveList 结果和复现日志 | 设备主数据、长期归档 |
 
 MoveList 指标、瓶颈和测试组统计只在 `backend/analysis.py` 中实现；前端通过 HTTP
 契约请求结果，不保留兼容计算副本。
@@ -88,6 +88,8 @@ HTTP 请求。批量运行会输出测试 ID、校验状态、Move 数量和 mak
 
 1. 前端编辑后通过 `/api/workspaces/*` 保存测试集，不能直接写 `data/` 或 `exports/`。
 2. 调度运行由 `/api/run`、`/api/run-batch` 触发，结果由服务端写入 `exports/results/`。
+   这些文件只用于当前结果的回放、分析和按需下载；服务启动及写入新制品时会自动清理
+   超过 24 小时的旧文件，用户无需手动维护导出目录。
 3. 前端读取结果只使用 `/api/results/*`；分析只使用 `/api/analysis/*`。
 4. 新增指标必须先补后端分析函数和 API 回归测试，再增加前端展示。
 5. 算法仓库只位于策略 `init/update` 与可选 `get_replay_actions` 调用边界；输出返回后，MoveList 校验、

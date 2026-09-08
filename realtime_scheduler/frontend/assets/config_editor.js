@@ -7050,11 +7050,15 @@ function renderAlgorithmMetadata() {
   };
   showAlgorithmDetails(state.strategy);
 }
+function readableLogFileName(testName) {
+  const readableTestName = String(testName || "\u5F53\u524D\u6D4B\u8BD5").replace(/[\\/:*?"<>|\u0000-\u001f]+/g, "_").replace(/^[ ._]+|[ ._]+$/g, "") || "\u5F53\u524D\u6D4B\u8BD5";
+  return `\u590D\u73B0\u65E5\u5FD7-${readableTestName}.json`;
+}
 function prepareLogDownload(result) {
   if (!result?.logUrl) return false;
   const link = document.getElementById("logButton");
   link.href = result.logUrl;
-  link.download = result.logFileName || "ct-input-log.json";
+  link.download = readableLogFileName(state.testCaseName);
   link.removeAttribute("aria-disabled");
   return true;
 }
@@ -7731,7 +7735,7 @@ function renderBatchItems(items) {
           <button class="batch-result-title" type="button" aria-pressed="${selected}" aria-label="\u67E5\u770B ${escapeHtml3(item.testName || `\u6D4B\u8BD5 ${index + 1}`)} \u7684\u8BE6\u7EC6\u6307\u6807"><strong title="${escapeHtml3(item.testName || `\u6D4B\u8BD5 ${index + 1}`)}">${escapeHtml3(item.testName || `\u6D4B\u8BD5 ${index + 1}`)}</strong></button>
           <div class="batch-result-meta">
             <span class="batch-status">${statusLabels[item.status] || "\u7B49\u5F85\u4E2D"}</span>
-            ${item.logUrl ? `<a class="btn" href="${escapeHtml3(item.logUrl)}" download>\u65E5\u5FD7</a>` : `<span class="btn" aria-disabled="true">\u65E5\u5FD7</span>`}
+            ${item.logUrl ? `<a class="btn" href="${escapeHtml3(item.logUrl)}" download="${escapeHtml3(readableLogFileName(item.testName || `\u6D4B\u8BD5-${index + 1}`))}">\u65E5\u5FD7</a>` : `<span class="btn" aria-disabled="true">\u65E5\u5FD7</span>`}
             ${item.resultUrl ? `<button class="btn primary" type="button" data-playback-result="${escapeHtml3(item.resultUrl)}" data-playback-name="${escapeHtml3(item.testName || `\u6D4B\u8BD5 ${index + 1}`)}">\u56DE\u653E</button>` : `<span class="btn" aria-disabled="true">\u56DE\u653E</span>`}
             ${item.ganttUrl ? `<a class="btn" href="${escapeHtml3(item.ganttUrl)}" target="_blank">\u7518\u7279\u56FE</a>` : `<span class="btn" aria-disabled="true">\u7518\u7279\u56FE</span>`}
             ${failed ? `<button class="btn danger" type="button" data-batch-error="${index}" aria-label="\u67E5\u770B ${escapeHtml3(displayId)} \u7684\u62A5\u9519\u4FE1\u606F">\u62A5\u9519</button>` : ""}
@@ -7773,7 +7777,10 @@ function updateBatchLogDownload(result) {
     return;
   }
   button.href = `/api/run-batches/${encodeURIComponent(result.batchId)}/logs`;
-  button.download = `ct-batch-logs-${String(result.batchId).slice(0, 8)}.zip`;
+  const deviceName = String(result.deviceName || "\u5F53\u524D\u8BBE\u5907").replace(/\.json$/i, "");
+  const readableDeviceName = deviceName.replace(/[\\/:*?"<>|\u0000-\u001f]+/g, "_") || "\u5F53\u524D\u8BBE\u5907";
+  const readableGroupName = String(result.group || "\u5F53\u524D\u6D4B\u8BD5\u7EC4").replace(/[\\/:*?"<>|\u0000-\u001f]+/g, "_") || "\u5F53\u524D\u6D4B\u8BD5\u7EC4";
+  button.download = `\u6279\u91CF\u590D\u73B0\u65E5\u5FD7-${readableDeviceName}-${readableGroupName}.zip`;
   button.removeAttribute("aria-disabled");
 }
 function showBatchResult(result) {
@@ -7807,7 +7814,7 @@ function showBatchResult(result) {
     if (first.logUrl) {
       const log = document.getElementById("logButton");
       log.href = first.logUrl;
-      log.download = first.logFileName;
+      log.download = readableLogFileName(first.testName);
       log.removeAttribute("aria-disabled");
     }
   }
@@ -7816,26 +7823,6 @@ function showBatchResult(result) {
   if (allGanttUrl) {
     allGantt.href = allGanttUrl;
     allGantt.removeAttribute("aria-disabled");
-  }
-}
-async function clearExportedArtifacts() {
-  if (!window.confirm("\u5C06\u5220\u9664\u5168\u90E8\u5DF2\u5BFC\u51FA\u7684\u7ED3\u679C\u548C\u590D\u73B0\u65E5\u5FD7\uFF0C\u4E14\u65E0\u6CD5\u6062\u590D\u3002\u662F\u5426\u7EE7\u7EED\uFF1F")) return;
-  const button = document.getElementById("clearExportsButton");
-  button.disabled = true;
-  try {
-    const response = await fetch("/api/exports", { method: "DELETE" });
-    const result = await response.json();
-    if (!response.ok || !result.ok) throw new Error(result.error || "\u6E05\u7406\u5931\u8D25");
-    resetRunResult();
-    const deleted = result.deleted || {};
-    writeTerminal(`$ \u5DF2\u6E05\u7406\u5BFC\u51FA\u6570\u636E
-  \u7ED3\u679C\uFF1A${Number(deleted.results) || 0} \u4E2A
-  \u590D\u73B0\u65E5\u5FD7\uFF1A${Number(deleted.logs) || 0} \u4E2A`);
-  } catch (error) {
-    writeTerminal(`$ \u6E05\u7406\u5BFC\u51FA\u6570\u636E\u5931\u8D25
-  ${error.message || "\u672A\u77E5\u9519\u8BEF"}`, true);
-  } finally {
-    button.disabled = false;
   }
 }
 function showResult(result) {
@@ -8285,7 +8272,6 @@ document.getElementById("searchTreeOptionsForm").addEventListener("submit", (eve
     document.getElementById("searchTreeCheckpointHint").textContent = error.message || "\u53C2\u6570\u4FDD\u5B58\u5931\u8D25";
   });
 });
-document.getElementById("clearExportsButton").addEventListener("click", clearExportedArtifacts);
 document.getElementById("batchOverviewButton").addEventListener("click", showCurrentBatchOverview);
 document.getElementById("testGroupAnalysisButton").addEventListener("click", () => {
   showTestGroupAnalysis().catch((error) => writeTerminal(`$ \u6D4B\u8BD5\u7EC4\u7ED3\u679C\u5206\u6790\u5931\u8D25

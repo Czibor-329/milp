@@ -4081,11 +4081,17 @@ function renderAlgorithmMetadata() {
   showAlgorithmDetails(state.strategy);
 }
 
+/** 用测试名称生成便于用户识别且适合本地文件系统的复现日志名称。 */
+function readableLogFileName(testName) {
+  const readableTestName = String(testName || "当前测试").replace(/[\\/:*?"<>|\u0000-\u001f]+/g, "_").replace(/^[ ._]+|[ ._]+$/g, "") || "当前测试";
+  return `复现日志-${readableTestName}.json`;
+}
+
 /** 让本次运行生成的 input_data 日志可按需下载。 */
 function prepareLogDownload(result) {
   if (!result?.logUrl) return false;
   const link = document.getElementById("logButton");
-  link.href = result.logUrl; link.download = result.logFileName || "ct-input-log.json"; link.removeAttribute("aria-disabled");
+  link.href = result.logUrl; link.download = readableLogFileName(state.testCaseName); link.removeAttribute("aria-disabled");
   return true;
 }
 
@@ -4819,7 +4825,7 @@ function renderBatchItems(items) {
           <button class="batch-result-title" type="button" aria-pressed="${selected}" aria-label="查看 ${escapeHtml(item.testName || `测试 ${index + 1}`)} 的详细指标"><strong title="${escapeHtml(item.testName || `测试 ${index + 1}`)}">${escapeHtml(item.testName || `测试 ${index + 1}`)}</strong></button>
           <div class="batch-result-meta">
             <span class="batch-status">${statusLabels[item.status] || "等待中"}</span>
-            ${item.logUrl ? `<a class="btn" href="${escapeHtml(item.logUrl)}" download>日志</a>` : `<span class="btn" aria-disabled="true">日志</span>`}
+            ${item.logUrl ? `<a class="btn" href="${escapeHtml(item.logUrl)}" download="${escapeHtml(readableLogFileName(item.testName || `测试-${index + 1}`))}">日志</a>` : `<span class="btn" aria-disabled="true">日志</span>`}
             ${item.resultUrl ? `<button class="btn primary" type="button" data-playback-result="${escapeHtml(item.resultUrl)}" data-playback-name="${escapeHtml(item.testName || `测试 ${index + 1}`)}">回放</button>` : `<span class="btn" aria-disabled="true">回放</span>`}
             ${item.ganttUrl ? `<a class="btn" href="${escapeHtml(item.ganttUrl)}" target="_blank">甘特图</a>` : `<span class="btn" aria-disabled="true">甘特图</span>`}
             ${failed ? `<button class="btn danger" type="button" data-batch-error="${index}" aria-label="查看 ${escapeHtml(displayId)} 的报错信息">报错</button>` : ""}
@@ -4867,7 +4873,10 @@ function updateBatchLogDownload(result) {
     return;
   }
   button.href = `/api/run-batches/${encodeURIComponent(result.batchId)}/logs`;
-  button.download = `ct-batch-logs-${String(result.batchId).slice(0, 8)}.zip`;
+  const deviceName = String(result.deviceName || "当前设备").replace(/\.json$/i, "");
+  const readableDeviceName = deviceName.replace(/[\\/:*?"<>|\u0000-\u001f]+/g, "_") || "当前设备";
+  const readableGroupName = String(result.group || "当前测试组").replace(/[\\/:*?"<>|\u0000-\u001f]+/g, "_") || "当前测试组";
+  button.download = `批量复现日志-${readableDeviceName}-${readableGroupName}.zip`;
   button.removeAttribute("aria-disabled");
 }
 
@@ -4899,31 +4908,12 @@ function showBatchResult(result) {
       const gantt = document.getElementById("ganttButton"); gantt.href = first.ganttUrl; gantt.removeAttribute("aria-disabled");
     }
     if (first.logUrl) {
-      const log = document.getElementById("logButton"); log.href = first.logUrl; log.download = first.logFileName; log.removeAttribute("aria-disabled");
+      const log = document.getElementById("logButton"); log.href = first.logUrl; log.download = readableLogFileName(first.testName); log.removeAttribute("aria-disabled");
     }
   }
   const allGanttUrl = batchGanttUrl(result.items);
   const allGantt = document.getElementById("batchGanttButton");
   if (allGanttUrl) { allGantt.href = allGanttUrl; allGantt.removeAttribute("aria-disabled"); }
-}
-
-/** 删除服务端已保存的甘特图结果和复现日志，并重置当前结果入口。 */
-async function clearExportedArtifacts() {
-  if (!window.confirm("将删除全部已导出的结果和复现日志，且无法恢复。是否继续？")) return;
-  const button = document.getElementById("clearExportsButton");
-  button.disabled = true;
-  try {
-    const response = await fetch("/api/exports", { method: "DELETE" });
-    const result = await response.json();
-    if (!response.ok || !result.ok) throw new Error(result.error || "清理失败");
-    resetRunResult();
-    const deleted = result.deleted || {};
-    writeTerminal(`$ 已清理导出数据\n  结果：${Number(deleted.results) || 0} 个\n  复现日志：${Number(deleted.logs) || 0} 个`);
-  } catch (error) {
-    writeTerminal(`$ 清理导出数据失败\n  ${error.message || "未知错误"}`, true);
-  } finally {
-    button.disabled = false;
-  }
 }
 
 /** 显示运行指标和逐轮日志。 */
@@ -5371,7 +5361,6 @@ document.getElementById("searchTreeOptionsForm").addEventListener("submit", even
     document.getElementById("searchTreeCheckpointHint").textContent = error.message || "参数保存失败";
   });
 });
-document.getElementById("clearExportsButton").addEventListener("click", clearExportedArtifacts);
 document.getElementById("batchOverviewButton").addEventListener("click", showCurrentBatchOverview);
 document.getElementById("testGroupAnalysisButton").addEventListener("click", () => {
   showTestGroupAnalysis().catch(error => writeTerminal(`$ 测试组结果分析失败\n  ${error.message || "未知错误"}`, true));
