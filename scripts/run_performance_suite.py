@@ -36,8 +36,8 @@ from tests.performance.fixture_factory import (  # noqa: E402
 )
 
 
-DEFAULT_PROFILE_PATH = ROOT / "docs" / "performance" / "profiles.json"
-DEFAULT_BUDGET_PATH = ROOT / "docs" / "performance" / "budgets.json"
+DEFAULT_PROFILE_PATH = ROOT / "tests" / "performance" / "config" / "profiles.json"
+DEFAULT_BUDGET_PATH = ROOT / "tests" / "performance" / "config" / "budgets.json"
 DEFAULT_REPORT_PATH = ROOT / "output" / "performance-report.json"
 
 

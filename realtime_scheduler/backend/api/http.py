@@ -200,10 +200,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/documentation":
             try:
-                document = load_documentation((
-                    DOCUMENTATION_DIR,
-                    ALGORITHM_DOCUMENTATION_DIR,
-                ))
+                document = load_documentation(documentation_directory())
             except DocumentationError as error:
                 self._send_json(
                     {"ok": False, "error": str(error)},

@@ -173,7 +173,7 @@ from realtime_scheduler.backend.validation.move_validation import (
     validate_move_list,
 )
 from realtime_scheduler.backend.validation.replay_machine import ReplayMachine
-from realtime_scheduler.backend.api.documentation import DocumentationError, load_documentation
+from realtime_scheduler.backend.api.documentation import DocumentationError, load_documentation, documentation_directory
 from realtime_scheduler.backend.validation.hongye import HongYeLogValidator
 from realtime_scheduler.backend.observability import (
     configure_logging,
@@ -240,8 +240,6 @@ VIEWER_PATH = FRONTEND_DIR / "movelist_gantt_viewer.html"
 DOCUMENTATION_PAGE_PATH = FRONTEND_DIR / "documentation.html"
 ROUTE_EDITOR_LOGIC_PATH = FRONTEND_DIR / "route_editor_logic.js"
 FRONTEND_ASSET_DIR = FRONTEND_DIR / "assets"
-DOCUMENTATION_DIR = DATA_DIR / "documentation"
-ALGORITHM_DOCUMENTATION_DIR = ALGORITHM_ROOT / "docs" / "documentation"
 E2E_CTQ_MODEL_PATH = ALGORITHM_ROOT / "results" / "models" / "e2e_ctq_policy.npz"
 DUAL_ACTOR_MODEL_PATH = (
     ALGORITHM_ROOT / "results" / "dual_actor_primitive_v1_candidate.npz"

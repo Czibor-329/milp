@@ -320,7 +320,7 @@ class DocumentationView {
 
   private renderLoading(): void {
     this.root.setAttribute("aria-busy", "true");
-    this.root.innerHTML = `<div class="documentation-state" role="status"><span class="documentation-spinner" aria-hidden="true"></span><strong>正在读取本地 Markdown</strong><p>内容来自 realtime_scheduler/data/documentation，不会进入 Git。</p></div>`;
+    this.root.innerHTML = `<div class="documentation-state" role="status"><span class="documentation-spinner" aria-hidden="true"></span><strong>正在读取本地 Markdown</strong><p>内容来自独立文档仓库 D:/ct-scheduler-docs。</p></div>`;
   }
 
   private renderError(message: string): void {

@@ -6,10 +6,26 @@ from pathlib import Path
 
 import pytest
 
-from realtime_scheduler.backend.api.documentation import DocumentationError, load_documentation
+from realtime_scheduler.backend.api.documentation import DocumentationError, load_documentation, documentation_directory
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_documentation_root_is_independent_of_code_and_data(monkeypatch, tmp_path) -> None:
+    """文档根目录由独立配置决定，不回退到平台或算法仓库。"""
+    monkeypatch.setenv("CT_DOCUMENTATION_ROOT", str(tmp_path / "manuals"))
+    assert documentation_directory() == tmp_path / "manuals" / "pages"
+
+
+def test_load_documentation_reads_nested_repository_pages(tmp_path) -> None:
+    """独立仓库的平台和算法子目录应递归加载并检测跨目录冲突。"""
+    _write_page(tmp_path / "pages" / "platform")
+    _write_page(tmp_path / "pages" / "algorithm", slug="algorithm-api", order=20)
+    assert len(load_documentation(tmp_path / "pages")["pages"]) == 2
+    _write_page(tmp_path / "pages" / "duplicate")
+    with pytest.raises(DocumentationError, match="slug 重复"):
+        load_documentation(tmp_path / "pages")
 
 
 def _write_page(
@@ -80,7 +96,7 @@ def test_load_documentation_merges_platform_and_algorithm_pages(tmp_path) -> Non
 
 def test_load_documentation_reports_missing_directory(tmp_path) -> None:
     """文档未部署时应返回可执行的 Markdown 目录提示。"""
-    with pytest.raises(DocumentationError, match="data/documentation"):
+    with pytest.raises(DocumentationError, match="CT_DOCUMENTATION_ROOT"):
         load_documentation(tmp_path / "documentation")
 
 
@@ -107,10 +123,9 @@ def test_load_documentation_requires_matching_h1(tmp_path) -> None:
 
 def test_deadlock_catalog_page_is_visible_before_standard_api() -> None:
     """死锁类型页应进入前端导航，正文和右侧目录所需标题必须完整。"""
-    loaded = load_documentation((
-        ROOT / "realtime_scheduler" / "data" / "documentation",
-        ROOT / "alg" / "docs" / "documentation",
-    ))
+    if not documentation_directory().is_dir():
+        pytest.skip("独立文档仓库未部署；页面内容验收在文档仓库执行")
+    loaded = load_documentation(documentation_directory())
     pages = loaded["pages"]
     slugs = [page["slug"] for page in pages]
     page = next(page for page in pages if page["slug"] == "deadlock-types")

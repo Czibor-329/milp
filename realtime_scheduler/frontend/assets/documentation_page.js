@@ -14644,7 +14644,7 @@ var DocumentationView = class {
   }
   renderLoading() {
     this.root.setAttribute("aria-busy", "true");
-    this.root.innerHTML = `<div class="documentation-state" role="status"><span class="documentation-spinner" aria-hidden="true"></span><strong>\u6B63\u5728\u8BFB\u53D6\u672C\u5730 Markdown</strong><p>\u5185\u5BB9\u6765\u81EA realtime_scheduler/data/documentation\uFF0C\u4E0D\u4F1A\u8FDB\u5165 Git\u3002</p></div>`;
+    this.root.innerHTML = `<div class="documentation-state" role="status"><span class="documentation-spinner" aria-hidden="true"></span><strong>\u6B63\u5728\u8BFB\u53D6\u672C\u5730 Markdown</strong><p>\u5185\u5BB9\u6765\u81EA\u72EC\u7ACB\u6587\u6863\u4ED3\u5E93 D:/ct-scheduler-docs\u3002</p></div>`;
   }
   renderError(message) {
     this.root.removeAttribute("aria-busy");

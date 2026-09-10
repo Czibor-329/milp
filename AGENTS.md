@@ -19,7 +19,7 @@
 ## Read documentation before solving problems
 
 1. Before analyzing, troubleshooting, or modifying a problem, read the project documentation directly related to the task.
-   - At minimum, check the relevant parts of the repository or target module's `README.md`, `docs/`, `realtime_scheduler/data/documentation/*.md`, and any design or constraint documents referenced at the top of source files.
+   - At minimum, check the relevant parts of `D:/ct-scheduler-docs/README.md`, the relevant pages in `D:/ct-scheduler-docs/pages/`, and any design or constraint documents referenced at the top of source files.
    - Read only the pages relevant to the current problem; a full indiscriminate review is not required.
 
 2. Use the documentation to establish the problem boundary, terminology, business rules, input and output constraints, current design, and validation approach before choosing a solution.
@@ -72,10 +72,10 @@
    - Do not encode an obsolete file location in logs, protocol metadata, UI guidance, or tests after the implementation has moved.
 
 10. Scheduling feature changes must update the corresponding user documentation.
-   - When changing quick start, input APIs, constraint semantics, scheduling strategies, timing layers, Machine action feasibility, LoadLock management, or result analysis, update the corresponding pages in `realtime_scheduler/data/documentation/*.md` and verify page switching, body rendering, and the right-side table of contents in the user-documentation tab.
+   - When changing quick start, input APIs, constraint semantics, scheduling strategies, timing layers, Machine action feasibility, LoadLock management, or result analysis, update the corresponding pages in `D:/ct-scheduler-docs/pages/` and verify page switching, body rendering, and the right-side table of contents in the user-documentation tab.
    - Each Markdown file is a separate page and must retain `title`, `slug`, `group`, `order`, and `description` front matter. Its level-one heading must match `title`. Split overly long content by topic instead of continuing to expand a single page.
    - Standard API documentation must remain last in document navigation. Changes to API fields, types, enums, inheritance, or aggregation must update the API overview, device objects, job objects, and Move/output pages, not only summary fields.
-   - Documentation content is local runtime data and must remain excluded by `realtime_scheduler/data/.gitignore`. Do not remove that ignore rule merely to commit documentation changes; only documentation reading, validation, and display capabilities belong in the code repository.
+   - All documentation content is owned by the separate Git repository `D:/ct-scheduler-docs`. Do not create documentation copies or old-path navigation pages in either code repository. Keep code-repository agent instructions here and point their reading requirements to the documentation repository. Runtime data ignore rules remain unchanged.
 
 ## Frontend versioning
 
@@ -95,4 +95,4 @@
 - A device `device.json` contains init data only (`Stations` and `Robots`). Routes, groups, and tests must remain in their separate files or directories.
 - Every persistent format change must increment `schemaVersion`, provide an idempotent migration from the previous released version, preserve a recoverable backup, and add migration fixtures and tests.
 - Import must reject newer unsupported versions and must never silently overwrite a same-ID item with different content.
-- When the data layout or exchange behavior changes, update `docs/data-format.md`, the root `README.md`, and the frontend user documentation in the same change.
+- When the data layout or exchange behavior changes, update `D:/ct-scheduler-docs/pages/engineering/data-format.md` and the corresponding platform pages in the documentation repository in the same change.

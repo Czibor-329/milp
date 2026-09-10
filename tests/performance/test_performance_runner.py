@@ -25,7 +25,7 @@ class RelativeBudgetTests(unittest.TestCase):
     def setUp(self) -> None:
         """加载仓库中的试运行预算。"""
         self.budgets = json.loads(
-            (ROOT / "docs" / "performance" / "budgets.json").read_text(encoding="utf-8")
+            (ROOT / "tests" / "performance" / "config" / "budgets.json").read_text(encoding="utf-8")
         )
 
     def _report(self, p50: float, p95: float, response_bytes: int) -> dict:

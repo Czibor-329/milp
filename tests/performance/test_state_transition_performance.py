@@ -1,7 +1,7 @@
 """平台状态推进的确定性性能门禁。
 
 本测试只计量平台 MoveList 状态机推进，不包含算法、HongYe、文件访问或前端。预算
-来自 ``docs/performance/budgets.json``；超过预算即 pytest 失败，不能进入提交。
+来自 ``tests/performance/config/budgets.json``；超过预算即 pytest 失败，不能进入提交。
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ def _state_transition_fixture() -> tuple[dict, dict]:
 def test_state_transition_1000_moves_p95_stays_within_budget() -> None:
     """1000 个 Move 的平台状态推进 P95 必须低于提交门禁预算。"""
     budget_ms = json.loads(
-        (ROOT / "docs" / "performance" / "budgets.json").read_text(encoding="utf-8")
+        (ROOT / "tests" / "performance" / "config" / "budgets.json").read_text(encoding="utf-8")
     )["absoluteMilliseconds"]["stateTransition1000MovesP95"]
     samples: list[float] = []
     for _ in range(SAMPLE_COUNT):

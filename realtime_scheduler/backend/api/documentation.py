@@ -1,12 +1,13 @@
 """读取本地 Markdown 教学文档并提供稳定的页面数据契约。
 
-正文以 ``realtime_scheduler/data/documentation/*.md`` 保存且不进入 Git。
+正文统一保存在独立文档仓库，默认 ``D:/ct-scheduler-docs/pages``。
 每个 Markdown 文件对应左侧导航中的一个独立页面；本模块只负责元数据解析、
 排序和基本校验，Markdown 到 HTML 的转换由浏览器端完成。
 """
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Iterable
 from pathlib import Path
@@ -16,6 +17,11 @@ from typing import Any, Dict
 DOCUMENTATION_SCHEMA_VERSION = 2
 _FRONT_MATTER_BOUNDARY = "---"
 _SLUG_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+
+def documentation_directory() -> Path:
+    """返回独立文档仓库的页面目录；环境变量可覆盖默认根目录。"""
+    return Path(os.environ.get("CT_DOCUMENTATION_ROOT") or "D:/ct-scheduler-docs").expanduser() / "pages"
 
 
 class DocumentationError(ValueError):
@@ -94,9 +100,8 @@ def _load_page(path: Path) -> Dict[str, Any]:
 def load_documentation(directories: Path | Iterable[Path]) -> Dict[str, Any]:
     """聚合一个或多个 Markdown 页面目录并返回统一导航数据。
 
-    本地使用手册可以继续放在 ``data/documentation``；算法仓库维护的接口
-    文档从其版本化目录直接读取。不同来源仍共用 slug 唯一性与 order 排序，
-    因而前端无需了解页面来自哪个仓库。
+    递归读取独立文档仓库中的平台、算法与开发页面。不同分类共用 slug
+    唯一性与 order 排序，前端无需了解页面所在的子目录。
     """
     source_directories = (
         [directories]
@@ -107,13 +112,13 @@ def load_documentation(directories: Path | Iterable[Path]) -> Dict[str, Any]:
         path
         for directory in source_directories
         if directory.is_dir()
-        for path in directory.glob("*.md")
+        for path in directory.rglob("*.md")
         if path.is_file()
     )
     if not paths:
         raise DocumentationError(
-            "文档尚未配置，请在 realtime_scheduler/data/documentation/ 或"
-            "算法仓库 docs/documentation/ 下提供至少一个 .md 文件"
+            "文档尚未配置，请在独立文档仓库 pages/ 下提供 .md 文件；"
+            "默认 D:/ct-scheduler-docs，可用 CT_DOCUMENTATION_ROOT 指定仓库根目录"
         )
 
     pages = [_load_page(path) for path in paths]
