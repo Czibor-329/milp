@@ -155,7 +155,8 @@ class FrontendTemplateTests(unittest.TestCase):
         script = EDITOR_SCRIPT_PATH.read_text(encoding="utf-8")
 
         for code in ("DEADLOCK.SINGLE_ARM_TARGET_FULL", "DEADLOCK.DUAL_ARM_TARGETS_FULL",
-                     "DLK-ROB-001", "DLK-ROB-002", "未死锁，但算法认为死锁"):
+                     "DLK-ROB-001", "DLK-ROB-002", "DLK-UNK",
+                     "当前现场不满足这两种类型，算法报告无法继续调度。"):
             self.assertIn(code, script)
         for code in ("DLK-ROB-003", "DLK-ROB-004", "DLK-ROB-005", "DLK-ROB-006",
                      "DLK-LL-001", "DLK-CLN-001", "DLK-RES-001"):
@@ -771,6 +772,17 @@ class ConfigEditorServerTests(unittest.TestCase):
         self.assertNotIn("兼容参数：旧前瞻秒数", source)
         self.assertNotIn('data-option="loadLockExchange"', source)
         self.assertNotIn("禁用交换", source)
+
+    def test_frontend_exposes_three_heuristic_loadlock_radios(self) -> None:
+        """Heuristic 只暴露与算法配置同名的三个 LoadLock 单选参数，并复用仓库既有的勾选样式。"""
+        source = _editor_source()
+        self.assertIn('id="heuristicLoadLockOptions"', source)
+        for option in ("loadLockDirection", "loadLockCapacity", "loadLockBindBatch"):
+            self.assertIn(f'data-option="{option}" type="radio"', source)
+        self.assertIn('class="run-setting-option heuristic-loadlock-choice"', source)
+        self.assertIn(".heuristic-loadlock-choice", source)
+        self.assertIn(".run-setting-option:has(input:checked)", source)
+        self.assertIn('state.strategy !== "heuristic"', EDITOR_SCRIPT_PATH.read_text(encoding="utf-8"))
 
     def test_frontend_does_not_expose_removed_milp_strategy(self) -> None:
         """页面、状态和健康检查不再暴露已移除的 MILP 策略。"""

@@ -47,6 +47,9 @@ let analysisSettingsPreferencesDirty = false;
 
 const EXPECTED_API_SCHEMA = "cjob-pjob-v3";
 const DEFAULT_SCHEDULE_OPTIONS = Object.freeze({
+  loadLockDirection: 1,
+  loadLockCapacity: 1,
+  loadLockBindBatch: 0,
   loadLockManager: "petri-look",
   residencyGuardSeconds: 0,
   maximumRobotHoldingSeconds: 0,
@@ -78,9 +81,9 @@ function deadlockDisplay(deadlock) {
   if (registered) return { internalCode: code, ...registered, message: String(deadlock.Message || "") };
   return {
     internalCode: "DEADLOCK.UNCLASSIFIED",
-    deadlockCode: "DLK-UNK-001",
-    title: "未死锁，但算法认为死锁",
-    message: "平台仅识别 DLK-ROB-001 和 DLK-ROB-002；当前现场不满足这两种类型，算法报告无法继续调度。",
+    deadlockCode: "DLK-UNK",
+    title: "当前现场不满足这两种类型，算法报告无法继续调度。",
+    message: "当前现场不满足这两种类型，算法报告无法继续调度。",
   };
 }
 
@@ -2083,6 +2086,13 @@ function applyTestCase(testCase) {
     ),
   };
   state.options.loadLockManager = state.options.loadLockManager || "petri-look";
+  const heuristicLoadLockOptionRanges = {
+    loadLockDirection: [0, 1], loadLockCapacity: [0, 1, 2], loadLockBindBatch: [0, 1],
+  };
+  for (const [key, allowedValues] of Object.entries(heuristicLoadLockOptionRanges)) {
+    const optionValue = Number(state.options[key]);
+    state.options[key] = allowedValues.includes(optionValue) ? optionValue : DEFAULT_SCHEDULE_OPTIONS[key];
+  }
   delete state.options.loadLockExchange;
   for (const key of ["residencyGuardSeconds", "maximumRobotHoldingSeconds", "maximumSystemResidenceCv"]) {
     const objectiveValue = Number(state.options[key]);
@@ -2124,7 +2134,11 @@ function applyTestCase(testCase) {
   state.dirty = false;
   document.getElementById("roundCount").value = state.roundCount;
   document.querySelectorAll('input[name="strategy"]').forEach(input => { input.checked = input.value === state.strategy; });
-  document.querySelectorAll("[data-option]").forEach(input => { input.value = state.options[input.dataset.option] ?? input.value; });
+  document.querySelectorAll("[data-option]").forEach(input => {
+    const optionValue = state.options[input.dataset.option];
+    if (input.type === "radio") input.checked = String(optionValue) === input.value;
+    else input.value = optionValue ?? input.value;
+  });
   updateStrategyOptionVisibility();
   document.getElementById("roundCount").disabled = false;
   if (Object.keys(state.algorithmMetadata).length) showAlgorithmDetails(state.strategy);
@@ -3539,6 +3553,9 @@ function updateStateFromControl(control) {
     return;
   }
   if (control.dataset.option) {
+    if (["loadLockDirection", "loadLockCapacity", "loadLockBindBatch"].includes(control.dataset.option)) {
+      value = Number(control.value);
+    }
     if (["residencyGuardSeconds", "maximumRobotHoldingSeconds", "maximumSystemResidenceCv"].includes(control.dataset.option)) {
       value = Number.isFinite(value) ? Math.max(0, value) : 0;
       control.value = value;
@@ -3835,9 +3852,12 @@ function buildPayload() {
   return { schemaVersion: EXPECTED_API_SCHEMA, workspaceDeviceId: state.workspaceDeviceId, workspaceTestId: state.testCaseId, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options, hongYeCheck: hongYeCheckEnabled(), compatibilityMode: compatibilityModeEnabled(), executionTimingEnabled: executionTimingEnabled(), skipBaseline: skipBaselineEnabled(), cleanValidationTypes: cleanValidationTypes(), recipes: collectRecipes(routes), cleans, routes, rounds: instances.rounds };
 }
 
-/** 收集发送给算法的选项；Heuristic 完全由算法仓库配置。 */
+/** 收集发送给算法的选项；Heuristic 仅允许覆盖其三个 LoadLock 配置。 */
 function schedulingRequestOptions() {
-  return state.strategy === "heuristic" ? {} : { ...state.options };
+  if (state.strategy !== "heuristic") return { ...state.options };
+  return Object.fromEntries(
+    ["loadLockDirection", "loadLockCapacity", "loadLockBindBatch"].map(key => [key, state.options[key]])
+  );
 }
 
 /** 把数字输入限制在 [min, max] 并回填 DOM，防止手输越界值。 */
@@ -4074,7 +4094,7 @@ function updateStrategyOptionVisibility() {
   const algorithm = state.availableAlgorithms.find(item => item.strategy === state.strategy);
   const optionGroups = new Set(algorithm?.optionGroups || []);
   document.getElementById("loadlockOptions").classList.toggle("is-hidden", !optionGroups.has("loadlock"));
-  document.getElementById("heuristicObjectiveOptions").classList.toggle("is-hidden", !optionGroups.has("heuristic-objectives"));
+  document.getElementById("heuristicLoadLockOptions").classList.toggle("is-hidden", state.strategy !== "heuristic");
   document.getElementById("searchTreeOptions").classList.toggle("is-hidden", !optionGroups.has("search-tree"));
 }
 

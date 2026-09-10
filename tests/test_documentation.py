@@ -134,7 +134,8 @@ def test_deadlock_catalog_page_is_visible_before_standard_api() -> None:
     assert slugs.index("deadlock-types") < slugs.index("interface-overview")
     assert page["group"] == "调度机制"
     for code in ("DEADLOCK.SINGLE_ARM_TARGET_FULL", "DEADLOCK.DUAL_ARM_TARGETS_FULL",
-                 "DEADLOCK.UNCLASSIFIED", "未死锁，但算法认为死锁"):
+                 "DEADLOCK.UNCLASSIFIED", "DLK-UNK",
+                 "当前现场不满足这两种类型，算法报告无法继续调度。"):
         assert code in page["markdown"]
     assert "## 可证明的诊断类型" in page["markdown"]
     assert "## 失败时如何定位" in page["markdown"]

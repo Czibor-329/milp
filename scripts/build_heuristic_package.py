@@ -141,13 +141,17 @@ def validate_source(source_root: Path) -> str:
 
 
 def iter_runtime_files(source_root: Path) -> Iterable[Path]:
-    """按稳定路径顺序返回精简运行时需要的 Python 源文件。"""
+    """按稳定路径返回运行时源码与算法自有的单值 LoadLock 配置。"""
     candidates = [
         path
         for runtime_directory in (source_root / "src",)
         for path in runtime_directory.rglob("*.py")
         if "__pycache__" not in path.parts
     ]
+    configuration = source_root / "config" / "heuristic.json"
+    if not configuration.is_file():
+        raise FileNotFoundError(f"缺少 Heuristic LoadLock 配置：{configuration}")
+    candidates.append(configuration)
     for path in sorted(
         candidates,
         key=lambda item: item.relative_to(source_root).as_posix(),
@@ -191,7 +195,7 @@ def restrict_to_heuristic(relative_path: PurePosixPath, content: bytes) -> bytes
             text,
             count=1,
         )
-        if reset_replacement_count != 1:
+        if reset_replacement_count != 1 and "reset_schedule_alphago_telemetry" in text:
             raise RuntimeError("无法移除 heuristic 初始化中的搜索遥测依赖")
         return text.encode("utf-8")
     return content

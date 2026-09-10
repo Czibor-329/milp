@@ -27,6 +27,10 @@ class BuildHeuristicPackageTests(TestCase):
             source_root = temporary_root / "source"
             output_directory = temporary_root / "output"
             (source_root / "src").mkdir(parents=True)
+            (source_root / "config").mkdir()
+            (source_root / "config" / "heuristic.json").write_text(
+                '{"loadLockDirection": 1, "loadLockCapacity": 1, "loadLockBindBatch": 0}\n', encoding="utf-8",
+            )
             heuristic_directory = (
                 source_root / "src" / "schedule" / "strategies" / "heuristic"
             )
@@ -79,6 +83,7 @@ class BuildHeuristicPackageTests(TestCase):
             with ZipFile(archive_path) as archive:
                 archive_names = archive.namelist()
                 function_source = archive.read("alg/src/api.py").decode("utf-8")
+                self.assertEqual(archive.read("alg/config/heuristic.json").replace(b"\r\n", b"\n"), b'{"loadLockDirection": 1, "loadLockCapacity": 1, "loadLockBindBatch": 0}\n')
 
             self.assertFalse(
                 any("schedule_alphago" in name for name in archive_names),

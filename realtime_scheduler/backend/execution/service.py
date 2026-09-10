@@ -79,10 +79,7 @@ def _execute_standard_algorithm(
 
         prepared_first_update = deepcopy(dict(first_update))
         options = plan.get("options")
-        # Heuristic 的策略参数由算法仓库配置，旧测试保存的选项也不得透传。
-        if builtin_strategy == "heuristic":
-            prepared_first_update.pop("AlgorithmOptions", None)
-        elif isinstance(options, Mapping):
+        if isinstance(options, Mapping):
             prepared_first_update["AlgorithmOptions"] = deepcopy(dict(options))
     else:
         strategy = f"other_alg:{algorithm_id}"
