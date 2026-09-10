@@ -4133,7 +4133,23 @@ var DEFAULT_SCHEDULE_OPTIONS = Object.freeze({
   loadLockMacroSearchSeconds: 4,
   loadLockMacroRollouts: 96,
   searchTreeModelPath: "",
+  heuristicConfig: null,
   seed: 0
+});
+var DEFAULT_HEURISTIC_WEIGHTS = Object.freeze({
+  feed_block_penalty: 4,
+  residency_urgency_bonus: 2,
+  residency_slack_weight: 1,
+  earliest_start_weight: 0.35,
+  finish_time_weight: 0.15,
+  exchange_bonus: 2,
+  process_departure_bonus: 1.6,
+  into_process_bonus: 1.5,
+  drain_bonus: 0.3,
+  sink_bonus: 0.25,
+  feed_penalty: -0.35,
+  route_balance_weight: 0.4,
+  stage_progress_bonus: 0.2
 });
 var SCHEDULE_OPTION_KEYS = new Set(Object.keys(DEFAULT_SCHEDULE_OPTIONS));
 var DEADLOCK_TYPE_CATALOG = Object.freeze({
@@ -6922,6 +6938,47 @@ function openSearchTreeOptionsDialog() {
   document.getElementById("searchTreeCheckpointHint").textContent = configuredPath ? "\u5F53\u524D checkpoint \u5DF2\u4FDD\u5B58\u5728\u672C\u5730\u670D\u52A1\u4E2D\uFF1B\u91CD\u65B0\u9009\u62E9\u6587\u4EF6\u53EF\u66FF\u6362\u5B83\u3002" : "\u9009\u62E9\u672C\u673A checkpoint \u540E\u5C06\u4E0A\u4F20\u5230\u672C\u5730\u670D\u52A1\uFF0C\u5E76\u7528\u4E8E\u540E\u7EED\u8FD0\u884C\u3002";
   document.getElementById("searchTreeOptionsDialog").showModal();
 }
+function openHeuristicSettingsDialog() {
+  document.getElementById("heuristicSettingsError").textContent = "";
+  const configured = state.options.heuristicConfig && typeof state.options.heuristicConfig === "object" ? state.options.heuristicConfig : null;
+  document.getElementById("heuristicCustomWeightsEnabled").checked = Boolean(configured);
+  document.querySelectorAll("[data-heuristic-weight]").forEach((input) => {
+    const key = input.dataset.heuristicWeight;
+    input.value = configured?.[key] ?? DEFAULT_HEURISTIC_WEIGHTS[key];
+  });
+  for (const key of ["loadLockDirection", "loadLockCapacity", "loadLockBindBatch"]) {
+    document.querySelectorAll(`[data-heuristic-dialog-option="${key}"]`).forEach((input) => {
+      input.checked = String(state.options[key]) === input.value;
+    });
+  }
+  updateHeuristicWeightEditorState();
+  document.getElementById("heuristicSettingsDialog").showModal();
+}
+function updateHeuristicWeightEditorState() {
+  const enabled = document.getElementById("heuristicCustomWeightsEnabled")?.checked === true;
+  document.querySelectorAll("[data-heuristic-weight]").forEach((input) => {
+    input.disabled = !enabled;
+  });
+  document.getElementById("heuristicWeightFields")?.classList.toggle("is-disabled", !enabled);
+}
+function saveHeuristicSettings() {
+  for (const key of ["loadLockDirection", "loadLockCapacity", "loadLockBindBatch"]) {
+    const input = document.querySelector(`[data-heuristic-dialog-option="${key}"]:checked`);
+    state.options[key] = Number(input?.value);
+  }
+  if (document.getElementById("heuristicCustomWeightsEnabled").checked) {
+    const weights = {};
+    document.querySelectorAll("[data-heuristic-weight]").forEach((input) => {
+      const value = Number(input.value);
+      if (!Number.isFinite(value)) throw new Error(`${input.dataset.heuristicWeight} \u5FC5\u987B\u662F\u6709\u9650\u6570\u5B57`);
+      weights[input.dataset.heuristicWeight] = value;
+    });
+    state.options.heuristicConfig = weights;
+  } else state.options.heuristicConfig = null;
+  retainSessionSchedulingConfiguration();
+  markTestDirty();
+  document.getElementById("heuristicSettingsDialog").close();
+}
 async function uploadSearchTreeCheckpoint(file) {
   const response = await fetch("/api/model-checkpoints", {
     method: "POST",
@@ -7313,9 +7370,11 @@ function buildPayload() {
 }
 function schedulingRequestOptions() {
   if (state.strategy !== "heuristic") return { ...state.options };
-  return Object.fromEntries(
+  const options = Object.fromEntries(
     ["loadLockDirection", "loadLockCapacity", "loadLockBindBatch"].map((key) => [key, state.options[key]])
   );
+  if (state.options.heuristicConfig) options.heuristicConfig = structuredClone(state.options.heuristicConfig);
+  return options;
 }
 function clampParallelismInput(elementId, min, max, fallback) {
   const input = document.getElementById(elementId);
@@ -7503,7 +7562,7 @@ function updateStrategyOptionVisibility() {
   const algorithm = state.availableAlgorithms.find((item) => item.strategy === state.strategy);
   const optionGroups = new Set(algorithm?.optionGroups || []);
   document.getElementById("loadlockOptions").classList.toggle("is-hidden", !optionGroups.has("loadlock"));
-  document.getElementById("heuristicLoadLockOptions").classList.toggle("is-hidden", state.strategy !== "heuristic");
+  document.getElementById("heuristicSettings").classList.toggle("is-hidden", state.strategy !== "heuristic");
   document.getElementById("searchTreeOptions").classList.toggle("is-hidden", !optionGroups.has("search-tree"));
 }
 function showAlgorithmDetails(strategy) {
@@ -8871,6 +8930,17 @@ document.getElementById("batchTestSelectionForm").addEventListener("submit", (ev
   runBatchSelection(false);
 });
 document.getElementById("openSearchTreeOptionsDialogButton").addEventListener("click", openSearchTreeOptionsDialog);
+document.getElementById("openHeuristicSettingsDialogButton").addEventListener("click", openHeuristicSettingsDialog);
+document.getElementById("heuristicSettingsDialogCancel").addEventListener("click", () => document.getElementById("heuristicSettingsDialog").close());
+document.getElementById("heuristicCustomWeightsEnabled").addEventListener("change", updateHeuristicWeightEditorState);
+document.getElementById("heuristicSettingsForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  try {
+    saveHeuristicSettings();
+  } catch (error) {
+    document.getElementById("heuristicSettingsError").textContent = error.message;
+  }
+});
 document.getElementById("searchTreeOptionsDialogCancel").addEventListener("click", () => document.getElementById("searchTreeOptionsDialog").close());
 document.getElementById("searchTreeCheckpointFile").addEventListener("change", (event) => {
   pendingSearchTreeCheckpointFile = event.currentTarget.files?.[0] || null;

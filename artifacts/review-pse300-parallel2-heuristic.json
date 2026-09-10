@@ -1,0 +1,48 @@
+{
+  "ok": true,
+  "strategy": "heuristic",
+  "group": "单次重算-1Job-基础",
+  "status": "completed",
+  "completed": 1,
+  "testCount": 1,
+  "succeeded": 1,
+  "failed": 0,
+  "cancelled": 0,
+  "workerCount": 1,
+  "validationWorkers": 1,
+  "processIsolation": false,
+  "totalElapsedMs": 3473.8748999989184,
+  "items": [
+    {
+      "index": 0,
+      "testId": "d1fa3721a27b4732a111c7fdea9477ae",
+      "testName": "并2",
+      "ok": true,
+      "status": "succeeded",
+      "totalElapsedMs": 892.2848999973212,
+      "cpuTimeMs": 937.5,
+      "recomputeCount": 1,
+      "averageRecomputeTimeMs": 937.5,
+      "makespan": 1064.9800000000002,
+      "moveCount": 790,
+      "validation": "passed",
+      "robotWaferDwellTime": {
+        "totalSeconds": 17.440000000000268,
+        "medianSeconds": 0.0,
+        "maxSeconds": 2.1800000000000637,
+        "sampleCount": 100
+      },
+      "resultUrl": "/api/results/acfbeab172e74f5a93e476b7aa5c46e8",
+      "ganttUrl": "/movelist_gantt_viewer.html?src=/api/results/acfbeab172e74f5a93e476b7aa5c46e8",
+      "logUrl": "/api/logs/f79711f25b874095b0cd9c1fe7684247",
+      "logFileName": "ct-input-log-f79711f2.json",
+      "baseline": {
+        "status": "skipped",
+        "fingerprint": "ce2ebff6103e183986596bf288602753ba6c054fb05f359d23f6db2c81a05208",
+        "updatedAt": "2026-09-10T23:11:10+08:00"
+      }
+    }
+  ],
+  "deviceId": "460fad299cda43298409d7ce16d54906",
+  "deviceName": "PSE300"
+}

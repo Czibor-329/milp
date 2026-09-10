@@ -1778,7 +1778,7 @@ test("机械手清除旧坐标偏移，并按 PRE_TRANS 进度连续旋转", () 
   assert.match(css, /\.load-port-slot\.is-unprocessed::after[^}]*width:\s*30px;[^}]*height:\s*3px;/);
   assert.doesNotMatch(css, /\.load-port-kind|\.topology-module-filter/);
   assert.match(css, /\.load-port-cassette[^}]*align-self:\s*center;/);
-  assert.match(css, /\.equipment-buffer[^}]*width:\s*104px;\s*height:\s*56px;/);
+  assert.match(css, /\.equipment-buffer[^}]*width:\s*104px;\s*height:\s*72px;/);
   assert.match(css, /\.equipment-cooler[^}]*width:\s*76px;\s*height:\s*56px;/);
   assert.match(css, /\.robot-arm[^}]*width:\s*88px;/);
   assert.match(css, /\.robot-end-effector \{[^}]*width:\s*26px;[^}]*border-radius:\s*50%;/);
@@ -1795,6 +1795,29 @@ test("机械手清除旧坐标偏移，并按 PRE_TRANS 进度连续旋转", () 
   assert.doesNotMatch(css, /\.robot-end-effector::after/);
   assert.match(css, /\.equipment-card\.door-open :is\(\.chamber-door, \.loadlock-door\)[^}]*visibility:\s*hidden;\s*opacity:\s*0;/);
   assert.match(css, /\.equipment-card\.door-opening :is\(\.chamber-door, \.loadlock-door\)[^}]*visibility:\s*hidden;\s*opacity:\s*0;/);
+});
+
+test("拓扑回放的晶圆尺寸统一以机器手持片为基准", () => {
+  const css = fs.readFileSync(
+    path.join(__dirname, "../realtime_scheduler/frontend/assets/config_editor.css"),
+    "utf8",
+  );
+  const uniformToken = "width: var(--topology-wafer-size); min-width: var(--topology-wafer-size); height: var(--topology-wafer-size);";
+
+  assert.match(css, /\.reference-grid-canvas \{ --topology-wafer-size:\s*54px; \}/);
+  [
+    ".process-wafer-slot .wafer-token",
+    ".port-top-cassette .wafer-token",
+    ".loadlock-top-seat .wafer-token",
+    ".cooler-top-pocket .wafer-token",
+    ".auxiliary-wafer-slot .wafer-token",
+    ".buffer-tray .wafer-token",
+    ".aligner-cross .wafer-token",
+    ".robot-held-wafer .wafer-token",
+  ].forEach(selector => {
+    const escapedSelector = selector.replaceAll(".", "\\.").replaceAll(" ", "\\s+");
+    assert.match(css, new RegExp(`${escapedSelector}[^}]*${uniformToken.replaceAll("(", "\\(").replaceAll(")", "\\)").replaceAll(".", "\\.")}`));
+  });
 });
 
 test("LoadLock 空层不画晶圆线，并区分已加工晶圆且按环境变化蓝色液位", () => {

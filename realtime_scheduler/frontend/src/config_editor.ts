@@ -57,7 +57,15 @@ const DEFAULT_SCHEDULE_OPTIONS = Object.freeze({
   loadLockMacroSearchSeconds: 4,
   loadLockMacroRollouts: 96,
   searchTreeModelPath: "",
+  heuristicConfig: null,
   seed: 0,
+});
+const DEFAULT_HEURISTIC_WEIGHTS = Object.freeze({
+  feed_block_penalty: 4, residency_urgency_bonus: 2, residency_slack_weight: 1,
+  earliest_start_weight: .35, finish_time_weight: .15, exchange_bonus: 2,
+  process_departure_bonus: 1.6, into_process_bonus: 1.5, drain_bonus: .3,
+  sink_bonus: .25, feed_penalty: -.35, route_balance_weight: .4,
+  stage_progress_bonus: .2,
 });
 const SCHEDULE_OPTION_KEYS = new Set(Object.keys(DEFAULT_SCHEDULE_OPTIONS));
 
@@ -3505,6 +3513,52 @@ function openSearchTreeOptionsDialog() {
   document.getElementById("searchTreeOptionsDialog").showModal();
 }
 
+/** 打开 Heuristic 设置；编辑值先留在弹窗，确认后才影响本次会话。 */
+function openHeuristicSettingsDialog() {
+  document.getElementById("heuristicSettingsError").textContent = "";
+  const configured = state.options.heuristicConfig && typeof state.options.heuristicConfig === "object"
+    ? state.options.heuristicConfig : null;
+  document.getElementById("heuristicCustomWeightsEnabled").checked = Boolean(configured);
+  document.querySelectorAll("[data-heuristic-weight]").forEach(input => {
+    const key = input.dataset.heuristicWeight;
+    input.value = configured?.[key] ?? DEFAULT_HEURISTIC_WEIGHTS[key];
+  });
+  for (const key of ["loadLockDirection", "loadLockCapacity", "loadLockBindBatch"]) {
+    document.querySelectorAll(`[data-heuristic-dialog-option="${key}"]`).forEach(input => {
+      input.checked = String(state.options[key]) === input.value;
+    });
+  }
+  updateHeuristicWeightEditorState();
+  document.getElementById("heuristicSettingsDialog").showModal();
+}
+
+/** 根据自定义开关启用或禁用权重输入，避免未启用时造成已生效的误解。 */
+function updateHeuristicWeightEditorState() {
+  const enabled = document.getElementById("heuristicCustomWeightsEnabled")?.checked === true;
+  document.querySelectorAll("[data-heuristic-weight]").forEach(input => { input.disabled = !enabled; });
+  document.getElementById("heuristicWeightFields")?.classList.toggle("is-disabled", !enabled);
+}
+
+/** 校验并提交 Heuristic 设置；所有权重仅随当前测试请求发送。 */
+function saveHeuristicSettings() {
+  for (const key of ["loadLockDirection", "loadLockCapacity", "loadLockBindBatch"]) {
+    const input = document.querySelector(`[data-heuristic-dialog-option="${key}"]:checked`);
+    state.options[key] = Number(input?.value);
+  }
+  if (document.getElementById("heuristicCustomWeightsEnabled").checked) {
+    const weights = {};
+    document.querySelectorAll("[data-heuristic-weight]").forEach(input => {
+      const value = Number(input.value);
+      if (!Number.isFinite(value)) throw new Error(`${input.dataset.heuristicWeight} 必须是有限数字`);
+      weights[input.dataset.heuristicWeight] = value;
+    });
+    state.options.heuristicConfig = weights;
+  } else state.options.heuristicConfig = null;
+  retainSessionSchedulingConfiguration();
+  markTestDirty();
+  document.getElementById("heuristicSettingsDialog").close();
+}
+
 /** 上传用户从文件夹选取的 checkpoint，并返回本地服务可访问的绝对路径。 */
 async function uploadSearchTreeCheckpoint(file) {
   const response = await fetch("/api/model-checkpoints", {
@@ -3855,9 +3909,11 @@ function buildPayload() {
 /** 收集发送给算法的选项；Heuristic 仅允许覆盖其三个 LoadLock 配置。 */
 function schedulingRequestOptions() {
   if (state.strategy !== "heuristic") return { ...state.options };
-  return Object.fromEntries(
+  const options = Object.fromEntries(
     ["loadLockDirection", "loadLockCapacity", "loadLockBindBatch"].map(key => [key, state.options[key]])
   );
+  if (state.options.heuristicConfig) options.heuristicConfig = structuredClone(state.options.heuristicConfig);
+  return options;
 }
 
 /** 把数字输入限制在 [min, max] 并回填 DOM，防止手输越界值。 */
@@ -4094,7 +4150,7 @@ function updateStrategyOptionVisibility() {
   const algorithm = state.availableAlgorithms.find(item => item.strategy === state.strategy);
   const optionGroups = new Set(algorithm?.optionGroups || []);
   document.getElementById("loadlockOptions").classList.toggle("is-hidden", !optionGroups.has("loadlock"));
-  document.getElementById("heuristicLoadLockOptions").classList.toggle("is-hidden", state.strategy !== "heuristic");
+  document.getElementById("heuristicSettings").classList.toggle("is-hidden", state.strategy !== "heuristic");
   document.getElementById("searchTreeOptions").classList.toggle("is-hidden", !optionGroups.has("search-tree"));
 }
 
@@ -5542,6 +5598,13 @@ document.getElementById("batchTestSelectionForm").addEventListener("submit", eve
   runBatchSelection(false);
 });
 document.getElementById("openSearchTreeOptionsDialogButton").addEventListener("click", openSearchTreeOptionsDialog);
+document.getElementById("openHeuristicSettingsDialogButton").addEventListener("click", openHeuristicSettingsDialog);
+document.getElementById("heuristicSettingsDialogCancel").addEventListener("click", () => document.getElementById("heuristicSettingsDialog").close());
+document.getElementById("heuristicCustomWeightsEnabled").addEventListener("change", updateHeuristicWeightEditorState);
+document.getElementById("heuristicSettingsForm").addEventListener("submit", event => {
+  event.preventDefault();
+  try { saveHeuristicSettings(); } catch (error) { document.getElementById("heuristicSettingsError").textContent = error.message; }
+});
 document.getElementById("searchTreeOptionsDialogCancel").addEventListener("click", () => document.getElementById("searchTreeOptionsDialog").close());
 document.getElementById("searchTreeCheckpointFile").addEventListener("change", event => {
   pendingSearchTreeCheckpointFile = event.currentTarget.files?.[0] || null;
