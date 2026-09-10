@@ -1558,18 +1558,6 @@ function detectTerminalPlaybackDeadlock(moves, device, plan) {
     });
     return blocked.length === targets.length ? blocked : [];
   };
-  const unfinishedCleaningBlockers = (targets) => targets.flatMap((target) => {
-    const occupants = modules.get(target)?.wafers ?? [];
-    return occupants.flatMap((wafer) => {
-      const latestCleaningMove = [...records].filter((move) => move.MoveType === PROCESS_MOVE && move.ModuleName === target && materialIds(move).includes(wafer) && isCleaningMove(move)).sort((left, right) => right.EndTime - left.EndTime || right.MoveID - left.MoveID)[0];
-      if (!latestCleaningMove || latestCleaningMove.IsLastCleanTaskMove !== false) return [];
-      return [{
-        target,
-        wafer,
-        taskName: String(latestCleaningMove.CleanTaskName || latestCleaningMove.ProcessRecipe || "\u6E05\u6D17\u4EFB\u52A1")
-      }];
-    });
-  });
   for (const robot of snapshot.robots) {
     const held = [...robot.wafers].sort(naturalCompare);
     if (robot.capacity === 1 && held.length === 1) {
@@ -1580,18 +1568,6 @@ function detectTerminalPlaybackDeadlock(moves, device, plan) {
         Code: "DEADLOCK.SINGLE_ARM_TARGET_FULL",
         Category: "single-arm-target-full",
         Message: `${robot.name} \u7684\u552F\u4E00\u624B\u81C2\u6301\u6709\u6676\u5706 ${held[0]}\uFF0C\u76EE\u6807 ${targets.join("\u3001")} \u88AB\u6676\u5706 ${occupants.join("\u3001")} \u5360\u7528\uFF1B\u5B83\u6CA1\u6709\u7A7A\u624B\u63A5\u8D70\u8154\u5185\u6676\u5706\uFF0C\u6301\u7247\u53C8\u5FC5\u987B\u7B49\u76EE\u6807\u817E\u7A7A\u624D\u80FD\u653E\u4E0B\uFF0C\u5F62\u6210\u76F8\u4E92\u7B49\u5F85\u3002`
-      };
-    }
-    if (robot.capacity === 2 && held.length === 1) {
-      const targets = blockingTargets(robot, held[0]);
-      if (!targets.length) continue;
-      const occupants = [...new Set(targets.flatMap((target) => modules.get(target)?.wafers ?? []))].sort(naturalCompare);
-      const cleaningBlockers = unfinishedCleaningBlockers(targets);
-      const reason = cleaningBlockers.length ? cleaningBlockers.map((blocker) => `${blocker.target} \u88AB\u5C1A\u672A\u5B8C\u6210\u6574\u7EC4 ${blocker.taskName} \u7684\u6E05\u6D17\u7247 ${blocker.wafer} \u5360\u7528\uFF1B\u6676\u5706 ${held[0]} \u5728\u6E05\u6D17\u5B8C\u6210\u524D\u7981\u6B62\u8FDB\u5165\uFF0C\u4E0D\u80FD\u76F4\u63A5\u6362\u7247\u3002`).join("") : `\u76F4\u63A5\u6362\u7247\u4F1A\u8BA9\u8154\u5185\u6676\u5706 ${occupants.join("\u3001")} \u8F6C\u5230 ${robot.name} \u7684\u7B2C\u4E8C\u53EA\u624B\u81C2\uFF0C\u4F46\u56DE\u653E\u7EC8\u70B9\u6CA1\u6709\u80FD\u5C06\u8FD9\u4E9B\u6676\u5706\u7EE7\u7EED\u653E\u4E0B\u7684\u5408\u6CD5\u540E\u7EE7\u51FA\u53E3\uFF0C\u6362\u7247\u94FE\u65E0\u6CD5\u95ED\u5408\u3002`;
-      return {
-        Code: "DEADLOCK.DUAL_ARM_SINGLE_HELD_TARGET_FULL",
-        Category: "dual-arm-single-held-target-full",
-        Message: `${robot.name} \u5DF2\u6301\u6709\u6676\u5706 ${held[0]}\u3002${reason}\u8154\u5185\u7247\u53C8\u53EA\u80FD\u7531 ${robot.name} \u53D6\u51FA\uFF0C\u5F62\u6210\u6301\u7247\u7B49\u5F85\u95ED\u73AF\u3002`
       };
     }
     if (robot.capacity === 2 && held.length === 2) {
@@ -4165,34 +4141,6 @@ var DEADLOCK_TYPE_CATALOG = Object.freeze({
   "DEADLOCK.DUAL_ARM_TARGETS_FULL": {
     deadlockCode: "DLK-ROB-002",
     title: "\u53CC\u81C2\u673A\u5668\u624B\u6301\u6709\u4E24\u7247\uFF0C\u76EE\u6807\u8154\u5BA4\u5747\u5DF2\u6EE1"
-  },
-  "DEADLOCK.DUAL_ARM_SINGLE_HELD_TARGET_FULL": {
-    deadlockCode: "DLK-ROB-003",
-    title: "\u53CC\u81C2\u673A\u5668\u624B\u6301\u6709\u4E00\u7247\uFF0C\u76EE\u6807\u8154\u5BA4\u5DF2\u6EE1\u4E14\u65E0\u4EA4\u6362\u51FA\u53E3"
-  },
-  "DEADLOCK.ROBOT_HELD_CLEANING_CONFLICT": {
-    deadlockCode: "DLK-ROB-004",
-    title: "\u673A\u5668\u624B\u6301\u7247\u4E0E\u524D\u7F6E\u6E05\u6D17\u987A\u5E8F\u51B2\u7A81"
-  },
-  "DEADLOCK.ROBOT_HELD_LOADLOCK_BLOCKED": {
-    deadlockCode: "DLK-ROB-005",
-    title: "\u673A\u5668\u624B\u6301\u7247\uFF0C\u76EE\u6807 LoadLock \u65E0\u6CD5\u63A5\u7247"
-  },
-  "DEADLOCK.ROBOT_HELD_RESOURCE_WAIT": {
-    deadlockCode: "DLK-ROB-006",
-    title: "\u673A\u5668\u624B\u6301\u7247\u4E14\u76EE\u6807\u8D44\u6E90\u65E0\u6CD5\u63A8\u8FDB"
-  },
-  "DEADLOCK.LOADLOCK_DIRECTION_CYCLE": {
-    deadlockCode: "DLK-LL-001",
-    title: "LoadLock \u538B\u529B\u65B9\u5411\u4E0E\u56DE\u7A0B\u5FAA\u73AF\u7B49\u5F85"
-  },
-  "DEADLOCK.CLEANING_SELF_BLOCKED": {
-    deadlockCode: "DLK-CLN-001",
-    title: "Dummy \u6E05\u6D17\u7247\u5728\u540C\u8154\u81EA\u963B\u585E"
-  },
-  "DEADLOCK.RESOURCE_WAIT_CYCLE": {
-    deadlockCode: "DLK-RES-001",
-    title: "\u6EE1\u8154\u8D44\u6E90\u7B49\u5F85\u73AF"
   }
 });
 function deadlockDisplay(deadlock) {
@@ -4203,8 +4151,8 @@ function deadlockDisplay(deadlock) {
   return {
     internalCode: "DEADLOCK.UNCLASSIFIED",
     deadlockCode: "DLK-UNK-001",
-    title: "\u524D\u7AEF\u56DE\u653E\u672A\u8BC6\u522B\u51FA\u5DF2\u767B\u8BB0\u6B7B\u9501",
-    message: "MoveList \u5DF2\u56DE\u653E\u5230\u7EC8\u70B9\uFF0C\u4F46\u73B0\u573A\u4E0D\u7B26\u5408\u5DF2\u767B\u8BB0\u7684\u6301\u7247\u6EE1\u8154\u6761\u4EF6\u3002"
+    title: "\u672A\u6B7B\u9501\uFF0C\u4F46\u7B97\u6CD5\u8BA4\u4E3A\u6B7B\u9501",
+    message: "\u5E73\u53F0\u4EC5\u8BC6\u522B DLK-ROB-001 \u548C DLK-ROB-002\uFF1B\u5F53\u524D\u73B0\u573A\u4E0D\u6EE1\u8DB3\u8FD9\u4E24\u79CD\u7C7B\u578B\uFF0C\u7B97\u6CD5\u62A5\u544A\u65E0\u6CD5\u7EE7\u7EED\u8C03\u5EA6\u3002"
   };
 }
 var CLEAN_TYPE_DEFINITIONS = [
@@ -7340,11 +7288,14 @@ function buildPayload() {
   const instances = runtimePJobRouteInstances();
   const routes = instances.routes.map((route) => ({ ...normalizeRoute(route), stages: route.stages.map((stage) => ({ ...stage, visits: stage.visits.map((visit) => structuredClone(visit)) })) }));
   const cleans = state.cleans.map(runtimeClean);
-  const options = { ...state.options };
+  const options = schedulingRequestOptions();
   if (state.strategy === "search-tree") {
     options.searchTreeExecutionMode = "continuous";
   }
   return { schemaVersion: EXPECTED_API_SCHEMA, workspaceDeviceId: state.workspaceDeviceId, workspaceTestId: state.testCaseId, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options, hongYeCheck: hongYeCheckEnabled(), compatibilityMode: compatibilityModeEnabled(), executionTimingEnabled: executionTimingEnabled(), skipBaseline: skipBaselineEnabled(), cleanValidationTypes: cleanValidationTypes(), recipes: collectRecipes(routes), cleans, routes, rounds: instances.rounds };
+}
+function schedulingRequestOptions() {
+  return state.strategy === "heuristic" ? {} : { ...state.options };
 }
 function clampParallelismInput(elementId, min, max, fallback) {
   const input = document.getElementById(elementId);
@@ -7924,7 +7875,7 @@ async function runCurrentTestGroup(selectedTestIds = null) {
     const response = await fetch("/api/run-batch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ deviceId: state.workspaceDeviceId, group: state.activeTestGroup, testIds: tests.map((test) => test.id), strategy: state.strategy, options: state.options, hongYeCheck: hongYeCheckEnabled(), compatibilityMode: compatibilityModeEnabled(), executionTimingEnabled: executionTimingEnabled(), skipBaseline: skipBaselineEnabled(), maximumWorkers: batchParallelism(), validationWorkers: validationParallelism(), cleanValidationTypes: cleanValidationTypes() })
+      body: JSON.stringify({ deviceId: state.workspaceDeviceId, group: state.activeTestGroup, testIds: tests.map((test) => test.id), strategy: state.strategy, options: schedulingRequestOptions(), hongYeCheck: hongYeCheckEnabled(), compatibilityMode: compatibilityModeEnabled(), executionTimingEnabled: executionTimingEnabled(), skipBaseline: skipBaselineEnabled(), maximumWorkers: batchParallelism(), validationWorkers: validationParallelism(), cleanValidationTypes: cleanValidationTypes() })
     });
     let result = await response.json();
     if (!response.ok || !result.batchId || !Array.isArray(result.items)) throw new Error(result.error || `\u670D\u52A1\u8FD4\u56DE ${response.status}`);

@@ -155,7 +155,7 @@ test("前端回放识别单臂持片且目标满腔依赖同一机器手排空",
   assert.match(deadlock.Message, /R.*唯一手臂.*W_NEW.*PM1.*W_OLD.*没有空手接走腔内晶圆.*相互等待/);
 });
 
-test("前端回放识别双臂单片持有且目标满腔无交换出口", () => {
+test("前端回放不再将双臂单片持有且目标满腔识别为死锁", () => {
   const replayMoves = [
     {
       MoveID: 1, MoveType: 5, ModuleName: "R", SrcStationList: ["PM2"],
@@ -195,9 +195,7 @@ test("前端回放识别双臂单片持有且目标满腔无交换出口", () =>
 
   const deadlock = logic.detectTerminalPlaybackDeadlock(replayMoves, replayDevice, replayPlan);
 
-  assert.equal(deadlock.Code, "DEADLOCK.DUAL_ARM_SINGLE_HELD_TARGET_FULL");
-  assert.match(deadlock.Message, /R.*W_HELD.*PM1.*尚未完成整组 PreDummyClean.*W_BLOCKING/);
-  assert.match(deadlock.Message, /W_HELD.*清洗完成前禁止进入.*不能直接换片.*只能由 R 取出/);
+  assert.equal(deadlock, null);
 });
 
 test("前端回放识别双臂同时持有两片且目标腔室均已满", () => {

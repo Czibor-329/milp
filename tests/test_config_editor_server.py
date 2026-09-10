@@ -154,29 +154,12 @@ class FrontendTemplateTests(unittest.TestCase):
         """前端登记回放和 Machine 现场可证明的死锁，未知现场保留兜底。"""
         script = EDITOR_SCRIPT_PATH.read_text(encoding="utf-8")
 
-        for code in (
-            "DEADLOCK.SINGLE_ARM_TARGET_FULL",
-            "DEADLOCK.DUAL_ARM_SINGLE_HELD_TARGET_FULL",
-            "DEADLOCK.DUAL_ARM_TARGETS_FULL",
-            "DEADLOCK.UNCLASSIFIED",
-            "DLK-ROB-001",
-            "DLK-ROB-002",
-            "DLK-ROB-003",
-            "DEADLOCK.ROBOT_HELD_CLEANING_CONFLICT",
-            "DEADLOCK.ROBOT_HELD_LOADLOCK_BLOCKED",
-            "DEADLOCK.ROBOT_HELD_RESOURCE_WAIT",
-            "DEADLOCK.LOADLOCK_DIRECTION_CYCLE",
-            "DEADLOCK.CLEANING_SELF_BLOCKED",
-            "DEADLOCK.RESOURCE_WAIT_CYCLE",
-            "DLK-ROB-004",
-            "DLK-ROB-005",
-            "DLK-ROB-006",
-            "DLK-LL-001",
-            "DLK-CLN-001",
-            "DLK-RES-001",
-            "DLK-UNK-001",
-        ):
+        for code in ("DEADLOCK.SINGLE_ARM_TARGET_FULL", "DEADLOCK.DUAL_ARM_TARGETS_FULL",
+                     "DLK-ROB-001", "DLK-ROB-002", "未死锁，但算法认为死锁"):
             self.assertIn(code, script)
+        for code in ("DLK-ROB-003", "DLK-ROB-004", "DLK-ROB-005", "DLK-ROB-006",
+                     "DLK-LL-001", "DLK-CLN-001", "DLK-RES-001"):
+            self.assertNotIn(code, script)
         self.assertIn("function deadlockDisplay", script)
         self.assertIn("visualizationWorkspace.getTerminalDeadlock()", script)
 
@@ -203,17 +186,17 @@ class FrontendTemplateTests(unittest.TestCase):
         failure = context.exception.failure_output
         self.assertEqual([7], [move["MoveID"] for move in failure["MoveList"]])
         self.assertEqual(
-            "DEADLOCK.NO_EXECUTABLE_ACTION",
+            "DEADLOCK.UNCLASSIFIED",
             failure["FailureContext"]["Code"],
         )
         self.assertEqual(
-            "Machine 无可执行搬运意图",
+            "未死锁，但算法认为死锁",
             failure["FailureContext"]["Message"],
         )
         self.assertEqual("AlgOutput", reproduction.entries[-1]["Describe"])
 
     def test_machine_diagnostic_classifies_cleaning_and_loadlock_deadlocks(self) -> None:
-        """结构化现场应区分持片清洗冲突、Dummy 自阻塞和 LoadLock 方向环。"""
+        """平台不再识别清洗冲突、Dummy 自阻塞、LoadLock 及资源等待环。"""
         held_cleaning = {
             "PendingMaterials": [
                 {"MaterialID": 1, "Location": "VTR", "NextStations": ["PM4"]},
@@ -224,10 +207,7 @@ class FrontendTemplateTests(unittest.TestCase):
             "OccupiedStations": [],
             "LoadLocks": [{"Station": "LB"}],
         }
-        self.assertEqual(
-            "DEADLOCK.ROBOT_HELD_CLEANING_CONFLICT",
-            config_server._classify_deadlock_diagnostic(held_cleaning)["Code"],
-        )
+        self.assertIsNone(config_server._classify_deadlock_diagnostic(held_cleaning))
 
         cleaning_self_blocked = {
             "PendingMaterials": [{
@@ -235,10 +215,7 @@ class FrontendTemplateTests(unittest.TestCase):
                 "NextStations": ["PM2"],
             }],
         }
-        self.assertEqual(
-            "DEADLOCK.CLEANING_SELF_BLOCKED",
-            config_server._classify_deadlock_diagnostic(cleaning_self_blocked)["Code"],
-        )
+        self.assertIsNone(config_server._classify_deadlock_diagnostic(cleaning_self_blocked))
 
         loadlock_cycle = {
             "PendingMaterials": [
@@ -247,10 +224,7 @@ class FrontendTemplateTests(unittest.TestCase):
             ],
             "LoadLocks": [{"Station": "LA"}],
         }
-        self.assertEqual(
-            "DEADLOCK.LOADLOCK_DIRECTION_CYCLE",
-            config_server._classify_deadlock_diagnostic(loadlock_cycle)["Code"],
-        )
+        self.assertIsNone(config_server._classify_deadlock_diagnostic(loadlock_cycle))
 
         process_cycle = {
             "PendingMaterials": [
@@ -262,10 +236,25 @@ class FrontendTemplateTests(unittest.TestCase):
                 {"Station": "PM2", "Full": True, "Occupied": {"1": 2}},
             ],
         }
-        self.assertEqual(
-            "DEADLOCK.RESOURCE_WAIT_CYCLE",
-            config_server._classify_deadlock_diagnostic(process_cycle)["Code"],
-        )
+        self.assertIsNone(config_server._classify_deadlock_diagnostic(process_cycle))
+
+    def test_machine_diagnostic_only_recognizes_full_hands_and_all_targets(self) -> None:
+        """平台仅保留两种满手满腔类型，双臂必须检查两片的全部目标。"""
+        diagnostic = {
+            "PendingMaterials": [
+                {"MaterialID": 1, "NextStations": ["PM1"]},
+                {"MaterialID": 2, "NextStations": ["PM2"]},
+            ],
+            "HeldRobots": [{"Robot": "R", "Capacity": 1, "Hands": {"1": 1}}],
+            "OccupiedStations": [{"Station": "PM1", "Full": True}, {"Station": "PM2", "Full": True}],
+        }
+        self.assertEqual("DEADLOCK.SINGLE_ARM_TARGET_FULL", config_server._classify_deadlock_diagnostic(diagnostic)["Code"])
+        diagnostic["HeldRobots"][0]["Capacity"] = 2
+        self.assertIsNone(config_server._classify_deadlock_diagnostic(diagnostic))
+        diagnostic["HeldRobots"][0]["Hands"]["2"] = 2
+        self.assertEqual("DEADLOCK.DUAL_ARM_TARGETS_FULL", config_server._classify_deadlock_diagnostic(diagnostic)["Code"])
+        diagnostic["OccupiedStations"][1]["Full"] = False
+        self.assertIsNone(config_server._classify_deadlock_diagnostic(diagnostic))
 
     def test_single_run_responds_before_preflight_and_reuses_pending_save(self) -> None:
         """单测点击应立即显示准备状态，且运行前只保存确有修改的测试。"""

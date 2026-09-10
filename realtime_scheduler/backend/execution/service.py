@@ -79,7 +79,10 @@ def _execute_standard_algorithm(
 
         prepared_first_update = deepcopy(dict(first_update))
         options = plan.get("options")
-        if isinstance(options, Mapping):
+        # Heuristic 的策略参数由算法仓库配置，旧测试保存的选项也不得透传。
+        if builtin_strategy == "heuristic":
+            prepared_first_update.pop("AlgorithmOptions", None)
+        elif isinstance(options, Mapping):
             prepared_first_update["AlgorithmOptions"] = deepcopy(dict(options))
     else:
         strategy = f"other_alg:{algorithm_id}"
@@ -690,7 +693,8 @@ def _execute_plan(raw_plan: Mapping[str, Any], reproduction: ReproductionLog) ->
         else "petri-look"
     )
     loadlock_manager_mode = str(
-        options.get("loadLockManager") or default_loadlock_manager_mode
+        (options.get("loadLockManager") if strategy != "heuristic" else None)
+        or default_loadlock_manager_mode
     ).strip().lower()
     supported_loadlock_managers = {
         "joint",

@@ -132,20 +132,9 @@ def test_deadlock_catalog_page_is_visible_before_standard_api() -> None:
 
     assert slugs.index("analysis-diagnostics") < slugs.index("deadlock-types")
     assert slugs.index("deadlock-types") < slugs.index("interface-overview")
-    assert page["group"] == "结果分析"
-    for code in (
-        "DEADLOCK.SINGLE_ARM_TARGET_FULL",
-        "DEADLOCK.DUAL_ARM_SINGLE_HELD_TARGET_FULL",
-        "DEADLOCK.DUAL_ARM_TARGETS_FULL",
-        "DEADLOCK.ROBOT_HELD_CLEANING_CONFLICT",
-        "DEADLOCK.ROBOT_HELD_LOADLOCK_BLOCKED",
-        "DEADLOCK.ROBOT_HELD_RESOURCE_WAIT",
-        "DEADLOCK.LOADLOCK_DIRECTION_CYCLE",
-        "DEADLOCK.CLEANING_SELF_BLOCKED",
-        "DEADLOCK.RESOURCE_WAIT_CYCLE",
-        "DEADLOCK.NO_EXECUTABLE_ACTION",
-        "DEADLOCK.UNCLASSIFIED",
-    ):
-        assert f"## {code}" in page["markdown"]
-    assert "## 前端回放判定字段" in page["markdown"]
-    assert "## 回放与校验边界" in page["markdown"]
+    assert page["group"] == "调度机制"
+    for code in ("DEADLOCK.SINGLE_ARM_TARGET_FULL", "DEADLOCK.DUAL_ARM_TARGETS_FULL",
+                 "DEADLOCK.UNCLASSIFIED", "未死锁，但算法认为死锁"):
+        assert code in page["markdown"]
+    assert "## 可证明的诊断类型" in page["markdown"]
+    assert "## 失败时如何定位" in page["markdown"]

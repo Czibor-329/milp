@@ -91,7 +91,6 @@ export interface WorkspaceSnapshot {
 export interface PlaybackDeadlock {
   Code:
     | "DEADLOCK.SINGLE_ARM_TARGET_FULL"
-    | "DEADLOCK.DUAL_ARM_SINGLE_HELD_TARGET_FULL"
     | "DEADLOCK.DUAL_ARM_TARGETS_FULL";
   Category:
     | "single-arm-target-full"
@@ -1772,7 +1771,7 @@ function hasConsistentTransferReplay(
 }
 
 /**
- * 在 MoveList 回放终点识别三种明确的持片满腔死锁。
+ * 在 MoveList 回放终点识别两种明确的持片满腔死锁。
  *
  * 判定只读取前端回放出的最终位置、Route 下一步和设备容量，不信任算法提供的
  * DEADLOCK 分类。目标腔内晶圆的下一步也必须由同一机器手搬出，才算形成依赖。
@@ -1804,31 +1803,6 @@ export function detectTerminalPlaybackDeadlock(
     return blocked.length === targets.length ? blocked : [];
   };
 
-  /** 找出仍占用目标腔室、且尚未完成整组清洗的 Dummy。 */
-  const unfinishedCleaningBlockers = (targets: string[]): Array<{
-    target: string;
-    wafer: string;
-    taskName: string;
-  }> => targets.flatMap(target => {
-    const occupants = modules.get(target)?.wafers ?? [];
-    return occupants.flatMap(wafer => {
-      const latestCleaningMove = [...records]
-        .filter(move => (
-          move.MoveType === PROCESS_MOVE
-          && move.ModuleName === target
-          && materialIds(move).includes(wafer)
-          && isCleaningMove(move)
-        ))
-        .sort((left, right) => right.EndTime - left.EndTime || right.MoveID - left.MoveID)[0];
-      if (!latestCleaningMove || latestCleaningMove.IsLastCleanTaskMove !== false) return [];
-      return [{
-        target,
-        wafer,
-        taskName: String(latestCleaningMove.CleanTaskName || latestCleaningMove.ProcessRecipe || "清洗任务"),
-      }];
-    });
-  });
-
   for (const robot of snapshot.robots) {
     const held = [...robot.wafers].sort(naturalCompare);
     if (robot.capacity === 1 && held.length === 1) {
@@ -1839,24 +1813,6 @@ export function detectTerminalPlaybackDeadlock(
         Code: "DEADLOCK.SINGLE_ARM_TARGET_FULL",
         Category: "single-arm-target-full",
         Message: `${robot.name} 的唯一手臂持有晶圆 ${held[0]}，目标 ${targets.join("、")} 被晶圆 ${occupants.join("、")} 占用；它没有空手接走腔内晶圆，持片又必须等目标腾空才能放下，形成相互等待。`,
-      };
-    }
-    if (robot.capacity === 2 && held.length === 1) {
-      const targets = blockingTargets(robot, held[0]);
-      if (!targets.length) continue;
-      const occupants = [...new Set(targets.flatMap(target => modules.get(target)?.wafers ?? []))].sort(naturalCompare);
-      const cleaningBlockers = unfinishedCleaningBlockers(targets);
-      const reason = cleaningBlockers.length
-        ? cleaningBlockers.map(blocker => (
-          `${blocker.target} 被尚未完成整组 ${blocker.taskName} 的清洗片 ${blocker.wafer} 占用；`
-          + `晶圆 ${held[0]} 在清洗完成前禁止进入，不能直接换片。`
-        )).join("")
-        : `直接换片会让腔内晶圆 ${occupants.join("、")} 转到 ${robot.name} 的第二只手臂，`
-          + `但回放终点没有能将这些晶圆继续放下的合法后继出口，换片链无法闭合。`;
-      return {
-        Code: "DEADLOCK.DUAL_ARM_SINGLE_HELD_TARGET_FULL",
-        Category: "dual-arm-single-held-target-full",
-        Message: `${robot.name} 已持有晶圆 ${held[0]}。${reason}腔内片又只能由 ${robot.name} 取出，形成持片等待闭环。`,
       };
     }
     if (robot.capacity === 2 && held.length === 2) {

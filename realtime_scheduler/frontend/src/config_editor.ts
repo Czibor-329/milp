@@ -68,34 +68,6 @@ const DEADLOCK_TYPE_CATALOG = Object.freeze({
     deadlockCode: "DLK-ROB-002",
     title: "双臂机器手持有两片，目标腔室均已满",
   },
-  "DEADLOCK.DUAL_ARM_SINGLE_HELD_TARGET_FULL": {
-    deadlockCode: "DLK-ROB-003",
-    title: "双臂机器手持有一片，目标腔室已满且无交换出口",
-  },
-  "DEADLOCK.ROBOT_HELD_CLEANING_CONFLICT": {
-    deadlockCode: "DLK-ROB-004",
-    title: "机器手持片与前置清洗顺序冲突",
-  },
-  "DEADLOCK.ROBOT_HELD_LOADLOCK_BLOCKED": {
-    deadlockCode: "DLK-ROB-005",
-    title: "机器手持片，目标 LoadLock 无法接片",
-  },
-  "DEADLOCK.ROBOT_HELD_RESOURCE_WAIT": {
-    deadlockCode: "DLK-ROB-006",
-    title: "机器手持片且目标资源无法推进",
-  },
-  "DEADLOCK.LOADLOCK_DIRECTION_CYCLE": {
-    deadlockCode: "DLK-LL-001",
-    title: "LoadLock 压力方向与回程循环等待",
-  },
-  "DEADLOCK.CLEANING_SELF_BLOCKED": {
-    deadlockCode: "DLK-CLN-001",
-    title: "Dummy 清洗片在同腔自阻塞",
-  },
-  "DEADLOCK.RESOURCE_WAIT_CYCLE": {
-    deadlockCode: "DLK-RES-001",
-    title: "满腔资源等待环",
-  },
 });
 
 /** 展示平台判型结论；算法只声明规划无法继续，不自行提供具体分类。 */
@@ -107,8 +79,8 @@ function deadlockDisplay(deadlock) {
   return {
     internalCode: "DEADLOCK.UNCLASSIFIED",
     deadlockCode: "DLK-UNK-001",
-    title: "前端回放未识别出已登记死锁",
-    message: "MoveList 已回放到终点，但现场不符合已登记的持片满腔条件。",
+    title: "未死锁，但算法认为死锁",
+    message: "平台仅识别 DLK-ROB-001 和 DLK-ROB-002；当前现场不满足这两种类型，算法报告无法继续调度。",
   };
 }
 
@@ -3855,12 +3827,17 @@ function buildPayload() {
   const instances = runtimePJobRouteInstances();
   const routes = instances.routes.map(route => ({ ...normalizeRoute(route), stages: route.stages.map(stage => ({ ...stage, visits: stage.visits.map(visit => structuredClone(visit)) })) }));
   const cleans = state.cleans.map(runtimeClean);
-  const options = { ...state.options };
+  const options = schedulingRequestOptions();
   if (state.strategy === "search-tree") {
     // 拓扑回放固定为连续求解，不再提供步进求解分支。
     options.searchTreeExecutionMode = "continuous";
   }
   return { schemaVersion: EXPECTED_API_SCHEMA, workspaceDeviceId: state.workspaceDeviceId, workspaceTestId: state.testCaseId, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options, hongYeCheck: hongYeCheckEnabled(), compatibilityMode: compatibilityModeEnabled(), executionTimingEnabled: executionTimingEnabled(), skipBaseline: skipBaselineEnabled(), cleanValidationTypes: cleanValidationTypes(), recipes: collectRecipes(routes), cleans, routes, rounds: instances.rounds };
+}
+
+/** 收集发送给算法的选项；Heuristic 完全由算法仓库配置。 */
+function schedulingRequestOptions() {
+  return state.strategy === "heuristic" ? {} : { ...state.options };
 }
 
 /** 把数字输入限制在 [min, max] 并回填 DOM，防止手输越界值。 */
@@ -4506,7 +4483,7 @@ async function runCurrentTestGroup(selectedTestIds = null) {
     const response = await fetch("/api/run-batch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ deviceId: state.workspaceDeviceId, group: state.activeTestGroup, testIds: tests.map(test => test.id), strategy: state.strategy, options: state.options, hongYeCheck: hongYeCheckEnabled(), compatibilityMode: compatibilityModeEnabled(), executionTimingEnabled: executionTimingEnabled(), skipBaseline: skipBaselineEnabled(), maximumWorkers: batchParallelism(), validationWorkers: validationParallelism(), cleanValidationTypes: cleanValidationTypes() }),
+      body: JSON.stringify({ deviceId: state.workspaceDeviceId, group: state.activeTestGroup, testIds: tests.map(test => test.id), strategy: state.strategy, options: schedulingRequestOptions(), hongYeCheck: hongYeCheckEnabled(), compatibilityMode: compatibilityModeEnabled(), executionTimingEnabled: executionTimingEnabled(), skipBaseline: skipBaselineEnabled(), maximumWorkers: batchParallelism(), validationWorkers: validationParallelism(), cleanValidationTypes: cleanValidationTypes() }),
     });
     let result = await response.json();
     if (!response.ok || !result.batchId || !Array.isArray(result.items)) throw new Error(result.error || `服务返回 ${response.status}`);
