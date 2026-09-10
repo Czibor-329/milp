@@ -11,6 +11,9 @@ import {
   requestReplayDecision,
   requestScheduleAnalysis,
 } from "./api_client";
+import { configuredRobotArms, renderParallelRobotArms, robotSlotWafers, type RobotArmDefinition } from "./topology_robot_mechanism";
+import { projectTopologyTransfers } from "./topology_transfer_projection";
+import { atmosphereRailMotion, type AtmosphereRailMotion } from "./topology_atmosphere_rail";
 import type {
   ActivityCategory,
   BottleneckUtilizationSummary,
@@ -55,6 +58,12 @@ export interface RobotSnapshot {
   name: string;
   type: string;
   capacity: number;
+  /** 配置中的物理臂与槽位；旧快照缺省时允许按容量回退。 */
+  arms?: RobotArmDefinition[];
+  /** 以 RobotSlot 为键的已完成动作占位，不能用晶圆排序替代。 */
+  slotWafers?: Record<number, string>;
+  /** 大气侧沿导轨的源、目标及对齐进度。 */
+  railMotion?: AtmosphereRailMotion;
   environment: RobotEnvironment;
   wafers: string[];
   processedWafers: string[];
@@ -1377,7 +1386,7 @@ function buildLoadLockSlots(
 }
 
 /** 返回动作在给定时刻的线性进度。 */
-function moveProgress(move: NormalizedMove, time: number): number {
+function moveProgress(move: Pick<NormalizedMove, "StartTime" | "EndTime">, time: number): number {
   const duration = move.EndTime - move.StartTime;
   if (duration <= 0) return time >= move.EndTime ? 1 : 0;
   return Math.max(0, Math.min(1, (time - move.StartTime) / duration));
@@ -1584,7 +1593,10 @@ export function buildWorkspaceSnapshot(
       name,
       type: String(definition.Type ?? ""),
       capacity: robotCapacity(definition, wafers.length),
+      arms: configuredRobotArms(definition),
+      slotWafers: robotSlotWafers(records, time, name, wafers),
       environment: robotEnvironment(name, definition),
+      railMotion: robotEnvironment(name, definition) === "atmosphere" ? atmosphereRailMotion(records, name, time) : undefined,
       wafers,
       processedWafers: wafers.filter(isProcessed),
       busy: Boolean(move),
@@ -2368,12 +2380,13 @@ function renderModule(
 const ROBOT_DOUBLE_HOLD_CAPACITY = 2;
 const ROBOT_DISPLAY_WAFER_LIMIT = 2;
 
-/** 绘制机器手：双片仅用轻微错层区分，不额外显示数量标签。 */
+/** 绘制机器手与持片；单腔/级联传入按真实配置生成的分臂机构，否则保留双腔外观。 */
 function renderRobotHub(
   robot: RobotSnapshot,
   waferOrigins: Readonly<Record<string, string>>,
   environment: RobotEnvironment,
   angleDegrees: number,
+  mechanismMarkup?: string,
 ): string {
   const visibleWafers = robot.wafers.slice(0, ROBOT_DISPLAY_WAFER_LIMIT);
   const capacityLabel = robot.capacity >= ROBOT_DOUBLE_HOLD_CAPACITY ? "双片机械手" : "单槽机械手";
@@ -2387,15 +2400,14 @@ function renderRobotHub(
     : "";
   return `
     <article class="robot-hub robot-hub-${environment} ${robot.busy ? "is-busy" : ""}" style="--robot-arm-angle:${angleDegrees.toFixed(1)}deg" aria-label="${escapeHtml(robot.name)}，${capacityLabel}，${robot.busy ? "工作中" : "待命"}${holdingLabel}">
-      <span class="robot-environment-badge">${escapeHtml(robot.name)}</span>
       <div class="robot-mechanism" aria-hidden="true">
         <span class="robot-base"><i></i></span>
-        <span class="robot-arm">
+        ${mechanismMarkup === undefined ? `<span class="robot-arm">
           <i class="robot-arm-beam"></i>
           <span class="robot-end-effector ${visibleWafers.length ? "is-occupied" : "is-empty"}">
             <span class="robot-held-wafers">${waferMarkup}${overflow}</span>
           </span>
-        </span>
+        </span>` : mechanismMarkup}
       </div>
     </article>`;
 }
@@ -2428,6 +2440,8 @@ const TOPOLOGY_ITEM_SIZE = 96;
 const TOPOLOGY_PROCESS_WIDTH = 82;
 const TOPOLOGY_PROCESS_HEIGHT = 82;
 const TOPOLOGY_ROBOT_SIZE = 132;
+/** 俯视晶圆的遮挡半径，机构在已放置晶圆的实心区域下方通过。 */
+const TOPOLOGY_WAFER_OCCLUSION_RADII = { process: 24, port: 21, lock: 21, cooler: 16, aligner: 15 };
 /* 单腔、双腔均沿用原双腔的紧凑 LoadLock 尺寸。 */
 const TOPOLOGY_LOADLOCK_WIDTH = 82;
 const TOPOLOGY_LOADLOCK_HEIGHT = 82;
@@ -2645,8 +2659,8 @@ function topologyTightLoadLockOffsets(count: number, frameWidthPixels: number): 
   );
 }
 
-/** 把辅助设备固定在框架内部四角，避免随画布宽度变化而漂移。 */
-function topologyFrameInteriorCorner(
+/** 将辅助设备附着在大气框架上方两端，保持横向位置并为底边留出接缝。 */
+function topologyFrameUpperUtilityAttachment(
   frame: TopologyMachineFrame,
   attachmentId: string,
   horizontal: "left" | "right",
@@ -2656,7 +2670,7 @@ function topologyFrameInteriorCorner(
   const horizontalOffset = frame.widthPixels / 2 - TOPOLOGY_ATMOSPHERE_INTERIOR_INSET - widthPixels / 2;
   return {
     leftPercent: frame.centerLeftPercent + (horizontal === "left" ? -horizontalOffset : horizontalOffset) / TOPOLOGY_VIEWBOX_WIDTH * 100,
-    topPixels: frame.centerTopPixels - frame.heightPixels / 2 + TOPOLOGY_ATMOSPHERE_INTERIOR_INSET + heightPixels / 2,
+    topPixels: frame.centerTopPixels - frame.heightPixels / 2 - heightPixels / 2 - TOPOLOGY_LOADLOCK_BRIDGE_GAP,
     widthPixels,
     heightPixels,
     attachmentId,
@@ -2930,18 +2944,18 @@ function moduleTopologyPosition(
     };
   }
   if (isAlignerModule(module.name, module.type)) {
-    return topologyFrameInteriorCorner(
+    return topologyFrameUpperUtilityAttachment(
       topologyAtmosphereFrame(layout),
-      "atmosphere-aligner-top-left@inside",
+      "atmosphere-aligner-top-left@top",
       "left",
       TOPOLOGY_ALIGNER_WIDTH,
       TOPOLOGY_ALIGNER_HEIGHT,
     );
   }
   if (role === "auxiliary" && isCoolerModule(module.name, module.type)) {
-    return topologyFrameInteriorCorner(
+    return topologyFrameUpperUtilityAttachment(
       topologyAtmosphereFrame(layout),
-      "atmosphere-cooler-top-right@inside",
+      "atmosphere-cooler-top-right@top",
       "right",
       TOPOLOGY_COOLER_WIDTH,
       TOPOLOGY_COOLER_HEIGHT,
@@ -3194,7 +3208,9 @@ export function renderEquipmentTopology(
   hiddenFilters?: ReadonlySet<string>,
   device?: DeviceDefinition | null,
 ): string {
-  const visibleModules = snapshot.modules.filter(module => (
+  const layout = device ? detectDeviceTopologyLayout(device) : detectTopologyLayout(snapshot.modules, snapshot.robots.length);
+  const projection = layout === "dual" ? null : projectTopologyTransfers(snapshot, device);
+  const visibleModules = (projection?.modules ?? snapshot.modules).filter(module => (
     !isTopologyHiddenModule(module) && !isModuleFilteredOut(module, hiddenFilters)
   ));
   const groups = topologyGroups(visibleModules);
@@ -3205,9 +3221,6 @@ export function renderEquipmentTopology(
   ));
   const atmosphereNames = new Set(atmosphereRobots.map(robot => robot.name));
   const vacuumRobots = snapshot.robots.filter(robot => !atmosphereNames.has(robot.name));
-  const layout = device
-    ? detectDeviceTopologyLayout(device)
-    : detectTopologyLayout(visibleModules, snapshot.robots.length);
   const machineFrames = TOPOLOGY_MACHINE_FRAMES[layout].map(frame => ({ ...frame }));
   /* 双腔布局把 MultiProcessChamber 拆成独立腔室卡片，占满单腔 6 腔室 U 形布局。 */
   const processChamberViews = layout === "dual"
@@ -3346,10 +3359,29 @@ export function renderEquipmentTopology(
     robots: RobotSnapshot[],
     environment: "vacuum" | "atmosphere",
   ): string => robots.map(robot => {
-    const position = robotPositions.get(robot.name);
-    if (!position) return "";
+    const originalPosition = robotPositions.get(robot.name);
+    if (!originalPosition) return "";
+    const position = { ...originalPosition };
+    // 大气机械手先沿水平轨道到达目标正上/下方，真空手仍固定在框架中心。
+    if (layout !== "dual" && environment === "atmosphere" && robot.railMotion?.target) {
+      const motion = robot.railMotion;
+      const source = modulePositions.get(motion.source);
+      const destination = modulePositions.get(motion.target);
+      const sourceX = source?.fixedLeftOffsetPixels ?? (source ? (source.leftPercent - 50) / 100 * TOPOLOGY_VIEWBOX_WIDTH : 0);
+      const destinationX = destination?.fixedLeftOffsetPixels ?? (destination ? (destination.leftPercent - 50) / 100 * TOPOLOGY_VIEWBOX_WIDTH : sourceX);
+      const progress = motion.progress * motion.progress * (3 - 2 * motion.progress);
+      const offset = sourceX + (destinationX - sourceX) * progress;
+      position.fixedLeftOffsetPixels = offset;
+      position.leftPercent = 50 + offset / TOPOLOGY_VIEWBOX_WIDTH * 100;
+    }
+    const parallelArms = layout === "single" || layout === "cascade";
+    const activeMove = snapshot.activeMoves.find(move => move.ModuleName === robot.name);
+    const transferring = activeMove && (PICK_MOVE_TYPES.has(activeMove.MoveType) || PLACE_MOVE_TYPES.has(activeMove.MoveType) || activeMove.MoveType === SWAP_MOVE);
     const target = robot.target || decisionTargetForRobot(robot, decision);
-    const targetPosition = robotTargetTopologyPosition(robot, target, modulePositions);
+    // 取放必须深入真实目标腔室，不能沿用转位预览中 LA/LB 的公共中点。
+    const targetPosition = parallelArms && transferring
+      ? modulePositions.get(target)
+      : robotTargetTopologyPosition(robot, target, modulePositions);
     const targetAngle = targetPosition
       ? Math.atan2(
           targetPosition.topPixels - position.topPixels,
@@ -3371,10 +3403,35 @@ export function renderEquipmentTopology(
       }
     }
     const angleDegrees = armAngle * 180 / Math.PI;
+    const distance = targetPosition ? Math.hypot(
+      targetPosition.topPixels - position.topPixels,
+      (targetPosition.leftPercent - position.leftPercent) / 100 * TOPOLOGY_VIEWBOX_WIDTH,
+    ) : 0;
+    const mechanism = parallelArms ? renderParallelRobotArms(projection?.animations.get(robot.name) ?? [], distance,
+      wafer => `<span class="robot-held-wafer robot-held-wafer-0">${renderWaferToken(wafer, snapshot.waferOrigins[wafer] ?? "", 0,
+        robot.processedWafers.includes(wafer) || snapshot.modules.some(module => module.processedWafers.includes(wafer)))}</span>`, escapeHtml,
+      station => {
+        const target = modulePositions.get(station);
+        if (!target) return undefined;
+        const dx = (target.leftPercent - position.leftPercent) / 100 * TOPOLOGY_VIEWBOX_WIDTH;
+        const dy = target.topPixels - position.topPixels;
+        return { distance: Math.hypot(dx, dy), angle: Math.atan2(dy, dx) * 180 / Math.PI - angleDegrees };
+      }, visibleModules.filter(module => module.wafers.length > 0).flatMap(module => {
+        const location = modulePositions.get(module.name);
+        if (!location) return [];
+        const dx = (location.leftPercent - position.leftPercent) / 100 * TOPOLOGY_VIEWBOX_WIDTH;
+        const dy = location.topPixels - position.topPixels;
+        const type = module.type.toLowerCase();
+        const radius = type.includes("loadport") || type.includes("dummyport") ? TOPOLOGY_WAFER_OCCLUSION_RADII.port
+          : type.includes("loadlock") ? TOPOLOGY_WAFER_OCCLUSION_RADII.lock
+          : type.includes("cooler") ? TOPOLOGY_WAFER_OCCLUSION_RADII.cooler
+          : type.includes("aligner") ? TOPOLOGY_WAFER_OCCLUSION_RADII.aligner : TOPOLOGY_WAFER_OCCLUSION_RADII.process;
+        return [{ x: dx * Math.cos(armAngle) + dy * Math.sin(armAngle), y: -dx * Math.sin(armAngle) + dy * Math.cos(armAngle), radius }];
+      }), robot.name, environment === "atmosphere" ? "telescopic" : "articulated") : undefined;
     const fixedLeft = position.fixedLeftOffsetPixels === undefined
       ? ""
       : `;--fixed-left:calc(50% ${position.fixedLeftOffsetPixels < 0 ? "-" : "+"} ${Math.abs(position.fixedLeftOffsetPixels)}px)`;
-    return `<div class="reference-robot-position" style="--robot-left:${position.leftPercent}%;--robot-top:${position.topPixels}px${fixedLeft}">${renderRobotHub(robot, snapshot.waferOrigins, environment, angleDegrees)}</div>`;
+    return `<div class="reference-robot-position" style="--robot-left:${position.leftPercent}%;--robot-top:${position.topPixels}px${fixedLeft}">${renderRobotHub(robot, snapshot.waferOrigins, environment, angleDegrees, mechanism)}</div>`;
   }).join("");
   const robotMarkup = renderRobotGroup(vacuumRobots, "vacuum")
     + renderRobotGroup(atmosphereRobots, "atmosphere");
@@ -3391,6 +3448,7 @@ export function renderEquipmentTopology(
         </div>
         ${machineAreaMarkup}
         ${machineFrameMarkup}
+        ${layout !== "dual" && atmosphereRobots.length ? `<div class="topology-atmosphere-rail" aria-label="大气机械手轨道" style="top:${atmosphereFrame.centerTopPixels}px;width:${atmosphereFrame.widthPixels - TOPOLOGY_ATMOSPHERE_INTERIOR_INSET * 2}px"></div>` : ""}
         ${attachmentPointMarkup}
         ${moduleMarkup}
         ${robotMarkup}

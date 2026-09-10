@@ -244,6 +244,246 @@ async function requestSearchControl(command, actionKey = null) {
   });
 }
 
+// src/topology_robot_mechanism.ts
+var REST_REACH = 58;
+var ATR_RETRACTED_REACH = 42;
+var CLAW_SCALE = 0.8;
+var ARM_SEPARATION = 44;
+var CLAW_SEPARATION = 18;
+var SHOULDER_SEPARATION = 16;
+var EXTENDED_ELBOW_RATIO = 0.12;
+var CLAW_STEM_OFFSET = 23;
+var CLAW_PATH = "M -23 -4 L -15 -4 Q -8 -4 -7 -14 L 14 -20 L 16 -18 L -1 -12 Q -8 0 -1 12 L 16 18 L 14 20 L -7 14 Q -8 4 -15 4 L -23 4 Z";
+var HANDOFF_PROGRESS = 0.5;
+var SWAP_MOVE = 4;
+function values(value) {
+  return Array.isArray(value) ? value : [];
+}
+function configuredRobotArms(definition) {
+  const arms = Object.entries(definition.ArmInfo ?? {}).filter(([, arm]) => arm && typeof arm === "object").map(([name, arm]) => ({
+    name,
+    enabled: arm.IsEnable !== false,
+    slots: [...new Set(values(arm.SlotIDs).map(Number).filter((slot) => Number.isInteger(slot) && slot > 0))]
+  }));
+  if (arms.length) return arms;
+  const declaredSlots = values(definition.Slots).map(Number).filter((slot) => Number.isInteger(slot) && slot > 0);
+  const slots = declaredSlots.length ? declaredSlots : Array.from({ length: Math.max(1, Math.floor(Number(definition.Capacity) || 1)) }, (_, index) => index + 1);
+  return slots.map((slot) => ({ name: `Arm${slot}`, enabled: true, slots: [slot] }));
+}
+function transferStages(move) {
+  const type = Number(move.MoveType);
+  const stage = (kind, slots, materials, stations, stationSlots) => values(move[materials]).map((wafer, index) => ({
+    kind,
+    wafer: String(wafer),
+    robotSlot: Number(values(move[slots])[index] ?? 0),
+    station: String(values(move[stations])[index] ?? values(move[stations])[0] ?? ""),
+    stationSlot: Number(values(move[stationSlots])[index] ?? 0)
+  }));
+  if (type === SWAP_MOVE) {
+    const pick = stage("pick", "RecvSlotList", "RecvMatList", "StationList", "StnSendSlotList");
+    const place = stage("place", "SendSlotList", "SendMatList", "StationList", "StnRecvSlotList");
+    return Number(move.SwapMode) === 1 ? [place, pick] : [pick, place];
+  }
+  if (type === 0 || type === 2) return [stage("pick", "RobotSlotList", "MatIDList", "SrcStationList", "SrcSlotList")];
+  if (type === 1 || type === 3) return [stage("place", "RobotSlotList", "MatIDList", "DestStationList", "DestSlotList")];
+  return [];
+}
+function robotSlotWafers(moves, time, name, heldWafers) {
+  const byWafer = /* @__PURE__ */ new Map();
+  const relevant = moves.filter((move) => move.ModuleName === name);
+  for (const move of relevant) {
+    for (const transfer of transferStages(move).flat()) {
+      if (transfer.robotSlot > 0 && !byWafer.has(transfer.wafer)) byWafer.set(transfer.wafer, transfer.robotSlot);
+    }
+  }
+  for (const move of [...relevant].sort((a, b) => Number(a.EndTime) - Number(b.EndTime))) {
+    if (Number(move.EndTime) > time) continue;
+    for (const transfer of transferStages(move).flat()) {
+      if (transfer.kind === "pick" && transfer.robotSlot > 0) byWafer.set(transfer.wafer, transfer.robotSlot);
+    }
+  }
+  return Object.fromEntries(heldWafers.filter((wafer) => byWafer.has(wafer)).map((wafer) => [byWafer.get(wafer), wafer]));
+}
+function robotArmAnimation(definitions, slotWafers, move, time) {
+  const arms = definitions.map((arm) => ({
+    ...arm,
+    progress: null,
+    target: "",
+    wafers: Object.fromEntries(arm.slots.map((slot) => [slot, slotWafers[slot] ?? ""]))
+  }));
+  const transfers = [];
+  if (!move) return { arms, transfers };
+  const stages = transferStages(move);
+  const duration = Number(move.EndTime) - Number(move.StartTime);
+  const progress = duration > 0 ? Math.max(0, Math.min(1, (time - Number(move.StartTime)) / duration)) : 1;
+  stages.forEach((stage, index) => {
+    const localProgress = progress * stages.length - index;
+    for (const transfer of stage) {
+      const enabledSlots = arms.filter((arm2) => arm2.enabled).flatMap((arm2) => arm2.slots);
+      const slot = transfer.robotSlot || (enabledSlots.length === 1 ? enabledSlots[0] : 0);
+      const arm = arms.find((arm2) => arm2.enabled && arm2.slots.includes(slot));
+      if (!arm) continue;
+      if (localProgress >= 0 && localProgress < 1) {
+        arm.progress = localProgress;
+        arm.target = transfer.station;
+      }
+      if (localProgress >= HANDOFF_PROGRESS) {
+        arm.wafers[slot] = transfer.kind === "pick" ? transfer.wafer : "";
+        transfers.push({ ...transfer, robotSlot: slot });
+      }
+    }
+  });
+  return { arms, transfers };
+}
+function robotTransferReach(distance, progress, restReach = REST_REACH) {
+  return restReach + (distance - restReach) * extensionFraction(progress);
+}
+function extensionFraction(progress) {
+  if (progress === null) return 0;
+  const bounded = Math.max(0, Math.min(1, progress));
+  const phase = Math.min(1, bounded * 3, (1 - bounded) * 3);
+  return phase * phase * (3 - 2 * phase);
+}
+function robotArmGeometry(reach, index, count, progress) {
+  const side = index < (count - 1) / 2 ? -1 : 1;
+  const shoulder = (index - (count - 1) / 2) * SHOULDER_SEPARATION;
+  const fraction = extensionFraction(progress);
+  const tipY = (index - (count - 1) / 2) * ARM_SEPARATION * (1 - fraction);
+  const bend = (1 - fraction) / 2 + fraction * EXTENDED_ELBOW_RATIO;
+  return {
+    shoulder,
+    tipY,
+    elbowX: reach / 2 - side * (tipY - shoulder) * bend,
+    elbowY: (shoulder + tipY) / 2 + side * reach * bend
+  };
+}
+function renderParallelRobotArms(arms, distance, renderWafer, escape, targetGeometry, occlusions = [], maskPrefix = "robot", mechanism = "articulated") {
+  const waferLayers = [];
+  const markup = arms.map((arm, index) => {
+    const geometry = arm.target ? targetGeometry?.(arm.target) : void 0;
+    const visibleProgress = targetGeometry && arm.target && !geometry ? null : arm.progress;
+    const reach = robotTransferReach(
+      geometry?.distance ?? distance,
+      visibleProgress,
+      mechanism === "telescopic" ? ATR_RETRACTED_REACH : REST_REACH
+    );
+    const { shoulder, elbowX, elbowY, tipY } = robotArmGeometry(reach, index, arms.length, visibleProgress);
+    const clawAngle = mechanism === "telescopic" ? 0 : Math.atan2(tipY - elbowY, reach - elbowX);
+    const mountX = reach - CLAW_STEM_OFFSET * CLAW_SCALE * Math.cos(clawAngle);
+    const mountY = tipY - CLAW_STEM_OFFSET * CLAW_SCALE * Math.sin(clawAngle);
+    const linkPath = mechanism === "telescopic" ? `M 0 ${tipY} L ${mountX} ${mountY}` : `M 0 ${shoulder} L ${elbowX} ${elbowY} L ${mountX} ${mountY}`;
+    const wristHalfWidth = (arm.slots.length - 1) * CLAW_SEPARATION / 2;
+    const wristPath = arm.slots.length > 1 ? ` M ${mountX} ${mountY - wristHalfWidth} V ${mountY + wristHalfWidth}` : "";
+    const claws = arm.slots.map((slot, slotIndex) => {
+      const y = tipY + (slotIndex - (arm.slots.length - 1) / 2) * CLAW_SEPARATION;
+      return `<g class="parallel-robot-claw" data-robot-slot="${slot}" transform="translate(${reach} ${y}) rotate(${clawAngle * 180 / Math.PI}) scale(${CLAW_SCALE})">
+        <path d="${CLAW_PATH}"/>
+      </g>`;
+    }).join("");
+    const wafers = arm.slots.map((slot, slotIndex) => {
+      const wafer = arm.wafers[slot];
+      const y = tipY + (slotIndex - (arm.slots.length - 1) / 2) * CLAW_SEPARATION;
+      return wafer ? `<span class="parallel-robot-wafers" data-held-slot="${slot}" style="left:${reach}px;top:${y}px">${renderWafer(wafer)}</span>` : "";
+    }).join("");
+    const localAngle = geometry?.angle ?? 0;
+    waferLayers.push(`<div class="parallel-robot-wafer-layer" style="--robot-arm-local-angle:${localAngle}deg">${wafers}</div>`);
+    const maskId = `robot-mask-${Array.from(maskPrefix).map((character) => character.codePointAt(0)).join("-")}-${index}`;
+    const radians = localAngle * Math.PI / 180;
+    const holes = occlusions.map((point) => `<circle cx="${point.x * Math.cos(radians) + point.y * Math.sin(radians)}" cy="${-point.x * Math.sin(radians) + point.y * Math.cos(radians)}" r="${point.radius}" fill="black"/>`).join("");
+    return `<div class="parallel-robot-arm${arm.progress === null ? "" : " is-transferring"}${arm.enabled ? "" : " is-disabled"}" data-arm="${escape(arm.name)}" style="--robot-reach:${reach.toFixed(2)}px;--robot-arm-local-angle:${localAngle}deg">
+      <svg class="parallel-robot-arms" overflow="visible" aria-hidden="true">
+        <defs><mask id="${maskId}" maskUnits="userSpaceOnUse" x="-2000" y="-2000" width="4000" height="4000"><rect x="-2000" y="-2000" width="4000" height="4000" fill="white"/>${holes}</mask></defs>
+        <g mask="url(#${maskId})"><path class="parallel-robot-link" d="${linkPath}${wristPath}"/>
+        <path class="parallel-robot-link-inset" d="${linkPath}${wristPath}"/>
+        ${mechanism === "telescopic" ? `<path class="parallel-robot-slide" d="M 0 ${tipY} H ${reach / 2}"/>` : `<circle class="parallel-robot-joint" cx="${elbowX}" cy="${elbowY}" r="4"/>`}${claws}</g>
+      </svg></div>`;
+  }).join("");
+  return `<div class="parallel-robot-mechanism">${markup}${waferLayers.join("")}</div>`;
+}
+
+// src/topology_transfer_projection.ts
+function projectTopologyTransfers(snapshot, device) {
+  const modules = snapshot.modules.map((module) => ({
+    ...module,
+    wafers: [...module.wafers],
+    processedWafers: [...module.processedWafers],
+    loadPortSlots: module.loadPortSlots.map((slot) => ({ ...slot })),
+    loadLockSlots: module.loadLockSlots.map((slot) => ({ ...slot }))
+  }));
+  const animations = /* @__PURE__ */ new Map();
+  for (const robot of snapshot.robots) {
+    const definition = device?.Robots?.[robot.name];
+    const arms = definition ? configuredRobotArms(definition) : robot.arms ?? configuredRobotArms({ Capacity: robot.capacity });
+    const slots = arms.flatMap((arm) => arm.slots);
+    const slotWafers = { ...robot.slotWafers };
+    if (slots.length === 1 && robot.wafers.length === 1 && !Object.keys(slotWafers).length) {
+      slotWafers[slots[0]] = robot.wafers[0];
+    }
+    const move = snapshot.activeMoves.find((move2) => move2.ModuleName === robot.name);
+    const preparation = robot.environment === "atmosphere" ? robot.railMotion?.preparationFraction ?? 0 : 0;
+    const alignedMove = move && preparation ? {
+      ...move,
+      StartTime: Number(move.StartTime) + (Number(move.EndTime) - Number(move.StartTime)) * preparation
+    } : move;
+    const animation = robotArmAnimation(
+      arms,
+      slotWafers,
+      alignedMove && snapshot.time < Number(alignedMove.StartTime) ? void 0 : alignedMove,
+      snapshot.time
+    );
+    animations.set(robot.name, animation.arms);
+    for (const transfer of animation.transfers) {
+      const module = modules.find((module2) => module2.name === transfer.station);
+      if (!module) continue;
+      const processed = robot.processedWafers.includes(transfer.wafer);
+      if (transfer.kind === "pick") {
+        module.wafers = module.wafers.filter((wafer) => wafer !== transfer.wafer);
+      } else if (!module.wafers.includes(transfer.wafer)) {
+        module.wafers.push(transfer.wafer);
+        if (processed) module.processedWafers.push(transfer.wafer);
+      }
+      for (const slot of [...module.loadPortSlots, ...module.loadLockSlots]) {
+        if (transfer.kind === "pick" && slot.wafer === transfer.wafer) {
+          slot.wafer = "";
+          slot.processed = false;
+        } else if (transfer.kind === "place" && slot.slot === transfer.stationSlot) {
+          slot.wafer = transfer.wafer;
+          slot.processed = processed;
+        }
+      }
+    }
+  }
+  return { modules, animations };
+}
+
+// src/topology_atmosphere_rail.ts
+var PRE_TRANS_MOVE = 5;
+var RAIL_PREPARATION_FRACTION = 0.25;
+function station(move, field) {
+  return Array.isArray(move[field]) ? String(move[field][0] ?? "") : "";
+}
+function atmosphereRailMotion(moves, robot, time) {
+  let previousTarget = "";
+  for (const move of moves.filter((move2) => move2.ModuleName === robot).sort((left, right) => Number(left.StartTime) - Number(right.StartTime))) {
+    if (Number(move.StartTime) > time) break;
+    const target = station(move, "DestStationList") || station(move, "SrcStationList") || station(move, "StationList");
+    if (!target) continue;
+    if (Number(move.EndTime) > time) {
+      const source = Number(move.MoveType) === PRE_TRANS_MOVE ? station(move, "SrcStationList") || previousTarget : previousTarget;
+      const preparationFraction = Number(move.MoveType) < PRE_TRANS_MOVE && source !== target ? RAIL_PREPARATION_FRACTION : 0;
+      const progress = (time - Number(move.StartTime)) / (Number(move.EndTime) - Number(move.StartTime));
+      return {
+        source,
+        target,
+        preparationFraction,
+        progress: Number(move.MoveType) === PRE_TRANS_MOVE ? progress : preparationFraction ? Math.min(1, progress / preparationFraction) : 1
+      };
+    }
+    previousTarget = target;
+  }
+  return { source: previousTarget, target: previousTarget, progress: 1, preparationFraction: 0 };
+}
+
 // src/workspace_visualizer.ts
 var ALL_ACTION_DIAGNOSTIC_STATUSES = [
   "enabled",
@@ -252,14 +492,14 @@ var ALL_ACTION_DIAGNOSTIC_STATUSES = [
 ];
 var PICK_MOVE_TYPES = /* @__PURE__ */ new Set([0, 2]);
 var PLACE_MOVE_TYPES = /* @__PURE__ */ new Set([1, 3]);
-var SWAP_MOVE = 4;
-var DECISION_COMPLETION_MOVE_TYPES = /* @__PURE__ */ new Set([...PLACE_MOVE_TYPES, SWAP_MOVE]);
+var SWAP_MOVE2 = 4;
+var DECISION_COMPLETION_MOVE_TYPES = /* @__PURE__ */ new Set([...PLACE_MOVE_TYPES, SWAP_MOVE2]);
 var PRIMITIVE_DECISION_COMPLETION_MOVE_TYPES = /* @__PURE__ */ new Set([
   ...PICK_MOVE_TYPES,
   ...PLACE_MOVE_TYPES,
-  SWAP_MOVE
+  SWAP_MOVE2
 ]);
-var PRE_TRANS_MOVE = 5;
+var PRE_TRANS_MOVE2 = 5;
 var PREPARE_MOVE = 6;
 var COMPLETE_MOVE = 7;
 var PROCESS_MOVE = 9;
@@ -672,10 +912,10 @@ function collectRobotNames(moves, device) {
 function initialMaterialLocations(moves) {
   const locations = /* @__PURE__ */ new Map();
   for (const move of moves) {
-    if (move.MoveType === SWAP_MOVE) {
-      const station = String(listValue(move.StationList)[0] ?? "");
+    if (move.MoveType === SWAP_MOVE2) {
+      const station2 = String(listValue(move.StationList)[0] ?? "");
       for (const material of materialIds(move, "RecvMatList")) {
-        if (!locations.has(material)) locations.set(material, station);
+        if (!locations.has(material)) locations.set(material, station2);
       }
       for (const material of materialIds(move, "SendMatList")) {
         if (!locations.has(material)) locations.set(material, move.ModuleName);
@@ -696,7 +936,7 @@ function initialMaterialOrigins(moves) {
     origins.set(material, slot > 0 ? `${module}.${slot}` : module);
   };
   for (const move of moves) {
-    if (move.MoveType === SWAP_MOVE) {
+    if (move.MoveType === SWAP_MOVE2) {
       materialIds(move, "RecvMatList").forEach((material, index) => {
         setOrigin(
           material,
@@ -733,10 +973,10 @@ function applyCompletedTransfer(move, locations) {
     }
     return;
   }
-  if (move.MoveType === SWAP_MOVE) {
-    const station = String(listValue(move.StationList)[0] ?? "");
+  if (move.MoveType === SWAP_MOVE2) {
+    const station2 = String(listValue(move.StationList)[0] ?? "");
     for (const material of materialIds(move, "RecvMatList")) locations.set(material, move.ModuleName);
-    for (const material of materialIds(move, "SendMatList")) locations.set(material, station);
+    for (const material of materialIds(move, "SendMatList")) locations.set(material, station2);
   }
 }
 function indexedStation(move, field, index) {
@@ -921,11 +1161,11 @@ function buildLoadLockSlots(records, device, time, initialLocations, processedMa
         if (!isLoadLockName(source, String(device?.Stations?.[source]?.Type ?? ""))) return;
         occupyInitial(source, indexedSlot(move, "SrcSlotList", index), material);
       });
-    } else if (move.MoveType === SWAP_MOVE) {
+    } else if (move.MoveType === SWAP_MOVE2) {
       materialIds(move, "RecvMatList").forEach((material, index) => {
-        const station = indexedStation(move, "StationList", index);
-        if (!isLoadLockName(station, String(device?.Stations?.[station]?.Type ?? ""))) return;
-        occupyInitial(station, indexedSlot(move, "StnSendSlotList", index), material);
+        const station2 = indexedStation(move, "StationList", index);
+        if (!isLoadLockName(station2, String(device?.Stations?.[station2]?.Type ?? ""))) return;
+        occupyInitial(station2, indexedSlot(move, "StnSendSlotList", index), material);
       });
     }
   }
@@ -965,7 +1205,7 @@ function buildLoadLockSlots(records, device, time, initialLocations, processedMa
           occupancy.set(slot, material);
           observedMaximum.set(name, Math.max(observedMaximum.get(name) ?? 0, slot));
         });
-      } else if (move.MoveType === SWAP_MOVE) {
+      } else if (move.MoveType === SWAP_MOVE2) {
         materialIds(move, "RecvMatList").forEach((material, index) => {
           if (indexedStation(move, "StationList", index) !== name) return;
           const slot = indexedSlot(move, "StnSendSlotList", index);
@@ -1164,15 +1404,18 @@ function buildWorkspaceSnapshot(moves, device, requestedTime, replenishments = [
       name,
       type: String(definition.Type ?? ""),
       capacity: robotCapacity(definition, wafers.length),
+      arms: configuredRobotArms(definition),
+      slotWafers: robotSlotWafers(records, time, name, wafers),
       environment: robotEnvironment(name, definition),
+      railMotion: robotEnvironment(name, definition) === "atmosphere" ? atmosphereRailMotion(records, name, time) : void 0,
       wafers,
       processedWafers: wafers.filter(isProcessed),
       busy: Boolean(move),
       source: move ? firstStation(move, "SrcStationList") : "",
       target: robotTargets.get(name) ?? lastRobotTargets.get(name) ?? "",
       activeMoveName: move ? MOVE_NAMES[move.MoveType] ?? `\u52A8\u4F5C ${move.MoveType}` : "",
-      isPreTrans: move?.MoveType === PRE_TRANS_MOVE,
-      preTransProgress: move?.MoveType === PRE_TRANS_MOVE ? moveProgress(move, time) : 1
+      isPreTrans: move?.MoveType === PRE_TRANS_MOVE2,
+      preTransProgress: move?.MoveType === PRE_TRANS_MOVE2 ? moveProgress(move, time) : 1
     };
   });
   return {
@@ -1231,7 +1474,7 @@ function replayMaterialProgress(records) {
     });
   };
   for (const move of [...records].sort((left, right) => left.EndTime - right.EndTime || left.MoveID - right.MoveID)) {
-    if (move.MoveType === SWAP_MOVE) {
+    if (move.MoveType === SWAP_MOVE2) {
       const received = materialIds(move, "RecvMatList");
       update(move, received, "RecvMatStepIDList");
       update(move, materialIds(move, "SendMatList"), "SendMatStepIDList", received.length);
@@ -1256,7 +1499,7 @@ function hasConsistentTransferReplay(records, device) {
   const locations = initialMaterialLocations(records);
   const robotNames = new Set(Object.keys(device.Robots ?? {}));
   const locationCount = (location) => [...locations.values()].filter((current) => current === location).length;
-  const orderedTransfers = records.filter((move) => PICK_MOVE_TYPES.has(move.MoveType) || PLACE_MOVE_TYPES.has(move.MoveType) || move.MoveType === SWAP_MOVE).sort((left, right) => left.EndTime - right.EndTime || left.MoveID - right.MoveID);
+  const orderedTransfers = records.filter((move) => PICK_MOVE_TYPES.has(move.MoveType) || PLACE_MOVE_TYPES.has(move.MoveType) || move.MoveType === SWAP_MOVE2).sort((left, right) => left.EndTime - right.EndTime || left.MoveID - right.MoveID);
   for (const move of orderedTransfers) {
     if (PICK_MOVE_TYPES.has(move.MoveType)) {
       const materials = materialIds(move);
@@ -1284,15 +1527,15 @@ function hasConsistentTransferReplay(records, device) {
     const received = materialIds(move, "RecvMatList");
     const sent = materialIds(move, "SendMatList");
     for (let index = 0; index < received.length; index += 1) {
-      const station = indexedStation(move, "StationList", index);
-      if (!station || locations.get(received[index]) !== station) return false;
+      const station2 = indexedStation(move, "StationList", index);
+      if (!station2 || locations.get(received[index]) !== station2) return false;
       locations.set(received[index], move.ModuleName);
     }
     for (let index = 0; index < sent.length; index += 1) {
-      const station = indexedStation(move, "StationList", index);
-      if (!station || locations.get(sent[index]) !== move.ModuleName) return false;
-      if (locationCount(station) >= stationCapacity(device, station)) return false;
-      locations.set(sent[index], station);
+      const station2 = indexedStation(move, "StationList", index);
+      if (!station2 || locations.get(sent[index]) !== move.ModuleName) return false;
+      if (locationCount(station2) >= stationCapacity(device, station2)) return false;
+      locations.set(sent[index], station2);
     }
   }
   return true;
@@ -1721,7 +1964,7 @@ function renderModule(module, waferOrigins, role, candidate, layout = "single", 
 }
 var ROBOT_DOUBLE_HOLD_CAPACITY = 2;
 var ROBOT_DISPLAY_WAFER_LIMIT = 2;
-function renderRobotHub(robot, waferOrigins, environment, angleDegrees) {
+function renderRobotHub(robot, waferOrigins, environment, angleDegrees, mechanismMarkup) {
   const visibleWafers = robot.wafers.slice(0, ROBOT_DISPLAY_WAFER_LIMIT);
   const capacityLabel = robot.capacity >= ROBOT_DOUBLE_HOLD_CAPACITY ? "\u53CC\u7247\u673A\u68B0\u624B" : "\u5355\u69FD\u673A\u68B0\u624B";
   const holdingLabel = robot.wafers.length ? `\uFF0C\u6301\u6709 ${robot.wafers.length} \u7247\u6676\u5706 ${robot.wafers.join("\u3001")}` : "\uFF0C\u69FD\u4F4D\u4E3A\u7A7A";
@@ -1730,15 +1973,14 @@ function renderRobotHub(robot, waferOrigins, environment, angleDegrees) {
   const overflow = robot.wafers.length > ROBOT_DISPLAY_WAFER_LIMIT ? `<span class="robot-held-overflow">+${robot.wafers.length - ROBOT_DISPLAY_WAFER_LIMIT}</span>` : "";
   return `
     <article class="robot-hub robot-hub-${environment} ${robot.busy ? "is-busy" : ""}" style="--robot-arm-angle:${angleDegrees.toFixed(1)}deg" aria-label="${escapeHtml(robot.name)}\uFF0C${capacityLabel}\uFF0C${robot.busy ? "\u5DE5\u4F5C\u4E2D" : "\u5F85\u547D"}${holdingLabel}">
-      <span class="robot-environment-badge">${escapeHtml(robot.name)}</span>
       <div class="robot-mechanism" aria-hidden="true">
         <span class="robot-base"><i></i></span>
-        <span class="robot-arm">
+        ${mechanismMarkup === void 0 ? `<span class="robot-arm">
           <i class="robot-arm-beam"></i>
           <span class="robot-end-effector ${visibleWafers.length ? "is-occupied" : "is-empty"}">
             <span class="robot-held-wafers">${waferMarkup}${overflow}</span>
           </span>
-        </span>
+        </span>` : mechanismMarkup}
       </div>
     </article>`;
 }
@@ -1749,6 +1991,7 @@ var TOPOLOGY_ITEM_SIZE = 96;
 var TOPOLOGY_PROCESS_WIDTH = 82;
 var TOPOLOGY_PROCESS_HEIGHT = 82;
 var TOPOLOGY_ROBOT_SIZE = 132;
+var TOPOLOGY_WAFER_OCCLUSION_RADII = { process: 24, port: 21, lock: 21, cooler: 16, aligner: 15 };
 var TOPOLOGY_LOADLOCK_WIDTH = 82;
 var TOPOLOGY_LOADLOCK_HEIGHT = 82;
 var TOPOLOGY_LOADLOCK_BRIDGE_GAP = 2;
@@ -1911,11 +2154,11 @@ function topologyTightLoadLockOffsets(count, frameWidthPixels) {
     (_, index) => (index - (count - 1) / 2) * offsetStep
   );
 }
-function topologyFrameInteriorCorner(frame, attachmentId, horizontal, widthPixels, heightPixels) {
+function topologyFrameUpperUtilityAttachment(frame, attachmentId, horizontal, widthPixels, heightPixels) {
   const horizontalOffset = frame.widthPixels / 2 - TOPOLOGY_ATMOSPHERE_INTERIOR_INSET - widthPixels / 2;
   return {
     leftPercent: frame.centerLeftPercent + (horizontal === "left" ? -horizontalOffset : horizontalOffset) / TOPOLOGY_VIEWBOX_WIDTH * 100,
-    topPixels: frame.centerTopPixels - frame.heightPixels / 2 + TOPOLOGY_ATMOSPHERE_INTERIOR_INSET + heightPixels / 2,
+    topPixels: frame.centerTopPixels - frame.heightPixels / 2 - heightPixels / 2 - TOPOLOGY_LOADLOCK_BRIDGE_GAP,
     widthPixels,
     heightPixels,
     attachmentId,
@@ -1940,9 +2183,9 @@ function detectTopologyLayout(modules, robotCount) {
 function detectDeviceTopologyLayout(device) {
   const robotCount = Object.keys(device?.Robots ?? {}).length;
   if (robotCount > 2) return "cascade";
-  const hasMultiProcessChamber = Object.values(device?.Stations ?? {}).some((station) => {
-    const type = String(station.Type ?? "");
-    return isMultiProcessChamberType(type) || /process|chamber/i.test(type) && finiteNumber(station.Capacity, 1) > 1;
+  const hasMultiProcessChamber = Object.values(device?.Stations ?? {}).some((station2) => {
+    const type = String(station2.Type ?? "");
+    return isMultiProcessChamberType(type) || /process|chamber/i.test(type) && finiteNumber(station2.Capacity, 1) > 1;
   });
   return hasMultiProcessChamber ? "dual" : "single";
 }
@@ -1954,8 +2197,8 @@ function configurationReferencesName(value, name) {
 }
 function cascadeBridgeLoadLockNames(orderedLoadLockNames, device, vacuumRobotNames) {
   const structurallyLinked = orderedLoadLockNames.filter((loadLockName) => {
-    const station = device?.Stations?.[loadLockName];
-    const linkedVacuumRobots = vacuumRobotNames.filter((robotName) => configurationReferencesName(station, robotName) || configurationReferencesName(device?.Robots?.[robotName], loadLockName));
+    const station2 = device?.Stations?.[loadLockName];
+    const linkedVacuumRobots = vacuumRobotNames.filter((robotName) => configurationReferencesName(station2, robotName) || configurationReferencesName(device?.Robots?.[robotName], loadLockName));
     return linkedVacuumRobots.length >= 2;
   });
   if (structurallyLinked.length) return new Set(structurallyLinked);
@@ -2116,18 +2359,18 @@ function moduleTopologyPosition(module, role, index, roleModules, layout, bridge
     };
   }
   if (isAlignerModule(module.name, module.type)) {
-    return topologyFrameInteriorCorner(
+    return topologyFrameUpperUtilityAttachment(
       topologyAtmosphereFrame(layout),
-      "atmosphere-aligner-top-left@inside",
+      "atmosphere-aligner-top-left@top",
       "left",
       TOPOLOGY_ALIGNER_WIDTH,
       TOPOLOGY_ALIGNER_HEIGHT
     );
   }
   if (role === "auxiliary" && isCoolerModule(module.name, module.type)) {
-    return topologyFrameInteriorCorner(
+    return topologyFrameUpperUtilityAttachment(
       topologyAtmosphereFrame(layout),
-      "atmosphere-cooler-top-right@inside",
+      "atmosphere-cooler-top-right@top",
       "right",
       TOPOLOGY_COOLER_WIDTH,
       TOPOLOGY_COOLER_HEIGHT
@@ -2262,13 +2505,14 @@ function isModuleFilteredOut(module, hiddenFilters) {
   return hiddenFilters.has("aligner") && (/^(AL|ALIGNER)$/.test(normalized) || type === "aligner") || hiddenFilters.has("cooler") && (/^(CL|COOL(?:ER)?)$/.test(normalized) || type === "cooler");
 }
 function renderEquipmentTopology(snapshot, decision, hiddenFilters, device) {
-  const visibleModules = snapshot.modules.filter((module) => !isTopologyHiddenModule(module) && !isModuleFilteredOut(module, hiddenFilters));
+  const layout = device ? detectDeviceTopologyLayout(device) : detectTopologyLayout(snapshot.modules, snapshot.robots.length);
+  const projection = layout === "dual" ? null : projectTopologyTransfers(snapshot, device);
+  const visibleModules = (projection?.modules ?? snapshot.modules).filter((module) => !isTopologyHiddenModule(module) && !isModuleFilteredOut(module, hiddenFilters));
   const groups = topologyGroups(visibleModules);
   const destinations = candidateDestinations(decision);
   const atmosphereRobots = snapshot.robots.filter((robot) => robot.environment === "atmosphere" || !robot.environment && /^(ATR|ATM)/i.test(robot.name));
   const atmosphereNames = new Set(atmosphereRobots.map((robot) => robot.name));
   const vacuumRobots = snapshot.robots.filter((robot) => !atmosphereNames.has(robot.name));
-  const layout = device ? detectDeviceTopologyLayout(device) : detectTopologyLayout(visibleModules, snapshot.robots.length);
   const machineFrames = TOPOLOGY_MACHINE_FRAMES[layout].map((frame) => ({ ...frame }));
   const processChamberViews = layout === "dual" ? expandDualProcessChambers(groups.processModules) : groups.processModules.map((module) => ({ view: module, sourceName: module.name }));
   const processSourceNames = new Map(processChamberViews.map((item) => [item.view.name, item.sourceName]));
@@ -2369,10 +2613,25 @@ function renderEquipmentTopology(snapshot, decision, hiddenFilters, device) {
     renderModuleGroup(groups.auxiliaryModules, "auxiliary")
   ].join("");
   const renderRobotGroup = (robots, environment) => robots.map((robot) => {
-    const position = robotPositions.get(robot.name);
-    if (!position) return "";
+    const originalPosition = robotPositions.get(robot.name);
+    if (!originalPosition) return "";
+    const position = { ...originalPosition };
+    if (layout !== "dual" && environment === "atmosphere" && robot.railMotion?.target) {
+      const motion = robot.railMotion;
+      const source = modulePositions.get(motion.source);
+      const destination = modulePositions.get(motion.target);
+      const sourceX = source?.fixedLeftOffsetPixels ?? (source ? (source.leftPercent - 50) / 100 * TOPOLOGY_VIEWBOX_WIDTH : 0);
+      const destinationX = destination?.fixedLeftOffsetPixels ?? (destination ? (destination.leftPercent - 50) / 100 * TOPOLOGY_VIEWBOX_WIDTH : sourceX);
+      const progress = motion.progress * motion.progress * (3 - 2 * motion.progress);
+      const offset = sourceX + (destinationX - sourceX) * progress;
+      position.fixedLeftOffsetPixels = offset;
+      position.leftPercent = 50 + offset / TOPOLOGY_VIEWBOX_WIDTH * 100;
+    }
+    const parallelArms = layout === "single" || layout === "cascade";
+    const activeMove = snapshot.activeMoves.find((move) => move.ModuleName === robot.name);
+    const transferring = activeMove && (PICK_MOVE_TYPES.has(activeMove.MoveType) || PLACE_MOVE_TYPES.has(activeMove.MoveType) || activeMove.MoveType === SWAP_MOVE2);
     const target = robot.target || decisionTargetForRobot(robot, decision);
-    const targetPosition = robotTargetTopologyPosition(robot, target, modulePositions);
+    const targetPosition = parallelArms && transferring ? modulePositions.get(target) : robotTargetTopologyPosition(robot, target, modulePositions);
     const targetAngle = targetPosition ? Math.atan2(
       targetPosition.topPixels - position.topPixels,
       targetPosition.leftPercent / 100 * TOPOLOGY_VIEWBOX_WIDTH - position.leftPercent / 100 * TOPOLOGY_VIEWBOX_WIDTH
@@ -2390,8 +2649,41 @@ function renderEquipmentTopology(snapshot, decision, hiddenFilters, device) {
       }
     }
     const angleDegrees = armAngle * 180 / Math.PI;
+    const distance = targetPosition ? Math.hypot(
+      targetPosition.topPixels - position.topPixels,
+      (targetPosition.leftPercent - position.leftPercent) / 100 * TOPOLOGY_VIEWBOX_WIDTH
+    ) : 0;
+    const mechanism = parallelArms ? renderParallelRobotArms(
+      projection?.animations.get(robot.name) ?? [],
+      distance,
+      (wafer) => `<span class="robot-held-wafer robot-held-wafer-0">${renderWaferToken(
+        wafer,
+        snapshot.waferOrigins[wafer] ?? "",
+        0,
+        robot.processedWafers.includes(wafer) || snapshot.modules.some((module) => module.processedWafers.includes(wafer))
+      )}</span>`,
+      escapeHtml,
+      (station2) => {
+        const target2 = modulePositions.get(station2);
+        if (!target2) return void 0;
+        const dx = (target2.leftPercent - position.leftPercent) / 100 * TOPOLOGY_VIEWBOX_WIDTH;
+        const dy = target2.topPixels - position.topPixels;
+        return { distance: Math.hypot(dx, dy), angle: Math.atan2(dy, dx) * 180 / Math.PI - angleDegrees };
+      },
+      visibleModules.filter((module) => module.wafers.length > 0).flatMap((module) => {
+        const location = modulePositions.get(module.name);
+        if (!location) return [];
+        const dx = (location.leftPercent - position.leftPercent) / 100 * TOPOLOGY_VIEWBOX_WIDTH;
+        const dy = location.topPixels - position.topPixels;
+        const type = module.type.toLowerCase();
+        const radius = type.includes("loadport") || type.includes("dummyport") ? TOPOLOGY_WAFER_OCCLUSION_RADII.port : type.includes("loadlock") ? TOPOLOGY_WAFER_OCCLUSION_RADII.lock : type.includes("cooler") ? TOPOLOGY_WAFER_OCCLUSION_RADII.cooler : type.includes("aligner") ? TOPOLOGY_WAFER_OCCLUSION_RADII.aligner : TOPOLOGY_WAFER_OCCLUSION_RADII.process;
+        return [{ x: dx * Math.cos(armAngle) + dy * Math.sin(armAngle), y: -dx * Math.sin(armAngle) + dy * Math.cos(armAngle), radius }];
+      }),
+      robot.name,
+      environment === "atmosphere" ? "telescopic" : "articulated"
+    ) : void 0;
     const fixedLeft = position.fixedLeftOffsetPixels === void 0 ? "" : `;--fixed-left:calc(50% ${position.fixedLeftOffsetPixels < 0 ? "-" : "+"} ${Math.abs(position.fixedLeftOffsetPixels)}px)`;
-    return `<div class="reference-robot-position" style="--robot-left:${position.leftPercent}%;--robot-top:${position.topPixels}px${fixedLeft}">${renderRobotHub(robot, snapshot.waferOrigins, environment, angleDegrees)}</div>`;
+    return `<div class="reference-robot-position" style="--robot-left:${position.leftPercent}%;--robot-top:${position.topPixels}px${fixedLeft}">${renderRobotHub(robot, snapshot.waferOrigins, environment, angleDegrees, mechanism)}</div>`;
   }).join("");
   const robotMarkup = renderRobotGroup(vacuumRobots, "vacuum") + renderRobotGroup(atmosphereRobots, "atmosphere");
   return `
@@ -2407,6 +2699,7 @@ function renderEquipmentTopology(snapshot, decision, hiddenFilters, device) {
         </div>
         ${machineAreaMarkup}
         ${machineFrameMarkup}
+        ${layout !== "dual" && atmosphereRobots.length ? `<div class="topology-atmosphere-rail" aria-label="\u5927\u6C14\u673A\u68B0\u624B\u8F68\u9053" style="top:${atmosphereFrame.centerTopPixels}px;width:${atmosphereFrame.widthPixels - TOPOLOGY_ATMOSPHERE_INTERIOR_INSET * 2}px"></div>` : ""}
         ${attachmentPointMarkup}
         ${moduleMarkup}
         ${robotMarkup}
@@ -2582,9 +2875,9 @@ function renderResidenceMetricChart(samples, kind) {
     robot: { title: "\u673A\u5668\u624B\u9A7B\u7559\u65F6\u95F4", label: "\u673A\u5668\u624B\u9A7B\u7559", value: (sample) => sample.robotDwellSeconds ?? 0 }
   };
   const metric = definitions[kind];
-  const values = samples.map(metric.value);
-  const meanSeconds = values.reduce((sum, value) => sum + value, 0) / values.length;
-  const maximumSeconds = Math.max(...values, 1);
+  const values2 = samples.map(metric.value);
+  const meanSeconds = values2.reduce((sum, value) => sum + value, 0) / values2.length;
+  const maximumSeconds = Math.max(...values2, 1);
   const plotHeight = 150;
   const scaleMaximum = maximumSeconds * 1.08;
   const meanHeight = Math.min(meanSeconds / scaleMaximum * plotHeight, plotHeight);
@@ -2621,12 +2914,12 @@ function renderWaferResidenceChart(performance2) {
   const systemValues = samples.map((sample) => sample.duration);
   const chamberValues = samples.map((sample) => sample.chamberDwellSeconds ?? 0);
   const robotValues = samples.map((sample) => sample.robotDwellSeconds ?? 0);
-  const metricSummary = (values, label) => {
-    const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
-    const deviation = Math.sqrt(values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length);
+  const metricSummary = (values2, label) => {
+    const mean = values2.reduce((sum, value) => sum + value, 0) / values2.length;
+    const deviation = Math.sqrt(values2.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values2.length);
     const upperControlLimit = mean + deviation * 2;
-    const abnormalCount = values.filter((value) => value > upperControlLimit).length;
-    return `<span><small>\u5E73\u5747</small><b>${formatSeconds2(mean)}</b><em>s</em></span><span><small>\u6700\u5927</small><b>${formatSeconds2(Math.max(...values))}</b><em>s</em></span><span class="${abnormalCount ? "is-warning" : ""}"><small>\u504F\u9AD8\u6BD4\u4F8B</small><b>${(abnormalCount / values.length * 100).toFixed(1)}</b><em>%</em></span><span><small>\u6837\u672C</small><b>${values.length}</b><em>\u7247</em></span><span class="visually-hidden">${label}</span>`;
+    const abnormalCount = values2.filter((value) => value > upperControlLimit).length;
+    return `<span><small>\u5E73\u5747</small><b>${formatSeconds2(mean)}</b><em>s</em></span><span><small>\u6700\u5927</small><b>${formatSeconds2(Math.max(...values2))}</b><em>s</em></span><span class="${abnormalCount ? "is-warning" : ""}"><small>\u504F\u9AD8\u6BD4\u4F8B</small><b>${(abnormalCount / values2.length * 100).toFixed(1)}</b><em>%</em></span><span><small>\u6837\u672C</small><b>${values2.length}</b><em>\u7247</em></span><span class="visually-hidden">${label}</span>`;
   };
   const summary = (kind, content) => `<div class="analysis-compact-stats residence-chart-summary" data-residence-summary="${kind}"${kind === "system" ? "" : " hidden"}>${content}</div>`;
   return `
@@ -2693,9 +2986,9 @@ function renderThroughputSvg(points, title) {
   const allValues = points.map((point) => Math.max(0, Number(point.throughputPerHour) || 0));
   const mean = allValues.reduce((sum, value) => sum + value, 0) / allValues.length;
   const displayPoints = simplifyThroughputPoints(points);
-  const values = displayPoints.map((point) => Math.max(0, Number(point.throughputPerHour) || 0));
-  const observedMinimum = Math.min(...values);
-  const observedMaximum = Math.max(...values);
+  const values2 = displayPoints.map((point) => Math.max(0, Number(point.throughputPerHour) || 0));
+  const observedMinimum = Math.min(...values2);
+  const observedMaximum = Math.max(...values2);
   const spread = Math.max(observedMaximum - observedMinimum, Math.max(mean * 0.04, 1));
   const padding = Math.max(1, spread * 0.18);
   const step = spread > 20 ? 5 : spread > 8 ? 2 : 1;
@@ -2707,7 +3000,7 @@ function renderThroughputSvg(points, title) {
   const indexRange = Math.max(1, lastIndex - firstIndex);
   const coordinates = displayPoints.map((point, index) => ({
     x: left + (point.completedWaferIndex - firstIndex) / indexRange * usableWidth,
-    y: top + (1 - (values[index] - minimum) / yRange) * usableHeight
+    y: top + (1 - (values2[index] - minimum) / yRange) * usableHeight
   }));
   const linePath = coordinates.length === 1 ? `M ${coordinates[0].x.toFixed(2)} ${coordinates[0].y.toFixed(2)}` : coordinates.reduce((path, point, index) => {
     if (index === 0) return `M ${point.x.toFixed(2)} ${point.y.toFixed(2)}`;
@@ -2719,10 +3012,10 @@ function renderThroughputSvg(points, title) {
   const labelStride = Math.max(1, Math.ceil(displayPoints.length / MAXIMUM_THROUGHPUT_VALUE_LABELS));
   const pointTargets = displayPoints.map((point, index) => {
     const coordinate = coordinates[index];
-    const value = values[index];
-    const previousValue = values[index - 1] ?? value;
-    const nextValue = values[index + 1] ?? value;
-    const isLocalMinimum = index > 0 && index < values.length - 1 && value <= previousValue && value <= nextValue;
+    const value = values2[index];
+    const previousValue = values2[index - 1] ?? value;
+    const nextValue = values2[index + 1] ?? value;
+    const isLocalMinimum = index > 0 && index < values2.length - 1 && value <= previousValue && value <= nextValue;
     const labelY = isLocalMinimum ? Math.min(top + usableHeight - 4, coordinate.y + 17) : Math.max(top + 10, coordinate.y - 9);
     const labelClass = isLocalMinimum ? "throughput-chart-value is-below" : "throughput-chart-value";
     const showLabel = index === 0 || index === displayPoints.length - 1 || index % labelStride === 0;
@@ -3678,8 +3971,8 @@ function renderTestGroupAnalysis(summary, groupName) {
 var CJOB_TYPES = ["NormalLot", "HighestLot", "HigherLot"];
 var TASK_MODES = ["Smart", "Pipeline", "Sequential", "Concurrent"];
 function stringList(value) {
-  const values = Array.isArray(value) ? value : String(value || "").replaceAll("\uFF0C", ",").split(",");
-  return [...new Set(values.map((item) => String(item).trim()).filter(Boolean))];
+  const values2 = Array.isArray(value) ? value : String(value || "").replaceAll("\uFF0C", ",").split(",");
+  return [...new Set(values2.map((item) => String(item).trim()).filter(Boolean))];
 }
 function makeVisit(stationName = "", processRecipe = "") {
   return {
@@ -4554,12 +4847,12 @@ async function chooseDataTransfer(kind) {
 function robotAvailableSlots(robot) {
   const slots = /* @__PURE__ */ new Set();
   const addSlots = (rawSlots, scalarIsCapacity = false) => {
-    let values = [];
+    let values2 = [];
     if (Number.isInteger(rawSlots) && typeof rawSlots !== "boolean") {
-      values = scalarIsCapacity ? Array.from({ length: Math.max(0, rawSlots) }, (_, index) => index + FIRST_ROBOT_SLOT_ID) : [rawSlots];
-    } else if (Array.isArray(rawSlots)) values = rawSlots;
-    else if (rawSlots && typeof rawSlots === "object") values = Object.keys(rawSlots);
-    values.forEach((value) => {
+      values2 = scalarIsCapacity ? Array.from({ length: Math.max(0, rawSlots) }, (_, index) => index + FIRST_ROBOT_SLOT_ID) : [rawSlots];
+    } else if (Array.isArray(rawSlots)) values2 = rawSlots;
+    else if (rawSlots && typeof rawSlots === "object") values2 = Object.keys(rawSlots);
+    values2.forEach((value) => {
       const slotId = Number(value);
       if (Number.isInteger(slotId) && slotId >= FIRST_ROBOT_SLOT_ID) slots.add(slotId);
     });
@@ -4676,15 +4969,15 @@ function applyDeviceTopology(device, deviceName, rawRobotSlots = {}) {
 }
 function buildDeviceTimingDraft(device) {
   const draft = { stations: {}, robots: {} };
-  Object.entries(device?.Stations || {}).forEach(([stationName, station]) => {
+  Object.entries(device?.Stations || {}).forEach(([stationName, station2]) => {
     const timing = {};
     [...STATION_ACTION_TIME_FIELDS, { key: "AlignmentTime" }].forEach(({ key }) => {
-      if (station?.[key] && typeof station[key] === "object" && !Array.isArray(station[key])) {
-        timing[key] = structuredClone(station[key]);
+      if (station2?.[key] && typeof station2[key] === "object" && !Array.isArray(station2[key])) {
+        timing[key] = structuredClone(station2[key]);
       }
     });
-    if (Array.isArray(station?.PrePrepareTime)) {
-      timing.PrePrepareTime = station.PrePrepareTime.map((row) => Number(row?.Time) || 0);
+    if (Array.isArray(station2?.PrePrepareTime)) {
+      timing.PrePrepareTime = station2.PrePrepareTime.map((row) => Number(row?.Time) || 0);
     }
     draft.stations[stationName] = timing;
   });
@@ -4703,12 +4996,12 @@ function buildDeviceTimingDraft(device) {
   const configuredExecution = device?.ExecutionTiming && typeof device.ExecutionTiming === "object" ? device.ExecutionTiming : {};
   const overlayTiming = (defaults, configured) => Object.fromEntries(Object.entries(defaults).map(([itemName, fields]) => [
     itemName,
-    Object.fromEntries(Object.entries(fields).map(([fieldName, values]) => {
+    Object.fromEntries(Object.entries(fields).map(([fieldName, values2]) => {
       const configuredValues = configured?.[itemName]?.[fieldName];
-      if (Array.isArray(values)) {
-        return [fieldName, values.map((value, index) => Number.isFinite(Number(configuredValues?.[index])) ? Number(configuredValues[index]) : value)];
+      if (Array.isArray(values2)) {
+        return [fieldName, values2.map((value, index) => Number.isFinite(Number(configuredValues?.[index])) ? Number(configuredValues[index]) : value)];
       }
-      return [fieldName, Object.fromEntries(Object.entries(values).map(([key, value]) => [
+      return [fieldName, Object.fromEntries(Object.entries(values2).map(([key, value]) => [
         key,
         Number.isFinite(Number(configuredValues?.[key])) ? Number(configuredValues[key]) : value
       ]))];
@@ -4810,9 +5103,9 @@ function stepDeviceTimingSelection(kind, offset) {
 function renderDeviceStationTiming() {
   const container = document.getElementById("deviceStationTimingEditor");
   const stationName = state.deviceStationName;
-  const station = state.baseDevice?.Stations?.[stationName];
+  const station2 = state.baseDevice?.Stations?.[stationName];
   const timing = state.deviceTimingDraft?.stations?.[stationName];
-  if (!station || !timing) {
+  if (!station2 || !timing) {
     container.innerHTML = `<div class="device-config-empty"><strong>\u6682\u65E0\u53EF\u914D\u7F6E\u7AD9\u70B9</strong><span>\u9009\u62E9\u6216\u5BFC\u5165\u8BBE\u5907\u540E\uFF0C\u53EF\u5728\u8FD9\u91CC\u6821\u51C6\u7AD9\u70B9\u52A8\u4F5C\u65F6\u95F4\u3002</span></div>`;
     return;
   }
@@ -4834,7 +5127,7 @@ function renderDeviceStationTiming() {
     </tr>
   `).join("");
   const alignmentEntries = Object.entries(timing.AlignmentTime || {});
-  const prePrepareRows = Array.isArray(station.PrePrepareTime) ? station.PrePrepareTime : [];
+  const prePrepareRows = Array.isArray(station2.PrePrepareTime) ? station2.PrePrepareTime : [];
   const specialRows = [
     ...alignmentEntries.map(([slotId, value]) => `
       <div class="device-transition-row">
@@ -5040,8 +5333,8 @@ function validateDeviceTimingDraft() {
     executionStations: state.deviceTimingDraft?.execution?.stations || {},
     executionRobots: state.deviceTimingDraft?.execution?.robots || {}
   };
-  Object.entries(timingSections).some(([sectionName, items]) => Object.entries(items).some(([itemName, fields]) => Object.entries(fields).some(([fieldName, values]) => {
-    const rows = Array.isArray(values) ? values.map((value, index) => [index, value]) : Object.entries(values || {});
+  Object.entries(timingSections).some(([sectionName, items]) => Object.entries(items).some(([itemName, fields]) => Object.entries(fields).some(([fieldName, values2]) => {
+    const rows = Array.isArray(values2) ? values2.map((value, index) => [index, value]) : Object.entries(values2 || {});
     const invalid = rows.find(([, value]) => !Number.isFinite(Number(value)) || Number(value) < 0);
     if (!invalid) return false;
     invalidLabel = `${sectionName}.${itemName}.${fieldName}.${invalid[0]}`;
@@ -5085,7 +5378,7 @@ function shortestDevicePath(source, destination) {
     const path = queue.shift(), node = path.at(-1);
     if (node === `S:${destination}`) return path.map((item) => item.slice(2));
     const [kind, name] = node.split(":");
-    const neighbours = kind === "S" ? state.robotNames.filter((robot) => (state.robotScopes[robot] || []).includes(name)).map((robot) => `R:${robot}`) : (state.robotScopes[name] || []).map((station) => `S:${station}`);
+    const neighbours = kind === "S" ? state.robotNames.filter((robot) => (state.robotScopes[robot] || []).includes(name)).map((robot) => `R:${robot}`) : (state.robotScopes[name] || []).map((station2) => `S:${station2}`);
     neighbours.forEach((next) => {
       if (!visited.has(next)) {
         visited.add(next);
@@ -6997,10 +7290,10 @@ function collectRecipes(routes = state.routes) {
   return recipes;
 }
 function stationSlotList(stationName) {
-  const station = state.device?.Stations?.[stationName];
-  if (station) {
-    if (Array.isArray(station.Slots) && station.Slots.length) return station.Slots.map(Number);
-    const capacity = Number(station.Capacity) || 0;
+  const station2 = state.device?.Stations?.[stationName];
+  if (station2) {
+    if (Array.isArray(station2.Slots) && station2.Slots.length) return station2.Slots.map(Number);
+    const capacity = Number(station2.Capacity) || 0;
     return capacity >= 1 ? Array.from({ length: capacity }, (_, index) => index + 1) : [1];
   }
   const robot = state.device?.Robots?.[stationName];

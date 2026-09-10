@@ -942,9 +942,9 @@ test("单真空机械手拓扑以方框架固定四个 PM、Heater 与两把 Loa
   assert.ok(lp1.x < dummyPort.x, "DummyPort 应排在实际 LoadPort 之后");
   const atr = robotPosition("ATR");
   assert.equal(lp1.y - atr.y, 116, "LoadPort 整排应由大气框架下边固定");
-  assert.equal(modulePosition("Aligner").x, 33.95, "Aligner 应位于大气框架内左上角");
-  assert.equal(modulePosition("Cooler").x, 66.05, "Cooler 应位于大气框架内右上角");
-  assert.equal(modulePosition("Cooler").y - modulePosition("Aligner").y, 9, "Aligner 与 Cooler 应使用紧凑的顶部纵向间距");
+  assert.equal(modulePosition("Aligner").x, 33.95, "Aligner 上移时保持左侧横坐标");
+  assert.equal(modulePosition("Cooler").x, 66.05, "Cooler 上移时保持右侧横坐标");
+  assert.equal(modulePosition("Cooler").y - modulePosition("Aligner").y, -9, "不同高度的辅助模块底边应对齐在框架上方");
   const pm2 = modulePosition("PM2");
   const pm3 = modulePosition("PM3");
   const pm4 = modulePosition("PM4");
@@ -1484,6 +1484,7 @@ test("双腔拓扑使用 init 机器手名称和 Type，并用双片错层效果
     Robot: "AtmosphereArm",
     SrcStationList: ["LP1", "LP1"],
     SrcSlotList: [1, 2],
+    RobotSlotList: [1, 2],
     MatIDList: ["W1", "W2"],
     StartTime: 0,
     EndTime: 1,
@@ -1495,11 +1496,12 @@ test("双腔拓扑使用 init 机器手名称和 Type，并用双片错层效果
   const robot = snapshot.robots.find(item => item.name === "AtmosphereArm");
   assert.deepEqual(robot.wafers, ["W1", "W2"]);
   const topology = logic.renderEquipmentTopology(snapshot, null);
-  assert.match(topology, /class="robot-environment-badge">AtmosphereArm</);
+  assert.doesNotMatch(topology, /class="robot-environment-badge"/);
   assert.doesNotMatch(topology, />ATMRobot</);
   assert.match(topology, /aria-label="AtmosphereArm，双片机械手/);
   assert.match(topology, /class="robot-held-wafer robot-held-wafer-0"/);
-  assert.match(topology, /class="robot-held-wafer robot-held-wafer-1"/);
+  assert.match(topology, /data-held-slot="1"/);
+  assert.match(topology, /data-held-slot="2"/);
   assert.doesNotMatch(topology, /robot-external-name|robot-capacity-badge|robot-holding-count|is-dual-hold/);
   assert.doesNotMatch(topology, />2片</);
   assert.doesNotMatch(topology, /loadlock-pressure-state/);
@@ -1729,11 +1731,11 @@ test("E2E 决策在机器人尚未执行时驱动单槽机械臂朝向且不再�
   };
   const topology = logic.renderEquipmentTopology(idleSnapshot, decision);
   assert.match(topology, /class="robot-hub robot-hub-atmosphere[^>]*style="--robot-arm-angle:[\d.-]+deg"[^>]*aria-label="ATR，单槽机械手/);
-  assert.match(topology, /class="robot-end-effector is-empty"/);
+  assert.match(topology, /class="parallel-robot-mechanism"/);
   assert.doesNotMatch(topology, /class="robot-wrist-joint"/);
   assert.doesNotMatch(topology, /robot-fork-tine/);
   assert.doesNotMatch(topology, /robot-reach-sector/);
-  assert.match(topology, /class="robot-environment-badge">ATR</);
+  assert.doesNotMatch(topology, /class="robot-environment-badge"/);
   assert.doesNotMatch(topology, /topology-target-arrows|<line /);
 });
 
@@ -1898,7 +1900,7 @@ test("ATR 指向大气侧入口，VTR 放入 LA/LB 时指向两腔中点", () =>
   assert.doesNotMatch(topology, /topology-target-arrows/);
 });
 
-test("VTR 目标为 LA 或 LB 时使用相同的两腔中点角度", () => {
+test("VTR 取放 LA 或 LB 时分别深入实际腔室", () => {
   const midpointDevice = {
     Stations: {
       LA: { Type: "LoadLock" }, LB: { Type: "LoadLock" }, PM1: { Type: "Process" },
@@ -1926,8 +1928,26 @@ test("VTR 目标为 LA 或 LB 时使用相同的两腔中点角度", () => {
     assert.ok(match);
     return Number(match[1]);
   };
-  assert.ok(Math.abs(angleFor("LA") - 90) < 0.1);
-  assert.ok(Math.abs(angleFor("LB") - 90) < 0.1);
+  assert.ok(angleFor("LA") > 90);
+  assert.ok(angleFor("LB") < 90);
+});
+
+test("单腔和级联取放配置臂伸入后收回，大气框架显示轨道", () => {
+  for (const robots of [{ ATR: {}, VTR: {} }, { ATR: {}, VTR_1: {}, VTR_2: {} }]) {
+    const testDevice = { Stations: { LP1: { Type: "LoadPort" }, PM1: { Type: "Process" } }, Robots: robots };
+    const transfer = [{ MoveID: 1, MoveType: 0, ModuleName: "ATR", SrcStationList: ["LP1"], MatIDList: ["W1"], RobotSlotList: [1], StartTime: 0, EndTime: 10 }];
+    const renderAt = time => logic.renderEquipmentTopology(logic.snapshotWithFullDeviceModules(
+      logic.buildWorkspaceSnapshot(transfer, testDevice, time), testDevice), null, undefined, testDevice);
+    const reachAt = time => Number(/robot-hub-atmosphere[\s\S]*?--robot-reach:([\d.]+)px/.exec(renderAt(time))[1]);
+    const midpoint = renderAt(5);
+    assert.match(midpoint, /class="topology-atmosphere-rail"/);
+    assert.equal((midpoint.match(/class="parallel-robot-arm(?: is-transferring)?"/g) || []).length, Object.keys(robots).length);
+    assert.equal((midpoint.match(/class="parallel-robot-joint"/g) || []).length, Object.keys(robots).length - 1);
+    assert.equal(reachAt(0), 42);
+    assert.ok(reachAt(5) > reachAt(4));
+    assert.equal(reachAt(4), reachAt(8.5));
+    assert.equal(reachAt(10), 42);
+  }
 });
 
 test("完成取放动作后晶圆位置与机器人状态一致", () => {

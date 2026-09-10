@@ -1982,6 +1982,24 @@
     .reference-grid-canvas .robot-hub, .reference-grid-canvas .robot-hub-vacuum, .reference-grid-canvas .robot-hub-atmosphere { position: relative; top: auto; left: auto; display: block; width: 132px; height: 132px; min-height: 132px; overflow: visible; border: 0; border-radius: 0; clip-path: none; color: #334155; background: transparent; box-shadow: none; transform: none; }
     .robot-environment-badge { position: absolute; z-index: 6; top: calc(50% - 44px); left: 50%; padding: 2px 4px; border: 1px solid rgba(73,99,130,.42); border-radius: 2px; color: #5b6d83; background: rgba(248,250,252,.90); font: 800 7px/1 "Fira Code", Consolas, monospace; letter-spacing: .06em; white-space: nowrap; transform: translateX(-50%); }
     .robot-mechanism { position: absolute; inset: 8px; }
+    /* 单腔与级联共用水平双导轨；平行双臂随时间轴直接定位，拖动时不滞后。 */
+    .topology-atmosphere-rail { position: absolute; z-index: 2; left: 50%; height: 18px; transform: translate(-50%, -50%); border-block: 3px solid #8b9bad; border-inline: 5px solid #667b94; border-radius: 3px; background: repeating-linear-gradient(90deg, transparent 0 30px, #b6c2ce 30px 33px); box-shadow: 0 2px 3px #20304718; pointer-events: none; }
+    .parallel-robot-mechanism { position: absolute; left: 50%; top: 50%; transform: rotate(var(--robot-arm-angle)); transform-origin: 0 0; }
+    .reference-robot-position:has(.parallel-robot-mechanism) { left: var(--fixed-left, var(--robot-left)); }
+    .parallel-robot-arms { position: absolute; width: 1px; height: 1px; overflow: visible; }
+    .parallel-robot-link { fill: none; stroke: #52677f; stroke-width: 7px; stroke-linejoin: round; stroke-linecap: round; }
+    .parallel-robot-link-inset { fill: none; stroke: #b8c7d7; stroke-width: 4px; stroke-linejoin: round; stroke-linecap: round; }
+    .parallel-robot-slide { fill: none; stroke: #8298af; stroke-width: 5px; stroke-linecap: butt; }
+    .parallel-robot-joint { fill: #e6edf4; stroke: #52677f; stroke-width: 2px; }
+    .parallel-robot-claw { fill: #71879e; stroke: #465f7d; stroke-width: 1.2px; stroke-linejoin: round; }
+    .parallel-robot-wafers { position: absolute; left: var(--robot-reach); top: 0; }
+    .parallel-robot-arm.is-transferring .parallel-robot-link { stroke: var(--sim-transfer); }
+    .parallel-robot-arm.is-disabled { opacity: .35; }
+    .parallel-robot-arm { position: absolute; transform: rotate(var(--robot-arm-local-angle, 0deg)); transform-origin: 0 0; }
+    .parallel-robot-wafer-layer { position: absolute; z-index: 5; transform: rotate(var(--robot-arm-local-angle, 0deg)); transform-origin: 0 0; }
+    .robot-hub:has(.parallel-robot-mechanism) .robot-base { width: 34px; height: 34px; }
+    .robot-hub:has(.parallel-robot-mechanism) .robot-base i { width: 12px; height: 12px; }
+    .parallel-robot-wafers .robot-held-wafer { transform: translate(-50%, -50%) rotate(calc(-1 * (var(--robot-arm-angle) + var(--robot-arm-local-angle, 0deg)))); }
     .robot-base { position: absolute; z-index: 3; top: 50%; left: 50%; display: grid; width: 58px; height: 58px; place-items: center; border: 2px solid #667b94; border-radius: 50%; background: radial-gradient(circle at 38% 32%, #fbfdff 0, #d9e3ed 58%, #aebdcd 100%); box-shadow: inset 0 0 0 3px rgba(255,255,255,.58), 2px 3px 7px rgba(32,47,81,.14); transform: translate(-50%, -50%); }
     .robot-base i { width: 18px; height: 18px; border: 2px solid #52677f; border-radius: 50%; background: #9fb0c2; box-shadow: inset 0 2px 3px rgba(28,43,61,.28); }
     .robot-arm { position: absolute; z-index: 2; top: 50%; left: 50%; display: block; width: 88px; height: 38px; transform: translateY(-50%) rotate(var(--robot-arm-angle, -90deg)); transform-origin: 0 50%; transition: transform .22s ease-out; }

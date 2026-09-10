@@ -67,8 +67,8 @@ npm run build
 `assets/config_editor.js` 和 `assets/documentation_page.js`，并生成供 Node 单元测试使用的 `route_editor_logic.js`
 与 `workspace_visualizer_logic.js`。
 
-每次修改前端都必须递增 `frontend/package.json` 和 `package-lock.json` 中的版本号，
-并同步页面右上角显示版本及 CSS/JavaScript 资源查询版本。
+实现过程中不修改前端版本；仅在创建用户要求的提交前递增 `frontend/package.json`
+和 `package-lock.json` 中的版本号，并同步页面右上角显示版本、资源查询版本及版本断言。
 
 调度平台中的“结果分析”可直接载入当前运行结果、批处理结果或本地 MoveList JSON。
 结果分析支持拖动时间轴和按倍率播放，并根据 Prepare/Complete 动作显示腔室门的关闭、
