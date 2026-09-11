@@ -794,6 +794,28 @@ def _validate_clean_start(
                 and recipe_name not in requirement[2]
             ):
                 return _issue(move, ValidationErrorCode.CLEAN_RECIPE_INVALID, f"{clean_task_name} Recipe={recipe_name or '<empty>'}，期望 {list(requirement[2])} PJob={required_pjob}")
+            if (
+                requirement[0] == "pre"
+                and required_station == station.name
+                and task_name == clean_task_name
+                and required_pjob in selected_pjobs
+                and _clean_validation_type(
+                    task_name,
+                    material_count=requirement[1],
+                ) == "preclean"
+                and not skipped("preclean")
+            ):
+                clean_key = (required_pjob, required_station, task_name)
+                actual_count = state.completed_clean_counts.get(clean_key, 0)
+                expected_count = max(1, requirement[1])
+                if actual_count >= expected_count:
+                    return _issue(
+                        move,
+                        ValidationErrorCode.CLEAN_PRE_DUPLICATE,
+                        f"{clean_task_name} 已完成，不能重复执行 "
+                        f"required={expected_count} actual={actual_count} "
+                        f"PJob={required_pjob}",
+                    )
     if not clean_task_name or "wac" not in clean_task_name.casefold() or skipped(
         _clean_validation_type(clean_task_name)
     ):

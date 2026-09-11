@@ -2180,7 +2180,7 @@ export function renderFrontSlotOverview(
       );
       const identity = `${module.name}.${slot.slot}`;
       const detail = slot.wafer
-        ? `${identity} · 晶圆 ${slot.wafer}，${slot.processed ? "已加工" : "未加工"}`
+        ? `${identity} · 晶圆 ${waferSurfaceLabel(slot.wafer, waferOrigins[slot.wafer] ?? "")}，${slot.processed ? "已加工" : "未加工"}`
         : `${identity} · 空槽`;
       return `<span class="front-slot is-${state}${dummy ? " is-dummy" : ""}" tabindex="0" title="${escapeHtml(detail)}" aria-label="${escapeHtml(detail)}"></span>`;
     }).join("")

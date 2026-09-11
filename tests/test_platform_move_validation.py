@@ -615,6 +615,54 @@ def test_platform_requires_preclean_before_first_product_process() -> None:
     ) == []
 
 
+def test_platform_rejects_duplicate_preclean_for_same_pjob_station() -> None:
+    """同一 PJob/PM 的一次性 PreClean 完成后不得再次执行。"""
+    update = {
+        "Stations": {"PM1": {"Type": "ProcessChamber", "Capacity": 1}},
+        "Robots": {},
+        "Materials": [],
+        "ProcessJobs": [{
+            "JobName": "P1",
+            "OriginRoute": {
+                "PrePJob": {"PM1": [{
+                    "CheckConditions": {"Pre": [{
+                        "TaskName": "PreClean",
+                        "CleanRecipe": "PreRecipe",
+                        "MaterialCount": 0,
+                    }]},
+                }]},
+            },
+        }],
+    }
+    state = MachineState.from_sources(None, update)
+    first_clean = _move(
+        1,
+        9,
+        0,
+        10,
+        ModuleName="PM1",
+        MatIDList=[],
+        SlotList=[1],
+        PJobName=["P1"],
+        CleanTaskName="PreClean",
+        ProcessRecipe="PreRecipe",
+        IsLastCleanTaskMove=True,
+    )
+    duplicate_clean = {
+        **first_clean,
+        "MoveID": 2,
+        "StartTime": 10,
+        "EndTime": 20,
+    }
+
+    issues = validate_move_list(None, [first_clean, duplicate_clean], state)
+
+    assert issues == [
+        "[MVL-CLEAN-PRE-DUPLICATE] MoveID=2 MoveType=9："
+        "PreClean 已完成，不能重复执行 required=1 actual=1 PJob=P1"
+    ]
+
+
 def test_platform_requires_postclean_after_product_process() -> None:
     """产品加工已完成而当前代计划没有 PostClean 时必须报义务缺失。"""
     update = {

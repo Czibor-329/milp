@@ -1784,7 +1784,7 @@ function renderFrontSlotOverview(modules, waferOrigins = {}) {
       waferOrigins[slot.wafer] ?? `${module2.name}.${slot.slot}`
     );
     const identity = `${module2.name}.${slot.slot}`;
-    const detail = slot.wafer ? `${identity} \xB7 \u6676\u5706 ${slot.wafer}\uFF0C${slot.processed ? "\u5DF2\u52A0\u5DE5" : "\u672A\u52A0\u5DE5"}` : `${identity} \xB7 \u7A7A\u69FD`;
+    const detail = slot.wafer ? `${identity} \xB7 \u6676\u5706 ${waferSurfaceLabel(slot.wafer, waferOrigins[slot.wafer] ?? "")}\uFF0C${slot.processed ? "\u5DF2\u52A0\u5DE5" : "\u672A\u52A0\u5DE5"}` : `${identity} \xB7 \u7A7A\u69FD`;
     return `<span class="front-slot is-${state}${dummy ? " is-dummy" : ""}" tabindex="0" title="${escapeHtml(detail)}" aria-label="${escapeHtml(detail)}"></span>`;
   }).join("");
   if (!slotRows.length) return "";

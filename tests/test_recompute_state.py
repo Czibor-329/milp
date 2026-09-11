@@ -69,6 +69,57 @@ def test_recompute_notifications_keep_completed_clean_moves_for_hongye() -> None
     ]
 
 
+def test_algorithm_deadlock_output_keeps_committed_prefix_and_recompute_point() -> None:
+    """重算死锁的失败甘特图应包含旧代前缀及失败代部分计划。"""
+    update = {
+        "CurrentTime": 0.0,
+        "Materials": [],
+        "ProcessJobs": [],
+        "ControlJobs": [],
+        "Routes": {},
+        "Robots": {},
+        "Stations": {"PM1": {"Type": "Process", "Slots": [1]}},
+    }
+    committed_move = {
+        "MoveID": 1,
+        "MoveType": 9,
+        "ModuleName": "PM1",
+        "MatIDList": [],
+        "StartTime": 1.0,
+        "EndTime": 2.0,
+    }
+    runtime = PlatformMoveListRuntime(
+        update,
+        {"MoveList": [committed_move], "Feedback": []},
+    )
+    partial_move = {
+        "MoveID": 2,
+        "MoveType": 9,
+        "ModuleName": "PM1",
+        "MatIDList": [],
+        "StartTime": 3.0,
+        "EndTime": 4.0,
+    }
+
+    output = runtime.combined_failure_output(
+        {"MoveList": [partial_move], "Feedback": [{"Level": "Error"}]},
+        requested_time=3.0,
+        reason="CJobCycle 补片",
+        committed_moves=runtime.committed_moves(3.0),
+    )
+
+    assert [move["MoveID"] for move in output["MoveList"]] == [1, 2]
+    assert output["RecomputePoints"] == [{
+        "Time": 3.0,
+        "EffectiveTime": 3.0,
+        "ScheduleStartTime": 3.0,
+        "RecoveryEndTime": 3.0,
+        "Index": 1,
+        "Reason": "CJobCycle 补片",
+        "Status": "algorithm-deadlock",
+    }]
+
+
 def _wac_update(
     pjob_name: str,
     recipe_name: str,

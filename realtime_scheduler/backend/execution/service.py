@@ -359,8 +359,18 @@ def _execute_standard_algorithm(
                 f"收到 output #{recompute_index}",
                 "succeeded",
             )
+            cumulative_failure_output = (
+                runtime.combined_failure_output(
+                    output,
+                    requested_time,
+                    reason,
+                    committed_moves,
+                )
+                if _deadlock_feedback(output) is not None
+                else output
+            )
             _raise_deadlock_feedback(
-                output,
+                cumulative_failure_output,
                 reproduction,
                 sim_time=requested_time,
                 context=reason,

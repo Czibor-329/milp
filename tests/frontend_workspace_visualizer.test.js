@@ -77,6 +77,18 @@ test("拓扑晶圆标签保留 ID 并显示首次来源模块和槽位", () => {
   assert.doesNotMatch(markup, /wafer-dummy/);
 });
 
+test("槽位视图使用来源 LP 相对槽号，不把全局物料 ID 当晶圆编号", () => {
+  const snapshot = logic.buildWorkspaceSnapshot([
+    { MoveID: 1, MoveType: 0, ModuleName: "ATR", SrcStationList: ["LP2"],
+      SrcSlotList: [4], MatIDList: [79], StartTime: 0, EndTime: 1 },
+    { MoveID: 2, MoveType: 1, ModuleName: "ATR", DestStationList: ["LA"],
+      DestSlotList: [2], MatIDList: [79], StartTime: 1, EndTime: 2 },
+  ], { ...device, Stations: { ...device.Stations, LP2: { Type: "LoadPort" } } }, 2);
+  const markup = logic.renderFrontSlotOverview(snapshot.modules, snapshot.waferOrigins);
+  assert.match(markup, /LA\.2 · 晶圆 LP2\.4/);
+  assert.doesNotMatch(markup, /晶圆 79/);
+});
+
 test("Dummy 晶圆使用独立颜色，表面显示原始物料 ID", () => {
   const dummyDevice = {
     ...device,

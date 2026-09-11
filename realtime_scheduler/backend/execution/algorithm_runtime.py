@@ -226,5 +226,52 @@ class PlatformMoveListRuntime:
         output["RecomputePoints"] = deepcopy(self._recompute_points)
         return output
 
+    def combined_failure_output(
+        self,
+        output: Mapping[str, Any],
+        requested_time: float,
+        reason: str,
+        committed_moves: Sequence[Mapping[str, Any]],
+    ) -> Dict[str, Any]:
+        """拼接跨代历史、当前代承诺前缀和失败代的部分计划。
+
+        算法在重算中报告死锁时，``output`` 只包含本次 update 生成的部分
+        MoveList。失败甘特图仍必须保留更早代次已经执行或承诺的动作，否则
+        MoveID 和绝对时间会从中途开始，前端无法选择正确的回放代次。
+
+        参数:
+            output: 本次失败的标准算法输出。
+            requested_time: 触发本次重算的绝对时刻。
+            reason: CJobCycle 或定时重算的用户可读原因。
+            committed_moves: 当前有效代在重算时刻前已启动的不可取消动作。
+
+        返回:
+            可直接交给失败分类与结果持久化的累计输出副本。
+        """
+        failure_output = _alg_output_info(output)
+        moves = [
+            *deepcopy(self._history),
+            *deepcopy(list(committed_moves)),
+            *deepcopy(list(failure_output.get("MoveList") or [])),
+        ]
+        moves.sort(key=lambda move: (
+            float(move.get("StartTime") or 0.0),
+            int(move.get("MoveID") or 0),
+        ))
+        failure_output["MoveList"] = moves
+        failure_output["RecomputePoints"] = [
+            *deepcopy(self._recompute_points),
+            {
+                "Time": float(requested_time),
+                "EffectiveTime": float(requested_time),
+                "ScheduleStartTime": float(requested_time),
+                "RecoveryEndTime": float(requested_time),
+                "Index": len(self._recompute_points) + 1,
+                "Reason": reason,
+                "Status": "algorithm-deadlock",
+            },
+        ]
+        return failure_output
+
 
 __all__ = tuple(name for name in globals() if not name.startswith("__"))
