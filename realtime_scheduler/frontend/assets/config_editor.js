@@ -456,6 +456,100 @@ function projectTopologyTransfers(snapshot, device) {
   return { modules, animations };
 }
 
+// src/topology_loadlock_doors.ts
+var PREPARE = 6;
+var COMPLETE = 7;
+var TRANSFERS = /* @__PURE__ */ new Set([0, 1, 2, 3, 4]);
+var TIME_TOLERANCE = 1e-6;
+var RELATED_ATMOSPHERE = 0;
+var RELATED_VACUUM = 1;
+function values2(value) {
+  return value == null ? [] : Array.isArray(value) ? value : [value];
+}
+function robotKind(name, device) {
+  const type = String(device?.Robots?.[name]?.Type ?? "");
+  if (/HighVTM/i.test(type) || /VTR[_-]?2/i.test(name)) return "upper";
+  if (/ATM/i.test(type) || /ATR|ATM/i.test(name)) return "atmosphere";
+  if (/VTM|VAC/i.test(type) || /VTR|VAC/i.test(name)) return "vacuum";
+  return void 0;
+}
+function indexTransfers(moves) {
+  const index = { byId: /* @__PURE__ */ new Map(), dependents: /* @__PURE__ */ new Map(), starts: /* @__PURE__ */ new Map(), ends: /* @__PURE__ */ new Map() };
+  const append = (map, key, move) => {
+    const entries = map.get(key) ?? [];
+    entries.push(move);
+    map.set(key, entries);
+  };
+  for (const move of moves) {
+    if (!TRANSFERS.has(Number(move.MoveType))) continue;
+    if (move.MoveID !== void 0) index.byId.set(move.MoveID, move);
+    for (const id of values2(move.PreMoveID)) append(index.dependents, Number(id), move);
+    const stations = new Set([...values2(move.SrcStationList), ...values2(move.DestStationList), ...values2(move.StationList)].map(String));
+    for (const station2 of stations) {
+      append(index.starts, `${station2}:${Math.round(Number(move.StartTime) / TIME_TOLERANCE)}`, move);
+      append(index.ends, `${station2}:${Math.round(Number(move.EndTime) / TIME_TOLERANCE)}`, move);
+    }
+  }
+  return index;
+}
+function relatedRobot(door, index) {
+  const explicit = String(door.Robot ?? "");
+  if (explicit) return explicit;
+  const closing = door.MoveType === COMPLETE;
+  const boundary = Number(closing ? door.StartTime : door.EndTime);
+  const bucket = Math.round(boundary / TIME_TOLERANCE);
+  const dependencies = closing ? values2(door.PreMoveID).map((id) => index.byId.get(Number(id))).filter((move) => Boolean(move)) : index.dependents.get(Number(door.MoveID)) ?? [];
+  const adjacent = [-1, 0, 1].flatMap((offset) => (closing ? index.ends : index.starts).get(`${door.ModuleName}:${bucket + offset}`) ?? []);
+  const matches = (move) => {
+    const stations = [...values2(move.SrcStationList), ...values2(move.DestStationList), ...values2(move.StationList)];
+    if (!stations.map(String).includes(String(door.ModuleName))) return false;
+    const materials = values2(door.MatIDList).map(String);
+    const transported = values2(move.MatIDList).map(String);
+    return !materials.length || !transported.length || materials.some((material) => transported.includes(material));
+  };
+  const related = dependencies.filter(matches);
+  const selected = related.length ? related : adjacent.filter((move) => matches(move) && Math.abs(Number(closing ? move.EndTime : move.StartTime) - boundary) <= TIME_TOLERANCE);
+  const robots = [...new Set(selected.map((move) => String(move.Robot || move.ModuleName || "")).filter(Boolean))];
+  return robots.length === 1 ? robots[0] : void 0;
+}
+function projectLoadLockDoors(moves, device, time, names) {
+  const result = /* @__PURE__ */ new Map();
+  const transfers = indexTransfers(moves);
+  for (const name of names) {
+    const station2 = device?.Stations?.[name];
+    const preparations = values2(station2?.PrePrepareTime);
+    const linkedNames = preparations.flatMap((item) => [String(item.LastItem ?? ""), String(item.CurrentItem ?? "")]);
+    const bridge = linkedNames.some((robot) => robotKind(robot, device) === "upper") || /^(UBR|DBR)$/i.test(name);
+    const doors = { top: "closed", bottom: "closed", topLabel: bridge ? "\u4E0A\u7EA7\u771F\u7A7A\u4FA7" : "\u771F\u7A7A\u4FA7", bottomLabel: bridge ? "\u4E0B\u7EA7\u771F\u7A7A\u4FA7" : "\u5927\u6C14\u4FA7" };
+    const sideForRobot = (robot) => {
+      const kind = robotKind(robot, device);
+      if (bridge) return kind === "upper" ? "top" : kind === "vacuum" ? "bottom" : void 0;
+      return kind === "atmosphere" ? "bottom" : kind === "vacuum" || kind === "upper" ? "top" : void 0;
+    };
+    let previousSide;
+    let environmentRobot = String(station2?.LastItem ?? "");
+    for (const move of moves) {
+      if (move.ModuleName !== name || Number(move.StartTime) > time) continue;
+      if (move.MoveType === 10 && Number(move.EndTime) <= time) environmentRobot = String(move.CurState ?? "");
+      if (move.MoveType !== PREPARE && move.MoveType !== COMPLETE) continue;
+      const robot = relatedRobot(move, transfers);
+      let side = robot ? sideForRobot(robot) : void 0;
+      if (!side && move.MoveType === COMPLETE) side = previousSide;
+      if (!side && !bridge) side = move.RelatedRobotType === RELATED_ATMOSPHERE ? "bottom" : move.RelatedRobotType === RELATED_VACUUM ? "top" : void 0;
+      if (!side) side = sideForRobot(environmentRobot);
+      const completed = Number(move.EndTime) <= time;
+      if (side) {
+        doors[side] = move.MoveType === PREPARE ? completed ? "open" : "opening" : completed ? "closed" : "closing";
+        previousSide = side;
+      } else {
+        doors.top = doors.bottom = move.MoveType === COMPLETE && completed ? "closed" : "unknown";
+      }
+    }
+    result.set(name, doors);
+  }
+  return result;
+}
+
 // src/topology_atmosphere_rail.ts
 var PRE_TRANS_MOVE = 5;
 var RAIL_PREPARATION_FRACTION = 0.25;
@@ -509,7 +603,6 @@ var VENT_MOVE = 13;
 var CLEAN_MOVE = 14;
 var LOADLOCK_ENVIRONMENT_MOVE_TYPES = /* @__PURE__ */ new Set([PRE_PREPARE_MOVE, PUMP_MOVE, VENT_MOVE]);
 var PLAYBACK_FRAME_INTERVAL_MS = 40;
-var DOOR_VISUAL_MIN_SECONDS = 0.7;
 var DEFAULT_PLAYBACK_SPEED = 4;
 var PERFORMANCE_DISPLAY_TOLERANCE = 1e-6;
 var DEFAULT_LOAD_PORT_CAPACITY = 25;
@@ -1261,6 +1354,7 @@ function buildWorkspaceSnapshot(moves, device, requestedTime, replenishments = [
   const waferOrigins = initialMaterialOrigins(records);
   const locations = new Map(initialLocations);
   const doorStates = /* @__PURE__ */ new Map();
+  const loadLockDoors = projectLoadLockDoors(records, device, time, [...definitions].filter(([name, definition]) => isLoadLockName(name, definition.type)).map(([name]) => name));
   const environments = /* @__PURE__ */ new Map();
   const requiredProcesses = /* @__PURE__ */ new Map();
   for (const move of records) {
@@ -1311,7 +1405,7 @@ function buildWorkspaceSnapshot(moves, device, requestedTime, replenishments = [
         });
       }
     }
-    const doorVisualActive = move.StartTime <= time && time < Math.max(move.EndTime, move.StartTime + DOOR_VISUAL_MIN_SECONDS);
+    const doorVisualActive = move.StartTime <= time && time < move.EndTime;
     if (move.MoveType === PREPARE_MOVE) {
       if (doorVisualActive) doorStates.set(move.ModuleName, "opening");
       else if (completed) doorStates.set(move.ModuleName, "open");
@@ -1384,6 +1478,7 @@ function buildWorkspaceSnapshot(moves, device, requestedTime, replenishments = [
       type: definition.type,
       status,
       door: doorStates.get(name) ?? "closed",
+      loadLockDoors: loadLockDoors.get(name),
       wafers: wafersByLocation.get(name) ?? [],
       processedWafers: (wafersByLocation.get(name) ?? []).filter(isProcessed),
       loadPortSlots: loadPortSlots.get(name) ?? [],
@@ -1760,7 +1855,7 @@ function renderWaferToken(wafer, origin, progress, processed = false) {
 }
 function moduleDoorSides(module, role, layout = "single", roleIndex = 0, attachmentId = "") {
   if (module.door === "doorless") return [];
-  if (role === "lock") return [];
+  if (role === "lock") return ["top", "bottom"];
   if (role === "port") return ["top"];
   const name = module.name.trim().toUpperCase();
   if (role === "process" && attachmentId) {
@@ -1867,9 +1962,8 @@ function renderLoadPortTopView(module, wafers, accessibleStatus, candidate) {
   const isDummy = isDummyPortName(module.name) || module.type.trim().toLowerCase() === "dummyport";
   return `<strong class="equipment-external-name equipment-external-name-port">${escapeHtml(module.name)}</strong>
     <article class="equipment-card equipment-port-top-view status-${module.status} door-${module.door} ${isDummy ? "is-dummy-port" : ""} ${module.isRobotTarget ? "is-target" : ""} ${candidate ? "is-candidate-destination" : ""}" aria-label="${escapeHtml(`${accessibleStatus}\uFF0C\u4FEF\u89C6\u88C5\u8F7D\u53F0\uFF0C\u5171 ${slots.length} \u4E2A\u69FD\u4F4D\uFF0C\u672A\u52A0\u5DE5 ${unprocessed}\uFF0C\u5DF2\u52A0\u5DE5 ${processed}${candidateLabel}`)}">
-      <span class="port-top-gate" aria-hidden="true"></span>
       <span class="port-top-cassette ${wafers ? "is-occupied" : "is-empty"}">${wafers || "<i></i>"}</span>
-    </article>`;
+    </article>${module.door === "doorless" ? "" : `<div class="external-module-doors door-${module.door}" title="${escapeHtml(DOOR_LABELS[module.door])}"><i class="external-module-door external-module-door-top"></i></div>`}`;
 }
 function renderModule(module, waferOrigins, role, candidate, layout = "single", roleIndex = 0, attachmentId = "") {
   const waferProgress = module.status === "processing" ? module.progress : 0;
@@ -1878,7 +1972,12 @@ function renderModule(module, waferOrigins, role, candidate, layout = "single", 
   const wafers = module.wafers.slice(0, visibleWaferCount).map((wafer) => renderWaferToken(wafer, waferOrigins[wafer] ?? "", waferProgress, processedWafers.has(wafer))).join("");
   const layerCount = role === "lock" && module.loadLockSlots.length ? module.loadLockSlots.filter((slot) => slot.wafer).length : module.wafers.length;
   const overflow = layerCount > visibleWaferCount ? `<span class="wafer-more">+ ${layerCount - visibleWaferCount}</span>` : "";
-  const doors = moduleDoorSides(module, role, layout, roleIndex, attachmentId).map((side) => `<i class="chamber-door chamber-door-${side}"></i>`).join("");
+  const doors = moduleDoorSides(module, role, layout, roleIndex, attachmentId).map((side) => {
+    const state2 = role === "lock" && (side === "top" || side === "bottom") ? module.loadLockDoors?.[side] ?? "closed" : module.door;
+    const direction = role === "lock" ? side === "top" ? module.loadLockDoors?.topLabel ?? "\u771F\u7A7A\u4FA7" : module.loadLockDoors?.bottomLabel ?? "\u5927\u6C14\u4FA7" : "";
+    const label = state2 === "unknown" ? "\u5F00\u95E8\u65B9\u5411\u672A\u77E5" : DOOR_LABELS[state2];
+    return `<i class="external-module-door external-module-door-${side} door-${state2}" title="${escapeHtml(`${direction}${label}`)}"></i>`;
+  }).join("");
   const accessibleStatus = `${module.name}\uFF0C${STATUS_LABELS[module.status]}\uFF0C${DOOR_LABELS[module.door]}`;
   const candidateLabel = candidate ? `${candidate.count} \u4E2A\u53EF\u884C\u52A8\u4F5C\uFF0C\u6700\u9AD8\u6A21\u578B\u504F\u597D ${(candidate.preference * 100).toFixed(0)}%` : "";
   if (role === "port") {
@@ -1931,8 +2030,8 @@ function renderModule(module, waferOrigins, role, candidate, layout = "single", 
   const article = `
     <article class="equipment-card equipment-${role} status-${module.status} door-${module.door} ${module.loadLockPhase ? `loadlock-${module.loadLockPhase}` : ""} ${module.isRobotTarget ? "is-target" : ""} ${candidate ? "is-candidate-destination" : ""} ${candidate?.selected ? "is-model-selected" : ""}" style="--module-progress:${Math.round(module.progress * 100)}%;--loadlock-atmosphere:${Math.max(0, Math.min(100, atmosphereLevel)).toFixed(1)}%;--loadlock-atmosphere-ratio:${Math.max(0, Math.min(1, atmosphereLevel / 100)).toFixed(3)}" aria-label="${escapeHtml(`${accessibleStatus}${candidateLabel ? `\uFF0C${candidateLabel}` : ""}`)}">
        ${bodyMarkup}
-      <div class="chamber-doors" aria-hidden="true">${role === "lock" ? '<i class="loadlock-top-gate loadlock-top-gate-vacuum"></i><i class="loadlock-top-gate loadlock-top-gate-atmosphere"></i>' : doors}</div>
-    </article>`;
+    </article>
+    <div class="external-module-doors door-${module.door}" title="${escapeHtml(DOOR_LABELS[module.door])}">${doors}</div>`;
   if (role === "process" || role === "auxiliary" || role === "lock") {
     return `<strong class="equipment-external-name">${escapeHtml(module.name)}</strong>${article}`;
   }
@@ -1971,6 +2070,7 @@ var TOPOLOGY_WAFER_OCCLUSION_RADII = { process: 24, port: 21, lock: 21, cooler: 
 var TOPOLOGY_LOADLOCK_WIDTH = 82;
 var TOPOLOGY_LOADLOCK_HEIGHT = 82;
 var TOPOLOGY_LOADLOCK_BRIDGE_GAP = 2;
+var TOPOLOGY_EXTERNAL_DOOR_CLEARANCE = 7;
 var TOPOLOGY_CASCADE_FRAME_WIDTH = 240;
 var TOPOLOGY_CASCADE_VTR1_HEIGHT = 128;
 var TOPOLOGY_TIGHT_LOADLOCK_ATTACHMENT_OFFSET = (TOPOLOGY_LOADLOCK_WIDTH + 1) / TOPOLOGY_CASCADE_FRAME_WIDTH;
@@ -2020,8 +2120,8 @@ var TOPOLOGY_MACHINE_FRAMES = {
       id: "vacuum-vtr-1",
       label: "",
       centerLeftPercent: 50,
-      /* 上移 8px，使 UBR/DBR 同时贴合 VTR_2 底边与 VTR_1 顶边。 */
-      centerTopPixels: 496,
+      /* 桥接腔上下两侧均预留外置门空间。 */
+      centerTopPixels: 496 + 2 * TOPOLOGY_EXTERNAL_DOOR_CLEARANCE,
       widthPixels: TOPOLOGY_CASCADE_FRAME_WIDTH,
       heightPixels: TOPOLOGY_CASCADE_VTR1_HEIGHT,
       shape: "flat"
@@ -2035,7 +2135,7 @@ var TOPOLOGY_ATMOSPHERE_FRAMES = {
     label: "",
     centerLeftPercent: 50,
     /* LoadLock 作为真空与大气框架之间的桥接腔。 */
-    centerTopPixels: 547,
+    centerTopPixels: 547 + 2 * TOPOLOGY_EXTERNAL_DOOR_CLEARANCE,
     widthPixels: 425,
     heightPixels: 150,
     shape: "atmosphere"
@@ -2044,7 +2144,7 @@ var TOPOLOGY_ATMOSPHERE_FRAMES = {
     id: "atmosphere-main",
     label: "",
     centerLeftPercent: 50,
-    centerTopPixels: 547,
+    centerTopPixels: 547 + 2 * TOPOLOGY_EXTERNAL_DOOR_CLEARANCE,
     widthPixels: 425,
     heightPixels: 150,
     shape: "atmosphere"
@@ -2053,7 +2153,7 @@ var TOPOLOGY_ATMOSPHERE_FRAMES = {
     id: "atmosphere-main",
     label: "",
     centerLeftPercent: 50,
-    centerTopPixels: 717,
+    centerTopPixels: 717 + 4 * TOPOLOGY_EXTERNAL_DOOR_CLEARANCE,
     widthPixels: 425,
     heightPixels: 150,
     shape: "atmosphere"
@@ -2086,12 +2186,12 @@ function topologyFrameAttachment(frame, attachmentId, side, offset, widthPixels,
   const horizontalOffset = offset * frameWidthPercent / 2;
   const verticalOffset = offset * frame.heightPixels / 2;
   return {
-    leftPercent: side === "left" ? frame.centerLeftPercent - frameWidthPercent / 2 - halfWidthPercent : side === "right" ? frame.centerLeftPercent + frameWidthPercent / 2 + halfWidthPercent : frame.centerLeftPercent + horizontalOffset,
-    topPixels: Math.round(side === "top" ? frame.centerTopPixels - frame.heightPixels / 2 - heightPixels / 2 : side === "bottom" ? frame.centerTopPixels + frame.heightPixels / 2 + heightPixels / 2 : frame.centerTopPixels + verticalOffset),
+    leftPercent: side === "left" ? frame.centerLeftPercent - frameWidthPercent / 2 - halfWidthPercent - TOPOLOGY_EXTERNAL_DOOR_CLEARANCE / TOPOLOGY_VIEWBOX_WIDTH * 100 : side === "right" ? frame.centerLeftPercent + frameWidthPercent / 2 + halfWidthPercent + TOPOLOGY_EXTERNAL_DOOR_CLEARANCE / TOPOLOGY_VIEWBOX_WIDTH * 100 : frame.centerLeftPercent + horizontalOffset,
+    topPixels: Math.round(side === "top" ? frame.centerTopPixels - frame.heightPixels / 2 - heightPixels / 2 - TOPOLOGY_EXTERNAL_DOOR_CLEARANCE : side === "bottom" ? frame.centerTopPixels + frame.heightPixels / 2 + heightPixels / 2 + TOPOLOGY_EXTERNAL_DOOR_CLEARANCE : frame.centerTopPixels + verticalOffset),
     widthPixels,
     heightPixels,
     attachmentId,
-    fixedLeftOffsetPixels: side === "left" ? -frame.widthPixels / 2 - widthPixels / 2 : side === "right" ? frame.widthPixels / 2 + widthPixels / 2 : horizontalOffset / 100 * TOPOLOGY_VIEWBOX_WIDTH
+    fixedLeftOffsetPixels: side === "left" ? -frame.widthPixels / 2 - widthPixels / 2 - TOPOLOGY_EXTERNAL_DOOR_CLEARANCE : side === "right" ? frame.widthPixels / 2 + widthPixels / 2 + TOPOLOGY_EXTERNAL_DOOR_CLEARANCE : horizontalOffset / 100 * TOPOLOGY_VIEWBOX_WIDTH
   };
 }
 function topologyVacuumAtmosphereLoadLockBridge(layout, lockIndex, atmosphereOffset) {
@@ -2116,7 +2216,7 @@ function topologyVacuumAtmosphereLoadLockBridge(layout, lockIndex, atmosphereOff
   );
   return {
     ...vacuumAttachment,
-    /* 两端框架的中心距由常量固定；保留大气锚点的纵坐标以表达两侧同时相切。 */
+    /* 两端框架的中心距由常量固定；保留大气锚点的纵坐标以表达两侧相同的门条间距。 */
     topPixels: atmosphereAttachment.topPixels,
     attachmentId: `${vacuumAttachment.attachmentId}|${atmosphereAttachment.attachmentId}`
   };
@@ -2851,9 +2951,9 @@ function renderResidenceMetricChart(samples, kind) {
     robot: { title: "\u673A\u5668\u624B\u9A7B\u7559\u65F6\u95F4", label: "\u673A\u5668\u624B\u9A7B\u7559", value: (sample) => sample.robotDwellSeconds ?? 0 }
   };
   const metric = definitions[kind];
-  const values2 = samples.map(metric.value);
-  const meanSeconds = values2.reduce((sum, value) => sum + value, 0) / values2.length;
-  const maximumSeconds = Math.max(...values2, 1);
+  const values3 = samples.map(metric.value);
+  const meanSeconds = values3.reduce((sum, value) => sum + value, 0) / values3.length;
+  const maximumSeconds = Math.max(...values3, 1);
   const plotHeight = 150;
   const scaleMaximum = maximumSeconds * 1.08;
   const meanHeight = Math.min(meanSeconds / scaleMaximum * plotHeight, plotHeight);
@@ -2890,12 +2990,12 @@ function renderWaferResidenceChart(performance2) {
   const systemValues = samples.map((sample) => sample.duration);
   const chamberValues = samples.map((sample) => sample.chamberDwellSeconds ?? 0);
   const robotValues = samples.map((sample) => sample.robotDwellSeconds ?? 0);
-  const metricSummary = (values2, label) => {
-    const mean = values2.reduce((sum, value) => sum + value, 0) / values2.length;
-    const deviation = Math.sqrt(values2.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values2.length);
+  const metricSummary = (values3, label) => {
+    const mean = values3.reduce((sum, value) => sum + value, 0) / values3.length;
+    const deviation = Math.sqrt(values3.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values3.length);
     const upperControlLimit = mean + deviation * 2;
-    const abnormalCount = values2.filter((value) => value > upperControlLimit).length;
-    return `<span><small>\u5E73\u5747</small><b>${formatSeconds2(mean)}</b><em>s</em></span><span><small>\u6700\u5927</small><b>${formatSeconds2(Math.max(...values2))}</b><em>s</em></span><span class="${abnormalCount ? "is-warning" : ""}"><small>\u504F\u9AD8\u6BD4\u4F8B</small><b>${(abnormalCount / values2.length * 100).toFixed(1)}</b><em>%</em></span><span><small>\u6837\u672C</small><b>${values2.length}</b><em>\u7247</em></span><span class="visually-hidden">${label}</span>`;
+    const abnormalCount = values3.filter((value) => value > upperControlLimit).length;
+    return `<span><small>\u5E73\u5747</small><b>${formatSeconds2(mean)}</b><em>s</em></span><span><small>\u6700\u5927</small><b>${formatSeconds2(Math.max(...values3))}</b><em>s</em></span><span class="${abnormalCount ? "is-warning" : ""}"><small>\u504F\u9AD8\u6BD4\u4F8B</small><b>${(abnormalCount / values3.length * 100).toFixed(1)}</b><em>%</em></span><span><small>\u6837\u672C</small><b>${values3.length}</b><em>\u7247</em></span><span class="visually-hidden">${label}</span>`;
   };
   const summary = (kind, content) => `<div class="analysis-compact-stats residence-chart-summary" data-residence-summary="${kind}"${kind === "system" ? "" : " hidden"}>${content}</div>`;
   return `
@@ -2962,9 +3062,9 @@ function renderThroughputSvg(points, title) {
   const allValues = points.map((point) => Math.max(0, Number(point.throughputPerHour) || 0));
   const mean = allValues.reduce((sum, value) => sum + value, 0) / allValues.length;
   const displayPoints = simplifyThroughputPoints(points);
-  const values2 = displayPoints.map((point) => Math.max(0, Number(point.throughputPerHour) || 0));
-  const observedMinimum = Math.min(...values2);
-  const observedMaximum = Math.max(...values2);
+  const values3 = displayPoints.map((point) => Math.max(0, Number(point.throughputPerHour) || 0));
+  const observedMinimum = Math.min(...values3);
+  const observedMaximum = Math.max(...values3);
   const spread = Math.max(observedMaximum - observedMinimum, Math.max(mean * 0.04, 1));
   const padding = Math.max(1, spread * 0.18);
   const step = spread > 20 ? 5 : spread > 8 ? 2 : 1;
@@ -2976,7 +3076,7 @@ function renderThroughputSvg(points, title) {
   const indexRange = Math.max(1, lastIndex - firstIndex);
   const coordinates = displayPoints.map((point, index) => ({
     x: left + (point.completedWaferIndex - firstIndex) / indexRange * usableWidth,
-    y: top + (1 - (values2[index] - minimum) / yRange) * usableHeight
+    y: top + (1 - (values3[index] - minimum) / yRange) * usableHeight
   }));
   const linePath = coordinates.length === 1 ? `M ${coordinates[0].x.toFixed(2)} ${coordinates[0].y.toFixed(2)}` : coordinates.reduce((path, point, index) => {
     if (index === 0) return `M ${point.x.toFixed(2)} ${point.y.toFixed(2)}`;
@@ -2988,10 +3088,10 @@ function renderThroughputSvg(points, title) {
   const labelStride = Math.max(1, Math.ceil(displayPoints.length / MAXIMUM_THROUGHPUT_VALUE_LABELS));
   const pointTargets = displayPoints.map((point, index) => {
     const coordinate = coordinates[index];
-    const value = values2[index];
-    const previousValue = values2[index - 1] ?? value;
-    const nextValue = values2[index + 1] ?? value;
-    const isLocalMinimum = index > 0 && index < values2.length - 1 && value <= previousValue && value <= nextValue;
+    const value = values3[index];
+    const previousValue = values3[index - 1] ?? value;
+    const nextValue = values3[index + 1] ?? value;
+    const isLocalMinimum = index > 0 && index < values3.length - 1 && value <= previousValue && value <= nextValue;
     const labelY = isLocalMinimum ? Math.min(top + usableHeight - 4, coordinate.y + 17) : Math.max(top + 10, coordinate.y - 9);
     const labelClass = isLocalMinimum ? "throughput-chart-value is-below" : "throughput-chart-value";
     const showLabel = index === 0 || index === displayPoints.length - 1 || index % labelStride === 0;
@@ -3947,8 +4047,8 @@ function renderTestGroupAnalysis(summary, groupName) {
 var CJOB_TYPES = ["NormalLot", "HighestLot", "HigherLot"];
 var TASK_MODES = ["Smart", "Pipeline", "Sequential", "Concurrent"];
 function stringList(value) {
-  const values2 = Array.isArray(value) ? value : String(value || "").replaceAll("\uFF0C", ",").split(",");
-  return [...new Set(values2.map((item) => String(item).trim()).filter(Boolean))];
+  const values3 = Array.isArray(value) ? value : String(value || "").replaceAll("\uFF0C", ",").split(",");
+  return [...new Set(values3.map((item) => String(item).trim()).filter(Boolean))];
 }
 function makeVisit(stationName = "", processRecipe = "") {
   return {
@@ -4138,8 +4238,6 @@ var DEFAULT_SCHEDULE_OPTIONS = Object.freeze({
 });
 var DEFAULT_HEURISTIC_WEIGHTS = Object.freeze({
   feed_block_penalty: 4,
-  residency_urgency_bonus: 2,
-  residency_slack_weight: 1,
   earliest_start_weight: 0.35,
   finish_time_weight: 0.15,
   exchange_bonus: 2,
@@ -4148,7 +4246,6 @@ var DEFAULT_HEURISTIC_WEIGHTS = Object.freeze({
   drain_bonus: 0.3,
   sink_bonus: 0.25,
   feed_penalty: -0.35,
-  route_balance_weight: 0.4,
   stage_progress_bonus: 0.2
 });
 var SCHEDULE_OPTION_KEYS = new Set(Object.keys(DEFAULT_SCHEDULE_OPTIONS));
@@ -4814,12 +4911,12 @@ async function chooseDataTransfer(kind) {
 function robotAvailableSlots(robot) {
   const slots = /* @__PURE__ */ new Set();
   const addSlots = (rawSlots, scalarIsCapacity = false) => {
-    let values2 = [];
+    let values3 = [];
     if (Number.isInteger(rawSlots) && typeof rawSlots !== "boolean") {
-      values2 = scalarIsCapacity ? Array.from({ length: Math.max(0, rawSlots) }, (_, index) => index + FIRST_ROBOT_SLOT_ID) : [rawSlots];
-    } else if (Array.isArray(rawSlots)) values2 = rawSlots;
-    else if (rawSlots && typeof rawSlots === "object") values2 = Object.keys(rawSlots);
-    values2.forEach((value) => {
+      values3 = scalarIsCapacity ? Array.from({ length: Math.max(0, rawSlots) }, (_, index) => index + FIRST_ROBOT_SLOT_ID) : [rawSlots];
+    } else if (Array.isArray(rawSlots)) values3 = rawSlots;
+    else if (rawSlots && typeof rawSlots === "object") values3 = Object.keys(rawSlots);
+    values3.forEach((value) => {
       const slotId = Number(value);
       if (Number.isInteger(slotId) && slotId >= FIRST_ROBOT_SLOT_ID) slots.add(slotId);
     });
@@ -4963,12 +5060,12 @@ function buildDeviceTimingDraft(device) {
   const configuredExecution = device?.ExecutionTiming && typeof device.ExecutionTiming === "object" ? device.ExecutionTiming : {};
   const overlayTiming = (defaults, configured) => Object.fromEntries(Object.entries(defaults).map(([itemName, fields]) => [
     itemName,
-    Object.fromEntries(Object.entries(fields).map(([fieldName, values2]) => {
+    Object.fromEntries(Object.entries(fields).map(([fieldName, values3]) => {
       const configuredValues = configured?.[itemName]?.[fieldName];
-      if (Array.isArray(values2)) {
-        return [fieldName, values2.map((value, index) => Number.isFinite(Number(configuredValues?.[index])) ? Number(configuredValues[index]) : value)];
+      if (Array.isArray(values3)) {
+        return [fieldName, values3.map((value, index) => Number.isFinite(Number(configuredValues?.[index])) ? Number(configuredValues[index]) : value)];
       }
-      return [fieldName, Object.fromEntries(Object.entries(values2).map(([key, value]) => [
+      return [fieldName, Object.fromEntries(Object.entries(values3).map(([key, value]) => [
         key,
         Number.isFinite(Number(configuredValues?.[key])) ? Number(configuredValues[key]) : value
       ]))];
@@ -5300,8 +5397,8 @@ function validateDeviceTimingDraft() {
     executionStations: state.deviceTimingDraft?.execution?.stations || {},
     executionRobots: state.deviceTimingDraft?.execution?.robots || {}
   };
-  Object.entries(timingSections).some(([sectionName, items]) => Object.entries(items).some(([itemName, fields]) => Object.entries(fields).some(([fieldName, values2]) => {
-    const rows = Array.isArray(values2) ? values2.map((value, index) => [index, value]) : Object.entries(values2 || {});
+  Object.entries(timingSections).some(([sectionName, items]) => Object.entries(items).some(([itemName, fields]) => Object.entries(fields).some(([fieldName, values3]) => {
+    const rows = Array.isArray(values3) ? values3.map((value, index) => [index, value]) : Object.entries(values3 || {});
     const invalid = rows.find(([, value]) => !Number.isFinite(Number(value)) || Number(value) < 0);
     if (!invalid) return false;
     invalidLabel = `${sectionName}.${itemName}.${fieldName}.${invalid[0]}`;

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import threading
@@ -43,6 +44,7 @@ def _argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--strategy", default="heuristic", help="算法策略，默认 heuristic")
     parser.add_argument("--workers", type=int, default=1, help="并发数 1-4，默认 1 便于复现")
+    parser.add_argument("--process-isolation", action="store_true", help="使用平台已有的隔离进程运行整组回归；单次耗时基准仍用一个 worker")
     parser.add_argument(
         "--with-baseline",
         action="store_true",
@@ -62,6 +64,7 @@ def _argument_parser() -> argparse.ArgumentParser:
         help="改用平台内置 MoveList 校验器",
     )
     parser.add_argument("--json-output", type=Path, help="把完整批量结果另存为 JSON")
+    parser.add_argument("--options-json", type=Path, help="本次运行的算法选项覆盖文件，不修改测试集")
     parser.add_argument(
         "--list",
         action="store_true",
@@ -154,6 +157,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         reconfigure = getattr(stream, "reconfigure", None)
         if callable(reconfigure):
             reconfigure(encoding="utf-8")
+    # spawn worker 重新创建标准流，需要继承与父进程一致的输出编码。
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
     args = _argument_parser().parse_args(argv)
     if not args.list and (not args.device or args.group is None):
         raise ValueError("运行测试集必须同时指定 --device 和 --group；可先用 --list 查询")
@@ -198,14 +203,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         with print_lock:
             print(f"[{index + 1}/{expected_count}] {status.upper()} {label}{suffix}", flush=True)
 
+    options = json.loads(args.options_json.read_text(encoding="utf-8-sig")) if args.options_json else {}
+    if not isinstance(options, dict):
+        raise ValueError("--options-json 必须包含 JSON 对象")
     result = scheduler_server.run_workspace_test_batch(
         str(selected_device.get("id") or ""),
         str(args.group or ""),
         args.strategy,
-        {},
+        options,
         hongye_check=args.hongye_check,
         skip_baseline=not args.with_baseline,
         maximum_workers=args.workers,
+        use_process_isolation=args.process_isolation,
         test_ids=test_ids,
         progress_callback=report,
     )

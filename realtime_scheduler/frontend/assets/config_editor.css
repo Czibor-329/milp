@@ -2181,3 +2181,19 @@
       .search-telemetry-head select { flex: 1 1 auto; min-width: 0; }
       .search-telemetry-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
+
+    /* 外置门独立于腔室裁切层；5px 门条与外框留 1px，状态直接切换。 */
+    .external-module-doors { position: absolute; inset: 0; z-index: 6; pointer-events: none; --external-door-fill: #56677d; --external-door-stroke: #344a63; --external-door-thickness: 5px; --external-door-offset: -6px; }
+    .external-module-doors.door-open, .external-module-door.door-open { --external-door-fill: #f6f8fb; --external-door-stroke: #159167; }
+    .external-module-doors:is(.door-opening, .door-closing), .external-module-door:is(.door-opening, .door-closing) { --external-door-fill: #c58112; --external-door-stroke: #98620c; }
+    .external-module-door { position: absolute; display: block; box-sizing: border-box; border: 1px solid var(--external-door-stroke); border-radius: 1px; background: var(--external-door-fill); pointer-events: auto; transition: none; animation: none; }
+    .external-module-door-top, .external-module-door-bottom { left: 50%; width: 34px; height: var(--external-door-thickness); transform: translateX(-50%); }
+    .external-module-door-left, .external-module-door-right { top: 50%; width: var(--external-door-thickness); height: 34px; transform: translateY(-50%); }
+    .external-module-door-top { top: var(--external-door-offset); }
+    .external-module-door-bottom { bottom: var(--external-door-offset); }
+    .external-module-door-left { left: var(--external-door-offset); }
+    .external-module-door-right { right: var(--external-door-offset); }
+    .reference-module-position:has(.external-module-door-top) > .equipment-external-name { top: -24px; }
+
+    .external-module-door.door-closed { --external-door-fill: #56677d; --external-door-stroke: #344a63; }
+    .external-module-door.door-unknown { --external-door-fill: #f6f8fb; --external-door-stroke: #64748b; border-style: dashed; }

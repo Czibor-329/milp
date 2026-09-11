@@ -822,7 +822,9 @@ test("短门动作、LoadLock 相位和 PRE_TRANS 转位保持可观察", () => 
     },
   ];
   const snapshot = logic.buildWorkspaceSnapshot(animationMoves, device, 9.4);
-  assert.equal(moduleAt(snapshot, "PM1").door, "opening");
+  assert.equal(moduleAt(snapshot, "PM1").door, "open");
+  assert.equal(moduleAt(logic.buildWorkspaceSnapshot(animationMoves, device, 9.05), "PM1").door, "opening");
+  assert.equal(moduleAt(logic.buildWorkspaceSnapshot(animationMoves, device, 9.1), "PM1").door, "open");
   assert.equal(moduleAt(snapshot, "LA").loadLockPhase, "pumping");
   assert.equal(snapshot.robots[0].source, "LP1");
   assert.equal(snapshot.robots[0].target, "LA");
@@ -951,7 +953,7 @@ test("单真空机械手拓扑以方框架固定四个 PM、Heater 与两把 Loa
   assert.equal(dummyPort.y, lp1.y, "DummyPort 应与实际 LoadPort 共用大气框架底边");
   assert.ok(lp1.x < dummyPort.x, "DummyPort 应排在实际 LoadPort 之后");
   const atr = robotPosition("ATR");
-  assert.equal(lp1.y - atr.y, 116, "LoadPort 整排应由大气框架下边固定");
+  assert.equal(lp1.y - atr.y, 123, "LoadPort 整排应由大气框架下边固定");
   assert.equal(modulePosition("Aligner").x, 33.95, "Aligner 上移时保持左侧横坐标");
   assert.equal(modulePosition("Cooler").x, 66.05, "Cooler 上移时保持右侧横坐标");
   assert.equal(modulePosition("Cooler").y - modulePosition("Aligner").y, -9, "不同高度的辅助模块底边应对齐在框架上方");
@@ -1150,7 +1152,7 @@ test("级联与非级联拓扑的大气侧布局和区域高度保持一致", ()
     assert.doesNotMatch(topology, /topology-interface-bay|VACUUM \/ ATM INTERFACE/, "LoadLock 后方不应绘制接口框");
     assert.equal(
       verticalPosition(topology, "module", "LP1") - verticalPosition(topology, "robot", "ATR"),
-      116,
+      123,
       "ATR 到 LoadPort 的垂直间距应由大气框架固定",
     );
   }
@@ -1248,8 +1250,8 @@ test("三类设备以机器框架和不可见附着点固定真空腔室位置",
   const singleAtmosphereFrame = frameOf(singleTopology, "atmosphere-main");
   for (const name of ["LA", "LB"]) {
     const lock = positionOf(singleTopology, "module", name);
-    assert.equal(lock.y, singleFrame.y + singleFrame.height / 2 + 41, `${name} 应贴合真空框架下边`);
-    assert.equal(lock.y, singleAtmosphereFrame.y - singleAtmosphereFrame.height / 2 - 41, `${name} 应贴合大气框架上边`);
+    assert.equal(lock.y, singleFrame.y + singleFrame.height / 2 + 41 + 7, `${name} 应留出 7px 门条空间并连接真空框架下边`);
+    assert.equal(lock.y, singleAtmosphereFrame.y - singleAtmosphereFrame.height / 2 - 41 - 7, `${name} 应留出 7px 门条空间并连接大气框架上边`);
   }
   assert.equal(
     positionOf(singleTopology, "module", "LA").x + positionOf(singleTopology, "module", "LB").x,
@@ -1280,8 +1282,8 @@ test("三类设备以机器框架和不可见附着点固定真空腔室位置",
   const dualAtmosphereFrame = frameOf(dualTopology, "atmosphere-main");
   for (const name of ["LA", "LB", "LC", "LD"]) {
     const lock = positionOf(dualTopology, "module", name);
-    assert.equal(lock.y, dualFrame.y + dualFrame.height / 2 + 41, `${name} 应贴合双腔真空框架下边`);
-    assert.equal(lock.y, dualAtmosphereFrame.y - dualAtmosphereFrame.height / 2 - 41, `${name} 应贴合双腔大气框架上边`);
+    assert.equal(lock.y, dualFrame.y + dualFrame.height / 2 + 41 + 7, `${name} 应留出 7px 门条空间并连接双腔真空框架下边`);
+    assert.equal(lock.y, dualAtmosphereFrame.y - dualAtmosphereFrame.height / 2 - 41 - 7, `${name} 应留出 7px 门条空间并连接双腔大气框架上边`);
   }
   const dualLockPositions = ["LC", "LA", "LB", "LD"].map(name => positionOf(dualTopology, "module", name));
   for (let index = 1; index < dualLockPositions.length; index += 1) {
@@ -1367,8 +1369,8 @@ test("三类设备以机器框架和不可见附着点固定真空腔室位置",
   const cascadeLA = positionOf(cascadeTopology, "module", "LA");
   const cascadeLB = positionOf(cascadeTopology, "module", "LB");
   for (const [name, position] of [["LA", cascadeLA], ["LB", cascadeLB]]) {
-    assert.equal(position.y, lowerFrame.y + lowerFrame.height / 2 + 41, `${name} 应贴合 VTR_1 下边`);
-    assert.equal(position.y, cascadeAtmosphereFrame.y - cascadeAtmosphereFrame.height / 2 - 41, `${name} 应贴合大气框架上边`);
+    assert.equal(position.y, lowerFrame.y + lowerFrame.height / 2 + 41 + 7, `${name} 应留出 7px 门条空间并连接 VTR_1 下边`);
+    assert.equal(position.y, cascadeAtmosphereFrame.y - cascadeAtmosphereFrame.height / 2 - 41 - 7, `${name} 应留出 7px 门条空间并连接大气框架上边`);
   }
   assert.equal(cascadeLA.x + cascadeLB.x, lowerFrame.x * 2, "级联 LA/LB 应严格围绕 VTR_1 中轴对称");
   assert.ok(cascadeLB.x - cascadeLA.x - 82 <= 2.01, "级联 LA/LB 外框之间只应保留极小间隔");
@@ -2489,4 +2491,52 @@ test("驻留时间分析展示逐片腔室和机器手驻留，并提供说明",
   assert.match(html, /id="residenceAnalysisHelpDialog"[\s\S]*三种驻留时间分别表示什么？[\s\S]*已扣除显式 PreTrans 搬运时间/);
   assert.match(editorSource, /residenceAnalysisHelpDialog\.showModal\(\)/);
   assert.match(editorSource, /data-residence-metric-chart/);
+});
+
+
+test("LoadLock 双侧门按访问机械手独立回放并支持反向拖动", () => {
+  const definition = {Stations:{LA:{Type:"LoadLock"}},Robots:{入口:{Type:"ATMRobot"},真空:{Type:"VTMRobot"}}};
+  const timeline = [
+    {MoveID:1,MoveType:6,ModuleName:"LA",StartTime:0,EndTime:1},
+    {MoveID:2,MoveType:1,ModuleName:"入口",DestStationList:["LA"],PreMoveID:[1],StartTime:2,EndTime:3},
+    {MoveID:3,MoveType:7,ModuleName:"LA",StartTime:3,EndTime:4},
+    {MoveID:4,MoveType:6,ModuleName:"LA",StartTime:5,EndTime:6},
+    {MoveID:5,MoveType:0,ModuleName:"真空",SrcStationList:["LA"],PreMoveID:[4],StartTime:7,EndTime:8},
+    {MoveID:6,MoveType:7,ModuleName:"LA",StartTime:8,EndTime:9},
+  ];
+  const gates = time => moduleAt(logic.buildWorkspaceSnapshot(timeline,definition,time),"LA").loadLockDoors;
+  for(const [time,top,bottom] of [[0.5,"closed","opening"],[1,"closed","open"],[3.5,"closed","closing"],[4,"closed","closed"],[5.5,"opening","closed"],[6,"open","closed"],[8.5,"closing","closed"],[9,"closed","closed"],[1,"closed","open"]]) {
+    assert.equal(gates(time).top,top); assert.equal(gates(time).bottom,bottom);
+  }
+  const topology=logic.renderEquipmentTopology(logic.buildWorkspaceSnapshot(timeline,definition,1),null,undefined,definition);
+  assert.match(topology,/external-module-door-top door-closed/);
+  assert.match(topology,/external-module-door-bottom door-open/);
+  assert.match(topology,/title="大气侧门已打开"/);
+});
+
+test("桥接 LoadLock 使用关联 Robot 区分上下级而非全局枚举", () => {
+  const definition={Stations:{DBR:{Type:"LoadLock"}},Robots:{下级:{Type:"VTMRobot"},上级:{Type:"HighVTMRobot"}}};
+  const timeline=[
+    {MoveID:1,MoveType:6,ModuleName:"DBR",RelatedRobotType:1,StartTime:0,EndTime:1},
+    {MoveID:2,MoveType:0,ModuleName:"下级",SrcStationList:["DBR"],PreMoveID:[1],StartTime:2,EndTime:3},
+    {MoveID:3,MoveType:7,ModuleName:"DBR",StartTime:3,EndTime:4},
+    {MoveID:4,MoveType:6,ModuleName:"DBR",RelatedRobotType:2,StartTime:5,EndTime:6},
+    {MoveID:5,MoveType:0,ModuleName:"上级",SrcStationList:["DBR"],PreMoveID:[4],StartTime:7,EndTime:8},
+  ];
+  const first=moduleAt(logic.buildWorkspaceSnapshot(timeline,definition,1),"DBR").loadLockDoors;
+  const second=moduleAt(logic.buildWorkspaceSnapshot(timeline,definition,6),"DBR").loadLockDoors;
+  assert.equal(first.bottom,"open");assert.equal(first.top,"closed");
+  assert.equal(second.top,"open");assert.equal(second.bottom,"closed");
+  assert.equal(second.topLabel,"上级真空侧");
+});
+
+test("LoadLock 缺失方向不制造双侧开门，零时长动作直接完成", () => {
+  const definition={Stations:{LA:{Type:"LoadLock"}}};
+  const unknown=moduleAt(logic.buildWorkspaceSnapshot([{MoveID:1,MoveType:6,ModuleName:"LA",StartTime:0,EndTime:1}],definition,1),"LA").loadLockDoors;
+  assert.equal(unknown.top,"unknown");assert.equal(unknown.bottom,"unknown");
+  const closed=moduleAt(logic.buildWorkspaceSnapshot([
+    {MoveID:1,MoveType:6,ModuleName:"LA",RelatedRobotType:0,StartTime:0,EndTime:0},
+    {MoveID:2,MoveType:7,ModuleName:"LA",StartTime:0,EndTime:0},
+  ],definition,0),"LA").loadLockDoors;
+  assert.equal(closed.top,"closed");assert.equal(closed.bottom,"closed");
 });

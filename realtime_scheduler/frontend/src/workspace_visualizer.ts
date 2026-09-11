@@ -13,6 +13,7 @@ import {
 } from "./api_client";
 import { configuredRobotArms, renderParallelRobotArms, robotSlotWafers, type RobotArmDefinition } from "./topology_robot_mechanism";
 import { projectTopologyTransfers } from "./topology_transfer_projection";
+import { projectLoadLockDoors, type LoadLockDoors } from "./topology_loadlock_doors";
 import { atmosphereRailMotion, type AtmosphereRailMotion } from "./topology_atmosphere_rail";
 import type {
   ActivityCategory,
@@ -41,6 +42,8 @@ export interface ModuleSnapshot {
   type: string;
   status: ModuleStatus;
   door: DoorStatus;
+  /** LoadLock 上下两侧的独立门态；普通腔室不设置。 */
+  loadLockDoors?: LoadLockDoors;
   wafers: string[];
   processedWafers: string[];
   loadPortSlots: LoadPortSlotSnapshot[];
@@ -258,7 +261,6 @@ const VENT_MOVE = 13;
 const CLEAN_MOVE = 14;
 const LOADLOCK_ENVIRONMENT_MOVE_TYPES = new Set([PRE_PREPARE_MOVE, PUMP_MOVE, VENT_MOVE]);
 const PLAYBACK_FRAME_INTERVAL_MS = 40;
-const DOOR_VISUAL_MIN_SECONDS = 0.7;
 const DEFAULT_PLAYBACK_SPEED = 4;
 const PERFORMANCE_DISPLAY_TOLERANCE = 1e-6;
 const DEFAULT_LOAD_PORT_CAPACITY = 25;
@@ -1419,6 +1421,7 @@ export function buildWorkspaceSnapshot(
   const waferOrigins = initialMaterialOrigins(records);
   const locations = new Map(initialLocations);
   const doorStates = new Map<string, DoorStatus>();
+  const loadLockDoors = projectLoadLockDoors(records, device, time, [...definitions].filter(([name, definition]) => isLoadLockName(name, definition.type)).map(([name]) => name));
   const environments = new Map<string, string>();
   // 每片晶圆在整个计划中需要完成的加工工序数；只有全部工序完成才视为已加工。
   const requiredProcesses = new Map<string, number>();
@@ -1476,7 +1479,7 @@ export function buildWorkspaceSnapshot(
     }
 
     const doorVisualActive = move.StartTime <= time
-      && time < Math.max(move.EndTime, move.StartTime + DOOR_VISUAL_MIN_SECONDS);
+      && time < move.EndTime;
     if (move.MoveType === PREPARE_MOVE) {
       if (doorVisualActive) doorStates.set(move.ModuleName, "opening");
       else if (completed) doorStates.set(move.ModuleName, "open");
@@ -1571,6 +1574,7 @@ export function buildWorkspaceSnapshot(
       type: definition.type,
       status,
       door: doorStates.get(name) ?? "closed",
+      loadLockDoors: loadLockDoors.get(name),
       wafers: wafersByLocation.get(name) ?? [],
       processedWafers: (wafersByLocation.get(name) ?? []).filter(isProcessed),
       loadPortSlots: loadPortSlots.get(name) ?? [],
@@ -2082,7 +2086,7 @@ function moduleDoorSides(
   attachmentId = "",
 ): Array<"top" | "right" | "bottom" | "left"> {
   if (module.door === "doorless") return [];
-  if (role === "lock") return [];
+  if (role === "lock") return ["top", "bottom"];
   if (role === "port") return ["top"];
   const name = module.name.trim().toUpperCase();
   if (role === "process" && attachmentId) {
@@ -2211,9 +2215,8 @@ function renderLoadPortTopView(
   const isDummy = isDummyPortName(module.name) || module.type.trim().toLowerCase() === "dummyport";
   return `<strong class="equipment-external-name equipment-external-name-port">${escapeHtml(module.name)}</strong>
     <article class="equipment-card equipment-port-top-view status-${module.status} door-${module.door} ${isDummy ? "is-dummy-port" : ""} ${module.isRobotTarget ? "is-target" : ""} ${candidate ? "is-candidate-destination" : ""}" aria-label="${escapeHtml(`${accessibleStatus}，俯视装载台，共 ${slots.length} 个槽位，未加工 ${unprocessed}，已加工 ${processed}${candidateLabel}`)}">
-      <span class="port-top-gate" aria-hidden="true"></span>
       <span class="port-top-cassette ${wafers ? "is-occupied" : "is-empty"}">${wafers || "<i></i>"}</span>
-    </article>`;
+    </article>${module.door === "doorless" ? "" : `<div class="external-module-doors door-${module.door}" title="${escapeHtml(DOOR_LABELS[module.door])}"><i class="external-module-door external-module-door-top"></i></div>`}`;
 }
 
 /** 绘制拓扑中的紧凑腔室；晶圆标签只展示首次确认的来源模块。 */
@@ -2239,7 +2242,12 @@ function renderModule(
     ? `<span class="wafer-more">+ ${layerCount - visibleWaferCount}</span>`
     : "";
   const doors = moduleDoorSides(module, role, layout, roleIndex, attachmentId)
-    .map(side => `<i class="chamber-door chamber-door-${side}"></i>`)
+    .map(side => {
+      const state = role === "lock" && (side === "top" || side === "bottom") ? module.loadLockDoors?.[side] ?? "closed" : module.door;
+      const direction = role === "lock" ? (side === "top" ? module.loadLockDoors?.topLabel ?? "真空侧" : module.loadLockDoors?.bottomLabel ?? "大气侧") : "";
+      const label = state === "unknown" ? "开门方向未知" : DOOR_LABELS[state];
+      return `<i class="external-module-door external-module-door-${side} door-${state}" title="${escapeHtml(`${direction}${label}`)}"></i>`;
+    })
     .join("");
   const accessibleStatus = `${module.name}，${STATUS_LABELS[module.status]}，${DOOR_LABELS[module.door]}`;
   const candidateLabel = candidate
@@ -2325,8 +2333,8 @@ function renderModule(
   const article = `
     <article class="equipment-card equipment-${role} status-${module.status} door-${module.door} ${module.loadLockPhase ? `loadlock-${module.loadLockPhase}` : ""} ${module.isRobotTarget ? "is-target" : ""} ${candidate ? "is-candidate-destination" : ""} ${candidate?.selected ? "is-model-selected" : ""}" style="--module-progress:${Math.round(module.progress * 100)}%;--loadlock-atmosphere:${Math.max(0, Math.min(100, atmosphereLevel)).toFixed(1)}%;--loadlock-atmosphere-ratio:${Math.max(0, Math.min(1, atmosphereLevel / 100)).toFixed(3)}" aria-label="${escapeHtml(`${accessibleStatus}${candidateLabel ? `，${candidateLabel}` : ""}`)}">
        ${bodyMarkup}
-      <div class="chamber-doors" aria-hidden="true">${role === "lock" ? '<i class="loadlock-top-gate loadlock-top-gate-vacuum"></i><i class="loadlock-top-gate loadlock-top-gate-atmosphere"></i>' : doors}</div>
-    </article>`;
+    </article>
+    <div class="external-module-doors door-${module.door}" title="${escapeHtml(DOOR_LABELS[module.door])}">${doors}</div>`;
   if (role === "process" || role === "auxiliary" || role === "lock") {
     return `<strong class="equipment-external-name">${escapeHtml(module.name)}</strong>${article}`;
   }
@@ -2403,6 +2411,8 @@ const TOPOLOGY_LOADLOCK_WIDTH = 82;
 const TOPOLOGY_LOADLOCK_HEIGHT = 82;
 /** 同一桥接链相邻 LoadLock 外框之间保留的最小可读间隙。 */
 const TOPOLOGY_LOADLOCK_BRIDGE_GAP = 2;
+/** 门条厚度 5px，两侧各留 1px，避免覆盖机器框架。 */
+const TOPOLOGY_EXTERNAL_DOOR_CLEARANCE = 7;
 /* 级联双框等宽，LoadLock 的中心距离等于其自身宽度，从而形成紧贴的一对。 */
 const TOPOLOGY_CASCADE_FRAME_WIDTH = 240;
 const TOPOLOGY_CASCADE_VTR1_HEIGHT = 128;
@@ -2459,8 +2469,8 @@ const TOPOLOGY_MACHINE_FRAMES: Record<TopologyLayout, readonly TopologyMachineFr
       id: "vacuum-vtr-1",
       label: "",
       centerLeftPercent: 50,
-      /* 上移 8px，使 UBR/DBR 同时贴合 VTR_2 底边与 VTR_1 顶边。 */
-      centerTopPixels: 496,
+      /* 桥接腔上下两侧均预留外置门空间。 */
+      centerTopPixels: 496 + 2 * TOPOLOGY_EXTERNAL_DOOR_CLEARANCE,
       widthPixels: TOPOLOGY_CASCADE_FRAME_WIDTH,
       heightPixels: TOPOLOGY_CASCADE_VTR1_HEIGHT,
       shape: "flat",
@@ -2475,7 +2485,7 @@ const TOPOLOGY_ATMOSPHERE_FRAMES: Record<TopologyLayout, TopologyMachineFrame> =
     label: "",
     centerLeftPercent: 50,
     /* LoadLock 作为真空与大气框架之间的桥接腔。 */
-    centerTopPixels: 547,
+    centerTopPixels: 547 + 2 * TOPOLOGY_EXTERNAL_DOOR_CLEARANCE,
     widthPixels: 425,
     heightPixels: 150,
     shape: "atmosphere",
@@ -2484,7 +2494,7 @@ const TOPOLOGY_ATMOSPHERE_FRAMES: Record<TopologyLayout, TopologyMachineFrame> =
     id: "atmosphere-main",
     label: "",
     centerLeftPercent: 50,
-    centerTopPixels: 547,
+    centerTopPixels: 547 + 2 * TOPOLOGY_EXTERNAL_DOOR_CLEARANCE,
     widthPixels: 425,
     heightPixels: 150,
     shape: "atmosphere",
@@ -2493,7 +2503,7 @@ const TOPOLOGY_ATMOSPHERE_FRAMES: Record<TopologyLayout, TopologyMachineFrame> =
     id: "atmosphere-main",
     label: "",
     centerLeftPercent: 50,
-    centerTopPixels: 717,
+    centerTopPixels: 717 + 4 * TOPOLOGY_EXTERNAL_DOOR_CLEARANCE,
     widthPixels: 425,
     heightPixels: 150,
     shape: "atmosphere",
@@ -2517,7 +2527,7 @@ function topologyAtmosphereFrame(layout: TopologyLayout): TopologyMachineFrame {
 }
 
 /**
- * 由机器框架边缘生成模块中心点，使模块外框与框架边缘严格相切。
+ * 由机器框架边缘生成模块中心点，在模块外框与框架之间预留外置门空间。
  * offset 取 -1～1，表示沿该边从左/上到右/下的位置。
  */
 function topologyFrameAttachment(
@@ -2544,22 +2554,22 @@ function topologyFrameAttachment(
   const verticalOffset = offset * frame.heightPixels / 2;
   return {
     leftPercent: side === "left"
-      ? frame.centerLeftPercent - frameWidthPercent / 2 - halfWidthPercent
+      ? frame.centerLeftPercent - frameWidthPercent / 2 - halfWidthPercent - TOPOLOGY_EXTERNAL_DOOR_CLEARANCE / TOPOLOGY_VIEWBOX_WIDTH * 100
       : side === "right"
-        ? frame.centerLeftPercent + frameWidthPercent / 2 + halfWidthPercent
+        ? frame.centerLeftPercent + frameWidthPercent / 2 + halfWidthPercent + TOPOLOGY_EXTERNAL_DOOR_CLEARANCE / TOPOLOGY_VIEWBOX_WIDTH * 100
         : frame.centerLeftPercent + horizontalOffset,
     topPixels: Math.round(side === "top"
-      ? frame.centerTopPixels - frame.heightPixels / 2 - heightPixels / 2
+      ? frame.centerTopPixels - frame.heightPixels / 2 - heightPixels / 2 - TOPOLOGY_EXTERNAL_DOOR_CLEARANCE
       : side === "bottom"
-        ? frame.centerTopPixels + frame.heightPixels / 2 + heightPixels / 2
+        ? frame.centerTopPixels + frame.heightPixels / 2 + heightPixels / 2 + TOPOLOGY_EXTERNAL_DOOR_CLEARANCE
         : frame.centerTopPixels + verticalOffset),
     widthPixels,
     heightPixels,
     attachmentId,
     fixedLeftOffsetPixels: (side === "left"
-      ? -frame.widthPixels / 2 - widthPixels / 2
+      ? -frame.widthPixels / 2 - widthPixels / 2 - TOPOLOGY_EXTERNAL_DOOR_CLEARANCE
       : side === "right"
-        ? frame.widthPixels / 2 + widthPixels / 2
+        ? frame.widthPixels / 2 + widthPixels / 2 + TOPOLOGY_EXTERNAL_DOOR_CLEARANCE
         : horizontalOffset / 100 * TOPOLOGY_VIEWBOX_WIDTH),
   };
 }
@@ -2567,7 +2577,7 @@ function topologyFrameAttachment(
 /**
  * 计算连接真空与大气侧的 LoadLock 位置。
  *
- * LoadLock 的上缘由真空框架下边锚定，下缘与大气框架上边相切。横坐标从真空
+ * LoadLock 的上缘由真空框架下边锚定，下缘与大气框架上边之间保留门条间距。横坐标从真空
  * 框架推导，并按两框架宽度换算为大气框架上的同一物理位置，避免缩放后偏离中轴。
  */
 function topologyVacuumAtmosphereLoadLockBridge(
@@ -2598,7 +2608,7 @@ function topologyVacuumAtmosphereLoadLockBridge(
   );
   return {
     ...vacuumAttachment,
-    /* 两端框架的中心距由常量固定；保留大气锚点的纵坐标以表达两侧同时相切。 */
+    /* 两端框架的中心距由常量固定；保留大气锚点的纵坐标以表达两侧相同的门条间距。 */
     topPixels: atmosphereAttachment.topPixels,
     attachmentId: `${vacuumAttachment.attachmentId}|${atmosphereAttachment.attachmentId}`,
   };

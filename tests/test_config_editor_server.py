@@ -7,6 +7,7 @@ from concurrent.futures import Future
 import inspect
 import json
 import os
+import re
 import tempfile
 import threading
 import time
@@ -594,6 +595,14 @@ class RecomputeFailureOutputTests(unittest.TestCase):
         self.assertNotIn('id="skipValidationInput"', template)
         self.assertIn("width: 34px; min-width: 34px; height: 34px", style)
         self.assertIn("top: 3px; right: 3px; width: 5px; height: 5px", style)
+
+    def test_heuristic_weights_accept_arbitrary_decimal_values(self) -> None:
+        """自定义权重应允许后端支持的任意有限小数，包括默认的 0.25。"""
+        template = EDITOR_PATH.read_text(encoding="utf-8")
+
+        weight_inputs = re.findall(r'<input data-heuristic-weight="[^"]+"[^>]*>', template)
+        self.assertEqual(10, len(weight_inputs))
+        self.assertTrue(all('type="number"' in item and 'step="any"' in item for item in weight_inputs))
 
     def test_batch_status_refresh_obeys_frontend_performance_limit(self) -> None:
         """批量状态最多每秒轮询一次，且明细未变化时不得重建整组 DOM。"""

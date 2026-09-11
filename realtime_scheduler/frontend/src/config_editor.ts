@@ -61,10 +61,10 @@ const DEFAULT_SCHEDULE_OPTIONS = Object.freeze({
   seed: 0,
 });
 const DEFAULT_HEURISTIC_WEIGHTS = Object.freeze({
-  feed_block_penalty: 4, residency_urgency_bonus: 2, residency_slack_weight: 1,
+  feed_block_penalty: 4,
   earliest_start_weight: .35, finish_time_weight: .15, exchange_bonus: 2,
   process_departure_bonus: 1.6, into_process_bonus: 1.5, drain_bonus: .3,
-  sink_bonus: .25, feed_penalty: -.35, route_balance_weight: .4,
+  sink_bonus: .25, feed_penalty: -.35,
   stage_progress_bonus: .2,
 });
 const SCHEDULE_OPTION_KEYS = new Set(Object.keys(DEFAULT_SCHEDULE_OPTIONS));
