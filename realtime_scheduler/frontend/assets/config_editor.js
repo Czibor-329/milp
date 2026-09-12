@@ -344,11 +344,11 @@ function extensionFraction(progress) {
   const phase = Math.min(1, bounded * 3, (1 - bounded) * 3);
   return phase * phase * (3 - 2 * phase);
 }
-function robotArmGeometry(reach, index, count, progress) {
+function robotArmGeometry(reach, index, count, progress, targetSeparation = 0) {
   const side = index < (count - 1) / 2 ? -1 : 1;
   const shoulder = (index - (count - 1) / 2) * SHOULDER_SEPARATION;
   const fraction = extensionFraction(progress);
-  const tipY = (index - (count - 1) / 2) * ARM_SEPARATION * (1 - fraction);
+  const tipY = (index - (count - 1) / 2) * (ARM_SEPARATION * (1 - fraction) + targetSeparation * fraction);
   const bend = (1 - fraction) / 2 + fraction * EXTENDED_ELBOW_RATIO;
   return {
     shoulder,
@@ -357,8 +357,9 @@ function robotArmGeometry(reach, index, count, progress) {
     elbowY: (shoulder + tipY) / 2 + side * reach * bend
   };
 }
-function renderParallelRobotArms(arms, distance, renderWafer, escape, targetGeometry, occlusions = [], maskPrefix = "robot", mechanism = "articulated") {
+function renderParallelRobotArms(arms, distance, renderWafer, escape, targetGeometry, occlusions = [], maskPrefix = "robot", mechanism = "articulated", stackedArms = false) {
   const waferLayers = [];
+  const moving = arms.some((arm) => extensionFraction(arm.progress) > 0);
   const markup = arms.map((arm, index) => {
     const geometry = arm.target ? targetGeometry?.(arm.target) : void 0;
     const visibleProgress = targetGeometry && arm.target && !geometry ? null : arm.progress;
@@ -367,35 +368,57 @@ function renderParallelRobotArms(arms, distance, renderWafer, escape, targetGeom
       visibleProgress,
       mechanism === "telescopic" ? ATR_RETRACTED_REACH : REST_REACH
     );
-    const { shoulder, elbowX, elbowY, tipY } = robotArmGeometry(reach, index, arms.length, visibleProgress);
-    const clawAngle = mechanism === "telescopic" ? 0 : Math.atan2(tipY - elbowY, reach - elbowX);
+    const { shoulder, elbowX, elbowY, tipY } = robotArmGeometry(reach, stackedArms ? 0 : index, stackedArms ? 1 : arms.length, visibleProgress);
+    const verticalSlots = mechanism === "telescopic";
+    const visibleSlots = verticalSlots ? arm.slots.slice(0, 1) : arm.slots;
+    const faded = stackedArms && moving && !extensionFraction(visibleProgress);
+    const hidden = stackedArms && !moving && index > 0;
+    const clawSpacing = CLAW_SEPARATION;
+    const branches = stackedArms ? visibleSlots.map((slot, slotIndex) => {
+      const branchIndex = (geometry?.slotSpacing ?? 0) < 0 ? visibleSlots.length - 1 - slotIndex : slotIndex;
+      const shape = robotArmGeometry(
+        reach,
+        branchIndex,
+        visibleSlots.length,
+        visibleProgress,
+        Math.abs(geometry?.slotSpacing ?? ARM_SEPARATION)
+      );
+      const angle = Math.atan2(shape.tipY - shape.elbowY, reach - shape.elbowX);
+      const mountX2 = reach - CLAW_STEM_OFFSET * CLAW_SCALE * Math.cos(angle);
+      const mountY2 = shape.tipY - CLAW_STEM_OFFSET * CLAW_SCALE * Math.sin(angle);
+      return { ...shape, slot, angle, path: `M 0 ${shape.shoulder} L ${shape.elbowX} ${shape.elbowY} L ${mountX2} ${mountY2}` };
+    }) : [];
+    const clawAngle = mechanism === "telescopic" || stackedArms ? 0 : Math.atan2(tipY - elbowY, reach - elbowX);
     const mountX = reach - CLAW_STEM_OFFSET * CLAW_SCALE * Math.cos(clawAngle);
     const mountY = tipY - CLAW_STEM_OFFSET * CLAW_SCALE * Math.sin(clawAngle);
-    const linkPath = mechanism === "telescopic" ? `M 0 ${tipY} L ${mountX} ${mountY}` : `M 0 ${shoulder} L ${elbowX} ${elbowY} L ${mountX} ${mountY}`;
-    const wristHalfWidth = (arm.slots.length - 1) * CLAW_SEPARATION / 2;
-    const wristPath = arm.slots.length > 1 ? ` M ${mountX} ${mountY - wristHalfWidth} V ${mountY + wristHalfWidth}` : "";
-    const claws = arm.slots.map((slot, slotIndex) => {
-      const y = tipY + (slotIndex - (arm.slots.length - 1) / 2) * CLAW_SEPARATION;
-      return `<g class="parallel-robot-claw" data-robot-slot="${slot}" transform="translate(${reach} ${y}) rotate(${clawAngle * 180 / Math.PI}) scale(${CLAW_SCALE})">
+    const linkPath = stackedArms ? branches.map((branch) => branch.path).join(" ") : mechanism === "telescopic" ? `M 0 ${tipY} L ${mountX} ${mountY}` : `M 0 ${shoulder} L ${elbowX} ${elbowY} L ${mountX} ${mountY}`;
+    const wristHalfWidth = (visibleSlots.length - 1) * clawSpacing / 2;
+    const wristPath = !stackedArms && visibleSlots.length > 1 ? ` M ${mountX} ${mountY - wristHalfWidth} V ${mountY + wristHalfWidth}` : "";
+    const claws = visibleSlots.map((slot, slotIndex) => {
+      const branch = branches[slotIndex];
+      const y = branch?.tipY ?? tipY + (slotIndex - (visibleSlots.length - 1) / 2) * clawSpacing;
+      return `<g class="parallel-robot-claw" data-robot-slot="${slot}" transform="translate(${reach} ${y}) rotate(${(branch?.angle ?? clawAngle) * 180 / Math.PI}) scale(${CLAW_SCALE})">
         <path d="${CLAW_PATH}"/>
       </g>`;
     }).join("");
-    const wafers = arm.slots.map((slot, slotIndex) => {
+    const waferSlots = verticalSlots ? arm.slots.filter((slot) => arm.wafers[slot]).slice(0, 1) : arm.slots;
+    const wafers = waferSlots.map((slot, slotIndex) => {
+      if (stackedArms && !moving && arms.slice(0, index).some((upper) => upper.wafers[upper.slots[slotIndex]])) return "";
       const wafer = arm.wafers[slot];
-      const y = tipY + (slotIndex - (arm.slots.length - 1) / 2) * CLAW_SEPARATION;
+      const y = branches[slotIndex]?.tipY ?? tipY + (slotIndex - (waferSlots.length - 1) / 2) * clawSpacing;
       return wafer ? `<span class="parallel-robot-wafers" data-held-slot="${slot}" style="left:${reach}px;top:${y}px">${renderWafer(wafer)}</span>` : "";
     }).join("");
     const localAngle = geometry?.angle ?? 0;
-    waferLayers.push(`<div class="parallel-robot-wafer-layer" style="--robot-arm-local-angle:${localAngle}deg">${wafers}</div>`);
+    waferLayers.push(`<div class="parallel-robot-wafer-layer" style="--robot-arm-local-angle:${localAngle}deg;opacity:${faded ? 0.3 : 1}">${wafers}</div>`);
     const maskId = `robot-mask-${Array.from(maskPrefix).map((character) => character.codePointAt(0)).join("-")}-${index}`;
     const radians = localAngle * Math.PI / 180;
     const holes = occlusions.map((point) => `<circle cx="${point.x * Math.cos(radians) + point.y * Math.sin(radians)}" cy="${-point.x * Math.sin(radians) + point.y * Math.cos(radians)}" r="${point.radius}" fill="black"/>`).join("");
-    return `<div class="parallel-robot-arm${arm.progress === null ? "" : " is-transferring"}${arm.enabled ? "" : " is-disabled"}" data-arm="${escape(arm.name)}" style="--robot-reach:${reach.toFixed(2)}px;--robot-arm-local-angle:${localAngle}deg">
+    return `<div class="parallel-robot-arm${arm.progress === null ? "" : " is-transferring"}${arm.enabled ? "" : " is-disabled"}" data-arm="${escape(arm.name)}" style="--robot-reach:${reach.toFixed(2)}px;--robot-arm-local-angle:${localAngle}deg;${hidden ? "visibility:hidden;" : faded ? "opacity:.3;" : ""}">
       <svg class="parallel-robot-arms" overflow="visible" aria-hidden="true">
         <defs><mask id="${maskId}" maskUnits="userSpaceOnUse" x="-2000" y="-2000" width="4000" height="4000"><rect x="-2000" y="-2000" width="4000" height="4000" fill="white"/>${holes}</mask></defs>
         <g mask="url(#${maskId})"><path class="parallel-robot-link" d="${linkPath}${wristPath}"/>
         <path class="parallel-robot-link-inset" d="${linkPath}${wristPath}"/>
-        ${mechanism === "telescopic" ? `<path class="parallel-robot-slide" d="M 0 ${tipY} H ${reach / 2}"/>` : `<circle class="parallel-robot-joint" cx="${elbowX}" cy="${elbowY}" r="4"/>`}${claws}</g>
+        ${mechanism === "telescopic" ? `<path class="parallel-robot-slide" d="M 0 ${tipY} H ${reach / 2}"/>` : stackedArms ? branches.map((branch) => `<circle class="parallel-robot-joint" cx="${branch.elbowX}" cy="${branch.elbowY}" r="4"/>`).join("") : `<circle class="parallel-robot-joint" cx="${elbowX}" cy="${elbowY}" r="4"/>`}${claws}</g>
       </svg></div>`;
   }).join("");
   return `<div class="parallel-robot-mechanism">${markup}${waferLayers.join("")}</div>`;
@@ -408,7 +431,8 @@ function projectTopologyTransfers(snapshot, device) {
     wafers: [...module.wafers],
     processedWafers: [...module.processedWafers],
     loadPortSlots: module.loadPortSlots.map((slot) => ({ ...slot })),
-    loadLockSlots: module.loadLockSlots.map((slot) => ({ ...slot }))
+    loadLockSlots: module.loadLockSlots.map((slot) => ({ ...slot })),
+    processSlots: module.processSlots?.map((slot) => ({ ...slot }))
   }));
   const animations = /* @__PURE__ */ new Map();
   for (const robot of snapshot.robots) {
@@ -442,7 +466,7 @@ function projectTopologyTransfers(snapshot, device) {
         module.wafers.push(transfer.wafer);
         if (processed) module.processedWafers.push(transfer.wafer);
       }
-      for (const slot of [...module.loadPortSlots, ...module.loadLockSlots]) {
+      for (const slot of [...module.loadPortSlots, ...module.loadLockSlots, ...module.processSlots ?? []]) {
         if (transfer.kind === "pick" && slot.wafer === transfer.wafer) {
           slot.wafer = "";
           slot.processed = false;
@@ -576,6 +600,19 @@ function atmosphereRailMotion(moves, robot, time) {
     previousTarget = target;
   }
   return { source: previousTarget, target: previousTarget, progress: 1, preparationFraction: 0 };
+}
+
+// src/topology_robot_slots.ts
+function renderRobotSlotRow(robot, dual, renderSlots, escape) {
+  const arms = robot.arms ?? configuredRobotArms({ Capacity: robot.capacity });
+  const combined = dual && robot.environment === "vacuum";
+  const slots = (ids) => ids.map((slot) => ({
+    slot,
+    wafer: robot.slotWafers?.[slot] ?? "",
+    processed: robot.processedWafers.includes(robot.slotWafers?.[slot] ?? "")
+  }));
+  const boards = combined ? `<div class="front-module front-robot-combined"><strong>${escape(robot.name)}</strong><div class="front-slot-board front-robot-combined-board" style="--front-slot-count:${arms.length}">${arms.map((arm) => `<div class="front-robot-arm-pair" role="group" aria-label="${escape(arm.name)}">${renderSlots(slots(arm.slots))}</div>`).join("")}</div></div>` : arms.map((arm) => `<div class="front-module"><strong>${escape(robot.name)}${dual ? "" : ` \xB7 ${escape(arm.name)}`}</strong><div class="front-slot-board" style="--front-slot-count:${arm.slots.length}" role="group" aria-label="${escape(robot.name + " " + arm.name)}">${renderSlots(slots(arm.slots))}</div></div>`).join("");
+  return `<div class="front-slot-row front-slot-row-robot" data-robot="${escape(robot.name)}">${boards}</div>`;
 }
 
 // src/workspace_visualizer.ts
@@ -1229,42 +1266,43 @@ function buildLoadPortSlots(records, device, time, initialLocations, processedMa
   }
   return result;
 }
-function buildLoadLockSlots(records, device, time, initialLocations, processedMaterials, currentMaterialInstances) {
+function buildReplayStationSlots(records, device, time, initialLocations, processedMaterials, currentMaterialInstances) {
+  const isSlottedStation = (name, type) => isLoadLockName(name, type) || type.toLowerCase() === "multiprocesschamber";
   const names = /* @__PURE__ */ new Set();
   for (const [name, definition] of Object.entries(device?.Stations ?? {})) {
-    if (isLoadLockName(name, String(definition?.Type ?? ""))) names.add(name);
+    if (isSlottedStation(name, String(definition?.Type ?? ""))) names.add(name);
   }
   for (const location of initialLocations.values()) {
-    if (isLoadLockName(location, String(device?.Stations?.[location]?.Type ?? ""))) names.add(location);
+    if (isSlottedStation(location, String(device?.Stations?.[location]?.Type ?? ""))) names.add(location);
   }
-  const initialByLock = /* @__PURE__ */ new Map();
+  const initialByStation = /* @__PURE__ */ new Map();
   const observedMaximum = /* @__PURE__ */ new Map();
-  const occupyInitial = (lock, slot, material) => {
-    if (!lock || !slot || !material || initialLocations.get(material) !== lock) return;
-    names.add(lock);
-    const occupancy = initialByLock.get(lock) ?? /* @__PURE__ */ new Map();
+  const occupyInitial = (station2, slot, material) => {
+    if (!station2 || !slot || !material || initialLocations.get(material) !== station2) return;
+    names.add(station2);
+    const occupancy = initialByStation.get(station2) ?? /* @__PURE__ */ new Map();
     if (!occupancy.has(slot)) occupancy.set(slot, material);
-    initialByLock.set(lock, occupancy);
-    observedMaximum.set(lock, Math.max(observedMaximum.get(lock) ?? 0, slot));
+    initialByStation.set(station2, occupancy);
+    observedMaximum.set(station2, Math.max(observedMaximum.get(station2) ?? 0, slot));
   };
   for (const move of records) {
     if (PICK_MOVE_TYPES.has(move.MoveType)) {
       materialIds(move).forEach((material, index) => {
         const source = indexedStation(move, "SrcStationList", index);
-        if (!isLoadLockName(source, String(device?.Stations?.[source]?.Type ?? ""))) return;
+        if (!isSlottedStation(source, String(device?.Stations?.[source]?.Type ?? ""))) return;
         occupyInitial(source, indexedSlot(move, "SrcSlotList", index), material);
       });
     } else if (move.MoveType === SWAP_MOVE2) {
       materialIds(move, "RecvMatList").forEach((material, index) => {
         const station2 = indexedStation(move, "StationList", index);
-        if (!isLoadLockName(station2, String(device?.Stations?.[station2]?.Type ?? ""))) return;
+        if (!isSlottedStation(station2, String(device?.Stations?.[station2]?.Type ?? ""))) return;
         occupyInitial(station2, indexedSlot(move, "StnSendSlotList", index), material);
       });
     }
   }
   const result = /* @__PURE__ */ new Map();
   for (const name of names) {
-    const occupancy = new Map(initialByLock.get(name) ?? []);
+    const occupancy = new Map(initialByStation.get(name) ?? []);
     const initialMaterials = [...initialLocations.entries()].filter(([, location]) => location === name).map(([material]) => material).sort(naturalCompare);
     const assigned = new Set(occupancy.values());
     let fallbackSlot = 1;
@@ -1453,7 +1491,7 @@ function buildWorkspaceSnapshot(moves, device, requestedTime, replenishments = [
     processedMaterials,
     replenishments
   );
-  const loadLockSlots = buildLoadLockSlots(
+  const stationSlotSnapshots = buildReplayStationSlots(
     records,
     device,
     time,
@@ -1482,7 +1520,8 @@ function buildWorkspaceSnapshot(moves, device, requestedTime, replenishments = [
       wafers: wafersByLocation.get(name) ?? [],
       processedWafers: (wafersByLocation.get(name) ?? []).filter(isProcessed),
       loadPortSlots: loadPortSlots.get(name) ?? [],
-      loadLockSlots: loadLockSlots.get(name) ?? [],
+      loadLockSlots: isLoadLockName(name, definition.type) ? stationSlotSnapshots.get(name) ?? [] : [],
+      processSlots: definition.type.toLowerCase() === "multiprocesschamber" ? stationSlotSnapshots.get(name) : void 0,
       slotCapacity: stationSlotCapacity(device, name, isCoolerModule(name, definition.type) ? 3 : 1),
       activeMoveName: primaryMove ? isCleaningMove(primaryMove) ? "\u6E05\u6D01" : MOVE_NAMES[primaryMove.MoveType] ?? `\u52A8\u4F5C ${primaryMove.MoveType}` : "",
       progress: primaryMove ? moveProgress(primaryMove, time) : 0,
@@ -1830,7 +1869,7 @@ function expandDualProcessChambers(modules) {
       continue;
     }
     for (let index = 0; index < module.slotCapacity; index += 1) {
-      const wafer = module.wafers[index] ?? "";
+      const wafer = module.processSlots ? module.processSlots.find((slot) => slot.slot === index + 1)?.wafer ?? "" : module.wafers[index] ?? "";
       expanded.push({
         view: {
           ...module,
@@ -1912,7 +1951,7 @@ function visibleModuleSlots(module, kind) {
     processed: module.processedWafers.includes(module.wafers[index] ?? "")
   }));
 }
-function renderFrontSlotOverview(modules, waferOrigins = {}) {
+function renderFrontSlotOverview(modules, waferOrigins = {}, robots = [], layout = "single", device) {
   const visibleModules = modules.filter((module) => !isTopologyHiddenModule(module));
   const moduleNameOrder = (left, right) => {
     const leftName = left.module.name.trim();
@@ -1927,6 +1966,20 @@ function renderFrontSlotOverview(modules, waferOrigins = {}) {
   const loadPorts = visibleModules.filter((module) => isLoadPortName(module.name, module.type)).map((module) => ({ module, kind: "port" })).sort(moduleNameOrder);
   const coolers = visibleModules.filter((module) => isCoolerModule(module.name, module.type)).map((module) => ({ module, kind: "cooler" })).sort(moduleNameOrder);
   const loadLocks = visibleModules.filter((module) => isLoadLockName(module.name, module.type)).map((module) => ({ module, kind: "lock" })).sort(moduleNameOrder);
+  const bridgeNames = layout === "cascade" ? cascadeBridgeLoadLockNames(
+    Object.keys(device?.Stations ?? {}).filter((name) => loadLocks.some((item) => item.module.name === name)),
+    device,
+    robots.filter((robot) => robot.environment === "vacuum").map((robot) => robot.name)
+  ) : /* @__PURE__ */ new Set();
+  const lockPosition = (item) => moduleTopologyPosition(
+    item.module,
+    "lock",
+    0,
+    loadLocks.map((item2) => item2.module),
+    layout,
+    bridgeNames
+  );
+  if (robots.length && layout !== "dual") loadLocks.sort((left, right) => lockPosition(left).topPixels - lockPosition(right).topPixels || lockPosition(left).leftPercent - lockPosition(right).leftPercent);
   const splitRows = (items, columns) => Array.from({ length: Math.ceil(items.length / columns) }, (_, index) => items.slice(index * columns, (index + 1) * columns));
   const slotRows = [
     ...splitRows(loadLocks, 2),
@@ -1943,7 +1996,7 @@ function renderFrontSlotOverview(modules, waferOrigins = {}) {
     const detail = slot.wafer ? `${identity} \xB7 \u6676\u5706 ${waferSurfaceLabel(slot.wafer, waferOrigins[slot.wafer] ?? "")}\uFF0C${slot.processed ? "\u5DF2\u52A0\u5DE5" : "\u672A\u52A0\u5DE5"}` : `${identity} \xB7 \u7A7A\u69FD`;
     return `<span class="front-slot is-${state2}${dummy ? " is-dummy" : ""}" tabindex="0" title="${escapeHtml(detail)}" aria-label="${escapeHtml(detail)}"></span>`;
   }).join("");
-  if (!slotRows.length) return "";
+  if (!slotRows.length && !robots.length) return "";
   const renderModule2 = ({ module, kind }) => {
     const slots = visibleModuleSlots(module, kind);
     return `<div class="front-module">
@@ -1951,7 +2004,24 @@ function renderFrontSlotOverview(modules, waferOrigins = {}) {
       <div class="front-slot-board" style="--front-slot-count:${slots.length}" role="group" aria-label="${escapeHtml(`${module.name} \u6B63\u89C6\u69FD\u4F4D`)}">${renderSlots(slots, module)}</div>
     </div>`;
   };
-  const content = slotRows.map((row) => `<div class="front-slot-row front-slot-row-${row[0].kind}" style="--front-row-module-count:${row.length}">${row.map(renderModule2).join("")}</div>`).join("");
+  const positionedRows = slotRows.map((row) => {
+    const role = row[0].kind === "port" ? "port" : row[0].kind === "lock" ? "lock" : "auxiliary";
+    const peers = visibleModules.filter((module) => role === "port" ? isLoadPortName(module.name, module.type) : role === "lock" ? isLoadLockName(module.name, module.type) : isCoolerModule(module.name, module.type));
+    return {
+      top: moduleTopologyPosition(row[0].module, role, peers.indexOf(row[0].module), peers, layout, bridgeNames).topPixels,
+      category: role === "lock" ? 1 : role === "port" ? 2 : 3,
+      markup: `<div class="front-slot-row front-slot-row-${row[0].kind}" style="--front-row-module-count:${row.length}">${row.map(renderModule2).join("")}</div>`
+    };
+  });
+  for (const robot of robots) {
+    const peers = robots.filter((item) => item.environment === robot.environment);
+    positionedRows.push({
+      top: robotTopologyPosition(peers.indexOf(robot), peers.length, robot.environment, layout).topPixels,
+      category: 0,
+      markup: renderRobotSlotRow(robot, layout === "dual", (slots) => renderSlots(slots, robot), escapeHtml)
+    });
+  }
+  const content = positionedRows.sort((a, b) => layout === "dual" ? a.category - b.category || (a.category === 0 ? a.top - b.top : 0) : a.top - b.top).map((row) => row.markup).join("");
   return `<div class="topology-front-content" role="group" aria-label="\u8BBE\u5907\u6B63\u89C6\u69FD\u4F4D">${content}</div>`;
 }
 function renderLoadPortTopView(module, wafers, accessibleStatus, candidate) {
@@ -2435,6 +2505,14 @@ function moduleTopologyPosition(module, role, index, roleModules, layout, bridge
     };
   }
   if (isAlignerModule(module.name, module.type)) {
+    if (layout === "dual") return topologyFrameAttachment(
+      topologyAtmosphereFrame(layout),
+      "atmosphere-aligner@left",
+      "left",
+      0,
+      TOPOLOGY_ALIGNER_WIDTH,
+      TOPOLOGY_ALIGNER_HEIGHT
+    );
     return topologyFrameUpperUtilityAttachment(
       topologyAtmosphereFrame(layout),
       "atmosphere-aligner-top-left@top",
@@ -2444,6 +2522,14 @@ function moduleTopologyPosition(module, role, index, roleModules, layout, bridge
     );
   }
   if (role === "auxiliary" && isCoolerModule(module.name, module.type)) {
+    if (layout === "dual") return topologyFrameAttachment(
+      topologyAtmosphereFrame(layout),
+      "atmosphere-cooler@right",
+      "right",
+      0,
+      TOPOLOGY_COOLER_WIDTH,
+      TOPOLOGY_COOLER_HEIGHT
+    );
     return topologyFrameUpperUtilityAttachment(
       topologyAtmosphereFrame(layout),
       "atmosphere-cooler-top-right@top",
@@ -2582,8 +2668,8 @@ function isModuleFilteredOut(module, hiddenFilters) {
 }
 function renderEquipmentTopology(snapshot, decision, hiddenFilters, device) {
   const layout = device ? detectDeviceTopologyLayout(device) : detectTopologyLayout(snapshot.modules, snapshot.robots.length);
-  const projection = layout === "dual" ? null : projectTopologyTransfers(snapshot, device);
-  const visibleModules = (projection?.modules ?? snapshot.modules).filter((module) => !isTopologyHiddenModule(module) && !isModuleFilteredOut(module, hiddenFilters));
+  const projection = projectTopologyTransfers(snapshot, device);
+  const visibleModules = projection.modules.filter((module) => !isTopologyHiddenModule(module) && !isModuleFilteredOut(module, hiddenFilters));
   const groups = topologyGroups(visibleModules);
   const destinations = candidateDestinations(decision);
   const atmosphereRobots = snapshot.robots.filter((robot) => robot.environment === "atmosphere" || !robot.environment && /^(ATR|ATM)/i.test(robot.name));
@@ -2692,7 +2778,7 @@ function renderEquipmentTopology(snapshot, decision, hiddenFilters, device) {
     const originalPosition = robotPositions.get(robot.name);
     if (!originalPosition) return "";
     const position = { ...originalPosition };
-    if (layout !== "dual" && environment === "atmosphere" && robot.railMotion?.target) {
+    if (environment === "atmosphere" && robot.railMotion?.target) {
       const motion = robot.railMotion;
       const source = modulePositions.get(motion.source);
       const destination = modulePositions.get(motion.target);
@@ -2703,11 +2789,12 @@ function renderEquipmentTopology(snapshot, decision, hiddenFilters, device) {
       position.fixedLeftOffsetPixels = offset;
       position.leftPercent = 50 + offset / TOPOLOGY_VIEWBOX_WIDTH * 100;
     }
-    const parallelArms = layout === "single" || layout === "cascade";
     const activeMove = snapshot.activeMoves.find((move) => move.ModuleName === robot.name);
     const transferring = activeMove && (PICK_MOVE_TYPES.has(activeMove.MoveType) || PLACE_MOVE_TYPES.has(activeMove.MoveType) || activeMove.MoveType === SWAP_MOVE2);
     const target = robot.target || decisionTargetForRobot(robot, decision);
-    const targetPosition = parallelArms && transferring ? modulePositions.get(target) : robotTargetTopologyPosition(robot, target, modulePositions);
+    const pairedLoadLock = (station2) => layout === "dual" && environment === "vacuum" && /^(LA|LB|LC|LD)$/i.test(station2) && Boolean(activeMove) && ["RobotSlotList", "RecvSlotList", "SendSlotList"].some((field) => listValue(activeMove?.[field]).length >= 2);
+    const transferPosition = (station2) => pairedLoadLock(station2) ? robotTargetTopologyPosition(robot, "LA", modulePositions) : modulePositions.get(station2);
+    const targetPosition = transferring ? transferPosition(target) : robotTargetTopologyPosition(robot, target, modulePositions);
     const targetAngle = targetPosition ? Math.atan2(
       targetPosition.topPixels - position.topPixels,
       targetPosition.leftPercent / 100 * TOPOLOGY_VIEWBOX_WIDTH - position.leftPercent / 100 * TOPOLOGY_VIEWBOX_WIDTH
@@ -2729,8 +2816,8 @@ function renderEquipmentTopology(snapshot, decision, hiddenFilters, device) {
       targetPosition.topPixels - position.topPixels,
       (targetPosition.leftPercent - position.leftPercent) / 100 * TOPOLOGY_VIEWBOX_WIDTH
     ) : 0;
-    const mechanism = parallelArms ? renderParallelRobotArms(
-      projection?.animations.get(robot.name) ?? [],
+    const mechanism = renderParallelRobotArms(
+      projection.animations.get(robot.name) ?? [],
       distance,
       (wafer) => `<span class="robot-held-wafer robot-held-wafer-0">${renderWaferToken(
         wafer,
@@ -2740,13 +2827,17 @@ function renderEquipmentTopology(snapshot, decision, hiddenFilters, device) {
       )}</span>`,
       escapeHtml,
       (station2) => {
-        const target2 = modulePositions.get(station2);
+        const target2 = transferPosition(station2);
         if (!target2) return void 0;
         const dx = (target2.leftPercent - position.leftPercent) / 100 * TOPOLOGY_VIEWBOX_WIDTH;
         const dy = target2.topPixels - position.topPixels;
-        return { distance: Math.hypot(dx, dy), angle: Math.atan2(dy, dx) * 180 / Math.PI - angleDegrees };
+        const firstChamber = modulePositions.get(pairedLoadLock(station2) ? "LA" : `${station2}-1`);
+        const secondChamber = modulePositions.get(pairedLoadLock(station2) ? "LB" : `${station2}-2`);
+        const targetRadians = Math.atan2(dy, dx);
+        const slotSpacing = firstChamber && secondChamber ? -(secondChamber.leftPercent - firstChamber.leftPercent) / 100 * TOPOLOGY_VIEWBOX_WIDTH * Math.sin(targetRadians) + (secondChamber.topPixels - firstChamber.topPixels) * Math.cos(targetRadians) : void 0;
+        return { distance: Math.hypot(dx, dy), angle: targetRadians * 180 / Math.PI - angleDegrees, slotSpacing };
       },
-      visibleModules.filter((module) => module.wafers.length > 0).flatMap((module) => {
+      [...processChamberViews.map((item) => item.view), ...groups.loadLocks, ...groups.loadPorts, ...groups.auxiliaryModules].filter((module) => module.wafers.length > 0).flatMap((module) => {
         const location = modulePositions.get(module.name);
         if (!location) return [];
         const dx = (location.leftPercent - position.leftPercent) / 100 * TOPOLOGY_VIEWBOX_WIDTH;
@@ -2756,8 +2847,9 @@ function renderEquipmentTopology(snapshot, decision, hiddenFilters, device) {
         return [{ x: dx * Math.cos(armAngle) + dy * Math.sin(armAngle), y: -dx * Math.sin(armAngle) + dy * Math.cos(armAngle), radius }];
       }),
       robot.name,
-      environment === "atmosphere" ? "telescopic" : "articulated"
-    ) : void 0;
+      environment === "atmosphere" ? "telescopic" : "articulated",
+      layout === "dual" && environment === "vacuum"
+    );
     const fixedLeft = position.fixedLeftOffsetPixels === void 0 ? "" : `;--fixed-left:calc(50% ${position.fixedLeftOffsetPixels < 0 ? "-" : "+"} ${Math.abs(position.fixedLeftOffsetPixels)}px)`;
     return `<div class="reference-robot-position" style="--robot-left:${position.leftPercent}%;--robot-top:${position.topPixels}px${fixedLeft}">${renderRobotHub(robot, snapshot.waferOrigins, environment, angleDegrees, mechanism)}</div>`;
   }).join("");
@@ -2775,7 +2867,7 @@ function renderEquipmentTopology(snapshot, decision, hiddenFilters, device) {
         </div>
         ${machineAreaMarkup}
         ${machineFrameMarkup}
-        ${layout !== "dual" && atmosphereRobots.length ? `<div class="topology-atmosphere-rail" aria-label="\u5927\u6C14\u673A\u68B0\u624B\u8F68\u9053" style="top:${atmosphereFrame.centerTopPixels}px;width:${atmosphereFrame.widthPixels - TOPOLOGY_ATMOSPHERE_INTERIOR_INSET * 2}px"></div>` : ""}
+        ${atmosphereRobots.length ? `<div class="topology-atmosphere-rail" aria-label="\u5927\u6C14\u673A\u68B0\u624B\u8F68\u9053" style="top:${atmosphereFrame.centerTopPixels}px;width:${atmosphereFrame.widthPixels - TOPOLOGY_ATMOSPHERE_INTERIOR_INSET * 2}px"></div>` : ""}
         ${attachmentPointMarkup}
         ${moduleMarkup}
         ${robotMarkup}
@@ -3718,7 +3810,10 @@ var VisualizationWorkspace = class {
     this.elements.frontSlotOverview.style.setProperty("--topology-canvas-height", canvasHeight);
     this.elements.frontSlotOverview.innerHTML = renderFrontSlotOverview(
       topologySnapshot.modules,
-      topologySnapshot.waferOrigins
+      topologySnapshot.waferOrigins,
+      topologySnapshot.robots,
+      this.device ? detectDeviceTopologyLayout(this.device) : detectTopologyLayout(topologySnapshot.modules, topologySnapshot.robots.length),
+      this.device
     );
     const requestState = this.pendingReplayDecisionKeys.has(replayKey) ? "loading" : this.replayDecisionErrorKey === replayKey ? "error" : "idle";
     this.elements.decisionLens.innerHTML = renderDecisionLens(

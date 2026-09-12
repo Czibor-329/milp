@@ -2,6 +2,91 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const logic = require('../realtime_scheduler/frontend/workspace_visualizer_logic.js');
+const fs = require('node:fs');
+const path = require('node:path');
+/** 从唯一设备目录读取真实机械臂声明，避免夹具掩盖臂数、槽位数差异。 */
+function storedDevices() {
+  const root = path.join(__dirname, '../realtime_scheduler/data/datasets');
+  return fs.readdirSync(root).filter(name => fs.existsSync(path.join(root, name, 'device.json')))
+    .map(name => JSON.parse(fs.readFileSync(path.join(root, name, 'device.json'), 'utf8').replace(/^\uFEFF/, '')));
+}
+
+test('真实三类设备的机械手侧栏保留每个槽号，单臂留空列，双腔共享组合框', () => {
+  for (const definition of storedDevices()) {
+    const snapshot = logic.snapshotWithFullDeviceModules(logic.buildWorkspaceSnapshot([], definition, 0), definition);
+    const layout = logic.detectDeviceTopologyLayout(definition);
+    const html = logic.renderFrontSlotOverview(snapshot.modules, {}, snapshot.robots, layout, definition);
+    for (const robot of snapshot.robots) {
+      assert.ok(html.includes(`data-robot="${robot.name}"`));
+      for (const slot of robot.arms.flatMap(arm => arm.slots)) assert.ok(html.includes(`${robot.name}.${slot} · 空槽`));
+      const arms = logic.robotArmAnimation(robot.arms, {}, undefined, 0).arms;
+      if (robot.environment === 'atmosphere') {
+        const picture = logic.renderParallelRobotArms(arms, 100, String, String, undefined, [], robot.name, 'telescopic');
+        assert.equal((picture.match(/class="parallel-robot-claw"/g) || []).length, 1);
+      }
+    }
+    assert.equal(html.includes('front-robot-combined-board'), layout === 'dual');
+    if (layout === 'cascade') {
+      const order = ['data-robot="VTR_2"', 'title="UBR"', 'data-robot="VTR_1"', 'title="LA"', 'data-robot="ATR_1"'];
+      assert.ok(order.every((item, index) => index === 0 || html.indexOf(order[index - 1]) < html.indexOf(item)));
+    }
+  }
+});
+
+test('双腔两臂待命只露两个爪，伸出时另一臂变浅，底层持片不会消失', () => {
+  const arms = logic.configuredRobotArms({ ArmInfo: { A: { SlotIDs: [1, 2] }, B: { SlotIDs: [3, 4] } } });
+  const render = state => logic.renderParallelRobotArms(state.arms, 160, String, String, undefined, [], 'VAC', 'articulated', true);
+  const idle = render(logic.robotArmAnimation(arms, { 3: 'BOTTOM' }, undefined, 0));
+  assert.match(idle, /visibility:hidden/);
+  assert.match(idle, /BOTTOM/);
+  const active = render(logic.robotArmAnimation(arms, {}, { MoveType: 0, RobotSlotList: [3, 4], MatIDList: ['A', 'B'],
+    SrcStationList: ['PM1', 'PM1'], SrcSlotList: [1, 2], StartTime: 0, EndTime: 10 }, 4));
+  assert.doesNotMatch(active, /visibility:hidden/);
+  assert.match(active, /opacity:\.3/);
+});
+
+test('双腔每层双槽复用单腔镜像关节轮廓，而非单根横杆', () => {
+  const render = (slots, stacked) => logic.renderParallelRobotArms(logic.robotArmAnimation(
+    logic.configuredRobotArms({ ArmInfo: slots }), {}, undefined, 0).arms, 100, String, String,
+    undefined, [], 'shape', 'articulated', stacked);
+  const single = render({ A: { SlotIDs: [1] }, B: { SlotIDs: [2] } }, false);
+  const dual = render({ A: { SlotIDs: [1, 2] } }, true);
+  const paths = html => [...html.matchAll(/class="parallel-robot-link" d="([^"]+)"/g)].map(match => match[1]).join(' ');
+  assert.equal(paths(dual), paths(single));
+  assert.equal((dual.match(/class="parallel-robot-joint"/g) || []).length, 2);
+});
+
+test('双腔双片访问外侧 LC/LD 的动画使用 LA/LB 入口，并保留原始站点', () => {
+  const definition = storedDevices().find(item => logic.detectDeviceTopologyLayout(item) === 'dual');
+  const render = stations => {
+    const move = { MoveID: 1, MoveType: 0, ModuleName: 'VACRobot', RobotSlotList: [1, 2], MatIDList: ['A', 'B'],
+      SrcStationList: stations, SrcSlotList: [1, 1], StartTime: 0, EndTime: 10 };
+    const snapshot = logic.snapshotWithFullDeviceModules(logic.buildWorkspaceSnapshot([move], definition, 4), definition);
+    const html = logic.renderEquipmentTopology(snapshot, null, undefined, definition);
+    assert.deepEqual(snapshot.activeMoves[0].SrcStationList, stations);
+    assert.match(html, /topology-atmosphere-rail/);
+    return [...html.matchAll(/class="parallel-robot-claw"[^>]*transform="([^"]+)"/g)].map(match => match[1]);
+  };
+  assert.deepEqual(render(['LC', 'LD']), render(['LA', 'LB']));
+});
+
+test('双腔动画交接和完成后，二号腔晶圆不因一号腔取空而换位', () => {
+  const definition = storedDevices().find(item => logic.detectDeviceTopologyLayout(item) === 'dual');
+  const move = { MoveID: 1, MoveType: 0, ModuleName: 'VACRobot', RobotSlotList: [1], MatIDList: ['FIRST'],
+    SrcStationList: ['PM1'], SrcSlotList: [1], StartTime: 0, EndTime: 10 };
+  const later = { ...move, MoveID: 2, RobotSlotList: [2], MatIDList: ['SECOND'], SrcSlotList: [2], StartTime: 20, EndTime: 30 };
+  for (const time of [6, 10]) {
+    const snapshot = logic.snapshotWithFullDeviceModules(logic.buildWorkspaceSnapshot([move, later], definition, time), definition);
+    const projection = logic.projectTopologyTransfers(snapshot, definition);
+    const slots = projection.modules.find(module => module.name === 'PM1').processSlots;
+    assert.equal(slots.find(slot => slot.slot === 1).wafer, '');
+    assert.equal(slots.find(slot => slot.slot === 2).wafer, 'SECOND');
+    const html = logic.renderEquipmentTopology(snapshot, null, undefined, definition);
+    assert.match(html, /atmosphere-aligner@left/);
+    assert.match(html, /atmosphere-cooler@right/);
+    assert.match(html, /parallel-robot-mechanism/);
+  }
+});
 const device = {
   Stations: { LP1: { Type: 'LoadPort', Capacity: 1, Slots: [1] }, PM1: { Type: 'Process' } },
   Robots: {

@@ -1984,6 +1984,10 @@
     /* LoadPort 固定使用两列轨道；不足两个模块的末行仍保留单模块的统一宽度。 */
     .front-slot-row-port { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .front-slot-row-cooler { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    /* 机械手独占设备行；单臂右列留空，双腔双臂共享一个两列组合框。 */
+    .front-slot-row-robot { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .front-robot-combined { grid-column: 1 / -1; }
+    .front-robot-arm-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; }
     .front-module { display: grid; min-width: 0; height: fit-content; grid-template-rows: 16px auto; gap: 4px; align-content: start; }
     .front-module > strong { overflow: hidden; padding: 0 2px; color: #334a67; font: 800 9px/16px "Fira Code", Consolas, monospace; text-align: center; text-overflow: ellipsis; white-space: nowrap; }
     .front-slot-board { display: grid; width: 100%; height: auto; min-width: 0; align-self: start; grid-template-rows: repeat(var(--front-slot-count), 7px); gap: 1px; padding: 4px; overflow: hidden; box-sizing: border-box; border: 1px solid #c7d6e5; border-radius: 7px; background: #edf3f8; box-shadow: inset 0 1px 0 rgba(255,255,255,.78); }
@@ -2039,8 +2043,9 @@
     .parallel-robot-arm.is-disabled { opacity: .35; }
     .parallel-robot-arm { position: absolute; transform: rotate(var(--robot-arm-local-angle, 0deg)); transform-origin: 0 0; }
     .parallel-robot-wafer-layer { position: absolute; z-index: 5; transform: rotate(var(--robot-arm-local-angle, 0deg)); transform-origin: 0 0; }
-    .robot-hub:has(.parallel-robot-mechanism) .robot-base { width: 34px; height: 34px; }
-    .robot-hub:has(.parallel-robot-mechanism) .robot-base i { width: 12px; height: 12px; }
+    /* 所有设备共用单腔底座尺寸，不随臂数、槽位数或机构类型放大。 */
+    .reference-grid-canvas .robot-base { width: 34px; height: 34px; }
+    .reference-grid-canvas .robot-base i { width: 12px; height: 12px; }
     .parallel-robot-wafers .robot-held-wafer { transform: translate(-50%, -50%) rotate(calc(-1 * (var(--robot-arm-angle) + var(--robot-arm-local-angle, 0deg)))); }
     .robot-base { position: absolute; z-index: 3; top: 50%; left: 50%; display: grid; width: 58px; height: 58px; place-items: center; border: 2px solid #667b94; border-radius: 50%; background: radial-gradient(circle at 38% 32%, #fbfdff 0, #d9e3ed 58%, #aebdcd 100%); box-shadow: inset 0 0 0 3px rgba(255,255,255,.58), 2px 3px 7px rgba(32,47,81,.14); transform: translate(-50%, -50%); }
     .robot-base i { width: 18px; height: 18px; border: 2px solid #52677f; border-radius: 50%; background: #9fb0c2; box-shadow: inset 0 2px 3px rgba(28,43,61,.28); }

@@ -15,6 +15,7 @@ export function projectTopologyTransfers(snapshot: WorkspaceSnapshot, device?: D
     processedWafers: [...module.processedWafers],
     loadPortSlots: module.loadPortSlots.map(slot => ({ ...slot })),
     loadLockSlots: module.loadLockSlots.map(slot => ({ ...slot })),
+    processSlots: module.processSlots?.map(slot => ({ ...slot })),
   }));
   const animations = new Map<string, RobotArmAnimation[]>();
   for (const robot of snapshot.robots) {
@@ -44,7 +45,7 @@ export function projectTopologyTransfers(snapshot: WorkspaceSnapshot, device?: D
         module.wafers.push(transfer.wafer);
         if (processed) module.processedWafers.push(transfer.wafer);
       }
-      for (const slot of [...module.loadPortSlots, ...module.loadLockSlots]) {
+      for (const slot of [...module.loadPortSlots, ...module.loadLockSlots, ...module.processSlots ?? []]) {
         if (transfer.kind === "pick" && slot.wafer === transfer.wafer) {
           slot.wafer = "";
           slot.processed = false;

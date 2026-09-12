@@ -1,5 +1,5 @@
 /**
- * 单腔与级联机械臂的配置、槽位占位与取放动画。
+ * 单腔、级联与双腔机械臂的配置、槽位占位与取放动画。
  * ArmInfo/SlotIDs 定义臂和爪，动作的 RobotSlotList/RecvSlotList/SendSlotList 选择执行臂。
  * 交接仅用于画布投影，不修改调度快照或动作完成边界。
  */
@@ -138,13 +138,13 @@ function extensionFraction(progress: number | null): number {
 }
 
 /** 待命肘点位于首尾连线的直径圆上，保证内角九十度；两臂绕中轴镜像展开。 */
-export function robotArmGeometry(reach: number, index: number, count: number, progress: number | null): {
+export function robotArmGeometry(reach: number, index: number, count: number, progress: number | null, targetSeparation = 0): {
   shoulder: number; elbowX: number; elbowY: number; tipY: number;
 } {
   const side = index < (count - 1) / 2 ? -1 : 1;
   const shoulder = (index - (count - 1) / 2) * SHOULDER_SEPARATION;
   const fraction = extensionFraction(progress);
-  const tipY = (index - (count - 1) / 2) * ARM_SEPARATION * (1 - fraction);
+  const tipY = (index - (count - 1) / 2) * (ARM_SEPARATION * (1 - fraction) + targetSeparation * fraction);
   const bend = (1 - fraction) / 2 + fraction * EXTENDED_ELBOW_RATIO;
   return { shoulder, tipY,
     elbowX: reach / 2 - side * (tipY - shoulder) * bend,
@@ -152,50 +152,73 @@ export function robotArmGeometry(reach: number, index: number, count: number, pr
   };
 }
 
-/** 每个配置槽位绘制一个爪，持片绑定所属槽位；回调负责晶圆内容及名称转义。 */
+/** 按物理排列绘制俯视机构；纵向槽位重叠，双腔双臂上下重叠，回调负责晶圆与名称转义。 */
 export function renderParallelRobotArms(arms: RobotArmAnimation[], distance: number,
   renderWafer: (wafer: string) => string, escape: (text: string) => string,
-  targetGeometry?: (station: string) => { distance: number; angle: number } | undefined,
+  targetGeometry?: (station: string) => { distance: number; angle: number; slotSpacing?: number } | undefined,
   occlusions: Array<{ x: number; y: number; radius: number }> = [], maskPrefix = "robot",
-  mechanism: "articulated" | "telescopic" = "articulated"): string {
+  mechanism: "articulated" | "telescopic" = "articulated",
+  stackedArms = false): string {
   const waferLayers: string[] = [];
+  const moving = arms.some(arm => extensionFraction(arm.progress) > 0);
   const markup = arms.map((arm, index) => {
     const geometry = arm.target ? targetGeometry?.(arm.target) : undefined;
     const visibleProgress = targetGeometry && arm.target && !geometry ? null : arm.progress;
     const reach = robotTransferReach(geometry?.distance ?? distance, visibleProgress,
       mechanism === "telescopic" ? ATR_RETRACTED_REACH : REST_REACH);
-    const { shoulder, elbowX, elbowY, tipY } = robotArmGeometry(reach, index, arms.length, visibleProgress);
+    const { shoulder, elbowX, elbowY, tipY } = robotArmGeometry(reach, stackedArms ? 0 : index, stackedArms ? 1 : arms.length, visibleProgress);
+    const verticalSlots = mechanism === "telescopic";
+    const visibleSlots = verticalSlots ? arm.slots.slice(0, 1) : arm.slots;
+    const faded = stackedArms && moving && !extensionFraction(visibleProgress);
+    const hidden = stackedArms && !moving && index > 0;
+    const clawSpacing = CLAW_SEPARATION;
+    // 双腔一个物理臂的两槽使用单腔双臂的镜像分支外形，槽位选择与伸缩进度仍共享。
+    const branches = stackedArms ? visibleSlots.map((slot, slotIndex) => {
+      // 左右侧腔室的局部槽序相反；反转分支索引，不能让两个分支穿过中轴交换位置。
+      const branchIndex = (geometry?.slotSpacing ?? 0) < 0 ? visibleSlots.length - 1 - slotIndex : slotIndex;
+      const shape = robotArmGeometry(reach, branchIndex, visibleSlots.length, visibleProgress,
+        Math.abs(geometry?.slotSpacing ?? ARM_SEPARATION));
+      const angle = Math.atan2(shape.tipY - shape.elbowY, reach - shape.elbowX);
+      const mountX = reach - CLAW_STEM_OFFSET * CLAW_SCALE * Math.cos(angle);
+      const mountY = shape.tipY - CLAW_STEM_OFFSET * CLAW_SCALE * Math.sin(angle);
+      return { ...shape, slot, angle, path: `M 0 ${shape.shoulder} L ${shape.elbowX} ${shape.elbowY} L ${mountX} ${mountY}` };
+    }) : [];
     // 夹爪随前臂末段朝向旋转，前臂终点停在连接柄尾端，避免伸进叉口或错位。
-    const clawAngle = mechanism === "telescopic" ? 0 : Math.atan2(tipY - elbowY, reach - elbowX);
+    const clawAngle = mechanism === "telescopic" || stackedArms ? 0 : Math.atan2(tipY - elbowY, reach - elbowX);
     const mountX = reach - CLAW_STEM_OFFSET * CLAW_SCALE * Math.cos(clawAngle);
     const mountY = tipY - CLAW_STEM_OFFSET * CLAW_SCALE * Math.sin(clawAngle);
-    const linkPath = mechanism === "telescopic" ? `M 0 ${tipY} L ${mountX} ${mountY}`
+    const linkPath = stackedArms ? branches.map(branch => branch.path).join(" ") : mechanism === "telescopic" ? `M 0 ${tipY} L ${mountX} ${mountY}`
       : `M 0 ${shoulder} L ${elbowX} ${elbowY} L ${mountX} ${mountY}`;
-    const wristHalfWidth = (arm.slots.length - 1) * CLAW_SEPARATION / 2;
-    const wristPath = arm.slots.length > 1 ? ` M ${mountX} ${mountY - wristHalfWidth} V ${mountY + wristHalfWidth}` : "";
-    const claws = arm.slots.map((slot, slotIndex) => {
-      const y = tipY + (slotIndex - (arm.slots.length - 1) / 2) * CLAW_SEPARATION;
-      return `<g class="parallel-robot-claw" data-robot-slot="${slot}" transform="translate(${reach} ${y}) rotate(${clawAngle * 180 / Math.PI}) scale(${CLAW_SCALE})">
+    const wristHalfWidth = (visibleSlots.length - 1) * clawSpacing / 2;
+    const wristPath = !stackedArms && visibleSlots.length > 1 ? ` M ${mountX} ${mountY - wristHalfWidth} V ${mountY + wristHalfWidth}` : "";
+    const claws = visibleSlots.map((slot, slotIndex) => {
+      const branch = branches[slotIndex];
+      const y = branch?.tipY ?? tipY + (slotIndex - (visibleSlots.length - 1) / 2) * clawSpacing;
+      return `<g class="parallel-robot-claw" data-robot-slot="${slot}" transform="translate(${reach} ${y}) rotate(${(branch?.angle ?? clawAngle) * 180 / Math.PI}) scale(${CLAW_SCALE})">
         <path d="${CLAW_PATH}"/>
       </g>`;
     }).join("");
-    const wafers = arm.slots.map((slot, slotIndex) => {
+    const waferSlots = verticalSlots ? arm.slots.filter(slot => arm.wafers[slot]).slice(0, 1) : arm.slots;
+    const wafers = waferSlots.map((slot, slotIndex) => {
+      // 待命叠臂时，上层空槽不能遮掉下层实际持有的晶圆。
+      if (stackedArms && !moving && arms.slice(0, index).some(upper => upper.wafers[upper.slots[slotIndex]])) return "";
       const wafer = arm.wafers[slot];
-      const y = tipY + (slotIndex - (arm.slots.length - 1) / 2) * CLAW_SEPARATION;
+      const y = branches[slotIndex]?.tipY ?? tipY + (slotIndex - (waferSlots.length - 1) / 2) * clawSpacing;
       return wafer ? `<span class="parallel-robot-wafers" data-held-slot="${slot}" style="left:${reach}px;top:${y}px">${renderWafer(wafer)}</span>` : "";
     }).join("");
     const localAngle = geometry?.angle ?? 0;
-    waferLayers.push(`<div class="parallel-robot-wafer-layer" style="--robot-arm-local-angle:${localAngle}deg">${wafers}</div>`);
+    waferLayers.push(`<div class="parallel-robot-wafer-layer" style="--robot-arm-local-angle:${localAngle}deg;opacity:${faded ? .3 : 1}">${wafers}</div>`);
     // 站点晶圆仍在模块图层；机构在这些圆形区域留空，保证取片前和放片后爪子也位于晶圆下。
     const maskId = `robot-mask-${Array.from(maskPrefix).map(character => character.codePointAt(0)).join("-")}-${index}`;
     const radians = localAngle * Math.PI / 180;
     const holes = occlusions.map(point => `<circle cx="${point.x * Math.cos(radians) + point.y * Math.sin(radians)}" cy="${-point.x * Math.sin(radians) + point.y * Math.cos(radians)}" r="${point.radius}" fill="black"/>`).join("");
-    return `<div class="parallel-robot-arm${arm.progress === null ? "" : " is-transferring"}${arm.enabled ? "" : " is-disabled"}" data-arm="${escape(arm.name)}" style="--robot-reach:${reach.toFixed(2)}px;--robot-arm-local-angle:${localAngle}deg">
+    return `<div class="parallel-robot-arm${arm.progress === null ? "" : " is-transferring"}${arm.enabled ? "" : " is-disabled"}" data-arm="${escape(arm.name)}" style="--robot-reach:${reach.toFixed(2)}px;--robot-arm-local-angle:${localAngle}deg;${hidden ? "visibility:hidden;" : faded ? "opacity:.3;" : ""}">
       <svg class="parallel-robot-arms" overflow="visible" aria-hidden="true">
         <defs><mask id="${maskId}" maskUnits="userSpaceOnUse" x="-2000" y="-2000" width="4000" height="4000"><rect x="-2000" y="-2000" width="4000" height="4000" fill="white"/>${holes}</mask></defs>
         <g mask="url(#${maskId})"><path class="parallel-robot-link" d="${linkPath}${wristPath}"/>
         <path class="parallel-robot-link-inset" d="${linkPath}${wristPath}"/>
         ${mechanism === "telescopic" ? `<path class="parallel-robot-slide" d="M 0 ${tipY} H ${reach / 2}"/>`
+          : stackedArms ? branches.map(branch => `<circle class="parallel-robot-joint" cx="${branch.elbowX}" cy="${branch.elbowY}" r="4"/>`).join("")
           : `<circle class="parallel-robot-joint" cx="${elbowX}" cy="${elbowY}" r="4"/>`}${claws}</g>
       </svg></div>`;
   }).join("");
