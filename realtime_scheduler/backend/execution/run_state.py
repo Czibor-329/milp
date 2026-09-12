@@ -885,7 +885,7 @@ def advance_platform_move_list_to_update(
     finished: set[int] = set()
     for event_kind, event_time, notification in _planned_events(
         runtime.current_plan,
-        module_parallel=runtime.compatibility_mode,
+        module_parallel=runtime.module_parallel,
     ):
         move_id = int(notification["MoveID"])
         if (
@@ -1277,7 +1277,7 @@ def advance_to_platform_update(
 
     for event_kind, event_time, notification in _planned_events(
         runtime.current_plan,
-        module_parallel=runtime.compatibility_mode,
+        module_parallel=runtime.module_parallel,
     ):
         move_id = int(notification["MoveID"])
         if (

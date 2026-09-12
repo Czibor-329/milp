@@ -109,7 +109,7 @@ class RecomputeFailureOutputTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn('id="showRemovedMovesToggle"', viewer)
-        self.assertIn("removedByRecompute: rec.RemovedByRecompute === true", viewer)
+        self.assertIn("removedByRecompute: raw.RemovedByRecompute === true", viewer)
         self.assertIn("showRemovedMoves: true", viewer)
         self.assertIn("!rec.removedByRecompute", viewer)
         self.assertIn('fillOpacity = bar.rec.removedByRecompute ? "0.24" : "1"', viewer)
@@ -145,7 +145,7 @@ class RecomputeFailureOutputTests(unittest.TestCase):
 
         self.assertIn('id="openRunSettingsButton"', template)
         self.assertIn('id="runSettingsDialog"', template)
-        self.assertIn('id="compatibilityModeInput" type="checkbox" checked', template)
+        self.assertNotIn('id="compatibilityModeInput"', template)
         self.assertIn('id="hongYeCheckInput" type="checkbox" checked', template)
         self.assertIn('id="skipBaselineInput" type="checkbox" checked', template)
         self.assertNotIn('id="skipValidationInput"', template)

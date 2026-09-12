@@ -5171,6 +5171,7 @@ function buildDeviceTimingDraft(device) {
     mode: configuredExecution.mode === "fluctuation" ? "fluctuation" : "fixed",
     fluctuation: {
       kind: rawFluctuation.kind === "offset" ? "offset" : "ratio",
+      samplingMode: rawFluctuation.samplingMode === "per-init" ? "per-init" : "per-move",
       ratio: Math.max(0, Math.min(1, Number(rawFluctuation.ratio) || 0)),
       minimumOffsetSeconds: Number.isFinite(Number(rawFluctuation.minimumOffsetSeconds)) ? Number(rawFluctuation.minimumOffsetSeconds) : 0,
       maximumOffsetSeconds: Number.isFinite(Number(rawFluctuation.maximumOffsetSeconds)) ? Number(rawFluctuation.maximumOffsetSeconds) : 0
@@ -5208,11 +5209,12 @@ function renderExecutionTimingConfiguration() {
       <header><div><h3>\u5B9E\u9645\u52A8\u4F5C\u65F6\u957F</h3><p>\u7B97\u6CD5\u59CB\u7EC8\u4F7F\u7528\u7406\u8BBA\u65F6\u95F4\uFF1B\u5E73\u53F0\u72B6\u6001\u673A\u53EA\u5728\u8FD0\u884C\u8BBE\u7F6E\u542F\u7528\u540E\u5E94\u7528\u8FD9\u91CC\u7684\u6267\u884C\u65F6\u95F4\u3002</p></div></header>
       <div class="execution-mode-grid" role="radiogroup" aria-label="\u6267\u884C\u65F6\u95F4\u6A21\u5F0F">
         <label class="run-setting-option"><span class="run-setting-option-main"><input type="radio" name="executionTimingMode" value="fixed" ${fluctuating ? "" : "checked"}><span>\u56FA\u5B9A\u6267\u884C\u503C</span></span><small>\u4F7F\u7528\u8BBE\u5907\u65F6\u95F4\u548C\u673A\u5668\u624B\u65F6\u95F4\u8868\u4E2D\u5E76\u5217\u7684\u201C\u6267\u884C\u201D\u503C\u3002</small></label>
-        <label class="run-setting-option"><span class="run-setting-option-main"><input type="radio" name="executionTimingMode" value="fluctuation" ${fluctuating ? "checked" : ""}><span>\u7406\u8BBA\u503C\u968F\u673A\u6CE2\u52A8</span></span><small>\u4EE5\u6BCF\u4E2A Move \u7684\u7406\u8BBA\u65F6\u957F\u4E3A\u5747\u503C\uFF0C\u6309 seed \u751F\u6210\u53EF\u590D\u73B0\u6837\u672C\u3002</small></label>
+        <label class="run-setting-option"><span class="run-setting-option-main"><input type="radio" name="executionTimingMode" value="fluctuation" ${fluctuating ? "checked" : ""}><span>\u7406\u8BBA\u503C\u968F\u673A\u6CE2\u52A8</span></span><small>\u4EC5 init \u8BBE\u5907\u52A8\u4F5C\u65F6\u95F4\u53C2\u4E0E\u6CE2\u52A8\uFF0C\u8DEF\u5F84\u52A0\u5DE5\u65F6\u957F\u4FDD\u6301\u4E0D\u53D8\uFF1B\u6309 seed \u751F\u6210\u53EF\u590D\u73B0\u6837\u672C\u3002</small></label>
       </div>
       <div class="execution-fluctuation-fields" ${fluctuating ? "" : "hidden"}>
         <label class="field"><span>\u6CE2\u52A8\u65B9\u5F0F</span><select id="executionFluctuationKind"><option value="ratio" ${offset ? "" : "selected"}>\u6BD4\u4F8B\uFF08\xB1\uFF09</option><option value="offset" ${offset ? "selected" : ""}>\u6700\u5C0F/\u6700\u5927\u504F\u79FB</option></select></label>
         <label class="field" ${offset ? "hidden" : ""}><span>\u6CE2\u52A8\u6BD4\u4F8B</span><input id="executionFluctuationRatio" type="number" min="0" max="100" step="0.1" value="${(execution.fluctuation.ratio * 100).toFixed(1)}"><small>\u4F8B\u5982 10 \u8868\u793A\u7406\u8BBA\u65F6\u957F\u7684 \xB110%\u3002</small></label>
+        <label class="field" ${offset ? "hidden" : ""}><span>\u62BD\u6837\u53E3\u5F84</span><select id="executionSamplingMode"><option value="per-move" ${execution.fluctuation.samplingMode === "per-init" ? "" : "selected"}>\u6BCF\u4E2A Move \u91CD\u65B0\u968F\u673A</option><option value="per-init" ${execution.fluctuation.samplingMode === "per-init" ? "selected" : ""}>\u6BCF\u4E2A init \u65F6\u95F4\u9879\u521D\u6B21\u968F\u673A\u540E\u56FA\u5B9A</option></select><small>\u56FA\u5B9A\u62BD\u6837\u5728\u672C\u6B21\u8FD0\u884C\u53CA\u540E\u7EED\u91CD\u7B97\u4E2D\u590D\u7528\uFF0C\u540C seed \u53EF\u590D\u73B0\u3002</small></label>
         <label class="field" ${offset ? "" : "hidden"}><span>\u6700\u5C0F\u6CE2\u52A8\uFF08\u79D2\uFF09</span><input id="executionMinimumOffset" type="number" step="any" value="${execution.fluctuation.minimumOffsetSeconds}"></label>
         <label class="field" ${offset ? "" : "hidden"}><span>\u6700\u5927\u6CE2\u52A8\uFF08\u79D2\uFF09</span><input id="executionMaximumOffset" type="number" step="any" value="${execution.fluctuation.maximumOffsetSeconds}"></label>
       </div>
@@ -7558,7 +7560,7 @@ function buildPayload() {
   if (state.strategy === "search-tree") {
     options.searchTreeExecutionMode = "continuous";
   }
-  return { schemaVersion: EXPECTED_API_SCHEMA, workspaceDeviceId: state.workspaceDeviceId, workspaceTestId: state.testCaseId, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options, hongYeCheck: hongYeCheckEnabled(), compatibilityMode: compatibilityModeEnabled(), executionTimingEnabled: executionTimingEnabled(), skipBaseline: skipBaselineEnabled(), cleanValidationTypes: cleanValidationTypes(), recipes: collectRecipes(routes), cleans, routes, rounds: instances.rounds };
+  return { schemaVersion: EXPECTED_API_SCHEMA, workspaceDeviceId: state.workspaceDeviceId, workspaceTestId: state.testCaseId, deviceName: state.deviceName, device: state.device, strategy: state.strategy, roundCount: state.roundCount, options, hongYeCheck: hongYeCheckEnabled(), executionTimingEnabled: executionTimingEnabled(), skipBaseline: skipBaselineEnabled(), cleanValidationTypes: cleanValidationTypes(), recipes: collectRecipes(routes), cleans, routes, rounds: instances.rounds };
 }
 function schedulingRequestOptions() {
   if (state.strategy !== "heuristic") return { ...state.options };
@@ -7590,7 +7592,6 @@ function cleanValidationTypes() {
 var runSettingsPreferencesDirty = false;
 function currentRunSettingsPreferences() {
   return {
-    compatibilityMode: compatibilityModeEnabled(),
     hongYeCheck: hongYeCheckEnabled(),
     skipBaseline: skipBaselineEnabled(),
     executionTimingEnabled: executionTimingEnabled(),
@@ -7602,7 +7603,6 @@ function currentRunSettingsPreferences() {
 function applyRunSettingsPreferences(settings) {
   if (!settings || typeof settings !== "object") return;
   const checkboxFields = {
-    compatibilityMode: "compatibilityModeInput",
     hongYeCheck: "hongYeCheckInput",
     skipBaseline: "skipBaselineInput",
     executionTimingEnabled: "executionTimingEnabledInput"
@@ -7676,13 +7676,12 @@ function hongYeCheckEnabled() {
   return document.getElementById("hongYeCheckInput")?.checked === true;
 }
 function executionTimingEnabled() {
-  return compatibilityModeEnabled() && document.getElementById("executionTimingEnabledInput")?.checked === true;
+  return document.getElementById("executionTimingEnabledInput")?.checked === true;
 }
 var runSettingsTrigger = null;
 function updateRunSettingsButtonLabel() {
   const button = document.getElementById("openRunSettingsButton");
   if (!button) return;
-  const compatibility = document.getElementById("compatibilityModeInput")?.checked === true;
   const hongYe = document.getElementById("hongYeCheckInput")?.checked === true;
   const skipBaseline = document.getElementById("skipBaselineInput")?.checked === true;
   const executionTiming = document.getElementById("executionTimingEnabledInput")?.checked === true;
@@ -7691,16 +7690,14 @@ function updateRunSettingsButtonLabel() {
   const enabledCleanTypes = cleanValidationTypes();
   const validationInput = document.getElementById("validationParallelismInput");
   if (validationInput) validationInput.disabled = !hongYe;
-  const executionInput = document.getElementById("executionTimingEnabledInput");
-  if (executionInput) executionInput.disabled = !compatibility;
-  const labels = [compatibility && "\u517C\u5BB9\u6A21\u5F0F", executionTiming && compatibility && "\u6267\u884C\u65F6\u95F4\u6A21\u62DF", hongYe && "HongYe Check", skipBaseline && "\u8DF3\u8FC7 Baseline", enabledCleanTypes.length !== CLEAN_VALIDATION_TYPES.length && `Clean \u6821\u9A8C ${enabledCleanTypes.length}/${CLEAN_VALIDATION_TYPES.length}`].filter(Boolean);
+  const labels = [executionTiming && "\u65F6\u95F4\u6CE2\u52A8\u6A21\u5F0F", hongYe && "HongYe Check", skipBaseline && "\u8DF3\u8FC7 Baseline", enabledCleanTypes.length !== CLEAN_VALIDATION_TYPES.length && `Clean \u6821\u9A8C ${enabledCleanTypes.length}/${CLEAN_VALIDATION_TYPES.length}`].filter(Boolean);
   const parallelism = `\u7B97\u6CD5\xD7${algorithmWorkers}${hongYe ? ` \u6821\u9A8C\xD7${validationWorkers}` : ""}`;
   const summary = labels.length ? `\u8FD0\u884C\u8BBE\u7F6E\uFF1A${labels.join("\u3001")}\uFF08${parallelism}\uFF09` : `\u8FD0\u884C\u8BBE\u7F6E\uFF1A${parallelism}`;
   button.setAttribute("aria-label", summary);
   button.setAttribute("title", summary);
   button.classList.toggle(
     "is-customized",
-    !compatibility || executionTiming || !hongYe || !skipBaseline || algorithmWorkers !== 4 || validationWorkers !== 2 || enabledCleanTypes.length !== CLEAN_VALIDATION_TYPES.length
+    executionTiming || !hongYe || !skipBaseline || algorithmWorkers !== 4 || validationWorkers !== 2 || enabledCleanTypes.length !== CLEAN_VALIDATION_TYPES.length
   );
 }
 function openRunSettingsDialog() {
@@ -7708,7 +7705,7 @@ function openRunSettingsDialog() {
   runSettingsTrigger = document.getElementById("openRunSettingsButton");
   runSettingsTrigger?.setAttribute("aria-expanded", "true");
   dialog.showModal();
-  window.setTimeout(() => document.getElementById("compatibilityModeInput")?.focus(), 0);
+  window.setTimeout(() => document.getElementById("executionTimingEnabledInput")?.focus(), 0);
 }
 function closeRunSettingsDialog() {
   const dialog = document.getElementById("runSettingsDialog");
@@ -7726,9 +7723,6 @@ function finishRunSettingsDialog() {
   runSettingsTrigger?.setAttribute("aria-expanded", "false");
   if (runSettingsTrigger?.isConnected) runSettingsTrigger.focus();
   runSettingsTrigger = null;
-}
-function compatibilityModeEnabled() {
-  return document.getElementById("compatibilityModeInput")?.checked === true;
 }
 function skipBaselineEnabled() {
   return document.getElementById("skipBaselineInput")?.checked === true;
@@ -8146,7 +8140,7 @@ async function runCurrentTestGroup(selectedTestIds = null) {
     const response = await fetch("/api/run-batch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ deviceId: state.workspaceDeviceId, group: state.activeTestGroup, testIds: tests.map((test) => test.id), strategy: state.strategy, options: schedulingRequestOptions(), hongYeCheck: hongYeCheckEnabled(), compatibilityMode: compatibilityModeEnabled(), executionTimingEnabled: executionTimingEnabled(), skipBaseline: skipBaselineEnabled(), maximumWorkers: batchParallelism(), validationWorkers: validationParallelism(), cleanValidationTypes: cleanValidationTypes() })
+      body: JSON.stringify({ deviceId: state.workspaceDeviceId, group: state.activeTestGroup, testIds: tests.map((test) => test.id), strategy: state.strategy, options: schedulingRequestOptions(), hongYeCheck: hongYeCheckEnabled(), executionTimingEnabled: executionTimingEnabled(), skipBaseline: skipBaselineEnabled(), maximumWorkers: batchParallelism(), validationWorkers: validationParallelism(), cleanValidationTypes: cleanValidationTypes() })
     });
     let result = await response.json();
     if (!response.ok || !result.batchId || !Array.isArray(result.items)) throw new Error(result.error || `\u670D\u52A1\u8FD4\u56DE ${response.status}`);
@@ -9093,7 +9087,7 @@ document.getElementById("batchRunButton").addEventListener("click", runCurrentTe
 document.getElementById("openRunSettingsButton").addEventListener("click", openRunSettingsDialog);
 document.getElementById("runSettingsDialogClose").addEventListener("click", closeRunSettingsDialog);
 document.getElementById("runSettingsDialog").addEventListener("close", finishRunSettingsDialog);
-["hongYeCheckInput", "compatibilityModeInput", "executionTimingEnabledInput", "skipBaselineInput", "batchParallelismInput", "validationParallelismInput", ...CLEAN_VALIDATION_TYPES.map((type) => `cleanValidation${type[0].toUpperCase()}${type.slice(1)}Input`)].forEach((id) => {
+["hongYeCheckInput", "executionTimingEnabledInput", "skipBaselineInput", "batchParallelismInput", "validationParallelismInput", ...CLEAN_VALIDATION_TYPES.map((type) => `cleanValidation${type[0].toUpperCase()}${type.slice(1)}Input`)].forEach((id) => {
   document.getElementById(id).addEventListener("change", () => {
     runSettingsPreferencesDirty = true;
     updateRunSettingsButtonLabel();
@@ -9274,6 +9268,11 @@ document.addEventListener("change", (event) => {
     execution.fluctuation.kind = event.target.value === "offset" ? "offset" : "ratio";
     markDeviceTimingDirty();
     renderDeviceTimingConfiguration();
+    return;
+  }
+  if (execution && event.target.id === "executionSamplingMode") {
+    execution.fluctuation.samplingMode = event.target.value === "per-init" ? "per-init" : "per-move";
+    markDeviceTimingDirty();
     return;
   }
   const transferAxis = event.target.closest?.("[data-robot-transfer-axis]");

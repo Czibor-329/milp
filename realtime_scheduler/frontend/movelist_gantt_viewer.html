@@ -510,6 +510,15 @@
       white-space: nowrap;
     }
 
+    .diff-status {
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .diff-status.warn {
+      color: var(--warning);
+    }
+
     .switch {
       display: inline-flex;
       align-items: center;
@@ -792,6 +801,13 @@
       stroke: #0f172a;
       stroke-width: 2.6;
       filter: drop-shadow(0 2px 4px rgba(15, 23, 42, 0.22));
+    }
+
+    .bar.diff-selected {
+      stroke: #dc2626;
+      stroke-width: 3.5;
+      stroke-opacity: 1 !important;
+      filter: drop-shadow(0 0 8px rgba(220, 38, 38, 0.9));
     }
 
     .bar.invalid {
@@ -1205,6 +1221,12 @@
                   <button id="setProbeTimeBtn" type="button" disabled>Locate</button>
                   <label class="switch" title="Show/hide the draggable time cursor"><input id="showTimelineToggle" type="checkbox" disabled> Show timeline</label>
                 </div>
+                <div class="toolbar-group" title="逐个跳转到实际执行时间与原计划不同的 Move">
+                  <label class="field">Diff <strong id="diffStatus" class="diff-status">–</strong></label>
+                  <button id="prevDiffBtn" type="button" disabled>Previous</button>
+                  <button id="nextDiffBtn" type="button" disabled>Next</button>
+                  <label class="switch" title="只保留执行时长改变的 Move，忽略等时长的整体平移"><input id="durationOnlyToggle" type="checkbox" disabled> Duration only</label>
+                </div>
                 <label class="switch"><input id="hideDoorToggle" type="checkbox" disabled> Hide door/pre-trans</label>
                 <label class="switch"><input id="showRemovedMovesToggle" type="checkbox" checked disabled> Show removed moves</label>
               </div>
@@ -1242,6 +1264,7 @@
 
   <div class="tooltip" id="tooltip"></div>
 
+  <script src="/assets/gantt_execution_compare.js"></script>
   <script>
     "use strict";
 
@@ -1293,6 +1316,10 @@
       prevSearchBtn: document.getElementById("prevSearchBtn"),
       nextSearchBtn: document.getElementById("nextSearchBtn"),
       searchStatus: document.getElementById("searchStatus"),
+      diffStatus: document.getElementById("diffStatus"),
+      prevDiffBtn: document.getElementById("prevDiffBtn"),
+      nextDiffBtn: document.getElementById("nextDiffBtn"),
+      durationOnlyToggle: document.getElementById("durationOnlyToggle"),
       probeTimeInput: document.getElementById("probeTimeInput"),
       setProbeTimeBtn: document.getElementById("setProbeTimeBtn"),
       hideDoorToggle: document.getElementById("hideDoorToggle"),
@@ -1441,21 +1468,26 @@
     }
 
     function normalizeRecord(rec, index) {
-      const start = Number(rec.StartTime);
-      const end = Number(rec.EndTime);
-      const mt = Number.parseInt(rec.MoveType, 10);
+      const raw = rec.raw || rec;
+      const { planStart, planEnd, start, end } = window.GanttExecutionCompare.resolveMoveTimes(rec);
+      const mt = Number.parseInt(raw.MoveType, 10);
       return {
-        raw: rec,
+        raw,
         rawIndex: index,
         moveType: Number.isFinite(mt) ? mt : -1,
-        module: String(rec.ModuleName ?? ""),
+        module: String(raw.ModuleName ?? ""),
         start,
         end,
         duration: end - start,
-        invalid: rec.ValidationFailed === true,
-        removedByRecompute: rec.RemovedByRecompute === true,
-        validationIssues: Array.isArray(rec.ValidationIssues)
-          ? rec.ValidationIssues.map(String)
+        planStart,
+        planEnd,
+        executed: rec.executed !== false,
+        actualEndKnown: rec.actualEndKnown !== false,
+        aborted: rec.aborted === true,
+        invalid: raw.ValidationFailed === true,
+        removedByRecompute: raw.RemovedByRecompute === true,
+        validationIssues: Array.isArray(raw.ValidationIssues)
+          ? raw.ValidationIssues.map(String)
           : []
       };
     }
@@ -1498,61 +1530,7 @@
      * @returns {{records: unknown[], recomputePoints: unknown[]}|null} 可绘制数据；不是复现日志时返回 null。
      */
     function reconstructInputLogMoveList(entries) {
-      if (!entries.some((entry) => entry && typeof entry === "object" && "Describe" in entry)) return null;
-
-      const generations = [];
-      const recomputePoints = [];
-      let scheduleTime = 0;
-      for (const entry of entries) {
-        if (!entry || typeof entry !== "object") continue;
-        const describe = String(entry.Describe ?? "");
-        if (describe === "AlgSchedule") {
-          const time = Number(entry.SimTime);
-          scheduleTime = Number.isFinite(time) ? time : 0;
-          continue;
-        }
-        if (describe === "RecomputeControl") {
-          const info = entry.Info && typeof entry.Info === "object" ? entry.Info : {};
-          const recompute = info.RecomputeInfo && typeof info.RecomputeInfo === "object"
-            ? info.RecomputeInfo
-            : {};
-          const pointTime = Number(recompute.CurrentTime ?? entry.SimTime);
-          if (Number.isFinite(pointTime)) {
-            recomputePoints.push({
-              Time: pointTime,
-              EffectiveTime: Number(recompute.EffectiveTime ?? pointTime),
-              ScheduleStartTime: pointTime,
-              RecoveryEndTime: Number(recompute.RecoveryEndTime ?? recompute.EffectiveTime ?? pointTime),
-              Index: recomputePoints.length + 1,
-              Reason: String(recompute.Reason ?? "重算")
-            });
-          }
-          continue;
-        }
-        if (describe !== "AlgOutput") continue;
-        const info = entry.Info;
-        if (!info || typeof info !== "object" || !Array.isArray(info.MoveList)) continue;
-        generations.push({ scheduleTime, moves: info.MoveList });
-      }
-      if (!generations.length) return null;
-
-      const records = [];
-      for (let index = 0; index < generations.length; index += 1) {
-        const generation = generations[index];
-        const nextGeneration = generations[index + 1];
-        const cutoff = nextGeneration ? nextGeneration.scheduleTime : Infinity;
-        for (const move of generation.moves) {
-          if (!move || typeof move !== "object") continue;
-          const start = Number(move.StartTime);
-          if (Number.isFinite(cutoff) && !(start < cutoff - 1e-9)) continue;
-          records.push(move);
-        }
-      }
-      records.sort((left, right) => (
-        Number(left.StartTime) - Number(right.StartTime)
-        || Number(left.MoveID) - Number(right.MoveID)
-      ));
-      return { records, recomputePoints };
+      return window.GanttExecutionCompare.reconstructExecutionLog(entries);
     }
 
     /**
@@ -1779,7 +1757,9 @@
         selected: null,
         searchType: "moveId",
         searchQuery: "",
-        searchCursor: -1
+        searchCursor: -1,
+        diffCursor: -1,
+        durationOnly: false
       };
     }
 
@@ -2038,6 +2018,9 @@
         dom.moveSearchInput,
         dom.prevSearchBtn,
         dom.nextSearchBtn,
+        dom.prevDiffBtn,
+        dom.nextDiffBtn,
+        dom.durationOnlyToggle,
         dom.probeTimeInput,
         dom.setProbeTimeBtn,
         dom.hideDoorToggle,
@@ -2056,6 +2039,7 @@
       dom.probeTimeInput.value = fmt(state.probe.time);
       dom.hideDoorToggle.checked = dataset.view.hideDoor;
       dom.showRemovedMovesToggle.checked = dataset.view.showRemovedMoves;
+      dom.durationOnlyToggle.checked = dataset.view.durationOnly;
       dom.showTimelineToggle.checked = dataset.view.showTimeline;
       renderMoveLegend(model);
     }
@@ -2322,7 +2306,8 @@
       }
       dataset.view.selected = {
         rawIndex: bar.rec.rawIndex,
-        bar
+        bar,
+        diff: options.diff === true
       };
       renderDetails(dataset.view.selected);
       renderCurrent();
@@ -2343,6 +2328,44 @@
         : (dataset.view.searchCursor + delta + matches.length) % matches.length;
       updateSearchStatus(dataset, matches);
       selectAndRevealBar(dataset, matches[dataset.view.searchCursor]);
+    }
+
+    /** 收集实际时间与原计划不同的已执行 Move。 */
+    function findDiffBars(model, durationOnly) {
+      return model.bars
+        .filter((bar) => window.GanttExecutionCompare.hasExecutionTimeDifference(bar.rec, durationOnly))
+        .sort((left, right) => left.start - right.start || left.rec.rawIndex - right.rec.rawIndex);
+    }
+
+    /** 更新差异计数和跳转按钮。 */
+    function updateDiffStatus(dataset, diffs) {
+      const count = diffs.length;
+      dom.prevDiffBtn.disabled = !count;
+      dom.nextDiffBtn.disabled = !count;
+      if (!count) {
+        dom.diffStatus.textContent = "0";
+        dom.diffStatus.classList.remove("warn");
+        return;
+      }
+      const current = dataset.view.diffCursor >= 0 ? dataset.view.diffCursor + 1 : 0;
+      dom.diffStatus.textContent = `${current}/${count}`;
+      dom.diffStatus.classList.add("warn");
+    }
+
+    /** 按实际开始时间跳转到上一个或下一个差异 Move。 */
+    function jumpDiff(delta) {
+      const dataset = activeDataset();
+      if (!dataset) return;
+      const diffs = findDiffBars(buildModel(dataset), dataset.view.durationOnly);
+      if (!diffs.length) {
+        updateDiffStatus(dataset, diffs);
+        return;
+      }
+      dataset.view.diffCursor = dataset.view.diffCursor < 0
+        ? (delta >= 0 ? 0 : diffs.length - 1)
+        : (dataset.view.diffCursor + delta + diffs.length) % diffs.length;
+      updateDiffStatus(dataset, diffs);
+      selectAndRevealBar(dataset, diffs[dataset.view.diffCursor], { zoom: true, diff: true });
     }
 
     function niceTickInterval(span, targetCount) {
@@ -2429,6 +2452,7 @@
       if (dataset.view.searchCursor >= searchMatches.length) dataset.view.searchCursor = searchMatches.length - 1;
       const searchHitRawIndexes = new Set(searchMatches.map((bar) => bar.rec.rawIndex));
       updateSearchStatus(dataset, searchMatches);
+      updateDiffStatus(dataset, findDiffBars(model, dataset.view.durationOnly));
       renderStatsPanel(dataset, lanes, bars);
 
       const tickStep = niceTickInterval(span, Math.max(5, Math.floor(plotW / 110)));
@@ -2498,7 +2522,9 @@
           x = Math.max(labelW, Math.min(labelW + plotW - w, markerCenter - w / 2));
         }
         const color = effectiveMoveColor(bar);
-        const selected = dataset.view.selected && dataset.view.selected.rawIndex === bar.rec.rawIndex ? " selected" : "";
+        const selected = dataset.view.selected && dataset.view.selected.rawIndex === bar.rec.rawIndex
+          ? (dataset.view.selected.diff ? " diff-selected" : " selected")
+          : "";
         const searchHit = searchHitRawIndexes.has(bar.rec.rawIndex) ? " search-hit" : "";
         const invalid = bar.rec.invalid ? " invalid" : "";
         const removed = bar.rec.removedByRecompute ? " removed" : "";
@@ -2574,6 +2600,7 @@
       dom.probeTimeInput.value = fmt(state.probe.time);
       dom.hideDoorToggle.checked = dataset.view.hideDoor;
       dom.showRemovedMovesToggle.checked = dataset.view.showRemovedMoves;
+      dom.durationOnlyToggle.checked = dataset.view.durationOnly;
       dom.showTimelineToggle.checked = dataset.view.showTimeline;
     }
 
@@ -2815,6 +2842,17 @@
       return String(value);
     }
 
+    /** 实际时间变化时，在值后追加原计划时间。 */
+    function timeWithPlan(current, planned, estimated = false) {
+      const display = fmt(current);
+      const notes = [];
+      if (estimated) notes.push("estimated");
+      if (Number.isFinite(planned) && Math.abs(current - planned) > ZERO_DURATION_EPSILON_SECONDS) {
+        notes.push(`raw ${fmt(planned)}`);
+      }
+      return notes.length ? `${display} (${notes.join(", ")})` : display;
+    }
+
     function showTooltip(event, bar) {
       const name = effectiveMoveName(bar);
       const raw = bar.rec.raw || {};
@@ -2823,12 +2861,21 @@
         : "";
       const header = `
         <strong>${escapeHtml(name)}</strong>
-        <div class="muted">${escapeHtml(bar.label)} | ${escapeHtml(fmt(bar.start))} - ${escapeHtml(fmt(bar.end))} s (${escapeHtml(fmt(bar.duration))} s)</div>
+        <div class="muted">${escapeHtml(bar.label)} | ${escapeHtml(fmt(bar.start))} - ${escapeHtml(fmt(bar.end))} s (${escapeHtml(timeWithPlan(bar.duration, bar.rec.planEnd - bar.rec.planStart))} s)</div>
         ${validation}
       `;
       const rows = Object.keys(raw).map((key) => {
-        const v = formatTooltipValue(raw[key]);
-        return `<div><span class="muted">${escapeHtml(key)}:</span> ${escapeHtml(v)}</div>`;
+        let value = formatTooltipValue(raw[key]);
+        if (key === "StartTime" || key === "EndTime") {
+          const current = key === "StartTime" ? bar.start : bar.end;
+          const planned = key === "StartTime" ? bar.rec.planStart : bar.rec.planEnd;
+          value = timeWithPlan(
+            current,
+            planned,
+            key === "EndTime" && bar.rec.executed && !bar.rec.actualEndKnown
+          );
+        }
+        return `<div><span class="muted">${escapeHtml(key)}:</span> ${escapeHtml(value)}</div>`;
       }).join("");
       dom.tooltip.innerHTML = header + rows;
       positionTooltip(event);
@@ -2951,9 +2998,9 @@
         ? waferPath.slice(Math.max(0, waferIndex - 3), Math.min(waferPath.length, waferIndex + 4))
         : waferPath.slice(0, 7);
       const rows = [
-        ["StartTime", fmt(bar.start)],
-        ["EndTime", fmt(bar.end)],
-        ["Duration", `${fmt(bar.duration)} s`],
+        ["StartTime", timeWithPlan(bar.start, bar.rec.planStart)],
+        ["EndTime", timeWithPlan(bar.end, bar.rec.planEnd, bar.rec.executed && !bar.rec.actualEndKnown)],
+        ["Duration", `${timeWithPlan(bar.duration, bar.rec.planEnd - bar.rec.planStart)} s`],
         ["MoveID", raw.MoveID],
         ["MoveType", `${bar.moveType} ${name}`],
         ["Lane", bar.label],
@@ -3074,6 +3121,17 @@
     });
     dom.prevSearchBtn.addEventListener("click", () => jumpSearch(-1));
     dom.nextSearchBtn.addEventListener("click", () => jumpSearch(1));
+    dom.prevDiffBtn.addEventListener("click", () => jumpDiff(-1));
+    dom.nextDiffBtn.addEventListener("click", () => jumpDiff(1));
+    dom.durationOnlyToggle.addEventListener("change", () => {
+      const dataset = activeDataset();
+      if (!dataset) return;
+      dataset.view.durationOnly = dom.durationOnlyToggle.checked;
+      dataset.view.diffCursor = -1;
+      dataset.view.selected = null;
+      clearDetails();
+      renderCurrent();
+    });
     dom.setProbeTimeBtn.addEventListener("click", setProbeTimeFromInput);
     dom.probeTimeInput.addEventListener("keydown", (event) => {
       if (event.key === "Enter") setProbeTimeFromInput();

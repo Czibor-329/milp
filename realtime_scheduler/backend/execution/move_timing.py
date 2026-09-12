@@ -2,12 +2,13 @@
 
 本模块保存平台侧的执行时间语义：理论时间仍由设备标准字段提供给算法，
 执行时间只在兼容推进阶段用于生成真实 Running/Done 时刻。固定模式按设备
-字段逐项覆盖；波动模式以算法给出的 Move 理论时长为均值生成可复现样本。
+字段逐项覆盖；波动仅作用于能映射到 init 设备时间的动作，Route 加工时长不变。
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 from copy import deepcopy
 from typing import Any, Dict, Mapping, Optional, Sequence
@@ -15,6 +16,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 
 EXECUTION_TIMING_MODES = frozenset({"fixed", "fluctuation"})
 FLUCTUATION_KINDS = frozenset({"ratio", "offset"})
+FLUCTUATION_SAMPLING_MODES = frozenset({"per-move", "per-init"})
 STATION_MAPPING_FIELDS = (
     "PickPrepareTime", "PickCompleteTime", "PlacePrepareTime",
     "PlaceCompleteTime", "PostCompleteTime", "AlignmentTime",
@@ -81,6 +83,7 @@ def default_execution_timing(device: Mapping[str, Any]) -> Dict[str, Any]:
         "mode": "fixed",
         "fluctuation": {
             "kind": "ratio",
+            "samplingMode": "per-move",
             "ratio": 0.0,
             "minimumOffsetSeconds": 0.0,
             "maximumOffsetSeconds": 0.0,
@@ -137,6 +140,9 @@ def normalize_execution_timing(device: Mapping[str, Any], raw: Any = None) -> Di
     kind = str(fluctuation.get("kind") or "ratio")
     if kind not in FLUCTUATION_KINDS:
         raise ValueError(f"执行时间波动方式不支持：{kind}")
+    sampling_mode = str(fluctuation.get("samplingMode") or "per-move")
+    if sampling_mode not in FLUCTUATION_SAMPLING_MODES:
+        raise ValueError(f"执行时间抽样口径不支持：{sampling_mode}")
     ratio = _finite_nonnegative(fluctuation.get("ratio", 0), "fluctuation.ratio")
     if ratio > 1:
         raise ValueError("fluctuation.ratio 必须在 0 到 1 之间")
@@ -150,6 +156,7 @@ def normalize_execution_timing(device: Mapping[str, Any], raw: Any = None) -> Di
         "mode": mode,
         "fluctuation": {
             "kind": kind,
+            "samplingMode": sampling_mode,
             "ratio": ratio,
             "minimumOffsetSeconds": minimum_offset,
             "maximumOffsetSeconds": maximum_offset,
@@ -176,6 +183,32 @@ def _mapping_duration(fields: Mapping[str, Any], field: str, keys: Sequence[str]
         return None
     matched = [float(values[key]) for key in keys if key in values]
     return max(matched) if matched else None
+
+
+def sample_init_execution_timing(
+    device: Mapping[str, Any], timing: Mapping[str, Any], seed: int,
+) -> Dict[str, Any]:
+    """按 seed 和 init 字段路径一次生成执行表，供当前运行所有代次复用。
+
+    比例波动的 per-init 模式生成固定表，不修改设备或用户配置；其它模式
+    返回配置副本，偏移波动仍逐 Move 抽样。
+    """
+    fluctuation = timing.get("fluctuation") or {}
+    if (timing.get("mode") != "fluctuation" or fluctuation.get("kind") != "ratio"
+            or fluctuation.get("samplingMode", "per-move") != "per-init"):
+        return deepcopy(dict(timing))
+    sampled = {"mode": "fixed", **_theoretical_timing_snapshot(device)}
+    ratio = float(fluctuation.get("ratio") or 0)
+    for section in ("stations", "robots"):
+        for module, fields in sampled[section].items():
+            for field, values in fields.items():
+                for key in (range(len(values)) if isinstance(values, list) else values):
+                    # 用完整字段路径取样，避免 MoveID 或 RequestID 改变固定值。
+                    identity = json.dumps([seed, section, module, field, key], ensure_ascii=False)
+                    digest = hashlib.sha256(identity.encode("utf-8")).digest()
+                    unit = int.from_bytes(digest[:8], "big") / float((1 << 64) - 1)
+                    values[key] *= 1.0 - ratio + 2.0 * ratio * unit
+    return sampled
 
 
 def _station_field_duration(
@@ -209,8 +242,8 @@ def _fixed_execution_duration(
     device: Mapping[str, Any],
     timing: Mapping[str, Any],
     planned_duration: float,
-) -> float:
-    """把一个标准 Move 映射到设备固定执行字段；无法判定时保留理论时长。"""
+) -> Optional[float]:
+    """把标准 Move 映射到 init 设备执行字段；无法匹配时返回 None。"""
     move_type = int(move.get("MoveType", -1))
     module_name = str(move.get("ModuleName") or "")
     station_fields = (timing.get("stations") or {}).get(module_name, {})
@@ -218,10 +251,15 @@ def _fixed_execution_duration(
     station = (device.get("Stations") or {}).get(module_name, {})
     if move_type in {0, 2}:
         configured = _mapping_duration(robot_fields, "PickTime", [str(value) for value in move.get("SrcStationList") or []])
-        return planned_duration if configured is None else configured
+        return configured
     if move_type in {1, 3}:
         configured = _mapping_duration(robot_fields, "PlaceTime", [str(value) for value in move.get("DestStationList") or []])
-        return planned_duration if configured is None else configured
+        return configured
+    if move_type == 4:
+        keys = [str(value) for value in move.get("StationList") or []]
+        pick = _mapping_duration(robot_fields, "PickTime", keys)
+        place = _mapping_duration(robot_fields, "PlaceTime", keys)
+        return None if pick is None or place is None else pick + place
     if move_type == 5:
         rows = (device.get("Robots") or {}).get(module_name, {}).get("PrepTransTime") or []
         fixed = robot_fields.get("PrepTransTime") or []
@@ -235,7 +273,7 @@ def _fixed_execution_duration(
             and str(row.get("DestStation") or "") == destination
             and (int(row.get("TransType") or 0) == 1) == loaded
         ]
-        return max(matches) if matches else planned_duration
+        return max(matches) if matches else None
     if move_type == 6:
         action = int(move.get("RelatedActionType", -1))
         field = "PickPrepareTime" if action == 1 else "PlacePrepareTime" if action == 0 else ""
@@ -262,11 +300,11 @@ def _fixed_execution_duration(
             and str(row.get("CurrentItem") or "") == str(move.get("CurState") or "")
             and str(row.get("PrePrepareType") or "") == str(move.get("PrePrepareType") or "")
         ]
-        return max(matches) if matches else planned_duration
+        return max(matches) if matches else None
     if move_type == 11:
         configured = _mapping_duration(station_fields, "AlignmentTime", [str(value) for value in move.get("SlotList") or []])
-        return planned_duration if configured is None else configured
-    return planned_duration
+        return configured
+    return None
 
 
 def execution_duration(
@@ -279,8 +317,22 @@ def execution_duration(
     start = float(move.get("StartTime") or 0.0)
     end = float(move.get("EndTime") or start)
     planned_duration = max(0.0, end - start)
+    fluctuation = execution_timing.get("fluctuation") or {}
+    if (execution_timing.get("mode") == "fluctuation" and fluctuation.get("kind") == "ratio"
+            and fluctuation.get("samplingMode") == "per-init"):
+        execution_timing = sample_init_execution_timing(device, execution_timing, seed)
+    configured = _fixed_execution_duration(move, device, execution_timing, planned_duration)
     if execution_timing.get("mode") == "fixed":
-        return _fixed_execution_duration(move, device, execution_timing, planned_duration)
+        return planned_duration if configured is None else configured
+    # Swap 的取放部分也源于 init；Route Process 及无设备时间来源的动作不可波动。
+    if int(move.get("MoveType", -1)) == 4:
+        robot = (device.get("Robots") or {}).get(str(move.get("ModuleName") or ""), {})
+        stations = [str(value) for value in move.get("StationList") or []]
+        if (_mapping_duration(robot, "PickTime", stations) is not None
+                and _mapping_duration(robot, "PlaceTime", stations) is not None):
+            configured = planned_duration
+    if configured is None:
+        return planned_duration
     fluctuation = execution_timing.get("fluctuation") or {}
     unit = _stable_unit_sample(move, seed)
     if fluctuation.get("kind") == "offset":

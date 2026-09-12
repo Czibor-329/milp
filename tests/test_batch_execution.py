@@ -416,15 +416,15 @@ class BatchExecutionTests(unittest.TestCase):
         self.assertEqual("skipped", baseline["status"])
         persist.assert_not_called()
 
-    def test_batch_compatibility_mode_reaches_selected_plan(self) -> None:
-        """批量执行链路应将显式关闭的兼容模式写入最终执行计划。"""
+    def test_batch_execution_has_no_compatibility_setting(self) -> None:
+        """批量执行不再传递独立兼容开关，默认保持算法时间。"""
         test_case = {
-            "id": "test-compatibility-mode", "name": "兼容模式链路", "group": "回归",
+            "id": "test-execution-settings", "name": "执行设置链路", "group": "回归",
             "roundCount": 1, "options": {},
             "rounds": [{"currentTime": 0, "jobs": [_job("A", "BatchRoute", "LP1")]}],
         }
         device = {
-            "id": "device-compatibility-mode", "name": "fixture.json", "device": self.device,
+            "id": "device-execution-settings", "name": "fixture.json", "device": self.device,
             "routes": [_route("BatchRoute", "PM1,PM2", "BatchRecipe")],
             "cleans": [], "tests": [test_case],
         }
@@ -441,13 +441,14 @@ class BatchExecutionTests(unittest.TestCase):
         with patch.object(config_server, "execute_plan", side_effect=fake_execute):
             result, _baseline, error = config_server._execute_workspace_test_with_baseline(
                 device, test_case, "heuristic", {},
-                skip_baseline=True, hongye_check=False, compatibility_mode=False,
+                skip_baseline=True, hongye_check=False,
             )
 
         self.assertIsNone(error)
         self.assertIsNotNone(result)
         self.assertEqual(1, len(captured_plans))
-        self.assertFalse(captured_plans[0]["compatibilityMode"])
+        self.assertNotIn("compatibilityMode", captured_plans[0])
+        self.assertFalse(captured_plans[0]["executionTimingEnabled"])
 
     def test_batch_log_archive_contains_each_available_test_log_and_manifest(self) -> None:
         """批量日志下载应将各测试日志及其测试集映射一次性打包。"""
@@ -602,11 +603,12 @@ class BatchExecutionTests(unittest.TestCase):
         # 默认不写 skipValidation 键，保证 Baseline 指纹与旧版本一致。
         default_plan = config_server.build_workspace_batch_plan(device, test_case, "heuristic", {})
         self.assertNotIn("skipValidation", default_plan)
-        self.assertTrue(default_plan["compatibilityMode"])
-        explicit_incompatible_plan = config_server.build_workspace_batch_plan(
-            device, test_case, "heuristic", {}, compatibility_mode=False,
+        self.assertNotIn("compatibilityMode", default_plan)
+        fluctuation_plan = config_server.build_workspace_batch_plan(
+            device, test_case, "heuristic", {}, execution_timing_enabled=True,
         )
-        self.assertFalse(explicit_incompatible_plan["compatibilityMode"])
+        self.assertTrue(fluctuation_plan["executionTimingEnabled"])
+        self.assertNotIn("compatibilityMode", fluctuation_plan)
 
     def test_batch_skip_baseline_skips_heuristic(self) -> None:
         """勾选“跳过Baseline”后批量运行不再连带执行本地 heuristic。"""

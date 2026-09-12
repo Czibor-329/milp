@@ -78,9 +78,11 @@ def _run_frontend(*, fail_fast: bool) -> int:
         build_root = Path(directory)
         workspace_output = build_root / "workspace_visualizer_logic.js"
         route_output = build_root / "route_editor_logic.js"
+        gantt_output = build_root / "gantt_execution_compare.js"
         entries = (
             (FRONTEND_ROOT / "src" / "workspace_visualizer_test_entry.ts", workspace_output),
             (FRONTEND_ROOT / "src" / "route_editor_logic.ts", route_output),
+            (FRONTEND_ROOT / "src" / "gantt_execution_compare.ts", gantt_output),
         )
         for source, destination in entries:
             result = _run(
@@ -101,6 +103,7 @@ def _run_frontend(*, fail_fast: bool) -> int:
         environment = os.environ.copy()
         environment["CT_WORKSPACE_VISUALIZER_TEST_BUILD"] = str(workspace_output)
         environment["CT_ROUTE_EDITOR_TEST_BUILD"] = str(route_output)
+        environment["CT_GANTT_COMPARE_TEST_BUILD"] = str(gantt_output)
         command = [
             "node",
             "--test",

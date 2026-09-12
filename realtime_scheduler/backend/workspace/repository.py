@@ -864,6 +864,12 @@ def _migrate_workspace_catalog(catalog: Dict[str, Any]) -> bool:
             if isinstance(device_data, dict) and not isinstance(device_data.get("ExecutionTiming"), Mapping):
                 device_data["ExecutionTiming"] = default_execution_timing(device_data)
                 changed = True
+        if source_version < 9:
+            device_data = raw_device.get("device")
+            if isinstance(device_data, dict):
+                timing = device_data.setdefault("ExecutionTiming", default_execution_timing(device_data))
+                if isinstance(timing, dict):
+                    timing.setdefault("fluctuation", {}).setdefault("samplingMode", "per-move")
         if raw_device.get("cleans") != cleans:
             raw_device["cleans"] = cleans
             changed = True

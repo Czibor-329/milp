@@ -18,7 +18,6 @@ from realtime_scheduler.backend.preferences.repository import (
 def _settings(**overrides) -> dict:
     """构造一份完整有效的运行设置，并允许覆盖目标字段。"""
     value = {
-        "compatibilityMode": True,
         "hongYeCheck": True,
         "skipBaseline": True,
         "executionTimingEnabled": False,
@@ -57,10 +56,9 @@ def test_missing_run_preferences_use_defaults_without_creating_file(tmp_path: Pa
 
 
 def test_run_preferences_are_versioned_and_persisted_atomically(tmp_path: Path) -> None:
-    """保存后应写入 schemaVersion 4，并保留默认分析设置。"""
+    """保存后应写入 schemaVersion 5，并保留默认分析设置。"""
     path = tmp_path / "run_preferences.json"
     expected = _settings(
-        compatibilityMode=False,
         skipBaseline=True,
         maximumWorkers=30,
         validationWorkers=15,
@@ -68,7 +66,7 @@ def test_run_preferences_are_versioned_and_persisted_atomically(tmp_path: Path) 
     assert update_run_preferences(expected, path) == expected
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload == {
-        "schemaVersion": 4,
+        "schemaVersion": 5,
         "runSettings": expected,
         "analysisSettings": _analysis_settings(),
     }
@@ -98,10 +96,10 @@ def test_run_preferences_reject_newer_schema(tmp_path: Path) -> None:
     """较新版本偏好文件必须显式拒绝，不能按旧格式静默覆盖。"""
     path = tmp_path / "run_preferences.json"
     path.write_text(
-        json.dumps({"schemaVersion": 5, "runSettings": _settings()}),
+        json.dumps({"schemaVersion": 6, "runSettings": _settings()}),
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match="版本过新：5"):
+    with pytest.raises(ValueError, match="版本过新：6"):
         read_run_preferences(path)
 
 
@@ -134,8 +132,25 @@ def test_run_preferences_migrate_v3_and_add_analysis_settings(tmp_path: Path) ->
     path.write_text(fixture.read_text(encoding="utf-8"), encoding="utf-8")
 
     assert read_analysis_preferences(path) == _analysis_settings()
-    assert json.loads(path.read_text(encoding="utf-8"))["schemaVersion"] == 4
+    assert json.loads(path.read_text(encoding="utf-8"))["schemaVersion"] == 5
     assert json.loads((tmp_path / "run_preferences.json.v3.bak").read_text(encoding="utf-8"))["schemaVersion"] == 3
+
+
+@pytest.mark.parametrize("compatibility", [False, True])
+def test_v4_migration_removes_compatibility_without_disabling_fluctuation(tmp_path: Path, compatibility: bool) -> None:
+    """迁移删除旧开关但保留波动选择和分析偏好，原始备份及重复读取保持稳定。"""
+    path = tmp_path / "run_preferences.json"
+    expected = _settings(executionTimingEnabled=True)
+    original = {"schemaVersion": 4, "runSettings": {**expected, "compatibilityMode": compatibility}, "analysisSettings": _analysis_settings(windowMode="full")}
+    path.write_text(json.dumps(original), encoding="utf-8")
+    assert read_run_preferences(path) == expected
+    assert read_analysis_preferences(path)["windowMode"] == "full"
+    backup = path.with_suffix(".json.v4.bak")
+    assert json.loads(backup.read_text(encoding="utf-8")) == original
+    migrated = path.read_bytes()
+    assert read_run_preferences(path) == expected
+    assert path.read_bytes() == migrated
+    assert json.loads(backup.read_text(encoding="utf-8")) == original
 
 
 def test_analysis_preferences_persist_without_overwriting_run_settings(tmp_path: Path) -> None:

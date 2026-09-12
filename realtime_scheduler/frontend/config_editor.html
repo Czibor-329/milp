@@ -599,10 +599,6 @@
         <section class="run-settings-section" aria-labelledby="runSettingsBehaviorTitle">
           <div class="run-settings-section-head"><span id="runSettingsBehaviorTitle">执行行为</span><small>控制调度推进、结果校验与基线计算</small></div>
           <div class="run-settings-toggle-grid">
-            <label class="run-setting-option" for="compatibilityModeInput">
-              <span class="run-setting-option-main"><input id="compatibilityModeInput" type="checkbox" checked><span>兼容模式</span></span>
-              <small>模块并行推进；按 PreMoveID 延后动作，并自动补齐开关门动作。</small>
-            </label>
             <label class="run-setting-option" for="hongYeCheckInput">
               <span class="run-setting-option-main"><input id="hongYeCheckInput" type="checkbox" checked><span>HongYe Check <em>推荐</em></span></span>
               <small>使用 HongYe 原始日志二次校验；关闭后仍保留平台内置校验。</small>
@@ -612,8 +608,8 @@
               <small>不计算 Heuristic 性能基线，可更快得到本次批量结果。</small>
             </label>
             <label class="run-setting-option" for="executionTimingEnabledInput">
-              <span class="run-setting-option-main"><input id="executionTimingEnabledInput" type="checkbox"><span>设备执行时间模拟</span></span>
-              <small>按设备“执行时间”修正实际 Move 时刻；仅在兼容模式下生效。</small>
+              <span class="run-setting-option-main"><input id="executionTimingEnabledInput" type="checkbox"><span>时间波动模式</span></span>
+              <small>按设备“执行时间”配置修正实际 Move 时刻；关闭时使用算法原始时间，路径加工时长不变。</small>
             </label>
           </div>
         </section>

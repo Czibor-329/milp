@@ -635,7 +635,6 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                     options,
                     hongye_check=bool(payload.get("hongYeCheck", True)),
                     skip_baseline=bool(payload.get("skipBaseline")),
-                    compatibility_mode=bool(payload.get("compatibilityMode", True)),
                     execution_timing_enabled=bool(payload.get("executionTimingEnabled", False)),
                     maximum_workers=int(payload.get("maximumWorkers", DEFAULT_BATCH_WORKERS)),
                     validation_workers=int(payload.get("validationWorkers", DEFAULT_VALIDATION_WORKERS)),
@@ -724,7 +723,6 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                             selected_plan=selected_plan,
                             hongye_check=bool(payload.get("hongYeCheck", True)),
                             skip_baseline=bool(payload.get("skipBaseline")),
-                            compatibility_mode=bool(payload.get("compatibilityMode", True)),
                         )
                 else:
                     result, baseline, run_error = _execute_workspace_test_with_baseline(
@@ -735,7 +733,6 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                         selected_plan=selected_plan,
                         hongye_check=bool(payload.get("hongYeCheck", True)),
                         skip_baseline=bool(payload.get("skipBaseline")),
-                        compatibility_mode=bool(payload.get("compatibilityMode", True)),
                     )
                 baseline_response = deepcopy(baseline)
                 if run_error is not None or result is None:

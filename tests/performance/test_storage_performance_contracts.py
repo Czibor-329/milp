@@ -18,7 +18,7 @@ from unittest.mock import patch
 from realtime_scheduler.backend import application as server
 from realtime_scheduler.backend.execution import batch_service
 from tests.performance.fixture_factory import (
-    generate_v8_dataset,
+    generate_current_dataset,
     load_performance_profiles,
 )
 
@@ -73,8 +73,8 @@ class PerformanceFixtureTests(unittest.TestCase):
                 "payload_bytes_per_test": 128,
                 "round_count": 2,
             }
-            first = generate_v8_dataset(root / "first", **arguments)
-            second = generate_v8_dataset(root / "second", **arguments)
+            first = generate_current_dataset(root / "first", **arguments)
+            second = generate_current_dataset(root / "second", **arguments)
 
         self.assertEqual(first, second)
         self.assertEqual(2, first["deviceCount"])
@@ -84,7 +84,7 @@ class PerformanceFixtureTests(unittest.TestCase):
         """生成器必须拒绝超出产品上限的规模定义。"""
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(ValueError, "1~10"):
-                generate_v8_dataset(
+                generate_current_dataset(
                     Path(directory) / "datasets",
                     device_count=11,
                     tests_per_device=1,
@@ -100,7 +100,7 @@ class WorkspaceStorageComplexityTests(unittest.TestCase):
         """为每项测试创建包含多设备、多测试的可读数据目录。"""
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.store_dir = Path(self.temporary_directory.name) / "datasets"
-        generate_v8_dataset(
+        generate_current_dataset(
             self.store_dir,
             device_count=3,
             tests_per_device=12,

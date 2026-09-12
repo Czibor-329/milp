@@ -835,7 +835,8 @@ def materialize_module_parallel_moves(
     Move 按计划开始时刻和 MoveID 排序，实际开始时刻不得早于模块上一条 Move
     的结束时刻。当前 Move 引用的本代 ``PreMoveID`` 也必须全部结束，并把最晚
     前驱结束时刻作为开始下界。跨代前驱不在本 MoveList 中，其完成事实已经包含
-    在本代初始快照里，因此不会阻塞。
+    在本代初始快照里，因此不会阻塞。已有本代前驱或模块前项的 Move 按实际完成
+    时刻推进，保留原计划在前驱之后的等待间隔；独立首项保留起点，现场时刻始终是下界。
 
     参数:
         moves: 当前代算法输出的 MoveList。
@@ -866,6 +867,12 @@ def materialize_module_parallel_moves(
     actual_end_by_id: Dict[int, float] = {}
     ended_ids: Set[int] = set()
     materialized: List[dict] = []
+    planned_end_by_id = {
+        move["MoveID"]: (_number(move.get("EndTime")) if _number(move.get("EndTime")) is not None
+                         else (_number(move.get("StartTime")) or 0.0))
+        for move in copied if isinstance(move.get("MoveID"), int)
+    }
+    planned_module_end: Dict[str, float] = {}
 
     while queues:
         candidates: List[Tuple[float, str, int, dict]] = []
@@ -879,9 +886,18 @@ def materialize_module_parallel_moves(
                 if isinstance(value, int) and int(value) in known_ids
             }
             planned_start = _number(move.get("StartTime")) or 0.0
+            # 原计划可能含驻留、释放或工艺等待。只传播前驱完成时刻的变化，
+            # 不把这些等待误当成可删除的空白；零间隔依赖可随前驱完成直接提前。
+            planned_bounds = [planned_end_by_id[value] for value in predecessors]
+            if module_name in planned_module_end:
+                planned_bounds.append(planned_module_end[module_name])
+            wait_after_predecessors = max(0.0, planned_start - max(planned_bounds)) if planned_bounds else 0.0
+            actual_bounds = [actual_end_by_id[value] for value in predecessors if value in actual_end_by_id]
+            if module_name in planned_module_end:
+                actual_bounds.append(module_available[module_name])
             earliest_start = max(
                 normalized_floor,
-                planned_start,
+                (max(actual_bounds) + wait_after_predecessors) if actual_bounds else planned_start,
                 module_available[module_name],
                 *(actual_end_by_id[value] for value in predecessors if value in actual_end_by_id),
             )
@@ -906,6 +922,7 @@ def materialize_module_parallel_moves(
         move["StartTime"] = actual_start
         move["EndTime"] = actual_end
         materialized.append(move)
+        planned_module_end[module_name] = planned_end if planned_end is not None else planned_start
         module_available[module_name] = actual_end
         if isinstance(move.get("MoveID"), int):
             actual_end_by_id[move_id] = actual_end

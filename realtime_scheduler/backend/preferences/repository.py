@@ -24,11 +24,10 @@ from realtime_scheduler.backend.execution.validation_limiter import (
 from realtime_scheduler.backend.workspace.repository import _write_json_atomic
 
 
-RUN_PREFERENCES_SCHEMA_VERSION = 4
+RUN_PREFERENCES_SCHEMA_VERSION = 5
 RUN_PREFERENCES_PATH = DATA_DIR / "run_preferences.json"
 _RUN_PREFERENCES_LOCK = threading.RLock()
 _BOOLEAN_FIELDS = (
-    "compatibilityMode",
     "hongYeCheck",
     "skipBaseline",
     "executionTimingEnabled",
@@ -37,7 +36,6 @@ _CLEAN_VALIDATION_TYPES = (
     "preclean", "postclean", "wacclean", "dummy", "dummywac",
 )
 _DEFAULT_RUN_SETTINGS = {
-    "compatibilityMode": True,
     "hongYeCheck": True,
     "skipBaseline": True,
     "executionTimingEnabled": False,
@@ -156,7 +154,7 @@ def read_run_preferences(path: Optional[Path] = None) -> Dict[str, Any]:
         if not isinstance(payload, Mapping):
             raise ValueError("本地运行偏好必须是 JSON 对象")
         schema_version = payload.get("schemaVersion")
-        if schema_version in {1, 2, 3}:
+        if schema_version in {1, 2, 3, 4}:
             return _migrate_run_preferences(payload, path, int(schema_version))["runSettings"]
         if schema_version != RUN_PREFERENCES_SCHEMA_VERSION:
             if isinstance(schema_version, int) and schema_version > RUN_PREFERENCES_SCHEMA_VERSION:
@@ -181,7 +179,7 @@ def read_analysis_preferences(path: Optional[Path] = None) -> Dict[str, Any]:
         if not isinstance(payload, Mapping):
             raise ValueError("本地运行偏好必须是 JSON 对象")
         schema_version = payload.get("schemaVersion")
-        if schema_version in {1, 2, 3}:
+        if schema_version in {1, 2, 3, 4}:
             return _migrate_run_preferences(payload, path, int(schema_version))["analysisSettings"]
         if schema_version != RUN_PREFERENCES_SCHEMA_VERSION:
             if isinstance(schema_version, int) and schema_version > RUN_PREFERENCES_SCHEMA_VERSION:
