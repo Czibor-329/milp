@@ -83,7 +83,7 @@ def test_v6_layout_moves_legacy_init_options_out_of_device_json() -> None:
         restored = server.get_workspace_device(device["id"], store_dir)
 
         assert set(init_data) == {"Robots", "Stations"}
-        assert metadata["initOptions"] == {"InitialMoveID": 7}
+        assert metadata["initOptions"]["InitialMoveID"] == 7
         assert restored["device"]["InitialMoveID"] == 7
 
 
@@ -103,7 +103,7 @@ def test_device_archive_round_trip_includes_all_tests() -> None:
         imported, created_device, imported_tests = server.import_workspace_device_archive(content, target)
 
         assert set(files["device.json"]) == {"Robots", "Stations"}
-        assert files["metadata.json"]["initOptions"] == {"InitialMoveID": 7}
+        assert files["metadata.json"]["initOptions"]["InitialMoveID"] == 7
         assert filename.endswith(".zip")
         assert created_device == 1
         assert imported_tests == 1

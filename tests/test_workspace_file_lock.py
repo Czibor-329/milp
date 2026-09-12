@@ -9,10 +9,7 @@ import unittest
 from pathlib import Path
 
 from realtime_scheduler.backend import application as server
-
-
-ROOT = Path(__file__).resolve().parents[1]
-PSE300_PATH = ROOT / "alg" / "src" / "input_data" / "PSE300.json"
+from tests.support.plan_fixtures import PSE300_DEVICE_PATH
 
 
 def _create_test_after_signal(
@@ -43,9 +40,9 @@ class WorkspaceFileLockTests(unittest.TestCase):
         """同时新增两个测试后，目录应保持有效且两项都存在。"""
         with tempfile.TemporaryDirectory() as temporary_directory:
             store_path = Path(temporary_directory) / "workspaces.json"
-            raw_device = json.loads(PSE300_PATH.read_text(encoding="utf-8"))
+            raw_device = json.loads(PSE300_DEVICE_PATH.read_text(encoding="utf-8"))
             device, _ = server.import_workspace_device(
-                PSE300_PATH.name,
+                "PSE300",
                 raw_device,
                 store_path,
             )

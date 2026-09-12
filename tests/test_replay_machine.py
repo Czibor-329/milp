@@ -10,7 +10,7 @@ import pytest
 from realtime_scheduler.backend.validation.replay_machine import ReplayMachine
 from realtime_scheduler.backend.algorithms import interface as algorithm_interface
 from realtime_scheduler.backend.execution.plan_builder import extract_init_data
-from tests.test_config_editor_server import DEVICE_PATH, _job, _route
+from tests.support.plan_fixtures import DEVICE_PATH, job as _job, route as _route
 
 
 def test_missing_algorithm_action_interface_keeps_action_card_empty() -> None:

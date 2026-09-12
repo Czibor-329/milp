@@ -19,10 +19,30 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from realtime_scheduler.backend import application as scheduler_server
-from scripts.benchmark_neural_route_decomposition import six_pm_device
+from realtime_scheduler.backend.workspace.repository import (
+    _workspace_route_test_config,
+)
+from src.task_data.generator import PM_POOL_6, expand_topo_pms
 
 
-PSE300_PATH = ROOT / "alg" / "src" / "input_data" / "PSE300.json"
+DATASET_ROOT = ROOT / "realtime_scheduler" / "data" / "datasets"
+
+
+def _dataset_device_path(device_name: str) -> Path:
+    """按数据集元数据名称定位唯一设备文件，避免引用已删除的算法仓库副本。"""
+    matches: List[Path] = []
+    for metadata_path in DATASET_ROOT.glob("*/metadata.json"):
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if metadata.get("name") == device_name:
+            matches.append(metadata_path.parent / "device.json")
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"设备 {device_name!r} 应唯一，实际找到 {len(matches)} 个"
+        )
+    return matches[0]
+
+
+PSE300_PATH = _dataset_device_path("PSE300")
 RECOMPUTE_GRIDS = (50, 100, 150, 250, 300)
 WAFER_COUNTS = (10, 15)
 SIX_PM_LONG_ROUNDS = 5
@@ -38,6 +58,12 @@ LEGACY_LONG_GROUP = "R10-历史案例"
 ROUTE_DECOMPOSITION_GROUP = "六腔路线分解-验收"
 LONG_QUALITY_GROUP = "六腔长途质量A/B"
 LOADLOCK_CADENCE_GROUP = "LoadLock交换与短工艺-回归"
+
+
+def six_pm_device() -> Dict[str, Any]:
+    """从正式 PSE300 克隆六腔设备，供工作区验收夹具复用。"""
+    device = json.loads(PSE300_PATH.read_text(encoding="utf-8"))
+    return expand_topo_pms(device, PM_POOL_6)
 
 ROUTE_PM12 = "1道工序 · PM1/PM2(120s)"
 ROUTE_PM123 = "PM1/PM2/PM3(120s)"
@@ -588,12 +614,16 @@ def _six_pm_tests() -> List[Dict[str, Any]]:
         [_round(
             0,
             (
-                _pjob(ROUTE_SHORT6, "LP1", 12),
-                _pjob(ROUTE_SHORT6, "LP2", 12),
+                _pjob(ROUTE_FULL6, "LP1", 12),
+                _pjob(ROUTE_FULL6, "LP2", 12),
             ),
             separate_cjobs=True,
         )],
     )
+    # 工作区按拓扑去重 Route；短工艺与长工艺共享同一路径模板，差异放在测试配置。
+    cadence_test["routeConfigs"] = {
+        ROUTE_FULL6: _workspace_route_test_config(_six_pm_assets()[-1]),
+    }
     cadence_test["strategy"] = "heuristic"
     cadence_test["options"] = {
         "loadLockManager": "exchange-look",

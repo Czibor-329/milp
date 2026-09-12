@@ -16,6 +16,58 @@
 - 退出码 `0` 表示全部通过，`1` 表示至少一个测试失败，`2` 表示参数或运行环境错误。
   只有明确需要性能对比时才加 `--with-baseline`。
 
+## Automated test standards
+
+1. 使用隔离的统一入口运行自动化测试。
+   - 从父仓库运行 `./venv/Scripts/python.exe scripts/run_test_suite.py`，入口会分别启动
+     平台 pytest、`alg` pytest 和前端 Node 测试，不能把两个顶层 `tests` 包交给同一个
+     pytest 进程收集。
+   - 可用 `--suite platform`、`--suite algorithm` 或 `--suite frontend` 缩小范围；pytest
+     附加参数放在 `--` 后，例如 `--suite platform -- -k workspace`。
+   - 公司数据集验收仍使用 `scripts/run_dataset_suite.py`，不能以单元测试通过代替数据集验收。
+
+2. 失败测试不是业务语义的最终事实。
+   - 修改失败测试前，必须依次核对当前用户文档、正式接口、生产实现和同一边界的其它测试，
+     判断是实现回归、测试夹具过期、接口迁移遗漏还是历史语义已经废弃。
+   - 已有测试与当前文档冲突时，不能为了恢复绿色而修改生产实现迁就旧测试；应记录旧断言、
+     当前依据和替代断言。业务意图仍不明确时保留失败并提出问题，不能自行放宽约束。
+   - 不得仅因测试失败而删除测试。迁移后的测试必须继续覆盖原测试真正要防止的风险；如果风险
+     已被取消，应通过新语义的正向或反向案例明确证明。
+
+3. 按能力边界组织测试。
+   - 测试文件应对应生产模块的单一能力，例如 `workspace/catalog`、`execution/batch`、
+     `validation/dependencies` 或 `frontend/playback`，不得继续扩展综合性的 catch-all 测试文件。
+   - 测试文件超过 800 行或一个测试类超过 30 项时必须复核拆分；新文件不得超过 1200 行。
+     这是新增与重构标准，历史文件应在相关改动中逐步收敛。
+   - 公共夹具放在本仓库 `tests/support/`；算法夹具放在 `alg/tests/support/`。测试文件不得从
+     另一个 `test_*.py` 导入 helper，也不得跨仓库共享可变夹具。
+
+4. 夹具必须确定、隔离并说明语义。
+   - 文件写入使用 `tmp_path`、`TemporaryDirectory` 或专用临时目录；不得修改
+     `realtime_scheduler/data/datasets/` 主数据。
+   - 单元测试优先使用最小领域 builder；真实数据集只能用于标记为 `dataset` 的集成/验收测试，
+     读取后必须复制到隔离目录。性能夹具必须固定随机种子、规模、schemaVersion 和内容哈希。
+   - 不创建隐藏关键前提的万能 fixture。Machine、平台 MoveList 校验和接口 payload 使用各自
+     具名 builder，参数名称应体现槽位、环境、PJob、清洁和时间语义。
+
+5. 断言稳定契约，不绑定偶然实现。
+   - 校验失败优先断言稳定错误码或结构化字段，再按需要断言用户可见文案；不得默认只检查
+     `issues[0]`，除非首错顺序本身就是协议。
+   - 前端业务逻辑优先测试 TypeScript 导出函数；HTML 源码扫描只保留稳定 ID、可访问性、资源
+     版本和明确的架构禁令，不断言局部函数名、代码排版或整段实现字符串。
+   - 前端测试必须从当前 TypeScript 源码编译临时测试模块，不能信任仓库中已有的 CJS 构建产物。
+
+6. 明确测试层级和外部依赖。
+   - 使用 `integration`、`dataset`、`performance`、`external_model` 标记区分慢测试与非仓库制品。
+     缺少可选模型、HongYe 或固定性能机时应显式 skip，并说明恢复条件，不能以普通失败污染单测。
+   - 时间预算测试只在文档规定的固定环境门禁；普通测试优先断言访问路径、状态和复杂度等结构性
+     不变量，不能用宽松 sleep 或单次墙钟代替。
+
+7. 重构测试必须可审计。
+   - 先记录重构前可收集数、通过数、失败数和跳过数；只做搬迁时不得改变测试语义或减少覆盖。
+   - 语义迁移与机械拆分分开提交或至少分开说明；交付时列出更新的旧语义、保留的真实回归、
+     尚需外部环境或业务确认的测试。
+
 ## Read documentation before solving problems
 
 1. Before analyzing, troubleshooting, or modifying a problem, read the project documentation directly related to the task.

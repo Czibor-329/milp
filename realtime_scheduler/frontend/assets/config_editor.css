@@ -1967,7 +1967,6 @@
     .loadlock-top-gate-vacuum { top: 0; border-radius: 0 0 4px 4px; }
     .loadlock-top-gate-atmosphere { bottom: 0; border-radius: 4px 4px 0 0; }
     /* 双腔接口带容纳四个紧凑 Lock，横向轨道与底板保持一致。 */
-    .equipment-schematic[data-topology-layout="dual"] .topology-interface-bay { right: 24%; left: 24%; }
     .reference-grid-canvas .equipment-card.door-open :is(.port-top-gate, .loadlock-top-gate), .reference-grid-canvas .equipment-card.door-opening :is(.port-top-gate, .loadlock-top-gate) { visibility: hidden; opacity: 0; }
     .reference-grid-canvas .equipment-cooler-top-view { position: relative; display: grid; width: 82px; height: 84px; place-items: center; border-radius: 50%; background: transparent; filter: drop-shadow(2px 3px 5px rgba(32,47,81,.10)); }
     .cooler-top-plate { position: relative; display: grid; width: 66px; height: 76px; place-items: center; border: 2px solid #5c828c; border-radius: 50% / 32%; background: linear-gradient(90deg, #c6dde0, #f8ffff 50%, #c6dde0); box-shadow: inset 0 2px 4px rgba(35,78,85,.16), 0 0 0 3px rgba(255,255,255,.50); }

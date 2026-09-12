@@ -1,7 +1,10 @@
 /** 机械臂配置、真实槽位选择与 Swap 分阶段交接的前端回归测试。 */
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const logic = require('../realtime_scheduler/frontend/workspace_visualizer_logic.js');
+const logic = require(
+  process.env.CT_WORKSPACE_VISUALIZER_TEST_BUILD
+    || '../realtime_scheduler/frontend/workspace_visualizer_logic.js',
+);
 const fs = require('node:fs');
 const path = require('node:path');
 /** 从唯一设备目录读取真实机械臂声明，避免夹具掩盖臂数、槽位数差异。 */

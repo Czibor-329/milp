@@ -2,7 +2,10 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const logic = require("../realtime_scheduler/frontend/route_editor_logic.js");
+const logic = require(
+  process.env.CT_ROUTE_EDITOR_TEST_BUILD
+    || "../realtime_scheduler/frontend/route_editor_logic.js",
+);
 
 function visit(stationName, processTime = 20) {
   return {
